@@ -1,0 +1,19 @@
+set_tests_properties(
+    CryptoFileTest.RoundTripsEmptyAndChunkedFilesWithSeparatedKeys
+    HasherDigest.MatchesKnownBlake3VectorForEmptyInput
+    CryptoKeyDerivationTest.SeparatesEveryDomainAndKeysRemoteIdentifiers
+    VaultTest.WritesObscuredBytesAndReadsExactKey
+    WireIntegers.UsesObservableLittleEndianEncoding
+    WireStrings.RoundTripsEmptyAsciiUtf8AndMaximumLengthStrings
+    HistoryTest.BootstrapDeterminism
+    HistoryTest.CanonicalTimestampRoundTripsWithoutChangingBytes
+    TransactionCodecTest.RoundTripsAllActionsAndProgressFields
+    SyncCoordinatorTest.LogicalCheckpointCrashStatesRollbackWithoutPublicationOrLocalChange
+    StateStorageDatabaseTest.FreshDatabaseCreatesInitialSchemaAndEmptyCache
+    StateStorageDatabaseTest.UnicodePathRoundTrip
+    PrivateStorageTest.CreatesRestrictedDirectoryAndFile
+    H3LocalSyncTest.BootstrapAndNestedTreeConverge
+    SnapshotValidationTest.RejectsNonPortableLogicalComponents
+    ScannerTest.UnicodeFilenameRoundTrip
+    PROPERTIES LABELS "release-critical"
+)

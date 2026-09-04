@@ -1,0 +1,56 @@
+name: CI - Ubuntu
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: GCC 14
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CC: gcc-14
+      CXX: g++-14
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Instalar dependências
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build gcc-14 g++-14 git unzip
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 --slave /usr/bin/g++ g++ /usr/bin/g++-14
+          sudo update-alternatives --set gcc /usr/bin/gcc-14
+
+      - name: Exibir versões das ferramentas
+        run: |
+          cmake --version
+          gcc-14 --version
+          g++-14 --version
+          ninja --version
+
+      - name: Compilar (Debug)
+        run: |
+          cmake --preset debug
+          cmake --build --preset debug -j$(nproc)
+
+      - name: Executar Testes (Debug)
+        run: |
+          ctest --preset debug --output-on-failure
+
+      - name: Compilar (Release)
+        run: |
+          cmake --preset default
+          cmake --build --preset default -j$(nproc)
+
+      - name: Executar Testes (Release)
+        run: |
+          ctest --test-dir build --output-on-failure

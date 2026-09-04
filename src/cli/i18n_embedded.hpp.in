@@ -1,0 +1,15 @@
+#ifndef KASUMI_CLI_I18N_EMBEDDED_HPP
+#define KASUMI_CLI_I18N_EMBEDDED_HPP
+
+#include <string_view>
+
+namespace kasumi::cli::i18n::embedded {
+
+inline constexpr std::string_view EN_JSON = R"json(@KASUMI_I18N_EN_JSON@)json";
+
+inline constexpr std::string_view PT_BR_JSON = R"json(@KASUMI_I18N_PT_BR_JSON@)json";
+
+} // namespace kasumi::cli::i18n::embedded
+
+#endif // KASUMI_CLI_I18N_EMBEDDED_HPP
+

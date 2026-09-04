@@ -1,0 +1,109 @@
+name: CI - Windows
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  msvc:
+    name: MSVC 2022
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Exibir versões das ferramentas
+        shell: powershell
+        run: |
+          cmake --version
+          ninja --version
+
+      - name: Compilar (Debug)
+        shell: powershell
+        run: |
+          cmake -S . -B build-ci-debug -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
+          cmake --build build-ci-debug --config Debug --parallel
+
+      - name: Executar Testes (Debug)
+        shell: powershell
+        run: |
+          ctest --test-dir build-ci-debug -C Debug --output-on-failure
+
+      - name: Compilar (Release)
+        shell: powershell
+        run: |
+          cmake -S . -B build-ci-release -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
+          cmake --build build-ci-release --config Release --parallel
+
+      - name: Executar Testes (Release)
+        shell: powershell
+        run: |
+          ctest --test-dir build-ci-release -C Release --output-on-failure
+
+  gcc:
+    name: GCC 14 (MSYS2 UCRT64)
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      CC: gcc
+      CXX: g++
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-cmake
+            git
+
+      - name: Priorizar MSYS2 UCRT64 no PATH
+        shell: powershell
+        run: |
+          "C:\msys64\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Exibir versões das ferramentas
+        shell: powershell
+        run: |
+          Get-Command gcc | Select-Object -ExpandProperty Source
+          Get-Command g++ | Select-Object -ExpandProperty Source
+          gcc --version
+          g++ --version
+          cmake --version
+          ninja --version
+
+      - name: Compilar (Debug)
+        shell: powershell
+        run: |
+          cmake --preset debug
+          cmake --build --preset debug
+
+      - name: Executar Testes (Debug)
+        shell: powershell
+        run: |
+          ctest --preset debug --output-on-failure --parallel 2
+
+      - name: Compilar (Release)
+        shell: powershell
+        run: |
+          cmake --preset default -DBUILD_TESTING=ON
+          cmake --build --preset default
+
+      - name: Executar Testes (Release)
+        shell: powershell
+        run: |
+          ctest --test-dir build --output-on-failure --parallel 2

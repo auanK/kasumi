@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "scope": "Release x64, Windows, NTFS, same host class and idle machine",
+  "policy": {
+    "timing_ceiling": "historical median plus 35 percent",
+    "memory_ceiling": "historical median plus 10 percent",
+    "failure_rule": "investigate only after two consecutive comparable runs exceed a ceiling",
+    "online_results_are_gate": false
+  },
+  "historical_artifacts_commit": "b5b3f80",
+  "sources": [
+    "perf-r19 baseline",
+    "perf-r19 idle baseline",
+    "perf-r20 O3",
+    "perf-r30 final Release"
+  ],
+  "commands": [
+    "py -3 tests/operational/benchmark_local_path_scale.py --benchmark build-release/tests/kasumi_benchmark_local_scan.exe --output <output.json>",
+    "py -3 tests/operational/benchmark_structural_scale.py --benchmark build-release/tests/kasumi_benchmark_structural_scale.exe --output-state <state.json> --output-commit <commit.json>"
+  ],
+  "metrics": [
+    {
+      "name": "100k cold scan wall",
+      "baseline_p50_us": 42471062,
+      "ceiling_us": 57335934,
+      "r30_us": 42228085,
+      "pass": true
+    },
+    {
+      "name": "100k warm scan wall",
+      "baseline_p50_us": 10628658,
+      "ceiling_us": 14348689,
+      "r30_us": 11099694,
+      "pass": true
+    },
+    {
+      "name": "100k one-file delta scan wall",
+      "baseline_p50_us": 10386970,
+      "ceiling_us": 14022410,
+      "r30_us": 10554728,
+      "pass": true
+    },
+    {
+      "name": "100k re-warm scan wall",
+      "baseline_p50_us": 10354646,
+      "ceiling_us": 13978773,
+      "r30_us": 10491711,
+      "pass": true
+    },
+    {
+      "name": "100k path-scale peak working set",
+      "baseline_p50_bytes": 64057344,
+      "ceiling_bytes": 70463079,
+      "r30_bytes": 63406080,
+      "pass": true
+    },
+    {
+      "name": "100k unchanged combined state save",
+      "baseline_p50_us": 262292,
+      "ceiling_us": 354095,
+      "r30_us": 273627,
+      "pass": true
+    },
+    {
+      "name": "100k changed combined state save",
+      "baseline_p50_us": 268532,
+      "ceiling_us": 362519,
+      "r30_us": 278481,
+      "pass": true
+    },
+    {
+      "name": "100k commit construction",
+      "baseline_p50_us": 71277,
+      "ceiling_us": 96224,
+      "r30_us": 72418,
+      "pass": true
+    },
+    {
+      "name": "100k commit serialization",
+      "baseline_p50_us": 82681,
+      "ceiling_us": 111620,
+      "r30_us": 85337,
+      "pass": true
+    },
+    {
+      "name": "100k commit deserialization",
+      "baseline_p50_us": 122296,
+      "ceiling_us": 165100,
+      "r30_us": 120333,
+      "pass": true
+    }
+  ],
+  "correctness_invariants": {
+    "path_scale_validations": true,
+    "state_and_cache_valid": true,
+    "commit_roundtrip_valid": true,
+    "state_database_bytes_at_100k": 32165888,
+    "serialized_commit_bytes_at_100k": 7200126
+  },
+  "r30_status": "pass"
+}
