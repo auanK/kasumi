@@ -1,5 +1,6 @@
 #include "kasumi/test/filesystem.hpp"
 
+#include "platform/path.hpp"
 #include <algorithm>
 #include <cstddef>
 #include <fstream>
@@ -30,7 +31,7 @@ std::ifstream open_input(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         throw std::runtime_error("could not open file for reading: " +
-                                 path.string());
+                                 platform::path::to_utf8(path));
     }
     return input;
 }
@@ -40,14 +41,9 @@ std::ofstream open_output(const std::filesystem::path& path) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output) {
         throw std::runtime_error("could not open file for writing: " +
-                                 path.string());
+                                 platform::path::to_utf8(path));
     }
     return output;
-}
-
-std::string generic_utf8(const std::filesystem::path& path) {
-    const auto value = path.generic_u8string();
-    return {reinterpret_cast<const char*>(value.data()), value.size()};
 }
 
 } // namespace
@@ -65,7 +61,7 @@ void write_text(const std::filesystem::path& path, std::string_view contents) {
     }
     output.close();
     if (!output) {
-        throw std::runtime_error("could not write file: " + path.string());
+        throw std::runtime_error("could not write file: " + platform::path::to_utf8(path));
     }
 }
 
@@ -74,7 +70,7 @@ std::string read_text(const std::filesystem::path& path) {
     std::string contents{std::istreambuf_iterator<char>(input),
                          std::istreambuf_iterator<char>()};
     if (input.bad()) {
-        throw std::runtime_error("could not read file: " + path.string());
+        throw std::runtime_error("could not read file: " + platform::path::to_utf8(path));
     }
     return contents;
 }
@@ -93,7 +89,7 @@ void write_binary(const std::filesystem::path& path,
     }
     output.close();
     if (!output) {
-        throw std::runtime_error("could not write file: " + path.string());
+        throw std::runtime_error("could not write file: " + platform::path::to_utf8(path));
     }
 }
 
@@ -122,7 +118,7 @@ TreeSnapshot snapshot_tree(const std::filesystem::path& root) {
                 "could not inspect directory tree", root, status_error);
         }
         throw std::invalid_argument("tree root is not a directory: " +
-                                    root.string());
+                                    platform::path::to_utf8(root));
     }
 
     TreeSnapshot snapshot;
@@ -145,7 +141,7 @@ TreeSnapshot snapshot_tree(const std::filesystem::path& root) {
         }
 
         TreeEntry entry;
-        entry.relative_path = generic_utf8(entry_path.lexically_relative(root));
+        entry.relative_path = platform::path::to_logical_utf8(entry_path.lexically_relative(root));
         if (std::filesystem::is_symlink(status)) {
             entry.kind = TreeEntryKind::Symlink;
             const auto target =
@@ -154,7 +150,7 @@ TreeSnapshot snapshot_tree(const std::filesystem::path& root) {
                 throw std::filesystem::filesystem_error(
                     "could not read symbolic link", entry_path, entry_error);
             }
-            entry.symlink_target = generic_utf8(target);
+            entry.symlink_target = platform::path::to_logical_utf8(target);
         } else if (std::filesystem::is_directory(status)) {
             entry.kind = TreeEntryKind::Directory;
         } else if (std::filesystem::is_regular_file(status)) {
@@ -179,7 +175,7 @@ TreeSnapshot snapshot_tree(const std::filesystem::path& root) {
 bool has_temporary_history_workspace(const std::filesystem::path& root) {
     std::error_code error;
     for (const auto& entry : std::filesystem::directory_iterator(root, error)) {
-        if (entry.path().filename().string().starts_with(".kasumi-history-")) {
+        if (platform::path::to_utf8(entry.path().filename()).starts_with(".kasumi-history-")) {
             return true;
         }
     }

@@ -2,8 +2,10 @@
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
 #include "application/integrity/maintenance.hpp"
+#include "core/maintenance.hpp"
 #include "kasumi/test/history_storage.hpp"
 #include "platform/clock.hpp"
+#include "platform/path.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -64,6 +66,42 @@ void expect_presence(kasumi::transport::Transport& transport,
     const auto present = kasumi::transport::presence(transport, identifier);
     ASSERT_TRUE(present.has_value()) << present.error().message;
     EXPECT_EQ(*present, expected);
+}
+
+TEST(MaintenanceTest, UnicodeReferenceAndRecoveryPaths) {
+    const auto hash = kasumi::hasher::hash_string("content");
+    const std::string first_path = "千早愛音/𓆩🌸𓆪.txt";
+    const std::string second_path = "高松灯/カード💝.png";
+    kasumi::Snapshot tree{.rows = {
+        {.path = "", .is_directory = true},
+        {.path = "千早愛音", .is_directory = true},
+        {.path = first_path, .hash = hash, .size = 7},
+        {.path = "高松灯", .is_directory = true},
+        {.path = second_path, .hash = hash, .size = 7},
+    }};
+    kasumi::finalize_snapshot(tree);
+    const std::vector<std::string> physical{kasumi::hash_hex(hash), "unexpected-🌸.object"};
+    const auto inventory = kasumi::maintenance::analyze(tree, tree, physical);
+    ASSERT_TRUE(inventory.has_value()) << inventory.error().detail;
+    ASSERT_EQ(inventory->referenced_objects.size(), 1U);
+    const auto& reference = inventory->referenced_objects.front();
+    ASSERT_EQ(reference.referenced_paths.size(), 2U);
+    EXPECT_EQ(reference.referenced_paths[0], kasumi::platform::path::from_utf8(first_path));
+    EXPECT_EQ(reference.referenced_paths[1], kasumi::platform::path::from_utf8(second_path));
+    ASSERT_TRUE(reference.local_source.has_value());
+    EXPECT_EQ(*reference.local_source, kasumi::platform::path::from_utf8(first_path));
+    EXPECT_TRUE(reference.physically_present);
+    EXPECT_EQ(inventory->unknown_identifiers,
+              (std::vector<std::string>{"unexpected-🌸.object"}));
+
+    tree.rows.back().size = 8;
+    kasumi::finalize_snapshot(tree);
+    const auto conflict = kasumi::maintenance::analyze(tree, {}, physical);
+    ASSERT_FALSE(conflict.has_value());
+    EXPECT_EQ(conflict.error().code, kasumi::maintenance::ErrorCode::ConflictingReference);
+    ASSERT_EQ(conflict.error().paths.size(), 2U);
+    EXPECT_EQ(conflict.error().paths[0], kasumi::platform::path::from_utf8(first_path));
+    EXPECT_EQ(conflict.error().paths[1], kasumi::platform::path::from_utf8(second_path));
 }
 
 TEST(IntegrityMaintenanceTest,

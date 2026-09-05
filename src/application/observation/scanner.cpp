@@ -2,6 +2,7 @@
 
 #include "crypto/content.hpp"
 #include "platform/file_fingerprint.hpp"
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 
 #include <algorithm>
@@ -345,7 +346,7 @@ process_file(const std::filesystem::path& file_path,
 } // namespace
 
 std::string describe(const ScanError& error) {
-    return error.operation + " em '" + error.path.string() +
+    return error.operation + " em '" + platform::path::to_utf8(error.path) +
            "': " + error.detail;
 }
 
@@ -381,7 +382,7 @@ scan_result(const std::filesystem::path& local_root,
 
     if (!directory) {
         auto row = process_file(
-            local_root, local_root.filename().generic_string(), context);
+            local_root, platform::path::to_logical_utf8(local_root.filename()), context);
         if (!row)
             return std::unexpected(row.error());
         ScanResult result{.snapshot = Snapshot{{std::move(*row)}},
@@ -434,12 +435,11 @@ scan_result(const std::filesystem::path& local_root,
             std::filesystem::is_directory(entry_status);
         if (std::filesystem::is_symlink(entry_status))
             continue;
-        const auto entry_name = entry.path().filename().generic_string();
-        const auto relative =
-            (frame.path.empty()
-                 ? entry.path().filename()
-                 : std::filesystem::path(frame.path) / entry.path().filename())
-                .generic_string();
+        const auto entry_name =
+            platform::path::to_logical_utf8(entry.path().filename());
+        const auto relative = frame.path.empty()
+                                  ? entry_name
+                                  : frame.path + '/' + entry_name;
         if (is_ignored(relative, ignore_list, entry_directory))
             continue;
         if (!valid_logical_path_component(entry_name)) {
@@ -507,7 +507,7 @@ observe_file(const std::filesystem::path& local_root,
     if (relative_path.empty() || relative_path.front() == '/' ||
         relative_path.back() == '/') {
         return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                         std::filesystem::path(relative_path),
+                                         platform::path::from_utf8(relative_path),
                                          "observar arquivo direcionado",
                                          "caminho relativo inválido"});
     }
@@ -522,7 +522,7 @@ observe_file(const std::filesystem::path& local_root,
         if (!valid_logical_path_component(component)) {
             return std::unexpected(ScanError{
                 ScanErrorCode::Metadata,
-                std::filesystem::path(relative_path),
+                platform::path::from_utf8(relative_path),
                 "observar arquivo direcionado",
                 "unsupported non-portable path component: '" +
                     std::string(component) + "'"});
@@ -533,7 +533,7 @@ observe_file(const std::filesystem::path& local_root,
         comp_start = slash + 1;
     }
 
-    const std::filesystem::path relative{relative_path};
+    const auto relative = platform::path::from_utf8(relative_path);
     if (relative.is_absolute() || relative.has_root_name() ||
         relative.has_root_directory() ||
         std::ranges::find(relative, std::filesystem::path{".."}) !=
@@ -554,7 +554,7 @@ observe_file(const std::filesystem::path& local_root,
                                           ScanErrorCode::Metadata));
     }
     const auto ignore_list = load_ignore_list(local_root / ".kasumiignore");
-    const auto normalized = relative.generic_string();
+    const auto normalized = platform::path::to_logical_utf8(relative);
     if (is_ignored(normalized, ignore_list, false)) {
         return std::unexpected(ScanError{ScanErrorCode::Metadata,
                                          file_path,

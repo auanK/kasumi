@@ -16,6 +16,7 @@
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/clock.hpp"
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "runtime/paths.hpp"
 #include "runtime/resolver.hpp"
@@ -132,7 +133,8 @@ void create_system_directory(const std::filesystem::path& path) {
         return;
     }
     throw std::runtime_error("could not create system test directory: " +
-                             path.string() + ": " + error.message());
+                             kasumi::platform::path::to_utf8(path) + ": " +
+                             error.message());
 }
 
 std::expected<void, kasumi::application::Error>
@@ -227,10 +229,12 @@ RcloneHarness make_rclone_harness() {
         kasumi::test::workspace_path(workspace, "cwd-trap"));
     auto rclone_config = kasumi::test::scoped_environment_variable(
         "RCLONE_CONFIG",
-        kasumi::test::workspace_path(workspace, "rclone.conf").string());
+        kasumi::platform::path::to_utf8(
+            kasumi::test::workspace_path(workspace, "rclone.conf")));
     auto rclone_cache = kasumi::test::scoped_environment_variable(
         "RCLONE_CACHE_DIR",
-        kasumi::test::workspace_path(workspace, "rclone-cache").string());
+        kasumi::platform::path::to_utf8(
+            kasumi::test::workspace_path(workspace, "rclone-cache")));
 
     std::ofstream config(
         kasumi::test::workspace_path(workspace, "rclone.conf"));
@@ -240,8 +244,8 @@ RcloneHarness make_rclone_harness() {
     config << "[kasumi-test]\n"
            << "type = alias\n"
            << "remote = "
-           << kasumi::test::workspace_path(workspace, remote_backend)
-                  .generic_string()
+           << kasumi::platform::path::to_logical_utf8(
+                  kasumi::test::workspace_path(workspace, remote_backend))
            << "\n";
     if (!config.good()) {
         throw std::runtime_error("could not write temporary rclone.conf");
@@ -1345,11 +1349,11 @@ TEST(RcloneSystemTest, RealCliUsesOnlyTheTemporaryEnvironment) {
     auto harness = make_rclone_harness();
     const auto xdg = harness_root(harness) / "cli-home";
 #if defined(_WIN32)
-    auto appdata =
-        kasumi::test::scoped_environment_variable("APPDATA", xdg.string());
+    auto appdata = kasumi::test::scoped_environment_variable(
+        "APPDATA", kasumi::platform::path::to_utf8(xdg));
 #else
-    auto appdata = kasumi::test::scoped_environment_variable("XDG_CONFIG_HOME",
-                                                             xdg.string());
+    auto appdata = kasumi::test::scoped_environment_variable(
+        "XDG_CONFIG_HOME", kasumi::platform::path::to_utf8(xdg));
 #endif
     const ExecutionEnvironment environment{.app_data_dir = xdg / "kasumi"};
     const auto local = harness_root(harness) / "client-b/cli-local";
@@ -1372,7 +1376,8 @@ TEST(RcloneSystemTest, RealCliUsesOnlyTheTemporaryEnvironment) {
             {reproc::stop::terminate, reproc::milliseconds(2000)},
             {reproc::stop::kill, reproc::milliseconds(2000)}};
         const std::vector<std::string> arguments{
-            std::filesystem::path{KASUMI_SYSTEM_KASUMI_EXECUTABLE}.string(),
+            kasumi::platform::path::to_utf8(
+                std::filesystem::path{KASUMI_SYSTEM_KASUMI_EXECUTABLE}),
             "sync",
             std::string{profile_name}};
         const auto result = reproc::run(reproc::arguments{arguments},

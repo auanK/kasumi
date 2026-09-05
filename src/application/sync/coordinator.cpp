@@ -14,6 +14,7 @@
 #include "platform/clock.hpp"
 #include "platform/durability.hpp"
 #include "platform/metadata.hpp"
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
@@ -79,7 +80,7 @@ Error workspace_error(std::string_view operation,
                       const std::filesystem::path& path,
                       std::string detail) {
     return make_error(ErrorCode::WorkspaceFailure,
-                      std::string{operation} + " '" + path.string() +
+                      std::string{operation} + " '" + platform::path::to_utf8(path) +
                           "': " + std::move(detail));
 }
 
@@ -165,7 +166,7 @@ create_transaction_workspace(const std::filesystem::path& profile,
     if (!directory) {
         return std::unexpected(directory.error());
     }
-    const auto root = *directory / std::filesystem::path{std::string{id}};
+    const auto root = *directory / platform::path::from_utf8(id);
     auto status = read_status(root);
     if (status && !missing(*status)) {
         if (std::filesystem::is_symlink(*status) ||
@@ -269,7 +270,7 @@ cleanup_orphan_workspaces(const std::filesystem::path& profile) {
         const std::filesystem::directory_iterator end;
         while (entry != end) {
             const auto candidate = entry->path().lexically_normal();
-            const auto name = candidate.filename().string();
+            const auto name = platform::path::to_utf8(candidate.filename());
             if (transaction::valid_transaction_id(name)) {
                 if (candidate.parent_path() != directory->lexically_normal()) {
                     return std::unexpected(
@@ -933,7 +934,7 @@ bool is_storage_repair_operation(const reconciliation::Input& input,
     }
     const auto expected_hash = hash_from_hex(operation.hash);
     const auto row =
-        find_row(input.storage.tree, operation.path.generic_string());
+        find_row(input.storage.tree, platform::path::to_logical_utf8(operation.path));
     return expected_hash.has_value() && row != nullptr && !row->is_directory &&
            row->hash == *expected_hash && row->size == operation.size;
 }
@@ -989,7 +990,9 @@ restore_transaction_metadata(const Snapshot& expected_tree,
             continue;
         }
         std::error_code error;
-        auto path = row->path.empty() ? local_dir : local_dir / row->path;
+        auto path = row->path.empty()
+                        ? local_dir
+                        : local_dir / platform::path::from_utf8(row->path);
         const auto status = std::filesystem::symlink_status(path, error);
         if (error) {
             return std::unexpected(detail::make_error(
@@ -1663,9 +1666,9 @@ execute(const runtime::RuntimeData& runtime_data,
             find_row(observed_input.local_tree, row.path) == nullptr &&
             find_row(reconciliation_result.candidate_shared_tree, row.path) == nullptr) {
             concurrent_new_paths.insert(row.path);
-            std::filesystem::path p{row.path};
-            for (auto parent = p.parent_path(); !parent.empty(); parent = parent.parent_path()) {
-                affected_ancestor_dirs.insert(parent.generic_string());
+            for (auto parent = row_parent(row.path); !parent.empty();
+                 parent = row_parent(parent)) {
+                affected_ancestor_dirs.emplace(parent);
             }
             affected_ancestor_dirs.insert("");
         }

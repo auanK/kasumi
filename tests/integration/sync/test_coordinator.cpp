@@ -21,6 +21,7 @@
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/clock.hpp"
 #include "platform/metadata.hpp"
+#include "platform/path.hpp"
 #include "platform/workspace.hpp"
 #include "runtime/resolver.hpp"
 #include "state_storage/database.hpp"
@@ -297,7 +298,7 @@ make_runtime(const std::filesystem::path& profile,
     return {.local_dir = local,
             .database_path = profile / "state.db",
             .key_path = profile / "key.bin",
-            .storage_location = storage.string()};
+            .storage_location = kasumi::platform::path::to_utf8(storage)};
 }
 
 std::string
@@ -1206,7 +1207,8 @@ void add_storage_object(kasumi::transport::Transport& storage,
                         const std::filesystem::path& source,
                         const kasumi::Hash& hash) {
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
-    const auto encrypted = source.string() + ".encrypted";
+    const auto encrypted =
+        kasumi::platform::path::temporary_sibling_path(source, "", ".encrypted");
     ASSERT_TRUE(kasumi::crypto::encrypt_file(source, encrypted, key));
     ASSERT_TRUE(kasumi::transport::put(
         storage, encrypted, kasumi::crypto::content_identifier(key, hash)));
@@ -5065,16 +5067,117 @@ TEST(ReconciliationTest, ConflictReservationAvoidsUnicodeCaseCollisions) {
     const bool has_numbered_conflict = std::ranges::any_of(
         result->plan.operations, [](const kasumi::Operation& op) {
             return op.action == kasumi::Action::Download &&
-                   op.path == "ä.txt.kasumiconflict_remote.1";
+                   op.path == kasumi::platform::path::from_utf8(
+                                  "ä.txt.kasumiconflict_remote.1");
         });
     EXPECT_TRUE(has_numbered_conflict);
 
     const bool has_unfolded_collision = std::ranges::any_of(
         result->plan.operations, [](const kasumi::Operation& op) {
             return op.action == kasumi::Action::Download &&
-                   op.path == "ä.txt.kasumiconflict_remote";
+                   op.path == kasumi::platform::path::from_utf8(
+                                  "ä.txt.kasumiconflict_remote");
         });
     EXPECT_FALSE(has_unfolded_collision);
+}
+
+TEST(ReconciliationTest, UnicodeLocalConflictReservationUpdatesRelatedUpload) {
+    auto input = empty_publication_input();
+    input.storage.history_present = true;
+    input.storage.logical_heads = {std::string(64, 'a')};
+    const auto now = std::filesystem::file_time_type::clock::now();
+    const std::string logical_path = "高松灯/ä🌸.txt";
+    const std::string reserved_path = "高松灯/Ä🌸.txt.kasumiconflict_local";
+    const auto local_hash = kasumi::hasher::hash_string("local");
+    input.base_tree = input.local_tree;
+    input.base_tree.rows.push_back({.path = "高松灯", .is_directory = true});
+    input.base_tree.rows.push_back({.path = logical_path,
+                                    .hash = kasumi::hasher::hash_string("base"),
+                                    .size = 4,
+                                    .mtime = now});
+    kasumi::finalize_snapshot(input.base_tree);
+    input.local_tree = input.base_tree;
+    input.local_tree.rows.back().hash = local_hash;
+    input.local_tree.rows.back().size = 5;
+    input.local_tree.rows.push_back({.path = reserved_path,
+                                     .hash = kasumi::hasher::hash_string("reserved"),
+                                     .size = 8,
+                                     .mtime = now});
+    kasumi::finalize_snapshot(input.local_tree);
+    input.storage.tree = input.base_tree;
+    input.storage.tree.rows.back().hash = kasumi::hasher::hash_string("remote");
+    input.storage.tree.rows.back().size = 6;
+    input.storage.tree.rows.back().mtime = now + std::chrono::hours{1};
+    kasumi::finalize_snapshot(input.storage.tree);
+
+    const auto result = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_TRUE(result->has_conflicts);
+    const auto selected = kasumi::platform::path::from_utf8(
+        logical_path + ".kasumiconflict_local.1");
+    const auto renames = kasumi::sync_plan_phase(result->plan, kasumi::Action::RenameLocal);
+    ASSERT_EQ(renames.size(), 1U);
+    EXPECT_EQ(renames.front().path, kasumi::platform::path::from_utf8(logical_path));
+    EXPECT_EQ(renames.front().alt_path, selected);
+    EXPECT_TRUE(std::ranges::any_of(result->plan.operations, [&](const auto& operation) {
+        return operation.action == kasumi::Action::Upload &&
+               operation.hash == kasumi::hash_hex(local_hash) &&
+               operation.path == selected;
+    }));
+    EXPECT_NE(kasumi::find_row(result->candidate_shared_tree,
+                              logical_path + ".kasumiconflict_local.1"), nullptr);
+    EXPECT_NE(kasumi::find_row(result->candidate_shared_tree, reserved_path), nullptr);
+    EXPECT_TRUE(kasumi::valid_snapshot(result->candidate_shared_tree, false));
+}
+
+TEST(ReconciliationTest, UnicodeMissingObjectPathsPreserveRecoverySources) {
+    auto input = empty_publication_input();
+    input.storage.history_present = true;
+    input.storage.logical_heads = {std::string(64, 'a')};
+    input.audit_storage_objects = true;
+    const std::string source_path = "千早愛音/𝑬𝒎𝒊𝒍𝒊𝒂.txt";
+    const std::string missing_path = "高松灯/カード💝.png";
+    const auto missing_hash = kasumi::hasher::hash_string("missing");
+    const auto remote_hash = kasumi::hasher::hash_string("remote");
+    input.local_tree.rows.push_back({.path = "千早愛音", .is_directory = true});
+    input.local_tree.rows.push_back({.path = "高松灯", .is_directory = true});
+    input.local_tree.rows.push_back({.path = source_path,
+                                     .hash = missing_hash,
+                                     .size = 7});
+    kasumi::finalize_snapshot(input.local_tree);
+    input.base_tree = input.local_tree;
+    input.storage.tree = input.local_tree;
+    auto source = std::ranges::find(input.storage.tree.rows, source_path, &kasumi::NodeRow::path);
+    ASSERT_NE(source, input.storage.tree.rows.end());
+    source->hash = remote_hash;
+    source->size = 6;
+    input.storage.tree.rows.push_back({.path = missing_path,
+                                       .hash = missing_hash,
+                                       .size = 7});
+    input.storage.object_identifiers.insert(kasumi::hash_hex(remote_hash));
+    kasumi::finalize_snapshot(input.storage.tree);
+
+    const auto repaired = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(repaired.has_value()) << repaired.error().detail;
+    EXPECT_TRUE(repaired->requires_storage_repair);
+    EXPECT_TRUE(repaired->unrecoverable_paths.empty());
+    const auto uploads = kasumi::sync_plan_phase(repaired->plan, kasumi::Action::Upload);
+    ASSERT_EQ(uploads.size(), 1U);
+    EXPECT_EQ(uploads.front().path, kasumi::platform::path::from_utf8(source_path));
+    EXPECT_EQ(uploads.front().hash, kasumi::hash_hex(missing_hash));
+    EXPECT_FALSE(repaired->shared_tree_changed);
+
+    std::erase_if(input.local_tree.rows, [&](const auto& row) {
+        return row.path == source_path;
+    });
+    kasumi::finalize_snapshot(input.local_tree);
+    const auto pending = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(pending.has_value()) << pending.error().detail;
+    ASSERT_EQ(pending->unrecoverable_paths.size(), 1U);
+    EXPECT_EQ(pending->unrecoverable_paths.front(),
+              kasumi::platform::path::from_utf8(missing_path));
+    ASSERT_EQ(pending->pending_storage_rows.size(), 1U);
+    EXPECT_EQ(pending->pending_storage_rows.front().path, missing_path);
 }
 
 TEST(SyncCoordinatorTest, EmptyPlanPublishesAndPersistsConvergenceCommit) {

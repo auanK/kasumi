@@ -1,4 +1,5 @@
 #include "detail.hpp"
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 
 #include <algorithm>
@@ -49,7 +50,7 @@ bool valid_identifier(std::string_view identifier) {
         return false;
     }
 
-    const std::filesystem::path path{identifier};
+    const auto path = platform::path::from_utf8(identifier);
     if (path.empty() || path.is_absolute() || path.has_root_name() ||
         path.has_root_directory()) {
         return false;
@@ -301,8 +302,10 @@ Result rclone_put(void* context,
         return source_file;
     }
 
-    const auto source_name = absolute_source->filename().generic_string();
-    const auto source_parent = absolute_source->parent_path().generic_string();
+    const auto source_name =
+        platform::path::to_utf8(absolute_source->filename());
+    const auto source_parent =
+        platform::path::to_utf8(absolute_source->parent_path());
     if (source_name.empty() || source_parent.empty()) {
         return std::unexpected(make_error(ErrorCode::InvalidContext,
                                           "arquivo de origem inválido"));
@@ -341,7 +344,7 @@ Result rclone_put_batch(void* context, const PutBatch& batch) {
     if (!absolute_source) {
         return std::unexpected(absolute_source.error());
     }
-    const auto source_path = absolute_source->generic_string();
+    const auto source_path = platform::path::to_utf8(*absolute_source);
 
     nlohmann::json payload = {{"srcFs", source_path},
                               {"dstFs", objects_remote_fs(*state)},
@@ -382,9 +385,9 @@ Result rclone_get(void* context,
     }
 
     const auto destination_name =
-        absolute_destination->filename().generic_string();
+        platform::path::to_utf8(absolute_destination->filename());
     const auto destination_parent =
-        absolute_destination->parent_path().generic_string();
+        platform::path::to_utf8(absolute_destination->parent_path());
     if (destination_name.empty() || destination_parent.empty()) {
         return std::unexpected(
             make_error(ErrorCode::InvalidContext, "destino local inválido"));
@@ -455,7 +458,7 @@ Result rclone_get_batch(void* context, const GetBatch& batch) {
              ? objects_remote_fs(*state)
              : join_remote_path(objects_remote_fs(*state),
                                 batch.source_prefix)},
-        {"dstFs", absolute_destination->generic_string()},
+        {"dstFs", platform::path::to_utf8(*absolute_destination)},
         {"createEmptySrcDirs", false},
         {"_filter", {{"IncludeRule", std::move(include_rules)}}},
     };
@@ -787,7 +790,7 @@ rclone_physical_hash_batch(void* context,
         }
     }
 
-    const auto manifest_parent = root->generic_string();
+    const auto manifest_parent = platform::path::to_utf8(*root);
     const auto response = request_read_json(
         *state,
         "operations/check",
@@ -795,7 +798,7 @@ rclone_physical_hash_batch(void* context,
             {"dstFs", objects_remote_fs(*state)},
             {"checkFileHash", "SHA-256"},
             {"checkFileFs", manifest_parent},
-            {"checkFileRemote", manifest.filename().generic_string()},
+            {"checkFileRemote", platform::path::to_utf8(manifest.filename())},
             {"oneWay", true},
             {"missingOnSrc", false},
             {"missingOnDst", true},

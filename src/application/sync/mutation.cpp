@@ -2,6 +2,7 @@
 
 #include "crypto/content.hpp"
 #include "mutation_detail.hpp"
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/random.hpp"
 
@@ -467,8 +468,8 @@ apply_download(const Operation& operation,
                                           destination,
                                           operation_index));
     }
-    const auto candidate =
-        parent / ("." + destination.filename().string() + ".kasumi-new-" + *id);
+    const auto candidate = platform::path::temporary_sibling_path(
+        destination, ".", ".kasumi-new-" + *id);
     auto candidate_status = read_status(candidate, operation_index);
     if (!candidate_status) {
         return std::unexpected(candidate_status.error());
@@ -947,7 +948,7 @@ std::string describe(const MutationError& error) {
     result += std::to_string(error.operation_index);
     if (!error.path.empty()) {
         result += " ('";
-        result += error.path.string();
+        result += platform::path::to_utf8(error.path);
         result += "')";
     }
     if (!error.detail.empty()) {

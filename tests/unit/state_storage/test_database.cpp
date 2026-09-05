@@ -1,5 +1,6 @@
 #include "core/hasher.hpp"
 #include "kasumi/test/temp_workspace.hpp"
+#include "platform/path.hpp"
 #include "state_storage/database.hpp"
 #include "state_storage/database_connection.hpp"
 
@@ -884,15 +885,18 @@ TEST(StateStorageDatabaseTest, ReadOnlyConnectionDoesNotExecuteWritePragmas) {
 TEST(StateStorageDatabaseTest, UnicodePathRoundTrip) {
     auto workspace = kasumi::test::make_temp_workspace("persistence-unicode");
     const auto unicode_dir =
-        kasumi::test::workspace_root(workspace) / u8"usuário-João-日本-☁";
+        kasumi::test::workspace_root(workspace) /
+        kasumi::platform::path::from_utf8("usuário-João-日本-☁/高松灯🌸");
     std::filesystem::create_directories(unicode_dir);
-    const auto database_path = unicode_dir / "state.db";
+    const auto database_path =
+        unicode_dir / kasumi::platform::path::from_utf8("千早愛音💝.db");
 
     // 1. Initialize StateStorage in a Unicode directory (READWRITE + CREATE)
     ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
 
     // 2. Save state via StateStorage READWRITE connection
-    const auto snapshot = make_snapshot("unicode_test.txt", "conteúdo 日本", 100);
+    constexpr std::string_view logical_path = "docs/𝑬𝒎𝒊𝒍𝒊𝒂-𓆩🌸𓆪.txt";
+    const auto snapshot = make_snapshot(logical_path, "conteúdo 日本", 100);
     const std::string commit_hash(64, 'c');
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
@@ -903,14 +907,15 @@ TEST(StateStorageDatabaseTest, UnicodePathRoundTrip) {
     ASSERT_TRUE(loaded.has_value() && *loaded);
     EXPECT_EQ((*loaded)->commit_id, commit_hash);
     ASSERT_EQ((*loaded)->tree.rows.size(), snapshot.rows.size());
-    EXPECT_NE(kasumi::find_row((*loaded)->tree, "unicode_test.txt"), nullptr);
+    EXPECT_NE(kasumi::find_row((*loaded)->tree, logical_path), nullptr);
+    EXPECT_EQ((*loaded)->tree, snapshot);
 
     // 4. Query nodes and metadata tables directly via READONLY helper
     const auto node_rows =
         query_text(database_path, "SELECT path FROM nodes ORDER BY path");
     ASSERT_EQ(node_rows.size(), snapshot.rows.size());
     EXPECT_NE(
-        std::find(node_rows.begin(), node_rows.end(), "unicode_test.txt"),
+        std::find(node_rows.begin(), node_rows.end(), logical_path),
         node_rows.end());
 
     const auto commit_rows = query_text(

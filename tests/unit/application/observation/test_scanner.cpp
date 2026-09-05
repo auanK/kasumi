@@ -7,6 +7,7 @@
 #include "platform/change_journal.hpp"
 #include "platform/change_journal_diagnostic.hpp"
 #include "platform/metadata.hpp"
+#include "platform/path.hpp"
 
 #include <algorithm>
 #include <array>
@@ -575,6 +576,119 @@ TEST(ScannerTest, LineageCheckpointMismatchFallsBack) {
               kasumi::platform::ChangeEvidence::Indeterminate);
 }
 
+TEST(ScannerTest, UnicodeSupplementaryPathsAndTargetedObservation) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("scanner-unicode-supplementary");
+    const auto root = kasumi::test::workspace_path(workspace, "local");
+    constexpr std::array<std::string_view, 4> paths{
+        "高松灯/カード💝.png",
+        "Icons/Karyl💝.png",
+        "Icons/𝑬𝒎𝒊𝒍𝒊𝒂.txt",
+        "Icons/𓆩🌸𓆪.txt",
+    };
+    for (const auto path : paths) {
+        kasumi::test::write_text(root / kasumi::platform::path::from_utf8(path),
+                                 "original");
+    }
+    set_fingerprint_fake(FingerprintFakeMode::Supported);
+    const auto scan = kasumi::application::observation::scanner::scan_result(
+        root,
+        {},
+        kasumi::application::observation::scanner::ScanPolicy::FullHash,
+        fake_fingerprint);
+    ASSERT_TRUE(scan.has_value())
+        << kasumi::application::observation::scanner::describe(scan.error());
+    ASSERT_EQ(scan->snapshot.rows.size(), 7U);
+    ASSERT_EQ(scan->cache.size(), paths.size());
+    for (const auto path : paths) {
+        SCOPED_TRACE(path);
+        const auto* row = kasumi::find_row(scan->snapshot, path);
+        ASSERT_NE(row, nullptr);
+        EXPECT_EQ(row->path, path);
+        EXPECT_FALSE(row->is_directory);
+        const auto cached = std::ranges::find(
+            scan->cache, path, &kasumi::state_storage::FileCacheRow::path);
+        ASSERT_NE(cached, scan->cache.end());
+        EXPECT_EQ(cached->path, path);
+
+        const auto file = root / kasumi::platform::path::from_utf8(path);
+        kasumi::test::write_text(file, "updated Unicode content");
+        const auto targeted =
+            kasumi::application::observation::scanner::observe_file(
+                root, path, *cached, fake_fingerprint);
+        ASSERT_TRUE(targeted.has_value())
+            << kasumi::application::observation::scanner::describe(targeted.error());
+        EXPECT_EQ(targeted->row.path, path);
+        EXPECT_NE(targeted->row.hash, row->hash);
+        ASSERT_TRUE(targeted->cache.has_value());
+        EXPECT_EQ(targeted->cache->path, path);
+        EXPECT_EQ(targeted->cache->hash, targeted->row.hash);
+    }
+}
+
+TEST(ScannerTest, UnicodeSingleFileAndErrorDisplay) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("scanner-unicode-single-file");
+    const auto file = kasumi::test::workspace_path(workspace, "local") /
+                      kasumi::platform::path::from_utf8("千早愛音🌸.txt");
+    kasumi::test::write_text(file, "content");
+    const auto scanned =
+        kasumi::application::observation::scanner::scan_result(file);
+    ASSERT_TRUE(scanned.has_value())
+        << kasumi::application::observation::scanner::describe(scanned.error());
+    ASSERT_EQ(scanned->snapshot.rows.size(), 1U);
+    EXPECT_EQ(scanned->snapshot.rows.front().path, "千早愛音🌸.txt");
+
+    const auto missing = kasumi::application::observation::scanner::observe_file(
+        file.parent_path(), "missing-𓆩🌸𓆪.txt");
+    ASSERT_FALSE(missing.has_value());
+    EXPECT_NE(kasumi::application::observation::scanner::describe(missing.error())
+                  .find("missing-𓆩🌸𓆪.txt"),
+              std::string::npos);
+}
+
+TEST(ScannerTest, UnicodeIgnoreRulesExcludeAndReincludeFiles) {
+    auto workspace = kasumi::test::make_temp_workspace("scanner-unicode-ignore");
+    const auto root = kasumi::test::workspace_path(workspace, "local");
+    kasumi::test::write_text(root / ".kasumiignore",
+                             "/千早愛音/\n"
+                             "高松灯/*.png\n"
+                             "!高松灯/カード💝.png\n"
+                             "𓆩🌸𓆪.txt\n");
+    constexpr std::array<std::string_view, 3> excluded{
+        "千早愛音/Karyl💝.png", "高松灯/除外🌸.png", "Icons/𓆩🌸𓆪.txt"};
+    constexpr std::array<std::string_view, 2> included{
+        "高松灯/カード💝.png", "Icons/𝑬𝒎𝒊𝒍𝒊𝒂.txt"};
+    for (const auto path : excluded) {
+        kasumi::test::write_text(root / kasumi::platform::path::from_utf8(path),
+                                 "ignored");
+    }
+    for (const auto path : included) {
+        kasumi::test::write_text(root / kasumi::platform::path::from_utf8(path),
+                                 "kept");
+    }
+    const auto scanned =
+        kasumi::application::observation::scanner::scan_result(root);
+    ASSERT_TRUE(scanned.has_value())
+        << kasumi::application::observation::scanner::describe(scanned.error());
+    EXPECT_EQ(kasumi::find_row(scanned->snapshot, "千早愛音"), nullptr);
+    for (const auto path : excluded) {
+        SCOPED_TRACE(path);
+        EXPECT_EQ(kasumi::find_row(scanned->snapshot, path), nullptr);
+        EXPECT_FALSE(
+            kasumi::application::observation::scanner::observe_file(root, path));
+    }
+    for (const auto path : included) {
+        SCOPED_TRACE(path);
+        EXPECT_NE(kasumi::find_row(scanned->snapshot, path), nullptr);
+        const auto observed =
+            kasumi::application::observation::scanner::observe_file(root, path);
+        ASSERT_TRUE(observed.has_value())
+            << kasumi::application::observation::scanner::describe(observed.error());
+        EXPECT_EQ(observed->row.path, path);
+    }
+}
+
 TEST(ScannerTest, UnicodeFilenameRoundTrip) {
     auto workspace =
         kasumi::test::make_temp_workspace("scanner-unicode-roundtrip");
@@ -583,17 +697,16 @@ TEST(ScannerTest, UnicodeFilenameRoundTrip) {
     const std::string expected_file_utf8 = "pasta-日本/usuário-☁.txt";
 
     const auto dir_path =
-        root / std::filesystem::path(
-                   reinterpret_cast<const char8_t*>(u8"pasta-日本"));
+        root / kasumi::platform::path::from_utf8(expected_dir_utf8);
     std::filesystem::create_directories(dir_path);
     const auto file_path =
-        dir_path / std::filesystem::path(
-                       reinterpret_cast<const char8_t*>(u8"usuário-☁.txt"));
+        root / kasumi::platform::path::from_utf8(expected_file_utf8);
     kasumi::test::write_text(file_path, "conteúdo de teste unicode");
 
     const auto scan =
         kasumi::application::observation::scanner::scan_result(root);
-    ASSERT_TRUE(scan.has_value());
+    ASSERT_TRUE(scan.has_value())
+        << kasumi::application::observation::scanner::describe(scan.error());
 
     const auto* dir_row = kasumi::find_row(scan->snapshot, expected_dir_utf8);
     ASSERT_NE(dir_row, nullptr);
@@ -606,7 +719,6 @@ TEST(ScannerTest, UnicodeFilenameRoundTrip) {
     EXPECT_FALSE(file_row->is_directory);
     EXPECT_GT(file_row->size, 0U);
 
-    // Commit round trip
     const auto commit = kasumi::history::make_bootstrap(scan->snapshot, 0);
     ASSERT_TRUE(commit.has_value());
     const auto bytes = kasumi::history::serialize(*commit);

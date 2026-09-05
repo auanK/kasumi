@@ -5,6 +5,7 @@
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/change_journal.hpp"
+#include "platform/path.hpp"
 #include "runtime/resolver.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
@@ -86,7 +87,7 @@ Client make_client(Scenario& scenario, std::string name) {
         client_environment(result),
         Profile{.name = client_name(result),
                 .local_dir = client_local_dir(result),
-                .remote_dir = remote.string()},
+                .remote_dir = kasumi::platform::path::to_utf8(remote)},
         MasterKeyHex{std::string{key_hex}});
     if (!created) {
         throw std::runtime_error("could not create E2E profile: " +
@@ -106,6 +107,15 @@ std::expected<void, std::string> sync(const Client& client) {
     return {};
 }
 
+testing::AssertionResult sync_succeeds(const Client& client) {
+    const auto result = sync(client);
+    if (!result) {
+        return testing::AssertionFailure()
+               << client_name(client) << ": " << result.error();
+    }
+    return testing::AssertionSuccess();
+}
+
 std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> decode_key() {
     std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> result{};
     result.fill(0x77U);
@@ -114,7 +124,8 @@ std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> decode_key() {
 
 std::expected<StorageView, std::string> remote(Scenario& scenario) {
     const auto& remote_path = std::get<1>(scenario);
-    auto storage = kasumi::transport::open_transport(remote_path.string());
+    auto storage = kasumi::transport::open_transport(
+        kasumi::platform::path::to_utf8(remote_path));
     if (!storage) {
         return std::unexpected(storage.error().message);
     }
@@ -133,7 +144,8 @@ std::expected<StorageView, std::string> remote(Scenario& scenario) {
 std::expected<std::vector<std::string>, std::string>
 remote_identifiers(Scenario& scenario) {
     const auto& remote_path = std::get<1>(scenario);
-    auto storage = kasumi::transport::open_transport(remote_path.string());
+    auto storage = kasumi::transport::open_transport(
+        kasumi::platform::path::to_utf8(remote_path));
     if (!storage) {
         return std::unexpected(storage.error().message);
     }
@@ -265,7 +277,8 @@ void set_mtime(const Client& client,
                std::string_view path,
                std::filesystem::file_time_type timestamp) {
     std::error_code error;
-    std::filesystem::last_write_time(client_local_dir(client) / path,
+    std::filesystem::last_write_time(client_local_dir(client) /
+                                         kasumi::platform::path::from_utf8(path),
                                      timestamp,
                                      error);
     ASSERT_FALSE(error) << error.message();
@@ -273,27 +286,30 @@ void set_mtime(const Client& client,
 
 void remove_file(const Client& client, std::string_view path) {
     std::error_code error;
-    ASSERT_TRUE(std::filesystem::remove(client_local_dir(client) / path, error));
+    ASSERT_TRUE(std::filesystem::remove(
+        client_local_dir(client) / kasumi::platform::path::from_utf8(path), error));
     ASSERT_FALSE(error) << error.message();
 }
 
 void remove_directory(const Client& client, std::string_view path) {
     std::error_code error;
-    ASSERT_TRUE(std::filesystem::remove(client_local_dir(client) / path, error));
+    ASSERT_TRUE(std::filesystem::remove(
+        client_local_dir(client) / kasumi::platform::path::from_utf8(path), error));
     ASSERT_FALSE(error) << error.message();
 }
 
 void expect_file(const Client& client,
                  std::string_view path,
                  std::string_view contents) {
-    ASSERT_TRUE(std::filesystem::is_regular_file(client_local_dir(client) /
-                                                 path));
-    EXPECT_EQ(kasumi::test::read_text(client_local_dir(client) / path),
-              contents);
+    const auto file = client_local_dir(client) /
+                      kasumi::platform::path::from_utf8(path);
+    ASSERT_TRUE(std::filesystem::is_regular_file(file));
+    EXPECT_EQ(kasumi::test::read_text(file), contents);
 }
 
 void expect_absent(const Client& client, std::string_view path) {
-    EXPECT_FALSE(std::filesystem::exists(client_local_dir(client) / path));
+    EXPECT_FALSE(std::filesystem::exists(
+        client_local_dir(client) / kasumi::platform::path::from_utf8(path)));
 }
 
 void expect_remote_present(const StorageView& remote,
@@ -310,12 +326,8 @@ TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
     const auto a = make_client(scenario, "a");
     const auto b = make_client(scenario, "b");
 
-    const auto unicode_dir =
-        std::filesystem::path(
-            reinterpret_cast<const char8_t*>(u8"pasta-日本"));
-    const auto unicode_file =
-        std::filesystem::path(
-            reinterpret_cast<const char8_t*>(u8"usuário-☁.txt"));
+    const auto unicode_dir = kasumi::platform::path::from_utf8("pasta-日本");
+    const auto unicode_file = kasumi::platform::path::from_utf8("usuário-☁.txt");
     const auto a_unicode = client_local_dir(a) / unicode_dir / unicode_file;
     const std::string expected_dir_utf8 = "pasta-日本";
     const std::string expected_file_utf8 = "pasta-日本/usuário-☁.txt";
@@ -329,7 +341,7 @@ TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
                              "binary");
     kasumi::test::write_text(a_unicode, "unicode-v1");
 
-    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync_succeeds(a));
     auto observed_remote = remote(scenario);
     ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
     expect_remote_present(*observed_remote, "alpha.txt");
@@ -347,13 +359,12 @@ TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
     EXPECT_FALSE(r_file->is_directory);
     EXPECT_EQ(r_file->path, expected_file_utf8);
 
-    ASSERT_TRUE(sync(b));
+    ASSERT_TRUE(sync_succeeds(b));
     expect_file(b, "alpha.txt", "alpha");
     expect_file(b, "docs/readme.txt", "readme");
     expect_file(b, "docs/nested/data.txt", "data");
     expect_file(b, "images/image.bin", "binary");
 
-    // Native path on client B constructed independently via char8_t
     const auto b_unicode = client_local_dir(b) / unicode_dir / unicode_file;
     ASSERT_TRUE(std::filesystem::is_regular_file(b_unicode));
     EXPECT_EQ(kasumi::test::read_text(b_unicode), "unicode-v1");
@@ -362,7 +373,8 @@ TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
     const auto b_scan =
         kasumi::application::observation::scanner::scan_result(
             client_local_dir(b));
-    ASSERT_TRUE(b_scan.has_value());
+    ASSERT_TRUE(b_scan.has_value())
+        << kasumi::application::observation::scanner::describe(b_scan.error());
     const auto* b_scan_dir =
         kasumi::find_row(b_scan->snapshot, expected_dir_utf8);
     ASSERT_NE(b_scan_dir, nullptr);
@@ -377,8 +389,8 @@ TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
     // Reverse path B -> A: modify on B and sync to A
     kasumi::test::write_text(b_unicode, "unicode-v2");
 
-    ASSERT_TRUE(sync(b));
-    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync_succeeds(b));
+    ASSERT_TRUE(sync_succeeds(a));
 
     ASSERT_TRUE(std::filesystem::is_regular_file(a_unicode));
     EXPECT_EQ(kasumi::test::read_text(a_unicode), "unicode-v2");
@@ -392,6 +404,53 @@ TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
     ASSERT_NE(v2_file, nullptr);
     EXPECT_EQ(v2_file->path, expected_file_utf8);
 
+    expect_converged(scenario, {&a, &b});
+    expect_fixed_point(scenario, a);
+    expect_fixed_point(scenario, b);
+}
+
+TEST(H3LocalSyncTest, UnicodeSupplementaryAndExtendedSync) {
+    auto scenario = make_scenario();
+    const auto a = make_client(scenario, "a");
+    const auto b = make_client(scenario, "b");
+    constexpr std::array<std::pair<std::string_view, std::string_view>, 4> files{{
+        {"高松灯/カード💝.png", "card from A"},
+        {"Icons/Karyl💝.png", "Karyl from A"},
+        {"Icons/𝑬𝒎𝒊𝒍𝒊𝒂.txt", "Emilia from A"},
+        {"Icons/𓆩🌸𓆪.txt", "flower from A"},
+    }};
+    for (const auto& [path, contents] : files) {
+        kasumi::test::write_text(
+            client_local_dir(a) / kasumi::platform::path::from_utf8(path),
+            contents);
+    }
+
+    ASSERT_TRUE(sync_succeeds(a));
+    ASSERT_TRUE(sync_succeeds(b));
+    for (const auto& [path, contents] : files) {
+        SCOPED_TRACE(path);
+        expect_file(b, path, contents);
+    }
+
+    constexpr std::string_view modified = "高松灯/カード💝.png";
+    constexpr std::string_view added = "高松灯/千早愛音🌸.txt";
+    kasumi::test::write_text(
+        client_local_dir(b) / kasumi::platform::path::from_utf8(modified),
+        "card updated on B with Unicode path");
+    kasumi::test::write_text(
+        client_local_dir(b) / kasumi::platform::path::from_utf8(added),
+        "new file from B");
+
+    ASSERT_TRUE(sync_succeeds(b));
+    ASSERT_TRUE(sync_succeeds(a));
+    expect_file(a, modified, "card updated on B with Unicode path");
+    expect_file(a, added, "new file from B");
+    for (const auto& [path, contents] : files) {
+        SCOPED_TRACE(path);
+        if (path != modified) {
+            expect_file(a, path, contents);
+        }
+    }
     expect_converged(scenario, {&a, &b});
     expect_fixed_point(scenario, a);
     expect_fixed_point(scenario, b);

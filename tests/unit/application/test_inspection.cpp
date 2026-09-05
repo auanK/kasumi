@@ -6,6 +6,7 @@
 #include "crypto/file_crypto.hpp"
 #include "crypto/key_derivation.hpp"
 #include "kasumi/test/history_storage.hpp"
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "state_storage/database.hpp"
 
@@ -51,8 +52,9 @@ void write_profile(const TempWorkspace& workspace,
     kasumi::test::write_text(
         app / "config.toml",
         "[profiles.demo]\nlocal_dir = '" +
-            kasumi::test::workspace_path(workspace, "local").string() +
-            "'\nremote_dir = '" + remote.string() +
+            kasumi::platform::path::to_utf8(
+                kasumi::test::workspace_path(workspace, "local")) +
+            "'\nremote_dir = '" + kasumi::platform::path::to_utf8(remote) +
             "'\nmin_history_depth = 5\nmin_history_age_hours = 6\n");
 }
 
@@ -949,8 +951,8 @@ TEST(ApplicationInspectionTest,
     const auto profile = kasumi::application::Profile{
         .name = "demo",
         .local_dir = local,
-        .remote_dir = kasumi::test::workspace_path(fixture.workspace, "storage")
-                          .string()};
+        .remote_dir = kasumi::platform::path::to_utf8(
+            kasumi::test::workspace_path(fixture.workspace, "storage"))};
     ASSERT_TRUE(kasumi::application::create_profile(
         environment, profile, MasterKeyHex{key_hex()}));
 
@@ -1086,8 +1088,8 @@ TEST(ApplicationInspectionTest, UsesPersistedKeyFromProfileCreatedNormally) {
     const auto profile = kasumi::application::Profile{
         .name = "demo",
         .local_dir = local,
-        .remote_dir = kasumi::test::workspace_path(fixture.workspace, "storage")
-                          .string()};
+        .remote_dir = kasumi::platform::path::to_utf8(
+            kasumi::test::workspace_path(fixture.workspace, "storage"))};
 
     ASSERT_TRUE(kasumi::application::create_profile(
         environment, profile, MasterKeyHex{key_hex()}));
@@ -2047,8 +2049,9 @@ TEST(ApplicationInspectionTest,
             .value();
     publish(fixture, commit);
     const auto content_id = put_content(fixture, "conteúdo remoto");
-    const auto destination = kasumi::test::workspace_path(
-        workspace, "downloads/relatório final.txt");
+    const auto destination = kasumi::test::workspace_root(workspace) /
+                             kasumi::platform::path::from_utf8(
+                                 "downloads/relatório final.txt");
     std::filesystem::create_directories(destination.parent_path());
     kasumi::test::write_text(destination, "conteúdo anterior");
     const auto config =
@@ -2060,7 +2063,8 @@ TEST(ApplicationInspectionTest,
         {InspectionRequest{.operation = InspectionOperation::RemoteGet,
                            .profile_name = "demo",
                            .logical_path = "relatório final.txt",
-                           .destination_path = destination.string()},
+                           .destination_path =
+                               kasumi::platform::path::to_utf8(destination)},
          Credentials{MasterKeyHex{key_hex()}},
          ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")}});
 
@@ -2082,6 +2086,53 @@ TEST(ApplicationInspectionTest,
         workspace, "app/profiles/demo/db.sqlite")));
 }
 
+TEST(ApplicationInspectionTest, RemoteGetInstallsUnicodeDestination) {
+    auto fixture = make_local_storage();
+    auto workspace =
+        kasumi::test::make_temp_workspace("application-remote-get-unicode");
+    const auto remote_root =
+        kasumi::test::workspace_path(fixture.workspace, "storage");
+    write_profile(workspace, remote_root);
+    const auto commit = kasumi::history::make_commit(
+        0, {}, make_tree("カード💝.png", "unicode remote content"), 100);
+    ASSERT_TRUE(commit);
+    publish(fixture, *commit);
+    const auto content_id = put_content(fixture, "unicode remote content");
+    const auto destination = (kasumi::test::workspace_root(workspace) /
+                              kasumi::platform::path::from_utf8(
+                                  "downloads/高松灯/千早愛音🌸-𝑬𝒎𝒊𝒍𝒊𝒂-𓆩🌸𓆪.txt"))
+                                 .lexically_normal();
+    kasumi::test::write_text(destination, "previous content");
+    const auto remote_before = kasumi::test::snapshot_tree(remote_root);
+
+    const auto result = kasumi::application::read_remote_file(
+        {InspectionRequest{.operation = InspectionOperation::RemoteGet,
+                           .profile_name = "demo",
+                           .logical_path = "カード💝.png",
+                           .destination_path =
+                               kasumi::platform::path::to_utf8(destination)},
+         Credentials{MasterKeyHex{key_hex()}},
+         ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")}});
+
+    ASSERT_TRUE(result) << result.error().detail;
+    const auto* report =
+        std::get_if<kasumi::application::RemoteFileReport>(&result->payload);
+    ASSERT_NE(report, nullptr);
+    EXPECT_EQ(report->path, "カード💝.png");
+    EXPECT_EQ(report->destination_path,
+              kasumi::platform::path::to_utf8(destination));
+    EXPECT_NE(report->destination_path.find("千早愛音🌸-𝑬𝒎𝒊𝒍𝒊𝒂-𓆩🌸𓆪.txt"),
+              std::string::npos);
+    EXPECT_EQ(report->content_id, content_id);
+    EXPECT_EQ(kasumi::test::read_text(destination), "unicode remote content");
+    EXPECT_EQ(kasumi::test::snapshot_tree(remote_root), remote_before);
+    const auto installed =
+        kasumi::test::snapshot_tree(destination.parent_path());
+    ASSERT_EQ(installed.size(), 1U);
+    EXPECT_EQ(installed.front().relative_path,
+              "千早愛音🌸-𝑬𝒎𝒊𝒍𝒊𝒂-𓆩🌸𓆪.txt");
+}
+
 TEST(
     ApplicationInspectionTest,
     RemoteGetRejectsMissingCorruptAndDirectoryContentWithoutReplacingDestination) {
@@ -2101,7 +2152,8 @@ TEST(
             {InspectionRequest{.operation = InspectionOperation::RemoteGet,
                                .profile_name = "demo",
                                .logical_path = std::move(path),
-                               .destination_path = destination.string()},
+                               .destination_path =
+                                   kasumi::platform::path::to_utf8(destination)},
              Credentials{MasterKeyHex{key_hex()}},
              ExecutionEnvironment{
                  kasumi::test::workspace_path(workspace, "app")}});

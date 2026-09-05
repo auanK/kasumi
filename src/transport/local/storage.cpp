@@ -1,4 +1,5 @@
 #include "detail.hpp"
+#include "platform/path.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -53,7 +54,7 @@ bool valid_identifier(std::string_view identifier) {
         return false;
     }
 
-    const std::filesystem::path path{identifier};
+    const auto path = platform::path::from_utf8(identifier);
 
     if (path.empty() || path.is_absolute() || path.has_root_name() ||
         path.has_root_directory()) {
@@ -80,7 +81,7 @@ resolve_object_path(const State& state, std::string_view identifier) {
     }
 
     return objects_directory(state) /
-           std::filesystem::path{identifier}.lexically_normal();
+           platform::path::from_utf8(identifier).lexically_normal();
 }
 
 Result ensure_parent_directory(const std::filesystem::path& path) {
@@ -284,7 +285,7 @@ ListingResult local_list(void* context) {
                 return std::unexpected(make_error(error));
             }
 
-            identifiers.push_back(relative.generic_string());
+            identifiers.push_back(platform::path::to_logical_utf8(relative));
         }
 
         iterator.increment(error);
@@ -306,7 +307,7 @@ ListingResult local_list_prefix(void* context, std::string_view prefix) {
     }
 
     const auto base =
-        objects_directory(*state) / std::filesystem::path{std::string{prefix}};
+        objects_directory(*state) / platform::path::from_utf8(prefix);
     std::error_code error;
     if (!std::filesystem::is_directory(base, error)) {
         if (error == std::errc::no_such_file_or_directory || !error) {
@@ -331,7 +332,8 @@ ListingResult local_list_prefix(void* context, std::string_view prefix) {
     while (iterator != end) {
         const auto& entry = *iterator;
         if (entry.is_regular_file(error)) {
-            identifiers.push_back(entry.path().filename().generic_string());
+            identifiers.push_back(
+                platform::path::to_logical_utf8(entry.path().filename()));
         }
         if (error) {
             return std::unexpected(make_error(error));

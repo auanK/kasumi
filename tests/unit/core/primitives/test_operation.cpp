@@ -1,4 +1,5 @@
 #include "core/operation.hpp"
+#include "platform/path.hpp"
 
 #include <array>
 #include <cstddef>
@@ -33,7 +34,7 @@ constexpr std::array<Action, kasumi::ActionCount> all_actions{
 Operation make_operation(Action action, std::string_view relative_path) {
     return {
         .action = action,
-        .path = std::string{relative_path},
+        .path = kasumi::platform::path::from_utf8(relative_path),
         .hash = {},
         .alt_path = {},
         .size = 0,
@@ -44,7 +45,7 @@ Operation make_operation(Action action, std::string_view relative_path) {
 std::vector<std::string> phase_paths(const SyncPlan& plan, Action action) {
     std::vector<std::string> paths;
     for (const auto& operation : kasumi::sync_plan_phase(plan, action)) {
-        paths.push_back(operation.path.generic_string());
+        paths.push_back(kasumi::platform::path::to_logical_utf8(operation.path));
     }
     return paths;
 }
@@ -84,7 +85,7 @@ TEST(SyncPlanTest, StablyOrdersOperationsAndPreservesFields) {
     first_upload.size = 17;
 
     Operation rename = make_operation(Action::RenameLocal, "before.txt");
-    rename.alt_path = "after.txt";
+    rename.alt_path = kasumi::platform::path::from_utf8("after.txt");
     rename.hash = "rename-hash";
     rename.size = 29;
     rename.exclusive_destination = true;
@@ -109,9 +110,10 @@ TEST(SyncPlanTest, StablyOrdersOperationsAndPreservesFields) {
     const auto rename_phase =
         kasumi::sync_plan_phase(plan, Action::RenameLocal);
     ASSERT_EQ(rename_phase.size(), 1U);
-    EXPECT_EQ(rename_phase.front().path, std::filesystem::path{"before.txt"});
+    EXPECT_EQ(rename_phase.front().path,
+              kasumi::platform::path::from_utf8("before.txt"));
     EXPECT_EQ(rename_phase.front().alt_path,
-              std::filesystem::path{"after.txt"});
+              kasumi::platform::path::from_utf8("after.txt"));
     EXPECT_EQ(rename_phase.front().hash, "rename-hash");
     EXPECT_EQ(rename_phase.front().size, std::uint64_t{29});
     EXPECT_TRUE(rename_phase.front().exclusive_destination);
@@ -183,14 +185,15 @@ TEST(SyncPlanTest, MutableAndConstPhasesExposeOnlyCanonicalRanges) {
         }
     }
     EXPECT_EQ(visited, kasumi::sync_plan_size(plan));
-    kasumi::sync_plan_phase(plan, Action::Upload).front().path = "changed";
+    kasumi::sync_plan_phase(plan, Action::Upload).front().path =
+        kasumi::platform::path::from_utf8("changed");
 
     const SyncPlan& constant = plan;
     static_assert(std::is_same_v<decltype(kasumi::sync_plan_phase(
                                      constant, Action::Upload)),
                                  std::span<const Operation>>);
     EXPECT_EQ(kasumi::sync_plan_phase(constant, Action::Upload).front().path,
-              std::filesystem::path{"changed"});
+              kasumi::platform::path::from_utf8("changed"));
     EXPECT_TRUE(kasumi::sync_plan_phase(plan, Action::Count).empty());
     EXPECT_TRUE(kasumi::sync_plan_phase(constant, Action::Count).empty());
 }
@@ -225,11 +228,12 @@ TEST(SyncPlanTest, DetectsCorruptedOffsetsActionsAndFinalSize) {
 TEST(OperationPathTest, AcceptsNormalRelativePathsAndLiteralDotsAndColons) {
     Operation operation =
         make_operation(Action::RenameLocal, "archive/report..draft.txt");
-    operation.alt_path = "archive/name:revision...txt";
+    operation.alt_path =
+        kasumi::platform::path::from_utf8("archive/name:revision...txt");
     EXPECT_TRUE(kasumi::has_safe_paths(operation));
 
     operation.path = std::filesystem::path{"folder"} / "..." / "entry.txt";
-    operation.alt_path = "renamed:copy.txt";
+    operation.alt_path = kasumi::platform::path::from_utf8("renamed:copy.txt");
     EXPECT_TRUE(kasumi::has_safe_paths(operation));
 }
 
@@ -243,7 +247,7 @@ TEST(OperationPathTest, RejectsAbsolutePathsAndTraversal) {
     operation.path = absolute_path;
     EXPECT_FALSE(kasumi::has_safe_paths(operation));
 
-    operation.path = "inside/file.txt";
+    operation.path = kasumi::platform::path::from_utf8("inside/file.txt");
     operation.alt_path = absolute_path;
     EXPECT_FALSE(kasumi::has_safe_paths(operation));
 

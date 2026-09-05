@@ -5,6 +5,7 @@
 #include "application/use_cases/error_mapping.hpp"
 #include "application/use_cases/plan_support.hpp"
 #include "core/operation.hpp"
+#include "platform/path.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -81,7 +82,7 @@ std::string describe_reconciliation_error(const reconciliation::Error& error) {
             if (index != 0) {
                 detail += ", ";
             }
-            detail += error.paths[index].string();
+            detail += platform::path::to_utf8(error.paths[index]);
         }
         detail += ')';
     }
@@ -98,7 +99,7 @@ describe_unrecoverable_paths(std::span<const std::filesystem::path> paths) {
         if (index != 0) {
             detail += ", ";
         }
-        detail += paths[index].string();
+        detail += platform::path::to_utf8(paths[index]);
     }
     if (paths.size() > path_limit) {
         detail += "; e mais ";

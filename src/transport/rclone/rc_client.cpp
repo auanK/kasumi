@@ -1,5 +1,6 @@
 #include "detail.hpp"
 #include "platform/cancellation.hpp"
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 
 #include <algorithm>
@@ -82,7 +83,7 @@ Error with_request_context(const State& state,
         elapsed.count(),
         attempt,
         attempts,
-        state.configuration.executable.string(),
+        platform::path::to_utf8(state.configuration.executable),
         error.message);
     return error;
 }

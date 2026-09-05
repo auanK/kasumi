@@ -1,5 +1,6 @@
 #include "platform/workspace.hpp"
 
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
@@ -36,7 +37,7 @@ bool valid_extension(std::string_view extension) noexcept {
 }
 
 bool valid_name(std::string_view name) noexcept {
-    const std::filesystem::path path{std::string{name}};
+    const auto path = platform::path::from_utf8(name);
     return !name.empty() && path == path.filename() && !path.is_absolute() &&
            !path.has_root_name() && !path.has_root_directory() && path != "." &&
            path != "..";
@@ -57,7 +58,7 @@ clear_read_only(const std::filesystem::path& root) {
         std::filesystem::recursive_directory_iterator entries(root, error);
         if (error) {
             return std::unexpected("não foi possível enumerar o espaço de trabalho '" +
-                                   root.string() + "': " + error.message());
+                                   platform::path::to_utf8(root) + "': " + error.message());
         }
         const std::filesystem::recursive_directory_iterator end;
         while (entries != end) {
@@ -65,19 +66,19 @@ clear_read_only(const std::filesystem::path& root) {
             const auto attributes = GetFileAttributesW(path.c_str());
             if (attributes == INVALID_FILE_ATTRIBUTES) {
                 return std::unexpected("não foi possível inspecionar o caminho do espaço de trabalho '" +
-                                       path.string() +
+                                       platform::path::to_utf8(path) +
                                        "': " + windows_error(GetLastError()));
             }
             if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
                 return std::unexpected("caminho inválido do espaço de trabalho '" +
-                                       path.string() +
+                                       platform::path::to_utf8(path) +
                                        "': ponto de nova análise (reparse point) não é permitido");
             }
             paths.push_back(path);
             entries.increment(error);
             if (error) {
                 return std::unexpected("não foi possível enumerar o espaço de trabalho '" +
-                                       root.string() + "': " + error.message());
+                                       platform::path::to_utf8(root) + "': " + error.message());
             }
         }
     }
@@ -90,7 +91,7 @@ clear_read_only(const std::filesystem::path& root) {
                 continue;
             }
             return std::unexpected("não foi possível inspecionar o caminho do espaço de trabalho '" +
-                                   path.string() + "': " + windows_error(code));
+                                   platform::path::to_utf8(path) + "': " + windows_error(code));
         }
         if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
             continue;
@@ -100,7 +101,7 @@ clear_read_only(const std::filesystem::path& root) {
                 path.c_str(),
                 attributes & ~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY))) {
             return std::unexpected("não foi possível limpar o atributo somente leitura em '" +
-                                   path.string() +
+                                   platform::path::to_utf8(path) +
                                    "': " + windows_error(GetLastError()));
         }
     }
@@ -159,7 +160,8 @@ std::filesystem::path workspace_file(const Workspace& workspace,
     if (!valid_extension(extension)) {
         return {};
     }
-    return workspace.root / (std::to_string(index) + std::string{extension});
+    return workspace.root /
+           platform::path::from_utf8(std::to_string(index) + std::string{extension});
 }
 
 std::filesystem::path workspace_file(const Workspace& workspace,
@@ -167,7 +169,7 @@ std::filesystem::path workspace_file(const Workspace& workspace,
     if (!valid_name(name)) {
         return {};
     }
-    return workspace.root / std::filesystem::path{std::string{name}};
+    return workspace.root / platform::path::from_utf8(name);
 }
 
 std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
@@ -181,12 +183,12 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
     }
     if (error) {
         return std::unexpected("não foi possível inspecionar o espaço de trabalho '" +
-                               workspace.root.string() +
+                               platform::path::to_utf8(workspace.root) +
                                "': " + error.message());
     }
     if (std::filesystem::is_symlink(status) ||
         !std::filesystem::is_directory(status)) {
-        return std::unexpected("espaço de trabalho inválido '" + workspace.root.string() +
+        return std::unexpected("espaço de trabalho inválido '" + platform::path::to_utf8(workspace.root) +
                                "'");
     }
     auto secured = private_storage::protect_tree(workspace.root);
@@ -198,11 +200,11 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
     const auto attributes = GetFileAttributesW(workspace.root.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
         return std::unexpected("não foi possível inspecionar o espaço de trabalho '" +
-                               workspace.root.string() +
+                               platform::path::to_utf8(workspace.root) +
                                "': " + windows_error(GetLastError()));
     }
     if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return std::unexpected("espaço de trabalho inválido '" + workspace.root.string() +
+        return std::unexpected("espaço de trabalho inválido '" + platform::path::to_utf8(workspace.root) +
                                "'");
     }
     auto writable = clear_read_only(workspace.root);
@@ -227,7 +229,7 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
 #endif
     if (error) {
         return std::unexpected("não foi possível remover o espaço de trabalho '" +
-                               workspace.root.string() +
+                               platform::path::to_utf8(workspace.root) +
                                "': " + error.message());
     }
     return {};

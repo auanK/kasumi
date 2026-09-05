@@ -1,5 +1,7 @@
 #include "core/diff.hpp"
 
+#include "platform/path.hpp"
+
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
@@ -109,7 +111,7 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
         if (c)
             advance(cloud_children);
         const std::string_view path = l ? l->path : b ? b->path : c->path;
-        const std::filesystem::path target(path);
+        const auto target = platform::path::from_utf8(path);
 
         if (c && !c->is_directory && missing_blocks.contains(c->hash)) {
             if (l && !l->is_directory)
@@ -250,8 +252,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                                    ops);
             } else if (l->is_directory) {
                 ops.push_back({Action::Download,
-                               make_conflict_path(target.generic_string(),
-                                                  ".kasumiconflict_remote"),
+                               platform::path::from_utf8(make_conflict_path(
+                                   path, ".kasumiconflict_remote")),
                                hash_hex(c->hash),
                                {},
                                c->size,
@@ -292,15 +294,15 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                 ops.push_back(
                     {Action::Upload, target, hash_hex(l->hash), {}, l->size});
                 ops.push_back({Action::Download,
-                               make_conflict_path(target.generic_string(),
-                                                  ".kasumiconflict_remote"),
+                               platform::path::from_utf8(make_conflict_path(
+                                   path, ".kasumiconflict_remote")),
                                hash_hex(c->hash),
                                {},
                                c->size,
                                true});
             } else {
-                const auto conflict = std::filesystem::path(make_conflict_path(
-                    target.generic_string(), ".kasumiconflict_local"));
+                const auto conflict = platform::path::from_utf8(
+                    make_conflict_path(path, ".kasumiconflict_local"));
                 ops.push_back(
                     {Action::RenameLocal, target, "", conflict, 0, true});
                 ops.push_back(

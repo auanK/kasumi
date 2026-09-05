@@ -1,6 +1,7 @@
 #include "transport/transport.hpp"
 
 #include "detail.hpp"
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 
 #include <algorithm>
@@ -103,7 +104,7 @@ bool valid_list_prefix(std::string_view prefix) noexcept {
     if (prefix.empty() || prefix.find('\\') != std::string_view::npos) {
         return false;
     }
-    const std::filesystem::path path{std::string{prefix}};
+    const auto path = platform::path::from_utf8(prefix);
     if (path.is_absolute() || path.has_root_name() ||
         path.has_root_directory()) {
         return false;
@@ -128,7 +129,7 @@ std::expected<BackendConfiguration, Error> parse_backend_configuration(
 
     if (windows_drive_path(location) || location.starts_with("\\\\") ||
         location.find(':') == std::string_view::npos) {
-        const std::filesystem::path root{std::string{location}};
+        const auto root = platform::path::from_utf8(location);
         if (!root.is_absolute()) {
             return std::unexpected(
                 make_error(ErrorCode::InvalidContext,
@@ -178,7 +179,7 @@ bool valid_batch_identifier(std::string_view identifier) noexcept {
     if (identifier.empty() || identifier.find('\\') != std::string_view::npos) {
         return false;
     }
-    const std::filesystem::path path{std::string{identifier}};
+    const auto path = platform::path::from_utf8(identifier);
     if (path.is_absolute() || path.has_root_name() ||
         path.has_root_directory()) {
         return false;
@@ -216,7 +217,7 @@ std::expected<void, Error> validate_batch(const PutBatch& batch) {
                            "identificadores duplicados no batch"));
         }
 
-        auto path = batch.source_root / identifier;
+        auto path = batch.source_root / platform::path::from_utf8(identifier);
         if (std::filesystem::is_symlink(path, error)) {
             return std::unexpected(
                 make_error(ErrorCode::InvalidContext,
@@ -254,7 +255,8 @@ std::expected<void, Error> validate_batch(const PutBatch& batch) {
                     ErrorCode::Io,
                     "falha ao calcular caminho relativo no staging"));
             }
-            if (!unique_identifiers.contains(relative.generic_string())) {
+            if (!unique_identifiers.contains(
+                    platform::path::to_logical_utf8(relative))) {
                 return std::unexpected(make_error(
                     ErrorCode::InvalidContext,
                     "staging contém arquivos não especificados no manifest"));
@@ -442,8 +444,10 @@ Result put_batch(Transport& transport, const PutBatch& batch) {
     }
 
     for (const auto& identifier : batch.identifiers) {
-        auto result =
-            put(transport, batch.source_root / identifier, identifier);
+        auto result = put(transport,
+                          batch.source_root /
+                              platform::path::from_utf8(identifier),
+                          identifier);
         if (!result) {
             return result;
         }
@@ -483,8 +487,10 @@ Result get_batch(Transport& transport, const GetBatch& batch) {
         const auto source = batch.source_prefix.empty()
                                 ? identifier
                                 : batch.source_prefix + "/" + identifier;
-        auto result =
-            get(transport, source, batch.destination_root / identifier);
+        auto result = get(transport,
+                          source,
+                          batch.destination_root /
+                              platform::path::from_utf8(identifier));
         if (!result) {
             return result;
         }

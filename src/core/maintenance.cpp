@@ -1,6 +1,7 @@
 #include "core/maintenance.hpp"
 
 #include "core/hasher.hpp"
+#include "platform/path.hpp"
 
 #include <algorithm>
 #include <map>
@@ -14,7 +15,7 @@ namespace kasumi::maintenance {
 namespace {
 
 std::string path_text(const std::filesystem::path& path) {
-    return path.generic_string();
+    return platform::path::to_logical_utf8(path);
 }
 
 } // namespace
@@ -55,14 +56,14 @@ AnalyzeResult analyze(const Snapshot& history_tree,
         auto& reference = position->second;
         if (!inserted && reference.size != row.size) {
             auto paths = reference.referenced_paths;
-            paths.emplace_back(row.path);
+            paths.push_back(platform::path::from_utf8(row.path));
             return std::unexpected(Error{
                 .code = ErrorCode::ConflictingReference,
                 .detail = "o mesmo objeto possui tamanhos conflitantes",
                 .paths = std::move(paths),
             });
         }
-        reference.referenced_paths.emplace_back(row.path);
+        reference.referenced_paths.push_back(platform::path::from_utf8(row.path));
     }
 
     using SourceKey = std::pair<std::string, std::uint64_t>;
@@ -73,7 +74,7 @@ AnalyzeResult analyze(const Snapshot& history_tree,
         }
         const auto identifier = hash_hex(row.hash);
         const SourceKey key{identifier, row.size};
-        const auto source = std::filesystem::path{row.path};
+        const auto source = platform::path::from_utf8(row.path);
         auto position = local_sources.find(key);
         if (position == local_sources.end() ||
             path_text(source) < path_text(position->second)) {

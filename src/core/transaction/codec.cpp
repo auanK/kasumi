@@ -2,6 +2,7 @@
 
 #include "core/wire.hpp"
 #include "core/history.hpp"
+#include "platform/path.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -22,8 +23,8 @@ bool valid_string(std::string_view value) noexcept {
 
 bool valid_operation_strings(const kasumi::Operation& operation,
                              const OperationProgress& progress) {
-    return valid_string(operation.path.generic_string()) &&
-           valid_string(operation.alt_path.generic_string()) &&
+    return valid_string(platform::path::to_logical_utf8(operation.path)) &&
+           valid_string(platform::path::to_logical_utf8(operation.alt_path)) &&
            valid_string(operation.hash) && valid_string(progress.previous_hash);
 }
 
@@ -92,8 +93,10 @@ EncodeResult encode(const Record& record) {
 
             wire::write<std::uint8_t>(
                 writer, static_cast<std::uint8_t>(operation.action));
-            wire::write_string(writer, operation.path.generic_string());
-            wire::write_string(writer, operation.alt_path.generic_string());
+            wire::write_string(
+                writer, platform::path::to_logical_utf8(operation.path));
+            wire::write_string(
+                writer, platform::path::to_logical_utf8(operation.alt_path));
             wire::write_string(writer, operation.hash);
             wire::write<std::uint64_t>(writer, operation.size);
             wire::write<std::uint8_t>(writer,
@@ -223,9 +226,9 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
 
             record.plan.operations.push_back(kasumi::Operation{
                 .action = static_cast<kasumi::Action>(*action_raw),
-                .path = std::move(*path),
+                .path = platform::path::from_utf8(*path),
                 .hash = std::move(*hash),
-                .alt_path = std::move(*alt_path),
+                .alt_path = platform::path::from_utf8(*alt_path),
                 .size = *size,
                 .exclusive_destination = *exclusive == 1,
             });

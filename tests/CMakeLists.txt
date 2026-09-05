@@ -28,6 +28,10 @@ function(kasumi_add_test_suite target label)
 
     target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/src)
 
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
+        target_link_options(${target} PRIVATE -static-libgcc -static-libstdc++ -Wl,--allow-multiple-definition)
+    endif()
+
     gtest_discover_tests(
         ${target}
         DISCOVERY_MODE PRE_TEST
@@ -42,6 +46,7 @@ kasumi_add_test_suite(
     kasumi_test_unit_platform
     "unit.platform"
     SOURCES
+        unit/platform/test_path.cpp
         unit/platform/test_metadata.cpp
         unit/platform/test_file_fingerprint.cpp
         unit/platform/test_private_storage.cpp
@@ -188,6 +193,7 @@ kasumi_add_test_suite(
         unit/transport/test_rclone_storage.cpp
     LIBRARIES
         kasumi_transport
+        nlohmann_json::nlohmann_json
         httplib::httplib
         reproc++
 )

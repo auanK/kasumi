@@ -1,5 +1,7 @@
 #include "application/sync/metadata.hpp"
 
+#include "platform/path.hpp"
+
 #include <algorithm>
 #include <ranges>
 #include <string_view>
@@ -38,7 +40,7 @@ metadata_restore_paths(const transaction::Record& record,
             continue;
         }
         const auto& operation = record.plan.operations[index];
-        const auto path = operation.path.generic_string();
+        const auto path = platform::path::to_logical_utf8(operation.path);
         switch (operation.action) {
             case Action::Download:
             case Action::CreateLocalDirectory:
@@ -51,7 +53,7 @@ metadata_restore_paths(const transaction::Record& record,
             case Action::RenameLocal:
                 add_path_and_ancestors(paths, path, true);
                 add_path_and_ancestors(
-                    paths, operation.alt_path.generic_string(), true);
+                    paths, platform::path::to_logical_utf8(operation.alt_path), true);
                 break;
             case Action::Upload:
             case Action::CreateRemoteDirectory:

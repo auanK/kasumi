@@ -1,10 +1,12 @@
 #include "runtime/profile.hpp"
 
+#include "platform/path.hpp"
 #include "platform/private_storage.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <fstream>
 #include <limits>
 #include <sstream>
 #include <toml++/toml.h>
@@ -100,7 +102,13 @@ load_profiles(const std::filesystem::path& config_path) {
     }
     toml::table config;
     try {
-        config = toml::parse_file(config_path.string());
+        std::ifstream input(config_path, std::ios::binary);
+        if (!input) {
+            return std::unexpected(Error{
+                .code = ErrorCode::IoFailure,
+                .detail = "falha ao abrir a configuração global"});
+        }
+        config = toml::parse(input, platform::path::to_utf8(config_path));
     } catch (const toml::parse_error& error) {
         return std::unexpected(
             Error{.code = ErrorCode::ConfigInvalid,
@@ -117,7 +125,7 @@ load_profiles(const std::filesystem::path& config_path) {
 
                 if (local && remote) {
                     ProfileData pd{std::string(key.str()),
-                                   std::filesystem::path(*local),
+                                   platform::path::from_utf8(*local),
                                    *remote};
                     auto min_depth =
                         read_retention_value(*prof, "min_history_depth");
@@ -162,7 +170,7 @@ save_profiles(const std::filesystem::path& config_path,
     toml::table profiles_table;
     for (const auto& prof : profiles) {
         toml::table prof_data;
-        prof_data.insert("local_dir", prof.local_dir.string());
+        prof_data.insert("local_dir", platform::path::to_utf8(prof.local_dir));
         prof_data.insert("remote_dir", prof.remote_dir);
         prof_data.insert("min_history_depth", prof.min_history_depth);
         prof_data.insert("min_history_age_hours", prof.min_history_age_hours);

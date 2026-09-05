@@ -3,6 +3,7 @@
 #include "mutation_detail.hpp"
 #include "platform/durability.hpp"
 #include "platform/metadata.hpp"
+#include "platform/path.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 
@@ -491,8 +492,8 @@ restore_backup(const std::filesystem::path& backup,
                                           destination,
                                           operation_index));
     }
-    const auto candidate = parent / ("." + destination.filename().string() +
-                                     ".kasumi-rollback-" + *id);
+    const auto candidate = platform::path::temporary_sibling_path(
+        destination, ".", ".kasumi-rollback-" + *id);
     auto candidate_status = read_status(candidate, operation_index);
     if (!candidate_status) {
         return std::unexpected(candidate_status.error());

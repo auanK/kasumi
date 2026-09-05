@@ -1,5 +1,6 @@
 #include "cli/presenter.hpp"
 
+#include "platform/path.hpp"
 #include "cli/i18n.hpp"
 #include "cli/style.hpp"
 
@@ -39,9 +40,9 @@ void render_plan_report(const application::PlanReport& report) {
     for (const auto& item : report.items) {
         auto idx = static_cast<std::size_t>(item.action);
         if (idx < std::size(ACTION_NAMES)) {
-            std::print("  - [{}] {}", ACTION_NAMES[idx], item.path.string());
+            std::print("  - [{}] {}", ACTION_NAMES[idx], platform::path::to_utf8(item.path));
             if (item.action == application::PlanAction::RenameLocal) {
-                std::print(" -> {}", item.alternative_path.string());
+                std::print(" -> {}", platform::path::to_utf8(item.alternative_path));
             }
             if (item.action == application::PlanAction::Upload ||
                 item.action == application::PlanAction::Download) {

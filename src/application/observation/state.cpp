@@ -3,6 +3,7 @@
 #include "application/observation/history.hpp"
 #include "application/observation/patch.hpp"
 #include "application/observation/scanner.hpp"
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "state_storage/database.hpp"
 
@@ -133,12 +134,13 @@ apply_selective_delta(const std::filesystem::path& local_root,
         if (entry.kind != platform::LocalDeltaKind::ModifyExistingFile ||
             entry.current_relative_path.empty())
             return std::unexpected("delta não suportado");
-        const auto* cached = find_cached_row(
-            session, entry.current_relative_path.generic_string());
+        const auto relative =
+            platform::path::to_logical_utf8(entry.current_relative_path);
+        const auto* cached = find_cached_row(session, relative);
         ++session.targeted_file_observations;
         auto observed = scanner::observe_file(
             local_root,
-            entry.current_relative_path.generic_string(),
+            relative,
             cached == nullptr
                 ? std::nullopt
                 : std::optional<state_storage::FileCacheRow>{*cached});

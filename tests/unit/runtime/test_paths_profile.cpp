@@ -1,6 +1,7 @@
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
+#include "platform/path.hpp"
 #include "runtime/paths.hpp"
 #include "runtime/profile.hpp"
 
@@ -83,7 +84,7 @@ TEST(RuntimeProfileTest, ProfilesRoundTripAndMissingProfileAreReported) {
          kasumi::test::workspace_path(workspace, "local one"),
          "remote one:"},
         {"two",
-         kasumi::test::workspace_path(workspace, "local-é"),
+         kasumi::test::workspace_path(workspace, kasumi::platform::path::from_utf8("local-é")),
          "relative/path"}};
     ASSERT_TRUE(kasumi::runtime::save_profiles(config, profiles));
     const auto loaded = kasumi::runtime::load_profiles(config);
@@ -91,11 +92,38 @@ TEST(RuntimeProfileTest, ProfilesRoundTripAndMissingProfileAreReported) {
     ASSERT_EQ(loaded->size(), 2U);
     EXPECT_EQ(loaded->at(0).name, "one");
     EXPECT_EQ(loaded->at(1).local_dir,
-              kasumi::test::workspace_path(workspace, "local-é"));
+              kasumi::test::workspace_path(workspace, kasumi::platform::path::from_utf8("local-é")));
     EXPECT_TRUE(kasumi::runtime::load_profile(config, "one"));
     const auto absent = kasumi::runtime::load_profile(config, "missing");
     ASSERT_FALSE(absent.has_value());
     EXPECT_EQ(absent.error().code, kasumi::runtime::ErrorCode::ProfileNotFound);
+}
+
+TEST(RuntimeProfileTest, UnicodeFilesystemPathsSurvivePersistence) {
+    namespace path = kasumi::platform::path;
+    auto workspace = kasumi::test::make_temp_workspace("unicode-profile");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto directory = root / path::from_utf8("configuração-高松灯🌸");
+    std::filesystem::create_directories(directory);
+    const auto config = directory / path::from_utf8("千早愛音💝.toml");
+    const auto local = root / path::from_utf8("pasta-日本/usuário-☁/𝑬𝒎𝒊𝒍𝒊𝒂/𓆩🌸𓆪");
+    const auto remote = path::to_utf8(root / path::from_utf8("Backup/高松灯"));
+    const std::vector<kasumi::runtime::ProfileData> profiles{
+        {.name = "unicode", .local_dir = local, .remote_dir = remote}};
+    const auto saved = kasumi::runtime::save_profiles(config, profiles);
+    ASSERT_TRUE(saved) << saved.error().detail;
+    const auto loaded = kasumi::runtime::load_profile(config, "unicode");
+    ASSERT_TRUE(loaded) << loaded.error().detail;
+    EXPECT_EQ(loaded->local_dir, local);
+    EXPECT_EQ(path::to_utf8(loaded->local_dir), path::to_utf8(local));
+    EXPECT_EQ(loaded->remote_dir, remote);
+    const auto rewritten = kasumi::runtime::save_profiles(config, profiles);
+    ASSERT_TRUE(rewritten) << rewritten.error().detail;
+    const auto reloaded = kasumi::runtime::load_profile(config, "unicode");
+    ASSERT_TRUE(reloaded) << reloaded.error().detail;
+    EXPECT_EQ(reloaded->local_dir, local);
+    EXPECT_EQ(std::distance(std::filesystem::directory_iterator(directory),
+                            std::filesystem::directory_iterator{}), 1);
 }
 
 TEST(RuntimeProfileTest, ConfigErrorsAndEmptyProfilesHaveSpecificCodes) {
@@ -131,7 +159,8 @@ TEST(RuntimeProfileTest, RetentionFieldsAreRequiredAndRejectInvalidValues) {
     const auto config = kasumi::test::workspace_path(workspace, "config.toml");
     const auto prefix =
         "[profiles.demo]\nlocal_dir = '" +
-        kasumi::test::workspace_path(workspace, "local").string() +
+        kasumi::platform::path::to_utf8(
+            kasumi::test::workspace_path(workspace, "local")) +
         "'\nremote_dir = 'remote:root'\n";
 
     kasumi::test::write_text(config, prefix);
@@ -180,14 +209,17 @@ TEST(RuntimePathsTest, DefaultPathsRestoreEnvironmentOverrides) {
     auto workspace = kasumi::test::make_temp_workspace("runtime-env");
 #if defined(_WIN32)
     auto scoped = kasumi::test::scoped_environment_variable(
-        "APPDATA", kasumi::test::workspace_path(workspace, "appdata").string());
+        "APPDATA",
+        kasumi::platform::path::to_utf8(
+            kasumi::test::workspace_path(workspace, "appdata")));
     const auto paths = kasumi::runtime::default_global_paths();
     EXPECT_EQ(paths.app_data_dir,
               kasumi::test::workspace_path(workspace, "appdata") / "kasumi");
 #else
     auto scoped = kasumi::test::scoped_environment_variable(
         "XDG_CONFIG_HOME",
-        kasumi::test::workspace_path(workspace, "xdg").string());
+        kasumi::platform::path::to_utf8(
+            kasumi::test::workspace_path(workspace, "xdg")));
     const auto paths = kasumi::runtime::default_global_paths();
     EXPECT_EQ(paths.app_data_dir,
               kasumi::test::workspace_path(workspace, "xdg") / "kasumi");
@@ -200,7 +232,8 @@ TEST(RuntimePathsTest, AppDataWithUnicodeCharactersIsPreserved) {
     auto workspace =
         kasumi::test::make_temp_workspace("runtime-env-unicode");
     const auto unicode_appdata =
-        kasumi::test::workspace_root(workspace) / u8"usuário-João-日本";
+        kasumi::test::workspace_root(workspace) /
+        kasumi::platform::path::from_utf8("usuário-João-日本");
 
     {
         const auto env = kasumi::test::scoped_windows_environment_variable(

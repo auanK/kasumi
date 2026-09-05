@@ -12,6 +12,7 @@
 #include "crypto/key_derivation.hpp"
 #include "crypto/secure_memory.hpp"
 #include "platform/durability.hpp"
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
@@ -882,8 +883,10 @@ resolve_destination(const InspectionRequest& request,
                                      "o destino solicitado é inválido"));
     }
     std::error_code filesystem_error;
-    auto destination = std::filesystem::absolute(requested, filesystem_error)
-                           .lexically_normal();
+    auto destination =
+        std::filesystem::absolute(platform::path::from_utf8(requested),
+                                  filesystem_error)
+            .lexically_normal();
     if (filesystem_error || destination.filename().empty()) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::DestinationFailure,
@@ -1021,7 +1024,8 @@ download_remote_file(const InspectionRequest& request,
         return std::unexpected(installed.error());
     }
     return RemoteFileReport{.path = row->path,
-                            .destination_path = destination->string(),
+                            .destination_path =
+                                platform::path::to_utf8(*destination),
                             .logical_hash = logical_hash,
                             .content_id = content_id,
                             .size = row->size};

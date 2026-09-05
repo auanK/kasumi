@@ -1,6 +1,7 @@
 #include "core/reconciliation/plan.hpp"
 
 #include "core/diff.hpp"
+#include "platform/path.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -25,7 +26,8 @@ using LocalSources = std::unordered_map<Hash, NodeRow, decltype(&hash_key)>;
 
 bool is_conflict(const Operation& operation) {
     const auto marked = [](const std::filesystem::path& path) {
-        return path.string().find(".kasumiconflict_") != std::string::npos;
+        return platform::path::to_logical_utf8(path).find(".kasumiconflict_") !=
+               std::string::npos;
     };
 
     return operation.action == Action::RenameLocal ||
@@ -79,14 +81,12 @@ synchronize_ancestor_rows(Snapshot& candidate,
                           const Snapshot* fallback = nullptr) {
     std::vector<std::string> directories;
     directories.emplace_back();
-    for (const auto& component : std::filesystem::path{path}) {
-        directories.push_back(directories.back().empty()
-                                  ? component.string()
-                                  : directories.back() + '/' +
-                                        component.string());
+    for (std::size_t end = path.find('/'); end != std::string_view::npos;
+         end = path.find('/', end + 1)) {
+        directories.emplace_back(path.substr(0, end));
     }
-    if (!include_target && !path.empty()) {
-        directories.pop_back();
+    if (include_target && !path.empty()) {
+        directories.emplace_back(path);
     }
 
     for (const auto& directory : directories) {
@@ -98,7 +98,7 @@ synchronize_ancestor_rows(Snapshot& candidate,
             return std::unexpected(Error{
                 .code = ErrorCode::UnsafePlan,
                 .detail = "ancestor não observado como diretório",
-                .paths = {std::filesystem::path{directory}},
+                .paths = {platform::path::from_utf8(directory)},
             });
         }
         auto row = *local_row;
@@ -115,20 +115,19 @@ std::filesystem::path
 reserve_conflict_path(const std::filesystem::path& preferred,
                       std::unordered_set<std::string>& reserved,
                       std::unordered_set<std::string>& reserved_case_keys) {
-    auto candidate = preferred;
+    const auto preferred_text = platform::path::to_logical_utf8(preferred);
+    auto candidate = preferred_text;
     std::size_t suffix = 0;
 
-    while (reserved_case_keys.contains(portable_case_key(candidate.generic_string()))) {
-        candidate = std::filesystem::path{
-            make_conflict_path(preferred.generic_string(),
-                               "." + std::to_string(++suffix))};
+    while (reserved_case_keys.contains(portable_case_key(candidate))) {
+        candidate = make_conflict_path(preferred_text,
+                                       "." + std::to_string(++suffix));
     }
 
-    const auto candidate_str = candidate.generic_string();
-    reserved.insert(candidate_str);
-    reserved_case_keys.insert(portable_case_key(candidate_str));
+    reserved.insert(candidate);
+    reserved_case_keys.insert(portable_case_key(candidate));
 
-    return candidate;
+    return platform::path::from_utf8(candidate);
 }
 
 void reserve_conflict_destinations(const Snapshot& local_tree,
@@ -155,12 +154,12 @@ void reserve_conflict_destinations(const Snapshot& local_tree,
     for (const auto& operation : operations) {
         if (operation.action == Action::Download &&
             !operation.exclusive_destination) {
-            add_reserved(operation.path.generic_string());
+            add_reserved(platform::path::to_logical_utf8(operation.path));
         }
 
         if (operation.action == Action::RenameLocal &&
             !operation.exclusive_destination) {
-            add_reserved(operation.alt_path.generic_string());
+            add_reserved(platform::path::to_logical_utf8(operation.alt_path));
         }
     }
 
@@ -205,12 +204,12 @@ void collect_pending_rows(const Snapshot& storage_tree,
         pending.push_back(row);
 
         if (!local_sources.contains(row.hash)) {
-            unrecoverable.emplace_back(row.path);
+            unrecoverable.push_back(platform::path::from_utf8(row.path));
         }
     }
 
     std::ranges::sort(unrecoverable, {}, [](const auto& path) {
-        return path.generic_string();
+        return platform::path::to_logical_utf8(path);
     });
 }
 
@@ -239,7 +238,7 @@ void append_recovery_uploads(const HashSet& missing_objects,
 
         operations.push_back(Operation{
             .action = Action::Upload,
-            .path = source->second.path,
+            .path = platform::path::from_utf8(source->second.path),
             .hash = hash_identifier,
             .alt_path = {},
             .size = source->second.size,
@@ -256,12 +255,12 @@ bool is_repair_upload(const Operation& operation,
         return false;
     }
 
-    if (std::ranges::binary_search(repair_paths,
-                                   operation.path.generic_string())) {
+    const auto logical_path = platform::path::to_logical_utf8(operation.path);
+    if (std::ranges::binary_search(repair_paths, logical_path)) {
         return true;
     }
 
-    const auto row = find_row(storage_tree, operation.path.generic_string());
+    const auto row = find_row(storage_tree, logical_path);
     const auto hash = hash_from_hex(operation.hash);
     return row != nullptr && !row->is_directory && hash.has_value() &&
            row->hash == *hash;
@@ -303,8 +302,8 @@ candidate_shared_tree(const Input& input,
 
     const auto find_local_row =
         [&](const Operation& operation) -> const NodeRow* {
-        const auto direct =
-            find_row(input.local_tree, operation.path.generic_string());
+        const auto direct = find_row(
+            input.local_tree, platform::path::to_logical_utf8(operation.path));
         if (direct != nullptr) {
             return direct;
         }
@@ -351,7 +350,7 @@ candidate_shared_tree(const Input& input,
                     });
                 }
                 auto row = *source;
-                row.path = operation.path.generic_string();
+                row.path = platform::path::to_logical_utf8(operation.path);
                 auto parents = synchronize_ancestor_rows(
                     result.tree, input.local_tree, row.path, false);
                 if (!parents) {
@@ -361,7 +360,7 @@ candidate_shared_tree(const Input& input,
                 break;
             }
             case Action::CreateRemoteDirectory: {
-                const auto path = operation.path.generic_string();
+                const auto path = platform::path::to_logical_utf8(operation.path);
                 const auto* local_row = find_row(input.local_tree, path);
                 if (local_row == nullptr || !local_row->is_directory ||
                     !operation.hash.empty() || operation.size != 0) {
@@ -396,19 +395,19 @@ candidate_shared_tree(const Input& input,
             }
             case Action::DeleteRemote:
             case Action::DeleteRemoteDirectory: {
-                if (find_row(result.tree, operation.path.generic_string()) ==
-                    nullptr) {
+                const auto path = platform::path::to_logical_utf8(operation.path);
+                if (find_row(result.tree, path) == nullptr) {
                     return std::unexpected(Error{
                         .code = ErrorCode::UnsafePlan,
                         .detail = "remoção remota não corresponde à árvore",
                         .paths = {operation.path},
                     });
                 }
-                erase_subtree(result.tree, operation.path.generic_string());
+                erase_subtree(result.tree, path);
                 auto ancestors =
                     synchronize_ancestor_rows(result.tree,
                                               input.local_tree,
-                                              operation.path.generic_string(),
+                                              path,
                                               false);
                 if (!ancestors) {
                     return std::unexpected(std::move(ancestors.error()));
@@ -455,7 +454,7 @@ merge_pending_references(Snapshot& publication_tree,
                 .code = ErrorCode::InvalidStorageTree,
                 .detail = "referência pendente não "
                           "pode representar diretório",
-                .paths = {std::filesystem::path{pending.path}},
+                .paths = {platform::path::from_utf8(pending.path)},
             });
         }
 
@@ -631,7 +630,8 @@ ReconcileResult reconcile(const Input& input) {
     for (const auto& operation : operations) {
         if (is_repair_upload(
                 operation, repair_upload_paths, effective_storage_tree)) {
-            repair_upload_paths.push_back(operation.path.generic_string());
+            repair_upload_paths.push_back(
+                platform::path::to_logical_utf8(operation.path));
         }
     }
     std::ranges::sort(repair_upload_paths);

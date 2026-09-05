@@ -413,7 +413,7 @@ std::filesystem::path relative_handle_path(const JournalInfo& journal,
     const auto suffix = path.substr(journal.root_path.size() + 1);
     if (suffix.empty())
         return {};
-    return std::filesystem::path{suffix}.generic_string();
+    return std::filesystem::path{suffix};
 }
 
 void collect_delta_record(const USN_RECORD& record,

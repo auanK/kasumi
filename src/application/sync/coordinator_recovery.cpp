@@ -7,6 +7,7 @@
 #include "application/sync/mutation_batch.hpp"
 #include "application/sync/publication.hpp"
 #include "coordinator_detail.hpp"
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "state_storage/database.hpp"
 
@@ -29,7 +30,7 @@ open_workspace(const std::filesystem::path& profile, std::string_view id) {
         return std::unexpected(status.error());
     if (detail::missing(*status))
         return std::optional<platform::Workspace>{};
-    auto root = *directory / std::filesystem::path{std::string{id}};
+    auto root = *directory / platform::path::from_utf8(id);
     status = detail::read_status(root);
     if (!status)
         return std::unexpected(status.error());
@@ -39,7 +40,7 @@ open_workspace(const std::filesystem::path& profile, std::string_view id) {
         !std::filesystem::is_directory(*status)) {
         return std::unexpected(detail::make_error(
             ErrorCode::WorkspaceFailure,
-            "invalid transaction workspace '" + root.string() +
+            "invalid transaction workspace '" + platform::path::to_utf8(root) +
                 "': expected a physical directory"));
     }
     return std::optional<platform::Workspace>{

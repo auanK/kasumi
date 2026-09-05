@@ -1,6 +1,7 @@
 #include "core/diff.hpp"
 #include "core/hasher.hpp"
 #include "core/node.hpp"
+#include "platform/path.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -86,9 +87,9 @@ signatures(const std::vector<kasumi::Operation>& operations) {
     result.reserve(operations.size());
     for (const auto& operation : operations) {
         result.push_back(signature(operation.action,
-                                   operation.path.generic_string(),
+                                   kasumi::platform::path::to_logical_utf8(operation.path),
                                    operation.hash,
-                                   operation.alt_path.generic_string(),
+                                   kasumi::platform::path::to_logical_utf8(operation.alt_path),
                                    operation.size,
                                    operation.exclusive_destination));
     }
@@ -356,6 +357,60 @@ TEST(DiffThreeWayTest,
                                  kasumi::hash_hex(local_older.hash),
                                  {},
                                  local_older.size)});
+}
+
+TEST(DiffThreeWayTest, UnicodeConflictPathsPreserveAllConflictBranches) {
+    const std::string logical_path = "高松灯/カード💝.png";
+    const auto now = std::filesystem::file_time_type::clock::now();
+    const auto base = tree({directory("高松灯"), file(logical_path, "base", now)});
+    const auto cloud_file = file(logical_path, "cloud", now);
+    const auto cloud = tree({directory("高松灯"), cloud_file});
+    const auto local_file = file(logical_path, "local", now + std::chrono::hours{1});
+    const auto local = tree({directory("高松灯"), local_file});
+
+    expect_operations(kasumi::diff::compare_trees(local, base, cloud),
+                      {signature(Action::Upload,
+                                 logical_path,
+                                 kasumi::hash_hex(local_file.hash),
+                                 {},
+                                 local_file.size),
+                       signature(Action::Download,
+                                 logical_path + ".kasumiconflict_remote",
+                                 kasumi::hash_hex(cloud_file.hash),
+                                 {},
+                                 cloud_file.size,
+                                 true)});
+
+    const auto older_file = file(logical_path, "local", now - std::chrono::hours{1});
+    const auto older = tree({directory("高松灯"), older_file});
+    expect_operations(kasumi::diff::compare_trees(older, base, cloud),
+                      {signature(Action::RenameLocal,
+                                 logical_path,
+                                 {},
+                                 logical_path + ".kasumiconflict_local",
+                                 0,
+                                 true),
+                       signature(Action::Download,
+                                 logical_path,
+                                 kasumi::hash_hex(cloud_file.hash),
+                                 {},
+                                 cloud_file.size),
+                       signature(Action::Upload,
+                                 logical_path + ".kasumiconflict_local",
+                                 kasumi::hash_hex(older_file.hash),
+                                 {},
+                                 older_file.size)});
+
+    auto local_directory = directory(logical_path);
+    local_directory.mtime = now - std::chrono::hours{1};
+    expect_operations(kasumi::diff::compare_trees(
+                          tree({directory("高松灯"), local_directory}), base, cloud),
+                      {signature(Action::Download,
+                                 logical_path + ".kasumiconflict_remote",
+                                 kasumi::hash_hex(cloud_file.hash),
+                                 {},
+                                 cloud_file.size,
+                                 true)});
 }
 
 TEST(DiffThreeWayTest, FileAndDirectoryStatesDoNotBecomeAccidentalDeletes) {

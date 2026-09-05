@@ -2,6 +2,7 @@
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/cancellation.hpp"
+#include "platform/path.hpp"
 #include "transport/rclone/detail.hpp"
 
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <gtest/gtest.h>
 #include <httplib.h>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <thread>
@@ -109,6 +111,53 @@ TEST(RcloneSessionTest, RemovesKasumiSecretsFromChildEnvironment) {
                                         return entry.first == "RCLONE_RC_PASS";
                                     }),
               1);
+}
+
+TEST(RcloneSessionTest, UnicodeConfigPathIsPreservedInChildEnvironment) {
+    kasumi::transport::rclone_detail::State state;
+    state.configuration.config_path = kasumi::platform::path::from_utf8(
+        "高松灯/千早愛音🌸/rclone.conf");
+
+    const auto result =
+        kasumi::transport::rclone_detail::make_child_environment(state);
+
+    ASSERT_TRUE(result) << kasumi::transport::describe(result.error());
+    EXPECT_EQ(environment_value(*result, "RCLONE_CONFIG"),
+              kasumi::platform::path::to_utf8(*state.configuration.config_path));
+}
+
+TEST(RcloneSessionTest, ResolvesExecutableFromUnicodeSearchPath) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("rclone-unicode-executable");
+    const auto trusted = kasumi::test::workspace_root(workspace) /
+                         kasumi::platform::path::from_utf8("高松灯/千早愛音🌸");
+#if defined(_WIN32)
+    const auto expected = trusted / "rclone.exe";
+    auto path = kasumi::test::scoped_windows_environment_variable(
+        L"PATH", trusted.native());
+#else
+    const auto expected = trusted / "rclone";
+    auto path = kasumi::test::scoped_environment_variable(
+        "PATH", kasumi::platform::path::to_utf8(trusted));
+#endif
+    kasumi::test::write_text(expected, "trusted executable");
+#if !defined(_WIN32)
+    std::filesystem::permissions(expected,
+                                 std::filesystem::perms::owner_exec,
+                                 std::filesystem::perm_options::add);
+#endif
+    const kasumi::transport::detail::RcloneConfiguration configuration{
+        .remote_name = "remote",
+        .remote_root = "root",
+        .executable = "rclone",
+    };
+
+    const auto resolved =
+        kasumi::transport::rclone_detail::resolve_rclone_executable(
+            configuration);
+
+    ASSERT_TRUE(resolved) << kasumi::transport::describe(resolved.error());
+    EXPECT_EQ(*resolved, std::filesystem::canonical(expected));
 }
 
 TEST(RcloneSessionTest, SkipsExecutableInsideSynchronizedDirectory) {
@@ -516,6 +565,55 @@ TEST(RcloneRcClientTest, RejectsInvalidReadResponseWithoutRetry) {
     EXPECT_EQ(result.error().code,
               kasumi::transport::ErrorCode::ProtocolFailure);
     EXPECT_EQ(calls, 1);
+}
+
+TEST(RcloneStorageTest, PreservesUnicodeLocalPathsInCopyRequests) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("rclone-unicode-copy");
+    const auto source = kasumi::test::workspace_root(workspace) /
+                        kasumi::platform::path::from_utf8("高松灯/カード💝.png");
+    const auto destination = kasumi::test::workspace_root(workspace) /
+                             kasumi::platform::path::from_utf8(
+                                 "千早愛音🌸/𝑬𝒎𝒊𝒍𝒊𝒂-𓆩🌸𓆪.txt");
+    kasumi::test::write_text(source, "unicode payload");
+    RcServerState remote;
+    std::vector<nlohmann::json> requests;
+    remote.server.Post(
+        "/rc/operations/copyfile",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            const auto request = nlohmann::json::parse(input.body);
+            requests.push_back(request);
+            if (request.at("srcFs") == "test:") {
+                kasumi::test::write_text(
+                    kasumi::platform::path::from_utf8(
+                        request.at("dstFs").get<std::string>()) /
+                        kasumi::platform::path::from_utf8(
+                            request.at("dstRemote").get<std::string>()),
+                    "unicode payload");
+            }
+            response.set_content("{}", "application/json");
+        });
+    start_rc_server(remote);
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    const auto uploaded = operations.put(&state, source, "object");
+    const auto downloaded = operations.get(&state, "object", destination);
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(uploaded) << kasumi::transport::describe(uploaded.error());
+    ASSERT_TRUE(downloaded) << kasumi::transport::describe(downloaded.error());
+    ASSERT_EQ(requests.size(), 2U);
+    EXPECT_EQ(requests[0].at("srcFs"),
+              kasumi::platform::path::to_utf8(source.parent_path()));
+    EXPECT_EQ(requests[0].at("srcRemote"), "カード💝.png");
+    EXPECT_EQ(requests[0].at("dstRemote"), "root/object");
+    EXPECT_EQ(requests[1].at("dstFs"),
+              kasumi::platform::path::to_utf8(destination.parent_path()));
+    EXPECT_EQ(requests[1].at("dstRemote"), "𝑬𝒎𝒊𝒍𝒊𝒂-𓆩🌸𓆪.txt");
+    EXPECT_EQ(kasumi::test::read_text(destination), "unicode payload");
 }
 
 TEST(RcloneStorageTest, DownloadsExactBatchWithOneSequentialCopy) {

@@ -1,5 +1,6 @@
 #include "cli/wizard.hpp"
 
+#include "platform/path.hpp"
 #include "application/profile.hpp"
 #include "cli/credentials.hpp"
 #include "cli/i18n.hpp"
@@ -34,7 +35,7 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
             for (const auto& prof : profiles) {
                 std::println("- {}  [ Local: {} | Destino: {} ]",
                              prof.name,
-                             prof.local_dir.string(),
+                             platform::path::to_utf8(prof.local_dir),
                              prof.remote_dir);
             }
         }
@@ -69,7 +70,7 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
             std::print("{}", i18n::tr(i18n::Key::WizardPromptRemotePath));
             std::getline(std::cin, new_remote);
             std::println("");
-            if (!std::filesystem::path{new_local}.is_absolute()) {
+            if (!platform::path::from_utf8(new_local).is_absolute()) {
                 std::println("{}{}{} {}",
                              style::red,
                              i18n::tr(i18n::Key::LabelError),
@@ -78,7 +79,7 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
                 continue;
             }
             if (new_remote.find(':') == std::string::npos &&
-                !std::filesystem::path{new_remote}.is_absolute()) {
+                !platform::path::from_utf8(new_remote).is_absolute()) {
                 std::println("{}{}{} {}",
                              style::red,
                              i18n::tr(i18n::Key::LabelError),
@@ -96,7 +97,7 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
 
             application::Profile p{.name = new_profile,
                                    .local_dir =
-                                       std::filesystem::path(new_local),
+                                       platform::path::from_utf8(new_local),
                                    .remote_dir = new_remote};
             auto res =
                 application::create_profile(environment, p, std::move(creds));
@@ -148,7 +149,7 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
             });
             if (it != profiles.end()) {
                 std::string new_local, new_remote;
-                auto old_local = it->local_dir.string();
+                auto old_local = platform::path::to_utf8(it->local_dir);
                 auto old_remote = it->remote_dir;
 
                 i18n::print(i18n::Key::WizardPromptNewLocalPath, old_local);
@@ -165,7 +166,7 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
                     new_remote = old_remote;
 
                 application::Profile p{target,
-                                       std::filesystem::path(new_local),
+                                       platform::path::from_utf8(new_local),
                                        new_remote,
                                        it->min_history_depth,
                                        it->min_history_age_hours};

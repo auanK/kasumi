@@ -3,6 +3,7 @@
 #include "application/history_storage/publication.hpp"
 #include "core/transaction/codec.hpp"
 #include "platform/durability.hpp"
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
@@ -60,8 +61,8 @@ std::expected<void, std::string> validate_paths(const Paths& paths) {
         return std::unexpected(
             "caminhos do journal precisam compartilhar o diretório pai");
     }
-    if (paths.final_path.filename().generic_string() != journal_file_name ||
-        paths.temporary_path.filename().generic_string() !=
+    if (platform::path::to_logical_utf8(paths.final_path.filename()) != journal_file_name ||
+        platform::path::to_logical_utf8(paths.temporary_path.filename()) !=
             std::string{journal_file_name} + std::string{temporary_suffix}) {
         return std::unexpected("nomes de arquivo do journal são inválidos");
     }
@@ -90,7 +91,8 @@ read_status(const std::filesystem::path& path) {
     }
 
     if (error) {
-        return std::unexpected("não foi possível consultar '" + path.string() +
+        return std::unexpected("não foi possível consultar '" +
+                               platform::path::to_utf8(path) +
                                "': " + error.message());
     }
     return status;
@@ -247,10 +249,10 @@ make_paths(const std::filesystem::path& profile_directory) {
 
     Paths paths{
         .final_path =
-            directory / std::filesystem::path{std::string{journal_file_name}},
+            directory / platform::path::from_utf8(journal_file_name),
         .temporary_path =
-            directory / std::filesystem::path{std::string{journal_file_name} +
-                                              std::string{temporary_suffix}},
+            directory / platform::path::from_utf8(std::string{journal_file_name} +
+                                                  std::string{temporary_suffix}),
     };
     auto validation = validate_paths(paths);
     if (!validation) {

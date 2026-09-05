@@ -10,15 +10,7 @@
 #include <string>
 #include <string_view>
 
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
+#include "platform/path.hpp"
 
 namespace kasumi::sqlite {
 
@@ -35,53 +27,15 @@ inline std::string error(sqlite3* database) {
                                 : sqlite3_errmsg(database);
 }
 
-// Converts a filesystem path to a UTF-8 string suitable for sqlite3_open_v2.
-// On Windows, std::filesystem::path uses native UTF-16 wchar_t strings, while sqlite3_open_v2
-// expects UTF-8. Using path.string() causes lossy conversion via the system ANSI codepage (CP_ACP),
-// corrupting non-ANSI characters.
-// On POSIX, path.string() natively represents the filesystem bytes and is returned directly.
+// Converts a filesystem path to UTF-8 for sqlite3_open_v2.
 inline std::expected<std::string, std::string>
 sqlite_filename(const std::filesystem::path& path) {
-#if defined(_WIN32)
-    const auto& native = path.native();
-    if (native.empty()) {
-        return std::string{};
-    }
-    if (native.size() >
-        static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        return std::unexpected("path too long for sqlite conversion");
-    }
-    const int required_size = ::WideCharToMultiByte(
-        CP_UTF8,
-        WC_ERR_INVALID_CHARS,
-        native.data(),
-        static_cast<int>(native.size()),
-        nullptr,
-        0,
-        nullptr,
-        nullptr);
-    if (required_size <= 0) {
+    try {
+        return platform::path::to_utf8(path);
+    } catch (const std::filesystem::filesystem_error&) {
         return std::unexpected(
             "invalid unicode path cannot be converted to UTF-8 for SQLite");
     }
-    std::string result(static_cast<std::size_t>(required_size), '\0');
-    const int converted = ::WideCharToMultiByte(
-        CP_UTF8,
-        WC_ERR_INVALID_CHARS,
-        native.data(),
-        static_cast<int>(native.size()),
-        result.data(),
-        required_size,
-        nullptr,
-        nullptr);
-    if (converted != required_size) {
-        return std::unexpected(
-            "unicode path conversion to UTF-8 failed for SQLite");
-    }
-    return result;
-#else
-    return path.string();
-#endif
 }
 
 // Opens a database with the specified flags.

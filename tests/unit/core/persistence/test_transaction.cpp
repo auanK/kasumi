@@ -1,6 +1,7 @@
 #include "core/transaction/codec.hpp"
 #include "core/transaction/types.hpp"
 #include "core/wire.hpp"
+#include "platform/path.hpp"
 
 #include <algorithm>
 #include <array>
@@ -307,6 +308,63 @@ TEST(TransactionCodecTest, RoundTripsAllActionsAndProgressFields) {
                   original.progress[index].state);
         EXPECT_EQ(decoded->progress[index].had_original,
                   original.progress[index].had_original);
+    }
+}
+
+TEST(TransactionCodecTest, UnicodeOperationPathsRoundTrip) {
+    constexpr std::array<std::string_view, 6> paths{
+        "高松灯/カード💝.png",
+        "千早愛音/Karyl🌸.png",
+        "Icons/𝑬𝒎𝒊𝒍𝒊𝒂.txt",
+        "Icons/𓆩🌸𓆪.txt",
+        "pasta-日本/usuário-☁.txt",
+        "Ä/ä.txt",
+    };
+    auto original = representative_record();
+    for (std::size_t index = 0; index < original.plan.operations.size(); ++index) {
+        auto& operation = original.plan.operations[index];
+        operation.path = kasumi::platform::path::from_utf8(paths[index % paths.size()]);
+        operation.alt_path = kasumi::platform::path::from_utf8(
+            paths[(index + 1) % paths.size()]);
+    }
+
+    const auto encoded = kasumi::transaction::codec::encode(original);
+    ASSERT_TRUE(encoded.has_value()) << encoded.error();
+    const auto decoded = kasumi::transaction::codec::decode(*encoded);
+    ASSERT_TRUE(decoded.has_value()) << decoded.error();
+    ASSERT_EQ(decoded->plan.operations.size(), original.plan.operations.size());
+    for (std::size_t index = 0; index < decoded->plan.operations.size(); ++index) {
+        const auto& operation = decoded->plan.operations[index];
+        EXPECT_EQ(kasumi::platform::path::to_logical_utf8(operation.path),
+                  paths[index % paths.size()]);
+        EXPECT_EQ(kasumi::platform::path::to_logical_utf8(operation.alt_path),
+                  paths[(index + 1) % paths.size()]);
+        EXPECT_EQ(operation.path, original.plan.operations[index].path);
+        EXPECT_EQ(operation.alt_path, original.plan.operations[index].alt_path);
+    }
+    const auto reencoded = kasumi::transaction::codec::encode(*decoded);
+    ASSERT_TRUE(reencoded.has_value()) << reencoded.error();
+    EXPECT_EQ(*reencoded, *encoded);
+}
+
+TEST(TransactionCodecTest, UnicodeOperationPathLimitsUseUtf8Bytes) {
+    std::string logical_path;
+    for (std::size_t index = 0; index < 1024; ++index) {
+        logical_path += "🌸";
+    }
+    ASSERT_EQ(logical_path.size(), 4096U);
+    for (const bool alternate : {false, true}) {
+        SCOPED_TRACE(alternate);
+        auto record = representative_record();
+        auto& operation = record.plan.operations.front();
+        auto& path = alternate ? operation.alt_path : operation.path;
+        path = kasumi::platform::path::from_utf8(logical_path);
+        const auto encoded = kasumi::transaction::codec::encode(record);
+        ASSERT_TRUE(encoded.has_value()) << encoded.error();
+        const auto decoded = kasumi::transaction::codec::decode(*encoded);
+        ASSERT_TRUE(decoded.has_value()) << decoded.error();
+        path = kasumi::platform::path::from_utf8(logical_path + "🌸");
+        EXPECT_FALSE(kasumi::transaction::codec::encode(record).has_value());
     }
 }
 

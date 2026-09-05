@@ -143,13 +143,17 @@ TEST(LocalTransportTest, RejectsStorageBelowRegularFile) {
 }
 
 #if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 TEST(LocalTransportTest, RejectsUnavailableDrive) {
     std::filesystem::path unavailable;
     for (char letter = 'Z'; letter >= 'D'; --letter) {
-        const std::filesystem::path root{std::string{letter} + ":/"};
-        std::error_code error;
-        if (!std::filesystem::exists(root, error)) {
-            unavailable = root;
+        const auto root_str = std::string{letter} + ":\\";
+        if (::GetDriveTypeA(root_str.c_str()) == DRIVE_NO_ROOT_DIR) {
+            unavailable = std::filesystem::path{std::string{letter} + ":/"};
             break;
         }
     }

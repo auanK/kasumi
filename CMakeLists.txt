@@ -31,7 +31,11 @@ if(WIN32)
     endif()
 endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-    target_compile_options(kasumi_warnings INTERFACE /W4 /permissive-)
+    target_compile_options(kasumi_warnings INTERFACE
+        $<$<COMPILE_LANGUAGE:CXX>:/W4>
+        $<$<COMPILE_LANGUAGE:CXX>:/permissive->
+        $<$<COMPILE_LANGUAGE:CXX>:/utf-8>
+    )
 else()
     target_compile_options(kasumi_warnings INTERFACE
         -Wall

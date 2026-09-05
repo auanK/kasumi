@@ -1,5 +1,6 @@
 #include "crypto/content.hpp"
 
+#include "platform/path.hpp"
 #include <blake3.h>
 #include <fstream>
 #include <stdexcept>
@@ -13,7 +14,7 @@ std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
         std::ifstream input(path, std::ios::binary);
         if (!input) {
             return std::unexpected(
-                "não foi possível abrir o arquivo para hash: " + path.string());
+                "não foi possível abrir o arquivo para hash: " + platform::path::to_utf8(path));
         }
 
         blake3_hasher state;
@@ -32,7 +33,7 @@ std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
 
         if (input.bad()) {
             return std::unexpected("falha ao ler o arquivo para hash: " +
-                                   path.string());
+                                   platform::path::to_utf8(path));
         }
 
         Hash result{};

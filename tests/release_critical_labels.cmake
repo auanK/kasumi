@@ -8,6 +8,7 @@ set_tests_properties(
     HistoryTest.BootstrapDeterminism
     HistoryTest.CanonicalTimestampRoundTripsWithoutChangingBytes
     TransactionCodecTest.RoundTripsAllActionsAndProgressFields
+    TransactionCodecTest.UnicodeOperationPathsRoundTrip
     SyncCoordinatorTest.LogicalCheckpointCrashStatesRollbackWithoutPublicationOrLocalChange
     StateStorageDatabaseTest.FreshDatabaseCreatesInitialSchemaAndEmptyCache
     StateStorageDatabaseTest.UnicodePathRoundTrip
@@ -15,5 +16,10 @@ set_tests_properties(
     H3LocalSyncTest.BootstrapAndNestedTreeConverge
     SnapshotValidationTest.RejectsNonPortableLogicalComponents
     ScannerTest.UnicodeFilenameRoundTrip
+    PlatformPathTest.UnicodeRoundTripPreservesUtf8Bytes
+    PlatformPathTest.UnicodeFilesystemOperationsAndAtomicReplacement
+    ScannerTest.UnicodeSupplementaryPathsAndTargetedObservation
+    RuntimeProfileTest.UnicodeFilesystemPathsSurvivePersistence
+    H3LocalSyncTest.UnicodeSupplementaryAndExtendedSync
     PROPERTIES LABELS "release-critical"
 )

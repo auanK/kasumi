@@ -1,5 +1,6 @@
 #include "state_storage/database.hpp"
 
+#include "platform/path.hpp"
 #include "core/history.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
@@ -587,7 +588,8 @@ bool initialize(const std::filesystem::path& database_path) {
         require(sqlite::commit(*transaction));
         require(sqlite::execute(opened->get(), "PRAGMA journal_mode=WAL"));
         for (const auto& suffix : {"-wal", "-shm"}) {
-            const auto sidecar = database_path.string() + suffix;
+            const auto sidecar = platform::path::temporary_sibling_path(
+                database_path, "", suffix);
             status_error.clear();
             if (std::filesystem::exists(sidecar, status_error)) {
                 secured = platform::private_storage::protect_file(sidecar);

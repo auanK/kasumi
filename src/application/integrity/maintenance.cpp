@@ -7,6 +7,7 @@
 #include "core/maintenance.hpp"
 #include "crypto/content.hpp"
 #include "platform/clock.hpp"
+#include "platform/path.hpp"
 #include "platform/workspace.hpp"
 
 #include <algorithm>
@@ -146,7 +147,7 @@ std::string path_detail(const std::vector<std::filesystem::path>& paths) {
         if (index != 0) {
             result += ", ";
         }
-        result += paths[index].generic_string();
+        result += platform::path::to_utf8(paths[index]);
     }
     if (paths.size() > limit) {
         result += "; e mais ";
@@ -881,7 +882,7 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                                      reference.referenced_paths.end());
             }
             std::ranges::sort(unrecoverable, {}, [](const auto& path) {
-                return path.generic_string();
+                return platform::path::to_logical_utf8(path);
             });
             unrecoverable.erase(std::ranges::unique(unrecoverable).begin(),
                                 unrecoverable.end());

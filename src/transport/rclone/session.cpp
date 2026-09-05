@@ -1,4 +1,5 @@
 #include "detail.hpp"
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/random.hpp"
 
@@ -141,6 +142,27 @@ std::filesystem::path executable_name(std::filesystem::path value) {
     return value;
 }
 
+std::filesystem::path::string_type executable_search_path() {
+#if defined(_WIN32)
+    std::wstring result;
+    auto required = GetEnvironmentVariableW(L"PATH", nullptr, 0);
+    while (required != 0) {
+        result.resize(required);
+        const auto length =
+            GetEnvironmentVariableW(L"PATH", result.data(), required);
+        if (length < required) {
+            result.resize(length);
+            return result;
+        }
+        required = length;
+    }
+    return {};
+#else
+    const char* value = std::getenv("PATH");
+    return value != nullptr ? value : "";
+#endif
+}
+
 ChildEnvironment controlled_environment(const State& state) {
     ChildEnvironment result{
         {"RCLONE_RC_ADDR", "127.0.0.1:" + std::to_string(state.port)},
@@ -164,7 +186,8 @@ ChildEnvironment controlled_environment(const State& state) {
     };
     if (state.configuration.config_path) {
         result.emplace_back("RCLONE_CONFIG",
-                            state.configuration.config_path->string());
+                            platform::path::to_utf8(
+                                *state.configuration.config_path));
     }
     return result;
 }
@@ -422,14 +445,15 @@ std::expected<int, Error> start_process(State& state) {
     options.redirect.out.type = reproc::redirect::pipe;
     options.redirect.err.type = reproc::redirect::pipe;
     const std::vector<std::string> arguments{
-        state.configuration.executable.string(), "rcd"};
+        platform::path::to_utf8(state.configuration.executable), "rcd"};
     const auto result = state.process.start(arguments, options);
     platform::perf_trace::finish("rclone process startup", trace);
     if (result) {
         return std::unexpected(
             make_error(ErrorCode::ProcessFailure,
                        "não foi possível iniciar o processo rclone em " +
-                           state.configuration.executable.string(),
+                           platform::path::to_utf8(
+                               state.configuration.executable),
                        result.value()));
     }
     state.process_started = true;
@@ -536,23 +560,23 @@ resolve_rclone_executable(const detail::RcloneConfiguration& configuration) {
             ErrorCode::ProcessFailure,
             "executável rclone inválido, fora da raiz permitida ou não "
             "regular: " +
-                configured.string(),
+                platform::path::to_utf8(configured),
             std::make_error_code(std::errc::permission_denied).value()));
     }
 
-    const char* path_value = std::getenv("PATH");
-    if (path_value != nullptr) {
+    const auto native_paths = executable_search_path();
+    if (!native_paths.empty()) {
 #if defined(_WIN32)
-        constexpr char separator = ';';
+        constexpr wchar_t separator = L';';
 #else
         constexpr char separator = ':';
 #endif
-        const std::string_view paths{path_value};
+        const std::basic_string_view paths{native_paths};
         std::size_t begin = 0;
         while (begin <= paths.size()) {
             const auto end = paths.find(separator, begin);
             auto entry = paths.substr(begin,
-                                      end == std::string_view::npos
+                                      end == paths.npos
                                           ? paths.size() - begin
                                           : end - begin);
             if (entry.size() >= 2 && entry.front() == '"' &&
@@ -560,13 +584,13 @@ resolve_rclone_executable(const detail::RcloneConfiguration& configuration) {
                 entry.remove_prefix(1);
                 entry.remove_suffix(1);
             }
-            const std::filesystem::path directory{std::string{entry}};
+            const std::filesystem::path directory{entry};
             if (!directory.empty() && directory.is_absolute()) {
                 if (auto accepted = accept(directory / configured, true)) {
                     return *accepted;
                 }
             }
-            if (end == std::string_view::npos) {
+            if (end == paths.npos) {
                 break;
             }
             begin = end + 1;
@@ -679,7 +703,8 @@ start_state(detail::RcloneConfiguration configuration) {
         }
     }
     last_error.message +=
-        " (executável rclone: " + state->configuration.executable.string() +
+        " (executável rclone: " +
+        platform::path::to_utf8(state->configuration.executable) +
         ")";
     destroy_state(state.release());
     return std::unexpected(std::move(last_error));

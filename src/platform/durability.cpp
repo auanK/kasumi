@@ -1,5 +1,6 @@
 #include "platform/durability.hpp"
 
+#include "platform/path.hpp"
 #include <cerrno>
 #include <cstring>
 #include <system_error>
@@ -33,7 +34,7 @@ validate_parent(const std::filesystem::path& path, std::string_view operation) {
     const auto parent = path.parent_path();
     if (parent.empty()) {
         return std::unexpected(std::string{operation} +
-                               ": diretório pai vazio para '" + path.string() +
+                               ": diretório pai vazio para '" + platform::path::to_utf8(path) +
                                "'");
     }
 
@@ -48,7 +49,7 @@ validate_parent(const std::filesystem::path& path, std::string_view operation) {
         !std::filesystem::is_directory(status)) {
         return std::unexpected(std::string{operation} +
                                ": diretório pai inválido para '" +
-                               path.string() + "'");
+                               platform::path::to_utf8(path) + "'");
     }
     return {};
 }
@@ -61,13 +62,13 @@ validate_regular_file(const std::filesystem::path& path,
     if (error) {
         return std::unexpected(std::string{operation} +
                                ": não foi possível consultar '" +
-                               path.string() + "': " + error.message());
+                               platform::path::to_utf8(path) + "': " + error.message());
     }
     if (std::filesystem::is_symlink(status) ||
         !std::filesystem::is_regular_file(status)) {
         return std::unexpected(std::string{operation} +
                                ": arquivo regular esperado em '" +
-                               path.string() + "'");
+                               platform::path::to_utf8(path) + "'");
     }
     return {};
 }

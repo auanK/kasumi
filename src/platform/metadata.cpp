@@ -1,5 +1,6 @@
 #include "platform/metadata.hpp"
 
+#include "platform/path.hpp"
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -211,11 +212,11 @@ set_last_write_time(const std::filesystem::path& path,
 #endif
     if (!equivalent) {
         return std::unexpected("não foi possível verificar o timestamp para " +
-                               path.string() + ": " + equivalent.error());
+                               platform::path::to_utf8(path) + ": " + equivalent.error());
     }
     if (!*equivalent) {
         return std::unexpected("falha na verificação do timestamp para " +
-                               path.string());
+                               platform::path::to_utf8(path));
     }
     return {};
 }
