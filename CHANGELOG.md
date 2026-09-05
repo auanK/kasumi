@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.1] - 2026-09-05
+
+Patch release of Kasumi.
+
+### Fixed
+
+- Fixed Windows path handling issues that could cause incorrect filesystem path processing.
+- Improved Unicode path handling on Windows.
+- Improved cross-platform path normalization behavior.
+
 ## [0.5.0] - 2026-09-04
 
 Initial public release of Kasumi.
