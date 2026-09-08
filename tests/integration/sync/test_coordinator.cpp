@@ -4558,6 +4558,77 @@ TEST(ReconciliationTest, LocalUploadChangesSharedTree) {
     EXPECT_EQ(result->target_generation, input.storage.generation + 1);
 }
 
+TEST(ReconciliationTest,
+     UnrelatedUploadCanonicalizesEquivalentFileToObservedLocalMtime) {
+    const auto remote_mtime =
+        make_file_time(std::chrono::nanoseconds{1788563567000000000});
+    const auto local_mtime = make_file_time(
+        std::chrono::nanoseconds{1788563567915178000});
+    const auto same_hash = kasumi::hasher::hash_string("same");
+
+    auto input = empty_publication_input();
+    input.storage.history_present = true;
+    input.storage.logical_heads = {std::string(64, 'a')};
+    input.storage.tree = input.local_tree;
+    input.storage.tree.rows.push_back(
+        kasumi::NodeRow{.path = "A.txt",
+                        .hash = same_hash,
+                        .size = 4,
+                        .mtime = remote_mtime,
+                        .is_directory = false});
+    kasumi::finalize_snapshot(input.storage.tree);
+    input.base_tree = input.storage.tree;
+    input.local_tree = input.storage.tree;
+    kasumi::find_row(input.local_tree, "A.txt")->mtime = local_mtime;
+    input.local_tree.rows.push_back(
+        kasumi::NodeRow{.path = "B.txt",
+                        .hash = kasumi::hasher::hash_string("new"),
+                        .size = 3,
+                        .mtime = local_mtime,
+                        .is_directory = false});
+    kasumi::finalize_snapshot(input.local_tree);
+
+    const auto result = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    ASSERT_EQ(result->plan.operations.size(), 1U);
+    EXPECT_EQ(result->plan.operations.front().action, kasumi::Action::Upload);
+    EXPECT_EQ(result->plan.operations.front().path, "B.txt");
+    EXPECT_FALSE(result->has_conflicts);
+    EXPECT_TRUE(result->requires_publication);
+
+    const auto* candidate_a =
+        kasumi::find_row(result->candidate_shared_tree, "A.txt");
+    ASSERT_NE(candidate_a, nullptr);
+    EXPECT_EQ(candidate_a->hash, same_hash);
+    EXPECT_EQ(candidate_a->size, 4U);
+    EXPECT_EQ(candidate_a->mtime, local_mtime);
+
+    auto remote_metadata_change = input;
+    kasumi::find_row(remote_metadata_change.base_tree, "A.txt")->mtime =
+        local_mtime;
+    const auto remote_result =
+        kasumi::reconciliation::reconcile(remote_metadata_change);
+    ASSERT_TRUE(remote_result.has_value()) << remote_result.error().detail;
+    EXPECT_EQ(kasumi::find_row(remote_result->candidate_shared_tree, "A.txt")
+                  ->mtime,
+              local_mtime);
+
+    const auto publication = kasumi::reconciliation::build_publication_tree(
+        input.local_tree, {}, result->candidate_shared_tree);
+    ASSERT_TRUE(publication.has_value()) << publication.error().detail;
+    EXPECT_EQ(*publication, result->candidate_shared_tree);
+
+    auto converged = input;
+    converged.base_tree = result->candidate_shared_tree;
+    converged.local_tree = result->candidate_shared_tree;
+    converged.storage.tree = result->candidate_shared_tree;
+    const auto second = kasumi::reconciliation::reconcile(converged);
+    ASSERT_TRUE(second.has_value()) << second.error().detail;
+    EXPECT_TRUE(second->plan.operations.empty());
+    EXPECT_FALSE(second->has_conflicts);
+    EXPECT_FALSE(second->requires_publication);
+}
+
 TEST(ReconciliationTest, MissingReferencedObjectIsRepairOnly) {
     auto input = empty_publication_input();
     input.storage.history_present = true;

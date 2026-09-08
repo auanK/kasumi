@@ -420,7 +420,8 @@ candidate_shared_tree(const Input& input,
     }
 
     if (input.storage.history_present &&
-        input.storage.logical_heads.size() != 1) {
+        (input.storage.logical_heads.size() != 1 ||
+         result.tree != input.storage.tree)) {
         synchronize_common_local_rows(result.tree, input.local_tree);
     }
 
