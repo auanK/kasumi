@@ -3884,7 +3884,7 @@ TEST(ReobservationTest, RepeatedLocalChangesExhaustThreeAttempts) {
     EXPECT_EQ(stable.error().code,
               kasumi::application::sync::coordinator::ErrorCode::
                   ConcurrentModification);
-    EXPECT_NE(stable.error().detail.find("repetidamente"), std::string::npos);
+    EXPECT_NE(stable.error().detail.find("repeatedly"), std::string::npos);
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     const auto listing = kasumi::transport::list(storage);
     ASSERT_TRUE(listing.has_value());

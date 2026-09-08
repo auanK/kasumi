@@ -2,7 +2,9 @@
 #include "application/observation/history.hpp"
 #include "application/observation/scanner.hpp"
 #include "application/profile.hpp"
+#include "application/sync/journal.hpp"
 #include "kasumi/test/filesystem.hpp"
+#include "kasumi/test/hash_mutation.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/change_journal.hpp"
 #include "platform/metadata.hpp"
@@ -320,6 +322,21 @@ void expect_remote_present(const StorageView& remote,
 
 void expect_remote_absent(const StorageView& remote, std::string_view path) {
     EXPECT_EQ(kasumi::find_row(remote.effective_tree, path), nullptr);
+}
+
+void expect_no_transaction_artifacts(
+    const kasumi::runtime::RuntimeData& runtime) {
+    const auto profile = runtime.database_path.parent_path();
+    EXPECT_FALSE(std::filesystem::exists(
+        profile / kasumi::application::sync::journal::journal_file_name));
+    EXPECT_FALSE(std::filesystem::exists(
+        profile /
+        (std::string{kasumi::application::sync::journal::journal_file_name} +
+         std::string{kasumi::application::sync::journal::temporary_suffix})));
+    const auto transactions = profile / ".transactions";
+    if (std::filesystem::exists(transactions)) {
+        EXPECT_TRUE(std::filesystem::is_empty(transactions));
+    }
 }
 
 TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
@@ -705,6 +722,45 @@ TEST(H3LocalSyncTest,
     expect_file(client, ".kasumiignore", "ignored.txt\n");
     expect_file(client, "B.txt", "new");
     expect_fixed_point(scenario, client);
+}
+
+TEST(ScannerPropagationTest, HybridObservationFailsBeforeRemoteMutation) {
+    using namespace kasumi::test;
+    auto scenario = make_scenario();
+    const auto client = make_client(scenario, "hybrid-first");
+    const auto file = client_local_dir(client) / "large.bin";
+    write_large_file(file);
+    const auto initial_hash = independent_file_hash(file);
+    auto runtime =
+        kasumi::runtime::resolve(client_environment(client).app_data_dir,
+                                 client_name(client),
+                                 kasumi::runtime::AccessMode::ReadOnly);
+    ASSERT_TRUE(runtime);
+    kasumi::Hash hybrid_hash;
+    {
+        UnavailableFingerprint unavailable(file);
+        HashMutation mutation(file, [&] {
+            mutate_large_file(file, FileMutation::Overwrite);
+        });
+        const auto result = sync(client);
+        ASSERT_FALSE(result);
+        EXPECT_NE(result.error().find("file changed while being read"),
+                  std::string::npos);
+        ASSERT_EQ(mutation.mutations, 1U);
+        ASSERT_EQ(mutation.hashes.size(), 1U);
+        hybrid_hash = mutation.hashes.front();
+    }
+
+    const auto final_hash = independent_file_hash(file);
+    ASSERT_NE(hybrid_hash, initial_hash);
+    ASSERT_NE(hybrid_hash, final_hash);
+    const auto identifiers = remote_identifiers(scenario);
+    ASSERT_TRUE(identifiers);
+    EXPECT_TRUE(identifiers->empty());
+    const auto stored = state(client);
+    ASSERT_TRUE(stored);
+    EXPECT_FALSE(stored->has_value());
+    expect_no_transaction_artifacts(*runtime);
 }
 
 TEST(H3LocalSyncTest, RemoteDeletePreservesLocalConcurrentModification) {

@@ -60,8 +60,10 @@ kasumi_add_test_suite(
     SOURCES
         unit/application/observation/test_history.cpp
         unit/application/observation/test_scanner.cpp
+        support/src/hash_mutation.cpp
     LIBRARIES
         kasumi_application
+        blake3
 )
 
 kasumi_add_test_suite(
@@ -93,8 +95,10 @@ kasumi_add_test_suite(
     "e2e.local_sync"
     SOURCES
         e2e/local_sync/test_sync.cpp
+        support/src/hash_mutation.cpp
     LIBRARIES
         kasumi_application
+        blake3
 )
 
 kasumi_add_test_suite(

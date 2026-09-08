@@ -3,16 +3,19 @@
 #include "application/observation/state.hpp"
 #include "core/history.hpp"
 #include "kasumi/test/filesystem.hpp"
+#include "kasumi/test/hash_mutation.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/change_journal.hpp"
 #include "platform/change_journal_diagnostic.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
+#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <gtest/gtest.h>
+#include <iostream>
 #include <thread>
 
 namespace {
@@ -22,10 +25,13 @@ enum class FingerprintFakeMode {
     Unsupported,
     ErrorBefore,
     ErrorAfter,
+    Changing,
+    SettlesAfterFirst,
 };
 
 FingerprintFakeMode fingerprint_fake_mode = FingerprintFakeMode::Unsupported;
 int fingerprint_fake_calls = 0;
+int native_fingerprint_calls = 0;
 
 kasumi::platform::FileFingerprintResult
 fake_fingerprint(const std::filesystem::path&) {
@@ -35,8 +41,25 @@ fake_fingerprint(const std::filesystem::path&) {
     if (fingerprint_fake_mode == FingerprintFakeMode::ErrorAfter &&
         fingerprint_fake_calls > 1)
         return std::unexpected("fingerprint after hash failed");
-    if (fingerprint_fake_mode == FingerprintFakeMode::Unsupported)
+    if (fingerprint_fake_mode == FingerprintFakeMode::Unsupported) {
+        std::cout << "fingerprint_call=" << fingerprint_fake_calls
+                  << " unavailable\n";
         return std::optional<kasumi::platform::FileFingerprint>{};
+    }
+    if (fingerprint_fake_mode == FingerprintFakeMode::Changing ||
+        fingerprint_fake_mode == FingerprintFakeMode::SettlesAfterFirst) {
+        const auto value = static_cast<std::uint64_t>(
+            fingerprint_fake_mode == FingerprintFakeMode::Changing
+                ? fingerprint_fake_calls
+                : std::min(fingerprint_fake_calls, 2));
+        std::cout << "fingerprint_call=" << fingerprint_fake_calls << " F"
+                  << value << '\n';
+        return std::optional<kasumi::platform::FileFingerprint>{
+            kasumi::platform::FileFingerprint{
+                .kind =
+                    kasumi::platform::FileFingerprintKind::WindowsFileIdentity,
+                .value = {1, 2, 3, value}}};
+    }
     return std::optional<kasumi::platform::FileFingerprint>{
         kasumi::platform::FileFingerprint{
             .kind = kasumi::platform::FileFingerprintKind::WindowsFileIdentity,
@@ -46,6 +69,24 @@ fake_fingerprint(const std::filesystem::path&) {
 void set_fingerprint_fake(FingerprintFakeMode mode) {
     fingerprint_fake_mode = mode;
     fingerprint_fake_calls = 0;
+}
+
+kasumi::platform::FileFingerprintResult
+traced_native_fingerprint(const std::filesystem::path& path) {
+    ++native_fingerprint_calls;
+    const auto result = kasumi::platform::regular_file_fingerprint(path);
+    std::cout << "fingerprint_call=" << native_fingerprint_calls << ' ';
+    if (!result)
+        std::cout << "error=" << result.error();
+    else if (!*result)
+        std::cout << "unavailable";
+    else {
+        std::cout << static_cast<int>((**result).kind) << ':';
+        for (const auto value : (**result).value)
+            std::cout << value << ',';
+    }
+    std::cout << '\n';
+    return result;
 }
 
 void expect_same_snapshot(const kasumi::Snapshot& left,
@@ -623,6 +664,189 @@ TEST(ScannerTest, UnicodeSupplementaryPathsAndTargetedObservation) {
         ASSERT_TRUE(targeted->cache.has_value());
         EXPECT_EQ(targeted->cache->path, path);
         EXPECT_EQ(targeted->cache->hash, targeted->row.hash);
+    }
+}
+
+TEST(ScannerTest, FullHashRejectsTwoUnstableAttempts) {
+    auto workspace = kasumi::test::make_temp_workspace("unstable-full");
+    const auto file = kasumi::test::workspace_path(workspace, "a.txt");
+    kasumi::test::write_text(file, "alpha");
+    set_fingerprint_fake(FingerprintFakeMode::Changing);
+    using namespace kasumi::application::observation::scanner;
+    const auto result =
+        scan_result(file, {}, ScanPolicy::FullHash, fake_fingerprint);
+    EXPECT_FALSE(result) << "FullHash accepted an unstable observation";
+    EXPECT_EQ(fingerprint_fake_calls, 3);
+    if (result) {
+        std::cout << "unexpected_row_hash="
+                  << kasumi::hash_hex(result->snapshot.rows.front().hash)
+                  << '\n';
+    }
+    kasumi::test::print_file_evidence("FullHash F1/F2/F3 rejected", file);
+}
+
+TEST(ScannerTest, ReuseRejectsTwoUnstableAttempts) {
+    auto workspace = kasumi::test::make_temp_workspace("unstable-reuse");
+    const auto file = kasumi::test::workspace_path(workspace, "a.txt");
+    kasumi::test::write_text(file, "alpha");
+    set_fingerprint_fake(FingerprintFakeMode::Changing);
+    using namespace kasumi::application::observation::scanner;
+    const auto result = scan_result(
+        file, {}, ScanPolicy::ReuseStrongFingerprint, fake_fingerprint);
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().detail, "file changed while being read");
+    EXPECT_EQ(fingerprint_fake_calls, 3);
+    kasumi::test::print_file_evidence("Reuse F1/F2/F3 rejected", file);
+}
+
+TEST(ScannerTest, RetryUsesFreshBaselineAfterDetectedChange) {
+    auto workspace = kasumi::test::make_temp_workspace("stale-baseline");
+    const auto file = kasumi::test::workspace_path(workspace, "a.txt");
+    kasumi::test::write_text(file, "alpha");
+    set_fingerprint_fake(FingerprintFakeMode::SettlesAfterFirst);
+    using namespace kasumi::application::observation::scanner;
+    const auto result = scan_result(
+        file, {}, ScanPolicy::ReuseStrongFingerprint, fake_fingerprint);
+    EXPECT_TRUE(result) << "retry kept F1 instead of adopting F2: "
+                        << result.error().detail;
+    EXPECT_EQ(fingerprint_fake_calls, 3);
+    kasumi::test::print_file_evidence(
+        "Reuse F1/F2/F2 accepted with fresh baseline", file);
+}
+
+TEST(ScannerTest, UnavailableFingerprintRejectsSameSizeOverwrite) {
+    using namespace kasumi::application::observation::scanner;
+    using namespace kasumi::test;
+    for (auto policy :
+         {ScanPolicy::FullHash, ScanPolicy::ReuseStrongFingerprint}) {
+        SCOPED_TRACE(policy == ScanPolicy::FullHash ? "FullHash"
+                                                    : "ReuseStrongFingerprint");
+        auto workspace = make_temp_workspace("no-fingerprint-mutation");
+        const auto file = workspace_path(workspace, "large.bin");
+        write_large_file(file);
+        const auto initial_hash = independent_file_hash(file);
+        const auto initial_size = std::filesystem::file_size(file);
+        const auto initial_time = std::filesystem::last_write_time(file);
+        std::cout << "policy="
+                  << (policy == ScanPolicy::FullHash ? "FullHash"
+                                                     : "ReuseStrongFingerprint")
+                  << " mutation=same-size-overwrite\n";
+        print_file_evidence("initial", file);
+        set_fingerprint_fake(FingerprintFakeMode::Unsupported);
+        HashMutation mutation(file, [&] {
+            mutate_large_file(file, FileMutation::Overwrite);
+        });
+        const auto result = scan_result(file, {}, policy, fake_fingerprint);
+        const auto final_hash = independent_file_hash(file);
+        print_file_evidence("final", file);
+        ASSERT_EQ(mutation.mutations, 1U);
+        ASSERT_EQ(mutation.hashes.size(), 1U);
+        std::cout << "hash_attempts=" << mutation.hashes.size()
+                  << " attempt_hash=" << kasumi::hash_hex(mutation.hashes[0])
+                  << '\n';
+        EXPECT_NE(initial_hash, final_hash);
+        EXPECT_NE(mutation.hashes[0], initial_hash);
+        EXPECT_NE(mutation.hashes[0], final_hash);
+        EXPECT_EQ(fingerprint_fake_calls, 2);
+        if (result) {
+            const auto& row = result->snapshot.rows.front();
+            EXPECT_TRUE(result->cache.empty());
+            EXPECT_EQ(row.size, initial_size);
+            EXPECT_EQ(row.mtime, initial_time);
+            EXPECT_EQ(row.hash, mutation.hashes[0]);
+            std::cout << "scanner=success row_size=" << row.size
+                      << " row_mtime=" << row.mtime.time_since_epoch().count()
+                      << " row_hash=" << kasumi::hash_hex(row.hash) << '\n';
+        }
+        EXPECT_FALSE(result)
+            << "fingerprint unavailable was treated as proof of stability";
+    }
+}
+
+TEST(ScannerTest, RealMutationsDuringHashNeverReturnHybridRows) {
+    using namespace kasumi::application::observation::scanner;
+    using namespace kasumi::test;
+    for (auto policy :
+         {ScanPolicy::FullHash, ScanPolicy::ReuseStrongFingerprint}) {
+        for (auto mode : {FileMutation::Append,
+                          FileMutation::Truncate,
+                          FileMutation::Overwrite}) {
+            SCOPED_TRACE(testing::Message()
+                         << "policy=" << static_cast<int>(policy)
+                         << " mutation=" << static_cast<int>(mode));
+            auto workspace = make_temp_workspace("real-hash-mutation");
+            const auto file = workspace_path(workspace, "large.bin");
+            write_large_file(file);
+            const auto initial_hash = independent_file_hash(file);
+            const auto initial_size = std::filesystem::file_size(file);
+            const auto initial_time = std::filesystem::last_write_time(file);
+            const auto native =
+                kasumi::platform::regular_file_fingerprint(file);
+            ASSERT_TRUE(native);
+            const auto* policy_name = policy == ScanPolicy::FullHash
+                                          ? "FullHash"
+                                          : "ReuseStrongFingerprint";
+            const auto* mutation_name = mode == FileMutation::Append ? "append"
+                                        : mode == FileMutation::Truncate
+                                            ? "truncate"
+                                            : "same-size-overwrite";
+            std::cout << "policy=" << policy_name
+                      << " mutation=" << mutation_name << '\n';
+            print_file_evidence("before", file);
+            HashMutation mutation(file, [&] {
+                mutate_large_file(file, mode);
+            });
+            native_fingerprint_calls = 0;
+            kasumi::platform::perf_trace::force_enable(true);
+            kasumi::platform::perf_trace::reset();
+            const auto result =
+                scan_result(file, {}, policy, traced_native_fingerprint);
+            const auto changed = kasumi::platform::perf_trace::get_count(
+                "files changed during hash");
+            kasumi::platform::perf_trace::force_enable(false);
+            ASSERT_EQ(mutation.mutations, 1U);
+            ASSERT_FALSE(mutation.hashes.empty());
+            const auto final_hash = independent_file_hash(file);
+            print_file_evidence("after", file);
+            for (const auto& hash : mutation.hashes)
+                std::cout << "attempt_hash=" << kasumi::hash_hex(hash) << '\n';
+            std::cout << "hash_attempts=" << mutation.hashes.size()
+                      << " instability_detections=" << changed << '\n';
+            EXPECT_NE(initial_hash, final_hash);
+            if (mode == FileMutation::Overwrite) {
+                EXPECT_NE(mutation.hashes.front(), initial_hash);
+                EXPECT_NE(mutation.hashes.front(), final_hash);
+                EXPECT_EQ(mutation.hashes.front(),
+                          kasumi::hasher::hash_string(
+                              std::string(mutation_mib, 'A') +
+                              std::string(31 * mutation_mib, 'B')));
+            }
+            if (!*native) {
+                ASSERT_FALSE(result);
+                EXPECT_EQ(result.error().detail,
+                          "file changed while being read");
+                std::cout << "scanner=error returned_hash=N/A "
+                          << result.error().detail << '\n';
+            } else {
+                ASSERT_TRUE(result) << describe(result.error());
+                const auto& row = result->snapshot.rows.front();
+                EXPECT_EQ(row.size, std::filesystem::file_size(file));
+                EXPECT_EQ(row.mtime, std::filesystem::last_write_time(file));
+                EXPECT_NE(row.mtime, initial_time);
+                EXPECT_EQ(row.hash, mutation.hashes.back());
+                EXPECT_EQ(row.hash, final_hash);
+                if (mode != FileMutation::Overwrite) {
+                    EXPECT_NE(row.size, initial_size);
+                }
+                std::cout << "scanner=success row_size=" << row.size
+                          << " row_mtime="
+                          << row.mtime.time_since_epoch().count()
+                          << " row_hash=" << kasumi::hash_hex(row.hash) << '\n';
+            }
+            EXPECT_EQ(changed, 1U);
+            EXPECT_EQ(mutation.hashes.size(), *native ? 2U : 1U);
+            EXPECT_EQ(native_fingerprint_calls, *native ? 3 : 2);
+        }
     }
 }
 

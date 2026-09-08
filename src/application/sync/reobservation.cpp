@@ -164,6 +164,17 @@ stabilize(const runtime::RuntimeData& runtime_data,
             if (!removed) {
                 return std::unexpected(removed.error());
             }
+            if (observed.error().code ==
+                    reconciliation::ErrorCode::InvalidLocalTree &&
+                observed.error().detail.ends_with(
+                    "file changed while being read")) {
+                if (attempt + 1 == maximum_observation_attempts) {
+                    return std::unexpected(detail::make_error(
+                        ErrorCode::ConcurrentModification,
+                        "state changed repeatedly before publication"));
+                }
+                continue;
+            }
             return std::unexpected(detail::make_error(
                 ErrorCode::ObservationFailure, observed.error().detail));
         }
@@ -206,7 +217,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
         if (attempt + 1 == maximum_observation_attempts) {
             return std::unexpected(detail::make_error(
                 ErrorCode::ConcurrentModification,
-                "estado mudou repetidamente antes da publicação"));
+                "state changed repeatedly before publication"));
         }
         input = std::move(*observed);
         result = std::move(*recalculated);
@@ -219,7 +230,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
 
     return std::unexpected(
         detail::make_error(ErrorCode::ConcurrentModification,
-                           "estado mudou repetidamente antes da publicação"));
+                           "state changed repeatedly before publication"));
 }
 
 } // namespace kasumi::application::sync::coordinator::reobservation

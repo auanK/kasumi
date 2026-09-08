@@ -274,6 +274,7 @@ process_file(const std::filesystem::path& file_path,
         for (int attempt = 0; attempt < 2; ++attempt) {
             const auto before_fingerprint = fingerprint;
             const auto before_size = row.size;
+            const auto before_mtime = row.mtime;
             const auto hash_trace = platform::perf_trace::begin();
             hash = crypto::content::hash_file(file_path);
             platform::perf_trace::finish("local content hashing wall",
@@ -289,6 +290,19 @@ process_file(const std::filesystem::path& file_path,
             std::error_code after_error;
             const auto after_size =
                 std::filesystem::file_size(file_path, after_error);
+            if (after_error)
+                return std::unexpected(scan_error(file_path,
+                                                  "read size after hashing",
+                                                  after_error,
+                                                  ScanErrorCode::Metadata));
+            const auto after_mtime =
+                std::filesystem::last_write_time(file_path, after_error);
+            if (after_error)
+                return std::unexpected(
+                    scan_error(file_path,
+                               "read modification time after hashing",
+                               after_error,
+                               ScanErrorCode::Metadata));
             const auto after_fingerprint_trace = platform::perf_trace::begin();
             auto after_fingerprint = context.fingerprint_query(file_path);
             platform::perf_trace::finish("local fingerprint query wall",
@@ -296,11 +310,6 @@ process_file(const std::filesystem::path& file_path,
             platform::perf_trace::count("local fingerprint queries");
             if (context.targeted)
                 platform::perf_trace::count("targeted fingerprint queries");
-            if (after_error)
-                return std::unexpected(scan_error(file_path,
-                                                  "ler tamanho após hash",
-                                                  after_error,
-                                                  ScanErrorCode::Metadata));
             if (!after_fingerprint)
                 return std::unexpected(ScanError{ScanErrorCode::Metadata,
                                                  file_path,
@@ -308,29 +317,33 @@ process_file(const std::filesystem::path& file_path,
                                                  after_fingerprint.error()});
             if (!*after_fingerprint)
                 cache_allowed = false;
-            if (!*before_fingerprint || !*after_fingerprint ||
-                ((**before_fingerprint).kind == (**after_fingerprint).kind &&
-                 (**before_fingerprint).value == (**after_fingerprint).value &&
-                 before_size == static_cast<std::uint64_t>(after_size))) {
+            const bool same_fingerprint =
+                (!*before_fingerprint && !*after_fingerprint) ||
+                (*before_fingerprint && *after_fingerprint &&
+                 (**before_fingerprint).kind == (**after_fingerprint).kind &&
+                 (**before_fingerprint).value == (**after_fingerprint).value);
+            if (same_fingerprint &&
+                before_size == static_cast<std::uint64_t>(after_size) &&
+                before_mtime == after_mtime) {
                 stable = true;
                 fingerprint = std::move(after_fingerprint);
                 break;
             }
             platform::perf_trace::count("files changed during hash");
+            if (!*before_fingerprint || !*after_fingerprint)
+                break;
+            row.size = static_cast<std::uint64_t>(after_size);
+            row.mtime = after_mtime;
+            fingerprint = std::move(after_fingerprint);
         }
         if (!hash)
             return std::unexpected(ScanError{
-                ScanErrorCode::Io, file_path, "calcular hash", hash.error()});
-        if (!stable && context.policy == ScanPolicy::FullHash) {
-            row.hash = *hash;
-            return row;
-        }
+                ScanErrorCode::Io, file_path, "compute hash", hash.error()});
         if (!stable)
-            return std::unexpected(
-                ScanError{ScanErrorCode::Io,
-                          file_path,
-                          "calcular hash",
-                          "arquivo mudou durante a leitura"});
+            return std::unexpected(ScanError{ScanErrorCode::Io,
+                                             file_path,
+                                             "compute hash",
+                                             "file changed while being read"});
         row.hash = *hash;
         if (cache_allowed && fingerprint && fingerprint->has_value()) {
             context.cache.push_back(
