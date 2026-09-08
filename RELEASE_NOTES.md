@@ -1,17 +1,18 @@
-# Kasumi v0.5.1
+# Kasumi v0.5.2
 
 Patch release of Kasumi.
 
-Kasumi is a multi-master file synchronization tool for Linux and Windows that
-synchronizes through shared storage without requiring a dedicated Kasumi
-coordination server.
+Kasumi - Multi-client bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.
 
 ## Highlights
 
-- Improved Windows path handling reliability
-- Fixed Unicode path handling issues on Windows filesystem operations
-- Improved cross-platform path normalization consistency
-- Additional robustness improvements for synchronization across supported platforms
+- Fixed a `Composition Mismatch` caused by modification-time drift on equivalent
+  files, so unrelated changes can still be synchronized.
+- Prevented the scanner from combining metadata and content from different file
+  states when a file changes during hashing.
+- Retried unstable local observations and safely aborted synchronization after
+  repeated concurrent changes, without publishing partial state.
+- Added regression coverage across Linux, MSYS2, and MSVC.
 
 ## Downloads
 
@@ -24,4 +25,4 @@ Individual SHA-256 checksum files are also provided for each archive.
 GitHub artifact attestations are generated for the release archives and
 `SHA256SUMS.txt`.
 
-See `CHANGELOG.md` for the complete v0.5.1 change summary.
+See `CHANGELOG.md` for the complete v0.5.2 change summary.

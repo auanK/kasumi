@@ -1,6 +1,8 @@
 # Kasumi
 
-Kasumi is a bidirectional file synchronizer written in C++23 for Linux and Windows. It synchronizes directories across multiple machines through shared storage, including local filesystems, network shares, and rclone-compatible remotes. Machines synchronize independently, encrypt data on the client side, and do not need to be online at the same time.
+Kasumi - Multi-client bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.
+
+Kasumi is written in C++23 for Linux and Windows. It synchronizes directories through shared storage, including local filesystems, network shares, and rclone-compatible remotes. Clients synchronize independently and do not need to be online at the same time.
 
 ```text
 Machine A ───┐

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.2] - 2026-09-08
+
+Kasumi - Multi-client bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.
+
+### Fixed
+
+- Fixed a `Composition Mismatch` caused by modification-time drift on equivalent files. Shared rows are now synchronized with the current local tree before reconciliation, allowing unrelated changes to be published.
+- Prevented hybrid scanner rows containing metadata from one file state and content from another when a file changes during hashing.
+- Retried unstable local observations and safely aborted synchronization after repeated concurrent changes, without publishing partial state.
+
+### Tests
+
+- Added scanner, synchronization, and end-to-end regressions for concurrent file mutation and equivalent-file modification-time drift across Linux, MSYS2, and MSVC.
+
 ## [0.5.1] - 2026-09-05
 
 Patch release of Kasumi.
