@@ -46,7 +46,8 @@ std::expected<void, std::string> fill_bytes(std::span<std::uint8_t> output) {
     while (offset < output.size()) {
         const auto remaining = output.size() - offset;
         const auto count = static_cast<ULONG>(std::min(
-            remaining, static_cast<std::size_t>(std::numeric_limits<ULONG>::max())));
+            remaining,
+            static_cast<std::size_t>(std::numeric_limits<ULONG>::max())));
         const auto status = BCryptGenRandom(nullptr,
                                             output.data() + offset,
                                             count,

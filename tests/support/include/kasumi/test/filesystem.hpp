@@ -22,8 +22,8 @@ void write_binary(const std::filesystem::path& path,
                   std::initializer_list<std::byte> contents);
 [[nodiscard]] BinaryData read_binary(const std::filesystem::path& path);
 
-[[nodiscard]] bool has_temporary_history_workspace(
-    const std::filesystem::path& root);
+[[nodiscard]] bool
+has_temporary_history_workspace(const std::filesystem::path& root);
 
 enum class TreeEntryKind {
     Directory,

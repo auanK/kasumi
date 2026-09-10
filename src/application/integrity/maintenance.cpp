@@ -39,6 +39,7 @@ struct GarbageCollectionSnapshot {
     std::vector<std::string> required_commit_objects;
     std::vector<std::string> reachable_content;
     std::vector<std::string> candidates;
+    std::vector<std::string> physical_namespace;
 };
 
 Error make_error(ErrorCode code,
@@ -170,13 +171,13 @@ maintenance_workspace_root(const runtime::RuntimeData& runtime_data) {
 std::expected<void, Error> validate_history_inventory(
     const history_storage::ReachabilityInventory& inventory) {
     if (inventory.logical_heads.empty()) {
-        return std::unexpected(make_error(ErrorCode::IntegrityFailure,
-                                          "histórico remoto ausente"));
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure, "remote history absent"));
     }
     if (!inventory.unknown_history_objects.empty()) {
         return std::unexpected(
             make_error(ErrorCode::IntegrityFailure,
-                       list_detail("objetos de histórico desconhecidos: ",
+                       list_detail("unknown history objects: ",
                                    inventory.unknown_history_objects)));
     }
     if (!inventory.missing_parent_ids.empty()) {
@@ -188,7 +189,7 @@ std::expected<void, Error> validate_history_inventory(
     if (!inventory.invalid_parent_ids.empty()) {
         return std::unexpected(
             make_error(ErrorCode::IntegrityFailure,
-                       list_detail("commits pais inválidos: ",
+                       list_detail("invalid parent commits: ",
                                    inventory.invalid_parent_ids)));
     }
 
@@ -199,10 +200,10 @@ std::expected<void, Error> validate_history_inventory(
         }
     }
     if (!invalid_markers.empty()) {
-        return std::unexpected(make_error(
-            ErrorCode::IntegrityFailure,
-            list_detail("marcadores de head inválidos ou instáveis: ",
-                        invalid_markers)));
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure,
+                       list_detail("invalid or unstable head markers: ",
+                                   invalid_markers)));
     }
 
     std::vector<std::string> invalid_commits;
@@ -217,7 +218,7 @@ std::expected<void, Error> validate_history_inventory(
     if (!invalid_commits.empty()) {
         return std::unexpected(
             make_error(ErrorCode::IntegrityFailure,
-                       list_detail("commits inválidos: ", invalid_commits)));
+                       list_detail("invalid commits: ", invalid_commits)));
     }
     return {};
 }
@@ -227,7 +228,7 @@ std::expected<void, Error> validate_content_inventory(
     if (!inventory.unknown_storage_objects.empty()) {
         return std::unexpected(
             make_error(ErrorCode::IntegrityFailure,
-                       list_detail("identificadores físicos desconhecidos: ",
+                       list_detail("unknown physical identifiers: ",
                                    inventory.unknown_storage_objects)));
     }
 
@@ -241,8 +242,7 @@ std::expected<void, Error> validate_content_inventory(
     if (!damaged.empty()) {
         return std::unexpected(make_error(
             ErrorCode::IntegrityFailure,
-            list_detail("conteúdos alcançáveis ausentes ou corrompidos: ",
-                        damaged)));
+            list_detail("reachable contents missing or corrupted: ", damaged)));
     }
     return {};
 }
@@ -252,8 +252,14 @@ collect_garbage_collection_snapshot(
     transport::Transport& storage,
     KeySpan key,
     const std::filesystem::path& workspace_root) {
-    auto history =
-        history_storage::inventory_reachability(storage, key, workspace_root);
+    auto listing = transport::list(storage);
+    if (!listing) {
+        return std::unexpected(transport_error(listing.error()));
+    }
+    std::ranges::sort(*listing);
+
+    auto history = history_storage::inventory_reachability(
+        storage, key, *listing, workspace_root);
     if (!history) {
         return std::unexpected(history_storage_error(history.error()));
     }
@@ -262,7 +268,7 @@ collect_garbage_collection_snapshot(
     }
 
     auto content = history_storage::inventory_content_reachability(
-        storage, key, *history, workspace_root);
+        storage, key, *listing, *history, workspace_root, false);
     if (!content) {
         return std::unexpected(history_storage_error(content.error()));
     }
@@ -276,6 +282,7 @@ collect_garbage_collection_snapshot(
         .required_commit_objects = {},
         .reachable_content = content->reachable_content_ids,
         .candidates = {},
+        .physical_namespace = std::move(*listing),
     };
 
     std::vector<std::string> marked_commits;
@@ -339,7 +346,8 @@ bool same_reachable_state(const GarbageCollectionSnapshot& left,
            left.reachable_commits == right.reachable_commits &&
            left.required_commit_objects == right.required_commit_objects &&
            left.reachable_content == right.reachable_content &&
-           left.candidates == right.candidates;
+           left.candidates == right.candidates &&
+           left.physical_namespace == right.physical_namespace;
 }
 
 const history_storage::maintenance_protocol::QuarantineEntry* find_quarantined(
@@ -386,12 +394,17 @@ std::expected<std::size_t, Error> restore_reachable_quarantine(
     history_storage::maintenance_protocol::RegistrationState& barrier,
     const std::vector<history_storage::maintenance_protocol::QuarantineEntry>&
         entries) {
+    if (entries.empty()) {
+        return 0;
+    }
     std::size_t restored = 0;
     auto listing = transport::list(storage);
     if (!listing) {
         return std::unexpected(transport_error(listing.error()));
     }
+    std::ranges::sort(*listing);
 
+    bool marker_restored = false;
     for (const auto& identifier : *listing) {
         const auto reference = history_storage::parse_marker_object(identifier);
         if (!reference) {
@@ -403,23 +416,27 @@ std::expected<std::size_t, Error> restore_reachable_quarantine(
         if (!quarantined) {
             continue;
         }
-        auto present = transport::presence(storage, original);
-        if (!present) {
-            return std::unexpected(transport_error(present.error(), original));
-        }
-        if (*present == transport::Presence::Absent) {
+        if (!std::ranges::binary_search(*listing, original)) {
             auto restored_object = restore_quarantined_object(
                 storage, *quarantined, workspace_root, barrier);
             if (!restored_object) {
                 return std::unexpected(restored_object.error());
             }
             ++restored;
+            marker_restored = true;
         }
+    }
+    if (marker_restored) {
+        listing = transport::list(storage);
+        if (!listing) {
+            return std::unexpected(transport_error(listing.error()));
+        }
+        std::ranges::sort(*listing);
     }
 
     for (std::size_t pass = 0; pass <= entries.size(); ++pass) {
         auto history = history_storage::inventory_reachability(
-            storage, key, workspace_root);
+            storage, key, *listing, workspace_root);
         if (!history) {
             return std::unexpected(history_storage_error(history.error()));
         }
@@ -447,13 +464,18 @@ std::expected<std::size_t, Error> restore_reachable_quarantine(
             changed = true;
         }
         if (changed) {
+            listing = transport::list(storage);
+            if (!listing) {
+                return std::unexpected(transport_error(listing.error()));
+            }
+            std::ranges::sort(*listing);
             continue;
         }
         if (auto valid = validate_history_inventory(*history); !valid) {
             return std::unexpected(valid.error());
         }
         auto content = history_storage::inventory_content_reachability(
-            storage, key, *history, workspace_root);
+            storage, key, *listing, *history, workspace_root, false);
         if (!content) {
             return std::unexpected(history_storage_error(content.error()));
         }
@@ -478,7 +500,7 @@ std::expected<std::size_t, Error> restore_reachable_quarantine(
     }
     return std::unexpected(
         make_error(ErrorCode::IntegrityFailure,
-                   "a restauração da quarentena não estabilizou"));
+                   "quarantine restoration did not stabilize"));
 }
 
 bool quarantine_is_reachable(
@@ -560,7 +582,7 @@ std::expected<std::size_t, Error> purge_expired_quarantine(
         if (!*verified) {
             return std::unexpected(
                 make_error(ErrorCode::IntegrityFailure,
-                           "objeto de quarentena não corresponde ao metadata",
+                           "quarantine object does not match metadata",
                            entry.quarantine_identifier));
         }
         auto owned =
@@ -577,7 +599,7 @@ std::expected<std::size_t, Error> purge_expired_quarantine(
         if (*metadata_removed != transport::Removal::Removed) {
             return std::unexpected(
                 make_error(ErrorCode::ConcurrentChange,
-                           "metadata de quarentena desapareceu durante a purga",
+                           "quarantine metadata disappeared during purge",
                            entry.metadata_identifier));
         }
         owned =
@@ -594,7 +616,7 @@ std::expected<std::size_t, Error> purge_expired_quarantine(
         if (*object_removed != transport::Removal::Removed) {
             return std::unexpected(
                 make_error(ErrorCode::ConcurrentChange,
-                           "objeto de quarentena desapareceu durante a purga",
+                           "quarantine object disappeared during purge",
                            entry.quarantine_identifier));
         }
         ++purged;
@@ -613,20 +635,18 @@ prepare_workspace_file(const std::filesystem::path& path) {
     if (error) {
         return std::unexpected(
             make_error(ErrorCode::WorkspaceFailure,
-                       "não foi possível consultar arquivo temporário: " +
-                           error.message()));
+                       "could not inspect temporary file: " + error.message()));
     }
     if (std::filesystem::is_symlink(status) ||
         !std::filesystem::is_regular_file(status)) {
-        return std::unexpected(
-            make_error(ErrorCode::WorkspaceFailure,
-                       "arquivo temporário possui tipo inválido"));
+        return std::unexpected(make_error(ErrorCode::WorkspaceFailure,
+                                          "temporary file has invalid type"));
     }
     std::filesystem::remove(path, error);
     if (error) {
-        return std::unexpected(make_error(
-            ErrorCode::WorkspaceFailure,
-            "não foi possível limpar arquivo temporário: " + error.message()));
+        return std::unexpected(
+            make_error(ErrorCode::WorkspaceFailure,
+                       "could not clean temporary file: " + error.message()));
     }
     return {};
 }
@@ -666,7 +686,7 @@ std::expected<void, Error> verify_content(const std::filesystem::path& path,
                                           std::uint64_t expected_size,
                                           ErrorCode io_failure) {
     auto regular = require_regular_file(
-        path, io_failure, "arquivo não é regular para verificação");
+        path, io_failure, "file is not regular for verification");
     if (!regular) {
         return regular;
     }
@@ -674,22 +694,19 @@ std::expected<void, Error> verify_content(const std::filesystem::path& path,
     const auto actual_size = std::filesystem::file_size(path, error);
     if (error) {
         return std::unexpected(make_error(
-            io_failure,
-            "não foi possível ler tamanho do arquivo: " + error.message()));
+            io_failure, "could not read file size: " + error.message()));
     }
     if (actual_size != expected_size) {
-        return std::unexpected(
-            make_error(ErrorCode::IntegrityFailure,
-                       "tamanho do objeto não corresponde ao histórico"));
+        return std::unexpected(make_error(
+            ErrorCode::IntegrityFailure, "object size does not match history"));
     }
     auto actual_hash = crypto::content::hash_file(path);
     if (!actual_hash) {
         return std::unexpected(make_error(io_failure, actual_hash.error()));
     }
     if (hash_hex(*actual_hash) != identifier) {
-        return std::unexpected(
-            make_error(ErrorCode::IntegrityFailure,
-                       "hash do objeto não corresponde ao histórico"));
+        return std::unexpected(make_error(
+            ErrorCode::IntegrityFailure, "object hash does not match history"));
     }
     return {};
 }
@@ -702,8 +719,8 @@ audit_object(transport::Transport& storage,
              std::size_t index) {
     const auto plaintext_hash = hash_from_hex(reference.identifier);
     if (!plaintext_hash) {
-        return std::unexpected(make_error(
-            ErrorCode::IntegrityFailure, "identificador de conteúdo inválido"));
+        return std::unexpected(make_error(ErrorCode::IntegrityFailure,
+                                          "invalid content identifier"));
     }
     const auto remote_identifier =
         crypto::content_identifier(key, *plaintext_hash);
@@ -734,7 +751,7 @@ audit_object(transport::Transport& storage,
     }
 
     auto regular = require_regular_file(
-        encrypted, ErrorCode::WorkspaceFailure, "download temporário inválido");
+        encrypted, ErrorCode::WorkspaceFailure, "invalid temporary download");
     if (!regular)
         return std::unexpected(regular.error());
 
@@ -808,7 +825,7 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                                       KeySpan key) {
     if (runtime_data.local_dir.empty() || !transport::valid(storage)) {
         return std::unexpected(
-            make_error(ErrorCode::InvalidInput, "contexto de fsck inválido"));
+            make_error(ErrorCode::InvalidInput, "invalid fsck context"));
     }
     const auto history_workspace = maintenance_workspace_root(runtime_data);
     auto storage_state = observation::collect_storage_state(
@@ -818,8 +835,8 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
             make_error(ErrorCode::StateFailure, storage_state.error()));
     }
     if (!storage_state->history_present) {
-        return std::unexpected(make_error(ErrorCode::IntegrityFailure,
-                                          "histórico remoto ausente"));
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure, "remote history absent"));
     }
     auto listing = transport::list(storage);
     if (!listing) {
@@ -837,7 +854,7 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
         std::ranges::sort(unknown_storage_identifiers);
         return std::unexpected(
             make_error(ErrorCode::IntegrityFailure,
-                       list_detail("identificadores físicos desconhecidos: ",
+                       list_detail("unknown physical identifiers: ",
                                    unknown_storage_identifiers)));
     }
     auto local_tree = observation::collect_local_tree(runtime_data.local_dir);
@@ -852,7 +869,7 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
     if (!inventory->unknown_identifiers.empty()) {
         return std::unexpected(
             make_error(ErrorCode::IntegrityFailure,
-                       list_detail("identificadores físicos desconhecidos: ",
+                       list_detail("unknown physical identifiers: ",
                                    inventory->unknown_identifiers)));
     }
 
@@ -907,7 +924,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
     if (runtime_data.local_dir.empty() || runtime_data.database_path.empty() ||
         !transport::valid(storage)) {
         return std::unexpected(
-            make_error(ErrorCode::InvalidInput, "contexto de GC inválido"));
+            make_error(ErrorCode::InvalidInput, "invalid GC context"));
     }
 
     try {
@@ -929,7 +946,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     if (!writers->empty()) {
                         return std::unexpected(make_error(
                             ErrorCode::ConcurrentChange,
-                            list_detail("writers ativos ou abandonados: ",
+                            list_detail("active or abandoned writers: ",
                                         *writers)));
                     }
                     auto owned = history_storage::maintenance_protocol::
@@ -990,15 +1007,26 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     return std::unexpected(confirmed.error());
                 }
                 if (!same_reachable_state(*first, *confirmed)) {
-                    return std::unexpected(
-                        make_error(ErrorCode::ConcurrentChange,
-                                   "alcance ou inventário mudou durante o GC"));
+                    return std::unexpected(make_error(
+                        ErrorCode::ConcurrentChange,
+                        "reachability or inventory changed during GC"));
                 }
 
                 GarbageCollectResult result{
                     .candidate_objects = confirmed->candidates.size(),
                     .restored_objects = *restored,
                 };
+                auto final_listing = transport::list(storage);
+                if (!final_listing) {
+                    return std::unexpected(
+                        transport_error(final_listing.error()));
+                }
+                std::ranges::sort(*final_listing);
+                if (*final_listing != confirmed->physical_namespace) {
+                    return std::unexpected(make_error(
+                        ErrorCode::ConcurrentChange,
+                        "remote storage changed prior to destructive phase"));
+                }
                 auto purged = purge_expired_quarantine(storage,
                                                        workspace_root,
                                                        *now,
@@ -1014,7 +1042,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                             identifier)) {
                         return std::unexpected(make_error(
                             ErrorCode::IntegrityFailure,
-                            "candidato Epoch bloqueado contra quarentena",
+                            "epoch candidate blocked from quarantine",
                             identifier));
                     }
                     auto owned = history_storage::maintenance_protocol::
@@ -1025,10 +1053,10 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     auto quarantine_identifier = history_storage::
                         maintenance_protocol::quarantine_identifier(identifier);
                     if (!quarantine_identifier) {
-                        return std::unexpected(make_error(
-                            ErrorCode::IntegrityFailure,
-                            "candidato não pode ser colocado em quarentena",
-                            identifier));
+                        return std::unexpected(
+                            make_error(ErrorCode::IntegrityFailure,
+                                       "candidate cannot be quarantined",
+                                       identifier));
                     }
                     auto copied =
                         history_storage::maintenance_protocol::copy_verified(

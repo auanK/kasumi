@@ -57,28 +57,32 @@ clear_read_only(const std::filesystem::path& root) {
     {
         std::filesystem::recursive_directory_iterator entries(root, error);
         if (error) {
-            return std::unexpected("não foi possível enumerar o espaço de trabalho '" +
-                                   platform::path::to_utf8(root) + "': " + error.message());
+            return std::unexpected(
+                "não foi possível enumerar o espaço de trabalho '" +
+                platform::path::to_utf8(root) + "': " + error.message());
         }
         const std::filesystem::recursive_directory_iterator end;
         while (entries != end) {
             const auto path = entries->path();
             const auto attributes = GetFileAttributesW(path.c_str());
             if (attributes == INVALID_FILE_ATTRIBUTES) {
-                return std::unexpected("não foi possível inspecionar o caminho do espaço de trabalho '" +
+                return std::unexpected("não foi possível inspecionar o caminho "
+                                       "do espaço de trabalho '" +
                                        platform::path::to_utf8(path) +
                                        "': " + windows_error(GetLastError()));
             }
             if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                return std::unexpected("caminho inválido do espaço de trabalho '" +
-                                       platform::path::to_utf8(path) +
-                                       "': ponto de nova análise (reparse point) não é permitido");
+                return std::unexpected(
+                    "caminho inválido do espaço de trabalho '" +
+                    platform::path::to_utf8(path) +
+                    "': ponto de nova análise (reparse point) não é permitido");
             }
             paths.push_back(path);
             entries.increment(error);
             if (error) {
-                return std::unexpected("não foi possível enumerar o espaço de trabalho '" +
-                                       platform::path::to_utf8(root) + "': " + error.message());
+                return std::unexpected(
+                    "não foi possível enumerar o espaço de trabalho '" +
+                    platform::path::to_utf8(root) + "': " + error.message());
             }
         }
     }
@@ -90,8 +94,10 @@ clear_read_only(const std::filesystem::path& root) {
             if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
                 continue;
             }
-            return std::unexpected("não foi possível inspecionar o caminho do espaço de trabalho '" +
-                                   platform::path::to_utf8(path) + "': " + windows_error(code));
+            return std::unexpected("não foi possível inspecionar o caminho do "
+                                   "espaço de trabalho '" +
+                                   platform::path::to_utf8(path) +
+                                   "': " + windows_error(code));
         }
         if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
             continue;
@@ -100,9 +106,10 @@ clear_read_only(const std::filesystem::path& root) {
             !SetFileAttributesW(
                 path.c_str(),
                 attributes & ~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY))) {
-            return std::unexpected("não foi possível limpar o atributo somente leitura em '" +
-                                   platform::path::to_utf8(path) +
-                                   "': " + windows_error(GetLastError()));
+            return std::unexpected(
+                "não foi possível limpar o atributo somente leitura em '" +
+                platform::path::to_utf8(path) +
+                "': " + windows_error(GetLastError()));
         }
     }
     return {};
@@ -160,8 +167,8 @@ std::filesystem::path workspace_file(const Workspace& workspace,
     if (!valid_extension(extension)) {
         return {};
     }
-    return workspace.root /
-           platform::path::from_utf8(std::to_string(index) + std::string{extension});
+    return workspace.root / platform::path::from_utf8(std::to_string(index) +
+                                                      std::string{extension});
 }
 
 std::filesystem::path workspace_file(const Workspace& workspace,
@@ -182,14 +189,14 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
         return {};
     }
     if (error) {
-        return std::unexpected("não foi possível inspecionar o espaço de trabalho '" +
-                               platform::path::to_utf8(workspace.root) +
-                               "': " + error.message());
+        return std::unexpected(
+            "não foi possível inspecionar o espaço de trabalho '" +
+            platform::path::to_utf8(workspace.root) + "': " + error.message());
     }
     if (std::filesystem::is_symlink(status) ||
         !std::filesystem::is_directory(status)) {
-        return std::unexpected("espaço de trabalho inválido '" + platform::path::to_utf8(workspace.root) +
-                               "'");
+        return std::unexpected("espaço de trabalho inválido '" +
+                               platform::path::to_utf8(workspace.root) + "'");
     }
     auto secured = private_storage::protect_tree(workspace.root);
     if (!secured) {
@@ -199,13 +206,14 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
 #ifdef _WIN32
     const auto attributes = GetFileAttributesW(workspace.root.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
-        return std::unexpected("não foi possível inspecionar o espaço de trabalho '" +
-                               platform::path::to_utf8(workspace.root) +
-                               "': " + windows_error(GetLastError()));
+        return std::unexpected(
+            "não foi possível inspecionar o espaço de trabalho '" +
+            platform::path::to_utf8(workspace.root) +
+            "': " + windows_error(GetLastError()));
     }
     if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return std::unexpected("espaço de trabalho inválido '" + platform::path::to_utf8(workspace.root) +
-                               "'");
+        return std::unexpected("espaço de trabalho inválido '" +
+                               platform::path::to_utf8(workspace.root) + "'");
     }
     auto writable = clear_read_only(workspace.root);
     if (!writable) {
@@ -228,9 +236,9 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
     std::filesystem::remove_all(workspace.root, error);
 #endif
     if (error) {
-        return std::unexpected("não foi possível remover o espaço de trabalho '" +
-                               platform::path::to_utf8(workspace.root) +
-                               "': " + error.message());
+        return std::unexpected(
+            "não foi possível remover o espaço de trabalho '" +
+            platform::path::to_utf8(workspace.root) + "': " + error.message());
     }
     return {};
 }
@@ -241,7 +249,8 @@ void cleanup_workspace(const Workspace& workspace) noexcept {
     perf_trace::finish("workspace cleanup", trace);
 }
 
-std::expected<void, std::string> validate_non_redirecting_directory(const std::filesystem::path& path) {
+std::expected<void, std::string>
+validate_non_redirecting_directory(const std::filesystem::path& path) {
     return private_storage::protect_directory(path);
 }
 

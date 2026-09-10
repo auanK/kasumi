@@ -1274,8 +1274,7 @@ TEST(HistoryStorageTest, CorruptedCiphertextAndMarkerAreNotAccepted) {
     auto marker_storage = make_local_storage();
     const auto marker_published = publish(marker_storage, commit);
     const auto marker =
-        kasumi::test::workspace_path(marker_storage.workspace,
-                                     "storage/") /
+        kasumi::test::workspace_path(marker_storage.workspace, "storage/") /
         std::filesystem::path{marker_path(marker_published.head)};
     kasumi::test::write_text(marker, "bad marker");
     loaded = kasumi::application::history_storage::load_history(

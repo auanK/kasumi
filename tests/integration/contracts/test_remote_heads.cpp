@@ -497,10 +497,11 @@ TEST(RemoteHeadsContractTest,
     const auto remote_bytes_after = kasumi::test::snapshot_tree(remote_root);
     EXPECT_TRUE(summary_output.find("Resumo remoto") != std::string::npos ||
                 summary_output.find("Remote summary") != std::string::npos);
-    EXPECT_TRUE(summary_output.find("Conteúdos ausentes: 0") != std::string::npos ||
-                summary_output.find("Missing contents: 0") != std::string::npos ||
-                summary_output.find("missing_content_count") != std::string::npos ||
-                summary_output.find(": 0") != std::string::npos);
+    EXPECT_TRUE(
+        summary_output.find("Conteúdos ausentes: 0") != std::string::npos ||
+        summary_output.find("Missing contents: 0") != std::string::npos ||
+        summary_output.find("missing_content_count") != std::string::npos ||
+        summary_output.find(": 0") != std::string::npos);
     EXPECT_TRUE(stat_output.find("Caminho: file.txt") != std::string::npos ||
                 stat_output.find("Path: file.txt") != std::string::npos);
     EXPECT_NE(commit_output.find("Commit: " + published.head.commit_id),
@@ -525,20 +526,26 @@ TEST(RemoteHeadsContractTest,
                 audit_output.find("Valid") != std::string::npos);
     EXPECT_NE(content_output.find("Content ID: " + content_id),
               std::string::npos);
-    EXPECT_TRUE(markers_output.find("Markers físicos remotos: 1") != std::string::npos ||
+    EXPECT_TRUE(markers_output.find("Markers físicos remotos: 1") !=
+                    std::string::npos ||
                 markers_output.find("Physical markers") != std::string::npos);
-    EXPECT_TRUE(objects_output.find("Namespace físico remoto") != std::string::npos ||
+    EXPECT_TRUE(objects_output.find("Namespace físico remoto") !=
+                    std::string::npos ||
                 objects_output.find("Physical objects") != std::string::npos);
-    EXPECT_TRUE(orphans_output.find("Objetos sem alcance: 0") != std::string::npos ||
-                orphans_output.find("Orphan contents") != std::string::npos ||
-                orphans_output.find("Unreachable objects: 0") != std::string::npos);
-    EXPECT_TRUE(quarantine_output.find("Quarentena remota: 0") != std::string::npos ||
-                quarantine_output.find("Quarantine state") != std::string::npos);
-    EXPECT_TRUE(writers_output.find("Writers remotos: 0") != std::string::npos ||
+    EXPECT_TRUE(
+        orphans_output.find("Objetos sem alcance: 0") != std::string::npos ||
+        orphans_output.find("Orphan contents") != std::string::npos ||
+        orphans_output.find("Unreachable objects: 0") != std::string::npos);
+    EXPECT_TRUE(
+        quarantine_output.find("Quarentena remota: 0") != std::string::npos ||
+        quarantine_output.find("Quarantine state") != std::string::npos);
+    EXPECT_TRUE(writers_output.find("Writers remotos: 0") !=
+                    std::string::npos ||
                 writers_output.find("Remote writers") != std::string::npos);
-    EXPECT_TRUE(health_output.find("Saúde remota: saudável") != std::string::npos ||
-                health_output.find("Remote health report") != std::string::npos ||
-                health_output.find("healthy") != std::string::npos);
+    EXPECT_TRUE(
+        health_output.find("Saúde remota: saudável") != std::string::npos ||
+        health_output.find("Remote health report") != std::string::npos ||
+        health_output.find("healthy") != std::string::npos);
     EXPECT_EQ(summary_output.find("[Rede]"), std::string::npos);
     EXPECT_EQ(stat_output.find("[Rede]"), std::string::npos);
     EXPECT_EQ(commit_output.find("[Rede]"), std::string::npos);

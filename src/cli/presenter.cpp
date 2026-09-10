@@ -1,8 +1,8 @@
 #include "cli/presenter.hpp"
 
-#include "platform/path.hpp"
 #include "cli/i18n.hpp"
 #include "cli/style.hpp"
+#include "platform/path.hpp"
 
 #include <algorithm>
 #include <format>
@@ -40,9 +40,12 @@ void render_plan_report(const application::PlanReport& report) {
     for (const auto& item : report.items) {
         auto idx = static_cast<std::size_t>(item.action);
         if (idx < std::size(ACTION_NAMES)) {
-            std::print("  - [{}] {}", ACTION_NAMES[idx], platform::path::to_utf8(item.path));
+            std::print("  - [{}] {}",
+                       ACTION_NAMES[idx],
+                       platform::path::to_utf8(item.path));
             if (item.action == application::PlanAction::RenameLocal) {
-                std::print(" -> {}", platform::path::to_utf8(item.alternative_path));
+                std::print(" -> {}",
+                           platform::path::to_utf8(item.alternative_path));
             }
             if (item.action == application::PlanAction::Upload ||
                 item.action == application::PlanAction::Download) {
@@ -157,8 +160,9 @@ std::string_view yes_no(bool value) {
 int present_remote_summary(const application::RemoteSummaryReport& report) {
     std::println("{}", i18n::tr(i18n::Key::RemoteSummaryHeader));
     std::println("  Histórico: {}",
-                 report.history_present ? i18n::tr(i18n::Key::RemoteSummaryHistoryPresent)
-                                        : i18n::tr(i18n::Key::RemoteSummaryHistoryAbsent));
+                 report.history_present
+                     ? i18n::tr(i18n::Key::RemoteSummaryHistoryPresent)
+                     : i18n::tr(i18n::Key::RemoteSummaryHistoryAbsent));
     i18n::println(i18n::Key::FieldHeight, report.observed_height);
     std::println("  Commits alcançáveis: {}", report.reachable_commit_count);
     std::println("  Heads lógicas: {}", report.logical_head_count);
@@ -182,7 +186,7 @@ int present_remote_stat(const application::RemoteStatReport& report) {
     i18n::println(i18n::Key::FieldLogicalHash, report.logical_hash);
     i18n::println(i18n::Key::FieldSize, report.size);
     i18n::println(i18n::Key::FieldModifiedAt,
-                 report.modified_at_unix_nanoseconds);
+                  report.modified_at_unix_nanoseconds);
     return 0;
 }
 
@@ -517,8 +521,11 @@ int present_remote_health(const application::RemoteHealthReport& report) {
 
 int present(const application::Response& response) {
     if (std::holds_alternative<application::SyncCompleted>(response.data)) {
-        std::println(
-            "{}{}{} {}", style::green, i18n::tr(i18n::Key::LabelOk), style::reset, i18n::tr(i18n::Key::SyncCompleted));
+        std::println("{}{}{} {}",
+                     style::green,
+                     i18n::tr(i18n::Key::LabelOk),
+                     style::reset,
+                     i18n::tr(i18n::Key::SyncCompleted));
         return 0;
     }
     if (const auto* ptr =
@@ -542,10 +549,9 @@ int present(const application::Response& response) {
             std::get_if<application::GarbageCollectCompleted>(&response.data)) {
         std::println("{}", i18n::tr(i18n::Key::ErrorGcRunning));
         if (ptr->analysis_only) {
-            std::println(
-                "{}",
-                i18n::format(i18n::Key::ErrorGcWarning,
-                            ptr->candidate_objects));
+            std::println("{}",
+                         i18n::format(i18n::Key::ErrorGcWarning,
+                                      ptr->candidate_objects));
             return 0;
         }
         std::println("{}{}{} {}",
@@ -553,10 +559,10 @@ int present(const application::Response& response) {
                      i18n::tr(i18n::Key::LabelOk),
                      style::reset,
                      i18n::format(i18n::Key::ErrorGcCompleted,
-                                 ptr->candidate_objects,
-                                 ptr->quarantined_objects,
-                                 ptr->restored_objects,
-                                 ptr->purged_objects));
+                                  ptr->candidate_objects,
+                                  ptr->quarantined_objects,
+                                  ptr->restored_objects,
+                                  ptr->purged_objects));
         return 0;
     }
     return 0;
@@ -684,38 +690,45 @@ int present(const application::Error& error) {
         case application::ErrorCode::RuntimeFailure:
         case application::ErrorCode::CredentialsRequired:
         case application::ErrorCode::CredentialFailure:
-            std::println(
-                "{}{}{} {}", style::red, i18n::tr(i18n::Key::LabelError), style::reset, error.detail);
-            break;
-        case application::ErrorCode::PlanFailure:
             std::println("{}{}{} {}",
                          style::red,
                          i18n::tr(i18n::Key::LabelError),
                          style::reset,
-                         i18n::format(i18n::Key::ErrorPlanCalculation, error.detail));
+                         error.detail);
+            break;
+        case application::ErrorCode::PlanFailure:
+            std::println(
+                "{}{}{} {}",
+                style::red,
+                i18n::tr(i18n::Key::LabelError),
+                style::reset,
+                i18n::format(i18n::Key::ErrorPlanCalculation, error.detail));
             break;
         case application::ErrorCode::FsckFailure:
             std::println("{}", i18n::tr(i18n::Key::ErrorFsckAuditing));
-            std::println("{}{}{} {}",
-                         style::red,
-                         i18n::tr(i18n::Key::LabelError),
-                         style::reset,
-                         i18n::format(i18n::Key::ErrorFsckFailed, error.detail));
+            std::println(
+                "{}{}{} {}",
+                style::red,
+                i18n::tr(i18n::Key::LabelError),
+                style::reset,
+                i18n::format(i18n::Key::ErrorFsckFailed, error.detail));
             break;
         case application::ErrorCode::GarbageCollectionFailure:
             std::println("{}", i18n::tr(i18n::Key::ErrorGcRunning));
-            std::println("{}{}{} {}",
-                         style::red,
-                         i18n::tr(i18n::Key::LabelError),
-                         style::reset,
-                         i18n::format(i18n::Key::ErrorGcCancelled, error.detail));
+            std::println(
+                "{}{}{} {}",
+                style::red,
+                i18n::tr(i18n::Key::LabelError),
+                style::reset,
+                i18n::format(i18n::Key::ErrorGcCancelled, error.detail));
             break;
         case application::ErrorCode::SynchronizationFailure:
-            std::println("{}{}{} {}",
-                         style::red,
-                         i18n::tr(i18n::Key::LabelError),
-                         style::reset,
-                         i18n::format(i18n::Key::ErrorSyncFailed, error.detail));
+            std::println(
+                "{}{}{} {}",
+                style::red,
+                i18n::tr(i18n::Key::LabelError),
+                style::reset,
+                i18n::format(i18n::Key::ErrorSyncFailed, error.detail));
             break;
     }
     return 1;
@@ -723,7 +736,11 @@ int present(const application::Error& error) {
 
 int present(const application::InspectionError& error) {
     if (error.code == application::InspectionErrorCode::HeadSelectionRequired) {
-        std::println("{}{}{} {}", style::red, i18n::tr(i18n::Key::LabelError), style::reset, error.detail);
+        std::println("{}{}{} {}",
+                     style::red,
+                     i18n::tr(i18n::Key::LabelError),
+                     style::reset,
+                     error.detail);
         std::println("{}", i18n::tr(i18n::Key::ErrorAvailableHeads));
         for (const auto& id : error.candidate_ids) {
             std::println("  {}", id);
@@ -732,7 +749,11 @@ int present(const application::InspectionError& error) {
         return 1;
     }
 
-    std::println("{}{}{} {}", style::red, i18n::tr(i18n::Key::LabelError), style::reset, error.detail);
+    std::println("{}{}{} {}",
+                 style::red,
+                 i18n::tr(i18n::Key::LabelError),
+                 style::reset,
+                 error.detail);
     if (error.code == application::InspectionErrorCode::RemoteHeadNotFound &&
         !error.candidate_ids.empty()) {
         std::println("{}", i18n::tr(i18n::Key::ErrorAvailableHeads));

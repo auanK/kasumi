@@ -1,6 +1,7 @@
 #include "platform/metadata.hpp"
 
 #include "platform/path.hpp"
+
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -158,7 +159,8 @@ equivalent_file_time(std::filesystem::file_time_type requested,
 std::expected<bool, std::string>
 equivalent_file_time(std::filesystem::file_time_type requested,
                      std::filesystem::file_time_type actual) {
-    // The API writes and reads the same representation, allowing exact comparison.
+    // The API writes and reads the same representation, allowing exact
+    // comparison.
     return requested == actual;
 }
 #endif
@@ -212,7 +214,8 @@ set_last_write_time(const std::filesystem::path& path,
 #endif
     if (!equivalent) {
         return std::unexpected("não foi possível verificar o timestamp para " +
-                               platform::path::to_utf8(path) + ": " + equivalent.error());
+                               platform::path::to_utf8(path) + ": " +
+                               equivalent.error());
     }
     if (!*equivalent) {
         return std::unexpected("falha na verificação do timestamp para " +

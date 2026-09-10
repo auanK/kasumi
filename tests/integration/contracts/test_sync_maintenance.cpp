@@ -527,9 +527,9 @@ TEST(ApplicationMaintenanceContract,
     EXPECT_EQ(required.error().code,
               kasumi::application::ErrorCode::SynchronizationFailure);
 
-    kasumi::test::write_text(
-        kasumi::test::workspace_path(workspace, "remote") / identifier,
-        "invalid");
+    kasumi::test::write_text(kasumi::test::workspace_path(workspace, "remote") /
+                                 identifier,
+                             "invalid");
     const auto corruption =
         kasumi::application::execute(request(Operation::Fsck, environment));
     ASSERT_FALSE(corruption.has_value());

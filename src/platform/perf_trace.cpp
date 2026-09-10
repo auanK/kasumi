@@ -91,7 +91,12 @@ std::uint64_t get_time(std::string_view name) noexcept {
     try {
         std::lock_guard lock(metrics_mutex);
         const auto it = metrics.find(std::string{name});
-        return it != metrics.end() ? static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(it->second.elapsed).count()) : 0;
+        return it != metrics.end()
+                   ? static_cast<std::uint64_t>(
+                         std::chrono::duration_cast<std::chrono::microseconds>(
+                             it->second.elapsed)
+                             .count())
+                   : 0;
     } catch (...) {
         return 0;
     }

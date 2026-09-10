@@ -95,6 +95,21 @@ std::string remote_fs(const State& state) {
 }
 
 std::string join_remote_path(std::string_view root, std::string_view suffix) {
+    while (root.ends_with('/')) {
+        root.remove_suffix(1);
+    }
+    while (suffix.starts_with('/')) {
+        suffix.remove_prefix(1);
+    }
+    while (suffix.ends_with('/')) {
+        suffix.remove_suffix(1);
+    }
+    if (root.empty()) {
+        return std::string{suffix};
+    }
+    if (suffix.empty()) {
+        return std::string{root};
+    }
     return std::string{root} + "/" + std::string{suffix};
 }
 
@@ -258,7 +273,16 @@ stat_remote(State& state, std::string_view remote, bool files_only = true) {
 }
 
 bool not_found(const Error& error) noexcept {
-    return error.code == ErrorCode::ProtocolFailure && error.native_code == 404;
+    if (error.code == ErrorCode::ProtocolFailure) {
+        if (error.native_code == 404) {
+            return true;
+        }
+        if (error.message.find("directory not found") != std::string::npos ||
+            error.message.find("not found") != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
 }
 
 PresenceResult rclone_presence(void* context, std::string_view identifier);
@@ -762,8 +786,7 @@ rclone_physical_hash_batch(void* context,
     const auto manifest = *root / ".kasumi-batch-verify.sha256";
     const auto manifest_status =
         std::filesystem::symlink_status(manifest, status_error);
-    if (status_error &&
-        status_error != std::errc::no_such_file_or_directory) {
+    if (status_error && status_error != std::errc::no_such_file_or_directory) {
         return std::unexpected(filesystem_error(status_error));
     }
     if (!status_error && std::filesystem::exists(manifest_status)) {
@@ -874,8 +897,8 @@ rclone_control_read_batch(void* context,
     const auto response = request_read_json(
         *state,
         "job/batch",
-        // Admission depends on the ordering LIST writers -> STAT barrier; rclone
-        // executes inputs sequentially when concurrency <= 1.
+        // Admission depends on the ordering LIST writers -> STAT barrier;
+        // rclone executes inputs sequentially when concurrency <= 1.
         nlohmann::json{{"inputs", std::move(inputs)}, {"concurrency", 1}},
         maximum_list_response_size,
         control_read_deadline);

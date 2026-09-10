@@ -24,7 +24,8 @@ namespace kasumi::application::sync::coordinator::detail {
 
 // Sizing and TTL limits for chunked sub-batch uploads
 inline constexpr std::size_t upload_batch_max_items = 256;
-inline constexpr std::uint64_t upload_batch_max_bytes = 256 * 1024 * 1024; // 256 MiB
+inline constexpr std::uint64_t upload_batch_max_bytes =
+    256 * 1024 * 1024; // 256 MiB
 inline constexpr auto transaction_resumption_ttl = std::chrono::hours(24);
 
 // Creates a coordinator failure with optional operation context.
@@ -89,8 +90,8 @@ prepare_pruning_epoch(transaction::Record& record,
                       const std::string& previous_epoch_id,
                       std::span<const std::uint8_t, crypto::KEY_SIZE> key);
 
-// Constructs the final transaction state after the batch is applied, without modifying
-// the original.
+// Constructs the final transaction state after the batch is applied, without
+// modifying the original.
 transaction::Record
 make_upload_batch_checkpoint(const transaction::Record& original,
                              const mutation::StagedUploadBatch& batch);

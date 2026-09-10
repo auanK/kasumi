@@ -75,9 +75,10 @@ std::optional<HeadReference> parse_marker_object(std::string_view identifier) {
         return std::nullopt;
     }
 
-    const auto body = identifier.substr(
-        detail::heads_prefix.size(),
-        identifier.size() - detail::heads_prefix.size() - detail::head_suffix.size());
+    const auto body =
+        identifier.substr(detail::heads_prefix.size(),
+                          identifier.size() - detail::heads_prefix.size() -
+                              detail::head_suffix.size());
     if (body.size() != 129 || body[64] != '-') {
         return std::nullopt;
     }

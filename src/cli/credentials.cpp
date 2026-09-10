@@ -264,10 +264,11 @@ application::PasswordPair read_password_pair(const SecretPrompt& prompt) {
         return std::string{};
     };
 
-    auto password = confirmed("KASUMI_PASSWORD",
-                              std::string{i18n::tr(i18n::Key::PromptPassword)},
-                              std::string{i18n::tr(i18n::Key::PromptConfirmPassword)},
-                              std::string{i18n::tr(i18n::Key::PasswordsDoNotMatch)});
+    auto password =
+        confirmed("KASUMI_PASSWORD",
+                  std::string{i18n::tr(i18n::Key::PromptPassword)},
+                  std::string{i18n::tr(i18n::Key::PromptConfirmPassword)},
+                  std::string{i18n::tr(i18n::Key::PasswordsDoNotMatch)});
     if (platform::cancellation::requested()) {
         return application::PasswordPair{};
     }

@@ -13,7 +13,8 @@ using namespace kasumi::application;
 class CliPresenterTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::Portuguese);
+        kasumi::cli::i18n::set_language(
+            kasumi::cli::i18n::Language::Portuguese);
     }
     void TearDown() override {
         kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
@@ -544,14 +545,17 @@ TEST_F(CliPresenterTest, PresentsOutputsInEnglishWhenConfigured) {
     EXPECT_NE(empty_output.find("Nothing to do"), std::string::npos);
 
     testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(SyncCompleted{}, Operation::Sync)), 0);
+    EXPECT_EQ(kasumi::cli::present(response(SyncCompleted{}, Operation::Sync)),
+              0);
     const auto sync_output = testing::internal::GetCapturedStdout();
-    EXPECT_NE(sync_output.find("Synchronization completed."), std::string::npos);
+    EXPECT_NE(sync_output.find("Synchronization completed."),
+              std::string::npos);
 
     testing::internal::CaptureStdout();
     EXPECT_EQ(kasumi::cli::present(InspectionResponse{}), 0);
     const auto heads_empty = testing::internal::GetCapturedStdout();
-    EXPECT_NE(heads_empty.find("No remote heads published."), std::string::npos);
+    EXPECT_NE(heads_empty.find("No remote heads published."),
+              std::string::npos);
 }
 
 } // namespace

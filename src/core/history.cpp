@@ -360,8 +360,9 @@ std::expected<void, Error> validate_dag(const Index& index) {
         while (!stack.empty()) {
             auto& frame = stack.back();
             if (frame.depth > maximum_graph_depth) {
-                return std::unexpected(Error{ErrorCode::LimitExceeded,
-                                             "profundidade máxima do grafo excedida"});
+                return std::unexpected(
+                    Error{ErrorCode::LimitExceeded,
+                          "profundidade máxima do grafo excedida"});
             }
             colors.at(frame.id) = Color::Gray;
             const auto& parents = index.at(frame.id)->commit.parents;
@@ -374,8 +375,9 @@ std::expected<void, Error> validate_dag(const Index& index) {
             const auto& parent = parents[frame.next_parent++];
             if (index.at(parent)->commit.created_at >
                 index.at(frame.id)->commit.created_at) {
-                return std::unexpected(Error{ErrorCode::InvalidCommit,
-                                             "regressão de timestamp detectada"});
+                return std::unexpected(
+                    Error{ErrorCode::InvalidCommit,
+                          "regressão de timestamp detectada"});
             }
             switch (colors.at(parent)) {
                 case Color::Gray:
@@ -471,8 +473,8 @@ std::expected<std::string, Error>
 select_conflict_path(std::string_view path,
                      std::string_view source_head_id,
                      std::map<std::string, bool>& reserved) {
-    const std::string suffix_base = ".kasumiconflict_" +
-                             std::string(source_head_id.substr(0, 12));
+    const std::string suffix_base =
+        ".kasumiconflict_" + std::string(source_head_id.substr(0, 12));
     for (std::size_t suffix = 0;; ++suffix) {
         std::string suffix_str = suffix_base;
         if (suffix != 0) {
@@ -769,12 +771,12 @@ BytesResult serialize(const Commit& commit) {
         try {
             tree_bytes = serialize_tree(commit.tree, commit.height);
         } catch (const std::exception& e) {
-            return std::unexpected(
-                Error{ErrorCode::InvalidEncoding,
-                      std::string("falha na serialização da árvore: ") + e.what()});
+            return std::unexpected(Error{
+                ErrorCode::InvalidEncoding,
+                std::string("falha na serialização da árvore: ") + e.what()});
         } catch (...) {
-            return std::unexpected(
-                Error{ErrorCode::InvalidEncoding, "falha na serialização da árvore"});
+            return std::unexpected(Error{ErrorCode::InvalidEncoding,
+                                         "falha na serialização da árvore"});
         }
         if (tree_bytes.size() > maximum_commit_plaintext_size) {
             return std::unexpected(Error{ErrorCode::LimitExceeded,
@@ -990,8 +992,8 @@ resolve_impl(std::span<const LoadedCommit> commits,
                            unique_heads.end());
         for (const auto& head : unique_heads) {
             if (!valid_commit_id(head))
-                return std::unexpected(
-                    Error{ErrorCode::InvalidHead, "identificador de head inválido"});
+                return std::unexpected(Error{ErrorCode::InvalidHead,
+                                             "identificador de head inválido"});
         }
 
         std::unordered_set<std::string> trusted_anchors;
@@ -1043,8 +1045,8 @@ resolve_impl(std::span<const LoadedCommit> commits,
 
         for (const auto& [id, loaded] : index) {
             if (loaded->commit.parents.size() > maximum_parent_count) {
-                return std::unexpected(Error{ErrorCode::LimitExceeded,
-                                             "muitos pais no commit"});
+                return std::unexpected(
+                    Error{ErrorCode::LimitExceeded, "muitos pais no commit"});
             }
             if (loaded->commit.parents.empty())
                 continue;
@@ -1100,7 +1102,8 @@ resolve_impl(std::span<const LoadedCommit> commits,
         if (logical_heads.size() > maximum_parent_count)
             return std::unexpected(
                 Error{ErrorCode::LimitExceeded,
-                      "muitas heads lógicas para um único commit de merge (limite de pais excedido)"});
+                      "muitas heads lógicas para um único commit de merge "
+                      "(limite de pais excedido)"});
 
         if (logical_heads.size() == 1) {
             const auto& head = logical_heads.front();
@@ -1123,8 +1126,8 @@ resolve_impl(std::span<const LoadedCommit> commits,
             }
         }
         if (common_ancestors.empty())
-            return std::unexpected(
-                Error{ErrorCode::NoCommonAncestor, "nenhum ancestral comum encontrado"});
+            return std::unexpected(Error{ErrorCode::NoCommonAncestor,
+                                         "nenhum ancestral comum encontrado"});
 
         std::uint64_t max_height = 0;
         for (const auto& ancestor : common_ancestors) {
@@ -1137,8 +1140,9 @@ resolve_impl(std::span<const LoadedCommit> commits,
                 merge_bases.push_back(ancestor);
         }
         if (merge_bases.size() > 1)
-            return std::unexpected(Error{ErrorCode::AmbiguousMergeBase,
-                                         "base de merge ambígua (criss-cross / ambiguous merge base)"});
+            return std::unexpected(Error{
+                ErrorCode::AmbiguousMergeBase,
+                "base de merge ambígua (criss-cross / ambiguous merge base)"});
 
         const auto& base = index.at(merge_bases.front())->commit.tree;
         std::vector<HeadChanges> changes;
@@ -1168,8 +1172,8 @@ resolve_impl(std::span<const LoadedCommit> commits,
         return std::unexpected(
             Error{ErrorCode::LimitExceeded, "falha de alocação de memória"});
     } catch (...) {
-        return std::unexpected(
-            Error{ErrorCode::InvalidCommit, "exceção durante resolução de histórico"});
+        return std::unexpected(Error{ErrorCode::InvalidCommit,
+                                     "exceção durante resolução de histórico"});
     }
 }
 

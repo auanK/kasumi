@@ -104,9 +104,9 @@ load_profiles(const std::filesystem::path& config_path) {
     try {
         std::ifstream input(config_path, std::ios::binary);
         if (!input) {
-            return std::unexpected(Error{
-                .code = ErrorCode::IoFailure,
-                .detail = "falha ao abrir a configuração global"});
+            return std::unexpected(
+                Error{.code = ErrorCode::IoFailure,
+                      .detail = "falha ao abrir a configuração global"});
         }
         config = toml::parse(input, platform::path::to_utf8(config_path));
     } catch (const toml::parse_error& error) {

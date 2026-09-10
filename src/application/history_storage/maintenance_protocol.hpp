@@ -61,7 +61,8 @@ establish_barrier(transport::Transport& storage,
 std::expected<std::vector<std::string>, Error>
 active_writers(transport::Transport& storage);
 
-// Confirms immediate read-after-write and read-after-delete visibility in listings.
+// Confirms immediate read-after-write and read-after-delete visibility in
+// listings.
 std::expected<bool, Error>
 supports_online_collection(transport::Transport& storage,
                            const std::filesystem::path& workspace_root);

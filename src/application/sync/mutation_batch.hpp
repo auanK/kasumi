@@ -47,7 +47,8 @@ MutationResult transfer_upload_batch(const StagedUploadBatch& batch,
                                      std::size_t max_parallel_transfers);
 
 // Verifies remote integrity of batch objects concurrently, bounding
-// in-flight requests by parallelism. Fails deterministically on the lowest-index error.
+// in-flight requests by parallelism. Fails deterministically on the
+// lowest-index error.
 MutationResult
 verify_upload_batch(const StagedUploadBatch& batch,
                     transport::Transport& storage,

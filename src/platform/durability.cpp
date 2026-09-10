@@ -1,6 +1,7 @@
 #include "platform/durability.hpp"
 
 #include "platform/path.hpp"
+
 #include <cerrno>
 #include <cstring>
 #include <system_error>
@@ -34,8 +35,8 @@ validate_parent(const std::filesystem::path& path, std::string_view operation) {
     const auto parent = path.parent_path();
     if (parent.empty()) {
         return std::unexpected(std::string{operation} +
-                               ": diretório pai vazio para '" + platform::path::to_utf8(path) +
-                               "'");
+                               ": diretório pai vazio para '" +
+                               platform::path::to_utf8(path) + "'");
     }
 
     std::error_code error;
@@ -60,9 +61,9 @@ validate_regular_file(const std::filesystem::path& path,
     std::error_code error;
     const auto status = std::filesystem::symlink_status(path, error);
     if (error) {
-        return std::unexpected(std::string{operation} +
-                               ": não foi possível consultar '" +
-                               platform::path::to_utf8(path) + "': " + error.message());
+        return std::unexpected(
+            std::string{operation} + ": não foi possível consultar '" +
+            platform::path::to_utf8(path) + "': " + error.message());
     }
     if (std::filesystem::is_symlink(status) ||
         !std::filesystem::is_regular_file(status)) {

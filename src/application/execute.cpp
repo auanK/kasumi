@@ -73,8 +73,7 @@ std::expected<Response, Error> execute(ExecutionInput input) {
     const auto finalization_trace = platform::perf_trace::begin();
     detail::wipe_operation(context);
     wipe_credentials(input.credentials);
-    platform::perf_trace::finish("operation finalization",
-                                 finalization_trace);
+    platform::perf_trace::finish("operation finalization", finalization_trace);
     platform::perf_trace::finish("total sync", total_trace);
     platform::perf_trace::report(result ? "success" : "error");
     return result;

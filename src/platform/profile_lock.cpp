@@ -40,14 +40,14 @@ acquire_profile_lock(const std::filesystem::path& lock_path) {
     }
 
 #ifdef _WIN32
-    const auto handle = CreateFileW(lock_path.c_str(),
-                                    GENERIC_READ,
-                                    0,
-                                    nullptr,
-                                    OPEN_ALWAYS,
-                                    FILE_ATTRIBUTE_NORMAL |
-                                        FILE_FLAG_OPEN_REPARSE_POINT,
-                                    nullptr);
+    const auto handle =
+        CreateFileW(lock_path.c_str(),
+                    GENERIC_READ,
+                    0,
+                    nullptr,
+                    OPEN_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                    nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         const auto code = GetLastError();
         if (code == ERROR_SHARING_VIOLATION || code == ERROR_LOCK_VIOLATION) {
@@ -59,10 +59,8 @@ acquire_profile_lock(const std::filesystem::path& lock_path) {
                 .message());
     }
     FILE_ATTRIBUTE_TAG_INFO attributes{};
-    if (!GetFileInformationByHandleEx(handle,
-                                      FileAttributeTagInfo,
-                                      &attributes,
-                                      sizeof(attributes)) ||
+    if (!GetFileInformationByHandleEx(
+            handle, FileAttributeTagInfo, &attributes, sizeof(attributes)) ||
         (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
         const auto code = GetLastError();
         CloseHandle(handle);

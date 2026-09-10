@@ -80,8 +80,8 @@ find_cached_row(const LocalObservationSession& session,
                                                                : nullptr;
 }
 
-std::optional<reconciliation::EpochRetentionPolicy>
-epoch_policy(const std::optional<history_storage::epoch::VerifiedEpoch>& epoch) {
+std::optional<reconciliation::EpochRetentionPolicy> epoch_policy(
+    const std::optional<history_storage::epoch::VerifiedEpoch>& epoch) {
     if (!epoch) {
         return std::nullopt;
     }
@@ -90,8 +90,8 @@ epoch_policy(const std::optional<history_storage::epoch::VerifiedEpoch>& epoch) 
         .min_history_age_hours = epoch->value.policy.min_history_age_hours};
 }
 
-std::vector<reconciliation::EpochAnchor>
-epoch_anchors(const std::optional<history_storage::epoch::VerifiedEpoch>& epoch) {
+std::vector<reconciliation::EpochAnchor> epoch_anchors(
+    const std::optional<history_storage::epoch::VerifiedEpoch>& epoch) {
     std::vector<reconciliation::EpochAnchor> result;
     if (!epoch) {
         return result;
@@ -388,14 +388,12 @@ collect_storage_state(transport::Transport& storage,
         .logical_heads = std::move(observed->logical_heads),
         .ancestral_marked_heads = std::move(observed->ancestral_marked_heads),
         .epoch_vault_id = observed->epoch
-                        ? std::move(observed->epoch->value.vault_id)
-                        : std::string{},
+                              ? std::move(observed->epoch->value.vault_id)
+                              : std::string{},
         .epoch_id = observed->epoch
                         ? std::move(observed->epoch->reference.epoch_id)
                         : std::string{},
-        .epoch_sequence = observed->epoch
-                              ? observed->epoch->value.sequence
-                              : 0,
+        .epoch_sequence = observed->epoch ? observed->epoch->value.sequence : 0,
         .epoch_policy = epoch_policy(observed->epoch),
         .epoch_anchors = epoch_anchors(observed->epoch),
         .generation = observed->observed_height,
@@ -486,12 +484,11 @@ collect_reconciliation_input(
     std::vector<std::string> derived_trusted_markers;
     if (input.base_state_present) {
         known_frontier.emplace();
-        known_frontier->anchors.push_back(
-            history_storage::KnownHistoryAnchor{
-                .commit_id = input.base_commit_id,
-                .height = input.local_generation,
-                .tree = input.base_tree,
-            });
+        known_frontier->anchors.push_back(history_storage::KnownHistoryAnchor{
+            .commit_id = input.base_commit_id,
+            .height = input.local_generation,
+            .tree = input.base_tree,
+        });
         if (!(*persisted)->epoch_id.empty()) {
             known_frontier->accepted_epoch = history_storage::epoch::Reference{
                 .sequence = (*persisted)->epoch_sequence,
@@ -513,10 +510,10 @@ collect_reconciliation_input(
     const auto remote_history_trace = platform::perf_trace::begin();
     std::span<const std::string> effective_trusted_markers{};
     if (!audit_storage_objects) {
-        effective_trusted_markers = derived_trusted_markers.empty()
-                                         ? trusted_marker_identifiers
-                                         : std::span<const std::string>{
-                                               derived_trusted_markers};
+        effective_trusted_markers =
+            derived_trusted_markers.empty()
+                ? trusted_marker_identifiers
+                : std::span<const std::string>{derived_trusted_markers};
     }
     auto observed = history::observe(storage,
                                      key,
@@ -548,15 +545,11 @@ collect_reconciliation_input(
         .marked_head_identifiers = std::move(observed->marked_head_identifiers),
         .logical_heads = std::move(observed->logical_heads),
         .ancestral_marked_heads = std::move(observed->ancestral_marked_heads),
-        .epoch_vault_id = observed->epoch
-                        ? observed->epoch->value.vault_id
-                        : std::string{},
-        .epoch_id = observed->epoch
-                        ? observed->epoch->reference.epoch_id
-                        : std::string{},
-        .epoch_sequence = observed->epoch
-                              ? observed->epoch->value.sequence
-                              : 0,
+        .epoch_vault_id =
+            observed->epoch ? observed->epoch->value.vault_id : std::string{},
+        .epoch_id = observed->epoch ? observed->epoch->reference.epoch_id
+                                    : std::string{},
+        .epoch_sequence = observed->epoch ? observed->epoch->value.sequence : 0,
         .epoch_policy = epoch_policy(observed->epoch),
         .epoch_anchors = epoch_anchors(observed->epoch),
         .generation = observed->observed_height,
@@ -575,10 +568,9 @@ collect_reconciliation_input(
                               &kasumi::history::LoadedCommit::id);
         if (found == input.storage.reachable_commits.end()) {
             const bool epoch_advanced =
-                observed->epoch &&
-                ((*persisted)->epoch_id.empty() ||
-                 observed->epoch->value.sequence >
-                     (*persisted)->epoch_sequence);
+                observed->epoch && ((*persisted)->epoch_id.empty() ||
+                                    observed->epoch->value.sequence >
+                                        (*persisted)->epoch_sequence);
             if (!epoch_advanced) {
                 return std::unexpected(state_error(
                     reconciliation::ErrorCode::StorageHistoryRegression,

@@ -394,8 +394,10 @@ scan_result(const std::filesystem::path& local_root,
         return ScanResult{};
 
     if (!directory) {
-        auto row = process_file(
-            local_root, platform::path::to_logical_utf8(local_root.filename()), context);
+        auto row =
+            process_file(local_root,
+                         platform::path::to_logical_utf8(local_root.filename()),
+                         context);
         if (!row)
             return std::unexpected(row.error());
         ScanResult result{.snapshot = Snapshot{{std::move(*row)}},
@@ -450,9 +452,8 @@ scan_result(const std::filesystem::path& local_root,
             continue;
         const auto entry_name =
             platform::path::to_logical_utf8(entry.path().filename());
-        const auto relative = frame.path.empty()
-                                  ? entry_name
-                                  : frame.path + '/' + entry_name;
+        const auto relative =
+            frame.path.empty() ? entry_name : frame.path + '/' + entry_name;
         if (is_ignored(relative, ignore_list, entry_directory))
             continue;
         if (!valid_logical_path_component(entry_name)) {
@@ -492,7 +493,8 @@ scan_result(const std::filesystem::path& local_root,
             .code = ScanErrorCode::Metadata,
             .path = local_root,
             .operation = "validar snapshot",
-            .detail = "logical snapshot contains case collision or invalid structure",
+            .detail =
+                "logical snapshot contains case collision or invalid structure",
         });
     }
     std::ranges::sort(
@@ -519,10 +521,11 @@ observe_file(const std::filesystem::path& local_root,
              FingerprintQuery fingerprint_query) {
     if (relative_path.empty() || relative_path.front() == '/' ||
         relative_path.back() == '/') {
-        return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                         platform::path::from_utf8(relative_path),
-                                         "observar arquivo direcionado",
-                                         "caminho relativo inválido"});
+        return std::unexpected(
+            ScanError{ScanErrorCode::Metadata,
+                      platform::path::from_utf8(relative_path),
+                      "observar arquivo direcionado",
+                      "caminho relativo inválido"});
     }
 
     std::size_t comp_start = 0;
@@ -533,12 +536,12 @@ observe_file(const std::filesystem::path& local_root,
                 ? relative_path.substr(comp_start)
                 : relative_path.substr(comp_start, slash - comp_start);
         if (!valid_logical_path_component(component)) {
-            return std::unexpected(ScanError{
-                ScanErrorCode::Metadata,
-                platform::path::from_utf8(relative_path),
-                "observar arquivo direcionado",
-                "unsupported non-portable path component: '" +
-                    std::string(component) + "'"});
+            return std::unexpected(
+                ScanError{ScanErrorCode::Metadata,
+                          platform::path::from_utf8(relative_path),
+                          "observar arquivo direcionado",
+                          "unsupported non-portable path component: '" +
+                              std::string(component) + "'"});
         }
         if (slash == std::string_view::npos) {
             break;

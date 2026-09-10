@@ -1,12 +1,12 @@
 #include "application/observation/scanner.hpp"
 #include "application/observation/state.hpp"
 #include "application/sync/coordinator.hpp"
+#include "application/sync/coordinator_detail.hpp"
 #include "application/sync/journal.hpp"
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_batch.hpp"
-#include "application/sync/coordinator_detail.hpp"
-#include "core/history.hpp"
 #include "core/hasher.hpp"
+#include "core/history.hpp"
 #include "core/reconciliation/plan.hpp"
 #include "core/transaction/types.hpp"
 #include "crypto/file_crypto.hpp"
@@ -255,9 +255,8 @@ kasumi::transport::Result recording_put(void* context,
     return result;
 }
 
-kasumi::transport::Result recording_put_batch(
-    void* context,
-    const kasumi::transport::PutBatch& batch) {
+kasumi::transport::Result
+recording_put_batch(void* context, const kasumi::transport::PutBatch& batch) {
     auto* state = recording_state(context);
     auto* probe = state->probe;
     record_event(*state,
@@ -268,37 +267,34 @@ kasumi::transport::Result recording_put_batch(
         probe->content_put_batch_objects += batch.identifiers.size();
     }
 
-    const auto limit = probe == nullptr
-                           ? std::optional<std::size_t>{}
-                           : probe->fail_put_batch_after_objects;
+    const auto limit = probe == nullptr ? std::optional<std::size_t>{}
+                                        : probe->fail_put_batch_after_objects;
     const auto count = limit.has_value()
                            ? std::min(*limit, batch.identifiers.size())
                            : batch.identifiers.size();
     for (std::size_t index = 0; index < count; ++index) {
-        auto uploaded = kasumi::transport::put(
-            *state->base,
-            batch.source_root / batch.identifiers[index],
-            batch.identifiers[index]);
+        auto uploaded =
+            kasumi::transport::put(*state->base,
+                                   batch.source_root / batch.identifiers[index],
+                                   batch.identifiers[index]);
         if (!uploaded) {
             return uploaded;
         }
     }
     if (limit.has_value() && count < batch.identifiers.size()) {
         std::lock_guard lock(probe->mutex);
-        probe->bulk_missing.insert(probe->bulk_missing.end(),
-                                   std::next(
-                                       batch.identifiers.begin(),
-                                       static_cast<std::ptrdiff_t>(count)),
-                                   batch.identifiers.end());
+        probe->bulk_missing.insert(
+            probe->bulk_missing.end(),
+            std::next(batch.identifiers.begin(),
+                      static_cast<std::ptrdiff_t>(count)),
+            batch.identifiers.end());
         return std::unexpected(injected_put_error());
     }
     return {};
 }
 
-std::expected<std::string, kasumi::transport::Error>
-recording_physical_hash(void* context,
-                        std::string_view identifier,
-                        std::string_view algorithm) {
+std::expected<std::string, kasumi::transport::Error> recording_physical_hash(
+    void* context, std::string_view identifier, std::string_view algorithm) {
     auto* state = recording_state(context);
     auto* probe = state->probe;
     if (probe != nullptr && probe->physical_hash_unsupported) {
@@ -322,22 +318,25 @@ recording_physical_hash(void* context,
             probe->changed.wait_until(
                 lock,
                 std::chrono::steady_clock::now() + std::chrono::seconds{2},
-                [&] { return probe->content_physical_hash_calls >= 2; });
+                [&] {
+                    return probe->content_physical_hash_calls >= 2;
+                });
         }
     }
 
     auto result =
         probe != nullptr && probe->physical_hash_transport_failure &&
                 !identifier.starts_with("history/")
-            ? std::expected<std::string, kasumi::transport::Error>{
-                  std::unexpect,
-                  kasumi::transport::Error{
-                      .code = kasumi::transport::ErrorCode::Io,
-                      .message = "injected physical hash failure"}}
+            ? std::expected<
+                  std::string,
+                  kasumi::transport::
+                      Error>{std::unexpect,
+                             kasumi::transport::Error{
+                                 .code = kasumi::transport::ErrorCode::Io,
+                                 .message = "injected physical hash failure"}}
             : kasumi::transport::physical_hash(
                   *state->base, identifier, algorithm);
-    if (probe != nullptr &&
-        !probe->corrupt_physical_hash_identifier.empty() &&
+    if (probe != nullptr && !probe->corrupt_physical_hash_identifier.empty() &&
         identifier.find(probe->corrupt_physical_hash_identifier) !=
             std::string_view::npos) {
         result = std::string{"c0rrupt3d"};
@@ -353,8 +352,7 @@ recording_physical_hash(void* context,
 }
 
 kasumi::transport::PhysicalHashBatchResult recording_physical_hash_batch(
-    void* context,
-    const kasumi::transport::PhysicalHashBatchRequest& request) {
+    void* context, const kasumi::transport::PhysicalHashBatchRequest& request) {
     auto* state = recording_state(context);
     auto* probe = state->probe;
     if (probe != nullptr) {
@@ -379,13 +377,14 @@ kasumi::transport::PhysicalHashBatchResult recording_physical_hash_batch(
     kasumi::transport::PhysicalHashBatchReport report{
         .mismatched = probe == nullptr ? std::vector<std::string>{}
                                        : probe->bulk_mismatched,
-        .missing = probe == nullptr ? std::vector<std::string>{}
-                                    : probe->bulk_missing,
-        .errors = probe == nullptr ? std::vector<std::string>{}
-                                   : probe->bulk_errors};
+        .missing =
+            probe == nullptr ? std::vector<std::string>{} : probe->bulk_missing,
+        .errors =
+            probe == nullptr ? std::vector<std::string>{} : probe->bulk_errors};
     if (probe != nullptr && !probe->corrupt_physical_hash_identifier.empty()) {
         for (const auto& object : request.objects) {
-            if (object.identifier.find(probe->corrupt_physical_hash_identifier) !=
+            if (object.identifier.find(
+                    probe->corrupt_physical_hash_identifier) !=
                 std::string::npos) {
                 report.mismatched.push_back(object.identifier);
             }
@@ -663,9 +662,7 @@ void add_repeated_content_files(FixtureData& fixture, std::size_t count) {
     }
 }
 
-
-TEST(SyncContentBatchTest,
-     VerificationAtThresholdUsesBulkAndSinglePutBatch) {
+TEST(SyncContentBatchTest, VerificationAtThresholdUsesBulkAndSinglePutBatch) {
     auto fixture = make_fixture("batch-single-put");
     ContentWindowProbe probe;
     attach_probe(*fixture, probe);
@@ -684,11 +681,11 @@ TEST(SyncContentBatchTest,
     EXPECT_EQ(probe.physical_hash_batch_objects, 6U);
     EXPECT_EQ(probe.content_physical_hash_calls, 0U);
     EXPECT_EQ(content_put_events(*fixture), 0U);
-    EXPECT_EQ(
-        std::ranges::count_if(fixture->events, [](std::string_view event) {
-            return event.starts_with("put_batch:");
-        }),
-        1U);
+    EXPECT_EQ(std::ranges::count_if(fixture->events,
+                                    [](std::string_view event) {
+                                        return event.starts_with("put_batch:");
+                                    }),
+              1U);
     EXPECT_EQ(history_put_events(*fixture, "commits"), 1U);
     EXPECT_EQ(history_put_events(*fixture, "heads"), 1U);
 }
@@ -747,8 +744,7 @@ TEST(SyncContentBatchTest, VerificationAboveThresholdUsesBulk) {
     EXPECT_EQ(probe.content_physical_hash_calls, 0U);
 }
 
-TEST(SyncContentBatchTest,
-     PartialBatchFailureLeavesRemoteButZeroApplied) {
+TEST(SyncContentBatchTest, PartialBatchFailureLeavesRemoteButZeroApplied) {
     auto fixture = make_fixture("partial-batch-failure");
     ContentWindowProbe probe;
     probe.fail_put_batch_after_objects = 4;
@@ -767,12 +763,14 @@ TEST(SyncContentBatchTest,
 
     const auto listed = kasumi::transport::list(fixture->base);
     ASSERT_TRUE(listed.has_value());
-    EXPECT_EQ(
-        std::ranges::count_if(*listed, [](std::string_view identifier) {
-            return !identifier.starts_with("history/");
-        }),
-        4U);
-    EXPECT_FALSE(std::filesystem::exists(fixture->profile / "transaction.bin.enc"));
+    EXPECT_EQ(std::ranges::count_if(*listed,
+                                    [](std::string_view identifier) {
+                                        return !identifier.starts_with(
+                                            "history/");
+                                    }),
+              4U);
+    EXPECT_FALSE(
+        std::filesystem::exists(fixture->profile / "transaction.bin.enc"));
 }
 
 TEST(SyncContentBatchTest,
@@ -788,11 +786,10 @@ TEST(SyncContentBatchTest,
     ASSERT_GE(result->plan.operations.size(), 4U);
 
     const auto target_index = 3U;
-    probe.corrupt_physical_hash_identifier =
-        kasumi::crypto::content_identifier(
-            fixture->key,
-            kasumi::hash_from_hex(result->plan.operations[target_index].hash)
-                .value());
+    probe.corrupt_physical_hash_identifier = kasumi::crypto::content_identifier(
+        fixture->key,
+        kasumi::hash_from_hex(result->plan.operations[target_index].hash)
+            .value());
 
     const auto executed = execute_with(*fixture, input, *result);
     ASSERT_FALSE(executed.has_value());
@@ -803,7 +800,8 @@ TEST(SyncContentBatchTest,
     EXPECT_EQ(probe.content_physical_hash_calls, 0U);
     EXPECT_EQ(history_put_events(*fixture, "commits"), 1U);
     EXPECT_EQ(history_put_events(*fixture, "heads"), 0U);
-    EXPECT_FALSE(std::filesystem::exists(fixture->profile / "transaction.bin.enc"));
+    EXPECT_FALSE(
+        std::filesystem::exists(fixture->profile / "transaction.bin.enc"));
 }
 
 TEST(SyncContentBatchTest,
@@ -925,9 +923,8 @@ TEST(SyncContentBatchTest, CheckpointBuilderIsPureAndSafe) {
         kasumi::application::sync::mutation::StagedUploadObject{
             .operation_indices = {0U, 2U}});
 
-    const auto candidate =
-        kasumi::application::sync::coordinator::detail::
-            make_upload_batch_checkpoint(original, batch);
+    const auto candidate = kasumi::application::sync::coordinator::detail::
+        make_upload_batch_checkpoint(original, batch);
 
     EXPECT_EQ(original.progress[0].state,
               kasumi::transaction::OperationState::Prepared);
@@ -965,9 +962,9 @@ TEST(SyncContentBatchTest, CleanupRejectsReplacedBatchRoot) {
         kasumi::application::sync::mutation::cleanup_upload_batch(batch);
 
     ASSERT_FALSE(cleaned.has_value());
-    EXPECT_EQ(cleaned.error().code,
-              kasumi::application::sync::mutation::MutationErrorCode::
-                  UnsafePath);
+    EXPECT_EQ(
+        cleaned.error().code,
+        kasumi::application::sync::mutation::MutationErrorCode::UnsafePath);
     EXPECT_TRUE(std::filesystem::exists(outside / "sentinel.txt"));
 }
 
@@ -1012,8 +1009,8 @@ TEST(SyncContentBatchTest, RecoveryUsesSharedContentConcurrency) {
     const auto tree =
         kasumi::application::observation::collect_local_tree(fixture->local);
     ASSERT_TRUE(tree.has_value());
-    ASSERT_TRUE(kasumi::state_storage::initialize(
-        fixture->profile / "state.db"));
+    ASSERT_TRUE(
+        kasumi::state_storage::initialize(fixture->profile / "state.db"));
     ASSERT_TRUE(kasumi::state_storage::save_state(
         fixture->profile / "state.db",
         {.tree = *tree,
@@ -1025,15 +1022,15 @@ TEST(SyncContentBatchTest, RecoveryUsesSharedContentConcurrency) {
         kasumi::application::sync::coordinator::recover_if_needed(
             runtime_data(*fixture), fixture->storage, fixture->key);
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(*recovered,
-              kasumi::application::sync::coordinator::RecoveryResult::
-                  RolledForward);
+    EXPECT_EQ(
+        *recovered,
+        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
     EXPECT_EQ(probe.content_put_batch_count, 1U);
     EXPECT_EQ(probe.content_put_batch_objects, 6U);
     EXPECT_EQ(probe.peak_active, 2U);
     EXPECT_EQ(probe.active, 0U);
-    EXPECT_FALSE(std::filesystem::exists(fixture->profile /
-                                         "transaction.bin.enc"));
+    EXPECT_FALSE(
+        std::filesystem::exists(fixture->profile / "transaction.bin.enc"));
     EXPECT_FALSE(std::filesystem::exists(transaction_root));
 }
 

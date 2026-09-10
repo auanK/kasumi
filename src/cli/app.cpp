@@ -38,15 +38,17 @@ int run(int argc, char* argv[]) {
     char** effective_argv = sanitized_ptrs.data();
 
     const bool no_args = effective_argc == 1;
-    const bool is_help = effective_argc == 2 && effective_argv != nullptr && effective_argv[1] != nullptr &&
+    const bool is_help = effective_argc == 2 && effective_argv != nullptr &&
+                         effective_argv[1] != nullptr &&
                          (std::string_view{effective_argv[1]} == "help" ||
                           std::string_view{effective_argv[1]} == "--help" ||
                           std::string_view{effective_argv[1]} == "-h");
-    const bool is_version = effective_argc == 2 && effective_argv != nullptr &&
-                            effective_argv[1] != nullptr &&
-                            (std::string_view{effective_argv[1]} == "version" ||
-                             std::string_view{effective_argv[1]} == "--version" ||
-                             std::string_view{effective_argv[1]} == "-v");
+    const bool is_version =
+        effective_argc == 2 && effective_argv != nullptr &&
+        effective_argv[1] != nullptr &&
+        (std::string_view{effective_argv[1]} == "version" ||
+         std::string_view{effective_argv[1]} == "--version" ||
+         std::string_view{effective_argv[1]} == "-v");
 
     if (no_args || is_help) {
         std::print("{}", i18n::tr(i18n::Key::HelpText));

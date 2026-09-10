@@ -244,8 +244,9 @@ bool save_history_cache(const runtime::RuntimeData& runtime_data,
                         const observation::history::StorageView& observed) {
     try {
         std::error_code filesystem_error;
-        // ponytail: current frontier supports a single head; concurrency uses cold
-        // observation until there is a measured gain for a multi-head cache.
+        // ponytail: current frontier supports a single head; concurrency uses
+        // cold observation until there is a measured gain for a multi-head
+        // cache.
         if (observed.logical_heads.size() != 1 ||
             !std::filesystem::is_regular_file(runtime_data.database_path,
                                               filesystem_error) ||

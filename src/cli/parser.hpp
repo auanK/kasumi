@@ -1,8 +1,8 @@
 #ifndef KASUMI_CLI_PARSER_HPP
 #define KASUMI_CLI_PARSER_HPP
 
-#include "application/request.hpp"
 #include "application/inspection/request.hpp"
+#include "application/request.hpp"
 
 #include <expected>
 #include <variant>

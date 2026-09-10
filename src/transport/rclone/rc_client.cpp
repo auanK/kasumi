@@ -131,7 +131,9 @@ post_rc_impl(State& state,
     std::mutex watcher_mutex;
     std::condition_variable watcher_wakeup;
     std::jthread watcher([&](std::stop_token stop) {
-        std::stop_callback wake_on_stop(stop, [&] { watcher_wakeup.notify_all(); });
+        std::stop_callback wake_on_stop(stop, [&] {
+            watcher_wakeup.notify_all();
+        });
         std::unique_lock watcher_lock(watcher_mutex);
         bool reported = false;
         while (!stop.stop_requested()) {
@@ -161,8 +163,8 @@ post_rc_impl(State& state,
         client.Post(path, std::string{request_body}, "application/json");
     watcher.request_stop();
     if (platform::cancellation::requested()) {
-        return std::unexpected(
-            make_error(ErrorCode::Cancelled, "operação cancelada pelo usuário"));
+        return std::unexpected(make_error(ErrorCode::Cancelled,
+                                          "operação cancelada pelo usuário"));
     }
     if (!response) {
         return std::unexpected(
@@ -181,14 +183,20 @@ post_rc_impl(State& state,
     }
     if (response->status == 401 || response->status == 403) {
         return std::unexpected(make_error(ErrorCode::PermissionDenied,
-                                          "autenticação RC rejeitada",
+                                          "RC authentication rejected",
                                           response->status));
     }
     if (response->status < 200 || response->status >= 300) {
+        std::string detail = "unexpected RC HTTP status; body omitted";
+        try {
+            const auto json = nlohmann::json::parse(response->body);
+            if (json.contains("error") && json["error"].is_string()) {
+                detail = json["error"].get<std::string>();
+            }
+        } catch (...) {
+        }
         return std::unexpected(
-            make_error(ErrorCode::ProtocolFailure,
-                       "status HTTP RC inesperado; corpo omitido",
-                       response->status));
+            make_error(ErrorCode::ProtocolFailure, detail, response->status));
     }
     return response->body;
 }
@@ -235,9 +243,9 @@ std::expected<void, Error> validate_rc_handshake(State& state, int child_pid) {
                            "PID RC não corresponde ao processo iniciado"));
         }
     } catch (const std::exception&) {
-        return std::unexpected(make_error(
-            ErrorCode::ProtocolFailure,
-            "JSON core/pid inválido; corpo omitido"));
+        return std::unexpected(
+            make_error(ErrorCode::ProtocolFailure,
+                       "JSON core/pid inválido; corpo omitido"));
     }
     return {};
 }
@@ -293,13 +301,8 @@ post_rc(State& state,
                                      trace);
     }
     if (!result) {
-        return std::unexpected(
-            with_request_context(state,
-                                 std::move(result.error()),
-                                 endpoint,
-                                 started,
-                                 1,
-                                 1));
+        return std::unexpected(with_request_context(
+            state, std::move(result.error()), endpoint, started, 1, 1));
     }
     return result;
 }
@@ -344,26 +347,25 @@ post_rc_read_only(State& state,
                 attempt + 1,
                 maximum_read_attempts));
         }
-        const auto remaining = std::max(
-            std::chrono::milliseconds{1},
-            std::chrono::duration_cast<std::chrono::milliseconds>(expires_at -
-                                                                   now));
-        auto result = post_rc_impl(
-            state,
-            endpoint,
-            request_body,
-            response_limit,
-            remaining,
-            attempt + 1,
-            maximum_read_attempts);
+        const auto remaining =
+            std::max(std::chrono::milliseconds{1},
+                     std::chrono::duration_cast<std::chrono::milliseconds>(
+                         expires_at - now));
+        auto result = post_rc_impl(state,
+                                   endpoint,
+                                   request_body,
+                                   response_limit,
+                                   remaining,
+                                   attempt + 1,
+                                   maximum_read_attempts);
         if (!result) {
-            result = std::unexpected(with_request_context(
-                state,
-                std::move(result.error()),
-                endpoint,
-                started,
-                attempt + 1,
-                maximum_read_attempts));
+            result =
+                std::unexpected(with_request_context(state,
+                                                     std::move(result.error()),
+                                                     endpoint,
+                                                     started,
+                                                     attempt + 1,
+                                                     maximum_read_attempts));
         }
         if (result || !transient_read_failure(result.error())) {
             finish();

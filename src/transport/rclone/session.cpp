@@ -185,9 +185,9 @@ ChildEnvironment controlled_environment(const State& state) {
         {"RCLONE_STATS", "0"},
     };
     if (state.configuration.config_path) {
-        result.emplace_back("RCLONE_CONFIG",
-                            platform::path::to_utf8(
-                                *state.configuration.config_path));
+        result.emplace_back(
+            "RCLONE_CONFIG",
+            platform::path::to_utf8(*state.configuration.config_path));
     }
     return result;
 }
@@ -449,12 +449,11 @@ std::expected<int, Error> start_process(State& state) {
     const auto result = state.process.start(arguments, options);
     platform::perf_trace::finish("rclone process startup", trace);
     if (result) {
-        return std::unexpected(
-            make_error(ErrorCode::ProcessFailure,
-                       "não foi possível iniciar o processo rclone em " +
-                           platform::path::to_utf8(
-                               state.configuration.executable),
-                       result.value()));
+        return std::unexpected(make_error(
+            ErrorCode::ProcessFailure,
+            "não foi possível iniciar o processo rclone em " +
+                platform::path::to_utf8(state.configuration.executable),
+            result.value()));
     }
     state.process_started = true;
     const auto child_pid = state.process.pid();
@@ -575,10 +574,8 @@ resolve_rclone_executable(const detail::RcloneConfiguration& configuration) {
         std::size_t begin = 0;
         while (begin <= paths.size()) {
             const auto end = paths.find(separator, begin);
-            auto entry = paths.substr(begin,
-                                      end == paths.npos
-                                          ? paths.size() - begin
-                                          : end - begin);
+            auto entry = paths.substr(
+                begin, end == paths.npos ? paths.size() - begin : end - begin);
             if (entry.size() >= 2 && entry.front() == '"' &&
                 entry.back() == '"') {
                 entry.remove_prefix(1);
@@ -704,8 +701,7 @@ start_state(detail::RcloneConfiguration configuration) {
     }
     last_error.message +=
         " (executável rclone: " +
-        platform::path::to_utf8(state->configuration.executable) +
-        ")";
+        platform::path::to_utf8(state->configuration.executable) + ")";
     destroy_state(state.release());
     return std::unexpected(std::move(last_error));
 }

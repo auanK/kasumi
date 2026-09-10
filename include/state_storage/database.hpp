@@ -54,7 +54,8 @@ bool initialize(const std::filesystem::path& database_path);
 std::expected<std::optional<StoredState>, std::string>
 load_state(const std::filesystem::path& database_path);
 
-// Validates and replaces the state within a transaction; preserves Epoch if omitted.
+// Validates and replaces the state within a transaction; preserves Epoch if
+// omitted.
 bool save_state(const std::filesystem::path& database_path,
                 const StoredState& state);
 

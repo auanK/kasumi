@@ -679,8 +679,8 @@ TEST(ReachabilityTest, InventoryIsReadOnly) {
     EXPECT_EQ(state->objects, before);
     EXPECT_EQ(state->put_count, 0U);
     EXPECT_EQ(state->remove_count, 0U);
-    EXPECT_FALSE(
-        kasumi::test::has_temporary_history_workspace(kasumi::test::workspace_root(workspace)));
+    EXPECT_FALSE(kasumi::test::has_temporary_history_workspace(
+        kasumi::test::workspace_root(workspace)));
 }
 
 TEST(ReachabilityTest, InventoryIsDeterministicAcrossListingOrder) {
@@ -718,8 +718,56 @@ TEST(ReachabilityTest, InventoryCleansTemporaryWorkspaceAfterFailure) {
         kasumi::application::history_storage::inventory_reachability(
             transport, test_key(), kasumi::test::workspace_root(workspace));
     EXPECT_FALSE(result.has_value());
-    EXPECT_FALSE(
-        kasumi::test::has_temporary_history_workspace(kasumi::test::workspace_root(workspace)));
+    EXPECT_FALSE(kasumi::test::has_temporary_history_workspace(
+        kasumi::test::workspace_root(workspace)));
+}
+
+namespace {
+kasumi::transport::Result
+fake_reachability_get_batch(void* context,
+                            const kasumi::transport::GetBatch& batch) {
+    ++fake_state(context)->get_batch_count;
+    for (const auto& identifier : batch.identifiers) {
+        const auto source = batch.source_prefix.empty()
+                                ? identifier
+                                : batch.source_prefix + "/" + identifier;
+        auto result =
+            fake_get(context, source, batch.destination_root / identifier);
+        if (!result) {
+            return result;
+        }
+        --fake_state(context)->get_count;
+        --fake_state(context)->commit_get_count;
+        fake_state(context)->remote_events.pop_back();
+    }
+    return {};
+}
+} // namespace
+
+TEST(ReachabilityTest, InventoryConsumesOneNativeCommitBatchWhenSupported) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("reachability-native-batch");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    const auto parent = make_commit(0, {}, "file.txt", "zero").value();
+    const auto published_parent =
+        add_fake_commit(transport, workspace, parent, "parent");
+    const auto child =
+        make_commit(1, {published_parent.commit_id}, "file.txt", "one").value();
+    add_fake_commit(transport, workspace, child, "child");
+
+    transport.storage.get_batch = fake_reachability_get_batch;
+    state->get_batch_count = 0;
+    state->commit_get_count = 0;
+
+    const auto result =
+        kasumi::application::history_storage::inventory_reachability(
+            transport, test_key(), kasumi::test::workspace_root(workspace));
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->commits.size(), 2U);
+    EXPECT_EQ(state->get_batch_count, 1U);
+    EXPECT_EQ(state->commit_get_count, 0U);
 }
 
 } // namespace

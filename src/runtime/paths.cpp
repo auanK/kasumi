@@ -1,8 +1,7 @@
 #include "runtime/paths.hpp"
 
-#include "runtime/profile.hpp"
-
 #include "platform/private_storage.hpp"
+#include "runtime/profile.hpp"
 
 #include <cstdlib>
 #include <optional>
@@ -104,7 +103,8 @@ resolve_profile_paths(const std::filesystem::path& app_data_dir,
         return std::unexpected(
             Error{.code = ErrorCode::IoFailure, .detail = error.message()});
     const auto root = absolute_root.lexically_normal();
-    const auto candidate = (root / std::string(profile_name)).lexically_normal();
+    const auto candidate =
+        (root / std::string(profile_name)).lexically_normal();
     const auto relative = std::filesystem::relative(candidate, root, error);
     if (error || relative.empty() || relative.is_absolute() ||
         *relative.begin() == "..") {
@@ -124,8 +124,8 @@ std::expected<void, Error> ensure_profile_directory(const ProfilePaths& paths) {
     for (const auto& directory : {application, profiles, paths.profile_dir}) {
         auto secured = platform::private_storage::ensure_directory(directory);
         if (!secured) {
-            return std::unexpected(Error{.code = ErrorCode::IoFailure,
-                                         .detail = secured.error()});
+            return std::unexpected(
+                Error{.code = ErrorCode::IoFailure, .detail = secured.error()});
         }
     }
     return {};
@@ -144,8 +144,8 @@ std::expected<void, Error> remove_profile_directory(const ProfilePaths& paths) {
     }
     auto secured = platform::private_storage::protect_tree(paths.profile_dir);
     if (!secured) {
-        return std::unexpected(Error{.code = ErrorCode::IoFailure,
-                                     .detail = secured.error()});
+        return std::unexpected(
+            Error{.code = ErrorCode::IoFailure, .detail = secured.error()});
     }
     std::filesystem::remove_all(paths.profile_dir, ec);
     if (ec)
@@ -162,14 +162,14 @@ rename_profile_directory(const ProfilePaths& source,
         auto secured =
             platform::private_storage::protect_tree(source.profile_dir);
         if (!secured) {
-            return std::unexpected(Error{.code = ErrorCode::IoFailure,
-                                         .detail = secured.error()});
+            return std::unexpected(
+                Error{.code = ErrorCode::IoFailure, .detail = secured.error()});
         }
         auto parent = platform::private_storage::protect_directory(
             destination.profile_dir.parent_path());
         if (!parent) {
-            return std::unexpected(Error{.code = ErrorCode::IoFailure,
-                                         .detail = parent.error()});
+            return std::unexpected(
+                Error{.code = ErrorCode::IoFailure, .detail = parent.error()});
         }
         std::filesystem::rename(
             source.profile_dir, destination.profile_dir, ec);

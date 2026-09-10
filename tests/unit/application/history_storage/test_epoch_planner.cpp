@@ -1,9 +1,8 @@
 #include "application/history_storage/epoch.hpp"
 #include "core/history.hpp"
 
-#include <gtest/gtest.h>
-
 #include <cstdint>
+#include <gtest/gtest.h>
 #include <string>
 #include <utility>
 #include <vector>
@@ -22,11 +21,10 @@ LoadedCommit make_loaded(char id_char,
                          std::uint64_t height,
                          std::int64_t created_at,
                          std::vector<std::string> parents = {}) {
-    return LoadedCommit{
-        .id = make_id(id_char),
-        .commit = Commit{.height = height,
-                         .created_at = created_at,
-                         .parents = std::move(parents)}};
+    return LoadedCommit{.id = make_id(id_char),
+                        .commit = Commit{.height = height,
+                                         .created_at = created_at,
+                                         .parents = std::move(parents)}};
 }
 
 TEST(EpochPlannerTest, RespectsDepthAndAgeLimits) {

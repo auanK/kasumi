@@ -321,9 +321,11 @@ TEST(TransactionCodecTest, UnicodeOperationPathsRoundTrip) {
         "Ä/ä.txt",
     };
     auto original = representative_record();
-    for (std::size_t index = 0; index < original.plan.operations.size(); ++index) {
+    for (std::size_t index = 0; index < original.plan.operations.size();
+         ++index) {
         auto& operation = original.plan.operations[index];
-        operation.path = kasumi::platform::path::from_utf8(paths[index % paths.size()]);
+        operation.path =
+            kasumi::platform::path::from_utf8(paths[index % paths.size()]);
         operation.alt_path = kasumi::platform::path::from_utf8(
             paths[(index + 1) % paths.size()]);
     }
@@ -333,7 +335,8 @@ TEST(TransactionCodecTest, UnicodeOperationPathsRoundTrip) {
     const auto decoded = kasumi::transaction::codec::decode(*encoded);
     ASSERT_TRUE(decoded.has_value()) << decoded.error();
     ASSERT_EQ(decoded->plan.operations.size(), original.plan.operations.size());
-    for (std::size_t index = 0; index < decoded->plan.operations.size(); ++index) {
+    for (std::size_t index = 0; index < decoded->plan.operations.size();
+         ++index) {
         const auto& operation = decoded->plan.operations[index];
         EXPECT_EQ(kasumi::platform::path::to_logical_utf8(operation.path),
                   paths[index % paths.size()]);

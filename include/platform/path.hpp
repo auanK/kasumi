@@ -38,7 +38,8 @@ inline std::filesystem::path from_utf8(std::string_view value) {
 
 inline std::filesystem::path
 temporary_sibling_path(const std::filesystem::path& destination,
-                       std::string_view prefix, std::string_view suffix) {
+                       std::string_view prefix,
+                       std::string_view suffix) {
     auto filename = from_utf8(prefix).native();
     filename += destination.filename().native();
     filename += from_utf8(suffix).native();

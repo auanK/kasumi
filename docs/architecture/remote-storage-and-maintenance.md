@@ -89,12 +89,15 @@ History DAG
     ↓
 Reachable Inventory (HEADs + Epoch Anchors)
     ↓
-Orphan Identification
+Orphan Identification (Remote Listing Match)
     ↓
 Quarantine Staging (10-Day Quarantine Retention)
     ↓
 Permanent Purge
 ```
+
+Payload inspection is decoupled from garbage collection: GC does not download or decrypt content payloads (`audit_payloads = false`), determining reachability strictly by matching the remote physical namespace against the historical Merkle tree inventory. Cryptographic payload integrity verification is performed exclusively by `fsck`.
+
 
 ### Writers & Distributed Barrier Protocol
 

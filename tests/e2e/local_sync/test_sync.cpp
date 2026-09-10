@@ -43,10 +43,10 @@ using kasumi::application::observation::history::StorageView;
 constexpr std::string_view key_hex =
     "7777777777777777777777777777777777777777777777777777777777777777";
 
-using Client = std::tuple<std::string, ExecutionEnvironment,
-                          std::filesystem::path>;
-using Scenario = std::tuple<kasumi::test::TempWorkspace,
-                            std::filesystem::path, std::uint64_t>;
+using Client =
+    std::tuple<std::string, ExecutionEnvironment, std::filesystem::path>;
+using Scenario = std::
+    tuple<kasumi::test::TempWorkspace, std::filesystem::path, std::uint64_t>;
 
 const std::string& client_name(const Client& client) {
     return std::get<0>(client);
@@ -162,10 +162,10 @@ remote_identifiers(Scenario& scenario) {
 
 std::expected<std::optional<kasumi::state_storage::StoredState>, std::string>
 state(const Client& client) {
-    auto runtime = kasumi::runtime::resolve(
-        client_environment(client).app_data_dir,
-        client_name(client),
-        kasumi::runtime::AccessMode::ReadOnly);
+    auto runtime =
+        kasumi::runtime::resolve(client_environment(client).app_data_dir,
+                                 client_name(client),
+                                 kasumi::runtime::AccessMode::ReadOnly);
     if (!runtime) {
         return std::unexpected(runtime.error().detail);
     }
@@ -175,10 +175,10 @@ state(const Client& client) {
 std::expected<std::optional<kasumi::state_storage::ObservationCheckpoint>,
               std::string>
 checkpoint(const Client& client) {
-    auto runtime = kasumi::runtime::resolve(
-        client_environment(client).app_data_dir,
-        client_name(client),
-        kasumi::runtime::AccessMode::ReadOnly);
+    auto runtime =
+        kasumi::runtime::resolve(client_environment(client).app_data_dir,
+                                 client_name(client),
+                                 kasumi::runtime::AccessMode::ReadOnly);
     if (!runtime) {
         return std::unexpected(runtime.error().detail);
     }
@@ -195,8 +195,7 @@ bool supports_observation_checkpoint(const Client& client) {
 void expect_converged(Scenario& scenario,
                       std::initializer_list<const Client*> clients) {
     auto observed = remote(scenario);
-    ASSERT_TRUE(observed.has_value())
-        << (observed ? "" : observed.error());
+    ASSERT_TRUE(observed.has_value()) << (observed ? "" : observed.error());
     ASSERT_EQ(observed->logical_heads.size(), 1U);
 
     for (const auto* client : clients) {
@@ -207,8 +206,7 @@ void expect_converged(Scenario& scenario,
         EXPECT_EQ((*stored)->tree, observed->effective_tree);
 
         auto stored_checkpoint = checkpoint(*client);
-        ASSERT_TRUE(stored_checkpoint.has_value())
-            << stored_checkpoint.error();
+        ASSERT_TRUE(stored_checkpoint.has_value()) << stored_checkpoint.error();
         if (supports_observation_checkpoint(*client)) {
             ASSERT_TRUE(stored_checkpoint->has_value());
             ASSERT_FALSE((*stored)->tree.rows.empty());
@@ -229,8 +227,7 @@ void expect_fixed_point(Scenario& scenario, const Client& client) {
     ASSERT_TRUE(before_state.has_value()) << before_state.error();
     ASSERT_TRUE(before_state->has_value());
     auto before_checkpoint = checkpoint(client);
-    ASSERT_TRUE(before_checkpoint.has_value())
-        << before_checkpoint.error();
+    ASSERT_TRUE(before_checkpoint.has_value()) << before_checkpoint.error();
     const bool has_checkpoint = supports_observation_checkpoint(client);
     if (has_checkpoint) {
         ASSERT_TRUE(before_checkpoint->has_value());
@@ -254,8 +251,7 @@ void expect_fixed_point(Scenario& scenario, const Client& client) {
     EXPECT_EQ((*after_state)->tree, (*before_state)->tree);
 
     auto after_checkpoint = checkpoint(client);
-    ASSERT_TRUE(after_checkpoint.has_value())
-        << after_checkpoint.error();
+    ASSERT_TRUE(after_checkpoint.has_value()) << after_checkpoint.error();
     if (has_checkpoint) {
         ASSERT_TRUE(after_checkpoint->has_value());
         EXPECT_EQ((*after_checkpoint)->tree_root_hash,
@@ -280,32 +276,34 @@ void set_mtime(const Client& client,
                std::string_view path,
                std::filesystem::file_time_type timestamp) {
     std::error_code error;
-    std::filesystem::last_write_time(client_local_dir(client) /
-                                         kasumi::platform::path::from_utf8(path),
-                                     timestamp,
-                                     error);
+    std::filesystem::last_write_time(
+        client_local_dir(client) / kasumi::platform::path::from_utf8(path),
+        timestamp,
+        error);
     ASSERT_FALSE(error) << error.message();
 }
 
 void remove_file(const Client& client, std::string_view path) {
     std::error_code error;
     ASSERT_TRUE(std::filesystem::remove(
-        client_local_dir(client) / kasumi::platform::path::from_utf8(path), error));
+        client_local_dir(client) / kasumi::platform::path::from_utf8(path),
+        error));
     ASSERT_FALSE(error) << error.message();
 }
 
 void remove_directory(const Client& client, std::string_view path) {
     std::error_code error;
     ASSERT_TRUE(std::filesystem::remove(
-        client_local_dir(client) / kasumi::platform::path::from_utf8(path), error));
+        client_local_dir(client) / kasumi::platform::path::from_utf8(path),
+        error));
     ASSERT_FALSE(error) << error.message();
 }
 
 void expect_file(const Client& client,
                  std::string_view path,
                  std::string_view contents) {
-    const auto file = client_local_dir(client) /
-                      kasumi::platform::path::from_utf8(path);
+    const auto file =
+        client_local_dir(client) / kasumi::platform::path::from_utf8(path);
     ASSERT_TRUE(std::filesystem::is_regular_file(file));
     EXPECT_EQ(kasumi::test::read_text(file), contents);
 }
@@ -315,8 +313,7 @@ void expect_absent(const Client& client, std::string_view path) {
         client_local_dir(client) / kasumi::platform::path::from_utf8(path)));
 }
 
-void expect_remote_present(const StorageView& remote,
-                           std::string_view path) {
+void expect_remote_present(const StorageView& remote, std::string_view path) {
     EXPECT_NE(kasumi::find_row(remote.effective_tree, path), nullptr);
 }
 
@@ -345,7 +342,8 @@ TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
     const auto b = make_client(scenario, "b");
 
     const auto unicode_dir = kasumi::platform::path::from_utf8("pasta-日本");
-    const auto unicode_file = kasumi::platform::path::from_utf8("usuário-☁.txt");
+    const auto unicode_file =
+        kasumi::platform::path::from_utf8("usuário-☁.txt");
     const auto a_unicode = client_local_dir(a) / unicode_dir / unicode_file;
     const std::string expected_dir_utf8 = "pasta-日本";
     const std::string expected_file_utf8 = "pasta-日本/usuário-☁.txt";
@@ -387,10 +385,10 @@ TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
     ASSERT_TRUE(std::filesystem::is_regular_file(b_unicode));
     EXPECT_EQ(kasumi::test::read_text(b_unicode), "unicode-v1");
 
-    // Re-scan client B to confirm: remote logical UTF-8 -> native path -> scanner -> logical UTF-8
-    const auto b_scan =
-        kasumi::application::observation::scanner::scan_result(
-            client_local_dir(b));
+    // Re-scan client B to confirm: remote logical UTF-8 -> native path ->
+    // scanner -> logical UTF-8
+    const auto b_scan = kasumi::application::observation::scanner::scan_result(
+        client_local_dir(b));
     ASSERT_TRUE(b_scan.has_value())
         << kasumi::application::observation::scanner::describe(b_scan.error());
     const auto* b_scan_dir =
@@ -431,16 +429,17 @@ TEST(H3LocalSyncTest, UnicodeSupplementaryAndExtendedSync) {
     auto scenario = make_scenario();
     const auto a = make_client(scenario, "a");
     const auto b = make_client(scenario, "b");
-    constexpr std::array<std::pair<std::string_view, std::string_view>, 4> files{{
-        {"高松灯/カード💝.png", "card from A"},
-        {"Icons/Karyl💝.png", "Karyl from A"},
-        {"Icons/𝑬𝒎𝒊𝒍𝒊𝒂.txt", "Emilia from A"},
-        {"Icons/𓆩🌸𓆪.txt", "flower from A"},
-    }};
+    constexpr std::array<std::pair<std::string_view, std::string_view>, 4>
+        files{{
+            {"高松灯/カード💝.png", "card from A"},
+            {"Icons/Karyl💝.png", "Karyl from A"},
+            {"Icons/𝑬𝒎𝒊𝒍𝒊𝒂.txt", "Emilia from A"},
+            {"Icons/𓆩🌸𓆪.txt", "flower from A"},
+        }};
     for (const auto& [path, contents] : files) {
-        kasumi::test::write_text(
-            client_local_dir(a) / kasumi::platform::path::from_utf8(path),
-            contents);
+        kasumi::test::write_text(client_local_dir(a) /
+                                     kasumi::platform::path::from_utf8(path),
+                                 contents);
     }
 
     ASSERT_TRUE(sync_succeeds(a));
@@ -452,12 +451,12 @@ TEST(H3LocalSyncTest, UnicodeSupplementaryAndExtendedSync) {
 
     constexpr std::string_view modified = "高松灯/カード💝.png";
     constexpr std::string_view added = "高松灯/千早愛音🌸.txt";
-    kasumi::test::write_text(
-        client_local_dir(b) / kasumi::platform::path::from_utf8(modified),
-        "card updated on B with Unicode path");
-    kasumi::test::write_text(
-        client_local_dir(b) / kasumi::platform::path::from_utf8(added),
-        "new file from B");
+    kasumi::test::write_text(client_local_dir(b) /
+                                 kasumi::platform::path::from_utf8(modified),
+                             "card updated on B with Unicode path");
+    kasumi::test::write_text(client_local_dir(b) /
+                                 kasumi::platform::path::from_utf8(added),
+                             "new file from B");
 
     ASSERT_TRUE(sync_succeeds(b));
     ASSERT_TRUE(sync_succeeds(a));
@@ -539,11 +538,10 @@ TEST(H3LocalSyncTest, DeletesRootFilesAndPreservesAnEmptyRoot) {
     const auto a = make_client(scenario, "a");
     const auto b = make_client(scenario, "b");
 
-    for (const auto& [path, contents] : {
-             std::pair{"alpha.txt", "alpha"},
-             std::pair{"beta.txt", "beta"},
-             std::pair{"gamma.txt", "gamma"},
-             std::pair{"keep.txt", "keep"}}) {
+    for (const auto& [path, contents] : {std::pair{"alpha.txt", "alpha"},
+                                         std::pair{"beta.txt", "beta"},
+                                         std::pair{"gamma.txt", "gamma"},
+                                         std::pair{"keep.txt", "keep"}}) {
         kasumi::test::write_text(client_local_dir(a) / path, contents);
     }
     ASSERT_TRUE(sync(a));
@@ -580,7 +578,8 @@ TEST(H3LocalSyncTest, DeletesEmptyNestedDeepAndMixedDirectories) {
     kasumi::test::write_text(client_local_dir(a) / "single/file.txt", "single");
     kasumi::test::write_text(client_local_dir(a) / "nested/b/c.txt", "c");
     kasumi::test::write_text(client_local_dir(a) / "nested/d.txt", "d");
-    kasumi::test::write_text(client_local_dir(a) / "deep/a/b/c/file.txt", "deep");
+    kasumi::test::write_text(client_local_dir(a) / "deep/a/b/c/file.txt",
+                             "deep");
     kasumi::test::write_text(client_local_dir(a) / "mixed/gamma.txt", "gamma");
     kasumi::test::write_text(client_local_dir(a) / "other/keep.txt", "keep");
     ASSERT_TRUE(sync(a));
@@ -605,8 +604,8 @@ TEST(H3LocalSyncTest, DeletesEmptyNestedDeepAndMixedDirectories) {
 
     auto observed_remote = remote(scenario);
     ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
-    for (const auto path : {"empty", "single", "nested", "deep", "mixed",
-                            "mixed/gamma.txt"}) {
+    for (const auto path :
+         {"empty", "single", "nested", "deep", "mixed", "mixed/gamma.txt"}) {
         expect_absent(a, path);
         expect_remote_absent(*observed_remote, path);
     }
@@ -655,7 +654,8 @@ TEST(H3LocalSyncTest, IgnoreFilesStayLocalAcrossRemoteDeletes) {
     const auto a = make_client(scenario, "a");
     const auto b = make_client(scenario, "b");
 
-    kasumi::test::write_text(client_local_dir(a) / ".kasumiignore", "ignored.txt\n");
+    kasumi::test::write_text(client_local_dir(a) / ".kasumiignore",
+                             "ignored.txt\n");
     kasumi::test::write_text(client_local_dir(a) / "ignored.txt", "local-only");
     kasumi::test::write_text(client_local_dir(a) / "keep.txt", "keep");
     ASSERT_TRUE(sync(a));
@@ -691,12 +691,11 @@ TEST(H3LocalSyncTest,
     const auto original_hash = before_ignore->hash;
     const auto original_size = before_ignore->size;
     using FileDuration = std::filesystem::file_time_type::duration;
-    const auto local_subsecond = std::filesystem::file_time_type{
-        FileDuration{before_ignore->mtime.time_since_epoch().count() +
-                     std::chrono::duration_cast<FileDuration>(
-                         std::chrono::seconds{1} +
-                         std::chrono::nanoseconds{915178000})
-                         .count()}};
+    const auto local_subsecond = std::filesystem::file_time_type{FileDuration{
+        before_ignore->mtime.time_since_epoch().count() +
+        std::chrono::duration_cast<FileDuration>(
+            std::chrono::seconds{1} + std::chrono::nanoseconds{915178000})
+            .count()}};
     const auto written = kasumi::platform::metadata::set_last_write_time(
         ignore, local_subsecond);
     ASSERT_TRUE(written.has_value()) << written.error();
@@ -776,7 +775,8 @@ TEST(H3LocalSyncTest, RemoteDeletePreservesLocalConcurrentModification) {
         remove_directory(b, "dir");
         ASSERT_TRUE(sync(b));
 
-        kasumi::test::write_text(client_local_dir(a) / "dir/file.txt", "V2-local");
+        kasumi::test::write_text(client_local_dir(a) / "dir/file.txt",
+                                 "V2-local");
         auto preserve_local = sync(a);
         ASSERT_TRUE(preserve_local.has_value()) << preserve_local.error();
         ASSERT_TRUE(sync(b));

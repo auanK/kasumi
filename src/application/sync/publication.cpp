@@ -96,9 +96,8 @@ prepare_commit(Snapshot tree,
                std::int64_t created_at,
                std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
     if (created_at <= 0) {
-        return std::unexpected(
-            Error{.code = ErrorCode::InvalidInput,
-                  .detail = "invalid commit timestamp"});
+        return std::unexpected(Error{.code = ErrorCode::InvalidInput,
+                                     .detail = "invalid commit timestamp"});
     }
     if (!valid_snapshot(tree, false)) {
         return std::unexpected(
@@ -253,7 +252,8 @@ PruneMarkersResult prune_current_ancestral_markers(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const std::filesystem::path& workspace_root) {
-    // A marked ancestor does not become a head again upon receiving descendants.
+    // A marked ancestor does not become a head again upon receiving
+    // descendants.
     auto observed =
         observation::history::observe(storage, key, workspace_root, false);
     if (!observed) {

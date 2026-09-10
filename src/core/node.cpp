@@ -24,10 +24,14 @@ bool is_windows_reserved_device_name(std::string_view base) noexcept {
         char c0 = ascii_lower(base[0]);
         char c1 = ascii_lower(base[1]);
         char c2 = ascii_lower(base[2]);
-        if (c0 == 'c' && c1 == 'o' && c2 == 'n') return true;
-        if (c0 == 'p' && c1 == 'r' && c2 == 'n') return true;
-        if (c0 == 'a' && c1 == 'u' && c2 == 'x') return true;
-        if (c0 == 'n' && c1 == 'u' && c2 == 'l') return true;
+        if (c0 == 'c' && c1 == 'o' && c2 == 'n')
+            return true;
+        if (c0 == 'p' && c1 == 'r' && c2 == 'n')
+            return true;
+        if (c0 == 'a' && c1 == 'u' && c2 == 'x')
+            return true;
+        if (c0 == 'n' && c1 == 'u' && c2 == 'l')
+            return true;
         return false;
     }
 
@@ -78,18 +82,18 @@ bool valid_logical_path_component(std::string_view name) noexcept {
                 return false;
             }
             switch (b0) {
-            case '<':
-            case '>':
-            case ':':
-            case '"':
-            case '/':
-            case '\\':
-            case '|':
-            case '?':
-            case '*':
-                return false;
-            default:
-                break;
+                case '<':
+                case '>':
+                case ':':
+                case '"':
+                case '/':
+                case '\\':
+                case '|':
+                case '?':
+                case '*':
+                    return false;
+                default:
+                    break;
             }
         } else if (b0 >= 0xC2 && b0 <= 0xDF) {
             if (i + 1 >= name.size()) {
@@ -185,8 +189,7 @@ std::string portable_case_key(std::string_view logical_path) {
 
         utf8proc_int32_t upper = utf8proc_toupper(codepoint);
         utf8proc_uint8_t encoded[4];
-        utf8proc_ssize_t encoded_bytes =
-            utf8proc_encode_char(upper, encoded);
+        utf8proc_ssize_t encoded_bytes = utf8proc_encode_char(upper, encoded);
         if (encoded_bytes > 0) {
             key.append(reinterpret_cast<const char*>(encoded),
                        static_cast<std::size_t>(encoded_bytes));
@@ -212,14 +215,13 @@ std::string make_conflict_path(std::string_view original_path,
     const std::size_t max_orig_len =
         maximum_logical_component_length - suffix_len;
 
-    auto truncate_utf8 =
-        [](std::string_view s, std::size_t max_bytes) -> std::string_view {
+    auto truncate_utf8 = [](std::string_view s,
+                            std::size_t max_bytes) -> std::string_view {
         if (s.size() <= max_bytes) {
             return s;
         }
         std::size_t len = max_bytes;
-        while (len > 0 &&
-               (static_cast<unsigned char>(s[len]) & 0xC0) == 0x80) {
+        while (len > 0 && (static_cast<unsigned char>(s[len]) & 0xC0) == 0x80) {
             --len;
         }
         return s.substr(0, len);

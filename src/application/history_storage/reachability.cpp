@@ -89,11 +89,35 @@ ReachabilityResult inventory_impl(
     if (!temporary) {
         return std::unexpected(temporary.error());
     }
-    // The listing freezes the observation; new markers are deferred to the next run.
+    // The listing freezes the observation; new markers are deferred to the next
+    // run.
     auto listed = identifiers ? detail::build_history_inventory(*identifiers)
                               : detail::build_history_inventory(storage);
     if (!listed) {
         return std::unexpected(listed.error());
+    }
+
+    if (storage.storage.get_batch != nullptr) {
+        transport::GetBatch batch{
+            .source_prefix = std::string{detail::commit_prefix.substr(
+                0, detail::commit_prefix.size() - 1)},
+            .destination_root = (*temporary)->root,
+        };
+        for (const auto& [unused, references] : listed->commit_variants) {
+            static_cast<void>(unused);
+            for (const auto& reference : references) {
+                batch.identifiers.push_back(reference.commit_id + "/" +
+                                            reference.ciphertext_id +
+                                            std::string{detail::commit_suffix});
+            }
+        }
+        if (!batch.identifiers.empty()) {
+            auto prefetched = transport::get_batch(storage, batch);
+            if (!prefetched) {
+                return std::unexpected(
+                    detail::transport_error(prefetched.error()));
+            }
+        }
     }
 
     CommitMap commits;

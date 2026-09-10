@@ -542,8 +542,7 @@ std::expected<std::string, kasumi::transport::Error> reobserve_physical_hash(
     }
     if (!state->storage_root.empty()) {
         auto hash = kasumi::crypto::physical::hash_file(
-            state->storage_root / std::filesystem::path{identifier},
-            algorithm);
+            state->storage_root / std::filesystem::path{identifier}, algorithm);
         if (hash) {
             return *hash;
         }
@@ -1207,8 +1206,8 @@ void add_storage_object(kasumi::transport::Transport& storage,
                         const std::filesystem::path& source,
                         const kasumi::Hash& hash) {
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
-    const auto encrypted =
-        kasumi::platform::path::temporary_sibling_path(source, "", ".encrypted");
+    const auto encrypted = kasumi::platform::path::temporary_sibling_path(
+        source, "", ".encrypted");
     ASSERT_TRUE(kasumi::crypto::encrypt_file(source, encrypted, key));
     ASSERT_TRUE(kasumi::transport::put(
         storage, encrypted, kasumi::crypto::content_identifier(key, hash)));
@@ -3424,8 +3423,7 @@ TEST(ReobservationTest, AuditStorageObjectsDisablesTrustedMarkerShortcut) {
     const auto marker_id =
         kasumi::application::history_storage::marker_identifier(
             published->head);
-    kasumi::test::write_text(storage_path / marker_id,
-                             "corrupt marker bytes");
+    kasumi::test::write_text(storage_path / marker_id, "corrupt marker bytes");
 
     const auto observed =
         kasumi::application::observation::collect_reconciliation_input(
@@ -4562,20 +4560,19 @@ TEST(ReconciliationTest,
      UnrelatedUploadCanonicalizesEquivalentFileToObservedLocalMtime) {
     const auto remote_mtime =
         make_file_time(std::chrono::nanoseconds{1788563567000000000});
-    const auto local_mtime = make_file_time(
-        std::chrono::nanoseconds{1788563567915178000});
+    const auto local_mtime =
+        make_file_time(std::chrono::nanoseconds{1788563567915178000});
     const auto same_hash = kasumi::hasher::hash_string("same");
 
     auto input = empty_publication_input();
     input.storage.history_present = true;
     input.storage.logical_heads = {std::string(64, 'a')};
     input.storage.tree = input.local_tree;
-    input.storage.tree.rows.push_back(
-        kasumi::NodeRow{.path = "A.txt",
-                        .hash = same_hash,
-                        .size = 4,
-                        .mtime = remote_mtime,
-                        .is_directory = false});
+    input.storage.tree.rows.push_back(kasumi::NodeRow{.path = "A.txt",
+                                                      .hash = same_hash,
+                                                      .size = 4,
+                                                      .mtime = remote_mtime,
+                                                      .is_directory = false});
     kasumi::finalize_snapshot(input.storage.tree);
     input.base_tree = input.storage.tree;
     input.local_tree = input.storage.tree;
@@ -4609,9 +4606,9 @@ TEST(ReconciliationTest,
     const auto remote_result =
         kasumi::reconciliation::reconcile(remote_metadata_change);
     ASSERT_TRUE(remote_result.has_value()) << remote_result.error().detail;
-    EXPECT_EQ(kasumi::find_row(remote_result->candidate_shared_tree, "A.txt")
-                  ->mtime,
-              local_mtime);
+    EXPECT_EQ(
+        kasumi::find_row(remote_result->candidate_shared_tree, "A.txt")->mtime,
+        local_mtime);
 
     const auto publication = kasumi::reconciliation::build_publication_tree(
         input.local_tree, {}, result->candidate_shared_tree);
@@ -4956,53 +4953,57 @@ TEST(ReconciliationTest,
 
     const auto dummy_hash = kasumi::hasher::hash_string("dummy");
 
-    input.base_tree = kasumi::Snapshot{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "FooBar",
-                            .hash = base_foobar_hash,
-                            .size = 11,
-                            .mtime = remote_time,
-                            .is_directory = false},
-            kasumi::NodeRow{.path = "file.txt",
-                            .hash = base_file_hash,
-                            .size = 9,
-                            .mtime = remote_time,
-                            .is_directory = false},
-            kasumi::NodeRow{.path = "foo",
-                            .hash = base_foo_hash,
-                            .size = 8,
-                            .mtime = remote_time,
-                            .is_directory = false},
-        }};
+    input.base_tree =
+        kasumi::Snapshot{.rows = {
+                             kasumi::NodeRow{.path = "", .is_directory = true},
+                             kasumi::NodeRow{.path = "FooBar",
+                                             .hash = base_foobar_hash,
+                                             .size = 11,
+                                             .mtime = remote_time,
+                                             .is_directory = false},
+                             kasumi::NodeRow{.path = "file.txt",
+                                             .hash = base_file_hash,
+                                             .size = 9,
+                                             .mtime = remote_time,
+                                             .is_directory = false},
+                             kasumi::NodeRow{.path = "foo",
+                                             .hash = base_foo_hash,
+                                             .size = 8,
+                                             .mtime = remote_time,
+                                             .is_directory = false},
+                         }};
     kasumi::finalize_snapshot(input.base_tree);
 
-    input.storage.tree = kasumi::Snapshot{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "FooBar",
-                            .hash = remote_foobar_hash,
-                            .size = 13,
-                            .mtime = remote_time,
-                            .is_directory = false},
-            kasumi::NodeRow{.path = "file.txt",
-                            .hash = remote_file_hash,
-                            .size = 11,
-                            .mtime = remote_time,
-                            .is_directory = false},
-            kasumi::NodeRow{.path = "foo",
-                            .hash = remote_foo_hash,
-                            .size = 10,
-                            .mtime = remote_time,
-                            .is_directory = false},
-        }};
+    input.storage.tree =
+        kasumi::Snapshot{.rows = {
+                             kasumi::NodeRow{.path = "", .is_directory = true},
+                             kasumi::NodeRow{.path = "FooBar",
+                                             .hash = remote_foobar_hash,
+                                             .size = 13,
+                                             .mtime = remote_time,
+                                             .is_directory = false},
+                             kasumi::NodeRow{.path = "file.txt",
+                                             .hash = remote_file_hash,
+                                             .size = 11,
+                                             .mtime = remote_time,
+                                             .is_directory = false},
+                             kasumi::NodeRow{.path = "foo",
+                                             .hash = remote_foo_hash,
+                                             .size = 10,
+                                             .mtime = remote_time,
+                                             .is_directory = false},
+                         }};
     kasumi::finalize_snapshot(input.storage.tree);
 
     // local_tree has:
-    // - "FILE.txt.kasumiconflict_remote": pre-existing reserved path in local tree
-    // - "FooBar": locally modified (newer than remote) -> preferred "FooBar.kasumiconflict_remote"
-    // - "file.txt": locally modified (newer than remote) -> preferred "file.txt.kasumiconflict_remote"
-    // - "foo": locally modified (newer than remote) -> preferred "foo.kasumiconflict_remote"
+    // - "FILE.txt.kasumiconflict_remote": pre-existing reserved path in local
+    // tree
+    // - "FooBar": locally modified (newer than remote) -> preferred
+    // "FooBar.kasumiconflict_remote"
+    // - "file.txt": locally modified (newer than remote) -> preferred
+    // "file.txt.kasumiconflict_remote"
+    // - "foo": locally modified (newer than remote) -> preferred
+    // "foo.kasumiconflict_remote"
     input.local_tree = kasumi::Snapshot{
         .rows = {
             kasumi::NodeRow{.path = "", .is_directory = true},
@@ -5033,7 +5034,8 @@ TEST(ReconciliationTest,
     ASSERT_TRUE(result.has_value()) << result.error().detail;
 
     // "FILE.txt.kasumiconflict_remote" in reserved causes preferred
-    // "file.txt.kasumiconflict_remote" to be assigned ".1" via ASCII-fold matching.
+    // "file.txt.kasumiconflict_remote" to be assigned ".1" via ASCII-fold
+    // matching.
     const bool has_numbered_conflict = std::ranges::any_of(
         result->plan.operations, [](const kasumi::Operation& op) {
             return op.action == kasumi::Action::Download &&
@@ -5049,8 +5051,9 @@ TEST(ReconciliationTest,
     EXPECT_FALSE(has_unfolded_collision);
 
     // "foo" and "FooBar" do not falsely collide with each other:
-    // preferred "foo.kasumiconflict_remote" does not collide with "FooBar" or "FooBar.kasumiconflict_remote",
-    // and "FooBar.kasumiconflict_remote" does not collide with "foo" or "foo.kasumiconflict_remote".
+    // preferred "foo.kasumiconflict_remote" does not collide with "FooBar" or
+    // "FooBar.kasumiconflict_remote", and "FooBar.kasumiconflict_remote" does
+    // not collide with "foo" or "foo.kasumiconflict_remote".
     const bool has_foo_conflict = std::ranges::any_of(
         result->plan.operations, [](const kasumi::Operation& op) {
             return op.action == kasumi::Action::Download &&
@@ -5094,26 +5097,26 @@ TEST(ReconciliationTest, ConflictReservationAvoidsUnicodeCaseCollisions) {
     const auto local_hash = kasumi::hasher::hash_string("local");
     const auto dummy_hash = kasumi::hasher::hash_string("dummy");
 
-    input.base_tree = kasumi::Snapshot{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "ä.txt",
-                            .hash = base_hash,
-                            .size = 4,
-                            .mtime = remote_time,
-                            .is_directory = false},
-        }};
+    input.base_tree =
+        kasumi::Snapshot{.rows = {
+                             kasumi::NodeRow{.path = "", .is_directory = true},
+                             kasumi::NodeRow{.path = "ä.txt",
+                                             .hash = base_hash,
+                                             .size = 4,
+                                             .mtime = remote_time,
+                                             .is_directory = false},
+                         }};
     kasumi::finalize_snapshot(input.base_tree);
 
-    input.storage.tree = kasumi::Snapshot{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "ä.txt",
-                            .hash = remote_hash,
-                            .size = 6,
-                            .mtime = remote_time,
-                            .is_directory = false},
-        }};
+    input.storage.tree =
+        kasumi::Snapshot{.rows = {
+                             kasumi::NodeRow{.path = "", .is_directory = true},
+                             kasumi::NodeRow{.path = "ä.txt",
+                                             .hash = remote_hash,
+                                             .size = 6,
+                                             .mtime = remote_time,
+                                             .is_directory = false},
+                         }};
     kasumi::finalize_snapshot(input.storage.tree);
 
     input.local_tree = kasumi::Snapshot{
@@ -5170,10 +5173,11 @@ TEST(ReconciliationTest, UnicodeLocalConflictReservationUpdatesRelatedUpload) {
     input.local_tree = input.base_tree;
     input.local_tree.rows.back().hash = local_hash;
     input.local_tree.rows.back().size = 5;
-    input.local_tree.rows.push_back({.path = reserved_path,
-                                     .hash = kasumi::hasher::hash_string("reserved"),
-                                     .size = 8,
-                                     .mtime = now});
+    input.local_tree.rows.push_back(
+        {.path = reserved_path,
+         .hash = kasumi::hasher::hash_string("reserved"),
+         .size = 8,
+         .mtime = now});
     kasumi::finalize_snapshot(input.local_tree);
     input.storage.tree = input.base_tree;
     input.storage.tree.rows.back().hash = kasumi::hasher::hash_string("remote");
@@ -5186,18 +5190,23 @@ TEST(ReconciliationTest, UnicodeLocalConflictReservationUpdatesRelatedUpload) {
     EXPECT_TRUE(result->has_conflicts);
     const auto selected = kasumi::platform::path::from_utf8(
         logical_path + ".kasumiconflict_local.1");
-    const auto renames = kasumi::sync_plan_phase(result->plan, kasumi::Action::RenameLocal);
+    const auto renames =
+        kasumi::sync_plan_phase(result->plan, kasumi::Action::RenameLocal);
     ASSERT_EQ(renames.size(), 1U);
-    EXPECT_EQ(renames.front().path, kasumi::platform::path::from_utf8(logical_path));
+    EXPECT_EQ(renames.front().path,
+              kasumi::platform::path::from_utf8(logical_path));
     EXPECT_EQ(renames.front().alt_path, selected);
-    EXPECT_TRUE(std::ranges::any_of(result->plan.operations, [&](const auto& operation) {
-        return operation.action == kasumi::Action::Upload &&
-               operation.hash == kasumi::hash_hex(local_hash) &&
-               operation.path == selected;
-    }));
+    EXPECT_TRUE(std::ranges::any_of(
+        result->plan.operations, [&](const auto& operation) {
+            return operation.action == kasumi::Action::Upload &&
+                   operation.hash == kasumi::hash_hex(local_hash) &&
+                   operation.path == selected;
+        }));
     EXPECT_NE(kasumi::find_row(result->candidate_shared_tree,
-                              logical_path + ".kasumiconflict_local.1"), nullptr);
-    EXPECT_NE(kasumi::find_row(result->candidate_shared_tree, reserved_path), nullptr);
+                               logical_path + ".kasumiconflict_local.1"),
+              nullptr);
+    EXPECT_NE(kasumi::find_row(result->candidate_shared_tree, reserved_path),
+              nullptr);
     EXPECT_TRUE(kasumi::valid_snapshot(result->candidate_shared_tree, false));
 }
 
@@ -5212,19 +5221,18 @@ TEST(ReconciliationTest, UnicodeMissingObjectPathsPreserveRecoverySources) {
     const auto remote_hash = kasumi::hasher::hash_string("remote");
     input.local_tree.rows.push_back({.path = "千早愛音", .is_directory = true});
     input.local_tree.rows.push_back({.path = "高松灯", .is_directory = true});
-    input.local_tree.rows.push_back({.path = source_path,
-                                     .hash = missing_hash,
-                                     .size = 7});
+    input.local_tree.rows.push_back(
+        {.path = source_path, .hash = missing_hash, .size = 7});
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = input.local_tree;
     input.storage.tree = input.local_tree;
-    auto source = std::ranges::find(input.storage.tree.rows, source_path, &kasumi::NodeRow::path);
+    auto source = std::ranges::find(
+        input.storage.tree.rows, source_path, &kasumi::NodeRow::path);
     ASSERT_NE(source, input.storage.tree.rows.end());
     source->hash = remote_hash;
     source->size = 6;
-    input.storage.tree.rows.push_back({.path = missing_path,
-                                       .hash = missing_hash,
-                                       .size = 7});
+    input.storage.tree.rows.push_back(
+        {.path = missing_path, .hash = missing_hash, .size = 7});
     input.storage.object_identifiers.insert(kasumi::hash_hex(remote_hash));
     kasumi::finalize_snapshot(input.storage.tree);
 
@@ -5232,9 +5240,11 @@ TEST(ReconciliationTest, UnicodeMissingObjectPathsPreserveRecoverySources) {
     ASSERT_TRUE(repaired.has_value()) << repaired.error().detail;
     EXPECT_TRUE(repaired->requires_storage_repair);
     EXPECT_TRUE(repaired->unrecoverable_paths.empty());
-    const auto uploads = kasumi::sync_plan_phase(repaired->plan, kasumi::Action::Upload);
+    const auto uploads =
+        kasumi::sync_plan_phase(repaired->plan, kasumi::Action::Upload);
     ASSERT_EQ(uploads.size(), 1U);
-    EXPECT_EQ(uploads.front().path, kasumi::platform::path::from_utf8(source_path));
+    EXPECT_EQ(uploads.front().path,
+              kasumi::platform::path::from_utf8(source_path));
     EXPECT_EQ(uploads.front().hash, kasumi::hash_hex(missing_hash));
     EXPECT_FALSE(repaired->shared_tree_changed);
 
@@ -5680,8 +5690,7 @@ TEST(SyncCoordinatorTest, CompositionMismatchMatrixHasNoSideEffects) {
 }
 
 TEST(SyncCoordinatorTest, ConcurrentAddedFileDoesNotAbortSyncAndIsPreserved) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("concurrent-added-file");
+    auto workspace = kasumi::test::make_temp_workspace("concurrent-added-file");
     const auto profile = kasumi::test::workspace_path(workspace, "profile");
     const auto local = kasumi::test::workspace_path(workspace, "local");
     ASSERT_TRUE(std::filesystem::create_directories(profile));
@@ -5693,12 +5702,12 @@ TEST(SyncCoordinatorTest, ConcurrentAddedFileDoesNotAbortSyncAndIsPreserved) {
     ASSERT_TRUE(kasumi::transport::initialize(opened));
     kasumi::test::write_text(local / "file.txt", "file");
     auto input = empty_publication_input();
-    input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "file.txt",
-                        .hash = kasumi::hasher::hash_string("file"),
-                        .size = 4,
-                        .mtime = std::filesystem::last_write_time(local / "file.txt"),
-                        .is_directory = false});
+    input.local_tree.rows.push_back(kasumi::NodeRow{
+        .path = "file.txt",
+        .hash = kasumi::hasher::hash_string("file"),
+        .size = 4,
+        .mtime = std::filesystem::last_write_time(local / "file.txt"),
+        .is_directory = false});
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = kasumi::Snapshot{
         .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
@@ -5713,7 +5722,8 @@ TEST(SyncCoordinatorTest, ConcurrentAddedFileDoesNotAbortSyncAndIsPreserved) {
         runtime_data, opened, key, input, *expected);
     // Não deve abortar o sync!
     ASSERT_TRUE(execution.has_value()) << execution.error().detail;
-    // O arquivo novo deve continuar intacto no disco para ser sincronizado na próxima execução
+    // O arquivo novo deve continuar intacto no disco para ser sincronizado na
+    // próxima execução
     EXPECT_TRUE(std::filesystem::exists(local / "screenshot.png"));
     EXPECT_EQ(kasumi::test::read_text(local / "screenshot.png"), "image-bytes");
 }
@@ -5732,12 +5742,12 @@ TEST(SyncCoordinatorTest, ConcurrentModifiedFileFailsSync) {
     ASSERT_TRUE(kasumi::transport::initialize(opened));
     kasumi::test::write_text(local / "file.txt", "file");
     auto input = empty_publication_input();
-    input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "file.txt",
-                        .hash = kasumi::hasher::hash_string("file"),
-                        .size = 4,
-                        .mtime = std::filesystem::last_write_time(local / "file.txt"),
-                        .is_directory = false});
+    input.local_tree.rows.push_back(kasumi::NodeRow{
+        .path = "file.txt",
+        .hash = kasumi::hasher::hash_string("file"),
+        .size = 4,
+        .mtime = std::filesystem::last_write_time(local / "file.txt"),
+        .is_directory = false});
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = kasumi::Snapshot{
         .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
@@ -5751,10 +5761,12 @@ TEST(SyncCoordinatorTest, ConcurrentModifiedFileFailsSync) {
     const auto execution = kasumi::application::sync::coordinator::execute(
         runtime_data, opened, key, input, *expected);
     ASSERT_FALSE(execution.has_value());
-    EXPECT_EQ(execution.error().code,
-              kasumi::application::sync::coordinator::ErrorCode::MutationFailure);
+    EXPECT_EQ(
+        execution.error().code,
+        kasumi::application::sync::coordinator::ErrorCode::MutationFailure);
     EXPECT_NE(execution.error().detail.find("file.txt"), std::string::npos)
-        << "Detail should mention the modified file: " << execution.error().detail;
+        << "Detail should mention the modified file: "
+        << execution.error().detail;
 }
 
 TEST(SyncCoordinatorTest, AmbiguousPublicationWithReachableCommitRollsForward) {
@@ -6765,7 +6777,8 @@ TEST(SyncCoordinatorTest,
         EXPECT_EQ(first.error().code,
                   kasumi::application::sync::coordinator::ErrorCode::
                       WorkspaceFailure);
-        EXPECT_NE(first.error().detail.find("remover o espaço de trabalho da transação"),
+        EXPECT_NE(first.error().detail.find(
+                      "remover o espaço de trabalho da transação"),
                   std::string::npos);
         EXPECT_NE(first.error().detail.find(transaction_root.string()),
                   std::string::npos);
@@ -7778,8 +7791,7 @@ TEST(SyncCoordinatorTest, PruningFailurePreservesDatabaseCommittedPhase) {
 }
 
 TEST(SyncCoordinatorTest, UploadSubBatchChunkingAndSafeResumption) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("sub-batch-resumption");
+    auto workspace = kasumi::test::make_temp_workspace("sub-batch-resumption");
     const auto profile = kasumi::test::workspace_path(workspace, "profile");
     const auto local = kasumi::test::workspace_path(workspace, "local");
     ASSERT_TRUE(std::filesystem::create_directories(profile));
@@ -7801,7 +7813,8 @@ TEST(SyncCoordinatorTest, UploadSubBatchChunkingAndSafeResumption) {
             .mtime = std::filesystem::last_write_time(local / filename),
             .is_directory = false});
     }
-    input.local_tree.rows.front().mtime = std::filesystem::last_write_time(local);
+    input.local_tree.rows.front().mtime =
+        std::filesystem::last_write_time(local);
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = input.storage.tree;
 
@@ -7821,10 +7834,12 @@ TEST(SyncCoordinatorTest, UploadSubBatchChunkingAndSafeResumption) {
         runtime_data, storage, key, input, *result);
     ASSERT_FALSE(first_exec.has_value());
 
-    // Check that journal exists and sub-batch 1 (items 0..255) is checkpointed as Applied
+    // Check that journal exists and sub-batch 1 (items 0..255) is checkpointed
+    // as Applied
     const auto paths = kasumi::application::sync::journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    const auto journal_rec = kasumi::application::sync::journal::load(*paths, key);
+    const auto journal_rec =
+        kasumi::application::sync::journal::load(*paths, key);
     ASSERT_TRUE(journal_rec.has_value() && *journal_rec);
 
     std::size_t applied_count = 0;
@@ -7835,21 +7850,23 @@ TEST(SyncCoordinatorTest, UploadSubBatchChunkingAndSafeResumption) {
     }
     EXPECT_EQ(applied_count, 256);
 
-    // Call recover_if_needed: should recognize progress and declare ResumableTransaction
+    // Call recover_if_needed: should recognize progress and declare
+    // ResumableTransaction
     const auto recovered =
         kasumi::application::sync::coordinator::recover_if_needed(
             runtime_data, storage, key);
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::ResumableTransaction);
+    EXPECT_EQ(*recovered,
+              kasumi::application::sync::coordinator::RecoveryResult::
+                  ResumableTransaction);
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
 
     // Reset failure and reset content put counter
     state->fail_content_put_at = 0;
     state->content_put_count = 0;
 
-    // Second execution: must resume, elide the 256 already-applied uploads, and upload only 4 files!
+    // Second execution: must resume, elide the 256 already-applied uploads, and
+    // upload only 4 files!
     const auto second_exec = kasumi::application::sync::coordinator::execute(
         runtime_data, storage, key, input, *result);
     ASSERT_TRUE(second_exec.has_value()) << second_exec.error().detail;

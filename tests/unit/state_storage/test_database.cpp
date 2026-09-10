@@ -831,8 +831,8 @@ TEST(StateStorageDatabaseTest, NewReadWriteConnectionAppliesSynchronousNormal) {
     {
         auto raw_conn = open_database(database_path, SQLITE_OPEN_READWRITE);
         sqlite3_stmt* stmt = nullptr;
-        ASSERT_EQ(sqlite3_prepare_v2(raw_conn.get(), "PRAGMA synchronous", -1,
-                                     &stmt, nullptr),
+        ASSERT_EQ(sqlite3_prepare_v2(
+                      raw_conn.get(), "PRAGMA synchronous", -1, &stmt, nullptr),
                   SQLITE_OK);
         ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
         const auto raw_sync = sqlite3_column_int(stmt, 0);
@@ -840,14 +840,15 @@ TEST(StateStorageDatabaseTest, NewReadWriteConnectionAppliesSynchronousNormal) {
         EXPECT_EQ(raw_sync, 2);
     }
 
-    // A newly opened connection via StateStorage policy helper applies synchronous=NORMAL (1)
+    // A newly opened connection via StateStorage policy helper applies
+    // synchronous=NORMAL (1)
     auto state_conn =
         kasumi::state_storage::detail::open_state_database_readwrite(
             database_path);
     ASSERT_TRUE(state_conn.has_value());
     sqlite3_stmt* stmt = nullptr;
-    ASSERT_EQ(sqlite3_prepare_v2(state_conn->get(), "PRAGMA synchronous", -1,
-                                 &stmt, nullptr),
+    ASSERT_EQ(sqlite3_prepare_v2(
+                  state_conn->get(), "PRAGMA synchronous", -1, &stmt, nullptr),
               SQLITE_OK);
     ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
     const auto configured_sync = sqlite3_column_int(stmt, 0);
@@ -868,8 +869,8 @@ TEST(StateStorageDatabaseTest, ReadOnlyConnectionDoesNotExecuteWritePragmas) {
     ASSERT_TRUE(readonly_conn.has_value());
 
     sqlite3_stmt* stmt = nullptr;
-    ASSERT_EQ(sqlite3_prepare_v2(readonly_conn->get(), "SELECT 1", -1, &stmt,
-                                 nullptr),
+    ASSERT_EQ(sqlite3_prepare_v2(
+                  readonly_conn->get(), "SELECT 1", -1, &stmt, nullptr),
               SQLITE_OK);
     ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
     EXPECT_EQ(sqlite3_column_int(stmt, 0), 1);
@@ -877,7 +878,9 @@ TEST(StateStorageDatabaseTest, ReadOnlyConnectionDoesNotExecuteWritePragmas) {
 
     // Read-only connection rejects schema modification
     ASSERT_NE(sqlite3_exec(readonly_conn->get(),
-                           "CREATE TABLE test_write (x INT)", nullptr, nullptr,
+                           "CREATE TABLE test_write (x INT)",
+                           nullptr,
+                           nullptr,
                            nullptr),
               SQLITE_OK);
 }
@@ -914,9 +917,8 @@ TEST(StateStorageDatabaseTest, UnicodePathRoundTrip) {
     const auto node_rows =
         query_text(database_path, "SELECT path FROM nodes ORDER BY path");
     ASSERT_EQ(node_rows.size(), snapshot.rows.size());
-    EXPECT_NE(
-        std::find(node_rows.begin(), node_rows.end(), logical_path),
-        node_rows.end());
+    EXPECT_NE(std::find(node_rows.begin(), node_rows.end(), logical_path),
+              node_rows.end());
 
     const auto commit_rows = query_text(
         database_path, "SELECT value FROM metadata WHERE key='commit_id'");

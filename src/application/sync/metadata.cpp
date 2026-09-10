@@ -53,7 +53,9 @@ metadata_restore_paths(const transaction::Record& record,
             case Action::RenameLocal:
                 add_path_and_ancestors(paths, path, true);
                 add_path_and_ancestors(
-                    paths, platform::path::to_logical_utf8(operation.alt_path), true);
+                    paths,
+                    platform::path::to_logical_utf8(operation.alt_path),
+                    true);
                 break;
             case Action::Upload:
             case Action::CreateRemoteDirectory:

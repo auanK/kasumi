@@ -83,15 +83,20 @@ inventory_impl(transport::Transport& storage,
                std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                std::optional<std::span<const std::string>> identifiers,
                const ReachabilityInventory& history_inventory,
-               const std::filesystem::path& workspace_root) {
+               const std::filesystem::path& workspace_root,
+               bool audit_payloads) {
     try {
         if (!transport::valid(storage)) {
             return std::unexpected(
                 detail::error(ErrorCode::InvalidInput, "invalid transport"));
         }
-        auto temporary = detail::make_workspace(workspace_root);
-        if (!temporary) {
-            return std::unexpected(temporary.error());
+        detail::TemporaryWorkspace temporary{nullptr, detail::remove_workspace};
+        if (audit_payloads) {
+            auto ws = detail::make_workspace(workspace_root);
+            if (!ws) {
+                return std::unexpected(ws.error());
+            }
+            temporary = std::move(*ws);
         }
 
         ReferenceMap references;
@@ -181,17 +186,21 @@ inventory_impl(transport::Transport& storage,
             const auto found = physical.find(content_id);
             ContentObjectState state = ContentObjectState::Missing;
             if (found != physical.end()) {
-                auto audited = audit_object(storage,
-                                            key,
-                                            content_id,
-                                            content.plaintext_hash,
-                                            content.references.front().size,
-                                            (*temporary)->root,
-                                            sequence++);
-                if (!audited) {
-                    return std::unexpected(audited.error());
+                if (audit_payloads) {
+                    auto audited = audit_object(storage,
+                                                key,
+                                                content_id,
+                                                content.plaintext_hash,
+                                                content.references.front().size,
+                                                temporary->root,
+                                                sequence++);
+                    if (!audited) {
+                        return std::unexpected(audited.error());
+                    }
+                    state = *audited;
+                } else {
+                    state = ContentObjectState::Present;
                 }
-                state = *audited;
             }
             result.reachable_content_ids.push_back(content_id);
             if (state == ContentObjectState::Missing) {
@@ -211,27 +220,29 @@ inventory_impl(transport::Transport& storage,
             if (references.contains(content_id)) {
                 continue;
             }
-            // An orphan does not authorize deletion; GC must revalidate reachability
-            // and the object.
             result.orphan_content_ids.push_back(content_id);
-            auto audited = audit_object(storage,
-                                        key,
-                                        content_id,
-                                        std::nullopt,
-                                        std::nullopt,
-                                        (*temporary)->root,
-                                        sequence++);
-            if (!audited) {
-                return std::unexpected(audited.error());
+            ContentObjectState state = ContentObjectState::Present;
+            if (audit_payloads) {
+                auto audited = audit_object(storage,
+                                            key,
+                                            content_id,
+                                            std::nullopt,
+                                            std::nullopt,
+                                            temporary->root,
+                                            sequence++);
+                if (!audited) {
+                    return std::unexpected(audited.error());
+                }
+                state = *audited;
+                if (state == ContentObjectState::Corrupt) {
+                    result.corrupt_content_ids.push_back(content_id);
+                }
             }
             entries.emplace(content_id,
                             ContentEntry{.content_id = content_id,
-                                         .state = *audited,
+                                         .state = state,
                                          .reachable = false,
                                          .references = {}});
-            if (*audited == ContentObjectState::Corrupt) {
-                result.corrupt_content_ids.push_back(content_id);
-            }
         }
 
         std::ranges::sort(unknown);
@@ -256,9 +267,14 @@ ContentReachabilityResult inventory_content_reachability(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const ReachabilityInventory& history_inventory,
-    const std::filesystem::path& workspace_root) {
-    return inventory_impl(
-        storage, key, std::nullopt, history_inventory, workspace_root);
+    const std::filesystem::path& workspace_root,
+    bool audit_payloads) {
+    return inventory_impl(storage,
+                          key,
+                          std::nullopt,
+                          history_inventory,
+                          workspace_root,
+                          audit_payloads);
 }
 
 ContentReachabilityResult inventory_content_reachability(
@@ -266,9 +282,14 @@ ContentReachabilityResult inventory_content_reachability(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     std::span<const std::string> identifiers,
     const ReachabilityInventory& history_inventory,
-    const std::filesystem::path& workspace_root) {
-    return inventory_impl(
-        storage, key, identifiers, history_inventory, workspace_root);
+    const std::filesystem::path& workspace_root,
+    bool audit_payloads) {
+    return inventory_impl(storage,
+                          key,
+                          identifiers,
+                          history_inventory,
+                          workspace_root,
+                          audit_payloads);
 }
 
 } // namespace kasumi::application::history_storage

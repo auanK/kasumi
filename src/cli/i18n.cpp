@@ -1,14 +1,14 @@
 #include "cli/i18n.hpp"
-#include "cli/i18n_embedded.hpp"
-#include "application/environment.hpp"
 
-#include <nlohmann/json.hpp>
+#include "application/environment.hpp"
+#include "cli/i18n_embedded.hpp"
 
 #include <array>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -143,7 +143,8 @@ constexpr KeyMapping KEY_MAPPINGS[] = {
     {Key::WizardPromptLocalPath, "wizard.prompt_local_path"},
     {Key::WizardPromptRemotePath, "wizard.prompt_remote_path"},
     {Key::WizardLocalPathMustBeAbsolute, "wizard.local_path_must_be_absolute"},
-    {Key::WizardRemotePathMustBeAbsolute, "wizard.remote_path_must_be_absolute"},
+    {Key::WizardRemotePathMustBeAbsolute,
+     "wizard.remote_path_must_be_absolute"},
     {Key::WizardProfileCreated, "wizard.profile_created"},
     {Key::WizardProfileNotFound, "wizard.profile_not_found"},
     {Key::WizardPromptProfileToDelete, "wizard.prompt_profile_to_delete"},
@@ -178,8 +179,8 @@ void flatten_json(const nlohmann::json& j,
     }
 }
 
-std::unordered_map<std::string, std::string> parse_catalog(
-    std::string_view json_str) {
+std::unordered_map<std::string, std::string>
+parse_catalog(std::string_view json_str) {
     std::unordered_map<std::string, std::string> map;
     try {
         const auto parsed = nlohmann::json::parse(json_str);
@@ -284,7 +285,8 @@ void set_language(std::string_view code) {
     std::string lower_code;
     lower_code.reserve(code.size());
     for (char c : code) {
-        lower_code.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        lower_code.push_back(
+            static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     }
 
     g_current_language_code = std::string(code);
@@ -319,7 +321,8 @@ Language parse_language(std::string_view code) noexcept {
     std::string lower;
     lower.reserve(code.size());
     for (char c : code) {
-        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        lower.push_back(
+            static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     }
     if (lower == "pt" || lower == "pt-br" || lower == "pt_br" ||
         lower == "portuguese") {
@@ -366,8 +369,8 @@ bool load_custom_catalog(std::string_view json_content) {
     return true;
 }
 
-std::vector<std::string> extract_language_argument(
-    int argc, char* argv[]) noexcept {
+std::vector<std::string> extract_language_argument(int argc,
+                                                   char* argv[]) noexcept {
     std::vector<std::string> sanitized;
     sanitized.reserve(static_cast<std::size_t>(argc));
 

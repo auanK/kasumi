@@ -1,7 +1,7 @@
 #include "state_storage/database.hpp"
 
-#include "platform/path.hpp"
 #include "core/history.hpp"
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "sqlite/sqlite.hpp"
@@ -391,19 +391,19 @@ std::expected<Snapshot, std::string> load_tree(sqlite3* database) {
             const auto raw_nanos = sqlite::integer(query, 3);
             std::filesystem::file_time_type mtime{};
             if (raw_nanos != 0) {
-                const auto sys_dur =
-                    std::chrono::duration_cast<std::chrono::system_clock::duration>(
-                        std::chrono::nanoseconds{raw_nanos});
+                const auto sys_dur = std::chrono::duration_cast<
+                    std::chrono::system_clock::duration>(
+                    std::chrono::nanoseconds{raw_nanos});
                 const auto sys_tp =
                     std::chrono::time_point<std::chrono::system_clock>{sys_dur};
-                mtime = std::chrono::clock_cast<std::chrono::file_clock>(sys_tp);
+                mtime =
+                    std::chrono::clock_cast<std::chrono::file_clock>(sys_tp);
             }
-            snapshot.rows.push_back(
-                {.path = sqlite::text(query, 0),
-                 .hash = *hash,
-                 .size = static_cast<std::uint64_t>(size),
-                 .mtime = mtime,
-                 .is_directory = is_directory == 1});
+            snapshot.rows.push_back({.path = sqlite::text(query, 0),
+                                     .hash = *hash,
+                                     .size = static_cast<std::uint64_t>(size),
+                                     .mtime = mtime,
+                                     .is_directory = is_directory == 1});
         }
         std::ranges::sort(snapshot.rows, path_less, &NodeRow::path);
         return snapshot;
@@ -560,7 +560,7 @@ bool initialize(const std::filesystem::path& database_path) {
             return false;
         }
         auto opened = detail::open_state_database_readwrite(database_path,
-                                                             /*create=*/true);
+                                                            /*create=*/true);
         if (!opened) {
             return false;
         }
@@ -730,8 +730,9 @@ load_state(const std::filesystem::path& database_path) {
         platform::perf_trace::finish("state db load wall", state_trace);
         return state;
     } catch (const std::exception& exception) {
-        return std::unexpected(std::string{"não foi possível carregar state.db: "} +
-                               exception.what());
+        return std::unexpected(
+            std::string{"não foi possível carregar state.db: "} +
+            exception.what());
     }
 }
 
@@ -841,8 +842,9 @@ load_file_cache(const std::filesystem::path& database_path) {
         platform::perf_trace::count("file cache rows loaded", result.size());
         return result;
     } catch (const std::exception& exception) {
-        return std::unexpected(std::string{"não foi possível carregar o cache de arquivos: "} +
-                               exception.what());
+        return std::unexpected(
+            std::string{"não foi possível carregar o cache de arquivos: "} +
+            exception.what());
     }
 }
 
@@ -986,9 +988,9 @@ load_observation_checkpoint(const std::filesystem::path& database_path) {
         platform::perf_trace::finish("checkpoint load wall", checkpoint_trace);
         return loaded;
     } catch (const std::exception& exception) {
-        return std::unexpected(
-            std::string{"não foi possível carregar o ponto de controle de observação: "} +
-            exception.what());
+        return std::unexpected(std::string{"não foi possível carregar o ponto "
+                                           "de controle de observação: "} +
+                               exception.what());
     }
 }
 

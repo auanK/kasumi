@@ -84,7 +84,8 @@ TEST(RuntimeProfileTest, ProfilesRoundTripAndMissingProfileAreReported) {
          kasumi::test::workspace_path(workspace, "local one"),
          "remote one:"},
         {"two",
-         kasumi::test::workspace_path(workspace, kasumi::platform::path::from_utf8("local-é")),
+         kasumi::test::workspace_path(
+             workspace, kasumi::platform::path::from_utf8("local-é")),
          "relative/path"}};
     ASSERT_TRUE(kasumi::runtime::save_profiles(config, profiles));
     const auto loaded = kasumi::runtime::load_profiles(config);
@@ -92,7 +93,8 @@ TEST(RuntimeProfileTest, ProfilesRoundTripAndMissingProfileAreReported) {
     ASSERT_EQ(loaded->size(), 2U);
     EXPECT_EQ(loaded->at(0).name, "one");
     EXPECT_EQ(loaded->at(1).local_dir,
-              kasumi::test::workspace_path(workspace, kasumi::platform::path::from_utf8("local-é")));
+              kasumi::test::workspace_path(
+                  workspace, kasumi::platform::path::from_utf8("local-é")));
     EXPECT_TRUE(kasumi::runtime::load_profile(config, "one"));
     const auto absent = kasumi::runtime::load_profile(config, "missing");
     ASSERT_FALSE(absent.has_value());
@@ -106,7 +108,8 @@ TEST(RuntimeProfileTest, UnicodeFilesystemPathsSurvivePersistence) {
     const auto directory = root / path::from_utf8("configuração-高松灯🌸");
     std::filesystem::create_directories(directory);
     const auto config = directory / path::from_utf8("千早愛音💝.toml");
-    const auto local = root / path::from_utf8("pasta-日本/usuário-☁/𝑬𝒎𝒊𝒍𝒊𝒂/𓆩🌸𓆪");
+    const auto local =
+        root / path::from_utf8("pasta-日本/usuário-☁/𝑬𝒎𝒊𝒍𝒊𝒂/𓆩🌸𓆪");
     const auto remote = path::to_utf8(root / path::from_utf8("Backup/高松灯"));
     const std::vector<kasumi::runtime::ProfileData> profiles{
         {.name = "unicode", .local_dir = local, .remote_dir = remote}};
@@ -123,7 +126,8 @@ TEST(RuntimeProfileTest, UnicodeFilesystemPathsSurvivePersistence) {
     ASSERT_TRUE(reloaded) << reloaded.error().detail;
     EXPECT_EQ(reloaded->local_dir, local);
     EXPECT_EQ(std::distance(std::filesystem::directory_iterator(directory),
-                            std::filesystem::directory_iterator{}), 1);
+                            std::filesystem::directory_iterator{}),
+              1);
 }
 
 TEST(RuntimeProfileTest, ConfigErrorsAndEmptyProfilesHaveSpecificCodes) {
@@ -157,11 +161,10 @@ TEST(RuntimeProfileTest, RetentionFieldsAreRequiredAndRejectInvalidValues) {
     auto workspace =
         kasumi::test::make_temp_workspace("runtime-retention-policy");
     const auto config = kasumi::test::workspace_path(workspace, "config.toml");
-    const auto prefix =
-        "[profiles.demo]\nlocal_dir = '" +
-        kasumi::platform::path::to_utf8(
-            kasumi::test::workspace_path(workspace, "local")) +
-        "'\nremote_dir = 'remote:root'\n";
+    const auto prefix = "[profiles.demo]\nlocal_dir = '" +
+                        kasumi::platform::path::to_utf8(
+                            kasumi::test::workspace_path(workspace, "local")) +
+                        "'\nremote_dir = 'remote:root'\n";
 
     kasumi::test::write_text(config, prefix);
     const auto missing = kasumi::runtime::load_profile(config, "demo");
@@ -229,8 +232,7 @@ TEST(RuntimePathsTest, DefaultPathsRestoreEnvironmentOverrides) {
 
 #if defined(_WIN32)
 TEST(RuntimePathsTest, AppDataWithUnicodeCharactersIsPreserved) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("runtime-env-unicode");
+    auto workspace = kasumi::test::make_temp_workspace("runtime-env-unicode");
     const auto unicode_appdata =
         kasumi::test::workspace_root(workspace) /
         kasumi::platform::path::from_utf8("usuário-João-日本");
@@ -242,8 +244,7 @@ TEST(RuntimePathsTest, AppDataWithUnicodeCharactersIsPreserved) {
         EXPECT_EQ(paths.app_data_dir, unicode_appdata / "kasumi");
         EXPECT_EQ(paths.config_path,
                   unicode_appdata / "kasumi" / "config.toml");
-        EXPECT_EQ(paths.profiles_dir,
-                  unicode_appdata / "kasumi" / "profiles");
+        EXPECT_EQ(paths.profiles_dir, unicode_appdata / "kasumi" / "profiles");
     }
 }
 

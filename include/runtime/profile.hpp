@@ -24,7 +24,8 @@ struct ProfileData {
     std::uint32_t min_history_age_hours = 6;
 };
 
-// Accepts alphanumeric characters, '-', and '_', excluding empty, ".", and "..".
+// Accepts alphanumeric characters, '-', and '_', excluding empty, ".", and
+// "..".
 bool is_valid_profile_name(std::string_view name);
 
 // Loads a profile by name.

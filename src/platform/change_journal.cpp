@@ -279,7 +279,8 @@ query(const std::filesystem::path& root_path, HANDLE volume) {
                                native_error(GetLastError()));
     if (returned < offsetof(JournalDataV1, max) + sizeof(USN) ||
         result.root == 0 || result.volume == 0 || result.root_path.empty())
-        return std::unexpected("a consulta ao USN journal retornou dados inválidos");
+        return std::unexpected(
+            "a consulta ao USN journal retornou dados inválidos");
     return result;
 }
 
@@ -669,7 +670,8 @@ capture_change_journal_checkpoint(const std::filesystem::path& local_root) {
 #else
     const auto volume = open_volume(local_root);
     if (!valid_handle(volume))
-        return std::unexpected("não foi possível abrir o volume local para o USN journal");
+        return std::unexpected(
+            "não foi possível abrir o volume local para o USN journal");
     auto journal = query(local_root, volume);
     close_handle(volume);
     if (!journal)
@@ -702,7 +704,8 @@ probe_change_journal(const std::filesystem::path& local_root,
         return std::unexpected("o ponto de controle do USN é inválido");
     const auto volume = open_volume(local_root);
     if (!valid_handle(volume))
-        return std::unexpected("não foi possível abrir o volume local para o USN journal");
+        return std::unexpected(
+            "não foi possível abrir o volume local para o USN journal");
     auto journal = query(local_root, volume);
     if (!journal) {
         close_handle(volume);
@@ -749,7 +752,8 @@ probe_change_journal(const std::filesystem::path& local_root,
         return std::unexpected("o ponto de controle do USN é inválido");
     const auto volume = open_volume(local_root);
     if (!valid_handle(volume))
-        return std::unexpected("não foi possível abrir o volume local para o USN journal");
+        return std::unexpected(
+            "não foi possível abrir o volume local para o USN journal");
     auto journal = query(local_root, volume);
     if (!journal) {
         close_handle(volume);
@@ -786,7 +790,8 @@ probe_change_journal_delta(const std::filesystem::path& local_root,
         return std::unexpected("o ponto de controle de state.db é inválido");
     const auto volume = open_volume(local_root);
     if (!valid_handle(volume))
-        return std::unexpected("não foi possível abrir o volume local para o USN journal");
+        return std::unexpected(
+            "não foi possível abrir o volume local para o USN journal");
     auto journal = query(local_root, volume);
     if (!journal) {
         close_handle(volume);
@@ -822,7 +827,8 @@ probe_change_journal_diagnostic(const std::filesystem::path& local_root,
         return std::unexpected("o ponto de controle do USN é inválido");
     const auto volume = open_volume(local_root);
     if (!valid_handle(volume))
-        return std::unexpected("não foi possível abrir o volume local para o USN journal");
+        return std::unexpected(
+            "não foi possível abrir o volume local para o USN journal");
     auto journal = query(local_root, volume);
     if (!journal) {
         close_handle(volume);

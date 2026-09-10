@@ -2049,9 +2049,9 @@ TEST(ApplicationInspectionTest,
             .value();
     publish(fixture, commit);
     const auto content_id = put_content(fixture, "conteúdo remoto");
-    const auto destination = kasumi::test::workspace_root(workspace) /
-                             kasumi::platform::path::from_utf8(
-                                 "downloads/relatório final.txt");
+    const auto destination =
+        kasumi::test::workspace_root(workspace) /
+        kasumi::platform::path::from_utf8("downloads/relatório final.txt");
     std::filesystem::create_directories(destination.parent_path());
     kasumi::test::write_text(destination, "conteúdo anterior");
     const auto config =
@@ -2098,10 +2098,11 @@ TEST(ApplicationInspectionTest, RemoteGetInstallsUnicodeDestination) {
     ASSERT_TRUE(commit);
     publish(fixture, *commit);
     const auto content_id = put_content(fixture, "unicode remote content");
-    const auto destination = (kasumi::test::workspace_root(workspace) /
-                              kasumi::platform::path::from_utf8(
-                                  "downloads/高松灯/千早愛音🌸-𝑬𝒎𝒊𝒍𝒊𝒂-𓆩🌸𓆪.txt"))
-                                 .lexically_normal();
+    const auto destination =
+        (kasumi::test::workspace_root(workspace) /
+         kasumi::platform::path::from_utf8(
+             "downloads/高松灯/千早愛音🌸-𝑬𝒎𝒊𝒍𝒊𝒂-𓆩🌸𓆪.txt"))
+            .lexically_normal();
     kasumi::test::write_text(destination, "previous content");
     const auto remote_before = kasumi::test::snapshot_tree(remote_root);
 
@@ -2129,8 +2130,7 @@ TEST(ApplicationInspectionTest, RemoteGetInstallsUnicodeDestination) {
     const auto installed =
         kasumi::test::snapshot_tree(destination.parent_path());
     ASSERT_EQ(installed.size(), 1U);
-    EXPECT_EQ(installed.front().relative_path,
-              "千早愛音🌸-𝑬𝒎𝒊𝒍𝒊𝒂-𓆩🌸𓆪.txt");
+    EXPECT_EQ(installed.front().relative_path, "千早愛音🌸-𝑬𝒎𝒊𝒍𝒊𝒂-𓆩🌸𓆪.txt");
 }
 
 TEST(
@@ -2149,11 +2149,12 @@ TEST(
     kasumi::test::write_text(destination, "preservar");
     const auto read = [&](std::string path) {
         return kasumi::application::read_remote_file(
-            {InspectionRequest{.operation = InspectionOperation::RemoteGet,
-                               .profile_name = "demo",
-                               .logical_path = std::move(path),
-                               .destination_path =
-                                   kasumi::platform::path::to_utf8(destination)},
+            {InspectionRequest{
+                 .operation = InspectionOperation::RemoteGet,
+                 .profile_name = "demo",
+                 .logical_path = std::move(path),
+                 .destination_path =
+                     kasumi::platform::path::to_utf8(destination)},
              Credentials{MasterKeyHex{key_hex()}},
              ExecutionEnvironment{
                  kasumi::test::workspace_path(workspace, "app")}});

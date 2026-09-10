@@ -35,7 +35,8 @@ kasumi::Snapshot make_custom_snapshot(int i) {
                     .path = "",
                     .hash = {},
                     .size = 0,
-                    .mtime = canonical_time(static_cast<std::int64_t>(i) * 1'000'000),
+                    .mtime = canonical_time(static_cast<std::int64_t>(i) *
+                                            1'000'000),
                     .is_directory = true,
                 },
             },
@@ -177,10 +178,11 @@ TEST(HistoryTest, BootstrapDeterminism) {
 
     EXPECT_EQ(
         *s1,
-        hex_bytes("4b434f4d0200000000000000000000000000000000000000004500000000000000"
-                  "4b415355000000000000000000000000af1349b9f5f9a1a6a"
-                  "0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
-                  "000000000000000000000000000000000100000000"));
+        hex_bytes(
+            "4b434f4d0200000000000000000000000000000000000000004500000000000000"
+            "4b415355000000000000000000000000af1349b9f5f9a1a6a"
+            "0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+            "000000000000000000000000000000000100000000"));
 
     auto id1 = compute_id(*b1);
     auto id2 = compute_id(*b2);
@@ -232,40 +234,60 @@ TEST(HistoryTest, CommitCodecGoldenVectors) {
            "37969995ac87eae8c95862a4a8a4a94f00dd5092bf7be19df594af07bcff4ca1");
 #if defined(_MSC_VER)
     expect(*with_file,
-           "4b434f4d02000000000000000000000000000000000000000087000000000000004b41535500000000000000000000000035e462ba5dde50"
-           "0fdaa4273bd553d2a3eb89984e51e322fdcb2465247449f69705000000000000000000000000000000010100000009000000616c7068612e"
-           "747874644a9bc57c6063e2ba4028fa73ed585170ae7db8ac7723d32be49c021a0225f50500000000000000bccc5b07000000000000000000",
+           "4b434f4d02000000000000000000000000000000000000000087000000000000004"
+           "b41535500000000000000000000000035e462ba5dde50"
+           "0fdaa4273bd553d2a3eb89984e51e322fdcb2465247449f69705000000000000000"
+           "000000000000000010100000009000000616c7068612e"
+           "747874644a9bc57c6063e2ba4028fa73ed585170ae7db8ac7723d32be49c021a022"
+           "5f50500000000000000bccc5b07000000000000000000",
            "cad3bfbbd81e9c37b388b3258417d41a002f8d14d8f743156f47e7f7cd88c410");
     expect(*one_parent,
-           "4b434f4d02010000000000000000000000000000000100000037969995ac87eae8c95862a4a8a4a94f00dd5092bf7be19df594af07bcff4c"
-           "a186000000000000004b4153550100000000000000000000004bc2873777530dc7556a9788d558d522e1e15ff905766a1fc3d9e95775d2b7"
-           "5104000000000000000000000000000000010100000008000000626574612e747874c607f0e66519ff41d34c1c8e2e312228c3cc358c0a5b"
+           "4b434f4d02010000000000000000000000000000000100000037969995ac87eae8c"
+           "95862a4a8a4a94f00dd5092bf7be19df594af07bcff4c"
+           "a186000000000000004b4153550100000000000000000000004bc2873777530dc75"
+           "56a9788d558d522e1e15ff905766a1fc3d9e95775d2b7"
+           "5104000000000000000000000000000000010100000008000000626574612e74787"
+           "4c607f0e66519ff41d34c1c8e2e312228c3cc358c0a5b"
            "75cef4b22cf8ed3875db0400000000000000bcad510d000000000000000000",
            "9fd9dac7ae04588e0dbee71f78e426b88d44562e68d0f030d21290bb304fb2a1");
     expect(*multiple_parent,
-           "4b434f4d02090000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000"
-           "00111111111111111111111111111111111111111111111111111111111111111187000000000000004b4153550900000000000000000000"
-           "00b76e453e2e95d7e770a5760e46ef965d3373132bd225aa93c5dce717219ad4000500000000000000000000000000000001010000000900"
-           "000067616d6d612e747874039b3fa6c7a5987c410ffe6d58ab194dfc98840263841bc7c949bdd4497fd5760500000000000000bc8e471300"
+           "4b434f4d02090000000000000000000000000000000200000000000000000000000"
+           "000000000000000000000000000000000000000000000"
+           "0011111111111111111111111111111111111111111111111111111111111111118"
+           "7000000000000004b4153550900000000000000000000"
+           "00b76e453e2e95d7e770a5760e46ef965d3373132bd225aa93c5dce717219ad4000"
+           "500000000000000000000000000000001010000000900"
+           "000067616d6d612e747874039b3fa6c7a5987c410ffe6d58ab194dfc98840263841"
+           "bc7c949bdd4497fd5760500000000000000bc8e471300"
            "0000000000000000",
            "4dc7b87fb49ec1f1420b31d0ae8036cb9bb797ee1c160c13d4d5dd89abe6c662");
 #else
     expect(*with_file,
-           "4b434f4d02000000000000000000000000000000000000000087000000000000004b41535500000000000000000000000035e462ba5dde50"
-           "0fdaa4273bd553d2a3eb89984e51e322fdcb2465247449f69705000000000000000000000000000000010100000009000000616c7068612e"
-           "747874644a9bc57c6063e2ba4028fa73ed585170ae7db8ac7723d32be49c021a0225f5050000000000000015cd5b07000000000000000000",
+           "4b434f4d02000000000000000000000000000000000000000087000000000000004"
+           "b41535500000000000000000000000035e462ba5dde50"
+           "0fdaa4273bd553d2a3eb89984e51e322fdcb2465247449f69705000000000000000"
+           "000000000000000010100000009000000616c7068612e"
+           "747874644a9bc57c6063e2ba4028fa73ed585170ae7db8ac7723d32be49c021a022"
+           "5f5050000000000000015cd5b07000000000000000000",
            "2734919a604e32e8267013f8e2fbcf38c6934d1b37b633a4e47dee2af09f1860");
     expect(*one_parent,
-           "4b434f4d02010000000000000000000000000000000100000037969995ac87eae8c95862a4a8a4a94f00dd5092bf7be19df594af07bcff4c"
-           "a186000000000000004b4153550100000000000000000000004bc2873777530dc7556a9788d558d522e1e15ff905766a1fc3d9e95775d2b7"
-           "5104000000000000000000000000000000010100000008000000626574612e747874c607f0e66519ff41d34c1c8e2e312228c3cc358c0a5b"
+           "4b434f4d02010000000000000000000000000000000100000037969995ac87eae8c"
+           "95862a4a8a4a94f00dd5092bf7be19df594af07bcff4c"
+           "a186000000000000004b4153550100000000000000000000004bc2873777530dc75"
+           "56a9788d558d522e1e15ff905766a1fc3d9e95775d2b7"
+           "5104000000000000000000000000000000010100000008000000626574612e74787"
+           "4c607f0e66519ff41d34c1c8e2e312228c3cc358c0a5b"
            "75cef4b22cf8ed3875db040000000000000015ae510d000000000000000000",
            "1510b858cccd8f47b1b9cdc97f122e0f060f1a7f74482eee779a55ab772417e1");
     expect(*multiple_parent,
-           "4b434f4d02090000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000"
-           "00111111111111111111111111111111111111111111111111111111111111111187000000000000004b4153550900000000000000000000"
-           "00b76e453e2e95d7e770a5760e46ef965d3373132bd225aa93c5dce717219ad4000500000000000000000000000000000001010000000900"
-           "000067616d6d612e747874039b3fa6c7a5987c410ffe6d58ab194dfc98840263841bc7c949bdd4497fd5760500000000000000158f471300"
+           "4b434f4d02090000000000000000000000000000000200000000000000000000000"
+           "000000000000000000000000000000000000000000000"
+           "0011111111111111111111111111111111111111111111111111111111111111118"
+           "7000000000000004b4153550900000000000000000000"
+           "00b76e453e2e95d7e770a5760e46ef965d3373132bd225aa93c5dce717219ad4000"
+           "500000000000000000000000000000001010000000900"
+           "000067616d6d612e747874039b3fa6c7a5987c410ffe6d58ab194dfc98840263841"
+           "bc7c949bdd4497fd5760500000000000000158f471300"
            "0000000000000000",
            "16baad7c4a64234d153659f4357ec1c8d5472c54a5d6f92773c1a1aff7226db8");
 #endif
@@ -338,8 +360,7 @@ TEST(HistoryTest, CanonicalTimestampRoundTripsWithoutChangingBytes) {
     EXPECT_EQ(*reencoded, *encoded);
     EXPECT_EQ(decoded->created_at, 42);
     ASSERT_EQ(decoded->tree.rows.size(), commit->tree.rows.size());
-    EXPECT_EQ(decoded->tree.rows.back().mtime,
-              commit->tree.rows.back().mtime);
+    EXPECT_EQ(decoded->tree.rows.back().mtime, commit->tree.rows.back().mtime);
 }
 
 TEST(HistoryTest, CodecErrors) {
@@ -1047,8 +1068,7 @@ TEST(HistoryTest, Resolve33LogicalHeadsFailsClosed) {
     const auto result = resolve(loaded, marked);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ErrorCode::LimitExceeded);
-    EXPECT_NE(result.error().detail.find("heads lógicas"),
-              std::string::npos);
+    EXPECT_NE(result.error().detail.find("heads lógicas"), std::string::npos);
     EXPECT_NE(result.error().detail.find("merge"), std::string::npos);
     EXPECT_NE(result.error().detail.find("limite"), std::string::npos);
 }
@@ -1083,13 +1103,13 @@ std::vector<std::uint8_t>
 forge_commit_with_component(std::string_view component_name) {
     std::vector<std::uint8_t> tree;
     tree.insert(tree.end(), {'K', 'A', 'S', 'U'});
-    tree.resize(tree.size() + 8, 0); // height: 0
-    tree.resize(tree.size() + 4, 0); // root name len: 0
+    tree.resize(tree.size() + 8, 0);  // height: 0
+    tree.resize(tree.size() + 4, 0);  // root name len: 0
     tree.resize(tree.size() + 32, 0); // root hash
-    tree.resize(tree.size() + 8, 0); // root size
-    tree.resize(tree.size() + 8, 0); // root nanos
-    tree.push_back(1); // root is_directory
-    tree.push_back(1); // root children count = 1
+    tree.resize(tree.size() + 8, 0);  // root size
+    tree.resize(tree.size() + 8, 0);  // root nanos
+    tree.push_back(1);                // root is_directory
+    tree.push_back(1);                // root children count = 1
     tree.push_back(0);
     tree.push_back(0);
     tree.push_back(0);
@@ -1101,14 +1121,14 @@ forge_commit_with_component(std::string_view component_name) {
     tree.push_back(static_cast<std::uint8_t>((name_len >> 24) & 0xFF));
     tree.insert(tree.end(), component_name.begin(), component_name.end());
     tree.resize(tree.size() + 32, 0); // child hash
-    tree.resize(tree.size() + 8, 0); // child size
-    tree.resize(tree.size() + 8, 0); // child nanos
-    tree.push_back(0); // child is_directory = 0
-    tree.resize(tree.size() + 4, 0); // child children count = 0
+    tree.resize(tree.size() + 8, 0);  // child size
+    tree.resize(tree.size() + 8, 0);  // child nanos
+    tree.push_back(0);                // child is_directory = 0
+    tree.resize(tree.size() + 4, 0);  // child children count = 0
 
     std::vector<std::uint8_t> commit;
     commit.insert(commit.end(), {'K', 'C', 'O', 'M'});
-    commit.push_back(2); // version = 2
+    commit.push_back(2);                 // version = 2
     commit.resize(commit.size() + 8, 0); // height: 0
     commit.resize(commit.size() + 8, 0); // created_at: 0
     commit.resize(commit.size() + 4, 0); // parent_count: 0
@@ -1182,7 +1202,8 @@ TEST(HistoryTest, RejectsUnicodeCaseEquivalentSnapshotInCommit) {
     EXPECT_EQ(bootstrap_result.error().code, ErrorCode::InvalidSnapshot);
 
     const auto commit_result = make_commit(
-        1, {"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+        1,
+        {"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
         colliding_tree);
     ASSERT_FALSE(commit_result.has_value());
     EXPECT_EQ(commit_result.error().code, ErrorCode::InvalidSnapshot);

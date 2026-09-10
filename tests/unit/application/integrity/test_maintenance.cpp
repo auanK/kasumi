@@ -73,23 +73,27 @@ TEST(MaintenanceTest, UnicodeReferenceAndRecoveryPaths) {
     const std::string first_path = "千早愛音/𓆩🌸𓆪.txt";
     const std::string second_path = "高松灯/カード💝.png";
     kasumi::Snapshot tree{.rows = {
-        {.path = "", .is_directory = true},
-        {.path = "千早愛音", .is_directory = true},
-        {.path = first_path, .hash = hash, .size = 7},
-        {.path = "高松灯", .is_directory = true},
-        {.path = second_path, .hash = hash, .size = 7},
-    }};
+                              {.path = "", .is_directory = true},
+                              {.path = "千早愛音", .is_directory = true},
+                              {.path = first_path, .hash = hash, .size = 7},
+                              {.path = "高松灯", .is_directory = true},
+                              {.path = second_path, .hash = hash, .size = 7},
+                          }};
     kasumi::finalize_snapshot(tree);
-    const std::vector<std::string> physical{kasumi::hash_hex(hash), "unexpected-🌸.object"};
+    const std::vector<std::string> physical{kasumi::hash_hex(hash),
+                                            "unexpected-🌸.object"};
     const auto inventory = kasumi::maintenance::analyze(tree, tree, physical);
     ASSERT_TRUE(inventory.has_value()) << inventory.error().detail;
     ASSERT_EQ(inventory->referenced_objects.size(), 1U);
     const auto& reference = inventory->referenced_objects.front();
     ASSERT_EQ(reference.referenced_paths.size(), 2U);
-    EXPECT_EQ(reference.referenced_paths[0], kasumi::platform::path::from_utf8(first_path));
-    EXPECT_EQ(reference.referenced_paths[1], kasumi::platform::path::from_utf8(second_path));
+    EXPECT_EQ(reference.referenced_paths[0],
+              kasumi::platform::path::from_utf8(first_path));
+    EXPECT_EQ(reference.referenced_paths[1],
+              kasumi::platform::path::from_utf8(second_path));
     ASSERT_TRUE(reference.local_source.has_value());
-    EXPECT_EQ(*reference.local_source, kasumi::platform::path::from_utf8(first_path));
+    EXPECT_EQ(*reference.local_source,
+              kasumi::platform::path::from_utf8(first_path));
     EXPECT_TRUE(reference.physically_present);
     EXPECT_EQ(inventory->unknown_identifiers,
               (std::vector<std::string>{"unexpected-🌸.object"}));
@@ -98,10 +102,13 @@ TEST(MaintenanceTest, UnicodeReferenceAndRecoveryPaths) {
     kasumi::finalize_snapshot(tree);
     const auto conflict = kasumi::maintenance::analyze(tree, {}, physical);
     ASSERT_FALSE(conflict.has_value());
-    EXPECT_EQ(conflict.error().code, kasumi::maintenance::ErrorCode::ConflictingReference);
+    EXPECT_EQ(conflict.error().code,
+              kasumi::maintenance::ErrorCode::ConflictingReference);
     ASSERT_EQ(conflict.error().paths.size(), 2U);
-    EXPECT_EQ(conflict.error().paths[0], kasumi::platform::path::from_utf8(first_path));
-    EXPECT_EQ(conflict.error().paths[1], kasumi::platform::path::from_utf8(second_path));
+    EXPECT_EQ(conflict.error().paths[0],
+              kasumi::platform::path::from_utf8(first_path));
+    EXPECT_EQ(conflict.error().paths[1],
+              kasumi::platform::path::from_utf8(second_path));
 }
 
 TEST(IntegrityMaintenanceTest,
@@ -522,7 +529,7 @@ TEST(IntegrityMaintenanceTest,
     hide(object_path(concurrent_published.head));
     hide(marker_path(concurrent_published.head));
     hide(concurrent_content);
-    state->reveal_on_list_count = state->list_count + 13;
+    state->reveal_on_list_count = state->list_count + 9;
 
     const auto collected = kasumi::application::integrity::garbage_collect(
         runtime, transport, test_key());
@@ -941,6 +948,141 @@ TEST(IntegrityMaintenanceTest, InterruptedMoveResumesIdempotently) {
     EXPECT_EQ(resumed->quarantined_objects, 1U);
     expect_presence(transport, orphan, Presence::Absent);
     expect_presence(transport, quarantined, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest,
+     StableGarbageCollectPerformsZeroContentPayloadGets) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-zero-content-payload-gets");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    const auto commit = make_commit(0, {}, "alpha.txt", "alpha").value();
+    publish_remote(transport, workspace, commit);
+    const auto alpha_content =
+        put_content(transport, workspace, "alpha", "alpha");
+
+    state->get_count = 0;
+    state->commit_get_count = 0;
+    state->marker_get_count = 0;
+    state->disappear_on_get = alpha_content;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 0U);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
+
+    EXPECT_EQ(state->disappear_on_get, alpha_content);
+    EXPECT_EQ(state->commit_get_count, 2U);
+    EXPECT_EQ(state->marker_get_count, 2U);
+    EXPECT_EQ(state->get_count, 7U);
+}
+
+TEST(IntegrityMaintenanceTest, FinalListingDetectsLateConcurrentChange) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-final-list-concurrent");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    const auto bootstrap = kasumi::history::make_empty_bootstrap().value();
+    publish_remote(transport, workspace, bootstrap);
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+
+    const auto concurrent =
+        make_commit(0, {}, "concurrent.txt", "concurrent").value();
+    const auto concurrent_published =
+        publish_remote(transport, workspace, concurrent);
+    const auto concurrent_content =
+        put_content(transport, workspace, "concurrent", "concurrent");
+
+    const auto hide = [&](const std::string& identifier) {
+        auto node = state->objects.extract(identifier);
+        ASSERT_FALSE(node.empty());
+        state->hidden_objects.insert(std::move(node));
+    };
+    hide(object_path(concurrent_published.head));
+    hide(marker_path(concurrent_published.head));
+    hide(concurrent_content);
+    state->reveal_on_list_count = state->list_count + 10;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange);
+    expect_presence(transport, orphan, Presence::Present);
+    expect_presence(transport, concurrent_content, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest,
+     DirectedQuarantineRestorationRestoresReachableWithoutPayloadGets) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-directed-quarantine-restore");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    const auto alpha = make_commit(0, {}, "alpha.txt", "alpha").value();
+    publish_remote(transport, workspace, alpha);
+    put_content(transport, workspace, "alpha", "alpha");
+
+    const auto orphan = make_commit(0, {}, "old.txt", "old").value();
+    const auto orphan_published = publish_remote(transport, workspace, orphan);
+    ASSERT_EQ(
+        kasumi::transport::remove(transport, marker_path(orphan_published.head))
+            .value(),
+        kasumi::transport::Removal::Removed);
+    const auto orphan_content = put_content(transport, workspace, "old", "old");
+    const auto orphan_content_quarantine =
+        protocol::quarantine_identifier(orphan_content).value();
+    const auto orphan_commit_quarantine =
+        protocol::quarantine_identifier(object_path(orphan_published.head))
+            .value();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->quarantined_objects, 2U);
+
+    ASSERT_TRUE(
+        protocol::record_quarantine(transport,
+                                    orphan_content_quarantine,
+                                    0,
+                                    test_key(),
+                                    kasumi::test::workspace_root(workspace)));
+    ASSERT_TRUE(
+        protocol::record_quarantine(transport,
+                                    orphan_commit_quarantine,
+                                    0,
+                                    test_key(),
+                                    kasumi::test::workspace_root(workspace)));
+
+    const auto marker = kasumi::application::history_storage::encode_marker(
+                            orphan_published.head)
+                            .value();
+    const auto marker_file =
+        kasumi::test::workspace_path(workspace, "restored.head");
+    kasumi::test::write_binary(marker_file, std::as_bytes(std::span{marker}));
+    ASSERT_TRUE(kasumi::transport::put(
+        transport, marker_file, marker_path(orphan_published.head)));
+
+    state->disappear_on_get = orphan_content;
+
+    const auto restored = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(restored.has_value()) << restored.error().detail;
+    EXPECT_EQ(restored->restored_objects, 2U);
+    EXPECT_EQ(state->disappear_on_get, orphan_content);
+    expect_presence(transport, orphan_content, Presence::Present);
+    expect_presence(
+        transport, object_path(orphan_published.head), Presence::Present);
 }
 
 } // namespace

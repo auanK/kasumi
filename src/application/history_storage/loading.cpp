@@ -755,7 +755,8 @@ LoadResult load_impl(transport::Transport& storage,
         }
     } else if (cached_anchor && scoped) {
         if (!scoped_anchor_referenced) {
-            // Without proven linkage, retries loading without trusting the anchor.
+            // Without proven linkage, retries loading without trusting the
+            // anchor.
             return load_impl(storage,
                              key,
                              workspace_root,

@@ -10,7 +10,6 @@
 #include "kasumi/test/scoped_environment.hpp"
 #endif
 
-
 using namespace kasumi::cli::i18n;
 
 TEST(CliI18nTest, DefaultLanguageIsEnglish) {
@@ -96,7 +95,8 @@ TEST(CliI18nTest, AllKeysHaveValidTranslations) {
     set_language(Language::English); // Restore default
 }
 
-TEST(CliI18nTest, CustomJsonCatalogOverridesSpecifiedKeysAndFallsBackToEnglish) {
+TEST(CliI18nTest,
+     CustomJsonCatalogOverridesSpecifiedKeysAndFallsBackToEnglish) {
     constexpr const char* CUSTOM_SPANISH_JSON = R"json({
         "labels": {
             "error": "[ERROR_ES]"
@@ -120,12 +120,11 @@ TEST(CliI18nTest, CustomJsonCatalogOverridesSpecifiedKeysAndFallsBackToEnglish) 
 
 #if defined(_WIN32)
 TEST(CliI18nTest, ExternalLocaleDiscoveryUnderUnicodeAppData) {
-    const auto temp_root =
-        std::filesystem::temp_directory_path() / u8"kasumi_i18n_usuário-João-日本";
+    const auto temp_root = std::filesystem::temp_directory_path() /
+                           u8"kasumi_i18n_usuário-João-日本";
     std::filesystem::create_directories(temp_root / "kasumi" / "locales");
 
-    const auto locale_file =
-        temp_root / "kasumi" / "locales" / "fr.json";
+    const auto locale_file = temp_root / "kasumi" / "locales" / "fr.json";
     {
         std::ofstream file(locale_file);
         file << R"json({
@@ -139,9 +138,8 @@ TEST(CliI18nTest, ExternalLocaleDiscoveryUnderUnicodeAppData) {
     }
 
     {
-        const auto env =
-            kasumi::test::scoped_windows_environment_variable(
-                L"APPDATA", temp_root.native());
+        const auto env = kasumi::test::scoped_windows_environment_variable(
+            L"APPDATA", temp_root.native());
 
         set_language("fr");
         EXPECT_EQ(current_language(), Language::Custom);

@@ -178,23 +178,21 @@ bool load_custom_catalog(std::string_view json_content);
 
 // Processes arguments, extracts and removes --lang <val> / --lang=<val>
 // and returns the sanitized arguments without the language flag.
-std::vector<std::string> extract_language_argument(int argc, char* argv[]) noexcept;
+std::vector<std::string> extract_language_argument(int argc,
+                                                   char* argv[]) noexcept;
 
 // Initializes language from environment KASUMI_LANG or arguments.
 void init_language(int argc, char* argv[]) noexcept;
 
-template <typename... Args>
-inline std::string format(Key key, Args&&... args) {
+template <typename... Args> inline std::string format(Key key, Args&&... args) {
     return std::vformat(tr(key), std::make_format_args(args...));
 }
 
-template <typename... Args>
-inline void println(Key key, Args&&... args) {
+template <typename... Args> inline void println(Key key, Args&&... args) {
     std::println("{}", std::vformat(tr(key), std::make_format_args(args...)));
 }
 
-template <typename... Args>
-inline void print(Key key, Args&&... args) {
+template <typename... Args> inline void print(Key key, Args&&... args) {
     std::print("{}", std::vformat(tr(key), std::make_format_args(args...)));
 }
 

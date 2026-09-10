@@ -72,7 +72,8 @@ TEST(CliCredentialsTest, UsesPasswordSaltTerminologyInPrompts) {
     std::size_t next = 0;
     const auto result = kasumi::cli::credentials::read_password_pair(
         [&](const std::string& prompt) {
-            EXPECT_TRUE(prompt == "Password: " || prompt == "Confirm password: " ||
+            EXPECT_TRUE(prompt == "Password: " ||
+                        prompt == "Confirm password: " ||
                         prompt == "Password salt: " ||
                         prompt == "Confirm password salt: ");
             return answers.at(next++);
@@ -167,7 +168,8 @@ TEST(CliWizardTest, RejectsDuplicateNameBeforeOtherPrompts) {
     std::fflush(stdout);
     const auto output = testing::internal::GetCapturedStdout();
     std::cin.rdbuf(previous_input);
-    EXPECT_NE(output.find("The profile 'existing' already exists"), std::string::npos);
+    EXPECT_NE(output.find("The profile 'existing' already exists"),
+              std::string::npos);
     EXPECT_EQ(output.find("Synchronized local path"), std::string::npos);
 }
 

@@ -396,10 +396,18 @@ TEST(PortableComponentTest, ValidatesPortableNames) {
     EXPECT_FALSE(kasumi::valid_logical_path_component("LPT\xC2\xB3"));
 
     // Control characters and DEL
-    EXPECT_FALSE(kasumi::valid_logical_path_component(std::string("a\x01""b", 3)));
-    EXPECT_FALSE(kasumi::valid_logical_path_component(std::string("a\x1F""b", 3)));
-    EXPECT_FALSE(kasumi::valid_logical_path_component(std::string("a\x7F""b", 3)));
-    EXPECT_FALSE(kasumi::valid_logical_path_component(std::string("a\x00""b", 3)));
+    EXPECT_FALSE(kasumi::valid_logical_path_component(std::string("a\x01"
+                                                                  "b",
+                                                                  3)));
+    EXPECT_FALSE(kasumi::valid_logical_path_component(std::string("a\x1F"
+                                                                  "b",
+                                                                  3)));
+    EXPECT_FALSE(kasumi::valid_logical_path_component(std::string("a\x7F"
+                                                                  "b",
+                                                                  3)));
+    EXPECT_FALSE(kasumi::valid_logical_path_component(std::string("a\x00"
+                                                                  "b",
+                                                                  3)));
 
     // Structural invalid UTF-8
     EXPECT_FALSE(kasumi::valid_logical_path_component("\xC2"));
@@ -658,7 +666,8 @@ TEST(ConflictPathTest, HandlesBoundedTruncationAndDeviceNames) {
     const auto local_conflict =
         kasumi::make_conflict_path("nested/doc.txt", ".kasumiconflict_local");
     EXPECT_EQ(local_conflict, "nested/doc.txt.kasumiconflict_local");
-    EXPECT_TRUE(kasumi::valid_logical_path_component(kasumi::row_name(local_conflict)));
+    EXPECT_TRUE(
+        kasumi::valid_logical_path_component(kasumi::row_name(local_conflict)));
 
     // Numbered suffix
     const auto numbered_conflict =
@@ -674,10 +683,10 @@ TEST(ConflictPathTest, HandlesBoundedTruncationAndDeviceNames) {
     EXPECT_TRUE(kasumi::valid_logical_path_component(bounded));
 
     // UTF-8 truncation boundary (never split multi-byte sequence)
-    // 231 ASCII 'x' + "日本" (6 bytes) = 237 bytes. Suffix is 23 bytes (.kasumiconflict_remote).
-    // Available space: 255 - 23 = 232 bytes.
-    // 231 bytes + 1st byte of "日" would split the code point.
-    // Truncation must stop before "日", leaving exactly 231 'x' chars.
+    // 231 ASCII 'x' + "日本" (6 bytes) = 237 bytes. Suffix is 23 bytes
+    // (.kasumiconflict_remote). Available space: 255 - 23 = 232 bytes. 231
+    // bytes + 1st byte of "日" would split the code point. Truncation must stop
+    // before "日", leaving exactly 231 'x' chars.
     std::string utf8_name(231, 'x');
     utf8_name += "日本";
     const auto truncated_utf8 =

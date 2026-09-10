@@ -16,9 +16,10 @@ open_state_database_readonly(const std::filesystem::path& database_path) {
     return sqlite::open(database_path, SQLITE_OPEN_READONLY);
 }
 
-// Opens a StateStorage SQLite database connection in read-write mode and applies
-// the required StateStorage durability policy (PRAGMA synchronous=NORMAL).
-// Fails closed if the database cannot be opened or if the policy cannot be applied.
+// Opens a StateStorage SQLite database connection in read-write mode and
+// applies the required StateStorage durability policy (PRAGMA
+// synchronous=NORMAL). Fails closed if the database cannot be opened or if the
+// policy cannot be applied.
 inline std::expected<sqlite::Database, std::string>
 open_state_database_readwrite(const std::filesystem::path& database_path,
                               bool create = false) {
@@ -40,4 +41,3 @@ open_state_database_readwrite(const std::filesystem::path& database_path,
 } // namespace kasumi::state_storage::detail
 
 #endif
-

@@ -90,11 +90,12 @@ ReachabilityInventory history_inventory(kasumi::transport::Transport& transport,
 
 ContentReachabilityInventory
 content_inventory(kasumi::transport::Transport& transport,
-                  const std::filesystem::path& root) {
+                  const std::filesystem::path& root,
+                  bool audit_payloads = true) {
     const auto history = history_inventory(transport, root);
     const auto result =
         kasumi::application::history_storage::inventory_content_reachability(
-            transport, test_key(), history, root);
+            transport, test_key(), history, root, audit_payloads);
     EXPECT_TRUE(result.has_value()) << result.error().detail;
     return result ? *result : ContentReachabilityInventory{};
 }
@@ -671,7 +672,8 @@ TEST(ContentReachabilityTest, TransportFailureIsNotReportedAsMissing) {
             transport,
             test_key(),
             history,
-            kasumi::test::workspace_root(workspace));
+            kasumi::test::workspace_root(workspace),
+            true);
     ASSERT_FALSE(result.has_value());
     EXPECT_TRUE(result.error().code == ErrorCode::TransportFailure);
 }
@@ -823,8 +825,43 @@ TEST(ContentReachabilityTest, ContentInventoryCleansWorkspaceAfterFailure) {
             transport,
             test_key(),
             history,
-            kasumi::test::workspace_root(workspace));
+            kasumi::test::workspace_root(workspace),
+            true);
     EXPECT_FALSE(result.has_value());
+    EXPECT_FALSE(kasumi::test::has_temporary_history_workspace(
+        kasumi::test::workspace_root(workspace)));
+}
+
+TEST(ContentReachabilityTest,
+     ContentInventoryWithoutPayloadAuditSkipsPayloadDownloads) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("content-no-audit-downloads");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    const auto commit =
+        make_tree_commit(0,
+                         {},
+                         {NodeRow{.path = "", .is_directory = true},
+                          file_row("alpha", "alpha")});
+    add_fake_commit(transport, workspace, commit, "commit");
+    state->objects[content_id("alpha")] = {0};
+    state->fail_content_get = true;
+
+    const auto history =
+        history_inventory(transport, kasumi::test::workspace_root(workspace));
+    const auto result =
+        kasumi::application::history_storage::inventory_content_reachability(
+            transport,
+            test_key(),
+            history,
+            kasumi::test::workspace_root(workspace),
+            false);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->reachable_content_ids,
+              std::vector<std::string>{content_id("alpha")});
+    EXPECT_TRUE(result->missing_content_ids.empty());
+    EXPECT_TRUE(result->corrupt_content_ids.empty());
     EXPECT_FALSE(kasumi::test::has_temporary_history_workspace(
         kasumi::test::workspace_root(workspace)));
 }

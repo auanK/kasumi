@@ -33,8 +33,10 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace);
 // Attempts to remove directory without propagating errors.
 void cleanup_workspace(const Workspace& workspace) noexcept;
 
-// Validates that the path exists, is a directory, and is not a redirector (symlink/junction).
-std::expected<void, std::string> validate_non_redirecting_directory(const std::filesystem::path& path);
+// Validates that the path exists, is a directory, and is not a redirector
+// (symlink/junction).
+std::expected<void, std::string>
+validate_non_redirecting_directory(const std::filesystem::path& path);
 
 } // namespace kasumi::platform
 

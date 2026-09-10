@@ -1,4 +1,5 @@
 #include "core/transaction/types.hpp"
+
 #include "core/history.hpp"
 
 #include <algorithm>
@@ -70,7 +71,8 @@ bool valid(const Record& record) noexcept {
     const bool pruning_epoch = !genesis && !record.epoch_vault_id.empty();
     const bool epoch_phase = record.phase >= Phase::EpochPrepared &&
                              record.phase <= Phase::EpochVerified;
-    const bool epoch_required = (genesis || pruning_epoch) && record.phase >= Phase::EpochPrepared;
+    const bool epoch_required =
+        (genesis || pruning_epoch) && record.phase >= Phase::EpochPrepared;
     if (!valid_transaction_id(record.operation_id) ||
         !valid_publication_phase(record.phase) ||
         !valid_sync_plan(record.plan) ||
@@ -95,14 +97,12 @@ bool valid(const Record& record) noexcept {
         (epoch_required &&
          (!kasumi::history::valid_commit_id(record.epoch_vault_id) ||
           !kasumi::history::valid_commit_id(record.epoch_id) ||
-          record.epoch_issued_at < 0 ||
-          record.epoch_min_history_depth == 0 ||
+          record.epoch_issued_at < 0 || record.epoch_min_history_depth == 0 ||
           record.epoch_min_history_depth > history::maximum_graph_depth ||
           record.epoch_min_history_age_hours == 0)) ||
         (!epoch_required &&
          (!record.epoch_vault_id.empty() || !record.epoch_id.empty() ||
-          record.epoch_issued_at != 0 ||
-          record.epoch_min_history_depth != 0 ||
+          record.epoch_issued_at != 0 || record.epoch_min_history_depth != 0 ||
           record.epoch_min_history_age_hours != 0)) ||
         (record.publication_required &&
          ((record.storage_generation != 0 ||

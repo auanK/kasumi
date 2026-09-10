@@ -61,7 +61,8 @@ std::expected<void, std::string> validate_paths(const Paths& paths) {
         return std::unexpected(
             "caminhos do journal precisam compartilhar o diretório pai");
     }
-    if (platform::path::to_logical_utf8(paths.final_path.filename()) != journal_file_name ||
+    if (platform::path::to_logical_utf8(paths.final_path.filename()) !=
+            journal_file_name ||
         platform::path::to_logical_utf8(paths.temporary_path.filename()) !=
             std::string{journal_file_name} + std::string{temporary_suffix}) {
         return std::unexpected("nomes de arquivo do journal são inválidos");
@@ -248,11 +249,10 @@ make_paths(const std::filesystem::path& profile_directory) {
     }
 
     Paths paths{
-        .final_path =
-            directory / platform::path::from_utf8(journal_file_name),
-        .temporary_path =
-            directory / platform::path::from_utf8(std::string{journal_file_name} +
-                                                  std::string{temporary_suffix}),
+        .final_path = directory / platform::path::from_utf8(journal_file_name),
+        .temporary_path = directory / platform::path::from_utf8(
+                                          std::string{journal_file_name} +
+                                          std::string{temporary_suffix}),
     };
     auto validation = validate_paths(paths);
     if (!validation) {

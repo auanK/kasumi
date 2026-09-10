@@ -77,8 +77,8 @@ TempWorkspace make_temp_workspace(std::string_view label) {
 
 void clean_windows_tree(const std::filesystem::path& root) noexcept {
     std::error_code ec;
-    for (std::filesystem::recursive_directory_iterator it(
-             root, std::filesystem::directory_options::none, ec),
+    for (std::filesystem::recursive_directory_iterator
+             it(root, std::filesystem::directory_options::none, ec),
          end;
          it != end && !ec;) {
         const auto path = it->path();

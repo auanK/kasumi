@@ -279,7 +279,6 @@ void ensure_workspace(const std::filesystem::path& path) {
         << error.message();
 }
 
-
 LoadedHistory load_history(RcloneHarness& harness,
                            const std::filesystem::path& workspace) {
     ensure_workspace(workspace);

@@ -120,8 +120,8 @@ reserve_conflict_path(const std::filesystem::path& preferred,
     std::size_t suffix = 0;
 
     while (reserved_case_keys.contains(portable_case_key(candidate))) {
-        candidate = make_conflict_path(preferred_text,
-                                       "." + std::to_string(++suffix));
+        candidate =
+            make_conflict_path(preferred_text, "." + std::to_string(++suffix));
     }
 
     reserved.insert(candidate);
@@ -181,8 +181,8 @@ void reserve_conflict_destinations(const Snapshot& local_tree,
             }
         } else if (operation.action == Action::Download &&
                    operation.exclusive_destination) {
-            operation.path =
-                reserve_conflict_path(operation.path, reserved, reserved_case_keys);
+            operation.path = reserve_conflict_path(
+                operation.path, reserved, reserved_case_keys);
         }
     }
 }
@@ -360,7 +360,8 @@ candidate_shared_tree(const Input& input,
                 break;
             }
             case Action::CreateRemoteDirectory: {
-                const auto path = platform::path::to_logical_utf8(operation.path);
+                const auto path =
+                    platform::path::to_logical_utf8(operation.path);
                 const auto* local_row = find_row(input.local_tree, path);
                 if (local_row == nullptr || !local_row->is_directory ||
                     !operation.hash.empty() || operation.size != 0) {
@@ -395,7 +396,8 @@ candidate_shared_tree(const Input& input,
             }
             case Action::DeleteRemote:
             case Action::DeleteRemoteDirectory: {
-                const auto path = platform::path::to_logical_utf8(operation.path);
+                const auto path =
+                    platform::path::to_logical_utf8(operation.path);
                 if (find_row(result.tree, path) == nullptr) {
                     return std::unexpected(Error{
                         .code = ErrorCode::UnsafePlan,
@@ -404,11 +406,8 @@ candidate_shared_tree(const Input& input,
                     });
                 }
                 erase_subtree(result.tree, path);
-                auto ancestors =
-                    synchronize_ancestor_rows(result.tree,
-                                              input.local_tree,
-                                              path,
-                                              false);
+                auto ancestors = synchronize_ancestor_rows(
+                    result.tree, input.local_tree, path, false);
                 if (!ancestors) {
                     return std::unexpected(std::move(ancestors.error()));
                 }

@@ -115,15 +115,16 @@ TEST(RcloneSessionTest, RemovesKasumiSecretsFromChildEnvironment) {
 
 TEST(RcloneSessionTest, UnicodeConfigPathIsPreservedInChildEnvironment) {
     kasumi::transport::rclone_detail::State state;
-    state.configuration.config_path = kasumi::platform::path::from_utf8(
-        "高松灯/千早愛音🌸/rclone.conf");
+    state.configuration.config_path =
+        kasumi::platform::path::from_utf8("高松灯/千早愛音🌸/rclone.conf");
 
     const auto result =
         kasumi::transport::rclone_detail::make_child_environment(state);
 
     ASSERT_TRUE(result) << kasumi::transport::describe(result.error());
-    EXPECT_EQ(environment_value(*result, "RCLONE_CONFIG"),
-              kasumi::platform::path::to_utf8(*state.configuration.config_path));
+    EXPECT_EQ(
+        environment_value(*result, "RCLONE_CONFIG"),
+        kasumi::platform::path::to_utf8(*state.configuration.config_path));
 }
 
 TEST(RcloneSessionTest, ResolvesExecutableFromUnicodeSearchPath) {
@@ -568,13 +569,13 @@ TEST(RcloneRcClientTest, RejectsInvalidReadResponseWithoutRetry) {
 }
 
 TEST(RcloneStorageTest, PreservesUnicodeLocalPathsInCopyRequests) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("rclone-unicode-copy");
-    const auto source = kasumi::test::workspace_root(workspace) /
-                        kasumi::platform::path::from_utf8("高松灯/カード💝.png");
-    const auto destination = kasumi::test::workspace_root(workspace) /
-                             kasumi::platform::path::from_utf8(
-                                 "千早愛音🌸/𝑬𝒎𝒊𝒍𝒊𝒂-𓆩🌸𓆪.txt");
+    auto workspace = kasumi::test::make_temp_workspace("rclone-unicode-copy");
+    const auto source =
+        kasumi::test::workspace_root(workspace) /
+        kasumi::platform::path::from_utf8("高松灯/カード💝.png");
+    const auto destination =
+        kasumi::test::workspace_root(workspace) /
+        kasumi::platform::path::from_utf8("千早愛音🌸/𝑬𝒎𝒊𝒍𝒊𝒂-𓆩🌸𓆪.txt");
     kasumi::test::write_text(source, "unicode payload");
     RcServerState remote;
     std::vector<nlohmann::json> requests;
@@ -696,9 +697,12 @@ TEST(RcloneStorageTest, BulkCheckAcceptsThousandsOfFilesResponse) {
         }
         matches += "\"" + id + "\"";
     }
-    const auto json = "{\"differ\":[],\"error\":[],\"hashType\":\"sha256\",\"match\":[" + matches + "],\"missingOnDst\":[],\"success\":true}";
+    const auto json =
+        "{\"differ\":[],\"error\":[],\"hashType\":\"sha256\",\"match\":[" +
+        matches + "],\"missingOnDst\":[],\"success\":true}";
     const auto result =
-        kasumi::transport::rclone_detail::parse_physical_hash_batch_response(json, request);
+        kasumi::transport::rclone_detail::parse_physical_hash_batch_response(
+            json, request);
     ASSERT_TRUE(result.has_value());
     EXPECT_TRUE(result->mismatched.empty());
     EXPECT_TRUE(result->missing.empty());

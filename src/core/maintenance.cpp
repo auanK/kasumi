@@ -63,7 +63,8 @@ AnalyzeResult analyze(const Snapshot& history_tree,
                 .paths = std::move(paths),
             });
         }
-        reference.referenced_paths.push_back(platform::path::from_utf8(row.path));
+        reference.referenced_paths.push_back(
+            platform::path::from_utf8(row.path));
     }
 
     using SourceKey = std::pair<std::string, std::uint64_t>;

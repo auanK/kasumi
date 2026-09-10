@@ -1,7 +1,7 @@
 #include "platform/private_storage.hpp"
 
-#include "platform/path.hpp"
 #include "platform/durability.hpp"
+#include "platform/path.hpp"
 #include "platform/random.hpp"
 
 #include <cerrno>
@@ -203,7 +203,8 @@ protect_directory(const std::filesystem::path& path) {
         return std::unexpected(attributes.error());
     }
     if ((*attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-        return std::unexpected("diretório esperado em '" + platform::path::to_utf8(path) + "'");
+        return std::unexpected("diretório esperado em '" +
+                               platform::path::to_utf8(path) + "'");
     }
     return apply_acl(path, true);
 #else
@@ -212,7 +213,8 @@ protect_directory(const std::filesystem::path& path) {
         return std::unexpected(status.error());
     }
     if (!S_ISDIR(status->st_mode)) {
-        return std::unexpected("diretório esperado em '" + platform::path::to_utf8(path) + "'");
+        return std::unexpected("diretório esperado em '" +
+                               platform::path::to_utf8(path) + "'");
     }
     if (::chmod(path.c_str(), 0700) != 0) {
         return std::unexpected(
@@ -249,19 +251,28 @@ protect_tree(const std::filesystem::path& root) {
     std::filesystem::recursive_directory_iterator entries(root, error);
     if (error) {
         return std::unexpected(system_error(
-            "não foi possível listar '" + platform::path::to_utf8(root) + "'", error));
+            "could not list '" + platform::path::to_utf8(root) + "'", error));
     }
     const std::filesystem::recursive_directory_iterator end;
     while (entries != end) {
         const auto path = entries->path();
         const auto status = std::filesystem::symlink_status(path, error);
         if (error) {
+            if (error == std::errc::no_such_file_or_directory) {
+                error.clear();
+                entries.increment(error);
+                if (error == std::errc::no_such_file_or_directory) {
+                    error.clear();
+                }
+                continue;
+            }
             return std::unexpected(system_error(
-                "não foi possível consultar '" + platform::path::to_utf8(path) + "'", error));
+                "could not inspect '" + platform::path::to_utf8(path) + "'",
+                error));
         }
         if (std::filesystem::is_symlink(status)) {
-            return std::unexpected("link não é permitido em '" + platform::path::to_utf8(path) +
-                                   "'");
+            return std::unexpected("symlink is not allowed in '" +
+                                   platform::path::to_utf8(path) + "'");
         }
         std::expected<void, std::string> protected_path;
         if (std::filesystem::is_directory(status)) {
@@ -269,7 +280,7 @@ protect_tree(const std::filesystem::path& root) {
         } else if (std::filesystem::is_regular_file(status)) {
             protected_path = protect_file(path);
         } else {
-            return std::unexpected("objeto interno inválido em '" +
+            return std::unexpected("invalid internal object in '" +
                                    platform::path::to_utf8(path) + "'");
         }
         if (!protected_path) {
@@ -277,8 +288,13 @@ protect_tree(const std::filesystem::path& root) {
         }
         entries.increment(error);
         if (error) {
+            if (error == std::errc::no_such_file_or_directory) {
+                error.clear();
+                continue;
+            }
             return std::unexpected(system_error(
-                "não foi possível listar '" + platform::path::to_utf8(root) + "'", error));
+                "could not advance in '" + platform::path::to_utf8(root) + "'",
+                error));
         }
     }
     return {};
@@ -356,8 +372,8 @@ protect_file(const std::filesystem::path& path) {
         return std::unexpected(attributes.error());
     }
     if ((*attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-        return std::unexpected("arquivo regular esperado em '" + platform::path::to_utf8(path) +
-                               "'");
+        return std::unexpected("arquivo regular esperado em '" +
+                               platform::path::to_utf8(path) + "'");
     }
     return apply_acl(path, false);
 #else
@@ -366,8 +382,8 @@ protect_file(const std::filesystem::path& path) {
         return std::unexpected(status.error());
     }
     if (!S_ISREG(status->st_mode)) {
-        return std::unexpected("arquivo regular esperado em '" + platform::path::to_utf8(path) +
-                               "'");
+        return std::unexpected("arquivo regular esperado em '" +
+                               platform::path::to_utf8(path) + "'");
     }
     if (::chmod(path.c_str(), 0600) != 0) {
         return std::unexpected(

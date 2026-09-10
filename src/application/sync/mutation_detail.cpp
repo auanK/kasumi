@@ -162,7 +162,8 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
     }
 
     const auto encryption_trace = platform::perf_trace::begin();
-    auto encrypted_file = crypto::encrypt_file_with_hashes(source, destination, key);
+    auto encrypted_file =
+        crypto::encrypt_file_with_hashes(source, destination, key);
     platform::perf_trace::finish("content encryption", encryption_trace);
     if (!encrypted_file) {
         return std::unexpected(
@@ -192,9 +193,9 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
                        operation_index));
     }
 
-    return PreparedUploadCiphertext{
-        .plaintext_size = operation.size,
-        .ciphertext_sha256 = encrypted_file->ciphertext_sha256};
+    return PreparedUploadCiphertext{.plaintext_size = operation.size,
+                                    .ciphertext_sha256 =
+                                        encrypted_file->ciphertext_sha256};
 }
 
 } // namespace kasumi::application::sync::mutation::detail

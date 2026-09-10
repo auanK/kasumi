@@ -14,7 +14,8 @@ enum class Operation {
     Preview,
     // Compares differences between local and remote.
     Status,
-    // Analyzes cryptographic and structural integrity of remotely stored blocks.
+    // Analyzes cryptographic and structural integrity of remotely stored
+    // blocks.
     Fsck,
     // Quarantines objects unreachable from any logical head.
     GarbageCollect

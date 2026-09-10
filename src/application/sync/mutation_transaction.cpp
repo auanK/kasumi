@@ -81,8 +81,7 @@ validate_workspace(const platform::Workspace& workspace,
                                           workspace.root,
                                           operation_index));
     }
-    auto secured =
-        platform::private_storage::protect_directory(workspace.root);
+    auto secured = platform::private_storage::protect_directory(workspace.root);
     if (!secured) {
         return std::unexpected(make_error(MutationErrorCode::UnsafePath,
                                           secured.error(),

@@ -479,8 +479,8 @@ TEST(EpochLoadByIdTest, RejectsTamperedEpoch) {
                                            std::filesystem::path{identifier});
     ASSERT_FALSE(bytes.empty());
     bytes.back() ^= std::byte{0x01};
-    kasumi::test::write_binary(
-        storage_path / std::filesystem::path{identifier}, bytes);
+    kasumi::test::write_binary(storage_path / std::filesystem::path{identifier},
+                               bytes);
 
     const auto loaded =
         epoch::load_by_id(*storage,

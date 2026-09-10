@@ -6,7 +6,7 @@
 #include "runtime/resolver.hpp"
 #include "runtime/vault.hpp"
 #include "transport/transport.hpp"
- 
+
 #include <cstdint>
 #include <expected>
 

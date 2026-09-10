@@ -1,8 +1,8 @@
 #ifndef KASUMI_CLI_PRESENTER_HPP
 #define KASUMI_CLI_PRESENTER_HPP
 
-#include "application/result.hpp"
 #include "application/inspection/result.hpp"
+#include "application/result.hpp"
 
 namespace kasumi::cli {
 

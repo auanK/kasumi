@@ -444,10 +444,10 @@ Result put_batch(Transport& transport, const PutBatch& batch) {
     }
 
     for (const auto& identifier : batch.identifiers) {
-        auto result = put(transport,
-                          batch.source_root /
-                              platform::path::from_utf8(identifier),
-                          identifier);
+        auto result =
+            put(transport,
+                batch.source_root / platform::path::from_utf8(identifier),
+                identifier);
         if (!result) {
             return result;
         }
@@ -487,10 +487,10 @@ Result get_batch(Transport& transport, const GetBatch& batch) {
         const auto source = batch.source_prefix.empty()
                                 ? identifier
                                 : batch.source_prefix + "/" + identifier;
-        auto result = get(transport,
-                          source,
-                          batch.destination_root /
-                              platform::path::from_utf8(identifier));
+        auto result =
+            get(transport,
+                source,
+                batch.destination_root / platform::path::from_utf8(identifier));
         if (!result) {
             return result;
         }

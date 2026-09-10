@@ -11,7 +11,8 @@ namespace kasumi::application {
 std::expected<InspectionResponse, InspectionError>
 inspect(InspectionInput input);
 
-// Downloads and authenticates a file from the logical tree without modifying local profile.
+// Downloads and authenticates a file from the logical tree without modifying
+// local profile.
 std::expected<InspectionResponse, InspectionError>
 read_remote_file(InspectionInput input);
 

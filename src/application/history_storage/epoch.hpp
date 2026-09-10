@@ -110,7 +110,8 @@ BytesResult encode(const Epoch& value);
 // Decodes only canonical v1 content and rejects trailing bytes.
 std::expected<Epoch, Error> decode(std::span<const std::uint8_t> bytes);
 
-// Produces the confidential, authenticated envelope used by the immutable object.
+// Produces the confidential, authenticated envelope used by the immutable
+// object.
 std::expected<SealedEpoch, Error>
 seal(const Epoch& value,
      std::span<const std::uint8_t, crypto::KEY_SIZE> master_key);
@@ -126,8 +127,8 @@ std::expected<std::string, Error> object_identifier(const Reference& reference);
 std::expected<Reference, Error>
 parse_object_identifier(std::string_view identifier);
 
-// Validates a contiguous authenticated chain, rejects forks/gaps, and returns the
-// latest Epoch.
+// Validates a contiguous authenticated chain, rejects forks/gaps, and returns
+// the latest Epoch.
 std::expected<VerifiedEpoch, Error>
 select_latest(std::span<const VerifiedEpoch> epochs);
 
@@ -136,7 +137,8 @@ std::expected<void, Error> publish(transport::Transport& storage,
                                    const SealedEpoch& sealed,
                                    const std::filesystem::path& workspace_root);
 
-// Downloads, authenticates, and compares the remote object against the expected Epoch.
+// Downloads, authenticates, and compares the remote object against the expected
+// Epoch.
 std::expected<void, Error>
 verify(transport::Transport& storage,
        const Epoch& expected,
@@ -144,7 +146,8 @@ verify(transport::Transport& storage,
        std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
        const std::filesystem::path& workspace_root);
 
-// Discovers, authenticates, and deterministically selects the latest remote Epoch.
+// Discovers, authenticates, and deterministically selects the latest remote
+// Epoch.
 LatestResult
 load_latest(transport::Transport& storage,
             std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
@@ -173,7 +176,8 @@ load_latest(transport::Transport& storage,
             std::span<const std::string> identifiers,
             std::optional<Reference> trusted_ancestor);
 
-// Discovers and authenticates the full remote chain, from genesis to the current Epoch.
+// Discovers and authenticates the full remote chain, from genesis to the
+// current Epoch.
 ChainResult
 load_chain(transport::Transport& storage,
            std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,

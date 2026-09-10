@@ -104,7 +104,9 @@ CommitResult make_commit(std::uint64_t height,
                          std::int64_t created_at = 0);
 
 // Creates a parentless bootstrap commit to start history with tree.
-CommitResult make_bootstrap(Snapshot tree, std::uint64_t height, std::int64_t created_at = 0);
+CommitResult make_bootstrap(Snapshot tree,
+                            std::uint64_t height,
+                            std::int64_t created_at = 0);
 
 // Creates an initial empty bootstrap commit at height zero.
 CommitResult make_empty_bootstrap(std::int64_t created_at = 0);
@@ -126,9 +128,9 @@ ResolutionResult resolve(std::span<const LoadedCommit> commits,
                          std::span<const std::string> marked_heads);
 
 // Resolves commits whose IDs have already been authenticated by cryptography.
-ResolutionResult resolve_authenticated(
-    std::span<const LoadedCommit> commits,
-    std::span<const std::string> marked_heads);
+ResolutionResult
+resolve_authenticated(std::span<const LoadedCommit> commits,
+                      std::span<const std::string> marked_heads);
 
 // Resolves a truncated graph whose root is the trusted anchor.
 ResolutionResult resolve_from_anchor(std::span<const LoadedCommit> commits,
@@ -136,10 +138,10 @@ ResolutionResult resolve_from_anchor(std::span<const LoadedCommit> commits,
                                      std::string_view trusted_anchor_id);
 
 // Resolves a truncated graph with externally authenticated IDs.
-ResolutionResult resolve_from_anchor_authenticated(
-    std::span<const LoadedCommit> commits,
-    std::span<const std::string> marked_heads,
-    std::string_view trusted_anchor_id);
+ResolutionResult
+resolve_from_anchor_authenticated(std::span<const LoadedCommit> commits,
+                                  std::span<const std::string> marked_heads,
+                                  std::string_view trusted_anchor_id);
 
 // Resolves a truncated graph at one or more authenticated roots.
 ResolutionResult resolve_from_frontier_authenticated(

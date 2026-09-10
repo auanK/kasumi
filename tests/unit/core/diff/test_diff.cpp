@@ -86,12 +86,13 @@ signatures(const std::vector<kasumi::Operation>& operations) {
     std::vector<std::string> result;
     result.reserve(operations.size());
     for (const auto& operation : operations) {
-        result.push_back(signature(operation.action,
-                                   kasumi::platform::path::to_logical_utf8(operation.path),
-                                   operation.hash,
-                                   kasumi::platform::path::to_logical_utf8(operation.alt_path),
-                                   operation.size,
-                                   operation.exclusive_destination));
+        result.push_back(signature(
+            operation.action,
+            kasumi::platform::path::to_logical_utf8(operation.path),
+            operation.hash,
+            kasumi::platform::path::to_logical_utf8(operation.alt_path),
+            operation.size,
+            operation.exclusive_destination));
     }
     std::ranges::sort(result);
     return result;
@@ -230,49 +231,43 @@ TEST(DiffThreeWayTest, CoversDirectorySubtreesAndTypeChanges) {
 
 TEST(DiffThreeWayTest, ExpandsUnchangedLocalSubtreeDeletes) {
     {
-        const auto shared = tree(
-            {directory("dir"), file("dir/gamma.txt", "gamma")});
-        expect_operations(
-            kasumi::diff::compare_trees(shared, shared, tree()),
-            {signature(Action::DeleteLocal, "dir/gamma.txt"),
-             signature(Action::DeleteLocalDirectory, "dir")});
+        const auto shared =
+            tree({directory("dir"), file("dir/gamma.txt", "gamma")});
+        expect_operations(kasumi::diff::compare_trees(shared, shared, tree()),
+                          {signature(Action::DeleteLocal, "dir/gamma.txt"),
+                           signature(Action::DeleteLocalDirectory, "dir")});
     }
     {
-        const auto shared =
-            tree({directory("a"),
-                  directory("a/b"),
-                  file("a/b/c.txt", "c"),
-                  file("a/d.txt", "d")});
-        expect_operations(
-            kasumi::diff::compare_trees(shared, shared, tree()),
-            {signature(Action::DeleteLocal, "a/b/c.txt"),
-             signature(Action::DeleteLocal, "a/d.txt"),
-             signature(Action::DeleteLocalDirectory, "a/b"),
-             signature(Action::DeleteLocalDirectory, "a")});
+        const auto shared = tree({directory("a"),
+                                  directory("a/b"),
+                                  file("a/b/c.txt", "c"),
+                                  file("a/d.txt", "d")});
+        expect_operations(kasumi::diff::compare_trees(shared, shared, tree()),
+                          {signature(Action::DeleteLocal, "a/b/c.txt"),
+                           signature(Action::DeleteLocal, "a/d.txt"),
+                           signature(Action::DeleteLocalDirectory, "a/b"),
+                           signature(Action::DeleteLocalDirectory, "a")});
     }
     {
-        const auto shared =
-            tree({file("alpha.txt", "alpha"),
-                  file("beta.txt", "beta"),
-                  directory("dir"),
-                  file("dir/gamma.txt", "gamma")});
-        expect_operations(
-            kasumi::diff::compare_trees(shared, shared, tree()),
-            {signature(Action::DeleteLocal, "alpha.txt"),
-             signature(Action::DeleteLocal, "beta.txt"),
-             signature(Action::DeleteLocal, "dir/gamma.txt"),
-             signature(Action::DeleteLocalDirectory, "dir")});
+        const auto shared = tree({file("alpha.txt", "alpha"),
+                                  file("beta.txt", "beta"),
+                                  directory("dir"),
+                                  file("dir/gamma.txt", "gamma")});
+        expect_operations(kasumi::diff::compare_trees(shared, shared, tree()),
+                          {signature(Action::DeleteLocal, "alpha.txt"),
+                           signature(Action::DeleteLocal, "beta.txt"),
+                           signature(Action::DeleteLocal, "dir/gamma.txt"),
+                           signature(Action::DeleteLocalDirectory, "dir")});
     }
 }
 
 TEST(DiffThreeWayTest, PreservesRootAndConcurrentLocalSubtreeChanges) {
     {
-        const auto shared = tree(
-            {file("alpha.txt", "alpha"), file("beta.txt", "beta")});
-        expect_operations(
-            kasumi::diff::compare_trees(shared, shared, tree()),
-            {signature(Action::DeleteLocal, "alpha.txt"),
-             signature(Action::DeleteLocal, "beta.txt")});
+        const auto shared =
+            tree({file("alpha.txt", "alpha"), file("beta.txt", "beta")});
+        expect_operations(kasumi::diff::compare_trees(shared, shared, tree()),
+                          {signature(Action::DeleteLocal, "alpha.txt"),
+                           signature(Action::DeleteLocal, "beta.txt")});
     }
     {
         const auto base =
@@ -284,8 +279,7 @@ TEST(DiffThreeWayTest, PreservesRootAndConcurrentLocalSubtreeChanges) {
             {signature(Action::CreateRemoteDirectory, "dir", {}, {}, 0),
              signature(Action::Upload,
                        "dir/file.txt",
-                       kasumi::hash_hex(
-                           kasumi::hasher::hash_string("local")),
+                       kasumi::hash_hex(kasumi::hasher::hash_string("local")),
                        {},
                        5)});
     }
@@ -362,10 +356,12 @@ TEST(DiffThreeWayTest,
 TEST(DiffThreeWayTest, UnicodeConflictPathsPreserveAllConflictBranches) {
     const std::string logical_path = "高松灯/カード💝.png";
     const auto now = std::filesystem::file_time_type::clock::now();
-    const auto base = tree({directory("高松灯"), file(logical_path, "base", now)});
+    const auto base =
+        tree({directory("高松灯"), file(logical_path, "base", now)});
     const auto cloud_file = file(logical_path, "cloud", now);
     const auto cloud = tree({directory("高松灯"), cloud_file});
-    const auto local_file = file(logical_path, "local", now + std::chrono::hours{1});
+    const auto local_file =
+        file(logical_path, "local", now + std::chrono::hours{1});
     const auto local = tree({directory("高松灯"), local_file});
 
     expect_operations(kasumi::diff::compare_trees(local, base, cloud),
@@ -381,7 +377,8 @@ TEST(DiffThreeWayTest, UnicodeConflictPathsPreserveAllConflictBranches) {
                                  cloud_file.size,
                                  true)});
 
-    const auto older_file = file(logical_path, "local", now - std::chrono::hours{1});
+    const auto older_file =
+        file(logical_path, "local", now - std::chrono::hours{1});
     const auto older = tree({directory("高松灯"), older_file});
     expect_operations(kasumi::diff::compare_trees(older, base, cloud),
                       {signature(Action::RenameLocal,
@@ -403,14 +400,15 @@ TEST(DiffThreeWayTest, UnicodeConflictPathsPreserveAllConflictBranches) {
 
     auto local_directory = directory(logical_path);
     local_directory.mtime = now - std::chrono::hours{1};
-    expect_operations(kasumi::diff::compare_trees(
-                          tree({directory("高松灯"), local_directory}), base, cloud),
-                      {signature(Action::Download,
-                                 logical_path + ".kasumiconflict_remote",
-                                 kasumi::hash_hex(cloud_file.hash),
-                                 {},
-                                 cloud_file.size,
-                                 true)});
+    expect_operations(
+        kasumi::diff::compare_trees(
+            tree({directory("高松灯"), local_directory}), base, cloud),
+        {signature(Action::Download,
+                   logical_path + ".kasumiconflict_remote",
+                   kasumi::hash_hex(cloud_file.hash),
+                   {},
+                   cloud_file.size,
+                   true)});
 }
 
 TEST(DiffThreeWayTest, FileAndDirectoryStatesDoNotBecomeAccidentalDeletes) {

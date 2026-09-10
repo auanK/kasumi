@@ -45,7 +45,8 @@ Operation make_operation(Action action, std::string_view relative_path) {
 std::vector<std::string> phase_paths(const SyncPlan& plan, Action action) {
     std::vector<std::string> paths;
     for (const auto& operation : kasumi::sync_plan_phase(plan, action)) {
-        paths.push_back(kasumi::platform::path::to_logical_utf8(operation.path));
+        paths.push_back(
+            kasumi::platform::path::to_logical_utf8(operation.path));
     }
     return paths;
 }

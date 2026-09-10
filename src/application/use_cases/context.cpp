@@ -1,8 +1,8 @@
 #include "application/use_cases/context.hpp"
 
 #include "application/use_cases/error_mapping.hpp"
-#include "crypto/secure_memory.hpp"
 #include "core/history.hpp"
+#include "crypto/secure_memory.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/profile_lock.hpp"
 #include "runtime/resolver.hpp"

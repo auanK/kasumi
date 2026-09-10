@@ -1,7 +1,7 @@
 #include "core/transaction/codec.hpp"
 
-#include "core/wire.hpp"
 #include "core/history.hpp"
+#include "core/wire.hpp"
 #include "platform/path.hpp"
 
 #include <algorithm>
@@ -73,8 +73,7 @@ EncodeResult encode(const Record& record) {
         wire::write_string(writer, record.epoch_id);
         wire::write<std::int64_t>(writer, record.epoch_issued_at);
         wire::write<std::uint32_t>(writer, record.epoch_min_history_depth);
-        wire::write<std::uint32_t>(writer,
-                                   record.epoch_min_history_age_hours);
+        wire::write<std::uint32_t>(writer, record.epoch_min_history_age_hours);
         wire::write<std::uint32_t>(
             writer, static_cast<std::uint32_t>(record.parent_ids.size()));
         for (const auto& parent_id : record.parent_ids) {
@@ -93,8 +92,8 @@ EncodeResult encode(const Record& record) {
 
             wire::write<std::uint8_t>(
                 writer, static_cast<std::uint8_t>(operation.action));
-            wire::write_string(
-                writer, platform::path::to_logical_utf8(operation.path));
+            wire::write_string(writer,
+                               platform::path::to_logical_utf8(operation.path));
             wire::write_string(
                 writer, platform::path::to_logical_utf8(operation.alt_path));
             wire::write_string(writer, operation.hash);

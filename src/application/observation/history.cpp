@@ -96,14 +96,16 @@ validate_workspace_root(const std::filesystem::path& root) {
                 Error{.code = ErrorCode::WorkspaceFailure,
                       .detail = "a raiz do espaço de trabalho não existe"});
         }
-        return std::unexpected(
-            Error{.code = ErrorCode::WorkspaceFailure,
-                  .detail = "não foi possível inspecionar a raiz do espaço de trabalho: " +
-                            filesystem_error.message()});
+        return std::unexpected(Error{
+            .code = ErrorCode::WorkspaceFailure,
+            .detail =
+                "não foi possível inspecionar a raiz do espaço de trabalho: " +
+                filesystem_error.message()});
     }
     if (std::filesystem::is_symlink(status)) {
-        return std::unexpected(Error{.code = ErrorCode::WorkspaceFailure,
-                                     .detail = "a raiz do espaço de trabalho é um link simbólico"});
+        return std::unexpected(Error{
+            .code = ErrorCode::WorkspaceFailure,
+            .detail = "a raiz do espaço de trabalho é um link simbólico"});
     }
     if (!std::filesystem::exists(status)) {
         return std::unexpected(

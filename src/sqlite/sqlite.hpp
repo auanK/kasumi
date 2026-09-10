@@ -1,6 +1,8 @@
 #ifndef KASUMI_SQLITE_SQLITE_HPP
 #define KASUMI_SQLITE_SQLITE_HPP
 
+#include "platform/path.hpp"
+
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -9,8 +11,6 @@
 #include <sqlite3.h>
 #include <string>
 #include <string_view>
-
-#include "platform/path.hpp"
 
 namespace kasumi::sqlite {
 
@@ -24,7 +24,7 @@ using Rollback = std::unique_ptr<sqlite3, void (*)(sqlite3*)>;
 // Returns the last database error message.
 inline std::string error(sqlite3* database) {
     return database == nullptr ? "sqlite database is unavailable"
-                                : sqlite3_errmsg(database);
+                               : sqlite3_errmsg(database);
 }
 
 // Converts a filesystem path to UTF-8 for sqlite3_open_v2.

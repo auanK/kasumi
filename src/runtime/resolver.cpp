@@ -1,9 +1,8 @@
 #include "runtime/resolver.hpp"
 
+#include "platform/private_storage.hpp"
 #include "runtime/paths.hpp"
 #include "runtime/profile.hpp"
-
-#include "platform/private_storage.hpp"
 
 namespace kasumi::runtime {
 
@@ -20,9 +19,9 @@ resolve(const std::filesystem::path& app_data_dir,
         return std::unexpected(profile.error());
     }
     if (!profile->local_dir.is_absolute()) {
-        return std::unexpected(Error{
-            .code = ErrorCode::ProfileInvalid,
-            .detail = "o caminho local do perfil deve ser absoluto"});
+        return std::unexpected(
+            Error{.code = ErrorCode::ProfileInvalid,
+                  .detail = "o caminho local do perfil deve ser absoluto"});
     }
 
     auto profile_paths = resolve_profile_paths(app_data_dir, profile_name);
@@ -54,23 +53,20 @@ resolve(const std::filesystem::path& app_data_dir,
     }
 
     std::error_code profile_error;
-    const auto profile_status =
-        std::filesystem::symlink_status(profile_paths->profile_dir,
-                                        profile_error);
+    const auto profile_status = std::filesystem::symlink_status(
+        profile_paths->profile_dir, profile_error);
     if (profile_error) {
         if (profile_error != std::errc::no_such_file_or_directory) {
-            return std::unexpected(
-                Error{.code = ErrorCode::IoFailure,
-                      .detail = profile_error.message()});
+            return std::unexpected(Error{.code = ErrorCode::IoFailure,
+                                         .detail = profile_error.message()});
         }
     } else if (protect_existing_profile &&
-               profile_status.type() !=
-                   std::filesystem::file_type::not_found) {
+               profile_status.type() != std::filesystem::file_type::not_found) {
         auto secured =
             platform::private_storage::protect_tree(profile_paths->profile_dir);
         if (!secured) {
-            return std::unexpected(Error{.code = ErrorCode::IoFailure,
-                                         .detail = secured.error()});
+            return std::unexpected(
+                Error{.code = ErrorCode::IoFailure, .detail = secured.error()});
         }
     }
 

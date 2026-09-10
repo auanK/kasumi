@@ -1,11 +1,11 @@
 #include "cli/wizard.hpp"
 
-#include "platform/path.hpp"
 #include "application/profile.hpp"
 #include "cli/credentials.hpp"
 #include "cli/i18n.hpp"
 #include "cli/style.hpp"
 #include "platform/cancellation.hpp"
+#include "platform/path.hpp"
 
 #include <algorithm>
 #include <iostream>
@@ -60,7 +60,8 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
                              style::red,
                              i18n::tr(i18n::Key::LabelError),
                              style::reset,
-                             i18n::format(i18n::Key::WizardProfileAlreadyExists, new_profile));
+                             i18n::format(i18n::Key::WizardProfileAlreadyExists,
+                                          new_profile));
                 continue;
             }
 
@@ -71,20 +72,22 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
             std::getline(std::cin, new_remote);
             std::println("");
             if (!platform::path::from_utf8(new_local).is_absolute()) {
-                std::println("{}{}{} {}",
-                             style::red,
-                             i18n::tr(i18n::Key::LabelError),
-                             style::reset,
-                             i18n::tr(i18n::Key::WizardLocalPathMustBeAbsolute));
+                std::println(
+                    "{}{}{} {}",
+                    style::red,
+                    i18n::tr(i18n::Key::LabelError),
+                    style::reset,
+                    i18n::tr(i18n::Key::WizardLocalPathMustBeAbsolute));
                 continue;
             }
             if (new_remote.find(':') == std::string::npos &&
                 !platform::path::from_utf8(new_remote).is_absolute()) {
-                std::println("{}{}{} {}",
-                             style::red,
-                             i18n::tr(i18n::Key::LabelError),
-                             style::reset,
-                             i18n::tr(i18n::Key::WizardRemotePathMustBeAbsolute));
+                std::println(
+                    "{}{}{} {}",
+                    style::red,
+                    i18n::tr(i18n::Key::LabelError),
+                    style::reset,
+                    i18n::tr(i18n::Key::WizardRemotePathMustBeAbsolute));
                 continue;
             }
 
@@ -125,11 +128,12 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
 
             auto res = application::delete_profile(environment, target);
             if (res) {
-                std::println("{}{}{} {}",
-                             style::green,
-                             i18n::tr(i18n::Key::LabelOk),
-                             style::reset,
-                             i18n::format(i18n::Key::WizardProfileDeleted, target));
+                std::println(
+                    "{}{}{} {}",
+                    style::green,
+                    i18n::tr(i18n::Key::LabelOk),
+                    style::reset,
+                    i18n::format(i18n::Key::WizardProfileDeleted, target));
             } else {
                 std::println("{}{}{} {}",
                              style::red,
@@ -158,8 +162,7 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
                 if (new_local.empty())
                     new_local = old_local;
 
-                i18n::print(i18n::Key::WizardPromptNewRemotePath,
-                            old_remote);
+                i18n::print(i18n::Key::WizardPromptNewRemotePath, old_remote);
                 std::getline(std::cin, new_remote);
                 std::println("");
                 if (new_remote.empty())
@@ -172,11 +175,12 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
                                        it->min_history_age_hours};
                 auto res = application::update_profile(environment, p);
                 if (res) {
-                    std::println("{}{}{} {}",
-                                 style::green,
-                                 i18n::tr(i18n::Key::LabelOk),
-                                 style::reset,
-                                 i18n::format(i18n::Key::WizardProfileEdited, target));
+                    std::println(
+                        "{}{}{} {}",
+                        style::green,
+                        i18n::tr(i18n::Key::LabelOk),
+                        style::reset,
+                        i18n::format(i18n::Key::WizardProfileEdited, target));
                 } else {
                     std::println("{}{}{} {}",
                                  style::red,
@@ -206,11 +210,12 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
             auto res =
                 application::rename_profile(environment, target, new_name);
             if (res) {
-                std::println("{}{}{} {}",
-                             style::green,
-                             i18n::tr(i18n::Key::LabelOk),
-                             style::reset,
-                             i18n::format(i18n::Key::WizardProfileRenamed, new_name));
+                std::println(
+                    "{}{}{} {}",
+                    style::green,
+                    i18n::tr(i18n::Key::LabelOk),
+                    style::reset,
+                    i18n::format(i18n::Key::WizardProfileRenamed, new_name));
             } else {
                 std::println("{}{}{} {}",
                              style::red,

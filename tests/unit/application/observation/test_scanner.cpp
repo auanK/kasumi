@@ -658,7 +658,8 @@ TEST(ScannerTest, UnicodeSupplementaryPathsAndTargetedObservation) {
             kasumi::application::observation::scanner::observe_file(
                 root, path, *cached, fake_fingerprint);
         ASSERT_TRUE(targeted.has_value())
-            << kasumi::application::observation::scanner::describe(targeted.error());
+            << kasumi::application::observation::scanner::describe(
+                   targeted.error());
         EXPECT_EQ(targeted->row.path, path);
         EXPECT_NE(targeted->row.hash, row->hash);
         ASSERT_TRUE(targeted->cache.has_value());
@@ -863,16 +864,19 @@ TEST(ScannerTest, UnicodeSingleFileAndErrorDisplay) {
     ASSERT_EQ(scanned->snapshot.rows.size(), 1U);
     EXPECT_EQ(scanned->snapshot.rows.front().path, "千早愛音🌸.txt");
 
-    const auto missing = kasumi::application::observation::scanner::observe_file(
-        file.parent_path(), "missing-𓆩🌸𓆪.txt");
+    const auto missing =
+        kasumi::application::observation::scanner::observe_file(
+            file.parent_path(), "missing-𓆩🌸𓆪.txt");
     ASSERT_FALSE(missing.has_value());
-    EXPECT_NE(kasumi::application::observation::scanner::describe(missing.error())
-                  .find("missing-𓆩🌸𓆪.txt"),
-              std::string::npos);
+    EXPECT_NE(
+        kasumi::application::observation::scanner::describe(missing.error())
+            .find("missing-𓆩🌸𓆪.txt"),
+        std::string::npos);
 }
 
 TEST(ScannerTest, UnicodeIgnoreRulesExcludeAndReincludeFiles) {
-    auto workspace = kasumi::test::make_temp_workspace("scanner-unicode-ignore");
+    auto workspace =
+        kasumi::test::make_temp_workspace("scanner-unicode-ignore");
     const auto root = kasumi::test::workspace_path(workspace, "local");
     kasumi::test::write_text(root / ".kasumiignore",
                              "/千早愛音/\n"
@@ -881,8 +885,8 @@ TEST(ScannerTest, UnicodeIgnoreRulesExcludeAndReincludeFiles) {
                              "𓆩🌸𓆪.txt\n");
     constexpr std::array<std::string_view, 3> excluded{
         "千早愛音/Karyl💝.png", "高松灯/除外🌸.png", "Icons/𓆩🌸𓆪.txt"};
-    constexpr std::array<std::string_view, 2> included{
-        "高松灯/カード💝.png", "Icons/𝑬𝒎𝒊𝒍𝒊𝒂.txt"};
+    constexpr std::array<std::string_view, 2> included{"高松灯/カード💝.png",
+                                                       "Icons/𝑬𝒎𝒊𝒍𝒊𝒂.txt"};
     for (const auto path : excluded) {
         kasumi::test::write_text(root / kasumi::platform::path::from_utf8(path),
                                  "ignored");
@@ -899,8 +903,8 @@ TEST(ScannerTest, UnicodeIgnoreRulesExcludeAndReincludeFiles) {
     for (const auto path : excluded) {
         SCOPED_TRACE(path);
         EXPECT_EQ(kasumi::find_row(scanned->snapshot, path), nullptr);
-        EXPECT_FALSE(
-            kasumi::application::observation::scanner::observe_file(root, path));
+        EXPECT_FALSE(kasumi::application::observation::scanner::observe_file(
+            root, path));
     }
     for (const auto path : included) {
         SCOPED_TRACE(path);
@@ -908,7 +912,8 @@ TEST(ScannerTest, UnicodeIgnoreRulesExcludeAndReincludeFiles) {
         const auto observed =
             kasumi::application::observation::scanner::observe_file(root, path);
         ASSERT_TRUE(observed.has_value())
-            << kasumi::application::observation::scanner::describe(observed.error());
+            << kasumi::application::observation::scanner::describe(
+                   observed.error());
         EXPECT_EQ(observed->row.path, path);
     }
 }
@@ -1009,8 +1014,8 @@ TEST(ScannerTest, ScanResultRejectsNonPortableEntriesOnPosix) {
 }
 
 TEST(ScannerTest, ScanResultRejectsUnicodeCaseCollisionsOnPosix) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("scanner-posix-unicode-case-collision");
+    auto workspace = kasumi::test::make_temp_workspace(
+        "scanner-posix-unicode-case-collision");
     const auto root = kasumi::test::workspace_path(workspace, "local");
     kasumi::test::write_text(root / "Ä.txt", "upper");
     kasumi::test::write_text(root / "ä.txt", "lower");
@@ -1018,9 +1023,7 @@ TEST(ScannerTest, ScanResultRejectsUnicodeCaseCollisionsOnPosix) {
     const auto result =
         kasumi::application::observation::scanner::scan_result(root);
     ASSERT_FALSE(result.has_value());
-    EXPECT_NE(
-        result.error().detail.find("case collision"),
-        std::string::npos);
+    EXPECT_NE(result.error().detail.find("case collision"), std::string::npos);
 }
 #endif
 

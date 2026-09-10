@@ -71,7 +71,8 @@ ContentReachabilityResult inventory_content_reachability(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const ReachabilityInventory& history_inventory,
-    const std::filesystem::path& workspace_root);
+    const std::filesystem::path& workspace_root,
+    bool audit_payloads = false);
 
 // Variant reusing an already captured physical listing.
 ContentReachabilityResult inventory_content_reachability(
@@ -79,7 +80,8 @@ ContentReachabilityResult inventory_content_reachability(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     std::span<const std::string> identifiers,
     const ReachabilityInventory& history_inventory,
-    const std::filesystem::path& workspace_root);
+    const std::filesystem::path& workspace_root,
+    bool audit_payloads = false);
 
 } // namespace kasumi::application::history_storage
 

@@ -1,5 +1,5 @@
-#include "kasumi/test/history_storage.hpp"
 #include "application/sync/publication.hpp"
+#include "kasumi/test/history_storage.hpp"
 
 namespace {
 
