@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.3] - 2026-09-10
+
+Kasumi - Multi-client bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.
+
+### Fixed
+
+- Fixed a `Composition Mismatch` when synchronizing profiles where remote storage contains entries matching `.kasumiignore` (such as `desktop.ini`, `node_modules/`, `*.tmp`). Reconciler and diff now systematically evaluate ignore patterns, preserving local files while purging excluded paths from the shared remote namespace.
+
+### Changed
+
+- Decoupled payload auditing from garbage collection reachability analysis, avoiding redundant payload downloads and significantly reducing GC duration. Cryptographic payload integrity verification is performed exclusively by `fsck`.
+- Added pre-destructive remote listing verification before quarantine and purge in garbage collection to prevent races against concurrent modifications.
+
+### Tests
+
+- Added unit and end-to-end regression tests validating ignore pattern evaluation in 3-way reconciliation, remote cleanup of excluded entries, and composition consistency across Linux, MSYS2, and MSVC.
+- Added unit, integration, and operational live benchmarks validating garbage collection reachability, quarantine staging, and retention policies.
+
 ## [0.5.2] - 2026-09-08
 
 Kasumi - Multi-client bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.

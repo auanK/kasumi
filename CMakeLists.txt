@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(kasumi VERSION 0.5.2 LANGUAGES C CXX)
+project(kasumi VERSION 0.5.3 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 23)
