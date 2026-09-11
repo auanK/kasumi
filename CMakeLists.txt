@@ -139,6 +139,7 @@ add_library(kasumi_core STATIC
     src/core/node.cpp
     src/core/operation.cpp
     src/core/diff.cpp
+    src/core/ignore.cpp
     src/core/history.cpp
     src/core/wire.cpp
     src/core/reconciliation/plan.cpp

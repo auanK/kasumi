@@ -112,6 +112,7 @@ bool same_observation(const reconciliation::Input& left,
            left.base_state_present == right.base_state_present &&
            left.local_generation == right.local_generation &&
            left.audit_storage_objects == right.audit_storage_objects &&
+           left.ignore_list == right.ignore_list &&
            same_storage(left.storage, right.storage);
 }
 

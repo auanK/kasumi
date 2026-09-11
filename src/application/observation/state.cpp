@@ -3,6 +3,7 @@
 #include "application/observation/history.hpp"
 #include "application/observation/patch.hpp"
 #include "application/observation/scanner.hpp"
+#include "core/ignore.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "state_storage/database.hpp"
@@ -444,6 +445,8 @@ collect_reconciliation_input(
         input.base_ciphertext_id = std::move((*persisted)->ciphertext_id);
         input.base_state_present = true;
     }
+    input.ignore_list = kasumi::ignore::load_ignore_list(
+        runtime_data.local_dir / ".kasumiignore");
 
     std::jthread local_scan([&] {
         const auto scan_trace = platform::perf_trace::begin();

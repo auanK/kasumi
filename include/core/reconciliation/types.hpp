@@ -3,6 +3,7 @@
 
 #include "core/hasher.hpp"
 #include "core/history.hpp"
+#include "core/ignore.hpp"
 #include "core/node.hpp"
 #include "core/operation.hpp"
 
@@ -121,6 +122,9 @@ struct Input {
 
     // Also audits physical presence of objects.
     bool audit_storage_objects = false;
+
+    // Ignore rules observed for local synchronization.
+    ignore::IgnoreList ignore_list;
 };
 
 // Computed plan and decisions required to execute it safely.

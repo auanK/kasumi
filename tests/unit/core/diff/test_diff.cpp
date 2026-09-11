@@ -433,4 +433,106 @@ TEST(DiffThreeWayTest, FileAndDirectoryStatesDoNotBecomeAccidentalDeletes) {
                       {signature(Action::CreateLocalDirectory, "reverse")});
 }
 
+TEST(DiffThreeWayTest, IgnoredFilesOnRemoteArePurgedAndNotDownloaded) {
+    const auto now = std::filesystem::file_time_type::clock::now();
+    const auto ignore_list =
+        kasumi::ignore::parse_ignore_rules("desktop.ini\n");
+
+    const auto normal = file("normal.txt", "content", now);
+    const auto base_desktop =
+        file("desktop.ini", "base_ini", now - std::chrono::hours{1});
+    const auto cloud_desktop = file("desktop.ini", "modified_remote_ini", now);
+
+    const auto local_tree = tree({normal});
+    const auto base_tree = tree({normal, base_desktop});
+    const auto cloud_tree = tree({normal, cloud_desktop});
+
+    const auto operations = kasumi::diff::compare_trees(
+        local_tree, base_tree, cloud_tree, &ignore_list);
+
+    expect_operations(operations,
+                      {signature(Action::DeleteRemote,
+                                 "desktop.ini",
+                                 kasumi::hash_hex(cloud_desktop.hash))});
+}
+
+TEST(DiffThreeWayTest, IgnoredWildcardPatternPurgesRemoteMatches) {
+    const auto now = std::filesystem::file_time_type::clock::now();
+    const auto ignore_list = kasumi::ignore::parse_ignore_rules("*.log\n");
+
+    const auto doc = file("docs/readme.md", "read", now);
+    const auto log1 = file("logs/error.log", "err", now);
+    const auto log2 = file("logs/debug.log", "dbg", now);
+
+    const auto local_tree = tree({directory("docs"), doc});
+    const auto base_tree = tree();
+    const auto cloud_tree =
+        tree({directory("docs"), doc, directory("logs"), log2, log1});
+
+    const auto operations = kasumi::diff::compare_trees(
+        local_tree, base_tree, cloud_tree, &ignore_list);
+
+    EXPECT_FALSE(std::ranges::any_of(operations, [](const auto& op) {
+        return op.action == Action::Download &&
+               (op.path.string().ends_with(".log"));
+    }));
+    EXPECT_TRUE(std::ranges::any_of(operations, [&](const auto& op) {
+        return op.action == Action::DeleteRemote &&
+               op.path == std::filesystem::path{"logs/error.log"};
+    }));
+    EXPECT_TRUE(std::ranges::any_of(operations, [&](const auto& op) {
+        return op.action == Action::DeleteRemote &&
+               op.path == std::filesystem::path{"logs/debug.log"};
+    }));
+}
+
+TEST(DiffThreeWayTest, IgnoredDirectoryPurgesRemoteSubtreeWithoutRecursing) {
+    const auto now = std::filesystem::file_time_type::clock::now();
+    const auto ignore_list =
+        kasumi::ignore::parse_ignore_rules("node_modules/\n");
+
+    const auto pkg = file("package.json", "{}", now);
+    const auto mod_dir = directory("node_modules");
+    const auto mod_sub = directory("node_modules/lib");
+    const auto mod_file = file("node_modules/lib/index.js", "js", now);
+
+    const auto local_tree = tree({pkg});
+    const auto base_tree = tree();
+    const auto cloud_tree = tree({mod_dir, mod_sub, mod_file, pkg});
+
+    const auto operations = kasumi::diff::compare_trees(
+        local_tree, base_tree, cloud_tree, &ignore_list);
+
+    // Only node_modules directory itself should receive DeleteRemoteDirectory.
+    // Children inside node_modules must NOT be traversed or scheduled.
+    expect_operations(
+        operations, {signature(Action::DeleteRemoteDirectory, "node_modules")});
+}
+
+TEST(DiffThreeWayTest, NegatedIgnoreRuleReincludesRemoteFile) {
+    const auto now = std::filesystem::file_time_type::clock::now();
+    const auto ignore_list =
+        kasumi::ignore::parse_ignore_rules("*.txt\n!important.txt\n");
+
+    const auto other = file("other.txt", "drop", now);
+    const auto important = file("important.txt", "keep", now);
+
+    const auto local_tree = tree();
+    const auto base_tree = tree();
+    const auto cloud_tree = tree({important, other});
+
+    const auto operations = kasumi::diff::compare_trees(
+        local_tree, base_tree, cloud_tree, &ignore_list);
+
+    // other.txt is deleted remotely, important.txt is downloaded.
+    EXPECT_TRUE(std::ranges::any_of(operations, [&](const auto& op) {
+        return op.action == Action::DeleteRemote &&
+               op.path == std::filesystem::path{"other.txt"};
+    }));
+    EXPECT_TRUE(std::ranges::any_of(operations, [&](const auto& op) {
+        return op.action == Action::Download &&
+               op.path == std::filesystem::path{"important.txt"};
+    }));
+}
+
 } // namespace

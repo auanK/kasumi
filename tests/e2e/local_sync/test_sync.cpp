@@ -675,6 +675,41 @@ TEST(H3LocalSyncTest, IgnoreFilesStayLocalAcrossRemoteDeletes) {
 }
 
 TEST(H3LocalSyncTest,
+     IgnoredFileModifiedRemotelyDoesNotCauseCompositionMismatch) {
+    auto scenario = make_scenario();
+    const auto a = make_client(scenario, "a");
+    const auto b = make_client(scenario, "b");
+
+    // Initially both sync desktop.ini and file.txt
+    kasumi::test::write_text(client_local_dir(a) / "desktop.ini",
+                             "initial_desktop_ini");
+    kasumi::test::write_text(client_local_dir(a) / "file.txt", "file");
+    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync(b));
+    expect_file(b, "desktop.ini", "initial_desktop_ini");
+
+    // Client A now ignores desktop.ini
+    kasumi::test::write_text(client_local_dir(a) / ".kasumiignore",
+                             "desktop.ini\n");
+    kasumi::test::write_text(client_local_dir(a) / "desktop.ini",
+                             "local_a_ini");
+
+    // Client B modifies desktop.ini remotely (c != b)
+    kasumi::test::write_text(client_local_dir(b) / "desktop.ini",
+                             "modified_remote_desktop_ini_longer");
+    ASSERT_TRUE(sync(b));
+
+    // Client A syncs: must succeed without CompositionMismatch!
+    ASSERT_TRUE(sync(a));
+    // Local file on client A remains intact
+    expect_file(a, "desktop.ini", "local_a_ini");
+
+    auto observed_remote = remote(scenario);
+    ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
+    expect_remote_absent(*observed_remote, "desktop.ini");
+}
+
+TEST(H3LocalSyncTest,
      IdenticalKasumiIgnoreMtimeDoesNotBlockUnrelatedPublication) {
     auto scenario = make_scenario();
     const auto client = make_client(scenario, "mtime-regression");

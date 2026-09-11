@@ -406,8 +406,11 @@ candidate_shared_tree(const Input& input,
                     });
                 }
                 erase_subtree(result.tree, path);
-                auto ancestors = synchronize_ancestor_rows(
-                    result.tree, input.local_tree, path, false);
+                auto ancestors = synchronize_ancestor_rows(result.tree,
+                                                           input.local_tree,
+                                                           path,
+                                                           false,
+                                                           &input.storage.tree);
                 if (!ancestors) {
                     return std::unexpected(std::move(ancestors.error()));
                 }
@@ -619,7 +622,8 @@ ReconcileResult reconcile(const Input& input) {
     auto operations = diff::compare_trees(input.local_tree,
                                           input.base_tree,
                                           effective_storage_tree,
-                                          missing_objects);
+                                          missing_objects,
+                                          &input.ignore_list);
 
     reserve_conflict_destinations(input.local_tree, operations);
 

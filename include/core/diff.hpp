@@ -1,6 +1,7 @@
 #ifndef KASUMI_DIFF_HPP
 #define KASUMI_DIFF_HPP
 
+#include "core/ignore.hpp"
 #include "node.hpp"
 #include "operation.hpp"
 
@@ -56,20 +57,25 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                         const NodeRow* cloud,
                         std::string_view current_path,
                         const HashSet& missing_blocks,
-                        std::vector<SyncOperation>& operations);
+                        std::vector<SyncOperation>& operations,
+                        const ignore::IgnoreList* ignore_list = nullptr);
 
 } // namespace detail
 
 // Compares local, base, and remote considering missing physical objects.
-std::vector<SyncOperation> compare_trees(const Snapshot& local,
-                                         const Snapshot& base,
-                                         const Snapshot& cloud,
-                                         const HashSet& missing_blocks);
+std::vector<SyncOperation>
+compare_trees(const Snapshot& local,
+              const Snapshot& base,
+              const Snapshot& cloud,
+              const HashSet& missing_blocks,
+              const ignore::IgnoreList* ignore_list = nullptr);
 
 // Compares local, base, and remote assuming referenced objects are available.
-std::vector<SyncOperation> compare_trees(const Snapshot& local,
-                                         const Snapshot& base,
-                                         const Snapshot& cloud);
+std::vector<SyncOperation>
+compare_trees(const Snapshot& local,
+              const Snapshot& base,
+              const Snapshot& cloud,
+              const ignore::IgnoreList* ignore_list = nullptr);
 
 } // namespace kasumi::diff
 
