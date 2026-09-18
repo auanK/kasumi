@@ -29,9 +29,19 @@ namespace kasumi::cli {
 int run(int argc, char* argv[]) {
     i18n::init_language(argc, argv);
     const auto sanitized = i18n::extract_language_argument(argc, argv);
+    bool full = false;
+    std::vector<std::string> without_full;
+    without_full.reserve(sanitized.size());
+    for (const auto& arg : sanitized) {
+        if (arg == "--full") {
+            full = true;
+        } else {
+            without_full.push_back(arg);
+        }
+    }
     std::vector<char*> sanitized_ptrs;
-    sanitized_ptrs.reserve(sanitized.size());
-    for (const auto& s : sanitized) {
+    sanitized_ptrs.reserve(without_full.size());
+    for (const auto& s : without_full) {
         sanitized_ptrs.push_back(const_cast<char*>(s.c_str()));
     }
     const int effective_argc = static_cast<int>(sanitized_ptrs.size());
@@ -91,6 +101,10 @@ int run(int argc, char* argv[]) {
         auto result = run_remote(std::move(initial_credentials));
         application::wipe_credentials(initial_credentials);
 
+        if (platform::cancellation::requested()) {
+            return present_cancellation(application::Operation::Preview);
+        }
+
         if (result) {
             return present(*result);
         }
@@ -100,18 +114,42 @@ int run(int argc, char* argv[]) {
     auto request = std::get<application::Request>(*parse_result);
     auto initial_credentials = credentials::from_environment();
 
+    application::SyncProgressCallback on_progress{};
     if (request.operation == application::Operation::Sync) {
-        std::println("{}", i18n::tr(i18n::Key::SyncInProgress));
+        std::println(
+            "{}", i18n::format(i18n::Key::SyncStarting, request.profile_name));
+        on_progress = [](const application::SyncProgress& progress) {
+            present(progress, application::Operation::Sync);
+        };
+    } else if (request.operation == application::Operation::Preview) {
+        std::println(
+            "{}",
+            i18n::format(i18n::Key::PreviewStarting, request.profile_name));
+        on_progress = [](const application::SyncProgress& progress) {
+            present(progress, application::Operation::Preview);
+        };
+    } else if (request.operation == application::Operation::Status) {
+        std::println(
+            "{}",
+            i18n::format(i18n::Key::StatusStarting, request.profile_name));
+        on_progress = [](const application::SyncProgress& progress) {
+            present(progress, application::Operation::Status);
+        };
     }
 
     auto result =
         application::execute({.request = request,
                               .credentials = std::move(initial_credentials),
-                              .environment = environment});
+                              .environment = environment,
+                              .on_progress = std::move(on_progress)});
     application::wipe_credentials(initial_credentials);
 
+    if (platform::cancellation::requested()) {
+        return present_cancellation(request.operation);
+    }
+
     if (result) {
-        return present(*result);
+        return present(*result, full);
     } else {
         return present(result.error());
     }

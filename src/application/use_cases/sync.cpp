@@ -10,6 +10,7 @@
 #include "platform/perf_trace.hpp"
 #include "state_storage/database.hpp"
 
+#include <chrono>
 #include <exception>
 #include <optional>
 #include <utility>
@@ -55,9 +56,47 @@ void save_observation_checkpoint(
         runtime.database_path, checkpoint));
 }
 
+SyncCompleted compute_sync_summary(const reconciliation::Result& result) {
+    SyncCompleted summary;
+    summary.total = static_cast<std::uint32_t>(sync_plan_size(result.plan));
+    summary.published = result.requires_publication;
+
+    for (const auto& op : sync_plan_operations(result.plan)) {
+        switch (op.action) {
+            case Action::Upload:
+                ++summary.uploaded;
+                summary.upload_bytes += op.size;
+                break;
+            case Action::Download:
+                ++summary.downloaded;
+                summary.download_bytes += op.size;
+                break;
+            case Action::DeleteLocal:
+            case Action::DeleteRemote:
+                ++summary.removed;
+                break;
+            case Action::RenameLocal:
+                ++summary.renamed;
+                break;
+            case Action::CreateLocalDirectory:
+            case Action::CreateRemoteDirectory:
+                ++summary.created_dirs;
+                break;
+            case Action::DeleteLocalDirectory:
+            case Action::DeleteRemoteDirectory:
+                ++summary.removed_dirs;
+                break;
+            case Action::Count:
+                break;
+        }
+    }
+    return summary;
+}
+
 } // namespace
 
 std::expected<Response, Error> run_sync(OperationContext& context) {
+    const auto sync_start = std::chrono::steady_clock::now();
     platform::perf_trace::maximum(
         "configured content concurrency",
         sync::coordinator::detail::content_concurrency());
@@ -66,8 +105,10 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
         context.runtime, context.storage, context.key);
     platform::perf_trace::finish("transaction recovery", recovery_trace);
     if (!recovery) {
-        return std::unexpected(transaction_error(
-            context.operation, recovery.error(), context.summary));
+        auto err = transaction_error(
+            context.operation, recovery.error(), context.summary);
+        err.stage = SyncStage::Observing;
+        return std::unexpected(err);
     }
 
     observation::LocalObservationSession observation_session;
@@ -75,8 +116,14 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
     std::optional<history_storage::maintenance_protocol::RegistrationResult>
         eager_writer;
     history_storage::maintenance_protocol::RegistrationState writer;
+    SyncStage current_stage = SyncStage::Observing;
     auto outcome = [&]() -> std::expected<Response, Error> {
         try {
+            current_stage = SyncStage::Observing;
+            if (context.on_progress) {
+                context.on_progress(
+                    SyncProgress{.stage = SyncStage::Observing});
+            }
             const auto observation_trace = platform::perf_trace::begin();
             auto collected = observation::collect_reconciliation_input(
                 context.runtime,
@@ -97,28 +144,39 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             platform::perf_trace::finish("initial observation",
                                          observation_trace);
             if (!collected) {
-                return std::unexpected(plan_error(context.operation,
-                                                  collected.error().detail,
-                                                  context.summary));
+                auto err = plan_error(context.operation,
+                                      collected.error().detail,
+                                      context.summary);
+                err.stage = SyncStage::Observing;
+                return std::unexpected(err);
             }
 
+            current_stage = SyncStage::Calculating;
+            if (context.on_progress) {
+                context.on_progress(
+                    SyncProgress{.stage = SyncStage::Calculating});
+            }
             const auto reconciliation_trace = platform::perf_trace::begin();
             auto reconciled = reconciliation::reconcile(*collected);
             platform::perf_trace::finish("reconciliation",
                                          reconciliation_trace);
             if (!reconciled) {
-                return std::unexpected(plan_error(
+                auto err = plan_error(
                     context.operation,
                     describe_reconciliation_error(reconciled.error()),
-                    context.summary));
+                    context.summary);
+                err.stage = SyncStage::Calculating;
+                return std::unexpected(err);
             }
 
             if (!reconciled->unrecoverable_paths.empty()) {
-                return std::unexpected(
+                auto err =
                     synchronization_error(context.operation,
                                           describe_unrecoverable_paths(
                                               reconciled->unrecoverable_paths),
-                                          context.summary));
+                                          context.summary);
+                err.stage = SyncStage::Calculating;
+                return std::unexpected(err);
             }
 
             const bool remote_write_required =
@@ -129,10 +187,12 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                                      reconciled->requires_state_commit;
             if (eager_writer) {
                 if (!*eager_writer) {
-                    return std::unexpected(
+                    auto err =
                         synchronization_error(context.operation,
                                               eager_writer->error().detail,
-                                              context.summary));
+                                              context.summary);
+                    err.stage = SyncStage::Calculating;
+                    return std::unexpected(err);
                 }
                 writer = std::move(**eager_writer);
                 (**eager_writer).storage = nullptr;
@@ -143,10 +203,12 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 platform::perf_trace::finish("remote initialize",
                                              initialize_trace);
                 if (!initialized) {
-                    return std::unexpected(synchronization_error(
+                    auto err = synchronization_error(
                         context.operation,
                         transport::describe(initialized.error()),
-                        context.summary));
+                        context.summary);
+                    err.stage = SyncStage::Calculating;
+                    return std::unexpected(err);
                 }
             }
             if (active_sync &&
@@ -160,10 +222,11 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 platform::perf_trace::finish("writer registration",
                                              writer_trace);
                 if (!registered) {
-                    return std::unexpected(
-                        synchronization_error(context.operation,
-                                              registered.error().detail,
-                                              context.summary));
+                    auto err = synchronization_error(context.operation,
+                                                     registered.error().detail,
+                                                     context.summary);
+                    err.stage = SyncStage::Calculating;
+                    return std::unexpected(err);
                 }
                 writer = std::move(*registered);
             }
@@ -178,8 +241,19 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 &observation_session);
             platform::perf_trace::finish("reobservation", reobservation_trace);
             if (!stable) {
-                return std::unexpected(transaction_error(
-                    context.operation, stable.error(), context.summary));
+                auto err = transaction_error(
+                    context.operation, stable.error(), context.summary);
+                err.stage = SyncStage::Calculating;
+                return std::unexpected(err);
+            }
+
+            auto summary = compute_sync_summary(stable->result);
+            if (context.on_progress) {
+                context.on_progress(SyncProgress{
+                    .stage = SyncStage::Calculating,
+                    .summary = summary,
+                    .total_items = summary.total,
+                });
             }
 
             if (!stable->result.requires_publication &&
@@ -198,9 +272,19 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     context.runtime, observation_session, true);
                 platform::perf_trace::finish("finalization",
                                              finalization_trace);
+                summary.duration =
+                    std::chrono::steady_clock::now() - sync_start;
                 return Response{.operation = context.operation,
                                 .runtime = context.summary,
-                                .data = SyncCompleted{}};
+                                .data = summary};
+            }
+
+            current_stage = SyncStage::Applying;
+            if (context.on_progress) {
+                context.on_progress(SyncProgress{
+                    .stage = SyncStage::Applying,
+                    .total_items = summary.total,
+                });
             }
 
             const auto execution_trace = platform::perf_trace::begin();
@@ -214,9 +298,33 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             platform::perf_trace::finish("transaction execution",
                                          execution_trace);
             if (!synchronized) {
-                return std::unexpected(transaction_error(
-                    context.operation, synchronized.error(), context.summary));
+                const auto fail_stage =
+                    synchronized.error().code ==
+                            sync::coordinator::ErrorCode::PublicationFailure
+                        ? SyncStage::Publishing
+                        : SyncStage::Applying;
+                auto err = transaction_error(
+                    context.operation, synchronized.error(), context.summary);
+                err.stage = fail_stage;
+                return std::unexpected(err);
             }
+
+            if (summary.published) {
+                current_stage = SyncStage::Publishing;
+                if (context.on_progress) {
+                    context.on_progress(SyncProgress{
+                        .stage = SyncStage::Publishing,
+                    });
+                }
+            }
+
+            current_stage = SyncStage::Finalizing;
+            if (context.on_progress) {
+                context.on_progress(SyncProgress{
+                    .stage = SyncStage::Finalizing,
+                });
+            }
+
             const auto finalization_trace = platform::perf_trace::begin();
             if (observation_session.cache_dirty) {
                 static_cast<void>(state_storage::save_file_cache_delta(
@@ -229,12 +337,15 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             save_observation_checkpoint(
                 context.runtime, observation_session, true);
             platform::perf_trace::finish("finalization", finalization_trace);
+            summary.duration = std::chrono::steady_clock::now() - sync_start;
             return Response{.operation = context.operation,
                             .runtime = context.summary,
-                            .data = SyncCompleted{}};
+                            .data = summary};
         } catch (const std::exception& exception) {
-            return std::unexpected(synchronization_error(
-                context.operation, exception.what(), context.summary));
+            auto err = synchronization_error(
+                context.operation, exception.what(), context.summary);
+            err.stage = current_stage;
+            return std::unexpected(err);
         }
     }();
     auto* pending =
@@ -252,8 +363,10 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 *pending);
         platform::perf_trace::finish("writer release", release_trace);
         if (outcome && !released) {
-            return std::unexpected(synchronization_error(
-                context.operation, released.error().detail, context.summary));
+            auto err = synchronization_error(
+                context.operation, released.error().detail, context.summary);
+            err.stage = SyncStage::Finalizing;
+            return std::unexpected(err);
         }
     }
     return outcome;

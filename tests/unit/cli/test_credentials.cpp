@@ -1,6 +1,7 @@
 #include "application/profile.hpp"
 #include "cli/app.hpp"
 #include "cli/credentials.hpp"
+#include "cli/i18n.hpp"
 #include "cli/wizard.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/scoped_environment.hpp"
@@ -103,12 +104,13 @@ TEST(CliAppTest, PrintsSynchronizationProgressOnce) {
     EXPECT_EQ(kasumi::cli::run(3, argv), 1);
 
     const auto output = testing::internal::GetCapturedStdout();
+    const auto expected_starting = "Synchronizing \"missing\"...";
     std::size_t occurrences = 0;
     std::size_t position = 0;
-    while ((position = output.find("Synchronizing...", position)) !=
+    while ((position = output.find(expected_starting, position)) !=
            std::string::npos) {
         ++occurrences;
-        position += std::string{"Synchronizing..."}.size();
+        position += std::string{expected_starting}.size();
     }
     EXPECT_EQ(occurrences, 1U);
     EXPECT_EQ(output.find("[Synchronizing]"), std::string::npos);
@@ -144,6 +146,73 @@ TEST(CliAppTest, PrintsHelpInPortugueseWhenFlagProvided) {
     EXPECT_NE(output.find("kasumi sync <perfil>"), std::string::npos);
     EXPECT_NE(output.find("não executa GC"), std::string::npos);
     EXPECT_NE(output.find("diagnóstico remoto completo"), std::string::npos);
+    kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
+}
+
+TEST(CliAppTest, PrintsPreviewStartingProgressOnce) {
+    auto workspace = kasumi::test::make_temp_workspace("cli-app-preview");
+#if defined(_WIN32)
+    auto scoped_env = kasumi::test::scoped_environment_variable(
+        "KASUMI_WORKSPACE",
+        kasumi::test::workspace_path(workspace, "config").string());
+#endif
+    char command[] = "kasumi";
+    char operation[] = "sync";
+    char profile[] = "missing";
+    char flag[] = "--dry-run";
+    char* argv[] = {command, operation, profile, flag};
+    testing::internal::CaptureStdout();
+
+    EXPECT_EQ(kasumi::cli::run(4, argv), 1);
+
+    const auto output = testing::internal::GetCapturedStdout();
+    const auto expected_starting =
+        "Simulating synchronization of \"missing\"...";
+    EXPECT_NE(output.find(expected_starting), std::string::npos);
+    EXPECT_NE(output.find("[ERROR]"), std::string::npos);
+}
+
+TEST(CliAppTest, PrintsStatusStartingProgressOnce) {
+    auto workspace = kasumi::test::make_temp_workspace("cli-app-status");
+#if defined(_WIN32)
+    auto scoped_env = kasumi::test::scoped_environment_variable(
+        "KASUMI_WORKSPACE",
+        kasumi::test::workspace_path(workspace, "config").string());
+#endif
+    char command[] = "kasumi";
+    char operation[] = "status";
+    char profile[] = "missing";
+    char* argv[] = {command, operation, profile};
+    testing::internal::CaptureStdout();
+
+    EXPECT_EQ(kasumi::cli::run(3, argv), 1);
+
+    const auto output = testing::internal::GetCapturedStdout();
+    const auto expected_starting = "Checking status of \"missing\"...";
+    EXPECT_NE(output.find(expected_starting), std::string::npos);
+    EXPECT_NE(output.find("[ERROR]"), std::string::npos);
+}
+
+TEST(CliAppTest, AcceptsFullFlagOnStatusAndPreview) {
+    auto workspace = kasumi::test::make_temp_workspace("cli-app-full-flag");
+#if defined(_WIN32)
+    auto scoped_env = kasumi::test::scoped_environment_variable(
+        "KASUMI_WORKSPACE",
+        kasumi::test::workspace_path(workspace, "config").string());
+#endif
+    char command[] = "kasumi";
+    char operation[] = "status";
+    char profile[] = "missing";
+    char full_flag[] = "--full";
+    char* argv[] = {command, operation, profile, full_flag};
+    testing::internal::CaptureStdout();
+
+    EXPECT_EQ(kasumi::cli::run(4, argv), 1);
+
+    const auto output = testing::internal::GetCapturedStdout();
+    EXPECT_NE(output.find("Checking status of \"missing\"..."),
+              std::string::npos);
+    EXPECT_NE(output.find("[ERROR]"), std::string::npos);
 }
 
 TEST(CliWizardTest, RejectsDuplicateNameBeforeOtherPrompts) {

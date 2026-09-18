@@ -20,6 +20,7 @@ struct OperationContext {
     std::intptr_t profile_lock = platform::invalid_profile_lock;
     runtime::vault::KeyBytes key{};
     transport::Transport storage;
+    SyncProgressCallback on_progress{};
 };
 
 // Validates input and prepares profile, key, and transport.

@@ -19,6 +19,18 @@ TEST(CliI18nTest, DefaultLanguageIsEnglish) {
     EXPECT_EQ(tr(Key::LabelOk), "[OK]");
     EXPECT_EQ(tr(Key::SyncCompleted), "Synchronization completed.");
     EXPECT_EQ(tr(Key::SyncInProgress), "Synchronizing...");
+    EXPECT_EQ(tr(Key::SyncStageObserving),
+              "[1/5] Observing local and remote state...");
+    EXPECT_EQ(tr(Key::SyncStageCalculating), "[2/5] Calculating changes...");
+    EXPECT_EQ(tr(Key::SyncEverythingInSync), "Everything in sync.");
+    EXPECT_EQ(tr(Key::SyncStageApplying), "[3/5] Applying changes...");
+    EXPECT_EQ(tr(Key::SyncStagePublishing), "[4/5] Publishing new state...");
+    EXPECT_EQ(tr(Key::SyncStageFinalizing), "[5/5] Finalizing...");
+    EXPECT_EQ(tr(Key::PlanStageObserving),
+              "[1/2] Observing local and remote state...");
+    EXPECT_EQ(tr(Key::PlanStageCalculating), "[2/2] Calculating changes...");
+    EXPECT_EQ(format(Key::SyncPlanOmittedSingular, 1), "1 more item");
+    EXPECT_EQ(format(Key::SyncPlanOmittedPlural, 5), "5 more items");
 }
 
 TEST(CliI18nTest, SwitchingToPortugueseUpdatesStrings) {
@@ -28,6 +40,18 @@ TEST(CliI18nTest, SwitchingToPortugueseUpdatesStrings) {
     EXPECT_EQ(tr(Key::LabelOk), "[OK]");
     EXPECT_EQ(tr(Key::SyncCompleted), "Sincronização concluída.");
     EXPECT_EQ(tr(Key::SyncInProgress), "Sincronizando...");
+    EXPECT_EQ(tr(Key::SyncStageObserving),
+              "[1/5] Observando estado local e remoto...");
+    EXPECT_EQ(tr(Key::SyncStageCalculating), "[2/5] Calculando alterações...");
+    EXPECT_EQ(tr(Key::SyncEverythingInSync), "Tudo sincronizado.");
+    EXPECT_EQ(tr(Key::SyncStageApplying), "[3/5] Aplicando alterações...");
+    EXPECT_EQ(tr(Key::SyncStagePublishing), "[4/5] Publicando novo estado...");
+    EXPECT_EQ(tr(Key::SyncStageFinalizing), "[5/5] Finalizando...");
+    EXPECT_EQ(tr(Key::PlanStageObserving),
+              "[1/2] Observando estado local e remoto...");
+    EXPECT_EQ(tr(Key::PlanStageCalculating), "[2/2] Calculando alterações...");
+    EXPECT_EQ(format(Key::SyncPlanOmittedSingular, 1), "mais 1 item");
+    EXPECT_EQ(format(Key::SyncPlanOmittedPlural, 5), "mais 5 itens");
     set_language(Language::English); // Restore default
 }
 

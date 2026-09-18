@@ -4,6 +4,7 @@
 #include "application/request.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -58,8 +59,31 @@ struct PlanReport {
     std::vector<PlanItem> items;
 };
 
-// Indicates completed synchronization.
-struct SyncCompleted {};
+// High-level phases of synchronization execution.
+enum class SyncStage {
+    Observing,
+    Calculating,
+    Applying,
+    Publishing,
+    Finalizing,
+};
+
+// Indicates completed synchronization with summary counts.
+struct SyncCompleted {
+    std::uint32_t total = 0;
+    std::uint32_t uploaded = 0;
+    std::uint32_t downloaded = 0;
+    std::uint32_t removed = 0;
+    std::uint32_t renamed = 0;
+    std::uint32_t created_dirs = 0;
+    std::uint32_t removed_dirs = 0;
+
+    std::uint64_t upload_bytes = 0;
+    std::uint64_t download_bytes = 0;
+
+    bool published = false;
+    std::optional<std::chrono::nanoseconds> duration = std::nullopt;
+};
 
 // Indicates completed integrity check.
 struct FsckCompleted {};
@@ -105,6 +129,7 @@ struct Error {
     ErrorCode code = ErrorCode::RuntimeFailure;
     std::string detail;
     std::optional<RuntimeSummary> runtime;
+    std::optional<SyncStage> stage = std::nullopt;
 };
 
 } // namespace kasumi::application

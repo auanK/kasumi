@@ -110,25 +110,42 @@ describe_unrecoverable_paths(std::span<const std::filesystem::path> paths) {
 }
 
 std::expected<Response, Error> run_plan(OperationContext& context) {
+    if (context.on_progress) {
+        context.on_progress(SyncProgress{
+            .stage = SyncStage::Observing,
+        });
+    }
+
     auto collected = observation::collect_reconciliation_input(
         context.runtime, context.storage, context.key, false);
     if (!collected) {
-        return std::unexpected(plan_error(
-            context.operation, collected.error().detail, context.summary));
+        auto err = plan_error(
+            context.operation, collected.error().detail, context.summary);
+        err.stage = SyncStage::Observing;
+        return std::unexpected(err);
+    }
+
+    if (context.on_progress) {
+        context.on_progress(SyncProgress{
+            .stage = SyncStage::Calculating,
+        });
     }
 
     auto reconciled = reconciliation::reconcile(*collected);
     if (!reconciled) {
-        return std::unexpected(
-            plan_error(context.operation,
-                       describe_reconciliation_error(reconciled.error()),
-                       context.summary));
+        auto err = plan_error(context.operation,
+                              describe_reconciliation_error(reconciled.error()),
+                              context.summary);
+        err.stage = SyncStage::Calculating;
+        return std::unexpected(err);
     }
 
     auto report = reconciliation_to_report(*reconciled);
     if (!report) {
-        return std::unexpected(
-            plan_error(context.operation, report.error(), context.summary));
+        auto err =
+            plan_error(context.operation, report.error(), context.summary);
+        err.stage = SyncStage::Calculating;
+        return std::unexpected(err);
     }
     return Response{.operation = context.operation,
                     .runtime = context.summary,

@@ -47,13 +47,14 @@ New profiles default to a minimum retention depth of 5 commits and a minimum ret
 | Command | Action |
 |---|---|
 | `kasumi config` | Launches interactive profile configuration wizard |
-| `kasumi status <profile>` | Computes and displays the currently observed synchronization plan/status |
-| `kasumi sync <profile> --dry-run` | Computes and displays the synchronization plan without executing its synchronization mutations |
+| `kasumi status <profile> [--full]` | Computes and displays the currently observed synchronization plan/status |
+| `kasumi sync <profile> --dry-run [--full]` | Computes and displays the synchronization plan without executing its synchronization mutations |
 | `kasumi sync <profile>` | Runs synchronization |
 | `kasumi fsck <profile>` | Validates observed remote history and audits content objects referenced by the effective remote state |
 | `kasumi gc <profile>` | Runs garbage-collection analysis and, when online collection conditions are met, quarantine and removal processing |
 
 * `status` and `sync --dry-run` do not execute the computed synchronization plan or apply synchronization mutations to the synchronized tree or remote history. They read local profile configuration and private state, acquire the local profile lock, and perform observations.
+* **Plan Truncation & `--full`**: When a synchronization plan contains more than 10 items, Kasumi truncates output to display the first 5 and last 5 items, separated by an ellipsis line (`... (N more items) ...` / `... (mais N itens) ...`) to maintain clean terminal output. Pass `--full` to list all items without truncation (useful for inspection scripts, complete audits, or piping to log files).
 * `sync` applies local tree modifications, transfers content payloads, and publishes commit and HEAD records.
 * `gc` coordinates through a distributed barrier protocol, checks backend consistency visibility with probe objects, and stages candidate objects through a 10-day quarantine retention period prior to permanent removal. See [Remote Storage, Integrity, and Maintenance](architecture/remote-storage-and-maintenance.md) for details.
 * `fsck` validates the observed remote history DAG, inspects physical namespace identifiers, audits referenced content payloads, checks AEAD authentication tags, sizes, and logical hashes, and reports missing or corrupted objects.
@@ -100,6 +101,15 @@ These commands do not publish synchronization changes or run garbage collection.
 | `kasumi remote quarantine <profile>` | Displays quarantine contents without restoring or purging |
 | `kasumi remote writers <profile>` | Shows active writer markers and barrier registration state |
 | `kasumi remote health <profile>` | Runs remote health inspection checks |
+
+## General Options
+
+| Option | Description |
+|---|---|
+| `-h`, `--help`, `help` | Displays help message and command syntax |
+| `-v`, `--version`, `version` | Displays Kasumi version |
+| `--lang <en\|pt-BR>` | Sets CLI language (defaults to English; see below) |
+| `--full` | Displays all items in the synchronization plan without truncation |
 
 ## Language Selection (i18n)
 

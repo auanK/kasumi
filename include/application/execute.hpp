@@ -7,14 +7,28 @@
 #include "application/result.hpp"
 
 #include <expected>
+#include <functional>
+#include <optional>
 
 namespace kasumi::application {
+
+// Progress notification for high-level synchronization phases.
+struct SyncProgress {
+    SyncStage stage = SyncStage::Observing;
+    std::optional<SyncCompleted> summary = std::nullopt;
+    std::uint32_t completed_items = 0;
+    std::uint32_t total_items = 0;
+};
+
+// Callback type for receiving synchronization progress updates.
+using SyncProgressCallback = std::function<void(const SyncProgress&)>;
 
 // Inputs required for an execution.
 struct ExecutionInput {
     Request request;
     Credentials credentials;
     ExecutionEnvironment environment;
+    SyncProgressCallback on_progress{};
 };
 
 // Executes the requested operation.

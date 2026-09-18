@@ -17,6 +17,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     wipe_operation(output);
     const auto operation = input.request.operation;
     output.operation = operation;
+    output.on_progress = input.on_progress;
     const auto access_mode = operation == Operation::Sync
                                  ? runtime::AccessMode::ReadWrite
                                  : runtime::AccessMode::ReadOnly;
