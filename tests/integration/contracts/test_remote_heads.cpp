@@ -528,16 +528,20 @@ TEST(RemoteHeadsContractTest,
               std::string::npos);
     EXPECT_TRUE(markers_output.find("Markers físicos remotos: 1") !=
                     std::string::npos ||
-                markers_output.find("Physical markers") != std::string::npos);
-    EXPECT_TRUE(objects_output.find("Namespace físico remoto") !=
+                markers_output.find("Remote physical markers: 1") !=
                     std::string::npos ||
-                objects_output.find("Physical objects") != std::string::npos);
+                markers_output.find("Physical markers") != std::string::npos);
+    EXPECT_TRUE(
+        objects_output.find("Namespace físico remoto") != std::string::npos ||
+        objects_output.find("Remote physical namespace") != std::string::npos ||
+        objects_output.find("Physical objects") != std::string::npos);
     EXPECT_TRUE(
         orphans_output.find("Objetos sem alcance: 0") != std::string::npos ||
         orphans_output.find("Orphan contents") != std::string::npos ||
         orphans_output.find("Unreachable objects: 0") != std::string::npos);
     EXPECT_TRUE(
         quarantine_output.find("Quarentena remota: 0") != std::string::npos ||
+        quarantine_output.find("Remote quarantine: 0") != std::string::npos ||
         quarantine_output.find("Quarantine state") != std::string::npos);
     EXPECT_TRUE(writers_output.find("Writers remotos: 0") !=
                     std::string::npos ||

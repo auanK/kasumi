@@ -33,10 +33,10 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
             std::println("{}", i18n::tr(i18n::Key::WizardNoProfiles));
         } else {
             for (const auto& prof : profiles) {
-                std::println("- {}  [ Local: {} | Destino: {} ]",
-                             prof.name,
-                             platform::path::to_utf8(prof.local_dir),
-                             prof.remote_dir);
+                i18n::println(i18n::Key::WizardProfileListEntry,
+                              prof.name,
+                              platform::path::to_utf8(prof.local_dir),
+                              prof.remote_dir);
             }
         }
 

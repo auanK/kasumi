@@ -535,6 +535,92 @@ TEST(CliPresenterTest, PresentsEveryPhysicalInspectionReportInPortuguese) {
     EXPECT_NE(health.find("Conteúdos ausentes: 1"), std::string::npos);
 }
 
+TEST(CliPresenterTest, PresentsEveryPhysicalInspectionReportInEnglish) {
+    const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
+    const auto present_and_capture = [](InspectionResponse response) {
+        testing::internal::CaptureStdout();
+        EXPECT_EQ(kasumi::cli::present(response), 0);
+        const auto output = testing::internal::GetCapturedStdout();
+        EXPECT_EQ(output.find("[Rede]"), std::string::npos);
+        return output;
+    };
+
+    const auto markers = present_and_capture(InspectionResponse{
+        .operation = InspectionOperation::RemoteMarkers,
+        .payload = RemoteMarkersReport{
+            .logical_count = 1,
+            .ancestral_count = 1,
+            .invalid_count = 1,
+            .markers = {{.object_identifier = "head-atual",
+                         .commit_id = "commit-atual",
+                         .ciphertext_id = "variante-atual",
+                         .state = RemoteMarkerState::LogicalHead},
+                        {.object_identifier = "head-antiga",
+                         .state = RemoteMarkerState::Ancestral},
+                        {.object_identifier = "head-ruim",
+                         .state = RemoteMarkerState::InvalidMarker}}}});
+    EXPECT_NE(markers.find("authenticated logical head"), std::string::npos);
+    EXPECT_NE(markers.find("authenticated ancestral marker"),
+              std::string::npos);
+    EXPECT_NE(markers.find("invalid marker"), std::string::npos);
+
+    const auto objects = present_and_capture(InspectionResponse{
+        .operation = InspectionOperation::RemoteObjects,
+        .payload = RemoteObjectsReport{
+            .unknown_count = 1,
+            .objects = {{.identifier = "object-x",
+                         .category = RemoteObjectCategory::Unknown,
+                         .relation = "not audited"}}}});
+    EXPECT_NE(objects.find("Remote physical namespace"), std::string::npos);
+    EXPECT_NE(objects.find("unknown"), std::string::npos);
+    EXPECT_NE(objects.find("not audited"), std::string::npos);
+
+    const auto orphans = present_and_capture(InspectionResponse{
+        .operation = InspectionOperation::RemoteOrphans,
+        .payload = RemoteOrphansReport{
+            .objects = {{.identifier = "orphan-commit",
+                         .kind = RemoteOrphanKind::Commit,
+                         .removal_candidate = true},
+                        {.identifier = "protected-epoch",
+                         .kind = RemoteOrphanKind::ProtectedEpoch}}}});
+    EXPECT_NE(orphans.find("orphan logical commit"), std::string::npos);
+    EXPECT_NE(orphans.find("protected historical Epoch"), std::string::npos);
+    EXPECT_NE(orphans.find("not a GC plan"), std::string::npos);
+
+    const auto quarantine = present_and_capture(InspectionResponse{
+        .operation = InspectionOperation::RemoteQuarantine,
+        .payload = RemoteQuarantineReport{
+            .entries = {{.original_identifier = "original",
+                         .quarantine_identifier = "quarantine",
+                         .metadata_identifier = "metadata",
+                         .category = "content",
+                         .metadata_authenticated = true,
+                         .quarantined_at = 7}}}});
+    EXPECT_NE(quarantine.find("Authenticated metadata: yes"),
+              std::string::npos);
+    EXPECT_NE(quarantine.find("nothing will be restored or purged"),
+              std::string::npos);
+
+    const auto writers = present_and_capture(InspectionResponse{
+        .operation = InspectionOperation::RemoteWriters,
+        .payload = RemoteWritersReport{
+            .barrier_present = true,
+            .maintenance_blocked = true,
+            .writers = {{.identifier = "writer",
+                         .state = RemoteWriterState::Indeterminate}}}});
+    EXPECT_NE(writers.find("Barrier: present"), std::string::npos);
+    EXPECT_NE(writers.find("indeterminate"), std::string::npos);
+
+    const auto health = present_and_capture(InspectionResponse{
+        .operation = InspectionOperation::RemoteHealth,
+        .payload =
+            RemoteHealthReport{.state = RemoteHealthState::Critical,
+                               .missing_content_count = 1,
+                               .reasons = {"missing reachable content"}}});
+    EXPECT_NE(health.find("Remote health: critical"), std::string::npos);
+    EXPECT_NE(health.find("Missing contents: 1"), std::string::npos);
+}
+
 TEST(CliPresenterTest, PresentsRemoteLookupErrors) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
     for (const auto code : {InspectionErrorCode::RemotePathNotFound,

@@ -506,6 +506,11 @@ add_library(kasumi_cli STATIC
     src/cli/wizard.cpp
 )
 
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${PROJECT_SOURCE_DIR}/locales/en.json"
+    "${PROJECT_SOURCE_DIR}/locales/pt-BR.json"
+)
+
 file(READ "${PROJECT_SOURCE_DIR}/locales/en.json" KASUMI_I18N_EN_JSON)
 file(READ "${PROJECT_SOURCE_DIR}/locales/pt-BR.json" KASUMI_I18N_PT_BR_JSON)
 configure_file(

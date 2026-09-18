@@ -252,9 +252,10 @@ int present_remote_commits(const application::RemoteCommitsReport& report) {
     i18n::println(i18n::Key::RemoteCommitsHeader, report.commits.size());
     for (std::size_t index = 0; index < report.commits.size(); ++index) {
         const auto& commit = report.commits[index];
-        const auto label = commit.logical_head       ? "HEAD"
-                           : commit.ancestral_marked ? "MARKER ANCESTRAL"
-                                                     : "ANCESTRAL";
+        const auto label = commit.logical_head ? "HEAD"
+                           : commit.ancestral_marked
+                               ? i18n::tr(i18n::Key::LabelAncestralMarker)
+                               : i18n::tr(i18n::Key::LabelAncestral);
         std::println("\n[{}] {}", index + 1, label);
         i18n::println(i18n::Key::FieldCommit, commit.commit_id);
         i18n::println(i18n::Key::FieldHeight, commit.height);
@@ -272,17 +273,19 @@ std::string_view yes_no(bool value) {
 
 int present_remote_summary(const application::RemoteSummaryReport& report) {
     std::println("{}", i18n::tr(i18n::Key::RemoteSummaryHeader));
-    std::println("  Histórico: {}",
-                 report.history_present
-                     ? i18n::tr(i18n::Key::RemoteSummaryHistoryPresent)
-                     : i18n::tr(i18n::Key::RemoteSummaryHistoryAbsent));
+    i18n::println(i18n::Key::FieldHistory,
+                  report.history_present
+                      ? i18n::tr(i18n::Key::RemoteSummaryHistoryPresent)
+                      : i18n::tr(i18n::Key::RemoteSummaryHistoryAbsent));
     i18n::println(i18n::Key::FieldHeight, report.observed_height);
-    std::println("  Commits alcançáveis: {}", report.reachable_commit_count);
-    std::println("  Heads lógicas: {}", report.logical_head_count);
-    std::println("  Conflitos: {}", yes_no(report.has_conflicts));
-    std::println("  Conteúdos ausentes: {}", report.missing_content_count);
-    std::println("  Conteúdos órfãos: {}", report.orphan_content_count);
-    std::println("  Writers ativos: {}", report.active_writer_count);
+    i18n::println(i18n::Key::FieldReachableCommits,
+                  report.reachable_commit_count);
+    i18n::println(i18n::Key::FieldLogicalHeads, report.logical_head_count);
+    i18n::println(i18n::Key::FieldConflicts, yes_no(report.has_conflicts));
+    i18n::println(i18n::Key::FieldMissingContents,
+                  report.missing_content_count);
+    i18n::println(i18n::Key::FieldOrphanContents, report.orphan_content_count);
+    i18n::println(i18n::Key::FieldActiveWriters, report.active_writer_count);
     return 0;
 }
 
@@ -290,12 +293,12 @@ int present_remote_stat(const application::RemoteStatReport& report) {
     std::println("{}", i18n::tr(i18n::Key::RemoteStatHeader));
     std::println("{}", i18n::tr(i18n::Key::RemoteStatView));
     i18n::println(i18n::Key::FieldHeight, report.observed_height);
-    std::println("  Conflitos: {}", yes_no(report.has_conflicts));
+    i18n::println(i18n::Key::FieldConflicts, yes_no(report.has_conflicts));
     i18n::println(i18n::Key::FieldPath, report.path);
-    std::println("  Tipo: {}",
-                 report.type == application::RemoteTreeEntryType::Directory
-                     ? i18n::tr(i18n::Key::RemoteStatDirectory)
-                     : i18n::tr(i18n::Key::RemoteStatFile));
+    i18n::println(i18n::Key::FieldType,
+                  report.type == application::RemoteTreeEntryType::Directory
+                      ? i18n::tr(i18n::Key::RemoteStatDirectory)
+                      : i18n::tr(i18n::Key::RemoteStatFile));
     i18n::println(i18n::Key::FieldLogicalHash, report.logical_hash);
     i18n::println(i18n::Key::FieldSize, format_size(report.size));
     i18n::println(i18n::Key::FieldModifiedAt,
@@ -317,61 +320,66 @@ std::string_view variant_state(application::RemoteCommitVariantState state) {
 
 int present_remote_commit(const application::RemoteCommitReport& report) {
     const auto& commit = report.commit;
-    std::println("Commit remoto");
-    std::println("  Commit: {}", commit.commit_id);
-    std::println("  Altura: {}", commit.height);
-    std::println("  Criado em: {}", commit.created_at);
-    std::println("  Head lógica: {}", yes_no(commit.logical_head));
-    std::println("  Marker físico: {}", yes_no(commit.physically_marked));
-    std::println("  Marker ancestral: {}", yes_no(commit.ancestral_marked));
-    std::println("  Raiz: {}", commit.root_hash);
-    std::println("  Entradas: {}", commit.entry_count);
-    std::println("  Tamanho: {}", format_size(commit.total_bytes));
-    std::println("  Pais ({}):", commit.parent_ids.size());
+    std::println("{}", i18n::tr(i18n::Key::RemoteCommitHeader));
+    i18n::println(i18n::Key::FieldCommit, commit.commit_id);
+    i18n::println(i18n::Key::FieldHeight, commit.height);
+    i18n::println(i18n::Key::FieldCreatedAt, commit.created_at);
+    i18n::println(i18n::Key::FieldLogicalHead, yes_no(commit.logical_head));
+    i18n::println(i18n::Key::FieldPhysicalMarker,
+                  yes_no(commit.physically_marked));
+    i18n::println(i18n::Key::FieldAncestralMarker,
+                  yes_no(commit.ancestral_marked));
+    i18n::println(i18n::Key::FieldRoot, commit.root_hash);
+    i18n::println(i18n::Key::FieldEntries, commit.entry_count);
+    i18n::println(i18n::Key::FieldSize, format_size(commit.total_bytes));
+    i18n::println(i18n::Key::FieldParentsCount, commit.parent_ids.size());
     for (const auto& parent : commit.parent_ids) {
         std::println("    {}", parent);
     }
-    std::println("  Variantes físicas ({}):", report.variants.size());
+    i18n::println(i18n::Key::FieldPhysicalVariants, report.variants.size());
     for (std::size_t index = 0; index < report.variants.size(); ++index) {
         const auto& variant = report.variants[index];
         std::println("\n  [{}]", index + 1);
-        std::println("    Ciphertext: {}", variant.ciphertext_id);
-        std::println("    Objeto: {}", variant.object_identifier);
-        std::println("    Estado: {}", variant_state(variant.state));
+        i18n::println(i18n::Key::FieldCiphertext, variant.ciphertext_id);
+        i18n::println(i18n::Key::FieldObject, variant.object_identifier);
+        i18n::println(i18n::Key::FieldState, variant_state(variant.state));
     }
     return 0;
 }
 
 int present_remote_file(const application::RemoteFileReport& report) {
-    std::println("Arquivo remoto salvo");
-    std::println("  Caminho: {}", report.path);
-    std::println("  Destino: {}", report.destination_path);
-    std::println("  Hash lógico: {}", report.logical_hash);
-    std::println("  Tamanho: {}", format_size(report.size));
+    std::println("{}", i18n::tr(i18n::Key::RemoteFileSavedHeader));
+    i18n::println(i18n::Key::FieldPath, report.path);
+    i18n::println(i18n::Key::FieldDestination, report.destination_path);
+    i18n::println(i18n::Key::FieldLogicalHash, report.logical_hash);
+    i18n::println(i18n::Key::FieldSize, format_size(report.size));
     return 0;
 }
 
 void present_epoch_info(const application::RemoteEpochInfo& epoch) {
-    std::println("  Sequência: {}", epoch.sequence);
-    std::println("  Epoch ID: {}", epoch.epoch_id);
-    std::println("  Vault ID: {}", epoch.vault_id);
-    std::println("  Emitido em: {}", epoch.issued_at);
-    std::println("  Retenção mínima: {} commit(s), {} hora(s)",
-                 epoch.min_history_depth,
-                 epoch.min_history_age_hours);
-    std::println("  Epoch anterior: {}",
-                 epoch.previous_epoch_id.empty() ? "-"
-                                                 : epoch.previous_epoch_id);
-    std::println("  Próximo Epoch: {}",
-                 epoch.next_epoch_id.empty() ? "-" : epoch.next_epoch_id);
-    std::println("  Âncoras ({}):", epoch.anchors.size());
+    i18n::println(i18n::Key::FieldSequence, epoch.sequence);
+    i18n::println(i18n::Key::FieldEpochId, epoch.epoch_id);
+    i18n::println(i18n::Key::FieldVaultId, epoch.vault_id);
+    i18n::println(i18n::Key::FieldIssuedAt, epoch.issued_at);
+    i18n::println(i18n::Key::FieldMinRetention,
+                  epoch.min_history_depth,
+                  epoch.min_history_age_hours);
+    i18n::println(i18n::Key::FieldPreviousEpoch,
+                  epoch.previous_epoch_id.empty() ? "-"
+                                                  : epoch.previous_epoch_id);
+    i18n::println(i18n::Key::FieldNextEpoch,
+                  epoch.next_epoch_id.empty() ? "-" : epoch.next_epoch_id);
+    i18n::println(i18n::Key::FieldAnchors, epoch.anchors.size());
     for (const auto& anchor : epoch.anchors) {
-        std::println("    {} (altura {})", anchor.commit_id, anchor.height);
+        std::println("    {}",
+                     i18n::format(i18n::Key::FieldAnchorItem,
+                                  anchor.commit_id,
+                                  anchor.height));
     }
 }
 
 int present_remote_epochs(const application::RemoteEpochsReport& report) {
-    std::println("Epochs remotos: {}", report.epochs.size());
+    i18n::println(i18n::Key::RemoteEpochsHeader, report.epochs.size());
     for (std::size_t index = 0; index < report.epochs.size(); ++index) {
         std::println("\n[{}]", index + 1);
         present_epoch_info(report.epochs[index]);
@@ -380,7 +388,7 @@ int present_remote_epochs(const application::RemoteEpochsReport& report) {
 }
 
 int present_remote_epoch(const application::RemoteEpochReport& report) {
-    std::println("Epoch remoto");
+    std::println("{}", i18n::tr(i18n::Key::RemoteEpochDetailHeader));
     present_epoch_info(report.epoch);
     return 0;
 }
@@ -388,45 +396,48 @@ int present_remote_epoch(const application::RemoteEpochReport& report) {
 std::string_view content_state(application::RemoteContentState state) {
     switch (state) {
         case application::RemoteContentState::Present:
-            return "presente (não auditado)";
+            return i18n::tr(i18n::Key::ContentStatePresent);
         case application::RemoteContentState::Missing:
-            return "ausente";
+            return i18n::tr(i18n::Key::ContentStateMissing);
         case application::RemoteContentState::Orphan:
-            return "órfão (não auditado)";
+            return i18n::tr(i18n::Key::ContentStateOrphan);
         case application::RemoteContentState::Valid:
-            return "válido";
+            return i18n::tr(i18n::Key::ContentStateValid);
         case application::RemoteContentState::Invalid:
-            return "inválido";
+            return i18n::tr(i18n::Key::ContentStateInvalid);
     }
-    return "desconhecido";
+    return i18n::tr(i18n::Key::ContentStateUnknown);
 }
 
 void present_content_info(const application::RemoteContentInfo& content) {
-    std::println("  Content ID: {}", content.content_id);
-    std::println("  Estado: {}", content_state(content.state));
-    std::println("  Referenciado: {}", yes_no(content.referenced));
-    std::println("  Presente fisicamente: {}",
-                 yes_no(content.physically_present));
-    std::println("  Na árvore atual: {}", yes_no(content.current_tree));
-    std::println("  Hash lógico: {}",
-                 content.logical_hash.empty() ? "-" : content.logical_hash);
-    std::println("  Tamanho lógico: {} bytes", content.size);
-    std::println("  Caminhos ({}):", content.paths.size());
+    i18n::println(i18n::Key::FieldContentId, content.content_id);
+    i18n::println(i18n::Key::FieldState, content_state(content.state));
+    i18n::println(i18n::Key::FieldReferenced, yes_no(content.referenced));
+    i18n::println(i18n::Key::FieldPhysicallyPresent,
+                  yes_no(content.physically_present));
+    i18n::println(i18n::Key::FieldCurrentTree, yes_no(content.current_tree));
+    i18n::println(i18n::Key::FieldLogicalHash,
+                  content.logical_hash.empty() ? "-" : content.logical_hash);
+    i18n::println(i18n::Key::FieldLogicalSize, content.size);
+    i18n::println(i18n::Key::FieldPathsCount, content.paths.size());
     for (const auto& path : content.paths) {
         std::println("    {}", path);
     }
 }
 
 int present_remote_contents(const application::RemoteContentsReport& report) {
-    std::println("Conteúdos remotos{}",
-                 report.audited ? " — auditoria profunda" : "");
-    std::println("  Referenciados: {}", report.referenced_count);
-    std::println("  Físicos: {}", report.physical_count);
-    std::println("  Ausentes: {}", report.missing_count);
-    std::println("  Órfãos: {}", report.orphan_count);
+    std::println("{}",
+                 i18n::format(i18n::Key::RemoteContentsHeader,
+                              report.audited
+                                  ? i18n::tr(i18n::Key::RemoteContentsDeepAudit)
+                                  : ""));
+    i18n::println(i18n::Key::FieldReferenced, report.referenced_count);
+    i18n::println(i18n::Key::FieldPhysicalCount, report.physical_count);
+    i18n::println(i18n::Key::FieldMissingCount, report.missing_count);
+    i18n::println(i18n::Key::FieldOrphanCount, report.orphan_count);
     if (report.audited) {
-        std::println("  Válidos: {}", report.valid_count);
-        std::println("  Inválidos: {}", report.invalid_count);
+        i18n::println(i18n::Key::FieldValidCount, report.valid_count);
+        i18n::println(i18n::Key::FieldInvalidCount, report.invalid_count);
     }
     for (std::size_t index = 0; index < report.contents.size(); ++index) {
         std::println("\n[{}]", index + 1);
@@ -436,7 +447,7 @@ int present_remote_contents(const application::RemoteContentsReport& report) {
 }
 
 int present_remote_content(const application::RemoteContentReport& report) {
-    std::println("Conteúdo remoto");
+    std::println("{}", i18n::tr(i18n::Key::RemoteContentHeader));
     present_content_info(report.content);
     return 0;
 }
@@ -444,39 +455,40 @@ int present_remote_content(const application::RemoteContentReport& report) {
 std::string_view marker_state(application::RemoteMarkerState state) {
     switch (state) {
         case application::RemoteMarkerState::LogicalHead:
-            return "head lógica autenticada";
+            return i18n::tr(i18n::Key::MarkerStateLogicalHead);
         case application::RemoteMarkerState::Ancestral:
-            return "marker ancestral autenticado";
+            return i18n::tr(i18n::Key::MarkerStateAncestral);
         case application::RemoteMarkerState::InvalidPath:
-            return "identificador inválido";
+            return i18n::tr(i18n::Key::MarkerStateInvalidPath);
         case application::RemoteMarkerState::Missing:
-            return "ausente";
+            return i18n::tr(i18n::Key::MarkerStateMissing);
         case application::RemoteMarkerState::InvalidMarker:
-            return "marker inválido";
+            return i18n::tr(i18n::Key::MarkerStateInvalidMarker);
         case application::RemoteMarkerState::MissingCommit:
-            return "commit ausente";
+            return i18n::tr(i18n::Key::MarkerStateMissingCommit);
         case application::RemoteMarkerState::InvalidCiphertext:
-            return "ciphertext inválido";
+            return i18n::tr(i18n::Key::MarkerStateInvalidCiphertext);
         case application::RemoteMarkerState::InvalidCommit:
-            return "commit inválido";
+            return i18n::tr(i18n::Key::MarkerStateInvalidCommit);
     }
-    return "inválido";
+    return i18n::tr(i18n::Key::MarkerStateInvalid);
 }
 
 int present_remote_markers(const application::RemoteMarkersReport& report) {
-    std::println("Markers físicos remotos: {}", report.markers.size());
-    std::println("  Heads lógicas: {}", report.logical_count);
-    std::println("  Ancestrais: {}", report.ancestral_count);
-    std::println("  Inválidos: {}", report.invalid_count);
+    i18n::println(i18n::Key::RemoteMarkersHeader, report.markers.size());
+    i18n::println(i18n::Key::FieldLogicalHeads, report.logical_count);
+    i18n::println(i18n::Key::FieldAncestralsCount, report.ancestral_count);
+    i18n::println(i18n::Key::FieldInvalidCount, report.invalid_count);
     for (std::size_t index = 0; index < report.markers.size(); ++index) {
         const auto& marker = report.markers[index];
         std::println("\n[{}]", index + 1);
-        std::println("  Objeto: {}", marker.object_identifier);
-        std::println("  Commit: {}",
-                     marker.commit_id.empty() ? "-" : marker.commit_id);
-        std::println("  Ciphertext: {}",
-                     marker.ciphertext_id.empty() ? "-" : marker.ciphertext_id);
-        std::println("  Estado: {}", marker_state(marker.state));
+        i18n::println(i18n::Key::FieldObject, marker.object_identifier);
+        i18n::println(i18n::Key::FieldCommit,
+                      marker.commit_id.empty() ? "-" : marker.commit_id);
+        i18n::println(i18n::Key::FieldCiphertext,
+                      marker.ciphertext_id.empty() ? "-"
+                                                   : marker.ciphertext_id);
+        i18n::println(i18n::Key::FieldState, marker_state(marker.state));
     }
     return 0;
 }
@@ -484,41 +496,43 @@ int present_remote_markers(const application::RemoteMarkersReport& report) {
 std::string_view object_category(application::RemoteObjectCategory category) {
     switch (category) {
         case application::RemoteObjectCategory::Content:
-            return "conteúdo";
+            return i18n::tr(i18n::Key::ObjectCategoryContent);
         case application::RemoteObjectCategory::CommitVariant:
-            return "variante de commit";
+            return i18n::tr(i18n::Key::ObjectCategoryCommitVariant);
         case application::RemoteObjectCategory::HeadMarker:
-            return "marker de HEAD";
+            return i18n::tr(i18n::Key::ObjectCategoryHeadMarker);
         case application::RemoteObjectCategory::Epoch:
-            return "Epoch";
+            return i18n::tr(i18n::Key::ObjectCategoryEpoch);
         case application::RemoteObjectCategory::Writer:
-            return "writer";
+            return i18n::tr(i18n::Key::ObjectCategoryWriter);
         case application::RemoteObjectCategory::Barrier:
-            return "barrier";
+            return i18n::tr(i18n::Key::ObjectCategoryBarrier);
         case application::RemoteObjectCategory::Quarantine:
-            return "quarentena";
+            return i18n::tr(i18n::Key::ObjectCategoryQuarantine);
         case application::RemoteObjectCategory::RetentionMetadata:
-            return "metadata de retenção";
+            return i18n::tr(i18n::Key::ObjectCategoryRetentionMetadata);
         case application::RemoteObjectCategory::Protocol:
-            return "protocolo";
+            return i18n::tr(i18n::Key::ObjectCategoryProtocol);
         case application::RemoteObjectCategory::Unknown:
-            return "desconhecido";
+            return i18n::tr(i18n::Key::ObjectCategoryUnknown);
     }
-    return "desconhecido";
+    return i18n::tr(i18n::Key::ObjectCategoryUnknown);
 }
 
 int present_remote_objects(const application::RemoteObjectsReport& report) {
-    std::println("Namespace físico remoto: {} objeto(s)",
-                 report.objects.size());
-    std::println("  Desconhecidos ou inválidos: {}", report.unknown_count);
+    i18n::println(i18n::Key::RemoteObjectsHeader, report.objects.size());
+    i18n::println(i18n::Key::FieldUnknownOrInvalid, report.unknown_count);
     for (std::size_t index = 0; index < report.objects.size(); ++index) {
         const auto& object = report.objects[index];
         std::println("\n[{}]", index + 1);
-        std::println("  Identificador: {}", object.identifier);
-        std::println("  Categoria: {}", object_category(object.category));
-        std::println("  Estrutura: {}",
-                     object.structurally_valid ? "válida" : "inválida");
-        std::println("  Relação: {}", object.relation);
+        i18n::println(i18n::Key::FieldIdentifier, object.identifier);
+        i18n::println(i18n::Key::FieldCategory,
+                      object_category(object.category));
+        i18n::println(i18n::Key::FieldStructure,
+                      object.structurally_valid
+                          ? i18n::tr(i18n::Key::FieldStructureValid)
+                          : i18n::tr(i18n::Key::FieldStructureInvalid));
+        i18n::println(i18n::Key::FieldRelation, object.relation);
     }
     return 0;
 }
@@ -526,77 +540,77 @@ int present_remote_objects(const application::RemoteObjectsReport& report) {
 std::string_view orphan_kind(application::RemoteOrphanKind kind) {
     switch (kind) {
         case application::RemoteOrphanKind::Commit:
-            return "commit lógico órfão";
+            return i18n::tr(i18n::Key::OrphanKindCommit);
         case application::RemoteOrphanKind::CommitVariant:
-            return "variante órfã";
+            return i18n::tr(i18n::Key::OrphanKindCommitVariant);
         case application::RemoteOrphanKind::RedundantVariant:
-            return "variante redundante";
+            return i18n::tr(i18n::Key::OrphanKindRedundantVariant);
         case application::RemoteOrphanKind::InvalidVariant:
-            return "variante inválida";
+            return i18n::tr(i18n::Key::OrphanKindInvalidVariant);
         case application::RemoteOrphanKind::Content:
-            return "conteúdo órfão";
+            return i18n::tr(i18n::Key::OrphanKindContent);
         case application::RemoteOrphanKind::ProtectedEpoch:
-            return "Epoch histórico protegido";
+            return i18n::tr(i18n::Key::OrphanKindProtectedEpoch);
         case application::RemoteOrphanKind::Unknown:
-            return "objeto desconhecido";
+            return i18n::tr(i18n::Key::OrphanKindUnknown);
     }
-    return "objeto desconhecido";
+    return i18n::tr(i18n::Key::OrphanKindUnknown);
 }
 
 int present_remote_orphans(const application::RemoteOrphansReport& report) {
-    std::println("Objetos sem alcance: {}", report.objects.size());
-    std::println("  Diagnóstico somente-leitura; isto não é um plano de GC.");
+    i18n::println(i18n::Key::RemoteOrphansHeader, report.objects.size());
+    std::println("{}", i18n::tr(i18n::Key::RemoteOrphansReadOnlyHint));
     for (std::size_t index = 0; index < report.objects.size(); ++index) {
         const auto& object = report.objects[index];
         std::println("\n[{}]", index + 1);
-        std::println("  Identificador: {}", object.identifier);
-        std::println("  Classificação: {}", orphan_kind(object.kind));
-        std::println("  Candidato estrutural: {}",
-                     yes_no(object.removal_candidate));
+        i18n::println(i18n::Key::FieldIdentifier, object.identifier);
+        i18n::println(i18n::Key::FieldClassification, orphan_kind(object.kind));
+        i18n::println(i18n::Key::FieldStructuralCandidate,
+                      yes_no(object.removal_candidate));
     }
     return 0;
 }
 
 int present_remote_quarantine(
     const application::RemoteQuarantineReport& report) {
-    std::println("Quarentena remota: {} objeto(s)", report.entries.size());
-    std::println(
-        "  Inspeção somente-leitura; nada será restaurado ou purgado.");
+    i18n::println(i18n::Key::RemoteQuarantineHeader, report.entries.size());
+    std::println("{}", i18n::tr(i18n::Key::RemoteQuarantineReadOnlyHint));
     for (std::size_t index = 0; index < report.entries.size(); ++index) {
         const auto& entry = report.entries[index];
         std::println("\n[{}]", index + 1);
-        std::println("  Original: {}", entry.original_identifier);
-        std::println("  Quarentena: {}", entry.quarantine_identifier);
-        std::println("  Metadata: {}", entry.metadata_identifier);
-        std::println("  Categoria: {}", entry.category);
-        std::println("  Metadata autenticada: {}",
-                     yes_no(entry.metadata_authenticated));
-        std::println("  Entrada: {}",
-                     entry.metadata_authenticated
-                         ? std::to_string(entry.quarantined_at)
-                         : "-");
-        std::println("  Retenção transcorrida: {}",
-                     yes_no(entry.retention_elapsed));
+        i18n::println(i18n::Key::FieldOriginal, entry.original_identifier);
+        i18n::println(i18n::Key::FieldQuarantine, entry.quarantine_identifier);
+        i18n::println(i18n::Key::FieldMetadata, entry.metadata_identifier);
+        i18n::println(i18n::Key::FieldCategory, entry.category);
+        i18n::println(i18n::Key::FieldMetadataAuthenticated,
+                      yes_no(entry.metadata_authenticated));
+        i18n::println(i18n::Key::FieldEnqueued,
+                      entry.metadata_authenticated
+                          ? std::to_string(entry.quarantined_at)
+                          : "-");
+        i18n::println(i18n::Key::FieldRetentionElapsed,
+                      yes_no(entry.retention_elapsed));
     }
     return 0;
 }
 
 int present_remote_writers(const application::RemoteWritersReport& report) {
-    std::println("Writers remotos: {}", report.writers.size());
-    std::println("  Barrier: {}",
-                 report.barrier_present ? "presente" : "ausente");
-    std::println("  Manutenção bloqueada: {}",
-                 yes_no(report.maintenance_blocked));
-    std::println("  Protocolo consistente: {}",
-                 yes_no(report.protocol_consistent));
+    i18n::println(i18n::Key::RemoteWritersHeader, report.writers.size());
+    i18n::println(i18n::Key::FieldBarrier,
+                  report.barrier_present ? i18n::tr(i18n::Key::FieldPresent)
+                                         : i18n::tr(i18n::Key::FieldAbsent));
+    i18n::println(i18n::Key::FieldMaintenanceBlocked,
+                  yes_no(report.maintenance_blocked));
+    i18n::println(i18n::Key::FieldProtocolConsistent,
+                  yes_no(report.protocol_consistent));
     for (std::size_t index = 0; index < report.writers.size(); ++index) {
         const auto& writer = report.writers[index];
         std::println("\n[{}]", index + 1);
-        std::println("  Identificador: {}", writer.identifier);
-        std::println("  Estado: {}",
-                     writer.state == application::RemoteWriterState::Invalid
-                         ? "inválido"
-                         : "indeterminado; bloqueia enquanto presente");
+        i18n::println(i18n::Key::FieldIdentifier, writer.identifier);
+        i18n::println(i18n::Key::FieldState,
+                      writer.state == application::RemoteWriterState::Invalid
+                          ? i18n::tr(i18n::Key::WriterStateInvalid)
+                          : i18n::tr(i18n::Key::WriterStateIndeterminate));
     }
     return 0;
 }
@@ -604,26 +618,29 @@ int present_remote_writers(const application::RemoteWritersReport& report) {
 std::string_view health_state(application::RemoteHealthState state) {
     switch (state) {
         case application::RemoteHealthState::Healthy:
-            return "saudável";
+            return i18n::tr(i18n::Key::HealthStateHealthy);
         case application::RemoteHealthState::Degraded:
-            return "degradado";
+            return i18n::tr(i18n::Key::HealthStateDegraded);
         case application::RemoteHealthState::Critical:
-            return "crítico";
+            return i18n::tr(i18n::Key::HealthStateCritical);
     }
-    return "crítico";
+    return i18n::tr(i18n::Key::HealthStateCritical);
 }
 
 int present_remote_health(const application::RemoteHealthReport& report) {
-    std::println("Saúde remota: {}", health_state(report.state));
-    std::println("  Markers: {}", report.marker_count);
-    std::println("  Commits alcançáveis: {}", report.reachable_commit_count);
-    std::println("  Objetos sem alcance: {}", report.orphan_count);
-    std::println("  Conteúdos ausentes: {}", report.missing_content_count);
-    std::println("  Conteúdos inválidos: {}", report.invalid_content_count);
-    std::println("  Writers: {}", report.writer_count);
-    std::println("  Quarentena: {}", report.quarantine_count);
-    std::println("  Objetos desconhecidos: {}", report.unknown_object_count);
-    std::println("  Razões ({}):", report.reasons.size());
+    i18n::println(i18n::Key::RemoteHealthHeader, health_state(report.state));
+    i18n::println(i18n::Key::FieldMarkers, report.marker_count);
+    i18n::println(i18n::Key::FieldReachableCommits,
+                  report.reachable_commit_count);
+    i18n::println(i18n::Key::FieldUnreachableObjects, report.orphan_count);
+    i18n::println(i18n::Key::FieldMissingContents,
+                  report.missing_content_count);
+    i18n::println(i18n::Key::FieldInvalidContents,
+                  report.invalid_content_count);
+    i18n::println(i18n::Key::FieldWriters, report.writer_count);
+    i18n::println(i18n::Key::FieldQuarantine, report.quarantine_count);
+    i18n::println(i18n::Key::FieldUnknownObjects, report.unknown_object_count);
+    i18n::println(i18n::Key::FieldReasons, report.reasons.size());
     for (const auto& reason : report.reasons) {
         std::println("    {}", reason);
     }
