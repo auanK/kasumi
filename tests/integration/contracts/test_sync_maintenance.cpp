@@ -218,13 +218,19 @@ TEST(ApplicationMaintenanceContract, UnknownObjectsArePreserved) {
     ASSERT_FALSE(fsck.has_value());
     const auto identifiers = kasumi::transport::list(storage);
     ASSERT_TRUE(identifiers.has_value());
-    EXPECT_TRUE(std::ranges::any_of(*identifiers, [](const auto& identifier) {
-        return identifier.ends_with(".kcom") ||
-               identifier.starts_with("history/commits/");
+    const auto key_bytes =
+        kasumi::runtime::vault::decode_hex(std::string(64, '6')).value();
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key_bytes);
+    EXPECT_TRUE(std::ranges::any_of(*identifiers, [&](const auto& identifier) {
+        return kasumi::application::history_storage::parse_commit_object(
+                   layout, identifier)
+            .has_value();
     }));
-    EXPECT_TRUE(std::ranges::any_of(*identifiers, [](const auto& identifier) {
-        return identifier.ends_with(".head") ||
-               identifier.starts_with("history/heads/");
+    EXPECT_TRUE(std::ranges::any_of(*identifiers, [&](const auto& identifier) {
+        return kasumi::application::history_storage::parse_marker_object(
+                   layout, identifier)
+            .has_value();
     }));
     EXPECT_EQ(kasumi::transport::presence(storage, "foreign/object").value(),
               kasumi::transport::Presence::Present);
@@ -399,9 +405,14 @@ TEST(ApplicationMaintenanceContract,
     ASSERT_TRUE(kasumi::transport::initialize(storage));
     const auto listing = kasumi::transport::list(storage);
     ASSERT_TRUE(listing.has_value());
-    auto commit = std::ranges::find_if(*listing, [](const auto& identifier) {
-        return identifier.ends_with(".kcom") ||
-               identifier.starts_with("history/commits/");
+    const auto key_bytes =
+        kasumi::runtime::vault::decode_hex(std::string(64, '4')).value();
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key_bytes);
+    auto commit = std::ranges::find_if(*listing, [&](const auto& identifier) {
+        return kasumi::application::history_storage::parse_commit_object(
+                   layout, identifier)
+            .has_value();
     });
     ASSERT_NE(commit, listing->end());
     ASSERT_EQ(kasumi::transport::remove(storage, *commit).value(),

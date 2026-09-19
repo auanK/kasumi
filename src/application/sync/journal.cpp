@@ -222,15 +222,15 @@ validate_record_semantics(const transaction::Record& record) {
     }
     const history_storage::HeadReference reference{
         .commit_id = record.commit_id, .ciphertext_id = record.ciphertext_id};
-    const auto expected_suffix =
-        reference.commit_id + "-" + reference.ciphertext_id + ".head";
+    const auto expected_stem =
+        reference.commit_id + "-" + reference.ciphertext_id;
     const bool is_default_marker =
         record.marker_id == history_storage::marker_identifier(reference);
     const bool is_prefixed_marker =
-        record.marker_id.ends_with(expected_suffix) &&
-        record.marker_id.size() > expected_suffix.size() &&
-        record.marker_id[record.marker_id.size() - expected_suffix.size() -
-                         1] == '/' &&
+        record.marker_id.ends_with(expected_stem) &&
+        record.marker_id.size() > expected_stem.size() &&
+        record.marker_id[record.marker_id.size() - expected_stem.size() - 1] ==
+            '/' &&
         record.marker_id.find("..") == std::string::npos;
     if (!is_default_marker && !is_prefixed_marker) {
         return std::unexpected("marker ID incompatible with publication");

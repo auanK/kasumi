@@ -1899,13 +1899,6 @@ execute(const runtime::RuntimeData& runtime_data,
                         ff_ciphertext_id = parsed->ciphertext_id;
                         break;
                     }
-                    const auto legacy_parsed =
-                        history_storage::parse_marker_object(identifier);
-                    if (legacy_parsed &&
-                        legacy_parsed->commit_id == found->id) {
-                        ff_ciphertext_id = legacy_parsed->ciphertext_id;
-                        break;
-                    }
                 }
             }
         }

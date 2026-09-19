@@ -120,7 +120,7 @@ struct LocalStorage {
     const auto key = test_key();
     const auto canonical = kasumi::history::serialize(commit).value();
     const auto plaintext =
-        kasumi::test::workspace_path(storage.workspace, "variant.kcom");
+        kasumi::test::workspace_path(storage.workspace, "variant.canonical");
     const auto ciphertext =
         kasumi::test::workspace_path(storage.workspace, "variant.ciphertext");
     kasumi::test::write_binary(plaintext, std::as_bytes(std::span{canonical}));
@@ -134,7 +134,7 @@ struct LocalStorage {
     const auto marker =
         kasumi::application::history_storage::encode_marker(reference).value();
     const auto marker_file =
-        kasumi::test::workspace_path(storage.workspace, "variant.head");
+        kasumi::test::workspace_path(storage.workspace, "variant.marker");
     kasumi::test::write_binary(marker_file, std::as_bytes(std::span{marker}));
     EXPECT_TRUE(kasumi::transport::put(
         storage.transport, marker_file, marker_path(reference)));

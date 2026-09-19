@@ -113,8 +113,7 @@ ReachabilityResult inventory_impl(
             static_cast<void>(unused);
             for (const auto& reference : references) {
                 batch.identifiers.push_back(reference.commit_id + "/" +
-                                            reference.ciphertext_id +
-                                            std::string{detail::commit_suffix});
+                                            reference.ciphertext_id);
             }
         }
         if (!batch.identifiers.empty()) {

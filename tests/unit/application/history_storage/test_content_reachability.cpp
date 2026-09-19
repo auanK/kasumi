@@ -622,8 +622,6 @@ TEST(ContentReachabilityTest, HistoryObjectsAreExcludedFromContentInventory) {
         kasumi::application::history_storage::derive_remote_layout(test_key());
     state->objects[layout.commits_prefix + "garbage"] = {0};
     state->objects[layout.heads_prefix + "garbage"] = {0};
-    state->objects["history/commits/garbage"] = {0};
-    state->objects["history/heads/garbage"] = {0};
 
     const auto result =
         content_inventory(transport, kasumi::test::workspace_root(workspace));

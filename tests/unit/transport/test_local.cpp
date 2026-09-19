@@ -75,27 +75,27 @@ TEST(LocalTransportTest, ListsOnlyDirectFilesUnderValidatedPrefix) {
     const auto source = kasumi::test::workspace_path(workspace, "object.bin");
     kasumi::test::write_text(source, "object");
     ASSERT_TRUE(
-        kasumi::transport::put(transport, source, "history/heads/a.head"));
+        kasumi::transport::put(transport, source, "history/heads/head-a"));
     ASSERT_TRUE(
-        kasumi::transport::put(transport, source, "history/heads/b.head"));
+        kasumi::transport::put(transport, source, "history/heads/head-b"));
     ASSERT_TRUE(kasumi::transport::put(transport,
                                        source,
                                        "history/commits/"
                                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                                       "aaaaaaaaaaaaaaaaaaaaaaaaa/a.kcom"));
+                                       "aaaaaaaaaaaaaaaaaaaaaaaaa/var-a"));
     ASSERT_TRUE(kasumi::transport::put(transport, source, "irrelevant"));
 
     EXPECT_EQ(kasumi::transport::list(transport, "history/heads").value(),
-              (std::vector<std::string>{"a.head", "b.head"}));
+              (std::vector<std::string>{"head-a", "head-b"}));
     EXPECT_EQ(
         kasumi::transport::list(
             transport,
             "history/commits/"
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
             .value(),
-        (std::vector<std::string>{"a.kcom"}));
+        (std::vector<std::string>{"var-a"}));
     EXPECT_EQ(
-        kasumi::transport::list(transport, "history/heads/a.head").error().code,
+        kasumi::transport::list(transport, "history/heads/head-a").error().code,
         ErrorCode::StorageNotFound);
     EXPECT_EQ(kasumi::transport::list(transport, "../history").error().code,
               ErrorCode::InvalidIdentifier);

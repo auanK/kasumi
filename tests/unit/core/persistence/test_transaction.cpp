@@ -63,8 +63,8 @@ Record representative_record() {
     record.commit_id = std::string(64, 'a');
     record.ciphertext_id = std::string(64, 'b');
     record.parent_ids = {std::string(64, 'c')};
-    record.marker_id = "history/heads/" + record.commit_id + "-" +
-                       record.ciphertext_id + ".head";
+    record.marker_id =
+        "history/heads/" + record.commit_id + "-" + record.ciphertext_id;
     for (std::size_t index = 0; index < record.progress.size(); ++index) {
         record.progress[index].previous_hash =
             "previous-" + std::to_string(index);
@@ -401,8 +401,8 @@ TEST(TransactionCodecTest, RoundTripsGenesisEpochCheckpoint) {
     record->phase = Phase::EpochVerified;
     record->commit_id = std::string(64, 'a');
     record->ciphertext_id = std::string(64, 'b');
-    record->marker_id = "history/heads/" + record->commit_id + "-" +
-                        record->ciphertext_id + ".head";
+    record->marker_id =
+        "history/heads/" + record->commit_id + "-" + record->ciphertext_id;
     record->epoch_vault_id = std::string(64, 'c');
     record->epoch_id = std::string(64, 'd');
     record->epoch_issued_at = 123;

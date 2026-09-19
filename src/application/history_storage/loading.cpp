@@ -145,14 +145,6 @@ download_commit_candidate(transport::Transport& storage,
     const auto get_trace = platform::perf_trace::begin();
     auto result =
         transport::get(storage, commit_object(layout, reference), destination);
-    if (!result &&
-        result.error().code == transport::ErrorCode::ObjectNotFound) {
-        const auto legacy_obj =
-            commit_object(default_remote_layout(), reference);
-        if (legacy_obj != commit_object(layout, reference)) {
-            result = transport::get(storage, legacy_obj, destination);
-        }
-    }
     platform::perf_trace::finish("rc/get_commit", get_trace);
     if (!result) {
         if (result.error().code == transport::ErrorCode::ObjectNotFound) {
@@ -184,14 +176,6 @@ inspect_marker(transport::Transport& storage,
     const auto get_trace = platform::perf_trace::begin();
     auto fetched =
         transport::get(storage, marker_object(layout, reference), path);
-    if (!fetched &&
-        fetched.error().code == transport::ErrorCode::ObjectNotFound) {
-        const auto legacy_obj =
-            marker_object(default_remote_layout(), reference);
-        if (legacy_obj != marker_object(layout, reference)) {
-            fetched = transport::get(storage, legacy_obj, path);
-        }
-    }
     platform::perf_trace::finish("rc/get_marker", get_trace);
     if (!fetched) {
         remove_file(path);
@@ -272,8 +256,7 @@ try_load_variant(transport::Transport& storage,
                  const HeadReference& reference,
                  const std::filesystem::path& workspace,
                  std::size_t sequence) {
-    auto ciphertext = workspace / reference.commit_id /
-                      (reference.ciphertext_id + std::string{commit_suffix});
+    auto ciphertext = workspace / reference.commit_id / reference.ciphertext_id;
     std::error_code prefetched_error;
     if (!std::filesystem::is_regular_file(ciphertext, prefetched_error)) {
         ciphertext = workspace / ("ciphertext-" + std::to_string(sequence));
@@ -633,8 +616,7 @@ LoadResult load_impl(transport::Transport& storage,
             static_cast<void>(unused);
             for (const auto& reference : references) {
                 batch.identifiers.push_back(reference.commit_id + "/" +
-                                            reference.ciphertext_id +
-                                            std::string{commit_suffix});
+                                            reference.ciphertext_id);
             }
         }
         if (!batch.identifiers.empty()) {

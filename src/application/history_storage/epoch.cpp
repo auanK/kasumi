@@ -245,17 +245,7 @@ load_exact_reference(transport::Transport& storage,
         temporary->root / ("epoch-" + std::to_string(request_index));
     const auto get_trace = platform::perf_trace::begin();
     auto downloaded = detail::download(storage, *identifier, copy);
-    if (!downloaded) {
-        auto legacy_identifier =
-            object_identifier(default_remote_layout(), reference);
-        if (legacy_identifier && *legacy_identifier != *identifier) {
-            auto legacy_downloaded =
-                detail::download(storage, *legacy_identifier, copy);
-            if (legacy_downloaded) {
-                downloaded = std::move(legacy_downloaded);
-            }
-        }
-    }
+
     platform::perf_trace::finish("rc/get_epoch", get_trace);
     if (!downloaded) {
         return std::unexpected(

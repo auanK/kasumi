@@ -988,13 +988,11 @@ TEST(HistoryObservationTest, MapsWrongKeyAndCorruptionToStorageFailure) {
     const auto remote_storage =
         kasumi::test::workspace_path(storage.workspace, "storage");
     const auto source_path =
-        remote_storage /
-        kasumi::application::history_storage::marker_object(
-            layout, published_obj->head);
+        remote_storage / kasumi::application::history_storage::marker_object(
+                             layout, published_obj->head);
     const auto target_path =
-        remote_storage /
-        kasumi::application::history_storage::marker_object(
-            wrong_layout, published_obj->head);
+        remote_storage / kasumi::application::history_storage::marker_object(
+                             wrong_layout, published_obj->head);
     std::filesystem::create_directories(target_path.parent_path());
     std::filesystem::copy_file(source_path, target_path);
 

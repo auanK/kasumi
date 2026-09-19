@@ -1260,19 +1260,11 @@ physical_objects(InspectionContext& context, InspectionOperation operation) {
 
 bool valid_writer(const history_storage::RemoteLayout& layout,
                   std::string_view identifier) {
-    std::string_view prefix = layout.writers_prefix;
-    if (!identifier.starts_with(prefix)) {
-        if (identifier.starts_with("history/gc/v1/writers/")) {
-            prefix = "history/gc/v1/writers/";
-        } else if (identifier.starts_with("history/gc/writers/")) {
-            prefix = "history/gc/writers/";
-        } else {
-            return false;
-        }
+    if (!identifier.starts_with(layout.writers_prefix)) {
+        return false;
     }
-    const auto name = identifier.substr(prefix.size());
-    return name.size() == 39 && name.ends_with(".writer") &&
-           std::ranges::all_of(name.substr(0, 32), [](char value) {
+    const auto token = identifier.substr(layout.writers_prefix.size());
+    return token.size() == 32 && std::ranges::all_of(token, [](char value) {
                return (value >= '0' && value <= '9') ||
                       (value >= 'a' && value <= 'f');
            });

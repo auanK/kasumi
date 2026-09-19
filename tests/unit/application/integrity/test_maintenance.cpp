@@ -250,10 +250,11 @@ TEST(IntegrityMaintenanceTest,
         ASSERT_TRUE(sealed.has_value()) << sealed.error().detail;
         const auto identifier =
             kasumi::application::history_storage::epoch::object_identifier(
-                sealed->reference);
+                test_layout(), sealed->reference);
         ASSERT_TRUE(identifier.has_value()) << identifier.error().detail;
         ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
             storage.transport,
+            test_key(),
             *sealed,
             kasumi::test::workspace_root(storage.workspace)));
         epoch_objects.push_back(*identifier);
@@ -540,7 +541,7 @@ TEST(IntegrityMaintenanceTest,
     hide(object_path(concurrent_published.head));
     hide(marker_path(concurrent_published.head));
     hide(concurrent_content);
-    state->reveal_on_list_count = state->list_count + 13;
+    state->reveal_on_list_count = state->list_count + 9;
 
     const auto collected = kasumi::application::integrity::garbage_collect(
         runtime, transport, test_key());
@@ -563,7 +564,9 @@ TEST(IntegrityMaintenanceTest, ActiveOrAbandonedWriterBlocksCollection) {
     const auto orphan =
         put_content(storage.transport, storage.workspace, "orphan", "orphan");
     auto writer = protocol::register_writer(
-        storage.transport, kasumi::test::workspace_root(storage.workspace));
+        storage.transport,
+        test_layout(),
+        kasumi::test::workspace_root(storage.workspace));
     ASSERT_TRUE(writer.has_value()) << writer.error().detail;
 
     const auto collected = kasumi::application::integrity::garbage_collect(
@@ -1028,7 +1031,7 @@ TEST(IntegrityMaintenanceTest, FinalListingDetectsLateConcurrentChange) {
     hide(object_path(concurrent_published.head));
     hide(marker_path(concurrent_published.head));
     hide(concurrent_content);
-    state->reveal_on_list_count = state->list_count + 14;
+    state->reveal_on_list_count = state->list_count + 9;
 
     const auto collected = kasumi::application::integrity::garbage_collect(
         runtime, transport, test_key());

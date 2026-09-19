@@ -1532,8 +1532,10 @@ TEST(ApplicationInspectionTest,
     const auto orphan_id = kasumi::crypto::content_identifier(
         test_key(), kasumi::hasher::hash_string("orphan"));
     put_object(fixture, orphan_id, "not authenticated by summary");
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
     put_object(fixture,
-               "history/gc/v1/writers/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.writer");
+               layout.writers_prefix + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
     const auto before = kasumi::transport::list(fixture.transport);
     const auto result = inspect_request(
@@ -2254,12 +2256,14 @@ TEST(ApplicationInspectionTest,
     const auto child = publish(fixture, child_commit);
     const auto second_variant = add_variant(fixture, child_commit);
     ASSERT_NE(child.head.ciphertext_id, second_variant.ciphertext_id);
-    const auto invalid_marker = "history/heads/" + std::string(64, 'd') + "-" +
-                                std::string(64, 'e') + ".head";
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    const auto invalid_marker =
+        layout.heads_prefix + std::string(64, 'd') + "-" + std::string(64, 'e');
     put_object(fixture, invalid_marker, "invalid marker");
-    put_object(fixture, "history/gc/v1/barrier");
+    put_object(fixture, layout.barrier_identifier);
     put_object(fixture,
-               "history/gc/v1/writers/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.writer");
+               layout.writers_prefix + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     put_object(fixture, "namespace/desconhecido");
     const auto before = kasumi::test::snapshot_tree(remote_root);
 
@@ -2473,8 +2477,10 @@ TEST(ApplicationInspectionTest,
             .state,
         kasumi::application::RemoteHealthState::Healthy);
 
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
     const std::string valid_writer =
-        "history/gc/v1/writers/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.writer";
+        layout.writers_prefix + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     put_object(fixture, valid_writer);
     const auto degraded = inspect_health();
     const auto degraded_list = perf_count("transport list");
@@ -2490,8 +2496,8 @@ TEST(ApplicationInspectionTest,
             .state,
         kasumi::application::RemoteHealthState::Degraded);
 
-    const auto invalid_marker = "history/heads/" + std::string(64, 'd') + "-" +
-                                std::string(64, 'e') + ".head";
+    const auto invalid_marker =
+        layout.heads_prefix + std::string(64, 'd') + "-" + std::string(64, 'e');
     put_object(fixture, invalid_marker, "invalid");
     const auto critical = inspect_health();
     const auto critical_list = perf_count("transport list");
@@ -2507,8 +2513,8 @@ TEST(ApplicationInspectionTest,
             .state,
         kasumi::application::RemoteHealthState::Critical);
 
-    put_object(fixture, "history/gc/v1/barrier");
-    put_object(fixture, "history/gc/v1/writers/invalido.writer");
+    put_object(fixture, layout.barrier_identifier);
+    put_object(fixture, layout.writers_prefix + "invalido");
     const auto writers = inspect_request(
         workspace,
         InspectionRequest{InspectionOperation::RemoteWriters, "demo"},
@@ -2520,9 +2526,6 @@ TEST(ApplicationInspectionTest,
     EXPECT_TRUE(writer_report.maintenance_blocked);
     EXPECT_FALSE(writer_report.protocol_consistent);
     EXPECT_EQ(writer_report.writers.size(), 2U);
-
-    const auto layout =
-        kasumi::application::history_storage::derive_remote_layout(test_key());
     const auto original = std::string(64, 'f');
     const auto quarantined = protocol::quarantine_identifier(layout, original);
     ASSERT_TRUE(quarantined.has_value());
@@ -2576,7 +2579,7 @@ TEST(ApplicationInspectionTest,
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(test_key());
     const auto quarantined =
-        "history/gc/v1/quarantine/content/" + std::string(64, 'f');
+        layout.quarantine_content_prefix + std::string(64, 'f');
     put_object(fixture, quarantined, "quarantine");
     ASSERT_TRUE(protocol::record_quarantine(
         fixture.transport,
@@ -2584,6 +2587,19 @@ TEST(ApplicationInspectionTest,
         1,
         test_key(),
         kasumi::test::workspace_root(fixture.workspace)));
+
+    std::array<std::uint8_t, 32> wrong_key_bytes{};
+    wrong_key_bytes.fill(0xff);
+    const auto wrong_layout =
+        kasumi::application::history_storage::derive_remote_layout(
+            wrong_key_bytes);
+    const auto wrong_quarantined =
+        wrong_layout.quarantine_content_prefix + std::string(64, 'f');
+    put_object(fixture, wrong_quarantined, "quarantine");
+    const auto metadata_source = remote_root / (quarantined + ".meta");
+    const auto metadata_target = remote_root / (wrong_quarantined + ".meta");
+    std::filesystem::create_directories(metadata_target.parent_path());
+    std::filesystem::copy_file(metadata_source, metadata_target);
 
     const auto wrong_key = inspect_request(
         workspace,
@@ -2600,8 +2616,8 @@ TEST(ApplicationInspectionTest,
         auto id = std::string(64, '0');
         const auto suffix = std::to_string(index);
         id.replace(id.size() - suffix.size(), suffix.size(), suffix);
-        kasumi::test::write_text(
-            heads / (id + "-" + std::string(64, 'a') + ".head"), "x");
+        kasumi::test::write_text(heads / (id + "-" + std::string(64, 'a')),
+                                 "x");
     }
     const auto limited = inspect_request(
         workspace,

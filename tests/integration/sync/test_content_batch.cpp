@@ -155,7 +155,8 @@ kasumi::transport::Result recording_put(void* context,
     auto* state = recording_state(context);
     auto* probe = state->probe;
     const bool content = identifier.find('/') == std::string_view::npos;
-    const bool commit = identifier.ends_with(".kcom");
+    const bool commit = identifier.find('/') != std::string_view::npos &&
+                        identifier.find('-') == std::string_view::npos;
 
     if (!content) {
         record_event(*state, "put:" + std::string{identifier});
@@ -590,10 +591,12 @@ std::size_t history_put_events(const FixtureData& fixture,
             }
             const auto target = std::string_view{event}.substr(4);
             if (kind == "commits") {
-                return target.ends_with(".kcom");
+                return target.find('/') != std::string_view::npos &&
+                       target.find('-') == std::string_view::npos;
             }
             if (kind == "heads") {
-                return target.ends_with(".head");
+                return target.find('-') != std::string_view::npos &&
+                       target.substr(target.rfind('/') + 1).size() == 129;
             }
             return target.find('/' + std::string{kind} + '/') !=
                        std::string_view::npos ||

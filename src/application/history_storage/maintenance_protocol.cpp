@@ -414,7 +414,7 @@ register_writer(transport::Transport& storage,
         return std::unexpected(
             error(ErrorCode::WorkspaceFailure, token.error()));
     }
-    const auto name = *token + ".writer";
+    const auto name = *token;
     const auto identifier = layout.writers_prefix + name;
     auto bytes = payload("writer", *token);
     if (auto published =
@@ -540,38 +540,12 @@ active_writers(transport::Transport& storage, const RemoteLayout& layout) {
     }
     std::vector<std::string> result;
     for (const auto& name : *listed) {
-        if (name.size() != 39 || !name.ends_with(".writer")) {
-            return std::unexpected(error(ErrorCode::InvalidControlObject,
-                                         "invalid writer marker: " + name));
-        }
-        const auto token = name.substr(0, 32);
-        if (!detail::valid_hex_id(token + std::string(32, '0'))) {
+        if (name.size() != 32 ||
+            !detail::valid_hex_id(name + std::string(32, '0'))) {
             return std::unexpected(error(ErrorCode::InvalidControlObject,
                                          "invalid writer marker: " + name));
         }
         result.push_back(layout.writers_prefix + name);
-    }
-    if (writers_dir != "history/gc/v1/writers") {
-        for (std::string_view legacy_dir :
-             {"history/gc/v1/writers", "history/gc/writers"}) {
-            auto legacy = list_children(storage, legacy_dir);
-            if (legacy) {
-                for (const auto& name : *legacy) {
-                    if (name.size() != 39 || !name.ends_with(".writer")) {
-                        return std::unexpected(
-                            error(ErrorCode::InvalidControlObject,
-                                  "invalid writer marker: " + name));
-                    }
-                    const auto token = name.substr(0, 32);
-                    if (!detail::valid_hex_id(token + std::string(32, '0'))) {
-                        return std::unexpected(
-                            error(ErrorCode::InvalidControlObject,
-                                  "invalid writer marker: " + name));
-                    }
-                    result.push_back(std::string{legacy_dir} + "/" + name);
-                }
-            }
-        }
     }
     return result;
 }
@@ -590,7 +564,7 @@ supports_online_collection(transport::Transport& storage,
         return std::unexpected(
             error(ErrorCode::WorkspaceFailure, token.error()));
     }
-    const auto name = *token + ".probe";
+    const auto name = *token;
     const auto identifier = layout.probes_prefix + name;
     const auto bytes = payload("probe", *token);
     if (auto published =

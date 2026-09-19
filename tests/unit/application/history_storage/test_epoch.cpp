@@ -120,8 +120,9 @@ TEST(EpochCodecTest, UsesImmutableCanonicalObjectNames) {
         epoch::seal(representative_epoch(), epoch_test_key()).value();
     const auto object = epoch::object_identifier(sealed.reference);
     ASSERT_TRUE(object.has_value());
-    EXPECT_TRUE(object->starts_with("history/epochs/v1/00000000000000000002-"));
-    EXPECT_TRUE(object->ends_with(".epoch"));
+    EXPECT_EQ(*object,
+              "history/epochs/v1/00000000000000000002-" +
+                  sealed.reference.epoch_id);
 
     const auto parsed = epoch::parse_object_identifier(*object);
     ASSERT_TRUE(parsed.has_value());
@@ -552,8 +553,8 @@ TEST(EpochLoadByIdTest, RejectsMultipleReferencesForSameId) {
     ASSERT_TRUE(sealed.has_value());
     ASSERT_TRUE(epoch::publish(
         *storage, key, *sealed, kasumi::test::workspace_root(workspace)));
-    const auto conflicting = layout.epochs_prefix + "00000000000000000003-" +
-                             sealed->reference.epoch_id + ".epoch";
+    const auto conflicting =
+        history_storage::epoch_object(layout, 3, sealed->reference.epoch_id);
     const auto source = kasumi::test::workspace_path(workspace, "copy.epoch");
     kasumi::test::write_binary(
         source,

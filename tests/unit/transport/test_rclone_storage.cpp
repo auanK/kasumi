@@ -40,10 +40,10 @@ TEST(TransportTypesTest, ConnectionLossOrCancellationMakesMutationAmbiguous) {
 
 TEST(RcloneStorageTest, ParsesRelativePathsWithoutRemotePrefix) {
     const auto result = kasumi::transport::rclone_detail::parse_list_response(
-        R"({"list":[{"Path":"history/heads/example.head"},{"Path":"history/commits/example/object.kcom"}]})");
+        R"({"list":[{"Path":"history/heads/example"},{"Path":"history/commits/example/object"}]})");
     ASSERT_TRUE(result.has_value());
-    const std::vector<std::string> expected{
-        "history/commits/example/object.kcom", "history/heads/example.head"};
+    const std::vector<std::string> expected{"history/commits/example/object",
+                                            "history/heads/example"};
     EXPECT_EQ(*result, expected);
 }
 
@@ -640,15 +640,15 @@ TEST(RcloneStorageTest, DownloadsExactBatchWithOneSequentialCopy) {
         operations.get_batch(&state,
                              {.source_prefix = "history/commits",
                               .destination_root = destination,
-                              .identifiers = {"a/one.kcom", "b/two.kcom"},
+                              .identifiers = {"a/one", "b/two"},
                               .max_parallel_transfers = 1});
     stop_rc_server(remote);
     ASSERT_TRUE(downloaded);
     EXPECT_NE(request.find(R"("srcFs":"test:root/history/commits")"),
               std::string::npos);
     EXPECT_NE(request.find(R"("Transfers":1)"), std::string::npos);
-    EXPECT_NE(request.find("/a/one.kcom"), std::string::npos);
-    EXPECT_NE(request.find("/b/two.kcom"), std::string::npos);
+    EXPECT_NE(request.find("/a/one"), std::string::npos);
+    EXPECT_NE(request.find("/b/two"), std::string::npos);
 }
 
 kasumi::transport::PhysicalHashBatchRequest batch_request() {
@@ -802,11 +802,10 @@ TEST(RcloneStorageTest, BulkCheckRejectsFalseSuccessWithoutFailureReason) {
 
 TEST(RcloneStorageTest, ControlBatchParsesPositionalSuccessAndNotFound) {
     const auto result = parse_control_batch(
-        R"({"results":[{"list":[{"Path":"bench/history/writers/self.writer"}],"status":200},{"error":"object not found","status":404}]})");
+        R"({"results":[{"list":[{"Path":"bench/history/writers/self"}],"status":200},{"error":"object not found","status":404}]})");
     ASSERT_TRUE(result.has_value());
     ASSERT_EQ(result->listings.size(), 1);
-    EXPECT_EQ(result->listings.front(),
-              (std::vector<std::string>{"self.writer"}));
+    EXPECT_EQ(result->listings.front(), (std::vector<std::string>{"self"}));
     EXPECT_EQ(result->presences,
               (std::vector<kasumi::transport::Presence>{
                   kasumi::transport::Presence::Absent}));
@@ -828,7 +827,7 @@ TEST(RcloneStorageTest, ControlBatchRejectsMalformedEnvelope) {
 TEST(RcloneStorageTest, ControlBatchRejectsFailedStatusWithPlausiblePayload) {
     for (
         const auto response :
-        {R"({"results":[{"list":[{"Path":"bench/history/writers/self.writer"}],"status":500},{"item":null,"status":200}]})",
+        {R"({"results":[{"list":[{"Path":"bench/history/writers/self"}],"status":500},{"item":null,"status":200}]})",
          R"({"results":[{"list":[],"status":200},{"item":null,"status":500}]})"}) {
         const auto result = parse_control_batch(response);
         ASSERT_FALSE(result.has_value()) << response;
@@ -842,7 +841,7 @@ TEST(RcloneStorageTest, ControlBatchRejectsMalformedOrContradictorySubresults) {
         const auto response :
         {R"({"results":[{"error":7,"status":404},{"item":null,"status":200}]})",
          R"({"results":[{"list":[],"status":"200"},{"item":null,"status":200}]})",
-         R"({"results":[{"error":"not found","list":[{"Path":"bench/history/writers/self.writer"}],"status":404},{"item":null,"status":200}]})",
+         R"({"results":[{"error":"not found","list":[{"Path":"bench/history/writers/self"}],"status":404},{"item":null,"status":200}]})",
          R"({"results":[{"list":[],"status":200},{"error":"not found","item":{"IsDir":false},"status":404}]})",
          R"({"results":[{"list":7,"status":200},{"item":null,"status":200}]})",
          R"({"results":[{"list":[],"status":200},{"item":7,"status":200}]})",

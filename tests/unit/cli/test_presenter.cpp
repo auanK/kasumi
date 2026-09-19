@@ -330,15 +330,15 @@ TEST(CliPresenterTest, PresentsRemoteCommitParentsAndVariants) {
             .variants = {
                 RemoteCommitVariantInfo{
                     .ciphertext_id = "a",
-                    .object_identifier = "history/commits/commit/a.kcom",
+                    .object_identifier = "history/commits/commit/a",
                     .state = RemoteCommitVariantState::Valid},
                 RemoteCommitVariantInfo{
                     .ciphertext_id = "b",
-                    .object_identifier = "history/commits/commit/b.kcom",
+                    .object_identifier = "history/commits/commit/b",
                     .state = RemoteCommitVariantState::InvalidCiphertext},
                 RemoteCommitVariantInfo{
                     .ciphertext_id = "c",
-                    .object_identifier = "history/commits/commit/c.kcom",
+                    .object_identifier = "history/commits/commit/c",
                     .state = RemoteCommitVariantState::InvalidCommit},
             }}};
     testing::internal::CaptureStdout();

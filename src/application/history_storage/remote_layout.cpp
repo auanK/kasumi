@@ -9,9 +9,6 @@ namespace {
 
 constexpr std::size_t HASH_HEX_SIZE = 64;
 constexpr std::size_t SEQUENCE_WIDTH = 20;
-constexpr std::string_view COMMIT_SUFFIX = ".kcom";
-constexpr std::string_view HEAD_SUFFIX = ".head";
-constexpr std::string_view EPOCH_SUFFIX = ".epoch";
 
 bool valid_hex_hash(std::string_view value) noexcept {
     return value.size() == HASH_HEX_SIZE &&
@@ -83,25 +80,15 @@ RemoteLayout derive_remote_layout(
 std::string marker_object(const RemoteLayout& layout,
                           const HeadReference& reference) {
     return layout.heads_prefix + reference.commit_id + "-" +
-           reference.ciphertext_id + std::string{HEAD_SUFFIX};
+           reference.ciphertext_id;
 }
 
 std::optional<HeadReference> parse_marker_object(const RemoteLayout& layout,
                                                  std::string_view identifier) {
-    std::string_view prefix = layout.heads_prefix;
-    if (!identifier.starts_with(prefix)) {
-        if (identifier.starts_with("history/heads/")) {
-            prefix = "history/heads/";
-        } else {
-            return std::nullopt;
-        }
-    }
-    if (!identifier.ends_with(HEAD_SUFFIX)) {
+    if (!identifier.starts_with(layout.heads_prefix)) {
         return std::nullopt;
     }
-
-    const auto body = identifier.substr(
-        prefix.size(), identifier.size() - prefix.size() - HEAD_SUFFIX.size());
+    const auto body = identifier.substr(layout.heads_prefix.size());
     if (body.size() != 129 || body[64] != '-') {
         return std::nullopt;
     }
@@ -116,29 +103,19 @@ std::optional<HeadReference> parse_marker_object(const RemoteLayout& layout,
 std::string commit_object(const RemoteLayout& layout,
                           const HeadReference& reference) {
     return layout.commits_prefix + reference.commit_id + "/" +
-           reference.ciphertext_id + std::string{COMMIT_SUFFIX};
+           reference.ciphertext_id;
 }
 
 std::optional<HeadReference> parse_commit_object(const RemoteLayout& layout,
                                                  std::string_view identifier) {
-    std::string_view prefix = layout.commits_prefix;
-    if (!identifier.starts_with(prefix)) {
-        if (identifier.starts_with("history/commits/")) {
-            prefix = "history/commits/";
-        } else {
-            return std::nullopt;
-        }
-    }
-    if (!identifier.ends_with(COMMIT_SUFFIX)) {
+    if (!identifier.starts_with(layout.commits_prefix)) {
         return std::nullopt;
     }
-
-    const auto body = identifier.substr(prefix.size(),
-                                        identifier.size() - prefix.size() -
-                                            COMMIT_SUFFIX.size());
+    const auto body = identifier.substr(layout.commits_prefix.size());
     const auto separator = body.find('/');
     if (separator != 64 ||
-        body.find('/', separator + 1) != std::string_view::npos) {
+        body.find('/', separator + 1) != std::string_view::npos ||
+        body.size() != 129) {
         return std::nullopt;
     }
 
@@ -157,8 +134,7 @@ std::string epoch_object(const RemoteLayout& layout,
         sequence_text.insert(
             sequence_text.begin(), SEQUENCE_WIDTH - sequence_text.size(), '0');
     }
-    return layout.epochs_prefix + sequence_text + '-' + std::string{epoch_id} +
-           std::string{EPOCH_SUFFIX};
+    return layout.epochs_prefix + sequence_text + '-' + std::string{epoch_id};
 }
 
 std::string epoch_object(const RemoteLayout& layout,
@@ -168,27 +144,19 @@ std::string epoch_object(const RemoteLayout& layout,
 
 std::optional<epoch::Reference>
 parse_epoch_object(const RemoteLayout& layout, std::string_view identifier) {
-    std::string_view prefix = layout.epochs_prefix;
-    if (!identifier.starts_with(prefix)) {
-        if (identifier.starts_with("history/epochs/v1/")) {
-            prefix = "history/epochs/v1/";
-        } else {
-            return std::nullopt;
-        }
+    if (!identifier.starts_with(layout.epochs_prefix)) {
+        return std::nullopt;
     }
-    const auto expected_size = prefix.size() + SEQUENCE_WIDTH + 1 +
-                               HASH_HEX_SIZE + EPOCH_SUFFIX.size();
-    if (identifier.size() != expected_size ||
-        !identifier.ends_with(EPOCH_SUFFIX)) {
+    const auto body = identifier.substr(layout.epochs_prefix.size());
+    const auto expected_size = SEQUENCE_WIDTH + 1 + HASH_HEX_SIZE;
+    if (body.size() != expected_size || body[SEQUENCE_WIDTH] != '-') {
         return std::nullopt;
     }
 
-    const auto sequence_text = identifier.substr(prefix.size(), SEQUENCE_WIDTH);
-    if (!std::ranges::all_of(sequence_text,
-                             [](char c) {
-                                 return c >= '0' && c <= '9';
-                             }) ||
-        identifier[prefix.size() + SEQUENCE_WIDTH] != '-') {
+    const auto sequence_text = body.substr(0, SEQUENCE_WIDTH);
+    if (!std::ranges::all_of(sequence_text, [](char c) {
+            return c >= '0' && c <= '9';
+        })) {
         return std::nullopt;
     }
 
@@ -202,8 +170,7 @@ parse_epoch_object(const RemoteLayout& layout, std::string_view identifier) {
         return std::nullopt;
     }
 
-    const auto epoch_id =
-        identifier.substr(prefix.size() + SEQUENCE_WIDTH + 1, HASH_HEX_SIZE);
+    const auto epoch_id = body.substr(SEQUENCE_WIDTH + 1, HASH_HEX_SIZE);
     epoch::Reference result{.sequence = sequence,
                             .epoch_id = std::string{epoch_id}};
     return valid_hex_hash(result.epoch_id) ? std::optional{std::move(result)}
@@ -215,21 +182,12 @@ bool is_control_object(const RemoteLayout& layout,
     return identifier == layout.barrier_identifier ||
            identifier.starts_with(layout.writers_prefix) ||
            identifier.starts_with(layout.probes_prefix) ||
-           identifier.starts_with(layout.quarantine_prefix) ||
-           identifier == "history/gc/barrier" ||
-           identifier == "history/gc/v1/barrier" ||
-           identifier.starts_with("history/gc/writers/") ||
-           identifier.starts_with("history/gc/v1/writers/") ||
-           identifier.starts_with("history/gc/probes/") ||
-           identifier.starts_with("history/gc/v1/probes/") ||
-           identifier.starts_with("history/gc/quarantine/") ||
-           identifier.starts_with("history/gc/v1/quarantine/");
+           identifier.starts_with(layout.quarantine_prefix);
 }
 
 bool is_history_object(const RemoteLayout& layout,
                        std::string_view identifier) noexcept {
-    return identifier.starts_with(layout.history_prefix) ||
-           identifier.starts_with("history/");
+    return identifier.starts_with(layout.history_prefix);
 }
 
 std::optional<std::string>
@@ -239,11 +197,6 @@ quarantine_identifier(const RemoteLayout& layout,
         return layout.quarantine_commits_prefix +
                std::string{
                    original_identifier.substr(layout.commits_prefix.size())};
-    }
-    if (original_identifier.starts_with("history/commits/")) {
-        return layout.quarantine_commits_prefix +
-               std::string{original_identifier.substr(
-                   std::string_view{"history/commits/"}.size())};
     }
     if (valid_hex_hash(original_identifier)) {
         return layout.quarantine_content_prefix +
@@ -263,36 +216,12 @@ restore_destination(const RemoteLayout& layout,
         }
         return std::nullopt;
     }
-    for (std::string_view legacy_content_prefix :
-         {"history/gc/v1/quarantine/content/",
-          "history/gc/quarantine/content/"}) {
-        if (quarantine_identifier.starts_with(legacy_content_prefix)) {
-            const auto content =
-                quarantine_identifier.substr(legacy_content_prefix.size());
-            if (valid_hex_hash(content)) {
-                return std::string{content};
-            }
-            return std::nullopt;
-        }
-    }
     if (quarantine_identifier.starts_with(layout.quarantine_commits_prefix)) {
         const auto body = quarantine_identifier.substr(
             layout.quarantine_commits_prefix.size());
         const auto original = layout.commits_prefix + std::string{body};
         if (parse_commit_object(layout, original)) {
             return original;
-        }
-    }
-    for (std::string_view legacy_commits_prefix :
-         {"history/gc/v1/quarantine/commits/",
-          "history/gc/quarantine/commits/"}) {
-        if (quarantine_identifier.starts_with(legacy_commits_prefix)) {
-            const auto body =
-                quarantine_identifier.substr(legacy_commits_prefix.size());
-            const auto original = "history/commits/" + std::string{body};
-            if (parse_commit_object(layout, original)) {
-                return original;
-            }
         }
     }
     return std::nullopt;

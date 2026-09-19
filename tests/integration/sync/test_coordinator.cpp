@@ -410,16 +410,21 @@ kasumi::transport::Result reobserve_put(void* context,
                                         const std::filesystem::path& source,
                                         std::string_view identifier) {
     auto* state = reobserve_state(context);
-    const bool commit = identifier.ends_with(".kcom") ||
-                        identifier.starts_with("history/commits/");
-    const bool marker = identifier.ends_with(".head") ||
-                        identifier.starts_with("history/heads/");
+    const bool marker =
+        identifier.find('-') != std::string_view::npos &&
+        identifier.substr(identifier.rfind('/') + 1).size() == 129;
+    const bool epoch =
+        identifier.find('-') != std::string_view::npos &&
+        identifier.substr(identifier.rfind('/') + 1).size() == 85;
+    const bool commit =
+        !marker && !epoch && identifier.find('/') != std::string_view::npos;
     {
         std::unique_lock lock(state->mutex);
         ++state->put_count;
         state->request_events.emplace_back("PUT " + std::string{identifier});
         state->events.push_back(commit   ? "commit PUT"
                                 : marker ? "head PUT"
+                                : epoch  ? "epoch PUT"
                                          : "content PUT");
         if (commit) {
             state->commit_put_started = true;
@@ -447,11 +452,11 @@ reobserve_get(void* context,
         std::lock_guard lock(state->mutex);
         ++state->get_count;
         state->request_events.emplace_back("GET " + std::string{identifier});
-        if (identifier.ends_with(".head") ||
-            identifier.starts_with("history/heads/")) {
+        if (identifier.find('-') != std::string_view::npos &&
+            identifier.substr(identifier.rfind('/') + 1).size() == 129) {
             ++state->marker_get_count;
-        } else if (identifier.ends_with(".kcom") ||
-                   identifier.starts_with("history/commits/")) {
+        } else if (identifier.find('/') != std::string_view::npos &&
+                   identifier.find('-') == std::string_view::npos) {
             ++state->commit_get_count;
         }
     }
@@ -530,13 +535,18 @@ std::expected<std::string, kasumi::transport::Error> reobserve_physical_hash(
         std::unique_lock lock(state->mutex);
         ++state->physical_hash_count;
         state->request_events.emplace_back("HASH " + std::string{identifier});
-        const bool is_commit = identifier.ends_with(".kcom") ||
-                               identifier.starts_with("history/commits/");
-        const bool is_head = identifier.ends_with(".head") ||
-                             identifier.starts_with("history/heads/");
-        state->events.push_back(is_commit ? "commit verified"
-                                : is_head ? "head verified"
-                                          : "content verified");
+        const bool is_head =
+            identifier.find('-') != std::string_view::npos &&
+            identifier.substr(identifier.rfind('/') + 1).size() == 129;
+        const bool is_epoch =
+            identifier.find('-') != std::string_view::npos &&
+            identifier.substr(identifier.rfind('/') + 1).size() == 85;
+        const bool is_commit = !is_head && !is_epoch &&
+                               identifier.find('/') != std::string_view::npos;
+        state->events.push_back(is_commit  ? "commit verified"
+                                : is_head  ? "head verified"
+                                : is_epoch ? "epoch verified"
+                                           : "content verified");
         if (is_commit) {
             state->commit_verification_started = true;
             state->condition.notify_all();
@@ -601,8 +611,8 @@ AmbiguousPublicationState* ambiguous_state(void* context) {
 }
 
 bool ambiguous_marker(std::string_view identifier) {
-    return identifier.ends_with(".head") ||
-           identifier.starts_with("history/heads/");
+    return identifier.find('-') != std::string_view::npos &&
+           identifier.substr(identifier.rfind('/') + 1).size() == 129;
 }
 
 bool ambiguous_content(std::string_view identifier) {
@@ -610,8 +620,8 @@ bool ambiguous_content(std::string_view identifier) {
 }
 
 bool ambiguous_epoch(std::string_view identifier) {
-    return identifier.ends_with(".epoch") ||
-           identifier.starts_with("history/epochs/");
+    return identifier.find('-') != std::string_view::npos &&
+           identifier.substr(identifier.rfind('/') + 1).size() == 85;
 }
 
 kasumi::transport::Result ambiguous_initialize(void*) {
@@ -986,8 +996,8 @@ PruningFixture make_pruning_fixture(
         std::lock_guard lock(fixture.state->mutex);
         for (auto it = fixture.state->objects.begin();
              it != fixture.state->objects.end();) {
-            if (it->first.ends_with(".head") ||
-                it->first.starts_with("history/heads/")) {
+            if (it->first.find('-') != std::string::npos &&
+                it->first.substr(it->first.rfind('/') + 1).size() == 129) {
                 it = fixture.state->objects.erase(it);
             } else {
                 ++it;
@@ -1509,13 +1519,15 @@ TEST(SyncCoordinatorTest,
     EXPECT_EQ((**latest).value.policy.min_history_age_hours, 9U);
     const auto remote_objects = kasumi::transport::list(*storage);
     ASSERT_TRUE(remote_objects.has_value());
-    EXPECT_EQ(std::ranges::count_if(*remote_objects,
-                                    [](const auto& identifier) {
-                                        return identifier.ends_with(".epoch") ||
-                                               identifier.starts_with(
-                                                   "history/epochs/");
-                                    }),
-              1U);
+    EXPECT_EQ(
+        std::ranges::count_if(
+            *remote_objects,
+            [](const auto& identifier) {
+                return identifier.find('-') != std::string::npos &&
+                       identifier.substr(identifier.rfind('/') + 1).size() ==
+                           85;
+            }),
+        1U);
     EXPECT_EQ(kasumi::transport::presence(
                   *storage, kasumi::crypto::content_identifier(key, hash)),
               kasumi::transport::Presence::Present);
@@ -2144,10 +2156,10 @@ kasumi::application::history_storage::epoch::SealedEpoch make_pruning_successor(
 std::string epoch_listing_name(
     const kasumi::application::history_storage::epoch::SealedEpoch& epoch) {
     auto sequence_text = std::to_string(epoch.reference.sequence);
-    if (sequence_text.size() < 10) {
-        sequence_text.insert(0, 10 - sequence_text.size(), '0');
+    if (sequence_text.size() < 20) {
+        sequence_text.insert(0, 20 - sequence_text.size(), '0');
     }
-    return sequence_text + "-" + epoch.reference.epoch_id + ".epoch";
+    return sequence_text + "-" + epoch.reference.epoch_id;
 }
 
 TEST(SyncCoordinatorTest,
@@ -3252,11 +3264,12 @@ TEST(SyncCoordinatorTest, ConcurrentImmutablePublicationsRemainMultipleHeads) {
     EXPECT_EQ(heads, expected);
     const auto listing = kasumi::transport::list(*storage);
     ASSERT_TRUE(listing.has_value());
-    EXPECT_EQ(std::ranges::count_if(*listing,
-                                    [](const auto& id) {
-                                        return id.ends_with(".head") ||
-                                               id.starts_with("history/heads/");
-                                    }),
+    EXPECT_EQ(std::ranges::count_if(
+                  *listing,
+                  [](const auto& id) {
+                      return id.find('-') != std::string::npos &&
+                             id.substr(id.rfind('/') + 1).size() == 129;
+                  }),
               3);
 }
 
@@ -3816,28 +3829,28 @@ TEST(ReobservationTest,
         });
         const auto commit_put = request_index([](std::string_view event) {
             return event.starts_with("PUT ") &&
-                   (event.ends_with(".kcom") ||
-                    event.find("/commits/") != std::string_view::npos);
+                   event.substr(4).find('/') != std::string_view::npos &&
+                   event.find('-') == std::string_view::npos;
         });
         const auto commit_hash = request_index([](std::string_view event) {
             return event.starts_with("HASH ") &&
-                   (event.ends_with(".kcom") ||
-                    event.find("/commits/") != std::string_view::npos);
+                   event.substr(5).find('/') != std::string_view::npos &&
+                   event.find('-') == std::string_view::npos;
         });
         const auto head_put = request_index([](std::string_view event) {
             return event.starts_with("PUT ") &&
-                   (event.ends_with(".head") ||
-                    event.find("/heads/") != std::string_view::npos);
+                   (event.find('-') != std::string_view::npos &&
+                    event.substr(event.rfind('/') + 1).size() == 129);
         });
         const auto head_hash = request_index([](std::string_view event) {
             return event.starts_with("HASH ") &&
-                   (event.ends_with(".head") ||
-                    event.find("/heads/") != std::string_view::npos);
+                   (event.find('-') != std::string_view::npos &&
+                    event.substr(event.rfind('/') + 1).size() == 129);
         });
         const auto cleanup = request_index([](std::string_view event) {
             return event.starts_with("DELETE ") &&
-                   (event.ends_with(".head") ||
-                    event.find("/heads/") != std::string_view::npos);
+                   (event.find('-') != std::string_view::npos &&
+                    event.substr(event.rfind('/') + 1).size() == 129);
         });
         EXPECT_LT(content_put, content_hash);
         EXPECT_LT(commit_put, commit_hash);
@@ -4482,15 +4495,16 @@ TEST(SyncCoordinatorTest,
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     const auto listing = kasumi::transport::list(storage);
     ASSERT_TRUE(listing.has_value());
-    EXPECT_EQ(std::ranges::count_if(*listing,
-                                    [](const auto& id) {
-                                        return id.ends_with(".kcom") ||
-                                               id.starts_with(
-                                                   "history/commits/");
-                                    }),
-              1);
+    EXPECT_EQ(
+        std::ranges::count_if(*listing,
+                              [](const auto& id) {
+                                  return id.find('/') != std::string::npos &&
+                                         id.find('-') == std::string::npos;
+                              }),
+        1);
     EXPECT_TRUE(std::ranges::none_of(*listing, [](const auto& id) {
-        return id.ends_with(".head") || id.starts_with("history/heads/");
+        return id.find('-') != std::string::npos &&
+               id.substr(id.rfind('/') + 1).size() == 129;
     }));
 }
 
@@ -5466,18 +5480,19 @@ TEST(SyncCoordinatorTest, EmptyPlanPublishesAndPersistsConvergenceCommit) {
     }
     const auto listing = kasumi::transport::list(storage);
     ASSERT_TRUE(listing.has_value());
-    EXPECT_EQ(std::ranges::count_if(*listing,
-                                    [](const auto& id) {
-                                        return id.ends_with(".kcom") ||
-                                               id.starts_with(
-                                                   "history/commits/");
-                                    }),
-              4);
-    EXPECT_EQ(std::ranges::count_if(*listing,
-                                    [](const auto& id) {
-                                        return id.ends_with(".head") ||
-                                               id.starts_with("history/heads/");
-                                    }),
+    EXPECT_EQ(
+        std::ranges::count_if(*listing,
+                              [](const auto& id) {
+                                  return id.find('/') != std::string::npos &&
+                                         id.find('-') == std::string::npos;
+                              }),
+        4);
+    EXPECT_EQ(std::ranges::count_if(
+                  *listing,
+                  [](const auto& id) {
+                      return id.find('-') != std::string::npos &&
+                             id.substr(id.rfind('/') + 1).size() == 129;
+                  }),
               1);
 }
 
@@ -6428,14 +6443,14 @@ TEST(SyncCoordinatorTest, FailedRepairRemainsDurableAcrossRecoveryAttempts) {
     ASSERT_TRUE(kasumi::transport::initialize(storage));
     const auto count_commits = [&] {
         return std::ranges::count_if(state->objects, [&](const auto& entry) {
-            return entry.first.ends_with(".kcom") ||
-                   entry.first.starts_with("history/commits/");
+            return entry.first.find('/') != std::string::npos &&
+                   entry.first.find('-') == std::string::npos;
         });
     };
     const auto count_markers = [&] {
         return std::ranges::count_if(state->objects, [&](const auto& entry) {
-            return entry.first.ends_with(".head") ||
-                   entry.first.starts_with("history/heads/");
+            return entry.first.find('-') != std::string::npos &&
+                   entry.first.substr(entry.first.rfind('/') + 1).size() == 129;
         });
     };
     const auto commits_before = count_commits();
@@ -6647,14 +6662,14 @@ TEST(SyncCoordinatorTest, DurableRepairKeepsARealHistoryHead) {
     ASSERT_TRUE(after.has_value());
     const auto count_commits = [](const auto& values) {
         return std::ranges::count_if(values, [&](const auto& value) {
-            return value.ends_with(".kcom") ||
-                   value.starts_with("history/commits/");
+            return value.find('/') != std::string::npos &&
+                   value.find('-') == std::string::npos;
         });
     };
     const auto count_markers = [](const auto& values) {
         return std::ranges::count_if(values, [&](const auto& value) {
-            return value.ends_with(".head") ||
-                   value.starts_with("history/heads/");
+            return value.find('-') != std::string::npos &&
+                   value.substr(value.rfind('/') + 1).size() == 129;
         });
     };
     EXPECT_EQ(count_commits(*before), count_commits(*after));
@@ -7509,28 +7524,29 @@ TEST(SyncCoordinatorTest,
                                              transaction_id));
         const auto listing = kasumi::transport::list(storage);
         ASSERT_TRUE(listing.has_value());
-        EXPECT_EQ(std::ranges::count_if(*listing,
-                                        [](const auto& id) {
-                                            return id.ends_with(".head") ||
-                                                   id.starts_with(
-                                                       "history/heads/");
-                                        }),
+        EXPECT_EQ(std::ranges::count_if(
+                      *listing,
+                      [](const auto& id) {
+                          return id.find('-') != std::string::npos &&
+                                 id.substr(id.rfind('/') + 1).size() == 129;
+                      }),
                   visible ? 1 : 0)
             << static_cast<int>(phase);
         EXPECT_EQ(std::ranges::count_if(*listing,
                                         [](const auto& id) {
-                                            return id.ends_with(".kcom") ||
-                                                   id.starts_with(
-                                                       "history/commits/");
+                                            return id.find('/') !=
+                                                       std::string::npos &&
+                                                   id.find('-') ==
+                                                       std::string::npos;
                                         }),
                   phase >= kasumi::transaction::Phase::CommitUploaded ? 1 : 0)
             << static_cast<int>(phase);
-        EXPECT_EQ(std::ranges::count_if(*listing,
-                                        [](const auto& id) {
-                                            return id.ends_with(".epoch") ||
-                                                   id.starts_with(
-                                                       "history/epochs/");
-                                        }),
+        EXPECT_EQ(std::ranges::count_if(
+                      *listing,
+                      [](const auto& id) {
+                          return id.find('-') != std::string::npos &&
+                                 id.substr(id.rfind('/') + 1).size() == 85;
+                      }),
                   visible ? 1 : 0)
             << static_cast<int>(phase);
         EXPECT_EQ(std::filesystem::exists(runtime_data.database_path), visible)
