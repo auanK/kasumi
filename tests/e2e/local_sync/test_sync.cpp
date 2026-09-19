@@ -758,6 +758,45 @@ TEST(H3LocalSyncTest,
     expect_fixed_point(scenario, client);
 }
 
+TEST(H3LocalSyncTest, EquivalentFileMtimeDriftSucceedsWithoutPublication) {
+    auto scenario = make_scenario();
+    const auto client = make_client(scenario, "mtime-drift-no-pub");
+    const auto ignore = client_local_dir(client) / ".kasumiignore";
+    kasumi::test::write_text(ignore, "ignored.txt\n");
+
+    ASSERT_TRUE(sync_succeeds(client));
+
+    auto before = remote(scenario);
+    ASSERT_TRUE(before.has_value()) << before.error();
+    const auto* before_ignore =
+        kasumi::find_row(before->effective_tree, ".kasumiignore");
+    ASSERT_NE(before_ignore, nullptr);
+    const auto original_hash = before_ignore->hash;
+    const auto original_size = before_ignore->size;
+
+    using FileDuration = std::filesystem::file_time_type::duration;
+    const auto local_subsecond = std::filesystem::file_time_type{
+        FileDuration{before_ignore->mtime.time_since_epoch().count() +
+                     std::chrono::duration_cast<FileDuration>(
+                         std::chrono::nanoseconds{685272100})
+                         .count()}};
+    const auto written = kasumi::platform::metadata::set_last_write_time(
+        ignore, local_subsecond);
+    ASSERT_TRUE(written.has_value()) << written.error();
+
+    ASSERT_TRUE(sync_succeeds(client));
+
+    auto after = remote(scenario);
+    ASSERT_TRUE(after.has_value()) << after.error();
+    const auto* after_ignore =
+        kasumi::find_row(after->effective_tree, ".kasumiignore");
+    ASSERT_NE(after_ignore, nullptr);
+    EXPECT_EQ(after_ignore->hash, original_hash);
+    EXPECT_EQ(after_ignore->size, original_size);
+    EXPECT_FALSE(after->has_conflicts);
+    expect_fixed_point(scenario, client);
+}
+
 TEST(ScannerPropagationTest, HybridObservationFailsBeforeRemoteMutation) {
     using namespace kasumi::test;
     auto scenario = make_scenario();

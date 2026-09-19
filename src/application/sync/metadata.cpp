@@ -68,13 +68,17 @@ metadata_restore_paths(const transaction::Record& record,
 
     if (!record.publication_required && observed_tree != nullptr) {
         for (const auto& expected : expected_tree.rows) {
-            if (!expected.is_directory) {
+            const auto* observed = find_row(*observed_tree, expected.path);
+            if (observed == nullptr ||
+                observed->is_directory != expected.is_directory) {
                 continue;
             }
-            const auto* observed = find_row(*observed_tree, expected.path);
-            if (observed != nullptr && observed->is_directory &&
-                observed->mtime != expected.mtime) {
-                paths.emplace(expected.path);
+            if (observed->mtime != expected.mtime) {
+                if (expected.is_directory ||
+                    (expected.hash == observed->hash &&
+                     expected.size == observed->size)) {
+                    paths.emplace(expected.path);
+                }
             }
         }
     }

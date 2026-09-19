@@ -3016,6 +3016,79 @@ TEST(SyncCoordinatorTest, ConcurrentUntouchedFileMtimeChangeIsNotMasked) {
     EXPECT_TRUE(std::filesystem::is_empty(profile / ".transactions"));
 }
 
+TEST(SyncCoordinatorTest,
+     PreExistingEquivalentFileMtimeDriftSucceedsWithoutPublication) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("pre-existing-mtime-drift");
+    const auto profile = kasumi::test::workspace_path(workspace, "profile");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto storage_path =
+        kasumi::test::workspace_path(workspace, "storage");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    kasumi::test::write_text(local / ".kasumiignore", "ignored.txt\n");
+
+    const auto ignore_hash = kasumi::hasher::hash_string("ignored.txt\n");
+    const auto base_mtime = std::filesystem::file_time_type::clock::now();
+    const auto remote_mtime = base_mtime;
+    using FileDuration = std::filesystem::file_time_type::duration;
+    const auto local_mtime = std::filesystem::file_time_type{
+        FileDuration{base_mtime.time_since_epoch().count() +
+                     std::chrono::duration_cast<FileDuration>(
+                         std::chrono::nanoseconds{685272100})
+                         .count()}};
+
+    std::error_code error;
+    std::filesystem::last_write_time(
+        local / ".kasumiignore", local_mtime, error);
+    ASSERT_FALSE(error);
+    const auto actual_local_mtime =
+        std::filesystem::last_write_time(local / ".kasumiignore", error);
+    ASSERT_FALSE(error);
+    const auto root_mtime = std::filesystem::last_write_time(local, error);
+    ASSERT_FALSE(error);
+
+    auto input = empty_publication_input();
+    input.local_tree = kasumi::Snapshot{
+        .rows = {kasumi::NodeRow{
+                     .path = "", .mtime = root_mtime, .is_directory = true},
+                 kasumi::NodeRow{.path = ".kasumiignore",
+                                 .hash = ignore_hash,
+                                 .size = 12,
+                                 .mtime = actual_local_mtime,
+                                 .is_directory = false}}};
+    kasumi::finalize_snapshot(input.local_tree);
+    input.storage.tree = kasumi::Snapshot{
+        .rows = {kasumi::NodeRow{
+                     .path = "", .mtime = root_mtime, .is_directory = true},
+                 kasumi::NodeRow{.path = ".kasumiignore",
+                                 .hash = ignore_hash,
+                                 .size = 12,
+                                 .mtime = remote_mtime,
+                                 .is_directory = false}}};
+    kasumi::finalize_snapshot(input.storage.tree);
+    input.base_tree = input.storage.tree;
+    add_reachable_head(input);
+
+    auto storage = kasumi::transport::open_transport(storage_path.string());
+    ASSERT_TRUE(storage.has_value());
+    ASSERT_TRUE(kasumi::transport::initialize(*storage));
+
+    const auto result = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_TRUE(result->plan.operations.empty());
+    EXPECT_FALSE(result->requires_publication);
+
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    const auto executed = kasumi::application::sync::coordinator::execute(
+        make_runtime(profile, local, storage_path),
+        *storage,
+        key,
+        input,
+        *result);
+    ASSERT_TRUE(executed.has_value()) << executed.error().detail;
+}
+
 TEST(SyncCoordinatorTest, ConcurrentUntouchedDirectoryMtimeChangeIsNotMasked) {
     auto workspace = kasumi::test::make_temp_workspace(
         "concurrent-untouched-directory-mtime");

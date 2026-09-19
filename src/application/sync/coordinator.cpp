@@ -538,6 +538,38 @@ bool same_epoch_frontier(
         });
 }
 
+bool same_materialized_head_rows(const std::vector<NodeRow>& expected_rows,
+                                 const std::vector<NodeRow>& actual_rows,
+                                 const Snapshot& observed_local_tree) noexcept {
+    if (expected_rows.size() != actual_rows.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < expected_rows.size(); ++i) {
+        const auto& exp = expected_rows[i];
+        const auto& act = actual_rows[i];
+        if (exp.path != act.path || exp.is_directory != act.is_directory) {
+            return false;
+        }
+        if (!exp.is_directory) {
+            if (exp.size != act.size || exp.hash != act.hash) {
+                return false;
+            }
+        }
+        if (exp.mtime != act.mtime) {
+            const auto* obs = find_row(observed_local_tree, act.path);
+            const bool pre_existing_equivalent =
+                obs != nullptr && !obs->is_directory && !exp.is_directory &&
+                obs->hash == exp.hash && obs->size == exp.size &&
+                act.hash == exp.hash && act.size == exp.size &&
+                obs->mtime != exp.mtime;
+            if (!pre_existing_equivalent) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 transaction::Record
 make_upload_batch_checkpoint(const transaction::Record& original,
                              const mutation::StagedUploadBatch& batch) {
@@ -1026,7 +1058,7 @@ restore_transaction_metadata(const Snapshot& expected_tree,
             if (observed == nullptr || current != observed->mtime) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::ConcurrentModification,
-                    "directory modified after observation: " + path_name));
+                    "entry modified after observation: " + path_name));
             }
         }
         auto written =
@@ -1849,7 +1881,9 @@ execute(const runtime::RuntimeData& runtime_data,
             found->commit.height != observed_input.storage.generation ||
             !same_rows(found->commit.tree.rows,
                        observed_input.storage.tree.rows) ||
-            !same_rows(found->commit.tree.rows, publication_tree->rows)) {
+            !detail::same_materialized_head_rows(found->commit.tree.rows,
+                                                 publication_tree->rows,
+                                                 observed_input.local_tree)) {
             auto rolled = rollback_terminal();
             if (!rolled)
                 return std::unexpected(rolled.error());
@@ -1861,6 +1895,18 @@ execute(const runtime::RuntimeData& runtime_data,
                 for (std::size_t index = 0; index < count; ++index) {
                     const auto& expected = found->commit.tree.rows[index];
                     const auto& actual = publication_tree->rows[index];
+                    const auto* obs =
+                        find_row(observed_input.local_tree, actual.path);
+                    const bool pre_existing_equivalent =
+                        obs != nullptr && !obs->is_directory &&
+                        !expected.is_directory && obs->hash == expected.hash &&
+                        obs->size == expected.size &&
+                        actual.hash == expected.hash &&
+                        actual.size == expected.size &&
+                        obs->mtime != expected.mtime;
+                    if (pre_existing_equivalent) {
+                        continue;
+                    }
                     if (actual.path != expected.path ||
                         actual.hash != expected.hash ||
                         actual.size != expected.size ||
