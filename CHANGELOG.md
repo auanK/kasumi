@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.5.4] - 2026-09-19
+
+Kasumi - Multi-client bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.
+
+### Breaking Changes
+
+- **Remote Protocol Overhaul (Sync Reset Required):** The remote history storage layout and protocol have been overhauled to enforce privacy-preserving key-derived namespaces and extensionless canonical object identifiers. Backward compatibility with pre-0.5.4 remote layouts is not maintained. **Synchronization must be freshly redone on all client machines** (re-initialize or re-sync local profiles against remote storage).
+
+### Added
+
+- **Key-Derived Namespaces (Storage Obfuscation):** Remote history objects (markers, commits, epochs, active writers, and maintenance barriers) are now isolated within deterministic namespaces derived from the vault master key via HKDF/BLAKE3. Observers without credentials can no longer inspect commit graphs, transaction cadences, or marker metadata on public/shared cloud storage backends.
+- **Staged CLI Progress & Plan Summarization:** Overhauled `kasumi sync` and `kasumi status` presentation with real-time staged execution tracking (`Reconciling`, `Staging`, `Transferring`, `Finalizing`) and smart plan truncation for large file sets to keep terminal output readable.
+- **Internationalized Remote Inspection:** Full bilingual support (English default and Brazilian Portuguese `pt-BR`) for remote health diagnostics, marker validation, epoch verification, and orphan detection in `kasumi inspect`.
+
+### Changed
+
+- **Canonical Extensionless History Objects:** Completely eliminated plaintext file extensions (`.kcom`, `.head`, `.epoch`, `.writer`, `.probe`) across all remote storage operations. All remote objects now follow strict canonical, extensionless naming conventions.
+- **Standardized Internal Diagnostics:** Unified all internal error descriptions, assertion messages, and runtime diagnostic logging in English across the entire engine.
+- **Streamlined Maintenance & GC Protocol:** Removed legacy directory fallback scans (`history/gc/v1/writers`), reducing round-trip remote listing overhead and accelerating garbage collection and epoch maintenance.
+
+### Tests
+
+- Added comprehensive unit and integration test suites validating key-derived layout isolation, canonical object parsing, and concurrent GC barriers under partitioned namespaces.
+- Updated all end-to-end sync, coordinator, and inspection tests, achieving a 100% pass rate across all 811 tests.
+
 ## [0.5.3] - 2026-09-10
 
 Kasumi - Multi-client bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.

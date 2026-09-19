@@ -1,14 +1,19 @@
-# Kasumi v0.5.3
+# Kasumi v0.5.4
 
-Patch release of Kasumi.
+Feature and protocol release of Kasumi.
 
 Kasumi - Multi-client bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.
 
+## Breaking Changes
+
+- **Protocol Change — Synchronization Must Be Redone:** v0.5.4 introduces obfuscated, key-derived remote history namespaces and canonical extensionless storage objects (`.kcom`, `.head`, and `.epoch` have been removed). Because Kasumi is in pre-1.0 and does not carry legacy compatibility layers, **all client machines must re-synchronize (re-initialize profiles)** against remote storage.
+
 ## Highlights
 
-- Fixed a `Composition Mismatch` occurring when remote storage contains files or directories matching `.kasumiignore` (such as `desktop.ini`, `node_modules/`, `*.tmp`). Ignore rules are now systematically enforced during diff computation and reconciliation, keeping local files untouched and purging excluded entries from the synchronized remote snapshot.
-- Decoupled payload inspection and cryptographic auditing from garbage collection, allowing GC reachability to execute in constant time `O(1)` relative to file payloads without downloading content.
-- Strengthened garbage collection distributed barriers with pre-destructive remote listing consistency checks prior to quarantine and purge.
+- **Key-Derived Namespaces (Metadata Privacy):** Remote history objects (markers, commits, epochs, writers, GC barriers) are now partitioned and hashed under namespaces derived cryptographically from the vault master key, hiding commit frequency, graph topology, and marker identities from unauthorized observers on cloud storage.
+- **Canonical Extensionless Protocol:** Completely removed plaintext file extensions and legacy directory fallbacks across remote layouts, eliminating technical debt and simplifying object discovery.
+- **Staged CLI Progress & Plan Summarization:** Modernized `kasumi sync` and `kasumi status` with staged visual progress (`Reconciling` -> `Staging` -> `Transferring` -> `Finalizing`) and automated plan truncation for clean terminal output.
+- **Internationalized Remote Inspection:** Full English and Brazilian Portuguese (`pt-BR`) support for remote health reports, marker validation, epoch checks, and orphan detection, alongside standardized internal engine diagnostics in English.
 
 ## Downloads
 
@@ -21,4 +26,4 @@ Individual SHA-256 checksum files are also provided for each archive.
 GitHub artifact attestations are generated for the release archives and
 `SHA256SUMS.txt`.
 
-See `CHANGELOG.md` for the complete v0.5.3 change summary.
+See `CHANGELOG.md` for the complete v0.5.4 change summary.
