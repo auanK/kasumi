@@ -1,28 +1,40 @@
 # Changelog
 
+## [0.5.5] - 2026-09-19
+
+Kasumi - Multi-client bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.
+
+### Fixed
+
+- Fixed a `Composition Mismatch` caused by modification-time drift on pre-existing equivalent files when publication is not required. Timestamps are now aligned during metadata restoration without triggering false-positive local divergence.
+
+### Tests
+
+- Added unit, integration, and end-to-end regression tests validating pre-existing equivalent file modification-time drift without publication, while preserving strict rejection of concurrent modifications.
+
 ## [0.5.4] - 2026-09-19
 
 Kasumi - Multi-client bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.
 
 ### Breaking Changes
 
-- **Remote Protocol Overhaul (Sync Reset Required):** The remote history storage layout and protocol have been overhauled to enforce privacy-preserving key-derived namespaces and extensionless canonical object identifiers. Backward compatibility with pre-0.5.4 remote layouts is not maintained. **Synchronization must be freshly redone on all client machines** (re-initialize or re-sync local profiles against remote storage).
+- Overhauled remote history storage layout and protocol with privacy-preserving key-derived namespaces and canonical extensionless object identifiers. Backward compatibility with pre-0.5.4 remote layouts is not maintained and synchronization must be freshly re-initialized on all client machines.
 
 ### Added
 
-- **Key-Derived Namespaces (Storage Obfuscation):** Remote history objects (markers, commits, epochs, active writers, and maintenance barriers) are now isolated within deterministic namespaces derived from the vault master key via HKDF/BLAKE3. Observers without credentials can no longer inspect commit graphs, transaction cadences, or marker metadata on public/shared cloud storage backends.
-- **Staged CLI Progress & Plan Summarization:** Overhauled `kasumi sync` and `kasumi status` presentation with real-time staged execution tracking (`Reconciling`, `Staging`, `Transferring`, `Finalizing`) and smart plan truncation for large file sets to keep terminal output readable.
-- **Internationalized Remote Inspection:** Full bilingual support (English default and Brazilian Portuguese `pt-BR`) for remote health diagnostics, marker validation, epoch verification, and orphan detection in `kasumi inspect`.
+- Isolated remote history objects (markers, commits, epochs, active writers, and maintenance barriers) within deterministic namespaces derived from the vault master key via HKDF/BLAKE3 to prevent unauthorized observation of commit graphs and activity cadences on shared storage.
+- Added staged execution tracking (`Reconciling`, `Staging`, `Transferring`, `Finalizing`) and automated plan truncation for large file sets in `kasumi sync` and `kasumi status`.
+- Added full English and Brazilian Portuguese (`pt-BR`) localization for remote health reports, marker validation, epoch verification, and orphan detection in `kasumi inspect`.
 
 ### Changed
 
-- **Canonical Extensionless History Objects:** Completely eliminated plaintext file extensions (`.kcom`, `.head`, `.epoch`, `.writer`, `.probe`) across all remote storage operations. All remote objects now follow strict canonical, extensionless naming conventions.
-- **Standardized Internal Diagnostics:** Unified all internal error descriptions, assertion messages, and runtime diagnostic logging in English across the entire engine.
-- **Streamlined Maintenance & GC Protocol:** Removed legacy directory fallback scans (`history/gc/v1/writers`), reducing round-trip remote listing overhead and accelerating garbage collection and epoch maintenance.
+- Eliminated plaintext file extensions (`.kcom`, `.head`, `.epoch`, `.writer`, `.probe`) across all remote storage operations in favor of canonical extensionless object naming.
+- Standardized all internal error descriptions, assertion messages, and runtime diagnostic logging in English across the engine.
+- Removed legacy directory fallback scans (`history/gc/v1/writers`), reducing round-trip remote listing overhead during garbage collection and epoch maintenance.
 
 ### Tests
 
-- Added comprehensive unit and integration test suites validating key-derived layout isolation, canonical object parsing, and concurrent GC barriers under partitioned namespaces.
+- Added unit and integration test suites validating key-derived layout isolation, canonical object parsing, and concurrent GC barriers under partitioned namespaces.
 - Updated all end-to-end sync, coordinator, and inspection tests, achieving a 100% pass rate across all 811 tests.
 
 ## [0.5.3] - 2026-09-10
