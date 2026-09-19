@@ -2,6 +2,7 @@
 #define KASUMI_TEST_HISTORY_STORAGE_HELPERS_HPP
 
 #include "application/history_storage/history_storage.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "core/history.hpp"
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
@@ -82,13 +83,17 @@ std::string commit_id(const Commit& commit) {
 }
 
 std::string object_path(const HeadReference& reference) {
-    return "history/commits/" + reference.commit_id + "/" +
-           reference.ciphertext_id + ".kcom";
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    return kasumi::application::history_storage::commit_object(layout,
+                                                               reference);
 }
 
 std::string marker_path(const HeadReference& reference) {
-    return "history/heads/" + reference.commit_id + "-" +
-           reference.ciphertext_id + ".head";
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    return kasumi::application::history_storage::marker_object(layout,
+                                                               reference);
 }
 
 struct LocalStorage {
@@ -215,11 +220,17 @@ FakeState* fake_state(void* context) {
 }
 
 bool is_commit(std::string_view identifier) {
-    return identifier.starts_with("history/commits/");
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    return identifier.starts_with("history/commits/") ||
+           identifier.starts_with(layout.commits_prefix);
 }
 
 bool is_marker(std::string_view identifier) {
-    return identifier.starts_with("history/heads/");
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    return identifier.starts_with("history/heads/") ||
+           identifier.starts_with(layout.heads_prefix);
 }
 
 kasumi::transport::Result fake_initialize(void*) {
@@ -264,8 +275,11 @@ kasumi::transport::Result fake_put(void* context,
                static_cast<std::streamsize>(bytes.size()));
     state->objects[std::string{identifier}] = std::move(bytes);
     state->physical_hashes[std::string{identifier}] = std::move(*physical_hash);
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
     if (state->replace_barrier_after_quarantine_put &&
-        identifier.starts_with("history/gc/v1/quarantine/")) {
+        (identifier.starts_with("history/gc/v1/quarantine/") ||
+         identifier.starts_with(layout.quarantine_prefix))) {
         state->replace_barrier_after_quarantine_put = false;
         for (auto& [object_identifier, object] : state->objects) {
             constexpr std::string_view barrier_payload =
@@ -404,10 +418,24 @@ kasumi::transport::ListingResult fake_list_prefix(void* context,
         state->objects.merge(state->hidden_objects);
         state->reveal_on_list_count = 0;
     }
-    if (state->hide_probe_listing && prefix.ends_with("/probes")) {
+    const auto test_layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    const auto probes_dir = test_layout.probes_prefix.ends_with('/')
+                                ? test_layout.probes_prefix.substr(
+                                      0, test_layout.probes_prefix.size() - 1)
+                                : test_layout.probes_prefix;
+    const auto writers_dir = test_layout.writers_prefix.ends_with('/')
+                                 ? test_layout.writers_prefix.substr(
+                                       0, test_layout.writers_prefix.size() - 1)
+                                 : test_layout.writers_prefix;
+    const bool is_probes = prefix.ends_with("/probes") || prefix == probes_dir;
+    const bool is_writers =
+        prefix.ends_with("/writers") || prefix == writers_dir;
+
+    if (state->hide_probe_listing && is_probes) {
         return std::vector<std::string>{};
     }
-    if (state->fail_writer_list && prefix.ends_with("/writers")) {
+    if (state->fail_writer_list && is_writers) {
         return std::unexpected(kasumi::transport::Error{
             .code = kasumi::transport::ErrorCode::Io,
             .message = "injected writer listing failure"});
@@ -427,11 +455,11 @@ kasumi::transport::ListingResult fake_list_prefix(void* context,
     if (state->reverse_listing) {
         std::ranges::reverse(result);
     }
-    if (state->hide_writer_listing && prefix.ends_with("/writers")) {
+    if (state->hide_writer_listing && is_writers) {
         result.clear();
     }
-    if (state->publish_barrier_after_writer_list &&
-        prefix.ends_with("/writers")) {
+    if (state->publish_barrier_after_writer_list && is_writers) {
+        state->objects[test_layout.barrier_identifier] = {};
         state->objects["history/gc/v1/barrier"] = {};
     }
     return result;

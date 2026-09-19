@@ -1,5 +1,6 @@
 #include "application/history_storage/content_reachability.hpp"
 
+#include "application/history_storage/remote_layout.hpp"
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
 
@@ -160,9 +161,10 @@ inventory_impl(transport::Transport& storage,
         std::set<std::string> physical;
         std::vector<std::string> unknown;
         if (!listing_span.empty()) {
+            const auto layout = derive_remote_layout(key);
             std::size_t object_count = 0;
             for (const auto& identifier : listing_span) {
-                if (identifier.starts_with("history/")) {
+                if (is_history_object(layout, identifier)) {
                     continue;
                 }
                 if (++object_count > maximum_content_object_count) {

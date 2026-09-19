@@ -1,5 +1,6 @@
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/publication.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "application/observation/state.hpp"
 #include "application/sync/coordinator.hpp"
 #include "application/sync/coordinator_detail.hpp"
@@ -203,6 +204,7 @@ std::string save_recovery_record(
         record->ciphertext_id = std::move(ciphertext_id);
         record->marker_id =
             kasumi::application::history_storage::marker_identifier(
+                kasumi::application::history_storage::derive_remote_layout(key),
                 {.commit_id = record->commit_id,
                  .ciphertext_id = record->ciphertext_id});
     }
@@ -273,8 +275,8 @@ std::string save_pruning_recovery_record(
     record->commit_id = head.commit_id;
     record->ciphertext_id = head.ciphertext_id;
     record->parent_ids = parents;
-    record->marker_id =
-        kasumi::application::history_storage::marker_identifier(head);
+    record->marker_id = kasumi::application::history_storage::marker_identifier(
+        kasumi::application::history_storage::derive_remote_layout(key), head);
     record->epoch_vault_id = std::move(vault_id);
     record->epoch_id = epoch.reference.epoch_id;
     record->epoch_issued_at = 123;
@@ -350,6 +352,7 @@ struct AmbiguousPublicationState {
     bool fail_epoch_get = false;
     std::vector<std::vector<std::string>> scripted_epoch_listings;
     std::size_t scripted_epoch_listing_index = 0;
+    std::string epoch_listing_prefix;
     bool fail_content_get = false;
     UploadCorruption upload_corruption = UploadCorruption::None;
     bool claim_present_after_upload = false;
@@ -407,8 +410,10 @@ kasumi::transport::Result reobserve_put(void* context,
                                         const std::filesystem::path& source,
                                         std::string_view identifier) {
     auto* state = reobserve_state(context);
-    const bool commit = identifier.starts_with("history/commits/");
-    const bool marker = identifier.starts_with("history/heads/");
+    const bool commit = identifier.ends_with(".kcom") ||
+                        identifier.starts_with("history/commits/");
+    const bool marker = identifier.ends_with(".head") ||
+                        identifier.starts_with("history/heads/");
     {
         std::unique_lock lock(state->mutex);
         ++state->put_count;
@@ -442,9 +447,11 @@ reobserve_get(void* context,
         std::lock_guard lock(state->mutex);
         ++state->get_count;
         state->request_events.emplace_back("GET " + std::string{identifier});
-        if (identifier.starts_with("history/heads/")) {
+        if (identifier.ends_with(".head") ||
+            identifier.starts_with("history/heads/")) {
             ++state->marker_get_count;
-        } else if (identifier.starts_with("history/commits/")) {
+        } else if (identifier.ends_with(".kcom") ||
+                   identifier.starts_with("history/commits/")) {
             ++state->commit_get_count;
         }
     }
@@ -496,7 +503,10 @@ reobserve_list_prefix(void* context, std::string_view prefix) {
             --state->remaining_mutations;
             mutation = state->next_value++;
         }
-        if (prefix == "history/heads" && state->require_local_change_overlap &&
+        const bool is_heads = prefix == "history/heads" ||
+                              (prefix.find('/') != std::string_view::npos &&
+                               prefix.find('/') == prefix.rfind('/'));
+        if (is_heads && state->require_local_change_overlap &&
             !state->condition.wait_for(lock, std::chrono::seconds{2}, [&] {
                 return state->local_change_observed;
             })) {
@@ -520,15 +530,17 @@ std::expected<std::string, kasumi::transport::Error> reobserve_physical_hash(
         std::unique_lock lock(state->mutex);
         ++state->physical_hash_count;
         state->request_events.emplace_back("HASH " + std::string{identifier});
-        state->events.push_back(
-            identifier.starts_with("history/commits/") ? "commit verified"
-            : identifier.starts_with("history/heads/") ? "head verified"
-                                                       : "content verified");
-        if (identifier.starts_with("history/commits/")) {
+        const bool is_commit = identifier.ends_with(".kcom") ||
+                               identifier.starts_with("history/commits/");
+        const bool is_head = identifier.ends_with(".head") ||
+                             identifier.starts_with("history/heads/");
+        state->events.push_back(is_commit ? "commit verified"
+                                : is_head ? "head verified"
+                                          : "content verified");
+        if (is_commit) {
             state->commit_verification_started = true;
             state->condition.notify_all();
-        } else if (!identifier.starts_with("history/") &&
-                   state->require_commit_overlap &&
+        } else if (!is_commit && !is_head && state->require_commit_overlap &&
                    !state->condition.wait_for(
                        lock, std::chrono::seconds{2}, [&] {
                            return state->commit_verification_started;
@@ -589,15 +601,17 @@ AmbiguousPublicationState* ambiguous_state(void* context) {
 }
 
 bool ambiguous_marker(std::string_view identifier) {
-    return identifier.starts_with("history/heads/");
+    return identifier.ends_with(".head") ||
+           identifier.starts_with("history/heads/");
 }
 
 bool ambiguous_content(std::string_view identifier) {
-    return !identifier.starts_with("history/");
+    return identifier.find('/') == std::string_view::npos;
 }
 
 bool ambiguous_epoch(std::string_view identifier) {
-    return identifier.starts_with("history/epochs/");
+    return identifier.ends_with(".epoch") ||
+           identifier.starts_with("history/epochs/");
 }
 
 kasumi::transport::Result ambiguous_initialize(void*) {
@@ -790,9 +804,12 @@ ambiguous_list_prefix(void* context, std::string_view prefix) {
             .code = kasumi::transport::ErrorCode::Io,
             .message = "injected reachability inspection failure"});
     }
-    if (prefix == "history/epochs/v1" &&
-        state->scripted_epoch_listing_index <
-            state->scripted_epoch_listings.size()) {
+    const bool is_epoch = prefix == "history/epochs/v1" ||
+                          prefix == "history/epochs" ||
+                          (!state->epoch_listing_prefix.empty() &&
+                           prefix == state->epoch_listing_prefix);
+    if (is_epoch && state->scripted_epoch_listing_index <
+                        state->scripted_epoch_listings.size()) {
         return state
             ->scripted_epoch_listings[state->scripted_epoch_listing_index++];
     }
@@ -969,15 +986,21 @@ PruningFixture make_pruning_fixture(
         std::lock_guard lock(fixture.state->mutex);
         for (auto it = fixture.state->objects.begin();
              it != fixture.state->objects.end();) {
-            if (it->first.starts_with("history/heads/")) {
+            if (it->first.ends_with(".head") ||
+                it->first.starts_with("history/heads/")) {
                 it = fixture.state->objects.erase(it);
             } else {
                 ++it;
             }
         }
     }
+    const auto fixture_layout =
+        kasumi::application::history_storage::derive_remote_layout(fixture.key);
     if (!kasumi::application::sync::publication::publish_head_marker(
-            fixture.storage, fixture.recovery_head, fixture.local)) {
+            fixture.storage,
+            fixture_layout,
+            fixture.recovery_head,
+            fixture.local)) {
         return fixture;
     }
 
@@ -994,8 +1017,9 @@ PruningFixture make_pruning_fixture(
              .previous_epoch_id =
                  previous ? previous->reference.epoch_id : std::string{}},
             fixture.key);
-        if (!current || !kasumi::application::history_storage::epoch::publish(
-                            fixture.storage, *current, fixture.local)) {
+        if (!current ||
+            !kasumi::application::history_storage::epoch::publish(
+                fixture.storage, fixture.key, *current, fixture.local)) {
             return fixture;
         }
         previous = std::move(*current);
@@ -1487,8 +1511,9 @@ TEST(SyncCoordinatorTest,
     ASSERT_TRUE(remote_objects.has_value());
     EXPECT_EQ(std::ranges::count_if(*remote_objects,
                                     [](const auto& identifier) {
-                                        return identifier.starts_with(
-                                            "history/epochs/v1/");
+                                        return identifier.ends_with(".epoch") ||
+                                               identifier.starts_with(
+                                                   "history/epochs/");
                                     }),
               1U);
     EXPECT_EQ(kasumi::transport::presence(
@@ -1536,7 +1561,7 @@ TEST(SyncCoordinatorTest, PruningEpochPersistsMatchingEpochSequence) {
             key);
         ASSERT_TRUE(current.has_value());
         ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
-            *storage, *current, profile));
+            *storage, key, *current, profile));
         previous = std::move(*current);
     }
     ASSERT_TRUE(previous.has_value());
@@ -1695,7 +1720,7 @@ TEST(SyncCoordinatorTest, UnchangedFrontierDoesNotPublishRedundantEpoch) {
         fixture.key);
     ASSERT_TRUE(accepted.has_value()) << accepted.error().detail;
     ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
-        fixture.storage, *accepted, fixture.profile));
+        fixture.storage, fixture.key, *accepted, fixture.profile));
     fixture.previous_epoch = *accepted;
     fixture.input.storage.epoch_id = accepted->reference.epoch_id;
     fixture.input.storage.epoch_sequence = accepted->reference.sequence;
@@ -2118,11 +2143,11 @@ kasumi::application::history_storage::epoch::SealedEpoch make_pruning_successor(
 
 std::string epoch_listing_name(
     const kasumi::application::history_storage::epoch::SealedEpoch& epoch) {
-    constexpr std::string_view prefix = "history/epochs/v1/";
-    return kasumi::application::history_storage::epoch::object_identifier(
-               epoch.reference)
-        .value()
-        .substr(prefix.size());
+    auto sequence_text = std::to_string(epoch.reference.sequence);
+    if (sequence_text.size() < 10) {
+        sequence_text.insert(0, 10 - sequence_text.size(), '0');
+    }
+    return sequence_text + "-" + epoch.reference.epoch_id + ".epoch";
 }
 
 TEST(SyncCoordinatorTest,
@@ -2131,7 +2156,7 @@ TEST(SyncCoordinatorTest,
     ASSERT_TRUE(fixture.ready);
     const auto candidate = make_pruning_candidate(fixture);
     ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
-        fixture.storage, candidate, fixture.local));
+        fixture.storage, fixture.key, candidate, fixture.local));
     const auto epoch_puts = fixture.state->epoch_put_count;
     const auto id =
         save_pruning_recovery_record(fixture.profile,
@@ -2162,9 +2187,9 @@ TEST(SyncCoordinatorTest,
     const auto candidate = make_pruning_candidate(fixture);
     const auto newer = make_pruning_successor(candidate, fixture);
     ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
-        fixture.storage, candidate, fixture.local));
+        fixture.storage, fixture.key, candidate, fixture.local));
     ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
-        fixture.storage, newer, fixture.local));
+        fixture.storage, fixture.key, newer, fixture.local));
     ASSERT_FALSE(
         save_pruning_recovery_record(fixture.profile,
                                      kasumi::transaction::Phase::EpochUploaded,
@@ -2214,13 +2239,15 @@ TEST(SyncCoordinatorTest,
             fixture.key)
             .value();
     ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
-        fixture.storage, candidate_a, fixture.local));
+        fixture.storage, fixture.key, candidate_a, fixture.local));
     ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
-        fixture.storage, candidate_b, fixture.local));
+        fixture.storage, fixture.key, candidate_b, fixture.local));
     ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
-        fixture.storage, successor_b, fixture.local));
+        fixture.storage, fixture.key, successor_b, fixture.local));
 
-    constexpr std::string_view prefix = "history/epochs/v1/";
+    const auto fixture_layout =
+        kasumi::application::history_storage::derive_remote_layout(fixture.key);
+    const auto prefix = fixture_layout.epochs_prefix;
     std::vector<std::string> first_listing;
     for (const auto& [identifier, unused] : fixture.state->objects) {
         static_cast<void>(unused);
@@ -2228,7 +2255,7 @@ TEST(SyncCoordinatorTest,
             continue;
         }
         const auto parsed = kasumi::application::history_storage::epoch::
-            parse_object_identifier(identifier);
+            parse_object_identifier(fixture_layout, identifier);
         ASSERT_TRUE(parsed.has_value());
         if (parsed->sequence <= 2) {
             first_listing.push_back(identifier.substr(prefix.size()));
@@ -2241,6 +2268,8 @@ TEST(SyncCoordinatorTest,
     second_listing.push_back(epoch_listing_name(successor_b));
     fixture.state->scripted_epoch_listings = {std::move(first_listing),
                                               std::move(second_listing)};
+    fixture.state->epoch_listing_prefix =
+        prefix.ends_with('/') ? prefix.substr(0, prefix.size() - 1) : prefix;
     const auto epoch_puts = fixture.state->epoch_put_count;
     ASSERT_FALSE(
         save_pruning_recovery_record(fixture.profile,
@@ -2258,7 +2287,8 @@ TEST(SyncCoordinatorTest,
     ASSERT_FALSE(recovered.has_value());
     EXPECT_EQ(
         recovered.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict)
+        << recovered.error().detail;
     EXPECT_FALSE(std::filesystem::exists(fixture.runtime.database_path));
     EXPECT_TRUE(
         std::filesystem::exists(fixture.profile / "transaction.bin.enc"));
@@ -2278,7 +2308,7 @@ TEST(SyncCoordinatorTest,
     ASSERT_TRUE(fixture.ready);
     const auto candidate = make_pruning_candidate(fixture);
     ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
-        fixture.storage, candidate, fixture.local));
+        fixture.storage, fixture.key, candidate, fixture.local));
     const auto id =
         save_pruning_recovery_record(fixture.profile,
                                      kasumi::transaction::Phase::EpochVerified,
@@ -2333,10 +2363,12 @@ TEST(SyncCoordinatorTest,
     ASSERT_TRUE(fixture.ready);
     const auto candidate = make_pruning_candidate(fixture);
     ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
-        fixture.storage, candidate, fixture.local));
+        fixture.storage, fixture.key, candidate, fixture.local));
+    const auto fixture_layout =
+        kasumi::application::history_storage::derive_remote_layout(fixture.key);
     const auto predecessor_identifier =
         kasumi::application::history_storage::epoch::object_identifier(
-            fixture.previous_epoch.reference)
+            fixture_layout, fixture.previous_epoch.reference)
             .value();
     {
         std::lock_guard lock(fixture.state->mutex);
@@ -2370,10 +2402,12 @@ TEST(SyncCoordinatorTest,
     ASSERT_TRUE(fixture.ready);
     const auto candidate = make_pruning_candidate(fixture);
     ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
-        fixture.storage, candidate, fixture.local));
+        fixture.storage, fixture.key, candidate, fixture.local));
+    const auto fixture_layout =
+        kasumi::application::history_storage::derive_remote_layout(fixture.key);
     const auto identifier =
         kasumi::application::history_storage::epoch::object_identifier(
-            candidate.reference)
+            fixture_layout, candidate.reference)
             .value();
     {
         std::lock_guard lock(fixture.state->mutex);
@@ -2418,7 +2452,7 @@ TEST(SyncCoordinatorTest,
             phase >= kasumi::transaction::Phase::EpochUploaded;
         if (has_candidate) {
             ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
-                fixture.storage, candidate, fixture.local));
+                fixture.storage, fixture.key, candidate, fixture.local));
         }
         if (phase >= kasumi::transaction::Phase::DatabaseCommitted) {
             ASSERT_TRUE(kasumi::state_storage::initialize(
@@ -3194,12 +3228,14 @@ TEST(SyncCoordinatorTest, ConcurrentImmutablePublicationsRemainMultipleHeads) {
         EXPECT_TRUE(
             kasumi::application::sync::publication::verify_commit_object(
                 *storage, key, prepared, object->head, local));
+        const auto current_layout =
+            kasumi::application::history_storage::derive_remote_layout(key);
         auto marker =
             kasumi::application::sync::publication::publish_head_marker(
-                *storage, object->head, local);
+                *storage, current_layout, object->head, local);
         EXPECT_TRUE(marker.has_value());
         EXPECT_TRUE(kasumi::application::sync::publication::verify_head_marker(
-            *storage, object->head, local));
+            *storage, current_layout, object->head, local));
     };
     publish(*root);
     publish(*first);
@@ -3218,7 +3254,8 @@ TEST(SyncCoordinatorTest, ConcurrentImmutablePublicationsRemainMultipleHeads) {
     ASSERT_TRUE(listing.has_value());
     EXPECT_EQ(std::ranges::count_if(*listing,
                                     [](const auto& id) {
-                                        return id.starts_with("history/heads/");
+                                        return id.ends_with(".head") ||
+                                               id.starts_with("history/heads/");
                                     }),
               3);
 }
@@ -3422,6 +3459,7 @@ TEST(ReobservationTest, AuditStorageObjectsDisablesTrustedMarkerShortcut) {
 
     const auto marker_id =
         kasumi::application::history_storage::marker_identifier(
+            kasumi::application::history_storage::derive_remote_layout(key),
             published->head);
     kasumi::test::write_text(storage_path / marker_id, "corrupt marker bytes");
 
@@ -3509,9 +3547,11 @@ TEST(ReobservationTest, KnownBaseNoLongerReachableFailsClosed) {
         *storage, key, *base, profile));
     ASSERT_TRUE(kasumi::application::history_storage::publish_commit(
         *storage, key, *unrelated, profile));
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key);
     const std::vector<std::string> old_head{base_id};
     ASSERT_TRUE(kasumi::application::history_storage::remove_marker_variants(
-        *storage, old_head));
+        *storage, layout, old_head));
 
     const auto observed =
         kasumi::application::observation::collect_reconciliation_input(
@@ -3674,11 +3714,24 @@ TEST(ReobservationTest,
             kasumi::application::sync::coordinator::reobservation::stabilize(
                 runtime_data, storage, key, *observed, *result);
         ASSERT_TRUE(stable.has_value()) << stable.error().detail;
+        const auto test_layout =
+            kasumi::application::history_storage::derive_remote_layout(key);
+        const std::string heads_dir =
+            test_layout.heads_prefix.ends_with('/')
+                ? test_layout.heads_prefix.substr(
+                      0, test_layout.heads_prefix.size() - 1)
+                : test_layout.heads_prefix;
+        const std::string epochs_dir =
+            test_layout.epochs_prefix.ends_with('/')
+                ? test_layout.epochs_prefix.substr(
+                      0, test_layout.epochs_prefix.size() - 1)
+                : test_layout.epochs_prefix;
+
         EXPECT_EQ(state.presence_count, 0U);
         EXPECT_EQ(state.full_list_count, 0U);
         EXPECT_EQ(state.request_events,
-                  (std::vector<std::string>{"LIST history/heads",
-                                            "LIST history/epochs/v1"}));
+                  (std::vector<std::string>{"LIST " + heads_dir,
+                                            "LIST " + epochs_dir}));
         EXPECT_EQ(state.list_count, 2U);
         EXPECT_EQ(state.prefix_list_count, 2U);
         EXPECT_EQ(state.get_count, 0U);
@@ -3724,10 +3777,8 @@ TEST(ReobservationTest,
         EXPECT_EQ(state.initialize_count, 0U);
         EXPECT_EQ(state.prefix_list_count, 4U);
         EXPECT_EQ(state.listed_prefixes,
-                  (std::vector<std::string>{"history/heads",
-                                            "history/epochs/v1",
-                                            "history/heads",
-                                            "history/epochs/v1"}));
+                  (std::vector<std::string>{
+                      heads_dir, epochs_dir, heads_dir, epochs_dir}));
         EXPECT_EQ(state.get_count, 0U);
         EXPECT_EQ(state.marker_get_count, 0U);
         EXPECT_EQ(state.commit_get_count, 0U);
@@ -3744,10 +3795,10 @@ TEST(ReobservationTest,
             EXPECT_EQ(std::ranges::count(state.events, event), 1) << event;
         }
         ASSERT_EQ(state.request_events.size(), 11U);
-        EXPECT_EQ(state.request_events[0], "LIST history/heads");
-        EXPECT_EQ(state.request_events[1], "LIST history/epochs/v1");
-        EXPECT_EQ(state.request_events[2], "LIST history/heads");
-        EXPECT_EQ(state.request_events[3], "LIST history/epochs/v1");
+        EXPECT_EQ(state.request_events[0], "LIST " + heads_dir);
+        EXPECT_EQ(state.request_events[1], "LIST " + epochs_dir);
+        EXPECT_EQ(state.request_events[2], "LIST " + heads_dir);
+        EXPECT_EQ(state.request_events[3], "LIST " + epochs_dir);
         const auto request_index = [&](const auto& predicate) {
             const auto found =
                 std::ranges::find_if(state.request_events, predicate);
@@ -3757,26 +3808,36 @@ TEST(ReobservationTest,
         };
         const auto content_put = request_index([](std::string_view event) {
             return event.starts_with("PUT ") &&
-                   !event.starts_with("PUT history/");
+                   event.substr(4).find('/') == std::string_view::npos;
         });
         const auto content_hash = request_index([](std::string_view event) {
             return event.starts_with("HASH ") &&
-                   !event.starts_with("HASH history/");
+                   event.substr(5).find('/') == std::string_view::npos;
         });
         const auto commit_put = request_index([](std::string_view event) {
-            return event.starts_with("PUT history/commits/");
+            return event.starts_with("PUT ") &&
+                   (event.ends_with(".kcom") ||
+                    event.find("/commits/") != std::string_view::npos);
         });
         const auto commit_hash = request_index([](std::string_view event) {
-            return event.starts_with("HASH history/commits/");
+            return event.starts_with("HASH ") &&
+                   (event.ends_with(".kcom") ||
+                    event.find("/commits/") != std::string_view::npos);
         });
         const auto head_put = request_index([](std::string_view event) {
-            return event.starts_with("PUT history/heads/");
+            return event.starts_with("PUT ") &&
+                   (event.ends_with(".head") ||
+                    event.find("/heads/") != std::string_view::npos);
         });
         const auto head_hash = request_index([](std::string_view event) {
-            return event.starts_with("HASH history/heads/");
+            return event.starts_with("HASH ") &&
+                   (event.ends_with(".head") ||
+                    event.find("/heads/") != std::string_view::npos);
         });
         const auto cleanup = request_index([](std::string_view event) {
-            return event.starts_with("DELETE history/heads/");
+            return event.starts_with("DELETE ") &&
+                   (event.ends_with(".head") ||
+                    event.find("/heads/") != std::string_view::npos);
         });
         EXPECT_LT(content_put, content_hash);
         EXPECT_LT(commit_put, commit_hash);
@@ -4047,7 +4108,8 @@ TEST(SyncCoordinatorTest, LocalOnlyDatabaseFailureRollsBackAppliedDownload) {
     ASSERT_TRUE(listing.has_value());
     EXPECT_EQ(std::ranges::count_if(*listing,
                                     [](const auto& id) {
-                                        return id.starts_with("history/");
+                                        return id.find('/') !=
+                                               std::string_view::npos;
                                     }),
               0);
 }
@@ -4198,7 +4260,8 @@ TEST(SyncCoordinatorTest,
         ASSERT_TRUE(listing.has_value());
         EXPECT_EQ(std::ranges::count_if(*listing,
                                         [](const auto& id) {
-                                            return id.starts_with("history/");
+                                            return id.find('/') !=
+                                                   std::string_view::npos;
                                         }),
                   0);
     }
@@ -4421,12 +4484,13 @@ TEST(SyncCoordinatorTest,
     ASSERT_TRUE(listing.has_value());
     EXPECT_EQ(std::ranges::count_if(*listing,
                                     [](const auto& id) {
-                                        return id.starts_with(
-                                            "history/commits/");
+                                        return id.ends_with(".kcom") ||
+                                               id.starts_with(
+                                                   "history/commits/");
                                     }),
               1);
     EXPECT_TRUE(std::ranges::none_of(*listing, [](const auto& id) {
-        return id.starts_with("history/heads/");
+        return id.ends_with(".head") || id.starts_with("history/heads/");
     }));
 }
 
@@ -5332,6 +5396,8 @@ TEST(SyncCoordinatorTest, EmptyPlanPublishesAndPersistsConvergenceCommit) {
     ASSERT_TRUE(root_published.has_value());
     ASSERT_TRUE(first_published.has_value());
     ASSERT_TRUE(second_published.has_value());
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key);
     std::vector<std::string> heads{first->commit_id, second->commit_id};
     std::ranges::sort(heads);
 
@@ -5355,11 +5421,11 @@ TEST(SyncCoordinatorTest, EmptyPlanPublishesAndPersistsConvergenceCommit) {
              .marked_heads = heads,
              .marked_head_identifiers =
                  {kasumi::application::history_storage::marker_identifier(
-                      root_published->head),
+                      layout, root_published->head),
                   kasumi::application::history_storage::marker_identifier(
-                      first_published->head),
+                      layout, first_published->head),
                   kasumi::application::history_storage::marker_identifier(
-                      second_published->head)},
+                      layout, second_published->head)},
              .logical_heads = heads,
              .ancestral_marked_heads = {root->commit_id},
              .generation = 1,
@@ -5402,13 +5468,15 @@ TEST(SyncCoordinatorTest, EmptyPlanPublishesAndPersistsConvergenceCommit) {
     ASSERT_TRUE(listing.has_value());
     EXPECT_EQ(std::ranges::count_if(*listing,
                                     [](const auto& id) {
-                                        return id.starts_with(
-                                            "history/commits/");
+                                        return id.ends_with(".kcom") ||
+                                               id.starts_with(
+                                                   "history/commits/");
                                     }),
               4);
     EXPECT_EQ(std::ranges::count_if(*listing,
                                     [](const auto& id) {
-                                        return id.starts_with("history/heads/");
+                                        return id.ends_with(".head") ||
+                                               id.starts_with("history/heads/");
                                     }),
               1);
 }
@@ -6358,13 +6426,20 @@ TEST(SyncCoordinatorTest, FailedRepairRemainsDurableAcrossRecoveryAttempts) {
     AmbiguousPublicationState* state = nullptr;
     auto storage = make_ambiguous_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(storage));
-    const auto count_objects = [&](std::string_view prefix) {
+    const auto count_commits = [&] {
         return std::ranges::count_if(state->objects, [&](const auto& entry) {
-            return entry.first.starts_with(prefix);
+            return entry.first.ends_with(".kcom") ||
+                   entry.first.starts_with("history/commits/");
         });
     };
-    const auto commits_before = count_objects("history/commits/");
-    const auto markers_before = count_objects("history/heads/");
+    const auto count_markers = [&] {
+        return std::ranges::count_if(state->objects, [&](const auto& entry) {
+            return entry.first.ends_with(".head") ||
+                   entry.first.starts_with("history/heads/");
+        });
+    };
+    const auto commits_before = count_commits();
+    const auto markers_before = count_markers();
     state->upload_corruption =
         AmbiguousPublicationState::UploadCorruption::Truncated;
     const auto result = kasumi::reconciliation::reconcile(input);
@@ -6425,10 +6500,10 @@ TEST(SyncCoordinatorTest, FailedRepairRemainsDurableAcrossRecoveryAttempts) {
     EXPECT_EQ(state->put_count, 5U);
     EXPECT_EQ(state->get_count, 5U);
     EXPECT_TRUE(std::ranges::none_of(state->objects, [](const auto& entry) {
-        return entry.first.starts_with("history/");
+        return entry.first.find('/') != std::string_view::npos;
     }));
-    EXPECT_EQ(count_objects("history/commits/"), commits_before);
-    EXPECT_EQ(count_objects("history/heads/"), markers_before);
+    EXPECT_EQ(count_commits(), commits_before);
+    EXPECT_EQ(count_markers(), markers_before);
     EXPECT_EQ(input.storage.logical_heads, std::vector<std::string>{head_id});
     auto final_state =
         kasumi::state_storage::load_state(runtime_data.database_path);
@@ -6570,15 +6645,20 @@ TEST(SyncCoordinatorTest, DurableRepairKeepsARealHistoryHead) {
 
     auto after = kasumi::transport::list(storage);
     ASSERT_TRUE(after.has_value());
-    const auto count = [](const auto& values, std::string_view prefix) {
+    const auto count_commits = [](const auto& values) {
         return std::ranges::count_if(values, [&](const auto& value) {
-            return value.starts_with(prefix);
+            return value.ends_with(".kcom") ||
+                   value.starts_with("history/commits/");
         });
     };
-    EXPECT_EQ(count(*before, "history/commits/"),
-              count(*after, "history/commits/"));
-    EXPECT_EQ(count(*before, "history/heads/"),
-              count(*after, "history/heads/"));
+    const auto count_markers = [](const auto& values) {
+        return std::ranges::count_if(values, [&](const auto& value) {
+            return value.ends_with(".head") ||
+                   value.starts_with("history/heads/");
+        });
+    };
+    EXPECT_EQ(count_commits(*before), count_commits(*after));
+    EXPECT_EQ(count_markers(*before), count_markers(*after));
     ASSERT_TRUE(std::filesystem::create_directories(
         kasumi::test::workspace_path(workspace, "after-history")));
     const auto after_history =
@@ -7361,14 +7441,18 @@ TEST(SyncCoordinatorTest,
                             storage, key, *prepared, object->head, local));
             }
             if (phase >= kasumi::transaction::Phase::HeadPublished) {
+                const auto current_layout =
+                    kasumi::application::history_storage::derive_remote_layout(
+                        key);
                 auto marker =
                     kasumi::application::sync::publication::publish_head_marker(
-                        storage, object->head, local);
+                        storage, current_layout, object->head, local);
                 ASSERT_TRUE(marker.has_value()) << marker.error().detail;
                 if (phase >= kasumi::transaction::Phase::HeadVerified) {
                     ASSERT_TRUE(
                         kasumi::application::sync::publication::
-                            verify_head_marker(storage, object->head, local));
+                            verify_head_marker(
+                                storage, current_layout, object->head, local));
                 }
             }
         }
@@ -7377,7 +7461,7 @@ TEST(SyncCoordinatorTest,
         const auto genesis_epoch = set_test_genesis_epoch(epoch_record, key);
         if (phase >= kasumi::transaction::Phase::EpochUploaded) {
             ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
-                storage, genesis_epoch, local));
+                storage, key, genesis_epoch, local));
         }
         if (phase >= kasumi::transaction::Phase::EpochVerified) {
             const auto expected =
@@ -7427,22 +7511,25 @@ TEST(SyncCoordinatorTest,
         ASSERT_TRUE(listing.has_value());
         EXPECT_EQ(std::ranges::count_if(*listing,
                                         [](const auto& id) {
-                                            return id.starts_with(
-                                                "history/heads/");
+                                            return id.ends_with(".head") ||
+                                                   id.starts_with(
+                                                       "history/heads/");
                                         }),
                   visible ? 1 : 0)
             << static_cast<int>(phase);
         EXPECT_EQ(std::ranges::count_if(*listing,
                                         [](const auto& id) {
-                                            return id.starts_with(
-                                                "history/commits/");
+                                            return id.ends_with(".kcom") ||
+                                                   id.starts_with(
+                                                       "history/commits/");
                                         }),
                   phase >= kasumi::transaction::Phase::CommitUploaded ? 1 : 0)
             << static_cast<int>(phase);
         EXPECT_EQ(std::ranges::count_if(*listing,
                                         [](const auto& id) {
-                                            return id.starts_with(
-                                                "history/epochs/");
+                                            return id.ends_with(".epoch") ||
+                                                   id.starts_with(
+                                                       "history/epochs/");
                                         }),
                   visible ? 1 : 0)
             << static_cast<int>(phase);
@@ -7586,6 +7673,7 @@ TEST(SyncCoordinatorTest,
         record->parent_ids = prepared->commit.parents;
         record->marker_id =
             kasumi::application::history_storage::marker_identifier(
+                kasumi::application::history_storage::derive_remote_layout(key),
                 published->head);
         if (phase >= kasumi::transaction::Phase::EpochPrepared) {
             static_cast<void>(set_test_genesis_epoch(*record, key));
@@ -7659,6 +7747,7 @@ TEST(SyncCoordinatorTest, PublishedTransactionRollsForwardAfterRecovery) {
     record->ciphertext_id = published->head.ciphertext_id;
     record->parent_ids = prepared->commit.parents;
     record->marker_id = kasumi::application::history_storage::marker_identifier(
+        kasumi::application::history_storage::derive_remote_layout(key),
         published->head);
     const auto paths = kasumi::application::sync::journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());

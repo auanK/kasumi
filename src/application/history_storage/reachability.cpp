@@ -1,6 +1,7 @@
 #include "application/history_storage/reachability.hpp"
 
 #include "application/history_storage/epoch.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "platform/perf_trace.hpp"
 
 #include <algorithm>
@@ -89,18 +90,23 @@ ReachabilityResult inventory_impl(
     if (!temporary) {
         return std::unexpected(temporary.error());
     }
+    const auto layout = derive_remote_layout(key);
     // The listing freezes the observation; new markers are deferred to the next
     // run.
-    auto listed = identifiers ? detail::build_history_inventory(*identifiers)
-                              : detail::build_history_inventory(storage);
+    auto listed = identifiers
+                      ? detail::build_history_inventory(*identifiers, layout)
+                      : detail::build_history_inventory(storage, layout);
     if (!listed) {
         return std::unexpected(listed.error());
     }
 
     if (storage.storage.get_batch != nullptr) {
+        const auto commits_dir = layout.commits_prefix.ends_with('/')
+                                     ? layout.commits_prefix.substr(
+                                           0, layout.commits_prefix.size() - 1)
+                                     : layout.commits_prefix;
         transport::GetBatch batch{
-            .source_prefix = std::string{detail::commit_prefix.substr(
-                0, detail::commit_prefix.size() - 1)},
+            .source_prefix = std::string{commits_dir},
             .destination_root = (*temporary)->root,
         };
         for (const auto& [unused, references] : listed->commit_variants) {
@@ -133,7 +139,7 @@ ReachabilityResult inventory_impl(
             }
             commit.variants.push_back(ReachabilityVariant{
                 .reference = reference,
-                .identifier = detail::commit_object(reference),
+                .identifier = commit_object(layout, reference),
                 .state = loaded->state});
             if (loaded->state == detail::VariantState::Valid &&
                 loaded->commit.has_value() && !commit.valid) {
@@ -149,7 +155,7 @@ ReachabilityResult inventory_impl(
     if (verified_epochs) {
         loaded_epochs.reserve(verified_epochs->size());
         for (const auto& value : *verified_epochs) {
-            auto identifier = epoch::object_identifier(value.reference);
+            auto identifier = epoch::object_identifier(layout, value.reference);
             if (!identifier) {
                 return std::unexpected(detail::error(
                     ErrorCode::InvalidInput, identifier.error().detail));
@@ -158,8 +164,9 @@ ReachabilityResult inventory_impl(
         }
     }
     for (const auto& identifier : listed->identifiers) {
-        if (identifier.starts_with(detail::heads_prefix)) {
-            const auto parsed = parse_marker_object(identifier);
+        if (identifier.starts_with(layout.heads_prefix) ||
+            identifier.starts_with("history/heads/")) {
+            const auto parsed = parse_marker_object(layout, identifier);
             if (!parsed) {
                 result.unknown_history_objects.push_back(identifier);
                 continue;
@@ -169,8 +176,9 @@ ReachabilityResult inventory_impl(
                 ReachabilityMarker{.identifier = identifier,
                                    .reference = *parsed,
                                    .state = ReachabilityMarkerState::Missing});
-        } else if (!detail::parse_commit_object(identifier)) {
-            auto epoch_reference = epoch::parse_object_identifier(identifier);
+        } else if (!parse_commit_object(layout, identifier)) {
+            auto epoch_reference =
+                epoch::parse_object_identifier(layout, identifier);
             if (!epoch_reference) {
                 result.unknown_history_objects.push_back(identifier);
                 continue;
@@ -248,7 +256,7 @@ ReachabilityResult inventory_impl(
             continue;
         }
         auto inspected = detail::inspect_marker(
-            storage, *marker.reference, (*temporary)->root, sequence);
+            storage, layout, *marker.reference, (*temporary)->root, sequence);
         if (!inspected) {
             return std::unexpected(inspected.error());
         }

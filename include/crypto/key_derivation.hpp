@@ -24,6 +24,7 @@ enum class IdentifierPurpose {
     Content,
     Commit,
     Epoch,
+    Namespace,
 };
 
 using Key = std::array<std::uint8_t, KEY_SIZE>;
@@ -45,6 +46,11 @@ commit_identifier(std::span<const std::uint8_t, KEY_SIZE> master_key,
 
 std::string epoch_identifier(std::span<const std::uint8_t, KEY_SIZE> master_key,
                              std::span<const std::uint8_t> canonical_epoch);
+
+std::string
+namespace_identifier(std::span<const std::uint8_t, KEY_SIZE> master_key,
+                     std::string_view component_name,
+                     std::size_t hex_chars = 32);
 
 } // namespace kasumi::crypto
 

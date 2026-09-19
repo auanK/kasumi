@@ -1,3 +1,4 @@
+#include "application/history_storage/remote_layout.hpp"
 #include "application/sync/publication.hpp"
 #include "kasumi/test/history_storage.hpp"
 
@@ -72,10 +73,12 @@ TEST(HistoryStorageTest, RemovesAllPhysicalVariantsOfAncestralMarker) {
     EXPECT_TRUE(std::ranges::any_of(*listing, [&](const auto& id) {
         return id == marker_path(child_published.head);
     }));
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
     EXPECT_EQ(std::ranges::count_if(*listing,
-                                    [](const auto& id) {
+                                    [&](const auto& id) {
                                         return id.starts_with(
-                                            "history/commits/");
+                                            layout.commits_prefix);
                                     }),
               3);
 }
@@ -105,15 +108,18 @@ TEST(HistoryStorageTest, PrunesSixtyFourMarkedCommitsAndPreservesCommits) {
     EXPECT_EQ(pruned->removed_markers, 63U);
     const auto listing = kasumi::transport::list(storage.transport);
     ASSERT_TRUE(listing.has_value());
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
     EXPECT_EQ(std::ranges::count_if(*listing,
-                                    [](const auto& id) {
+                                    [&](const auto& id) {
                                         return id.starts_with(
-                                            "history/commits/");
+                                            layout.commits_prefix);
                                     }),
               64);
     EXPECT_EQ(std::ranges::count_if(*listing,
-                                    [](const auto& id) {
-                                        return id.starts_with("history/heads/");
+                                    [&](const auto& id) {
+                                        return id.starts_with(
+                                            layout.heads_prefix);
                                     }),
               1);
     EXPECT_TRUE(std::ranges::any_of(*listing, [&](const auto& id) {

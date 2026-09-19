@@ -19,6 +19,8 @@
 
 namespace kasumi::application::history_storage {
 
+struct RemoteLayout;
+
 // Binds a canonical commit to its published encrypted variant.
 struct HeadReference {
     // BLAKE3 of the canonical commit bytes.
@@ -195,9 +197,18 @@ LoadResult load_history(transport::Transport& storage,
 // Removes all marker variants for the given commits.
 RemoveMarkersResult
 remove_marker_variants(transport::Transport& storage,
+                       const RemoteLayout& layout,
+                       std::span<const std::string> commit_ids);
+RemoveMarkersResult
+remove_marker_variants(transport::Transport& storage,
                        std::span<const std::string> commit_ids);
 
 // Removes variants using an already observed listing.
+RemoveMarkersResult
+remove_marker_variants(transport::Transport& storage,
+                       const RemoteLayout& layout,
+                       std::span<const std::string> commit_ids,
+                       std::span<const std::string> identifiers);
 RemoveMarkersResult
 remove_marker_variants(transport::Transport& storage,
                        std::span<const std::string> commit_ids,

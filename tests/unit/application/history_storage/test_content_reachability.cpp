@@ -1,4 +1,5 @@
 #include "application/history_storage/content_reachability.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
 
@@ -617,6 +618,10 @@ TEST(ContentReachabilityTest, HistoryObjectsAreExcludedFromContentInventory) {
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    state->objects[layout.commits_prefix + "garbage"] = {0};
+    state->objects[layout.heads_prefix + "garbage"] = {0};
     state->objects["history/commits/garbage"] = {0};
     state->objects["history/heads/garbage"] = {0};
 

@@ -1,4 +1,5 @@
 #include "application/history_storage/maintenance_protocol.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "application/observation/state.hpp"
 #include "application/sync/coordinator.hpp"
 #include "application/sync/coordinator_detail.hpp"
@@ -119,6 +120,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
     SyncStage current_stage = SyncStage::Observing;
     auto outcome = [&]() -> std::expected<Response, Error> {
         try {
+            const auto layout =
+                history_storage::derive_remote_layout(context.key);
             current_stage = SyncStage::Observing;
             if (context.on_progress) {
                 context.on_progress(
@@ -137,6 +140,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     eager_writer.emplace(
                         history_storage::maintenance_protocol::register_writer(
                             context.storage,
+                            layout,
                             context.runtime.database_path.parent_path()));
                     platform::perf_trace::finish("writer registration",
                                                  writer_trace);
@@ -218,6 +222,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 auto registered =
                     history_storage::maintenance_protocol::register_writer(
                         context.storage,
+                        layout,
                         context.runtime.database_path.parent_path());
                 platform::perf_trace::finish("writer registration",
                                              writer_trace);

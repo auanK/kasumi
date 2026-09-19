@@ -2,6 +2,7 @@
 #define KASUMI_APPLICATION_HISTORY_STORAGE_DETAIL_HPP
 
 #include "application/history_storage/history_storage.hpp"
+#include "application/history_storage/remote_layout.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -70,12 +71,22 @@ void sort_unique(std::vector<HeadReference>& references);
 
 // Builds an inventory of all remote history objects.
 std::expected<HistoryInventory, Error>
+build_history_inventory(transport::Transport& storage,
+                        const RemoteLayout& layout);
+std::expected<HistoryInventory, Error>
 build_history_inventory(transport::Transport& storage);
+
 // Classifies an already observed remote listing.
+std::expected<HistoryInventory, Error>
+build_history_inventory(std::span<const std::string> identifiers,
+                        const RemoteLayout& layout);
 std::expected<HistoryInventory, Error>
 build_history_inventory(std::span<const std::string> identifiers);
 
 // Computes new objects required by the publication.
+PublicationDelta publication_delta(const HistoryInventory& inventory,
+                                   const HeadReference& reference,
+                                   const RemoteLayout& layout);
 PublicationDelta publication_delta(const HistoryInventory& inventory,
                                    const HeadReference& reference);
 
@@ -118,6 +129,11 @@ std::expected<void, Error> download(transport::Transport& storage,
 // Downloads a commit variant and distinguishes absence.
 std::expected<void, Error>
 download_commit_candidate(transport::Transport& storage,
+                          const RemoteLayout& layout,
+                          const HeadReference& reference,
+                          const std::filesystem::path& destination);
+std::expected<void, Error>
+download_commit_candidate(transport::Transport& storage,
                           const HeadReference& reference,
                           const std::filesystem::path& destination);
 
@@ -129,6 +145,12 @@ enum class MarkerState {
 };
 
 // Downloads and validates a remote marker.
+std::expected<MarkerState, Error>
+inspect_marker(transport::Transport& storage,
+               const RemoteLayout& layout,
+               const HeadReference& reference,
+               const std::filesystem::path& workspace,
+               std::size_t& sequence);
 std::expected<MarkerState, Error>
 inspect_marker(transport::Transport& storage,
                const HeadReference& reference,
@@ -162,12 +184,29 @@ using VariantResult = std::expected<LoadedVariant, Error>;
 // Downloads, decrypts, and validates a variant.
 VariantResult
 try_load_variant(transport::Transport& storage,
+                 const RemoteLayout& layout,
+                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                 const HeadReference& reference,
+                 const std::filesystem::path& workspace,
+                 std::size_t sequence);
+
+VariantResult
+try_load_variant(transport::Transport& storage,
                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                  const HeadReference& reference,
                  const std::filesystem::path& workspace,
                  std::size_t sequence);
 
 // Returns the first valid variant of the commit.
+std::expected<history::LoadedCommit, Error>
+try_load_variants(transport::Transport& storage,
+                  const RemoteLayout& layout,
+                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                  std::vector<HeadReference> references,
+                  const std::filesystem::path& workspace,
+                  std::size_t& sequence,
+                  HeadReference* authenticated_reference = nullptr);
+
 std::expected<history::LoadedCommit, Error>
 try_load_variants(transport::Transport& storage,
                   std::span<const std::uint8_t, crypto::KEY_SIZE> key,
@@ -177,6 +216,15 @@ try_load_variants(transport::Transport& storage,
                   HeadReference* authenticated_reference = nullptr);
 
 // Confirms that the remote commit matches the published one.
+std::expected<void, Error>
+verify_published_commit(transport::Transport& storage,
+                        const RemoteLayout& layout,
+                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                        const history::Commit& expected,
+                        const HeadReference& reference,
+                        const std::filesystem::path& workspace,
+                        std::size_t& sequence);
+
 std::expected<void, Error>
 verify_published_commit(transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,

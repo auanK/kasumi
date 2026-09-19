@@ -1,5 +1,7 @@
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/history_storage.hpp"
+#include "application/history_storage/publication.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
 #include "application/observation/history_detail.hpp"
 #include "core/hasher.hpp"
@@ -74,16 +76,17 @@ std::string commit_id(const Commit& commit) {
     return kasumi::crypto::commit_identifier(test_key(), canonical);
 }
 
+const auto layout =
+    kasumi::application::history_storage::derive_remote_layout(test_key());
+
 std::string
 object_path(const kasumi::application::history_storage::HeadReference& head) {
-    return "history/commits/" + head.commit_id + "/" + head.ciphertext_id +
-           ".kcom";
+    return kasumi::application::history_storage::commit_object(layout, head);
 }
 
 std::string
 marker_path(const kasumi::application::history_storage::HeadReference& head) {
-    return "history/heads/" + head.commit_id + "-" + head.ciphertext_id +
-           ".head";
+    return kasumi::application::history_storage::marker_object(layout, head);
 }
 
 bool same_tree(const kasumi::Snapshot& left, const kasumi::Snapshot& right) {
@@ -154,11 +157,11 @@ kasumi::transport::Error fake_error(std::string message) {
 }
 
 bool is_marker(std::string_view identifier) {
-    return identifier.starts_with("history/heads/");
+    return identifier.starts_with(layout.heads_prefix);
 }
 
 bool is_commit(std::string_view identifier) {
-    return identifier.starts_with("history/commits/");
+    return identifier.starts_with(layout.commits_prefix);
 }
 
 kasumi::transport::Result fake_initialize(void*) {
@@ -390,12 +393,17 @@ observe(FakeStorage& storage,
 }
 
 std::expected<StorageView, kasumi::application::observation::history::Error>
-observe(LocalStorage& storage, bool audit = false, Key key = test_key()) {
+observe(LocalStorage& storage,
+        bool audit = false,
+        Key key = test_key(),
+        std::span<const std::string> trusted_marker_identifiers = {}) {
     return kasumi::application::observation::history::observe(
         storage.transport,
         key,
         kasumi::test::workspace_root(storage.workspace),
-        audit);
+        audit,
+        nullptr,
+        trusted_marker_identifiers);
 }
 
 kasumi::application::history_storage::HeadReference
@@ -441,6 +449,7 @@ publish_epoch(FakeStorage& storage,
     if (sealed) {
         EXPECT_TRUE(kasumi::application::history_storage::epoch::publish(
             storage.transport,
+            test_key(),
             *sealed,
             kasumi::test::workspace_root(storage.workspace)));
         return *sealed;
@@ -483,6 +492,7 @@ TEST(HistoryObservationTest,
     ASSERT_TRUE(genesis.has_value());
     ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
         storage.transport,
+        test_key(),
         *genesis,
         kasumi::test::workspace_root(storage.workspace)));
 
@@ -497,6 +507,7 @@ TEST(HistoryObservationTest,
     ASSERT_TRUE(broken.has_value());
     ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
         storage.transport,
+        test_key(),
         *broken,
         kasumi::test::workspace_root(storage.workspace)));
 
@@ -736,7 +747,7 @@ TEST(HistoryObservationTest, ClassifiesWorkspaceRoots) {
         false);
     ASSERT_FALSE(missing.has_value());
     EXPECT_EQ(missing.error().code, ErrorCode::WorkspaceFailure);
-    EXPECT_NE(missing.error().detail.find("não existe"), std::string::npos);
+    EXPECT_NE(missing.error().detail.find("does not exist"), std::string::npos);
 
     const auto file =
         kasumi::test::workspace_path(storage.workspace, "workspace-file");
@@ -761,7 +772,7 @@ TEST(HistoryObservationTest, ClassifiesWorkspaceRoots) {
         storage.transport, test_key(), link, false);
     ASSERT_FALSE(symlink.has_value());
     EXPECT_EQ(symlink.error().code, ErrorCode::WorkspaceFailure);
-    EXPECT_NE(symlink.error().detail.find("link simbólico"), std::string::npos);
+    EXPECT_NE(symlink.error().detail.find("symbolic link"), std::string::npos);
 }
 
 TEST(HistoryObservationTest, PreservesHistoryStorageWorkspaceFailure) {
@@ -954,17 +965,48 @@ TEST(HistoryObservationTest, ObservationIsReadOnlyAndListingOrderIndependent) {
 TEST(HistoryObservationTest, MapsWrongKeyAndCorruptionToStorageFailure) {
     auto storage = make_local_storage();
     const auto commit = make_commit(0, {}, make_tree({{"file.txt", "one"}}));
-    const auto published = publish(storage, commit);
+    auto published_obj =
+        kasumi::application::history_storage::publish_commit_object(
+            storage.transport,
+            layout,
+            test_key(),
+            commit,
+            kasumi::test::workspace_root(storage.workspace));
+    ASSERT_TRUE(published_obj.has_value());
+    auto published_head =
+        kasumi::application::history_storage::publish_head_marker(
+            storage.transport,
+            layout,
+            published_obj->head,
+            kasumi::test::workspace_root(storage.workspace));
+    ASSERT_TRUE(published_head.has_value());
 
     auto wrong_key = test_key();
     wrong_key[0] ^= 0xffU;
+    const auto wrong_layout =
+        kasumi::application::history_storage::derive_remote_layout(wrong_key);
+    const auto remote_storage =
+        kasumi::test::workspace_path(storage.workspace, "storage");
+    const auto source_path =
+        remote_storage /
+        kasumi::application::history_storage::marker_object(
+            layout, published_obj->head);
+    const auto target_path =
+        remote_storage /
+        kasumi::application::history_storage::marker_object(
+            wrong_layout, published_obj->head);
+    std::filesystem::create_directories(target_path.parent_path());
+    std::filesystem::copy_file(source_path, target_path);
+
     auto wrong = observe(storage, false, wrong_key);
     ASSERT_FALSE(wrong.has_value());
     EXPECT_EQ(wrong.error().code, ErrorCode::HistoryStorageFailure);
 
     kasumi::test::write_text(
         kasumi::test::workspace_path(storage.workspace, "storage") /
-            std::filesystem::path{object_path(published.head)},
+            std::filesystem::path{
+                kasumi::application::history_storage::commit_object(
+                    layout, published_obj->head)},
         "corrupt");
     auto corrupt = observe(storage);
     ASSERT_FALSE(corrupt.has_value());

@@ -5,6 +5,7 @@
 #include "application/history_storage/history_storage.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
 #include "core/wire.hpp"
 #include "crypto/content.hpp"
@@ -58,6 +59,7 @@ struct InspectionObservationHints {
 struct InspectionContext {
     runtime::RuntimeData runtime;
     runtime::vault::KeyBytes key{};
+    history_storage::RemoteLayout layout{};
     transport::Transport storage{};
     std::optional<platform::Workspace> workspace;
     InspectionObservationHints hints;
@@ -535,8 +537,9 @@ make_observation_hints(const runtime::RuntimeData& runtime_data,
             .ciphertext_id = state.ciphertext_id,
         };
         if (history_storage::valid(reference)) {
+            const auto layout = history_storage::derive_remote_layout(key);
             hints.trusted_marker_identifiers.push_back(
-                history_storage::marker_object(reference));
+                history_storage::marker_object(layout, reference));
             platform::perf_trace::count("inspection trusted marker used");
         }
     }
@@ -1260,11 +1263,19 @@ physical_objects(InspectionContext& context, InspectionOperation operation) {
     return std::move(*listed);
 }
 
-bool valid_writer(std::string_view identifier) {
-    if (!identifier.starts_with(writer_prefix)) {
-        return false;
+bool valid_writer(const history_storage::RemoteLayout& layout,
+                  std::string_view identifier) {
+    std::string_view prefix = layout.writers_prefix;
+    if (!identifier.starts_with(prefix)) {
+        if (identifier.starts_with("history/gc/v1/writers/")) {
+            prefix = "history/gc/v1/writers/";
+        } else if (identifier.starts_with("history/gc/writers/")) {
+            prefix = "history/gc/writers/";
+        } else {
+            return false;
+        }
     }
-    const auto name = identifier.substr(writer_prefix.size());
+    const auto name = identifier.substr(prefix.size());
     return name.size() == 39 && name.ends_with(".writer") &&
            std::ranges::all_of(name.substr(0, 32), [](char value) {
                return (value >= '0' && value <= '9') ||
@@ -1272,53 +1283,69 @@ bool valid_writer(std::string_view identifier) {
            });
 }
 
-RemoteObjectInfo classify_object(std::string identifier) {
+RemoteObjectInfo classify_object(const history_storage::RemoteLayout& layout,
+                                 std::string identifier) {
     RemoteObjectInfo result{.identifier = std::move(identifier),
                             .relation = "não auditado"};
     const auto& id = result.identifier;
     if (history::valid_commit_id(id)) {
         result.category = RemoteObjectCategory::Content;
         result.structurally_valid = true;
-    } else if (history_storage::detail::parse_commit_object(id)) {
+    } else if (history_storage::parse_commit_object(layout, id)) {
         result.category = RemoteObjectCategory::CommitVariant;
         result.structurally_valid = true;
-    } else if (id.starts_with(history_storage::detail::heads_prefix)) {
+    } else if (id.starts_with(layout.heads_prefix) ||
+               id.starts_with("history/heads/")) {
         result.category = RemoteObjectCategory::HeadMarker;
         result.structurally_valid =
-            history_storage::parse_marker_object(id).has_value();
-    } else if (id.starts_with(history_storage::maintenance_protocol::
-                                  epoch_namespace_prefix)) {
+            history_storage::parse_marker_object(layout, id).has_value();
+    } else if (id.starts_with(layout.epochs_prefix) ||
+               id.starts_with("history/epochs/v1/")) {
         result.category = RemoteObjectCategory::Epoch;
         result.structurally_valid =
-            history_storage::epoch::parse_object_identifier(id).has_value();
-    } else if (id == barrier_identifier) {
+            history_storage::epoch::parse_object_identifier(layout, id)
+                .has_value();
+    } else if (id == layout.barrier_identifier ||
+               id == "history/gc/v1/barrier" || id == "history/gc/barrier") {
         result.category = RemoteObjectCategory::Barrier;
         result.structurally_valid = true;
         result.relation = "barreira de manutenção";
-    } else if (id.starts_with(writer_prefix)) {
+    } else if (id.starts_with(layout.writers_prefix) ||
+               id.starts_with("history/gc/v1/writers/") ||
+               id.starts_with("history/gc/writers/")) {
         result.category = RemoteObjectCategory::Writer;
-        result.structurally_valid = valid_writer(id);
+        result.structurally_valid = valid_writer(layout, id);
         result.relation = "bloqueia manutenção enquanto presente";
-    } else if (id.starts_with(quarantine_prefix) && id.ends_with(".meta")) {
+    } else if ((id.starts_with(layout.quarantine_prefix) ||
+                id.starts_with("history/gc/v1/quarantine/") ||
+                id.starts_with("history/gc/quarantine/")) &&
+               id.ends_with(".meta")) {
         result.category = RemoteObjectCategory::RetentionMetadata;
         result.structurally_valid = true;
-    } else if (id.starts_with(quarantine_prefix)) {
+    } else if (id.starts_with(layout.quarantine_prefix) ||
+               id.starts_with("history/gc/v1/quarantine/") ||
+               id.starts_with("history/gc/quarantine/")) {
         result.category = RemoteObjectCategory::Quarantine;
         result.structurally_valid = true;
-    } else if (id.starts_with(probe_prefix)) {
+    } else if (id.starts_with(layout.probes_prefix) ||
+               id.starts_with("history/gc/v1/probes/") ||
+               id.starts_with("history/gc/probes/")) {
         result.category = RemoteObjectCategory::Protocol;
         result.structurally_valid = true;
-    } else if (id.starts_with(gc_prefix)) {
+    } else if (id.starts_with(layout.gc_prefix) ||
+               id.starts_with("history/gc/")) {
         result.category = RemoteObjectCategory::Protocol;
     }
     return result;
 }
 
-RemoteObjectsReport make_objects_report(std::vector<std::string> identifiers) {
+RemoteObjectsReport
+make_objects_report(const history_storage::RemoteLayout& layout,
+                    std::vector<std::string> identifiers) {
     RemoteObjectsReport report;
     report.objects.reserve(identifiers.size());
     for (auto& identifier : identifiers) {
-        auto object = classify_object(std::move(identifier));
+        auto object = classify_object(layout, std::move(identifier));
         if (object.category == RemoteObjectCategory::Unknown ||
             !object.structurally_valid) {
             ++report.unknown_count;
@@ -1555,15 +1582,23 @@ RemoteOrphansReport make_orphans_report(
 }
 
 RemoteWritersReport
-make_writers_report(const std::vector<std::string>& identifiers) {
+make_writers_report(const history_storage::RemoteLayout& layout,
+                    const std::vector<std::string>& identifiers) {
     RemoteWritersReport report;
     report.barrier_present =
-        std::ranges::find(identifiers, barrier_identifier) != identifiers.end();
+        std::ranges::find(identifiers, layout.barrier_identifier) !=
+            identifiers.end() ||
+        std::ranges::find(identifiers, "history/gc/v1/barrier") !=
+            identifiers.end() ||
+        std::ranges::find(identifiers, "history/gc/barrier") !=
+            identifiers.end();
     for (const auto& identifier : identifiers) {
-        if (!identifier.starts_with(writer_prefix)) {
+        if (!identifier.starts_with(layout.writers_prefix) &&
+            !identifier.starts_with("history/gc/v1/writers/") &&
+            !identifier.starts_with("history/gc/writers/")) {
             continue;
         }
-        const auto state = valid_writer(identifier)
+        const auto state = valid_writer(layout, identifier)
                                ? RemoteWriterState::Indeterminate
                                : RemoteWriterState::Invalid;
         report.protocol_consistent &= state != RemoteWriterState::Invalid;
@@ -1571,11 +1606,21 @@ make_writers_report(const std::vector<std::string>& identifiers) {
             RemoteWriterInfo{.identifier = identifier, .state = state});
     }
     for (const auto& identifier : identifiers) {
-        if (identifier.starts_with(gc_prefix) &&
-            identifier != barrier_identifier &&
-            !identifier.starts_with(writer_prefix) &&
-            !identifier.starts_with(probe_prefix) &&
-            !identifier.starts_with(quarantine_prefix)) {
+        const bool is_gc = identifier.starts_with(layout.gc_prefix) ||
+                           identifier.starts_with("history/gc/v1/") ||
+                           identifier.starts_with("history/gc/");
+        if (is_gc && identifier != layout.barrier_identifier &&
+            identifier != "history/gc/v1/barrier" &&
+            identifier != "history/gc/barrier" &&
+            !identifier.starts_with(layout.writers_prefix) &&
+            !identifier.starts_with("history/gc/v1/writers/") &&
+            !identifier.starts_with("history/gc/writers/") &&
+            !identifier.starts_with(layout.probes_prefix) &&
+            !identifier.starts_with("history/gc/v1/probes/") &&
+            !identifier.starts_with("history/gc/probes/") &&
+            !identifier.starts_with(layout.quarantine_prefix) &&
+            !identifier.starts_with("history/gc/v1/quarantine/") &&
+            !identifier.starts_with("history/gc/quarantine/")) {
             report.protocol_consistent = false;
         }
     }
@@ -1601,7 +1646,8 @@ std::expected<RemoteQuarantineReport, InspectionError> make_quarantine_report(
         return std::unexpected(error(
             operation,
             InspectionErrorCode::RemoteObservationFailure,
-            "a quarentena remota possui metadata inválida ou inacessível"));
+            "a quarentena remota possui metadata inválida ou inacessível: " +
+                inventory.error().detail));
     }
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(
                          std::chrono::system_clock::now().time_since_epoch())
@@ -1616,7 +1662,7 @@ std::expected<RemoteQuarantineReport, InspectionError> make_quarantine_report(
             .quarantine_identifier = entry.quarantine_identifier,
             .metadata_identifier = entry.metadata_identifier,
             .category = entry.original_identifier.starts_with(
-                            history_storage::detail::commit_prefix)
+                            context.layout.commits_prefix)
                             ? "commit"
                             : "conteúdo",
             .metadata_authenticated = authenticated,
@@ -1657,8 +1703,8 @@ make_health_report(InspectionContext& context,
         return std::unexpected(quarantine.error());
     }
     const auto markers = make_markers_report(*history_inventory);
-    const auto objects = make_objects_report(identifiers);
-    const auto writers = make_writers_report(identifiers);
+    const auto objects = make_objects_report(context.layout, identifiers);
+    const auto writers = make_writers_report(context.layout, identifiers);
     const auto orphans =
         make_orphans_report(*history_inventory, *content_inventory);
 
@@ -1762,13 +1808,14 @@ inspect_physical(InspectionContext& context, InspectionOperation operation) {
         return std::unexpected(identifiers.error());
     }
     if (operation == InspectionOperation::RemoteObjects) {
-        return InspectionResponse{
-            .operation = operation,
-            .payload = make_objects_report(std::move(*identifiers))};
+        return InspectionResponse{.operation = operation,
+                                  .payload = make_objects_report(
+                                      context.layout, std::move(*identifiers))};
     }
     if (operation == InspectionOperation::RemoteWriters) {
-        return InspectionResponse{.operation = operation,
-                                  .payload = make_writers_report(*identifiers)};
+        return InspectionResponse{
+            .operation = operation,
+            .payload = make_writers_report(context.layout, *identifiers)};
     }
     auto health = make_health_report(context, operation, *identifiers);
     if (!health) {
@@ -1965,6 +2012,7 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     if (!key) {
         return std::unexpected(key.error());
     }
+    context.layout = history_storage::derive_remote_layout(context.key);
 
     context.hints =
         make_observation_hints(context.runtime, operation, context.key);
@@ -2128,7 +2176,7 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     if (operation == InspectionOperation::RemoteSummary) {
         const auto report_trace = platform::perf_trace::begin();
         auto writers = history_storage::maintenance_protocol::active_writers(
-            context.storage);
+            context.storage, context.layout);
         if (!writers) {
             platform::perf_trace::finish("inspection report build",
                                          report_trace);

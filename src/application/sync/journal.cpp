@@ -51,21 +51,20 @@ std::uint64_t decode_u64_le(const std::uint8_t* input) noexcept {
 
 std::expected<void, std::string> validate_paths(const Paths& paths) {
     if (paths.final_path.empty() || paths.temporary_path.empty()) {
-        return std::unexpected("caminhos do journal não podem ser vazios");
+        return std::unexpected("journal paths cannot be empty");
     }
 
     const auto final_parent = paths.final_path.parent_path().lexically_normal();
     const auto temporary_parent =
         paths.temporary_path.parent_path().lexically_normal();
     if (final_parent.empty() || final_parent != temporary_parent) {
-        return std::unexpected(
-            "caminhos do journal precisam compartilhar o diretório pai");
+        return std::unexpected("journal paths must share parent directory");
     }
     if (platform::path::to_logical_utf8(paths.final_path.filename()) !=
             journal_file_name ||
         platform::path::to_logical_utf8(paths.temporary_path.filename()) !=
             std::string{journal_file_name} + std::string{temporary_suffix}) {
-        return std::unexpected("nomes de arquivo do journal são inválidos");
+        return std::unexpected("journal file names are invalid");
     }
 
     const auto final_relative =
@@ -77,7 +76,7 @@ std::expected<void, std::string> validate_paths(const Paths& paths) {
         final_relative.has_parent_path() ||
         temporary_relative.has_parent_path()) {
         return std::unexpected(
-            "arquivos do journal não estão diretamente no diretório pai");
+            "journal files are not directly in parent directory");
     }
     return {};
 }
@@ -92,7 +91,7 @@ read_status(const std::filesystem::path& path) {
     }
 
     if (error) {
-        return std::unexpected("não foi possível consultar '" +
+        return std::unexpected("could not query '" +
                                platform::path::to_utf8(path) +
                                "': " + error.message());
     }
@@ -116,7 +115,7 @@ validate_parent_directory(const std::filesystem::path& path,
     }
     if (std::filesystem::is_symlink(*status) ||
         !std::filesystem::is_directory(*status)) {
-        return std::unexpected("diretório pai do journal é inválido");
+        return std::unexpected("journal parent directory is invalid");
     }
     return platform::private_storage::protect_directory(parent);
 }
@@ -135,7 +134,7 @@ validate_file_or_absent(const std::filesystem::path& path,
         std::filesystem::is_directory(*status) ||
         !std::filesystem::is_regular_file(*status)) {
         return std::unexpected(std::string{label} +
-                               " precisa ser arquivo regular ou estar ausente");
+                               " must be a regular file or absent");
     }
     return platform::private_storage::protect_file(path);
 }
@@ -187,12 +186,12 @@ std::expected<void, std::string> validate_save_paths(const Paths& paths) {
     if (!parent) {
         return parent;
     }
-    auto final = validate_file_or_absent(paths.final_path, "journal final");
+    auto final = validate_file_or_absent(paths.final_path, "final journal");
     if (!final) {
         return final;
     }
     auto temporary =
-        validate_file_or_absent(paths.temporary_path, "journal temporário");
+        validate_file_or_absent(paths.temporary_path, "temporary journal");
     if (!temporary) {
         return temporary;
     }
@@ -202,7 +201,7 @@ std::expected<void, std::string> validate_save_paths(const Paths& paths) {
 std::expected<void, std::string>
 validate_record_semantics(const transaction::Record& record) {
     if (!transaction::valid(record)) {
-        return std::unexpected("registro transacional inválido");
+        return std::unexpected("invalid transactional record");
     }
     if (!record.publication_required) {
         if (record.phase == transaction::Phase::CommitPrepared ||
@@ -214,7 +213,7 @@ validate_record_semantics(const transaction::Record& record) {
             record.phase == transaction::Phase::EpochUploaded ||
             record.phase == transaction::Phase::EpochVerified) {
             return std::unexpected(
-                "fase de publicação inválida para journal local-only");
+                "invalid publication phase for local-only journal");
         }
         return {};
     }
@@ -223,8 +222,18 @@ validate_record_semantics(const transaction::Record& record) {
     }
     const history_storage::HeadReference reference{
         .commit_id = record.commit_id, .ciphertext_id = record.ciphertext_id};
-    if (record.marker_id != history_storage::marker_identifier(reference)) {
-        return std::unexpected("marker ID incompatível com a publicação");
+    const auto expected_suffix =
+        reference.commit_id + "-" + reference.ciphertext_id + ".head";
+    const bool is_default_marker =
+        record.marker_id == history_storage::marker_identifier(reference);
+    const bool is_prefixed_marker =
+        record.marker_id.ends_with(expected_suffix) &&
+        record.marker_id.size() > expected_suffix.size() &&
+        record.marker_id[record.marker_id.size() - expected_suffix.size() -
+                         1] == '/' &&
+        record.marker_id.find("..") == std::string::npos;
+    if (!is_default_marker && !is_prefixed_marker) {
+        return std::unexpected("marker ID incompatible with publication");
     }
     return {};
 }
@@ -234,18 +243,17 @@ validate_record_semantics(const transaction::Record& record) {
 std::expected<Paths, std::string>
 make_paths(const std::filesystem::path& profile_directory) {
     if (profile_directory.empty()) {
-        return std::unexpected("diretório de perfil não pode ser vazio");
+        return std::unexpected("profile directory cannot be empty");
     }
     for (const auto& component : profile_directory) {
         if (component == "." || component == "..") {
-            return std::unexpected(
-                "diretório de perfil não pode conter . ou ..");
+            return std::unexpected("profile directory cannot contain . or ..");
         }
     }
 
     const auto directory = profile_directory.lexically_normal();
     if (directory.empty() || directory == "." || directory == "..") {
-        return std::unexpected("diretório de perfil inválido");
+        return std::unexpected("invalid profile directory");
     }
 
     Paths paths{
@@ -311,7 +319,7 @@ save_with_key(const Paths& paths,
             }
             if (!missing(*temporary_status)) {
                 return std::unexpected(
-                    "não foi possível remover journal temporário anterior");
+                    "could not remove previous temporary journal");
             }
         }
 
@@ -330,8 +338,7 @@ save_with_key(const Paths& paths,
             static_cast<std::uintmax_t>(payload.size());
         if (payload_size_value > maximum_payload_size) {
             wipe_sensitive(payload, plaintext, nonce, mac, aad);
-            return std::unexpected(
-                "payload do journal excede o limite suportado");
+            return std::unexpected("journal payload exceeds supported limit");
         }
         const auto payload_size =
             static_cast<std::uint64_t>(payload_size_value);
@@ -372,7 +379,7 @@ save_with_key(const Paths& paths,
             remove_regular_file(paths.temporary_path);
             wipe_sensitive(payload, plaintext, nonce, mac, aad);
             return std::unexpected(
-                "não foi possível abrir journal temporário para escrita");
+                "could not open temporary journal for writing");
         }
 
         output.write(reinterpret_cast<const char*>(journal_magic.data()),
@@ -394,7 +401,7 @@ save_with_key(const Paths& paths,
             crypto_wipe(nonce.data(), nonce.size());
             crypto_wipe(mac.data(), mac.size());
             crypto_wipe(aad.data(), aad.size());
-            return std::unexpected("falha ao escrever journal temporário");
+            return std::unexpected("failed to write temporary journal");
         }
         output.flush();
         if (!output) {
@@ -403,7 +410,7 @@ save_with_key(const Paths& paths,
             crypto_wipe(nonce.data(), nonce.size());
             crypto_wipe(mac.data(), mac.size());
             crypto_wipe(aad.data(), aad.size());
-            return std::unexpected("falha ao descarregar journal temporário");
+            return std::unexpected("failed to flush temporary journal");
         }
         output.close();
         if (output.fail()) {
@@ -411,7 +418,7 @@ save_with_key(const Paths& paths,
             crypto_wipe(nonce.data(), nonce.size());
             crypto_wipe(mac.data(), mac.size());
             crypto_wipe(aad.data(), aad.size());
-            return std::unexpected("falha ao fechar journal temporário");
+            return std::unexpected("failed to close temporary journal");
         }
 
         crypto_wipe(nonce.data(), nonce.size());
@@ -437,7 +444,7 @@ save_with_key(const Paths& paths,
     } catch (const std::exception& exception) {
         remove_regular_file(paths.temporary_path);
         wipe_sensitive(payload, plaintext, nonce, mac, aad);
-        return std::unexpected(std::string{"falha ao salvar journal: "} +
+        return std::unexpected(std::string{"failed to save journal: "} +
                                exception.what());
     }
 }
@@ -486,28 +493,27 @@ load_with_key(const Paths& paths, const crypto::Key& journal_key) {
         }
         if (std::filesystem::is_symlink(*final_status) ||
             !std::filesystem::is_regular_file(*final_status)) {
-            return std::unexpected("journal final não é um arquivo regular");
+            return std::unexpected("final journal is not a regular file");
         }
 
         std::error_code size_error;
         const auto file_size =
             std::filesystem::file_size(paths.final_path, size_error);
         if (size_error) {
-            return std::unexpected(
-                "não foi possível obter tamanho do journal: " +
-                size_error.message());
+            return std::unexpected("could not get journal file size: " +
+                                   size_error.message());
         }
         if (file_size < header_size ||
             file_size > header_size + maximum_payload_size ||
             file_size > std::numeric_limits<std::size_t>::max()) {
-            return std::unexpected("tamanho do journal inválido");
+            return std::unexpected("invalid journal file size");
         }
 
         std::vector<std::uint8_t> file_data(
             static_cast<std::size_t>(file_size));
         std::ifstream input(paths.final_path, std::ios::binary);
         if (!input) {
-            return std::unexpected("não foi possível abrir o journal");
+            return std::unexpected("could not open journal");
         }
         input.read(reinterpret_cast<char*>(file_data.data()),
                    static_cast<std::streamsize>(file_data.size()));
@@ -518,9 +524,9 @@ load_with_key(const Paths& paths, const crypto::Key& journal_key) {
             input.clear();
             input.close();
             if (input.fail()) {
-                return std::unexpected("falha ao fechar o journal");
+                return std::unexpected("failed to close journal");
             }
-            return std::unexpected("leitura incompleta do journal");
+            return std::unexpected("incomplete journal read");
         }
 
         char extra = 0;
@@ -531,19 +537,19 @@ load_with_key(const Paths& paths, const crypto::Key& journal_key) {
         input.clear();
         input.close();
         if (input.fail()) {
-            return std::unexpected("falha ao fechar o journal");
+            return std::unexpected("failed to close journal");
         }
         if (read_error) {
-            return std::unexpected("erro ao ler o journal");
+            return std::unexpected("error reading journal");
         }
         if (extra_bytes != 0) {
-            return std::unexpected("journal contém bytes excedentes");
+            return std::unexpected("journal contains trailing bytes");
         }
 
         if (!std::equal(journal_magic.begin(),
                         journal_magic.end(),
                         file_data.begin())) {
-            return std::unexpected("magic do journal inválido");
+            return std::unexpected("invalid journal magic");
         }
 
         std::copy_n(file_data.begin(), aad.size(), aad.begin());
@@ -551,7 +557,7 @@ load_with_key(const Paths& paths, const crypto::Key& journal_key) {
             decode_u64_le(file_data.data() + journal_magic.size());
         if (decoded_size > maximum_payload_size ||
             decoded_size != file_data.size() - header_size) {
-            return std::unexpected("tamanho do payload do journal inválido");
+            return std::unexpected("invalid journal payload size");
         }
 
         std::copy_n(file_data.data() + aad.size(), nonce.size(), nonce.begin());
@@ -569,7 +575,7 @@ load_with_key(const Paths& paths, const crypto::Key& journal_key) {
                                file_data.data() + header_size,
                                static_cast<std::size_t>(decoded_size)) != 0) {
             wipe_sensitive(payload, plaintext, nonce, mac, aad);
-            return std::unexpected("autenticação do journal falhou");
+            return std::unexpected("journal authentication failed");
         }
 
         auto decoded = transaction::codec::decode(std::span<const std::byte>(
@@ -586,7 +592,7 @@ load_with_key(const Paths& paths, const crypto::Key& journal_key) {
         return std::optional<transaction::Record>{std::move(*decoded)};
     } catch (const std::exception& exception) {
         wipe_sensitive(payload, plaintext, nonce, mac, aad);
-        return std::unexpected(std::string{"falha ao carregar journal: "} +
+        return std::unexpected(std::string{"failed to load journal: "} +
                                exception.what());
     }
 }
@@ -626,14 +632,14 @@ std::expected<void, std::string> clear(const Paths& paths) {
     }
     if (std::filesystem::is_symlink(*status) ||
         !std::filesystem::is_regular_file(*status)) {
-        return std::unexpected("journal final não é um arquivo regular");
+        return std::unexpected("final journal is not a regular file");
     }
 
     std::error_code error;
     if (!std::filesystem::remove(paths.final_path, error) || error) {
         return std::unexpected(
-            "não foi possível remover journal: " +
-            (error ? error.message() : std::string{"arquivo ausente"}));
+            "could not remove journal: " +
+            (error ? error.message() : std::string{"missing file"}));
     }
     return platform::durability::sync_parent_directory(paths.final_path);
 }

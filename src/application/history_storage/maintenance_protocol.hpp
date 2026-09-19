@@ -13,6 +13,10 @@
 #include <string_view>
 #include <vector>
 
+namespace kasumi::application::history_storage {
+struct RemoteLayout;
+}
+
 namespace kasumi::application::history_storage::maintenance_protocol {
 
 inline constexpr std::int64_t quarantine_retention_seconds = 10 * 24 * 60 * 60;
@@ -50,19 +54,32 @@ release_registration(RegistrationState& registration);
 
 // Registers a writer and denies entry when a barrier is present.
 RegistrationResult register_writer(transport::Transport& storage,
+                                   const RemoteLayout& layout,
+                                   const std::filesystem::path& workspace_root);
+RegistrationResult register_writer(transport::Transport& storage,
                                    const std::filesystem::path& workspace_root);
 
 // Publishes the barrier preventing new writers.
+RegistrationResult
+establish_barrier(transport::Transport& storage,
+                  const RemoteLayout& layout,
+                  const std::filesystem::path& workspace_root);
 RegistrationResult
 establish_barrier(transport::Transport& storage,
                   const std::filesystem::path& workspace_root);
 
 // Lists active writers; any abandoned marker continues to block GC.
 std::expected<std::vector<std::string>, Error>
+active_writers(transport::Transport& storage, const RemoteLayout& layout);
+std::expected<std::vector<std::string>, Error>
 active_writers(transport::Transport& storage);
 
 // Confirms immediate read-after-write and read-after-delete visibility in
 // listings.
+std::expected<bool, Error>
+supports_online_collection(transport::Transport& storage,
+                           const RemoteLayout& layout,
+                           const std::filesystem::path& workspace_root);
 std::expected<bool, Error>
 supports_online_collection(transport::Transport& storage,
                            const std::filesystem::path& workspace_root);
@@ -77,14 +94,20 @@ struct QuarantineEntry {
 
 inline constexpr std::string_view epoch_namespace_prefix = "history/epochs/v1/";
 
-inline bool is_epoch_object(std::string_view identifier) noexcept {
-    return identifier.starts_with(epoch_namespace_prefix);
-}
+bool is_epoch_object(const RemoteLayout& layout,
+                     std::string_view identifier) noexcept;
+
+bool is_epoch_object(std::string_view identifier) noexcept;
 
 // Identifies objects reserved for the protocol, outside logical history.
+bool is_control_object(const RemoteLayout& layout,
+                       std::string_view identifier) noexcept;
 bool is_control_object(std::string_view identifier) noexcept;
 
 // Builds the deterministic quarantine destination for content or commit.
+std::optional<std::string>
+quarantine_identifier(const RemoteLayout& layout,
+                      std::string_view original_identifier);
 std::optional<std::string>
 quarantine_identifier(std::string_view original_identifier);
 

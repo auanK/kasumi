@@ -1,5 +1,6 @@
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "application/inspection/inspect.hpp"
 #include "application/profile.hpp"
 #include "crypto/content.hpp"
@@ -640,6 +641,7 @@ TEST(ApplicationInspectionTest,
     ASSERT_TRUE(sealed_first.has_value());
     ASSERT_TRUE(
         epoch::publish(fixture.transport,
+                       test_key(),
                        *sealed_first,
                        kasumi::test::workspace_root(fixture.workspace)));
     const auto request =
@@ -661,6 +663,7 @@ TEST(ApplicationInspectionTest,
     ASSERT_TRUE(sealed_next.has_value());
     ASSERT_TRUE(
         epoch::publish(fixture.transport,
+                       test_key(),
                        *sealed_next,
                        kasumi::test::workspace_root(fixture.workspace)));
 
@@ -1153,6 +1156,23 @@ TEST(ApplicationInspectionTest,
     const auto published =
         publish(fixture, make_commit(0, {}, "file.txt", "contents").value());
     ASSERT_FALSE(published.head.commit_id.empty());
+    const std::array<std::uint8_t, 32> wrong_key{};
+    const auto default_layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    const auto wrong_layout =
+        kasumi::application::history_storage::derive_remote_layout(wrong_key);
+    const auto remote_storage =
+        kasumi::test::workspace_path(fixture.workspace, "storage");
+    const auto source_identifier =
+        kasumi::application::history_storage::marker_object(default_layout,
+                                                            published.head);
+    const auto target_identifier =
+        kasumi::application::history_storage::marker_object(wrong_layout,
+                                                            published.head);
+    const auto source_path = remote_storage / source_identifier;
+    const auto target_path = remote_storage / target_identifier;
+    std::filesystem::create_directories(target_path.parent_path());
+    std::filesystem::copy_file(source_path, target_path);
 
     const auto result = kasumi::application::inspect(
         {InspectionRequest{InspectionOperation::RemoteHeads, "demo"},
@@ -1799,6 +1819,7 @@ TEST(ApplicationInspectionTest,
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(
         epoch::publish(fixture.transport,
+                       test_key(),
                        *first,
                        kasumi::test::workspace_root(fixture.workspace)));
     auto next = genesis;
@@ -1810,6 +1831,7 @@ TEST(ApplicationInspectionTest,
     ASSERT_TRUE(second.has_value());
     ASSERT_TRUE(
         epoch::publish(fixture.transport,
+                       test_key(),
                        *second,
                        kasumi::test::workspace_root(fixture.workspace)));
     const auto remote_before = kasumi::test::snapshot_tree(remote_root);
@@ -1891,6 +1913,7 @@ TEST(ApplicationInspectionTest,
     ASSERT_TRUE(sealed.has_value());
     ASSERT_TRUE(
         epoch::publish(fixture.transport,
+                       test_key(),
                        *sealed,
                        kasumi::test::workspace_root(fixture.workspace)));
     const auto rejected = inspect_request(
@@ -2330,6 +2353,7 @@ TEST(ApplicationInspectionTest,
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(
         epoch::publish(fixture.transport,
+                       test_key(),
                        *first,
                        kasumi::test::workspace_root(fixture.workspace)));
     auto second_value = first_value;
@@ -2340,6 +2364,7 @@ TEST(ApplicationInspectionTest,
     ASSERT_TRUE(second.has_value());
     ASSERT_TRUE(
         epoch::publish(fixture.transport,
+                       test_key(),
                        *second,
                        kasumi::test::workspace_root(fixture.workspace)));
     const auto before = kasumi::test::snapshot_tree(remote_root);
@@ -2376,8 +2401,10 @@ TEST(ApplicationInspectionTest,
                     true));
     EXPECT_TRUE(has(
         kasumi::application::RemoteOrphanKind::Content, orphan_content, true));
+    const auto inspection_layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
     const auto first_epoch_identifier =
-        epoch::object_identifier(first->reference);
+        epoch::object_identifier(inspection_layout, first->reference);
     ASSERT_TRUE(first_epoch_identifier.has_value());
     EXPECT_TRUE(has(kasumi::application::RemoteOrphanKind::ProtectedEpoch,
                     *first_epoch_identifier,
@@ -2408,6 +2435,7 @@ TEST(ApplicationInspectionTest,
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(
         epoch::publish(fixture.transport,
+                       test_key(),
                        *first,
                        kasumi::test::workspace_root(fixture.workspace)));
     auto second_value = first_value;
@@ -2418,6 +2446,7 @@ TEST(ApplicationInspectionTest,
     ASSERT_TRUE(second.has_value());
     ASSERT_TRUE(
         epoch::publish(fixture.transport,
+                       test_key(),
                        *second,
                        kasumi::test::workspace_root(fixture.workspace)));
 
@@ -2492,8 +2521,10 @@ TEST(ApplicationInspectionTest,
     EXPECT_FALSE(writer_report.protocol_consistent);
     EXPECT_EQ(writer_report.writers.size(), 2U);
 
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
     const auto original = std::string(64, 'f');
-    const auto quarantined = protocol::quarantine_identifier(original);
+    const auto quarantined = protocol::quarantine_identifier(layout, original);
     ASSERT_TRUE(quarantined.has_value());
     put_object(fixture, *quarantined, "bytes em quarentena");
     ASSERT_TRUE(protocol::record_quarantine(
@@ -2542,13 +2573,14 @@ TEST(ApplicationInspectionTest,
         kasumi::test::workspace_path(fixture.workspace, "storage");
     write_profile(workspace, remote_root);
     publish(fixture, make_commit(0, {}, "file.txt", "contents").value());
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
     const auto quarantined =
-        protocol::quarantine_identifier(std::string(64, 'f'));
-    ASSERT_TRUE(quarantined.has_value());
-    put_object(fixture, *quarantined, "quarantine");
+        "history/gc/v1/quarantine/content/" + std::string(64, 'f');
+    put_object(fixture, quarantined, "quarantine");
     ASSERT_TRUE(protocol::record_quarantine(
         fixture.transport,
-        *quarantined,
+        quarantined,
         1,
         test_key(),
         kasumi::test::workspace_root(fixture.workspace)));
@@ -2561,7 +2593,7 @@ TEST(ApplicationInspectionTest,
     EXPECT_EQ(wrong_key.error().code,
               InspectionErrorCode::RemoteObservationFailure);
 
-    const auto heads = remote_root / "history/heads";
+    const auto heads = remote_root / std::filesystem::path{layout.heads_prefix};
     for (std::size_t index = 0;
          index <= kasumi::history::maximum_marked_head_count;
          ++index) {

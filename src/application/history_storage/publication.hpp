@@ -41,7 +41,15 @@ using PublishHeadResult = std::expected<PublishedHeadMarker, Error>;
 // Result of inspecting a marker.
 using HeadMarkerInspection = std::expected<HeadMarkerState, Error>;
 
+struct RemoteLayout;
+
 // Publishes or reuses the encrypted commit variant.
+PublishObjectResult
+publish_commit_object(transport::Transport& storage,
+                      const RemoteLayout& layout,
+                      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                      const history::Commit& commit,
+                      const std::filesystem::path& workspace_root);
 PublishObjectResult
 publish_commit_object(transport::Transport& storage,
                       std::span<const std::uint8_t, crypto::KEY_SIZE> key,
@@ -51,11 +59,25 @@ publish_commit_object(transport::Transport& storage,
 // Scoped variant avoids inventorying the entire remote storage.
 PublishObjectResult publish_commit_object_scoped(
     transport::Transport& storage,
+    const RemoteLayout& layout,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const history::Commit& commit,
+    const std::filesystem::path& workspace_root);
+PublishObjectResult publish_commit_object_scoped(
+    transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const history::Commit& commit,
     const std::filesystem::path& workspace_root);
 
 // Confirms the physical hash or downloads and validates the commit.
+std::expected<void, Error>
+verify_commit_object(transport::Transport& storage,
+                     const RemoteLayout& layout,
+                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                     const history::Commit& commit,
+                     const HeadReference& reference,
+                     const std::filesystem::path& workspace_root,
+                     std::string_view local_physical_hash = {});
 std::expected<void, Error>
 verify_commit_object(transport::Transport& storage,
                      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
@@ -67,16 +89,32 @@ verify_commit_object(transport::Transport& storage,
 // Publishes the marker after validating remote inventory.
 PublishHeadResult
 publish_head_marker(transport::Transport& storage,
+                    const RemoteLayout& layout,
+                    const HeadReference& reference,
+                    const std::filesystem::path& workspace_root);
+PublishHeadResult
+publish_head_marker(transport::Transport& storage,
                     const HeadReference& reference,
                     const std::filesystem::path& workspace_root);
 
 // Publishes the marker without inventorying the entire remote storage.
 PublishHeadResult
 publish_head_marker_scoped(transport::Transport& storage,
+                           const RemoteLayout& layout,
+                           const HeadReference& reference,
+                           const std::filesystem::path& workspace_root);
+PublishHeadResult
+publish_head_marker_scoped(transport::Transport& storage,
                            const HeadReference& reference,
                            const std::filesystem::path& workspace_root);
 
 // Confirms the physical hash or downloads and validates the marker.
+std::expected<void, Error>
+verify_head_marker(transport::Transport& storage,
+                   const RemoteLayout& layout,
+                   const HeadReference& reference,
+                   const std::filesystem::path& workspace_root,
+                   std::string_view local_physical_hash = {});
 std::expected<void, Error>
 verify_head_marker(transport::Transport& storage,
                    const HeadReference& reference,
@@ -86,13 +124,23 @@ verify_head_marker(transport::Transport& storage,
 // Classifies presence and validity of the marker.
 HeadMarkerInspection
 inspect_head_marker(transport::Transport& storage,
+                    const RemoteLayout& layout,
+                    const HeadReference& reference,
+                    const std::filesystem::path& workspace_root);
+HeadMarkerInspection
+inspect_head_marker(transport::Transport& storage,
                     const HeadReference& reference,
                     const std::filesystem::path& workspace_root);
 
 // Builds the remote identifier for the marker.
+std::string marker_identifier(const RemoteLayout& layout,
+                              const HeadReference& reference);
 std::string marker_identifier(const HeadReference& reference);
 
 // Queries remote head commit identifiers from storage.
+std::expected<std::vector<std::string>, Error>
+list_remote_head_commit_ids(transport::Transport& storage,
+                            const RemoteLayout& layout);
 std::expected<std::vector<std::string>, Error>
 list_remote_head_commit_ids(transport::Transport& storage);
 

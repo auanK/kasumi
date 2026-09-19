@@ -1,6 +1,7 @@
 #include "application/history_storage/epoch.hpp"
 
 #include "application/history_storage/detail.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "core/hasher.hpp"
 #include "core/history.hpp"
 #include "core/wire.hpp"
@@ -144,17 +145,23 @@ struct EpochInventory {
 
 std::expected<EpochInventory, Error> discover_epoch_inventory(
     transport::Transport& storage,
+    const RemoteLayout& layout,
     std::optional<std::span<const std::string>> known_identifiers,
     bool require_contiguous_chain = true) {
     std::vector<std::string> identifiers;
     if (known_identifiers) {
         for (const auto& identifier : *known_identifiers) {
-            if (identifier.starts_with(object_prefix)) {
+            if (identifier.starts_with(layout.epochs_prefix) ||
+                identifier.starts_with("history/epochs/v1/")) {
                 identifiers.push_back(identifier);
             }
         }
     } else {
-        auto listed = transport::list(storage, object_directory);
+        const auto directory = layout.epochs_prefix.ends_with('/')
+                                   ? layout.epochs_prefix.substr(
+                                         0, layout.epochs_prefix.size() - 1)
+                                   : layout.epochs_prefix;
+        auto listed = transport::list(storage, directory);
         if (!listed) {
             if (listed.error().code == transport::ErrorCode::StorageNotFound) {
                 return EpochInventory{};
@@ -164,9 +171,9 @@ std::expected<EpochInventory, Error> discover_epoch_inventory(
         }
         identifiers.reserve(listed->size());
         for (const auto& name : *listed) {
-            identifiers.push_back(name.starts_with(object_prefix)
+            identifiers.push_back(name.starts_with(layout.epochs_prefix)
                                       ? name
-                                      : std::string{object_prefix} + name);
+                                      : layout.epochs_prefix + name);
         }
     }
 
@@ -177,7 +184,7 @@ std::expected<EpochInventory, Error> discover_epoch_inventory(
     ids_by_sequence.reserve(identifiers.size());
     sequences_by_id.reserve(identifiers.size());
     for (const auto& identifier : identifiers) {
-        auto reference = parse_object_identifier(identifier);
+        auto reference = parse_object_identifier(layout, identifier);
         if (!reference) {
             return std::unexpected(reference.error());
         }
@@ -226,11 +233,12 @@ std::expected<EpochInventory, Error> discover_epoch_inventory(
 
 std::expected<VerifiedEpoch, Error>
 load_exact_reference(transport::Transport& storage,
+                     const RemoteLayout& layout,
                      std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
                      const detail::TemporaryWorkspace& temporary,
                      const Reference& reference,
                      std::size_t request_index) {
-    auto identifier = object_identifier(reference);
+    auto identifier = object_identifier(layout, reference);
     if (!identifier) {
         return std::unexpected(identifier.error());
     }
@@ -238,6 +246,17 @@ load_exact_reference(transport::Transport& storage,
         temporary->root / ("epoch-" + std::to_string(request_index));
     const auto get_trace = platform::perf_trace::begin();
     auto downloaded = detail::download(storage, *identifier, copy);
+    if (!downloaded) {
+        auto legacy_identifier =
+            object_identifier(default_remote_layout(), reference);
+        if (legacy_identifier && *legacy_identifier != *identifier) {
+            auto legacy_downloaded =
+                detail::download(storage, *legacy_identifier, copy);
+            if (legacy_downloaded) {
+                downloaded = std::move(legacy_downloaded);
+            }
+        }
+    }
     platform::perf_trace::finish("rc/get_epoch", get_trace);
     if (!downloaded) {
         return std::unexpected(
@@ -258,7 +277,9 @@ load_latest_impl(transport::Transport& storage,
                  const std::filesystem::path& workspace_root,
                  std::optional<std::span<const std::string>> known_identifiers,
                  std::optional<Reference> trusted_ancestor) {
-    auto inventory = discover_epoch_inventory(storage, known_identifiers);
+    const auto layout = derive_remote_layout(master_key);
+    auto inventory =
+        discover_epoch_inventory(storage, layout, known_identifiers);
     if (!inventory) {
         return std::unexpected(inventory.error());
     }
@@ -281,8 +302,12 @@ load_latest_impl(transport::Transport& storage,
     }
 
     std::size_t request_index = 0;
-    auto latest = load_exact_reference(
-        storage, master_key, *temporary, latest_reference, request_index++);
+    auto latest = load_exact_reference(storage,
+                                       layout,
+                                       master_key,
+                                       *temporary,
+                                       latest_reference,
+                                       request_index++);
     if (!latest) {
         return std::unexpected(latest.error());
     }
@@ -300,6 +325,7 @@ load_latest_impl(transport::Transport& storage,
         }
         --index;
         auto previous = load_exact_reference(storage,
+                                             layout,
                                              master_key,
                                              *temporary,
                                              inventory->references[index],
@@ -328,7 +354,8 @@ load_chain_impl(transport::Transport& storage,
                 std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
                 const std::filesystem::path& workspace_root,
                 std::optional<std::span<const std::string>> identifiers) {
-    auto inventory = discover_epoch_inventory(storage, identifiers);
+    const auto layout = derive_remote_layout(master_key);
+    auto inventory = discover_epoch_inventory(storage, layout, identifiers);
     if (!inventory) {
         return std::unexpected(inventory.error());
     }
@@ -345,6 +372,7 @@ load_chain_impl(transport::Transport& storage,
     chain.reserve(inventory->references.size());
     for (std::size_t index = 0; index < inventory->references.size(); ++index) {
         auto loaded = load_exact_reference(storage,
+                                           layout,
                                            master_key,
                                            *temporary,
                                            inventory->references[index],
@@ -596,54 +624,34 @@ open(std::span<const std::uint8_t> bytes,
 }
 
 std::expected<std::string, Error>
-object_identifier(const Reference& reference) {
+object_identifier(const RemoteLayout& layout, const Reference& reference) {
     if (!valid_id(reference.epoch_id)) {
         return std::unexpected(
             error(ErrorCode::InvalidInput, "referência de Epoch inválida"));
     }
-    auto sequence = std::to_string(reference.sequence);
-    sequence.insert(sequence.begin(), sequence_width - sequence.size(), '0');
-    return std::string{object_prefix} + sequence + '-' + reference.epoch_id +
-           std::string{object_suffix};
+    return epoch_object(layout, reference.sequence, reference.epoch_id);
+}
+
+std::expected<std::string, Error>
+object_identifier(const Reference& reference) {
+    return object_identifier(default_remote_layout(), reference);
+}
+
+std::expected<Reference, Error>
+parse_object_identifier(const RemoteLayout& layout,
+                        std::string_view identifier) {
+    auto parsed = parse_epoch_object(layout, identifier);
+    if (!parsed) {
+        return std::unexpected(
+            error(ErrorCode::InvalidInput, "nome de objeto Epoch inválido"));
+    }
+    return Reference{.sequence = parsed->sequence,
+                     .epoch_id = std::move(parsed->epoch_id)};
 }
 
 std::expected<Reference, Error>
 parse_object_identifier(std::string_view identifier) {
-    const auto expected_size = object_prefix.size() + sequence_width + 1 +
-                               HASH_HEX_SIZE + object_suffix.size();
-    if (identifier.size() != expected_size ||
-        !identifier.starts_with(object_prefix) ||
-        !identifier.ends_with(object_suffix)) {
-        return std::unexpected(
-            error(ErrorCode::InvalidInput, "nome de objeto Epoch inválido"));
-    }
-    const auto sequence_text =
-        identifier.substr(object_prefix.size(), sequence_width);
-    if (!std::ranges::all_of(sequence_text,
-                             [](char character) {
-                                 return character >= '0' && character <= '9';
-                             }) ||
-        identifier[object_prefix.size() + sequence_width] != '-') {
-        return std::unexpected(
-            error(ErrorCode::InvalidInput, "nome de objeto Epoch inválido"));
-    }
-    std::uint64_t sequence = 0;
-    const auto parsed =
-        std::from_chars(sequence_text.data(),
-                        sequence_text.data() + sequence_text.size(),
-                        sequence);
-    if (parsed.ec != std::errc{} ||
-        parsed.ptr != sequence_text.data() + sequence_text.size()) {
-        return std::unexpected(error(ErrorCode::InvalidInput,
-                                     "sequência do objeto Epoch inválida"));
-    }
-    const auto epoch_id = identifier.substr(
-        object_prefix.size() + sequence_width + 1, HASH_HEX_SIZE);
-    if (!valid_id(epoch_id)) {
-        return std::unexpected(
-            error(ErrorCode::InvalidInput, "ID do objeto Epoch inválido"));
-    }
-    return Reference{.sequence = sequence, .epoch_id = std::string{epoch_id}};
+    return parse_object_identifier(default_remote_layout(), identifier);
 }
 
 std::expected<VerifiedEpoch, Error>
@@ -705,9 +713,10 @@ select_latest(std::span<const VerifiedEpoch> epochs) {
 
 std::expected<void, Error>
 publish(transport::Transport& storage,
+        const RemoteLayout& layout,
         const SealedEpoch& sealed,
         const std::filesystem::path& workspace_root) {
-    auto identifier = object_identifier(sealed.reference);
+    auto identifier = object_identifier(layout, sealed.reference);
     if (!identifier || sealed.bytes.empty()) {
         return std::unexpected(
             identifier ? error(ErrorCode::InvalidInput, "Epoch selado vazio")
@@ -732,12 +741,29 @@ publish(transport::Transport& storage,
 }
 
 std::expected<void, Error>
+publish(transport::Transport& storage,
+        std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
+        const SealedEpoch& sealed,
+        const std::filesystem::path& workspace_root) {
+    return publish(
+        storage, derive_remote_layout(master_key), sealed, workspace_root);
+}
+
+std::expected<void, Error>
+publish(transport::Transport& storage,
+        const SealedEpoch& sealed,
+        const std::filesystem::path& workspace_root) {
+    return publish(storage, default_remote_layout(), sealed, workspace_root);
+}
+
+std::expected<void, Error>
 verify(transport::Transport& storage,
        const Epoch& expected,
        const Reference& reference,
        std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
        const std::filesystem::path& workspace_root) {
-    auto identifier = object_identifier(reference);
+    const auto layout = derive_remote_layout(master_key);
+    auto identifier = object_identifier(layout, reference);
     if (!identifier) {
         return std::unexpected(identifier.error());
     }
@@ -868,7 +894,12 @@ load_by_id(transport::Transport& storage,
                 error(ErrorCode::InvalidInput, "Epoch ID inválido"));
         }
 
-        auto listed = transport::list(storage, object_directory);
+        const auto layout = derive_remote_layout(master_key);
+        const auto directory = layout.epochs_prefix.ends_with('/')
+                                   ? layout.epochs_prefix.substr(
+                                         0, layout.epochs_prefix.size() - 1)
+                                   : layout.epochs_prefix;
+        auto listed = transport::list(storage, directory);
         if (!listed) {
             if (listed.error().code == transport::ErrorCode::StorageNotFound) {
                 return std::optional<VerifiedEpoch>{};
@@ -879,12 +910,13 @@ load_by_id(transport::Transport& storage,
         std::vector<std::string> identifiers;
         identifiers.reserve(listed->size());
         for (const auto& name : *listed) {
-            identifiers.push_back(name.starts_with(object_prefix)
+            identifiers.push_back(name.starts_with(layout.epochs_prefix)
                                       ? name
-                                      : std::string{object_prefix} + name);
+                                      : layout.epochs_prefix + name);
         }
         auto inventory = discover_epoch_inventory(
             storage,
+            layout,
             std::optional<std::span<const std::string>>{
                 std::span<const std::string>{identifiers}},
             false);
@@ -903,8 +935,8 @@ load_by_id(transport::Transport& storage,
             return std::unexpected(
                 error(ErrorCode::WorkspaceFailure, temporary.error().detail));
         }
-        auto loaded =
-            load_exact_reference(storage, master_key, *temporary, *matching, 0);
+        auto loaded = load_exact_reference(
+            storage, layout, master_key, *temporary, *matching, 0);
         if (!loaded) {
             return std::unexpected(loaded.error());
         }

@@ -2,10 +2,12 @@
 #include "application/history_storage/content_reachability.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
 #include "application/profile.hpp"
 #include "core/hasher.hpp"
 #include "crypto/file_crypto.hpp"
+#include "crypto/key_derivation.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "runtime/paths.hpp"
@@ -217,10 +219,12 @@ TEST(ApplicationMaintenanceContract, UnknownObjectsArePreserved) {
     const auto identifiers = kasumi::transport::list(storage);
     ASSERT_TRUE(identifiers.has_value());
     EXPECT_TRUE(std::ranges::any_of(*identifiers, [](const auto& identifier) {
-        return identifier.starts_with("history/commits/");
+        return identifier.ends_with(".kcom") ||
+               identifier.starts_with("history/commits/");
     }));
     EXPECT_TRUE(std::ranges::any_of(*identifiers, [](const auto& identifier) {
-        return identifier.starts_with("history/heads/");
+        return identifier.ends_with(".head") ||
+               identifier.starts_with("history/heads/");
     }));
     EXPECT_EQ(kasumi::transport::presence(storage, "foreign/object").value(),
               kasumi::transport::Presence::Present);
@@ -396,7 +400,8 @@ TEST(ApplicationMaintenanceContract,
     const auto listing = kasumi::transport::list(storage);
     ASSERT_TRUE(listing.has_value());
     auto commit = std::ranges::find_if(*listing, [](const auto& identifier) {
-        return identifier.starts_with("history/commits/");
+        return identifier.ends_with(".kcom") ||
+               identifier.starts_with("history/commits/");
     });
     ASSERT_NE(commit, listing->end());
     ASSERT_EQ(kasumi::transport::remove(storage, *commit).value(),
@@ -631,10 +636,18 @@ TEST(ApplicationMaintenanceContract,
               kasumi::transport::Presence::Present);
     EXPECT_EQ(kasumi::transport::presence(storage, orphan).value(),
               kasumi::transport::Presence::Absent);
-    EXPECT_EQ(kasumi::transport::presence(
-                  storage, protocol::quarantine_identifier(orphan).value())
-                  .value(),
-              kasumi::transport::Presence::Present);
+    const auto key_bytes = *kasumi::hash_from_hex(std::string(64, 'd'));
+    std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key_arr{};
+    for (std::size_t i = 0; i < key_arr.size(); ++i) {
+        key_arr[i] = static_cast<std::uint8_t>(key_bytes[i]);
+    }
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key_arr);
+    EXPECT_EQ(
+        kasumi::transport::presence(
+            storage, protocol::quarantine_identifier(layout, orphan).value())
+            .value(),
+        kasumi::transport::Presence::Present);
     const auto second = kasumi::application::execute(
         request(Operation::GarbageCollect, environment));
     ASSERT_TRUE(second.has_value()) << second.error().detail;
@@ -664,8 +677,15 @@ TEST(ApplicationMaintenanceContract, ActiveBarrierBlocksSyncBeforePublication) {
     ASSERT_TRUE(kasumi::transport::initialize(*opened));
     const auto paths = kasumi::runtime::resolve_profile_paths(
         environment.app_data_dir, profile.name);
-    ASSERT_TRUE(paths.has_value());
-    auto barrier = protocol::establish_barrier(*opened, paths->profile_dir);
+    const auto key_bytes = *kasumi::hash_from_hex(std::string(64, 'f'));
+    std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key_arr{};
+    for (std::size_t i = 0; i < key_arr.size(); ++i) {
+        key_arr[i] = static_cast<std::uint8_t>(key_bytes[i]);
+    }
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key_arr);
+    auto barrier =
+        protocol::establish_barrier(*opened, layout, paths->profile_dir);
     ASSERT_TRUE(barrier.has_value()) << barrier.error().detail;
 
     const auto no_op =

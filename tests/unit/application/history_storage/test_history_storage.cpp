@@ -1,5 +1,6 @@
 #include "application/history_storage/history_storage.hpp"
 #include "application/history_storage/publication.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
 
@@ -245,14 +246,17 @@ TEST(HistoryStorageTest, UnsupportedPhysicalHashFallsBackToSemanticReadback) {
     ASSERT_TRUE(kasumi::transport::initialize(storage));
     const auto commit = make_commit(0, {}, "file.txt", "contents").value();
     const auto root = kasumi::test::workspace_root(workspace);
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
 
     auto object =
         kasumi::application::history_storage::publish_commit_object_scoped(
-            storage, test_key(), commit, root);
+            storage, layout, test_key(), commit, root);
     ASSERT_TRUE(object.has_value());
     reset_remote_counts(*state);
     ASSERT_TRUE(kasumi::application::history_storage::verify_commit_object(
         storage,
+        layout,
         test_key(),
         commit,
         object->head,
@@ -263,11 +267,11 @@ TEST(HistoryStorageTest, UnsupportedPhysicalHashFallsBackToSemanticReadback) {
 
     auto marker =
         kasumi::application::history_storage::publish_head_marker_scoped(
-            storage, object->head, root);
+            storage, layout, object->head, root);
     ASSERT_TRUE(marker.has_value());
     reset_remote_counts(*state);
     ASSERT_TRUE(kasumi::application::history_storage::verify_head_marker(
-        storage, object->head, root, marker->physical_hash));
+        storage, layout, object->head, root, marker->physical_hash));
     EXPECT_EQ(state->physical_hash_count, 1U);
     EXPECT_EQ(state->marker_get_count, 1U);
 }
@@ -383,16 +387,18 @@ TEST(HistoryStorageTest, TrustedOldMarkerDoesNotHideNewRemoteMarker) {
     auto storage = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(storage));
     const auto root = kasumi::test::workspace_root(workspace);
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
     const auto first_commit = make_commit(0, {}, "first.txt", "first").value();
     const auto second_commit =
         make_commit(0, {}, "second.txt", "second").value();
     auto first =
         kasumi::application::history_storage::publish_commit_object_scoped(
-            storage, test_key(), first_commit, root);
+            storage, layout, test_key(), first_commit, root);
     ASSERT_TRUE(first.has_value());
     auto first_marker =
         kasumi::application::history_storage::publish_head_marker_scoped(
-            storage, first->head, root);
+            storage, layout, first->head, root);
     ASSERT_TRUE(first_marker.has_value());
 
     reset_remote_counts(*state);
@@ -411,11 +417,11 @@ TEST(HistoryStorageTest, TrustedOldMarkerDoesNotHideNewRemoteMarker) {
 
     auto second =
         kasumi::application::history_storage::publish_commit_object_scoped(
-            storage, test_key(), second_commit, root);
+            storage, layout, test_key(), second_commit, root);
     ASSERT_TRUE(second.has_value());
     auto second_marker =
         kasumi::application::history_storage::publish_head_marker_scoped(
-            storage, second->head, root);
+            storage, layout, second->head, root);
     ASSERT_TRUE(second_marker.has_value());
     reset_remote_counts(*state);
     auto changed = kasumi::application::history_storage::load_history_scoped(
@@ -576,10 +582,13 @@ TEST(HistoryStorageTest, CommitAndHeadPublicationHaveSeparateDurableStages) {
     auto storage = make_local_storage();
     const auto commit = kasumi::history::make_empty_bootstrap().value();
     const auto key = test_key();
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key);
 
     const auto object =
         kasumi::application::history_storage::publish_commit_object(
             storage.transport,
+            layout,
             key,
             commit,
             kasumi::test::workspace_root(storage.workspace));
@@ -587,15 +596,14 @@ TEST(HistoryStorageTest, CommitAndHeadPublicationHaveSeparateDurableStages) {
     EXPECT_EQ(kasumi::transport::presence(storage.transport, object->marker_id)
                   .value(),
               kasumi::transport::Presence::Absent);
-    EXPECT_EQ(kasumi::transport::presence(
-                  storage.transport,
-                  "history/commits/" + object->head.commit_id + "/" +
-                      object->head.ciphertext_id + ".kcom")
+    EXPECT_EQ(kasumi::transport::presence(storage.transport,
+                                          object_path(object->head))
                   .value(),
               kasumi::transport::Presence::Present);
 
     ASSERT_TRUE(kasumi::application::history_storage::verify_commit_object(
                     storage.transport,
+                    layout,
                     key,
                     commit,
                     object->head,
@@ -604,12 +612,14 @@ TEST(HistoryStorageTest, CommitAndHeadPublicationHaveSeparateDurableStages) {
     const auto marker =
         kasumi::application::history_storage::publish_head_marker(
             storage.transport,
+            layout,
             object->head,
             kasumi::test::workspace_root(storage.workspace));
     ASSERT_TRUE(marker.has_value());
     EXPECT_EQ(marker->marker_id, object->marker_id);
     ASSERT_TRUE(kasumi::application::history_storage::verify_head_marker(
                     storage.transport,
+                    layout,
                     object->head,
                     kasumi::test::workspace_root(storage.workspace))
                     .has_value());
@@ -617,6 +627,7 @@ TEST(HistoryStorageTest, CommitAndHeadPublicationHaveSeparateDurableStages) {
     const auto repeated =
         kasumi::application::history_storage::publish_commit_object(
             storage.transport,
+            layout,
             key,
             commit,
             kasumi::test::workspace_root(storage.workspace));
@@ -771,8 +782,11 @@ TEST(HistoryStorageTest, RejectsNewPublicationAtHistoryObjectLimitBeforePut) {
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
     for (std::size_t index = 0; index < 8192; ++index) {
-        state->objects.emplace("history/unknown/" + std::to_string(index),
+        state->objects.emplace(layout.history_prefix + "unknown/" +
+                                   std::to_string(index),
                                std::vector<std::uint8_t>{});
     }
 
@@ -797,8 +811,11 @@ TEST(HistoryStorageTest, IdempotentPublicationWorksAtHistoryObjectLimit) {
     const auto first = kasumi::application::history_storage::publish_commit(
         transport, test_key(), commit, kasumi::test::workspace_root(workspace));
     ASSERT_TRUE(first.has_value());
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
     for (std::size_t index = 0; index < 8190; ++index) {
-        state->objects.emplace("history/unknown/" + std::to_string(index),
+        state->objects.emplace(layout.history_prefix + "unknown/" +
+                                   std::to_string(index),
                                std::vector<std::uint8_t>{});
     }
     state->put_count = 0;
@@ -1169,9 +1186,24 @@ TEST(HistoryStorageTest, ParentVariantFallbackLoadsAndResolves) {
 TEST(HistoryStorageTest, WrongKeyIsNotAnOperationalFailure) {
     auto storage = make_local_storage();
     const auto commit = kasumi::history::make_empty_bootstrap().value();
-    publish(storage, commit);
+    const auto published = publish(storage, commit);
     auto wrong_key = test_key();
     wrong_key[0] ^= 0xffU;
+    const auto wrong_layout =
+        kasumi::application::history_storage::derive_remote_layout(wrong_key);
+    ASSERT_TRUE(kasumi::transport::put(
+        storage.transport,
+        kasumi::test::workspace_path(storage.workspace, "storage") /
+            std::filesystem::path{object_path(published.head)},
+        kasumi::application::history_storage::commit_object(wrong_layout,
+                                                            published.head)));
+    ASSERT_TRUE(kasumi::transport::put(
+        storage.transport,
+        kasumi::test::workspace_path(storage.workspace, "storage") /
+            std::filesystem::path{marker_path(published.head)},
+        kasumi::application::history_storage::marker_object(wrong_layout,
+                                                            published.head)));
+
     const auto loaded = kasumi::application::history_storage::load_history(
         storage.transport,
         wrong_key,
@@ -1194,9 +1226,11 @@ TEST(HistoryStorageTest, TemporaryWorkspacesAreRemovedAfterSuccessAndFailure) {
 
     const auto marker = kasumi::transport::list(storage.transport).value();
     ASSERT_FALSE(marker.empty());
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
     const auto first_marker =
-        std::ranges::find_if(marker, [](const std::string& id) {
-            return id.starts_with("history/heads/");
+        std::ranges::find_if(marker, [&](const std::string& id) {
+            return id.starts_with(layout.heads_prefix);
         });
     ASSERT_NE(first_marker, marker.end());
     const auto marker_file =
@@ -1299,8 +1333,11 @@ TEST(HistoryStorageTest, HeightMaximumIsRejectedBeforePublishing) {
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ErrorCode::LimitExceeded);
     const auto listing = kasumi::transport::list(storage.transport).value();
-    EXPECT_TRUE(std::ranges::none_of(listing, [](const std::string& id) {
-        return id.starts_with("history/heads/");
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    EXPECT_TRUE(std::ranges::none_of(listing, [&](const std::string& id) {
+        return id.starts_with(layout.heads_prefix) ||
+               id.starts_with("history/heads/");
     }));
 }
 
@@ -1372,9 +1409,11 @@ TEST(HistoryStorageTest, PartialMarkerRemovalCanBeRetriedIdempotently) {
     state->fail_remove_at = 2;
     const std::array<std::string, 2> ancestral{first.commit_id,
                                                second.commit_id};
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
     const auto first_attempt =
-        kasumi::application::history_storage::remove_marker_variants(transport,
-                                                                     ancestral);
+        kasumi::application::history_storage::remove_marker_variants(
+            transport, layout, ancestral);
     ASSERT_FALSE(first_attempt.has_value());
     EXPECT_FALSE(state->objects.contains(marker_path(first)));
     EXPECT_TRUE(state->objects.contains(marker_path(second)));
@@ -1382,8 +1421,8 @@ TEST(HistoryStorageTest, PartialMarkerRemovalCanBeRetriedIdempotently) {
 
     state->fail_remove_at = 0;
     const auto second_attempt =
-        kasumi::application::history_storage::remove_marker_variants(transport,
-                                                                     ancestral);
+        kasumi::application::history_storage::remove_marker_variants(
+            transport, layout, ancestral);
     ASSERT_TRUE(second_attempt.has_value());
     EXPECT_EQ(second_attempt->removed, 1U);
     EXPECT_FALSE(state->objects.contains(marker_path(second)));

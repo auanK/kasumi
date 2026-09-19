@@ -1,5 +1,6 @@
 #include "application/observation/state.hpp"
 
+#include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
 #include "application/observation/patch.hpp"
 #include "application/observation/scanner.hpp"
@@ -504,8 +505,10 @@ collect_reconciliation_input(
                 .commit_id = input.base_commit_id,
                 .ciphertext_id = input.base_ciphertext_id};
             if (history_storage::valid(persisted_reference)) {
+                const auto layout = history_storage::derive_remote_layout(key);
                 derived_trusted_markers.push_back(
-                    history_storage::marker_object(persisted_reference));
+                    history_storage::marker_object(layout,
+                                                   persisted_reference));
             }
         }
     }

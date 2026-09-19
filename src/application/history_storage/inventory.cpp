@@ -26,8 +26,7 @@ bool valid_hex_id(std::string_view id) noexcept {
 }
 
 std::string commit_object(const HeadReference& reference) {
-    return std::string{commit_prefix} + reference.commit_id + "/" +
-           reference.ciphertext_id + std::string{commit_suffix};
+    return commit_object(default_remote_layout(), reference);
 }
 
 } // namespace kasumi::application::history_storage::detail
@@ -35,8 +34,7 @@ std::string commit_object(const HeadReference& reference) {
 namespace kasumi::application::history_storage {
 
 std::string marker_object(const HeadReference& reference) {
-    return std::string{detail::heads_prefix} + reference.commit_id + "-" +
-           reference.ciphertext_id + std::string{detail::head_suffix};
+    return marker_object(default_remote_layout(), reference);
 }
 
 } // namespace kasumi::application::history_storage
@@ -44,25 +42,7 @@ std::string marker_object(const HeadReference& reference) {
 namespace kasumi::application::history_storage::detail {
 
 std::optional<HeadReference> parse_commit_object(std::string_view identifier) {
-    if (!identifier.starts_with(commit_prefix) ||
-        !identifier.ends_with(commit_suffix)) {
-        return std::nullopt;
-    }
-
-    const auto body = identifier.substr(
-        commit_prefix.size(),
-        identifier.size() - commit_prefix.size() - commit_suffix.size());
-    const auto separator = body.find('/');
-    if (separator != 64 ||
-        body.find('/', separator + 1) != std::string_view::npos) {
-        return std::nullopt;
-    }
-
-    HeadReference result{
-        .commit_id = std::string{body.substr(0, separator)},
-        .ciphertext_id = std::string{body.substr(separator + 1)},
-    };
-    return valid(result) ? std::optional{std::move(result)} : std::nullopt;
+    return parse_commit_object(default_remote_layout(), identifier);
 }
 
 } // namespace kasumi::application::history_storage::detail
@@ -70,24 +50,7 @@ std::optional<HeadReference> parse_commit_object(std::string_view identifier) {
 namespace kasumi::application::history_storage {
 
 std::optional<HeadReference> parse_marker_object(std::string_view identifier) {
-    if (!identifier.starts_with(detail::heads_prefix) ||
-        !identifier.ends_with(detail::head_suffix)) {
-        return std::nullopt;
-    }
-
-    const auto body =
-        identifier.substr(detail::heads_prefix.size(),
-                          identifier.size() - detail::heads_prefix.size() -
-                              detail::head_suffix.size());
-    if (body.size() != 129 || body[64] != '-') {
-        return std::nullopt;
-    }
-
-    HeadReference result{
-        .commit_id = std::string{body.substr(0, 64)},
-        .ciphertext_id = std::string{body.substr(65)},
-    };
-    return valid(result) ? std::optional{std::move(result)} : std::nullopt;
+    return parse_marker_object(default_remote_layout(), identifier);
 }
 
 } // namespace kasumi::application::history_storage
@@ -100,7 +63,8 @@ void sort_unique(std::vector<HeadReference>& references) {
 }
 
 std::expected<HistoryInventory, Error>
-build_history_inventory(transport::Transport& storage) {
+build_history_inventory(transport::Transport& storage,
+                        const RemoteLayout& layout) {
     auto listing = transport::list(storage);
     if (!listing) {
         if (listing.error().code == transport::ErrorCode::StorageNotFound) {
@@ -109,15 +73,21 @@ build_history_inventory(transport::Transport& storage) {
         return std::unexpected(transport_error(listing.error()));
     }
 
-    return build_history_inventory(*listing);
+    return build_history_inventory(*listing, layout);
 }
 
 std::expected<HistoryInventory, Error>
-build_history_inventory(std::span<const std::string> identifiers) {
+build_history_inventory(transport::Transport& storage) {
+    return build_history_inventory(storage, default_remote_layout());
+}
+
+std::expected<HistoryInventory, Error>
+build_history_inventory(std::span<const std::string> identifiers,
+                        const RemoteLayout& layout) {
     HistoryInventory inventory;
     for (const auto& identifier : identifiers) {
-        if (identifier.starts_with("history/") &&
-            !maintenance_protocol::is_control_object(identifier)) {
+        if (is_history_object(layout, identifier) &&
+            !is_control_object(layout, identifier)) {
             inventory.identifiers.insert(identifier);
         }
     }
@@ -127,10 +97,11 @@ build_history_inventory(std::span<const std::string> identifiers) {
     }
 
     for (const auto& identifier : inventory.identifiers) {
-        if (auto commit_reference = parse_commit_object(identifier)) {
+        if (auto commit_reference = parse_commit_object(layout, identifier)) {
             inventory.commit_variants[commit_reference->commit_id].push_back(
                 std::move(*commit_reference));
-        } else if (auto marker_reference = parse_marker_object(identifier)) {
+        } else if (auto marker_reference =
+                       parse_marker_object(layout, identifier)) {
             inventory.marker_variants[marker_reference->commit_id].push_back(
                 std::move(*marker_reference));
         }
@@ -153,12 +124,18 @@ build_history_inventory(std::span<const std::string> identifiers) {
     return inventory;
 }
 
+std::expected<HistoryInventory, Error>
+build_history_inventory(std::span<const std::string> identifiers) {
+    return build_history_inventory(identifiers, default_remote_layout());
+}
+
 PublicationDelta publication_delta(const HistoryInventory& inventory,
-                                   const HeadReference& reference) {
+                                   const HeadReference& reference,
+                                   const RemoteLayout& layout) {
     const bool adds_commit_object =
-        !inventory.identifiers.contains(commit_object(reference));
+        !inventory.identifiers.contains(commit_object(layout, reference));
     const bool adds_marker_object =
-        !inventory.identifiers.contains(marker_object(reference));
+        !inventory.identifiers.contains(marker_object(layout, reference));
     return PublicationDelta{
         .adds_commit_object = adds_commit_object,
         .adds_marker_object = adds_marker_object,
@@ -166,6 +143,11 @@ PublicationDelta publication_delta(const HistoryInventory& inventory,
             adds_marker_object &&
             !inventory.marker_variants.contains(reference.commit_id),
     };
+}
+
+PublicationDelta publication_delta(const HistoryInventory& inventory,
+                                   const HeadReference& reference) {
+    return publication_delta(inventory, reference, default_remote_layout());
 }
 
 std::expected<void, Error>

@@ -2,6 +2,7 @@
 
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
 #include "crypto/physical_hash.hpp"
@@ -19,11 +20,14 @@ PublishResult publish_impl(transport::Transport& storage,
                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                            const history::Commit& commit,
                            const std::filesystem::path& workspace_root) {
-    auto object = publish_commit_object(storage, key, commit, workspace_root);
+    const auto layout = derive_remote_layout(key);
+    auto object =
+        publish_commit_object(storage, layout, key, commit, workspace_root);
     if (!object) {
         return std::unexpected(object.error());
     }
     auto object_verified = verify_commit_object(storage,
+                                                layout,
                                                 key,
                                                 commit,
                                                 object->head,
@@ -32,12 +36,13 @@ PublishResult publish_impl(transport::Transport& storage,
     if (!object_verified) {
         return std::unexpected(object_verified.error());
     }
-    auto marker = publish_head_marker(storage, object->head, workspace_root);
+    auto marker =
+        publish_head_marker(storage, layout, object->head, workspace_root);
     if (!marker) {
         return std::unexpected(marker.error());
     }
     auto marker_verified = verify_head_marker(
-        storage, object->head, workspace_root, marker->physical_hash);
+        storage, layout, object->head, workspace_root, marker->physical_hash);
     if (!marker_verified) {
         return std::unexpected(marker_verified.error());
     }
@@ -82,6 +87,7 @@ verify_remote_physical_hash(transport::Transport& storage,
 
 std::expected<void, Error>
 verify_commit_object_impl(transport::Transport& storage,
+                          const RemoteLayout& layout,
                           std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                           const history::Commit& commit,
                           const HeadReference& reference,
@@ -90,12 +96,14 @@ verify_commit_object_impl(transport::Transport& storage,
 
 std::expected<void, Error>
 verify_head_marker_impl(transport::Transport& storage,
+                        const RemoteLayout& layout,
                         const HeadReference& reference,
                         const std::filesystem::path& workspace_root,
                         std::string_view local_physical_hash);
 
 PublishObjectResult
 publish_commit_object_impl(transport::Transport& storage,
+                           const RemoteLayout& layout,
                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                            const history::Commit& commit,
                            const std::filesystem::path& workspace_root,
@@ -128,7 +136,7 @@ publish_commit_object_impl(transport::Transport& storage,
 
     auto inventory = scoped ? std::expected<detail::HistoryInventory,
                                             Error>{detail::HistoryInventory{}}
-                            : detail::build_history_inventory(storage);
+                            : detail::build_history_inventory(storage, layout);
     if (!inventory) {
         return std::unexpected(inventory.error());
     }
@@ -152,7 +160,7 @@ publish_commit_object_impl(transport::Transport& storage,
             auto loaded_bytes = history::serialize(loaded->commit->commit);
             if (loaded_bytes && *loaded_bytes == *canonical) {
                 auto marker_state = detail::inspect_marker(
-                    storage, candidate, (*temporary)->root, sequence);
+                    storage, layout, candidate, (*temporary)->root, sequence);
                 if (!marker_state) {
                     return std::unexpected(marker_state.error());
                 }
@@ -160,7 +168,7 @@ publish_commit_object_impl(transport::Transport& storage,
                     continue;
                 }
                 auto candidate_delta =
-                    detail::publication_delta(*inventory, candidate);
+                    detail::publication_delta(*inventory, candidate, layout);
                 auto budget = detail::validate_publication_budget(
                     *inventory, candidate, candidate_delta, !scoped);
                 if (!budget) {
@@ -195,7 +203,7 @@ publish_commit_object_impl(transport::Transport& storage,
                                                  local_physical_hash.error()));
         }
         physical_hash = std::move(*local_physical_hash);
-        auto delta = detail::publication_delta(*inventory, reference);
+        auto delta = detail::publication_delta(*inventory, reference, layout);
         auto budget = detail::validate_publication_budget(
             *inventory, reference, delta, !scoped);
         if (!budget) {
@@ -203,15 +211,20 @@ publish_commit_object_impl(transport::Transport& storage,
         }
         const auto put_trace = platform::perf_trace::begin();
         auto published = transport::put(
-            storage, ciphertext, detail::commit_object(reference));
+            storage, ciphertext, commit_object(layout, reference));
         platform::perf_trace::finish("rc/put_commit", put_trace);
         if (!published) {
             if (!transport::mutation_result_is_ambiguous(published.error())) {
                 return std::unexpected(
                     detail::transport_error(published.error()));
             }
-            auto verified = verify_commit_object_impl(
-                storage, key, commit, reference, workspace_root, physical_hash);
+            auto verified = verify_commit_object_impl(storage,
+                                                      layout,
+                                                      key,
+                                                      commit,
+                                                      reference,
+                                                      workspace_root,
+                                                      physical_hash);
             if (!verified) {
                 return std::unexpected(verified.error());
             }
@@ -219,13 +232,14 @@ publish_commit_object_impl(transport::Transport& storage,
     }
 
     return PublishedCommitObject{.head = reference,
-                                 .marker_id = marker_object(reference),
+                                 .marker_id = marker_object(layout, reference),
                                  .physical_hash = std::move(physical_hash),
                                  .reused_existing_ciphertext = reused};
 }
 
 std::expected<void, Error>
 verify_commit_object_impl(transport::Transport& storage,
+                          const RemoteLayout& layout,
                           std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                           const history::Commit& commit,
                           const HeadReference& reference,
@@ -246,7 +260,7 @@ verify_commit_object_impl(transport::Transport& storage,
     }
     auto physical =
         verify_remote_physical_hash(storage,
-                                    detail::commit_object(reference),
+                                    commit_object(layout, reference),
                                     local_physical_hash,
                                     "commit remote hash verification");
     if (!physical) {
@@ -261,11 +275,12 @@ verify_commit_object_impl(transport::Transport& storage,
     }
     std::size_t sequence = 0;
     return detail::verify_published_commit(
-        storage, key, commit, reference, (*temporary)->root, sequence);
+        storage, layout, key, commit, reference, (*temporary)->root, sequence);
 }
 
 PublishHeadResult
 publish_head_marker_impl(transport::Transport& storage,
+                         const RemoteLayout& layout,
                          const HeadReference& reference,
                          const std::filesystem::path& workspace_root,
                          bool scoped) {
@@ -275,11 +290,11 @@ publish_head_marker_impl(transport::Transport& storage,
     }
     auto inventory = scoped ? std::expected<detail::HistoryInventory,
                                             Error>{detail::HistoryInventory{}}
-                            : detail::build_history_inventory(storage);
+                            : detail::build_history_inventory(storage, layout);
     if (!inventory) {
         return std::unexpected(inventory.error());
     }
-    auto delta = detail::publication_delta(*inventory, reference);
+    auto delta = detail::publication_delta(*inventory, reference, layout);
     auto budget = detail::validate_publication_budget(
         *inventory, reference, delta, !scoped);
     if (!budget) {
@@ -303,7 +318,7 @@ publish_head_marker_impl(transport::Transport& storage,
     if (!delta.adds_marker_object) {
         std::size_t sequence = 0;
         auto inspected = detail::inspect_marker(
-            storage, reference, (*temporary)->root, sequence);
+            storage, layout, reference, (*temporary)->root, sequence);
         if (!inspected) {
             return std::unexpected(inspected.error());
         }
@@ -324,7 +339,7 @@ publish_head_marker_impl(transport::Transport& storage,
         physical_hash = std::move(*local_physical_hash);
         const auto put_trace = platform::perf_trace::begin();
         auto uploaded =
-            transport::put(storage, marker, marker_object(reference));
+            transport::put(storage, marker, marker_object(layout, reference));
         platform::perf_trace::finish("rc/put_marker", put_trace);
         if (!uploaded) {
             if (!transport::mutation_result_is_ambiguous(uploaded.error())) {
@@ -332,18 +347,19 @@ publish_head_marker_impl(transport::Transport& storage,
                     detail::transport_error(uploaded.error()));
             }
             auto verified = verify_head_marker_impl(
-                storage, reference, workspace_root, physical_hash);
+                storage, layout, reference, workspace_root, physical_hash);
             if (!verified) {
                 return std::unexpected(verified.error());
             }
         }
     }
-    return PublishedHeadMarker{.marker_id = marker_object(reference),
+    return PublishedHeadMarker{.marker_id = marker_object(layout, reference),
                                .physical_hash = std::move(physical_hash)};
 }
 
 std::expected<void, Error>
 verify_head_marker_impl(transport::Transport& storage,
+                        const RemoteLayout& layout,
                         const HeadReference& reference,
                         const std::filesystem::path& workspace_root,
                         std::string_view local_physical_hash) {
@@ -356,7 +372,7 @@ verify_head_marker_impl(transport::Transport& storage,
     }
     auto physical =
         verify_remote_physical_hash(storage,
-                                    marker_object(reference),
+                                    marker_object(layout, reference),
                                     local_physical_hash,
                                     "head remote hash verification");
     if (!physical) {
@@ -371,7 +387,7 @@ verify_head_marker_impl(transport::Transport& storage,
     }
     std::size_t sequence = 0;
     auto state = detail::inspect_marker(
-        storage, reference, (*temporary)->root, sequence);
+        storage, layout, reference, (*temporary)->root, sequence);
     if (!state) {
         return std::unexpected(state.error());
     }
@@ -384,6 +400,7 @@ verify_head_marker_impl(transport::Transport& storage,
 
 HeadMarkerInspection
 inspect_head_marker_impl(transport::Transport& storage,
+                         const RemoteLayout& layout,
                          const HeadReference& reference,
                          const std::filesystem::path& workspace_root) {
     if (!transport::valid(storage) || !valid(reference)) {
@@ -396,7 +413,7 @@ inspect_head_marker_impl(transport::Transport& storage,
     }
     std::size_t sequence = 0;
     auto state = detail::inspect_marker(
-        storage, reference, (*temporary)->root, sequence);
+        storage, layout, reference, (*temporary)->root, sequence);
     if (!state) {
         return std::unexpected(state.error());
     }
@@ -416,12 +433,37 @@ inspect_head_marker_impl(transport::Transport& storage,
 
 PublishObjectResult
 publish_commit_object(transport::Transport& storage,
+                      const RemoteLayout& layout,
                       std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                       const history::Commit& commit,
                       const std::filesystem::path& workspace_root) {
     try {
         return publish_commit_object_impl(
-            storage, key, commit, workspace_root, false);
+            storage, layout, key, commit, workspace_root, false);
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(
+            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
+    }
+}
+
+PublishObjectResult
+publish_commit_object(transport::Transport& storage,
+                      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                      const history::Commit& commit,
+                      const std::filesystem::path& workspace_root) {
+    return publish_commit_object(
+        storage, derive_remote_layout(key), key, commit, workspace_root);
+}
+
+PublishObjectResult publish_commit_object_scoped(
+    transport::Transport& storage,
+    const RemoteLayout& layout,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const history::Commit& commit,
+    const std::filesystem::path& workspace_root) {
+    try {
+        return publish_commit_object_impl(
+            storage, layout, key, commit, workspace_root, true);
     } catch (const std::bad_alloc&) {
         return std::unexpected(
             detail::error(ErrorCode::LimitExceeded, "allocation failed"));
@@ -433,9 +475,26 @@ PublishObjectResult publish_commit_object_scoped(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const history::Commit& commit,
     const std::filesystem::path& workspace_root) {
+    return publish_commit_object_scoped(
+        storage, derive_remote_layout(key), key, commit, workspace_root);
+}
+
+std::expected<void, Error>
+verify_commit_object(transport::Transport& storage,
+                     const RemoteLayout& layout,
+                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                     const history::Commit& commit,
+                     const HeadReference& reference,
+                     const std::filesystem::path& workspace_root,
+                     std::string_view local_physical_hash) {
     try {
-        return publish_commit_object_impl(
-            storage, key, commit, workspace_root, true);
+        return verify_commit_object_impl(storage,
+                                         layout,
+                                         key,
+                                         commit,
+                                         reference,
+                                         workspace_root,
+                                         local_physical_hash);
     } catch (const std::bad_alloc&) {
         return std::unexpected(
             detail::error(ErrorCode::LimitExceeded, "allocation failed"));
@@ -449,13 +508,23 @@ verify_commit_object(transport::Transport& storage,
                      const HeadReference& reference,
                      const std::filesystem::path& workspace_root,
                      std::string_view local_physical_hash) {
+    return verify_commit_object(storage,
+                                derive_remote_layout(key),
+                                key,
+                                commit,
+                                reference,
+                                workspace_root,
+                                local_physical_hash);
+}
+
+PublishHeadResult
+publish_head_marker(transport::Transport& storage,
+                    const RemoteLayout& layout,
+                    const HeadReference& reference,
+                    const std::filesystem::path& workspace_root) {
     try {
-        return verify_commit_object_impl(storage,
-                                         key,
-                                         commit,
-                                         reference,
-                                         workspace_root,
-                                         local_physical_hash);
+        return publish_head_marker_impl(
+            storage, layout, reference, workspace_root, false);
     } catch (const std::bad_alloc&) {
         return std::unexpected(
             detail::error(ErrorCode::LimitExceeded, "allocation failed"));
@@ -466,9 +535,18 @@ PublishHeadResult
 publish_head_marker(transport::Transport& storage,
                     const HeadReference& reference,
                     const std::filesystem::path& workspace_root) {
+    return publish_head_marker(
+        storage, default_remote_layout(), reference, workspace_root);
+}
+
+PublishHeadResult
+publish_head_marker_scoped(transport::Transport& storage,
+                           const RemoteLayout& layout,
+                           const HeadReference& reference,
+                           const std::filesystem::path& workspace_root) {
     try {
         return publish_head_marker_impl(
-            storage, reference, workspace_root, false);
+            storage, layout, reference, workspace_root, true);
     } catch (const std::bad_alloc&) {
         return std::unexpected(
             detail::error(ErrorCode::LimitExceeded, "allocation failed"));
@@ -479,9 +557,19 @@ PublishHeadResult
 publish_head_marker_scoped(transport::Transport& storage,
                            const HeadReference& reference,
                            const std::filesystem::path& workspace_root) {
+    return publish_head_marker_scoped(
+        storage, default_remote_layout(), reference, workspace_root);
+}
+
+std::expected<void, Error>
+verify_head_marker(transport::Transport& storage,
+                   const RemoteLayout& layout,
+                   const HeadReference& reference,
+                   const std::filesystem::path& workspace_root,
+                   std::string_view local_physical_hash) {
     try {
-        return publish_head_marker_impl(
-            storage, reference, workspace_root, true);
+        return verify_head_marker_impl(
+            storage, layout, reference, workspace_root, local_physical_hash);
     } catch (const std::bad_alloc&) {
         return std::unexpected(
             detail::error(ErrorCode::LimitExceeded, "allocation failed"));
@@ -493,9 +581,21 @@ verify_head_marker(transport::Transport& storage,
                    const HeadReference& reference,
                    const std::filesystem::path& workspace_root,
                    std::string_view local_physical_hash) {
+    return verify_head_marker(storage,
+                              default_remote_layout(),
+                              reference,
+                              workspace_root,
+                              local_physical_hash);
+}
+
+HeadMarkerInspection
+inspect_head_marker(transport::Transport& storage,
+                    const RemoteLayout& layout,
+                    const HeadReference& reference,
+                    const std::filesystem::path& workspace_root) {
     try {
-        return verify_head_marker_impl(
-            storage, reference, workspace_root, local_physical_hash);
+        return inspect_head_marker_impl(
+            storage, layout, reference, workspace_root);
     } catch (const std::bad_alloc&) {
         return std::unexpected(
             detail::error(ErrorCode::LimitExceeded, "allocation failed"));
@@ -506,25 +606,31 @@ HeadMarkerInspection
 inspect_head_marker(transport::Transport& storage,
                     const HeadReference& reference,
                     const std::filesystem::path& workspace_root) {
-    try {
-        return inspect_head_marker_impl(storage, reference, workspace_root);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    return inspect_head_marker(
+        storage, default_remote_layout(), reference, workspace_root);
+}
+
+std::string marker_identifier(const RemoteLayout& layout,
+                              const HeadReference& reference) {
+    return marker_object(layout, reference);
 }
 
 std::string marker_identifier(const HeadReference& reference) {
-    return marker_object(reference);
+    return marker_object(default_remote_layout(), reference);
 }
 
 std::expected<std::vector<std::string>, Error>
-list_remote_head_commit_ids(transport::Transport& storage) {
+list_remote_head_commit_ids(transport::Transport& storage,
+                            const RemoteLayout& layout) {
     if (!transport::valid(storage)) {
         return std::unexpected(
             detail::error(ErrorCode::InvalidInput, "invalid transport"));
     }
-    auto listing = transport::list(storage, detail::heads_prefix);
+    const auto heads_dir =
+        layout.heads_prefix.ends_with('/')
+            ? layout.heads_prefix.substr(0, layout.heads_prefix.size() - 1)
+            : layout.heads_prefix;
+    auto listing = transport::list(storage, heads_dir);
     if (!listing) {
         if (listing.error().code == transport::ErrorCode::StorageNotFound) {
             return std::vector<std::string>{};
@@ -533,11 +639,11 @@ list_remote_head_commit_ids(transport::Transport& storage) {
     }
     std::vector<std::string> heads;
     for (const auto& name : *listing) {
-        const auto object_path = std::string{detail::heads_prefix} + name;
-        if (maintenance_protocol::is_control_object(object_path)) {
+        const auto object_path = layout.heads_prefix + name;
+        if (maintenance_protocol::is_control_object(layout, object_path)) {
             continue;
         }
-        auto ref = parse_marker_object(object_path);
+        auto ref = parse_marker_object(layout, object_path);
         if (ref) {
             heads.push_back(ref->commit_id);
         }
@@ -545,6 +651,11 @@ list_remote_head_commit_ids(transport::Transport& storage) {
     std::ranges::sort(heads);
     heads.erase(std::ranges::unique(heads).begin(), heads.end());
     return heads;
+}
+
+std::expected<std::vector<std::string>, Error>
+list_remote_head_commit_ids(transport::Transport& storage) {
+    return list_remote_head_commit_ids(storage, default_remote_layout());
 }
 
 } // namespace kasumi::application::history_storage

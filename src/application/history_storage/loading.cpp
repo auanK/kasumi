@@ -138,12 +138,21 @@ std::expected<void, Error> download(transport::Transport& storage,
 
 std::expected<void, Error>
 download_commit_candidate(transport::Transport& storage,
+                          const RemoteLayout& layout,
                           const HeadReference& reference,
                           const std::filesystem::path& destination) {
     remove_file(destination);
     const auto get_trace = platform::perf_trace::begin();
     auto result =
-        transport::get(storage, commit_object(reference), destination);
+        transport::get(storage, commit_object(layout, reference), destination);
+    if (!result &&
+        result.error().code == transport::ErrorCode::ObjectNotFound) {
+        const auto legacy_obj =
+            commit_object(default_remote_layout(), reference);
+        if (legacy_obj != commit_object(layout, reference)) {
+            result = transport::get(storage, legacy_obj, destination);
+        }
+    }
     platform::perf_trace::finish("rc/get_commit", get_trace);
     if (!result) {
         if (result.error().code == transport::ErrorCode::ObjectNotFound) {
@@ -155,8 +164,17 @@ download_commit_candidate(transport::Transport& storage,
     return {};
 }
 
+std::expected<void, Error>
+download_commit_candidate(transport::Transport& storage,
+                          const HeadReference& reference,
+                          const std::filesystem::path& destination) {
+    return download_commit_candidate(
+        storage, default_remote_layout(), reference, destination);
+}
+
 std::expected<MarkerState, Error>
 inspect_marker(transport::Transport& storage,
+               const RemoteLayout& layout,
                const HeadReference& reference,
                const std::filesystem::path& workspace,
                std::size_t& sequence) {
@@ -164,8 +182,16 @@ inspect_marker(transport::Transport& storage,
         workspace / ("marker-inspect-" + std::to_string(sequence++));
     remove_file(path);
     const auto get_trace = platform::perf_trace::begin();
-    const auto fetched =
-        transport::get(storage, marker_object(reference), path);
+    auto fetched =
+        transport::get(storage, marker_object(layout, reference), path);
+    if (!fetched &&
+        fetched.error().code == transport::ErrorCode::ObjectNotFound) {
+        const auto legacy_obj =
+            marker_object(default_remote_layout(), reference);
+        if (legacy_obj != marker_object(layout, reference)) {
+            fetched = transport::get(storage, legacy_obj, path);
+        }
+    }
     platform::perf_trace::finish("rc/get_marker", get_trace);
     if (!fetched) {
         remove_file(path);
@@ -189,6 +215,15 @@ inspect_marker(transport::Transport& storage,
     const auto decoded = decode_marker(*bytes);
     return decoded && *decoded == reference ? MarkerState::Valid
                                             : MarkerState::Invalid;
+}
+
+std::expected<MarkerState, Error>
+inspect_marker(transport::Transport& storage,
+               const HeadReference& reference,
+               const std::filesystem::path& workspace,
+               std::size_t& sequence) {
+    return inspect_marker(
+        storage, default_remote_layout(), reference, workspace, sequence);
 }
 
 std::expected<bool, Error> ciphertext_matches(const std::filesystem::path& path,
@@ -232,6 +267,7 @@ validate_ciphertext_size(const std::filesystem::path& path) {
 
 VariantResult
 try_load_variant(transport::Transport& storage,
+                 const RemoteLayout& layout,
                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                  const HeadReference& reference,
                  const std::filesystem::path& workspace,
@@ -259,7 +295,7 @@ try_load_variant(transport::Transport& storage,
 
     if (!std::filesystem::is_regular_file(ciphertext, prefetched_error)) {
         auto downloaded =
-            download_commit_candidate(storage, reference, ciphertext);
+            download_commit_candidate(storage, layout, reference, ciphertext);
         if (!downloaded) {
             if (downloaded.error().code == ErrorCode::MissingCommit) {
                 remove_file(ciphertext);
@@ -325,8 +361,23 @@ try_load_variant(transport::Transport& storage,
                                         .commit = std::move(*commit)}};
 }
 
+VariantResult
+try_load_variant(transport::Transport& storage,
+                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                 const HeadReference& reference,
+                 const std::filesystem::path& workspace,
+                 std::size_t sequence) {
+    return try_load_variant(storage,
+                            derive_remote_layout(key),
+                            key,
+                            reference,
+                            workspace,
+                            sequence);
+}
+
 std::expected<history::LoadedCommit, Error>
 try_load_variants(transport::Transport& storage,
+                  const RemoteLayout& layout,
                   std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                   std::vector<HeadReference> references,
                   const std::filesystem::path& workspace,
@@ -340,8 +391,8 @@ try_load_variants(transport::Transport& storage,
     bool saw_invalid_commit = false;
     sort_unique(references);
     for (const auto& reference : references) {
-        auto loaded =
-            try_load_variant(storage, key, reference, workspace, sequence++);
+        auto loaded = try_load_variant(
+            storage, layout, key, reference, workspace, sequence++);
         if (!loaded) {
             return std::unexpected(loaded.error());
         }
@@ -377,15 +428,32 @@ try_load_variants(transport::Transport& storage,
         error(ErrorCode::MissingCommit, "commit object is missing"));
 }
 
+std::expected<history::LoadedCommit, Error>
+try_load_variants(transport::Transport& storage,
+                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                  std::vector<HeadReference> references,
+                  const std::filesystem::path& workspace,
+                  std::size_t& sequence,
+                  HeadReference* authenticated_reference) {
+    return try_load_variants(storage,
+                             derive_remote_layout(key),
+                             key,
+                             std::move(references),
+                             workspace,
+                             sequence,
+                             authenticated_reference);
+}
+
 std::expected<void, Error>
 verify_published_commit(transport::Transport& storage,
+                        const RemoteLayout& layout,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         const history::Commit& expected,
                         const HeadReference& reference,
                         const std::filesystem::path& workspace,
                         std::size_t& sequence) {
-    auto loaded =
-        try_load_variant(storage, key, reference, workspace, sequence++);
+    auto loaded = try_load_variant(
+        storage, layout, key, reference, workspace, sequence++);
     if (!loaded) {
         return std::unexpected(loaded.error());
     }
@@ -402,10 +470,30 @@ verify_published_commit(transport::Transport& storage,
     return {};
 }
 
+std::expected<void, Error>
+verify_published_commit(transport::Transport& storage,
+                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                        const history::Commit& expected,
+                        const HeadReference& reference,
+                        const std::filesystem::path& workspace,
+                        std::size_t& sequence) {
+    return verify_published_commit(storage,
+                                   derive_remote_layout(key),
+                                   key,
+                                   expected,
+                                   reference,
+                                   workspace,
+                                   sequence);
+}
+
 std::expected<HistoryInventory, Error>
-build_scoped_history_inventory(transport::Transport& storage) {
-    auto listing = transport::list(
-        storage, heads_prefix.substr(0, heads_prefix.size() - 1));
+build_scoped_history_inventory(transport::Transport& storage,
+                               const RemoteLayout& layout) {
+    const auto heads_dir =
+        layout.heads_prefix.ends_with('/')
+            ? layout.heads_prefix.substr(0, layout.heads_prefix.size() - 1)
+            : layout.heads_prefix;
+    auto listing = transport::list(storage, heads_dir);
     if (!listing) {
         if (listing.error().code == transport::ErrorCode::StorageNotFound) {
             return HistoryInventory{};
@@ -415,11 +503,13 @@ build_scoped_history_inventory(transport::Transport& storage) {
 
     HistoryInventory inventory;
     for (const auto& name : *listing) {
-        const auto identifier = std::string{heads_prefix} + name;
-        if (maintenance_protocol::is_control_object(identifier)) {
+        const auto identifier = name.starts_with(layout.heads_prefix)
+                                    ? name
+                                    : layout.heads_prefix + name;
+        if (is_control_object(layout, identifier)) {
             continue;
         }
-        auto reference = parse_marker_object(identifier);
+        auto reference = parse_marker_object(layout, identifier);
         if (!reference) {
             continue;
         }
@@ -448,13 +538,14 @@ build_scoped_history_inventory(transport::Transport& storage) {
 
 std::expected<void, Error>
 discover_scoped_commit_variants(transport::Transport& storage,
+                                const RemoteLayout& layout,
                                 std::string_view commit_id,
                                 HistoryInventory& inventory) {
     if (!valid_hex_id(commit_id)) {
         return std::unexpected(
             error(ErrorCode::InvalidIdentifier, "invalid commit identifier"));
     }
-    const auto prefix = std::string{commit_prefix} + std::string{commit_id};
+    const auto prefix = layout.commits_prefix + std::string{commit_id};
     auto listing = transport::list(storage, prefix);
     if (!listing) {
         if (listing.error().code == transport::ErrorCode::StorageNotFound) {
@@ -466,7 +557,7 @@ discover_scoped_commit_variants(transport::Transport& storage,
     auto& variants = inventory.commit_variants[std::string{commit_id}];
     for (const auto& name : *listing) {
         const auto identifier = prefix + "/" + name;
-        auto reference = parse_commit_object(identifier);
+        auto reference = parse_commit_object(layout, identifier);
         if (!reference || reference->commit_id != commit_id) {
             continue;
         }
@@ -508,15 +599,16 @@ LoadResult load_impl(transport::Transport& storage,
     if (!temporary) {
         return std::unexpected(temporary.error());
     }
+    const auto layout = derive_remote_layout(key);
     const auto listing_trace = platform::perf_trace::begin();
     const auto scoped_head_trace =
         scoped ? platform::perf_trace::begin() : platform::perf_trace::Token{};
     auto inventory = [&]() {
         if (scoped) {
-            return build_scoped_history_inventory(storage);
+            return build_scoped_history_inventory(storage, layout);
         }
-        return identifiers ? build_history_inventory(*identifiers)
-                           : build_history_inventory(storage);
+        return identifiers ? build_history_inventory(*identifiers, layout)
+                           : build_history_inventory(storage, layout);
     }();
     platform::perf_trace::finish("history listing", listing_trace);
     if (scoped) {
@@ -529,9 +621,12 @@ LoadResult load_impl(transport::Transport& storage,
         return std::unexpected(inventory.error());
     }
     if (native_complete_batch) {
+        const auto commits_dir = layout.commits_prefix.ends_with('/')
+                                     ? layout.commits_prefix.substr(
+                                           0, layout.commits_prefix.size() - 1)
+                                     : layout.commits_prefix;
         transport::GetBatch batch{
-            .source_prefix =
-                std::string{commit_prefix.substr(0, commit_prefix.size() - 1)},
+            .source_prefix = commits_dir,
             .destination_root = (*temporary)->root,
         };
         for (const auto& [unused, references] : inventory->commit_variants) {
@@ -602,13 +697,16 @@ LoadResult load_impl(transport::Transport& storage,
     std::size_t sequence = 0;
     for (const auto& [commit_id, references] : inventory->marker_variants) {
         for (const auto& reference : references) {
-            const auto marker_id = marker_object(reference);
+            const auto marker_id = marker_object(layout, reference);
             auto state =
                 std::ranges::find(trusted_marker_identifiers, marker_id) !=
                         trusted_marker_identifiers.end()
                     ? std::expected<MarkerState, Error>{MarkerState::Valid}
-                    : inspect_marker(
-                          storage, reference, (*temporary)->root, sequence);
+                    : inspect_marker(storage,
+                                     layout,
+                                     reference,
+                                     (*temporary)->root,
+                                     sequence);
             if (!state) {
                 return std::unexpected(state.error());
             }
@@ -667,8 +765,8 @@ LoadResult load_impl(transport::Transport& storage,
 
         const auto marker_found = marker_candidates.find(commit_id);
         if (scoped && marker_found == marker_candidates.end()) {
-            auto discovered =
-                discover_scoped_commit_variants(storage, commit_id, *inventory);
+            auto discovered = discover_scoped_commit_variants(
+                storage, layout, commit_id, *inventory);
             if (!discovered) {
                 return std::unexpected(discovered.error());
             }
@@ -691,6 +789,7 @@ LoadResult load_impl(transport::Transport& storage,
 
         HeadReference authenticated_reference;
         auto commit = try_load_variants(storage,
+                                        layout,
                                         key,
                                         variants_for_attempt(),
                                         (*temporary)->root,
@@ -700,12 +799,13 @@ LoadResult load_impl(transport::Transport& storage,
             (commit.error().code == ErrorCode::MissingCommit ||
              commit.error().code == ErrorCode::InvalidCiphertext ||
              commit.error().code == ErrorCode::InvalidCommit)) {
-            auto discovered =
-                discover_scoped_commit_variants(storage, commit_id, *inventory);
+            auto discovered = discover_scoped_commit_variants(
+                storage, layout, commit_id, *inventory);
             if (!discovered) {
                 return std::unexpected(discovered.error());
             }
             commit = try_load_variants(storage,
+                                       layout,
                                        key,
                                        variants_for_attempt(),
                                        (*temporary)->root,
@@ -825,7 +925,8 @@ LoadResult load_impl(transport::Transport& storage,
         static_cast<void>(unused);
         result.marked_heads.push_back(commit_id);
         for (const auto& reference : marker_candidates.at(commit_id)) {
-            result.marked_head_identifiers.push_back(marker_object(reference));
+            result.marked_head_identifiers.push_back(
+                marker_object(layout, reference));
         }
     }
     std::ranges::sort(result.marked_head_identifiers);

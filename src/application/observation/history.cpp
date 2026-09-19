@@ -94,28 +94,27 @@ validate_workspace_root(const std::filesystem::path& root) {
         if (filesystem_error == std::errc::no_such_file_or_directory) {
             return std::unexpected(
                 Error{.code = ErrorCode::WorkspaceFailure,
-                      .detail = "a raiz do espaço de trabalho não existe"});
+                      .detail = "workspace root does not exist"});
         }
-        return std::unexpected(Error{
-            .code = ErrorCode::WorkspaceFailure,
-            .detail =
-                "não foi possível inspecionar a raiz do espaço de trabalho: " +
-                filesystem_error.message()});
+        return std::unexpected(
+            Error{.code = ErrorCode::WorkspaceFailure,
+                  .detail = "could not inspect workspace root: " +
+                            filesystem_error.message()});
     }
     if (std::filesystem::is_symlink(status)) {
-        return std::unexpected(Error{
-            .code = ErrorCode::WorkspaceFailure,
-            .detail = "a raiz do espaço de trabalho é um link simbólico"});
+        return std::unexpected(
+            Error{.code = ErrorCode::WorkspaceFailure,
+                  .detail = "workspace root is a symbolic link"});
     }
     if (!std::filesystem::exists(status)) {
         return std::unexpected(
             Error{.code = ErrorCode::WorkspaceFailure,
-                  .detail = "a raiz do espaço de trabalho não existe"});
+                  .detail = "workspace root does not exist"});
     }
     if (!std::filesystem::is_directory(status)) {
         return std::unexpected(
             Error{.code = ErrorCode::WorkspaceFailure,
-                  .detail = "a raiz do espaço de trabalho não é um diretório"});
+                  .detail = "workspace root is not a directory"});
     }
     return {};
 }
@@ -137,7 +136,7 @@ ancestral_heads(const std::vector<std::string>& marked,
         !std::ranges::includes(marked, logical)) {
         return std::unexpected(Error{
             .code = ErrorCode::ResolutionFailure,
-            .detail = "resolução possui heads inválidas",
+            .detail = "resolution has invalid heads",
         });
     }
 
@@ -156,7 +155,7 @@ validate_resolution(const kasumi::history::Resolution& resolution,
                                   std::numeric_limits<std::uint64_t>::max()
                               ? ErrorCode::LimitExceeded
                               : ErrorCode::ResolutionFailure,
-                  .detail = "resolução produz uma árvore ou altura inválida"});
+                  .detail = "resolution produces an invalid tree or height"});
     }
     auto ancestors = ancestral_heads(marked, resolution.heads);
     if (!ancestors) {
@@ -176,7 +175,7 @@ collect_content_identifiers(std::span<const std::string> identifiers,
     if (!collect_content_identifiers_into(identifiers, maximum_count, result)) {
         return std::unexpected(Error{
             .code = ErrorCode::LimitExceeded,
-            .detail = "muitos identificadores de conteúdo",
+            .detail = "too many content identifiers",
         });
     }
     return result;
@@ -193,7 +192,7 @@ ObserveResult observe(transport::Transport& storage,
                       bool complete_history) {
     try {
         if (!transport::valid(storage)) {
-            return std::unexpected(invalid_input("transport inválido"));
+            return std::unexpected(invalid_input("invalid transport"));
         }
 
         if (auto workspace = validate_workspace_root(workspace_root);
@@ -342,7 +341,7 @@ ObserveResult observe(transport::Transport& storage,
         return result;
     } catch (const std::bad_alloc&) {
         return std::unexpected(Error{.code = ErrorCode::LimitExceeded,
-                                     .detail = "falha de alocação de memória"});
+                                     .detail = "memory allocation failure"});
     } catch (const std::exception& exception) {
         return std::unexpected(Error{.code = ErrorCode::HistoryStorageFailure,
                                      .detail = exception.what()});

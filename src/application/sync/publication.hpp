@@ -72,11 +72,25 @@ prepare_commit(Snapshot tree,
 // Publishes only the encrypted commit object.
 PublishObjectResult
 publish_commit_object(transport::Transport& storage,
+                      const history_storage::RemoteLayout& layout,
+                      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                      const PreparedCommit& prepared,
+                      const std::filesystem::path& workspace_root);
+PublishObjectResult
+publish_commit_object(transport::Transport& storage,
                       std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                       const PreparedCommit& prepared,
                       const std::filesystem::path& workspace_root);
 
 // Confirms integrity of the published object.
+std::expected<void, Error>
+verify_commit_object(transport::Transport& storage,
+                     const history_storage::RemoteLayout& layout,
+                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                     const PreparedCommit& prepared,
+                     const history_storage::HeadReference& reference,
+                     const std::filesystem::path& workspace_root,
+                     std::string_view local_physical_hash = {});
 std::expected<void, Error>
 verify_commit_object(transport::Transport& storage,
                      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
@@ -88,10 +102,21 @@ verify_commit_object(transport::Transport& storage,
 // Publishes the marker that makes the commit visible.
 PublishHeadResult
 publish_head_marker(transport::Transport& storage,
+                    const history_storage::RemoteLayout& layout,
+                    const history_storage::HeadReference& reference,
+                    const std::filesystem::path& workspace_root);
+PublishHeadResult
+publish_head_marker(transport::Transport& storage,
                     const history_storage::HeadReference& reference,
                     const std::filesystem::path& workspace_root);
 
 // Confirms integrity of the published marker.
+std::expected<void, Error>
+verify_head_marker(transport::Transport& storage,
+                   const history_storage::RemoteLayout& layout,
+                   const history_storage::HeadReference& reference,
+                   const std::filesystem::path& workspace_root,
+                   std::string_view local_physical_hash = {});
 std::expected<void, Error>
 verify_head_marker(transport::Transport& storage,
                    const history_storage::HeadReference& reference,
@@ -99,6 +124,11 @@ verify_head_marker(transport::Transport& storage,
                    std::string_view local_physical_hash = {});
 
 // Inspects the current state of a marker.
+HeadMarkerInspection
+inspect_head_marker(transport::Transport& storage,
+                    const history_storage::RemoteLayout& layout,
+                    const history_storage::HeadReference& reference,
+                    const std::filesystem::path& workspace_root);
 HeadMarkerInspection
 inspect_head_marker(transport::Transport& storage,
                     const history_storage::HeadReference& reference,
@@ -125,6 +155,11 @@ PruneMarkersResult prune_current_ancestral_markers(
     const std::filesystem::path& workspace_root);
 
 // Prunes only markers present in the plan's observation.
+PruneMarkersResult prune_observed_parent_markers(
+    transport::Transport& storage,
+    const history_storage::RemoteLayout& layout,
+    std::span<const std::string> parent_ids,
+    std::span<const std::string> observed_marker_identifiers);
 PruneMarkersResult prune_observed_parent_markers(
     transport::Transport& storage,
     std::span<const std::string> parent_ids,

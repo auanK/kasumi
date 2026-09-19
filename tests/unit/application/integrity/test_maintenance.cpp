@@ -1,6 +1,7 @@
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/maintenance.hpp"
 #include "core/maintenance.hpp"
 #include "kasumi/test/history_storage.hpp"
@@ -21,6 +22,12 @@ namespace protocol = kasumi::application::history_storage::maintenance_protocol;
 using IntegrityErrorCode = kasumi::application::integrity::ErrorCode;
 using kasumi::runtime::RuntimeData;
 using kasumi::transport::Presence;
+
+inline const auto& test_layout() {
+    static const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    return layout;
+}
 
 RuntimeData runtime_data(TempWorkspace& workspace) {
     const auto local = kasumi::test::workspace_path(workspace, "local");
@@ -140,9 +147,10 @@ TEST(IntegrityMaintenanceTest,
     const auto loose_content =
         put_content(storage.transport, storage.workspace, "loose", "loose");
     const auto orphan_content_quarantine =
-        protocol::quarantine_identifier(orphan_content).value();
+        protocol::quarantine_identifier(test_layout(), orphan_content).value();
     const auto orphan_commit_quarantine =
-        protocol::quarantine_identifier(object_path(orphan_published.head))
+        protocol::quarantine_identifier(test_layout(),
+                                        object_path(orphan_published.head))
             .value();
 
     const auto collected = kasumi::application::integrity::garbage_collect(
@@ -168,9 +176,10 @@ TEST(IntegrityMaintenanceTest,
                     Presence::Absent);
     expect_presence(
         storage.transport, orphan_content_quarantine, Presence::Present);
-    expect_presence(storage.transport,
-                    protocol::quarantine_identifier(loose_content).value(),
-                    Presence::Present);
+    expect_presence(
+        storage.transport,
+        protocol::quarantine_identifier(test_layout(), loose_content).value(),
+        Presence::Present);
     expect_presence(
         storage.transport, orphan_commit_quarantine, Presence::Present);
 
@@ -341,7 +350,8 @@ TEST(IntegrityMaintenanceTest,
             .value(),
         kasumi::transport::Removal::Removed);
     const auto quarantined =
-        protocol::quarantine_identifier(object_path(redundant)).value();
+        protocol::quarantine_identifier(test_layout(), object_path(redundant))
+            .value();
 
     const auto collected = kasumi::application::integrity::garbage_collect(
         runtime, storage.transport, test_key());
@@ -438,7 +448,8 @@ TEST(IntegrityMaintenanceTest, PurgesOnlyAfterTenDaysAndAnotherCollection) {
                    kasumi::history::make_empty_bootstrap().value());
     const auto orphan =
         put_content(storage.transport, storage.workspace, "orphan", "orphan");
-    const auto quarantined = protocol::quarantine_identifier(orphan).value();
+    const auto quarantined =
+        protocol::quarantine_identifier(test_layout(), orphan).value();
 
     const auto first = kasumi::application::integrity::garbage_collect(
         runtime, storage.transport, test_key());
@@ -529,7 +540,7 @@ TEST(IntegrityMaintenanceTest,
     hide(object_path(concurrent_published.head));
     hide(marker_path(concurrent_published.head));
     hide(concurrent_content);
-    state->reveal_on_list_count = state->list_count + 9;
+    state->reveal_on_list_count = state->list_count + 13;
 
     const auto collected = kasumi::application::integrity::garbage_collect(
         runtime, transport, test_key());
@@ -537,9 +548,10 @@ TEST(IntegrityMaintenanceTest,
     EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange);
     expect_presence(transport, orphan, Presence::Present);
     expect_presence(transport, concurrent_content, Presence::Present);
-    expect_presence(transport,
-                    protocol::quarantine_identifier(orphan).value(),
-                    Presence::Absent);
+    expect_presence(
+        transport,
+        protocol::quarantine_identifier(test_layout(), orphan).value(),
+        Presence::Absent);
 }
 
 TEST(IntegrityMaintenanceTest, ActiveOrAbandonedWriterBlocksCollection) {
@@ -559,9 +571,10 @@ TEST(IntegrityMaintenanceTest, ActiveOrAbandonedWriterBlocksCollection) {
     ASSERT_FALSE(collected.has_value());
     EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange);
     expect_presence(storage.transport, orphan, Presence::Present);
-    expect_presence(storage.transport,
-                    protocol::quarantine_identifier(orphan).value(),
-                    Presence::Absent);
+    expect_presence(
+        storage.transport,
+        protocol::quarantine_identifier(test_layout(), orphan).value(),
+        Presence::Absent);
     ASSERT_TRUE(protocol::release_registration(*writer));
 }
 
@@ -792,9 +805,10 @@ TEST(IntegrityMaintenanceTest, UnsafeBackendRunsAnalysisWithoutQuarantine) {
     EXPECT_EQ(collected->candidate_objects, 1U);
     EXPECT_EQ(collected->quarantined_objects, 0U);
     expect_presence(transport, orphan, Presence::Present);
-    expect_presence(transport,
-                    protocol::quarantine_identifier(orphan).value(),
-                    Presence::Absent);
+    expect_presence(
+        transport,
+        protocol::quarantine_identifier(test_layout(), orphan).value(),
+        Presence::Absent);
 }
 
 TEST(IntegrityMaintenanceTest,
@@ -834,9 +848,10 @@ TEST(IntegrityMaintenanceTest, LostBarrierBeforeRemovalPreservesTheOriginal) {
     ASSERT_FALSE(collected.has_value());
     EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange);
     expect_presence(transport, orphan, Presence::Present);
-    expect_presence(transport,
-                    protocol::quarantine_identifier(orphan).value(),
-                    Presence::Present);
+    expect_presence(
+        transport,
+        protocol::quarantine_identifier(test_layout(), orphan).value(),
+        Presence::Present);
 }
 
 TEST(IntegrityMaintenanceTest, UnknownControlObjectFailsClosed) {
@@ -858,9 +873,10 @@ TEST(IntegrityMaintenanceTest, UnknownControlObjectFailsClosed) {
     ASSERT_FALSE(collected.has_value());
     EXPECT_EQ(collected.error().code, IntegrityErrorCode::IntegrityFailure);
     expect_presence(storage.transport, orphan, Presence::Present);
-    expect_presence(storage.transport,
-                    protocol::quarantine_identifier(orphan).value(),
-                    Presence::Absent);
+    expect_presence(
+        storage.transport,
+        protocol::quarantine_identifier(test_layout(), orphan).value(),
+        Presence::Absent);
 }
 
 TEST(IntegrityMaintenanceTest, InvalidRetentionMetadataPreservesQuarantine) {
@@ -871,7 +887,8 @@ TEST(IntegrityMaintenanceTest, InvalidRetentionMetadataPreservesQuarantine) {
                    kasumi::history::make_empty_bootstrap().value());
     const auto orphan =
         put_content(storage.transport, storage.workspace, "orphan", "orphan");
-    const auto quarantined = protocol::quarantine_identifier(orphan).value();
+    const auto quarantined =
+        protocol::quarantine_identifier(test_layout(), orphan).value();
     ASSERT_TRUE(kasumi::application::integrity::garbage_collect(
         runtime, storage.transport, test_key()));
 
@@ -897,7 +914,8 @@ TEST(IntegrityMaintenanceTest, InterruptedPurgeRestartsRetention) {
     publish_remote(
         transport, workspace, kasumi::history::make_empty_bootstrap().value());
     const auto orphan = put_content(transport, workspace, "orphan", "orphan");
-    const auto quarantined = protocol::quarantine_identifier(orphan).value();
+    const auto quarantined =
+        protocol::quarantine_identifier(test_layout(), orphan).value();
     ASSERT_TRUE(kasumi::application::integrity::garbage_collect(
         runtime, transport, test_key()));
     auto aged =
@@ -932,7 +950,8 @@ TEST(IntegrityMaintenanceTest, InterruptedMoveResumesIdempotently) {
     publish_remote(
         transport, workspace, kasumi::history::make_empty_bootstrap().value());
     const auto orphan = put_content(transport, workspace, "orphan", "orphan");
-    const auto quarantined = protocol::quarantine_identifier(orphan).value();
+    const auto quarantined =
+        protocol::quarantine_identifier(test_layout(), orphan).value();
     state->fail_remove_at = 2;
 
     const auto interrupted = kasumi::application::integrity::garbage_collect(
@@ -1009,7 +1028,7 @@ TEST(IntegrityMaintenanceTest, FinalListingDetectsLateConcurrentChange) {
     hide(object_path(concurrent_published.head));
     hide(marker_path(concurrent_published.head));
     hide(concurrent_content);
-    state->reveal_on_list_count = state->list_count + 10;
+    state->reveal_on_list_count = state->list_count + 14;
 
     const auto collected = kasumi::application::integrity::garbage_collect(
         runtime, transport, test_key());
@@ -1041,9 +1060,10 @@ TEST(IntegrityMaintenanceTest,
         kasumi::transport::Removal::Removed);
     const auto orphan_content = put_content(transport, workspace, "old", "old");
     const auto orphan_content_quarantine =
-        protocol::quarantine_identifier(orphan_content).value();
+        protocol::quarantine_identifier(test_layout(), orphan_content).value();
     const auto orphan_commit_quarantine =
-        protocol::quarantine_identifier(object_path(orphan_published.head))
+        protocol::quarantine_identifier(test_layout(),
+                                        object_path(orphan_published.head))
             .value();
 
     const auto collected = kasumi::application::integrity::garbage_collect(

@@ -1,6 +1,7 @@
 #include "application/sync/coordinator.hpp"
 
 #include "application/history_storage/epoch.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "application/observation/scanner.hpp"
 #include "application/sync/journal.hpp"
 #include "application/sync/metadata.hpp"
@@ -1335,11 +1336,12 @@ execute(const runtime::RuntimeData& runtime_data,
                 std::launch::async,
                 [&storage,
                  key,
+                 layout = history_storage::derive_remote_layout(key),
                  publication_workspace,
                  prepared = &*prepared_commit]() {
                     const auto commit_put_trace = platform::perf_trace::begin();
                     auto published = publication::publish_commit_object(
-                        storage, key, *prepared, publication_workspace);
+                        storage, layout, key, *prepared, publication_workspace);
                     platform::perf_trace::finish("commit PUT",
                                                  commit_put_trace);
                     if (!published)
@@ -1348,6 +1350,7 @@ execute(const runtime::RuntimeData& runtime_data,
                         platform::perf_trace::begin();
                     auto verified = publication::verify_commit_object(
                         storage,
+                        layout,
                         key,
                         *prepared,
                         published->head,
@@ -1898,10 +1901,19 @@ execute(const runtime::RuntimeData& runtime_data,
             if (it != observed_input.storage.marked_heads.end()) {
                 for (const auto& identifier :
                      observed_input.storage.marked_head_identifiers) {
-                    const auto parsed =
-                        history_storage::parse_marker_object(identifier);
+                    const auto layout =
+                        history_storage::derive_remote_layout(key);
+                    const auto parsed = history_storage::parse_marker_object(
+                        layout, identifier);
                     if (parsed && parsed->commit_id == found->id) {
                         ff_ciphertext_id = parsed->ciphertext_id;
+                        break;
+                    }
+                    const auto legacy_parsed =
+                        history_storage::parse_marker_object(identifier);
+                    if (legacy_parsed &&
+                        legacy_parsed->commit_id == found->id) {
+                        ff_ciphertext_id = legacy_parsed->ciphertext_id;
                         break;
                     }
                 }
@@ -1984,13 +1996,20 @@ execute(const runtime::RuntimeData& runtime_data,
     if (!saved)
         return std::unexpected(saved.error());
 
+    const auto layout = history_storage::derive_remote_layout(key);
     const auto head_put_trace = platform::perf_trace::begin();
     auto marker_published = publication::publish_head_marker(
-        storage, published->head, runtime_data.database_path.parent_path());
+        storage,
+        layout,
+        published->head,
+        runtime_data.database_path.parent_path());
     platform::perf_trace::finish("head PUT", head_put_trace);
     if (!marker_published) {
         auto inspected = publication::inspect_head_marker(
-            storage, published->head, runtime_data.database_path.parent_path());
+            storage,
+            layout,
+            published->head,
+            runtime_data.database_path.parent_path());
         if (!inspected) {
             return std::unexpected(detail::indeterminate_publication(
                 inspected.error(), "head marker publication"));
@@ -2010,6 +2029,7 @@ execute(const runtime::RuntimeData& runtime_data,
     const auto head_verification_trace = platform::perf_trace::begin();
     auto head_verified = publication::verify_head_marker(
         storage,
+        layout,
         published->head,
         runtime_data.database_path.parent_path(),
         marker_published ? marker_published->physical_hash
@@ -2024,7 +2044,10 @@ execute(const runtime::RuntimeData& runtime_data,
             return std::unexpected(publication_error(head_verified.error()));
         }
         auto inspected = publication::inspect_head_marker(
-            storage, published->head, runtime_data.database_path.parent_path());
+            storage,
+            layout,
+            published->head,
+            runtime_data.database_path.parent_path());
         if (!inspected) {
             return std::unexpected(detail::indeterminate_publication(
                 inspected.error(), "head marker verification"));
@@ -2056,7 +2079,7 @@ execute(const runtime::RuntimeData& runtime_data,
             return std::unexpected(saved.error());
 
         auto epoch_published = history_storage::epoch::publish(
-            storage, *epoch, runtime_data.database_path.parent_path());
+            storage, key, *epoch, runtime_data.database_path.parent_path());
         if (!epoch_published) {
             auto visible = history_storage::epoch::verify(
                 storage,
@@ -2133,7 +2156,10 @@ execute(const runtime::RuntimeData& runtime_data,
                     .previous_epoch_id = observed_input.storage.epoch_id};
 
                 auto epoch_published = history_storage::epoch::publish(
-                    storage, *epoch, runtime_data.database_path.parent_path());
+                    storage,
+                    key,
+                    *epoch,
+                    runtime_data.database_path.parent_path());
                 if (!epoch_published) {
                     auto visible = history_storage::epoch::verify(
                         storage,
@@ -2215,6 +2241,7 @@ execute(const runtime::RuntimeData& runtime_data,
     const auto cleanup_trace = platform::perf_trace::begin();
     auto post_prune = publication::prune_observed_parent_markers(
         storage,
+        layout,
         observed_cleanup_ids,
         observed_input.storage.marked_head_identifiers);
     platform::perf_trace::finish("marker cleanup", cleanup_trace);

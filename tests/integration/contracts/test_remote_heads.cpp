@@ -386,6 +386,7 @@ TEST(RemoteHeadsContractTest,
     ASSERT_TRUE(sealed_epoch.has_value());
     ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
         remote.transport,
+        test_key(),
         *sealed_epoch,
         kasumi::test::workspace_root(remote.workspace)));
     const auto before = kasumi::transport::list(remote.transport);

@@ -154,8 +154,8 @@ kasumi::transport::Result recording_put(void* context,
                                         std::string_view identifier) {
     auto* state = recording_state(context);
     auto* probe = state->probe;
-    const bool content = !identifier.starts_with("history/");
-    const bool commit = identifier.starts_with("history/commits/");
+    const bool content = identifier.find('/') == std::string_view::npos;
+    const bool commit = identifier.ends_with(".kcom");
 
     if (!content) {
         record_event(*state, "put:" + std::string{identifier});
@@ -305,14 +305,14 @@ std::expected<std::string, kasumi::transport::Error> recording_physical_hash(
 
     if (probe != nullptr) {
         std::unique_lock lock(probe->mutex);
-        if (!identifier.starts_with("history/")) {
+        if (identifier.find('/') == std::string_view::npos) {
             ++probe->content_physical_hash_calls;
         }
         ++probe->active;
         ++probe->physical_hash_started;
         probe->peak_active = std::max(probe->peak_active, probe->active);
         probe->changed.notify_all();
-        if (!identifier.starts_with("history/") &&
+        if (identifier.find('/') == std::string_view::npos &&
             probe->barrier_first_two_hashes &&
             probe->content_physical_hash_calls <= 2) {
             probe->changed.wait_until(
@@ -326,7 +326,7 @@ std::expected<std::string, kasumi::transport::Error> recording_physical_hash(
 
     auto result =
         probe != nullptr && probe->physical_hash_transport_failure &&
-                !identifier.starts_with("history/")
+                identifier.find('/') == std::string_view::npos
             ? std::expected<
                   std::string,
                   kasumi::transport::
@@ -399,7 +399,7 @@ recording_get(void* context,
               const std::filesystem::path& destination) {
     auto* state = recording_state(context);
     auto* probe = state->probe;
-    if (probe == nullptr || identifier.starts_with("history/")) {
+    if (probe == nullptr || identifier.find('/') != std::string_view::npos) {
         return kasumi::transport::get(*state->base, identifier, destination);
     }
 
@@ -576,7 +576,8 @@ std::size_t content_put_events(const FixtureData& fixture) {
     return static_cast<std::size_t>(
         std::ranges::count_if(fixture.events, [](std::string_view event) {
             return event.starts_with("put:") &&
-                   !event.starts_with("put:history/");
+                   std::string_view{event}.substr(4).find('/') ==
+                       std::string_view::npos;
         }));
 }
 
@@ -584,7 +585,19 @@ std::size_t history_put_events(const FixtureData& fixture,
                                std::string_view kind) {
     return static_cast<std::size_t>(
         std::ranges::count_if(fixture.events, [&](std::string_view event) {
-            return event.starts_with("put:history/" + std::string{kind} + "/");
+            if (!event.starts_with("put:")) {
+                return false;
+            }
+            const auto target = std::string_view{event}.substr(4);
+            if (kind == "commits") {
+                return target.ends_with(".kcom");
+            }
+            if (kind == "heads") {
+                return target.ends_with(".head");
+            }
+            return target.find('/' + std::string{kind} + '/') !=
+                       std::string_view::npos ||
+                   target.starts_with(std::string{kind} + '/');
         }));
 }
 
@@ -765,8 +778,8 @@ TEST(SyncContentBatchTest, PartialBatchFailureLeavesRemoteButZeroApplied) {
     ASSERT_TRUE(listed.has_value());
     EXPECT_EQ(std::ranges::count_if(*listed,
                                     [](std::string_view identifier) {
-                                        return !identifier.starts_with(
-                                            "history/");
+                                        return identifier.find('/') ==
+                                               std::string_view::npos;
                                     }),
               4U);
     EXPECT_FALSE(

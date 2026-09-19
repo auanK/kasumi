@@ -106,7 +106,8 @@ inspect_commit_variants(transport::Transport& storage,
             return std::unexpected(temporary.error());
         }
 
-        const auto prefix = std::string{commit_prefix} + std::string{commit_id};
+        const auto layout = derive_remote_layout(key);
+        const auto prefix = layout.commits_prefix + std::string{commit_id};
         auto listed = transport::list(storage, prefix);
         if (!listed) {
             if (listed.error().code == transport::ErrorCode::StorageNotFound) {
@@ -118,7 +119,7 @@ inspect_commit_variants(transport::Transport& storage,
         std::vector<HeadReference> references;
         references.reserve(listed->size());
         for (const auto& name : *listed) {
-            auto reference = parse_commit_object(prefix + "/" + name);
+            auto reference = parse_commit_object(layout, prefix + "/" + name);
             if (reference && reference->commit_id == commit_id) {
                 references.push_back(std::move(*reference));
             }
@@ -136,13 +137,17 @@ inspect_commit_variants(transport::Transport& storage,
             if (authenticated_variant && reference == *authenticated_variant) {
                 result.push_back(PhysicalCommitVariant{
                     .reference = reference,
-                    .identifier = commit_object(reference),
+                    .identifier = commit_object(layout, reference),
                     .state = PhysicalCommitVariantState::Valid,
                 });
                 continue;
             }
-            auto loaded = try_load_variant(
-                storage, key, reference, (*temporary)->root, sequence++);
+            auto loaded = try_load_variant(storage,
+                                           layout,
+                                           key,
+                                           reference,
+                                           (*temporary)->root,
+                                           sequence++);
             if (!loaded) {
                 return std::unexpected(loaded.error());
             }
@@ -157,7 +162,7 @@ inspect_commit_variants(transport::Transport& storage,
                     : PhysicalCommitVariantState::InvalidCiphertext;
             result.push_back(PhysicalCommitVariant{
                 .reference = reference,
-                .identifier = commit_object(reference),
+                .identifier = commit_object(layout, reference),
                 .state = state,
             });
         }

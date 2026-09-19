@@ -30,6 +30,8 @@ constexpr std::string_view domain(IdentifierPurpose purpose) noexcept {
             return "kasumi/v2/id/commit";
         case IdentifierPurpose::Epoch:
             return "kasumi/v2/id/epoch";
+        case IdentifierPurpose::Namespace:
+            return "kasumi/v2/id/namespace";
     }
     return {};
 }
@@ -89,6 +91,21 @@ std::string epoch_identifier(std::span<const std::uint8_t, KEY_SIZE> master_key,
                              std::span<const std::uint8_t> canonical_epoch) {
     return hash_hex(derive_identifier(
         master_key, IdentifierPurpose::Epoch, canonical_epoch));
+}
+
+std::string
+namespace_identifier(std::span<const std::uint8_t, KEY_SIZE> master_key,
+                     std::string_view component_name,
+                     std::size_t hex_chars) {
+    const std::span<const std::uint8_t> bytes{
+        reinterpret_cast<const std::uint8_t*>(component_name.data()),
+        component_name.size()};
+    const auto full_hex = hash_hex(
+        derive_identifier(master_key, IdentifierPurpose::Namespace, bytes));
+    if (hex_chars >= full_hex.size()) {
+        return full_hex;
+    }
+    return full_hex.substr(0, hex_chars);
 }
 
 } // namespace kasumi::crypto

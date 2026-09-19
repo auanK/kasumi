@@ -1,6 +1,7 @@
 #include "application/history_storage/maintenance_protocol.hpp"
 
 #include "application/history_storage/detail.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "crypto/physical_hash.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/random.hpp"
@@ -183,25 +184,9 @@ bool contains_name(const std::vector<std::string>& names,
 }
 
 std::optional<std::string>
-original_from_quarantine(std::string_view identifier) {
-    if (identifier.starts_with(quarantine_content_prefix)) {
-        const auto content =
-            identifier.substr(quarantine_content_prefix.size());
-        const auto hash = hash_from_hex(content);
-        if (hash && hash_hex(*hash) == content) {
-            return std::string{content};
-        }
-        return std::nullopt;
-    }
-    if (identifier.starts_with(quarantine_commit_prefix)) {
-        const auto body = identifier.substr(quarantine_commit_prefix.size());
-        const auto original =
-            std::string{detail::commit_prefix} + std::string{body};
-        if (detail::parse_commit_object(original)) {
-            return original;
-        }
-    }
-    return std::nullopt;
+original_from_quarantine(const RemoteLayout& layout,
+                         std::string_view identifier) {
+    return restore_destination(layout, identifier);
 }
 
 bool valid_sha256(std::string_view value) {
@@ -214,15 +199,20 @@ std::string metadata_for(std::string_view quarantine_identifier) {
 }
 
 std::optional<std::string>
-quarantine_from_metadata(std::string_view identifier) {
-    if (!identifier.starts_with(quarantine_prefix) ||
-        !identifier.ends_with(metadata_suffix)) {
+quarantine_from_metadata(const RemoteLayout& layout,
+                         std::string_view identifier) {
+    const bool is_quarantine =
+        identifier.starts_with(layout.quarantine_prefix) ||
+        identifier.starts_with("history/gc/v1/quarantine/") ||
+        identifier.starts_with("history/gc/quarantine/");
+    if (!is_quarantine || !identifier.ends_with(metadata_suffix)) {
         return std::nullopt;
     }
     auto quarantine = std::string{
         identifier.substr(0, identifier.size() - metadata_suffix.size())};
-    return original_from_quarantine(quarantine) ? std::move(quarantine)
-                                                : std::optional<std::string>{};
+    return original_from_quarantine(layout, quarantine)
+               ? std::move(quarantine)
+               : std::optional<std::string>{};
 }
 
 std::expected<std::string, Error>
@@ -233,7 +223,7 @@ object_sha256(transport::Transport& storage,
     if (remote) {
         if (!valid_sha256(*remote)) {
             return std::unexpected(error(ErrorCode::VerificationFailure,
-                                         "SHA-256 remoto inválido"));
+                                         "invalid remote SHA-256"));
         }
         return std::move(*remote);
     }
@@ -413,6 +403,7 @@ release_registration(RegistrationState& registration) {
 
 RegistrationResult
 register_writer(transport::Transport& storage,
+                const RemoteLayout& layout,
                 const std::filesystem::path& workspace_root) {
     if (!transport::valid(storage) || workspace_root.empty()) {
         return std::unexpected(
@@ -424,7 +415,7 @@ register_writer(transport::Transport& storage,
             error(ErrorCode::WorkspaceFailure, token.error()));
     }
     const auto name = *token + ".writer";
-    const auto identifier = std::string{writers_prefix} + '/' + name;
+    const auto identifier = layout.writers_prefix + name;
     auto bytes = payload("writer", *token);
     if (auto published =
             put_verified(storage, identifier, bytes, workspace_root);
@@ -438,12 +429,16 @@ register_writer(transport::Transport& storage,
                                    .verify_owner = false};
     std::vector<std::string> listed;
     transport::Presence barrier = transport::Presence::Absent;
+    const auto writers_dir =
+        layout.writers_prefix.ends_with('/')
+            ? layout.writers_prefix.substr(0, layout.writers_prefix.size() - 1)
+            : layout.writers_prefix;
     const auto batch_trace = platform::perf_trace::begin();
     auto control_reads = transport::control_read_batch(
         storage,
         transport::ControlReadBatchRequest{
-            .list_prefixes = {std::string{writers_prefix}},
-            .presence_identifiers = {std::string{barrier_identifier}}});
+            .list_prefixes = {std::string{writers_dir}},
+            .presence_identifiers = {layout.barrier_identifier}});
     platform::perf_trace::finish("writer admission batch", batch_trace);
     if (control_reads) {
         if (control_reads->listings.size() != 1 ||
@@ -458,7 +453,7 @@ register_writer(transport::Transport& storage,
     } else if (control_reads.error().code ==
                transport::ErrorCode::Unsupported) {
         const auto list_trace = platform::perf_trace::begin();
-        auto sequential_list = list_children(storage, writers_prefix);
+        auto sequential_list = list_children(storage, writers_dir);
         platform::perf_trace::finish("writer admission LIST", list_trace);
         if (!sequential_list) {
             auto failure = sequential_list.error();
@@ -468,7 +463,7 @@ register_writer(transport::Transport& storage,
         listed = std::move(*sequential_list);
         const auto barrier_trace = platform::perf_trace::begin();
         auto sequential_barrier =
-            transport::presence(storage, barrier_identifier);
+            transport::presence(storage, layout.barrier_identifier);
         platform::perf_trace::finish("writer admission barrier", barrier_trace);
         if (!sequential_barrier) {
             auto failure = transport_error(sequential_barrier.error());
@@ -497,7 +492,14 @@ register_writer(transport::Transport& storage,
 }
 
 RegistrationResult
+register_writer(transport::Transport& storage,
+                const std::filesystem::path& workspace_root) {
+    return register_writer(storage, default_remote_layout(), workspace_root);
+}
+
+RegistrationResult
 establish_barrier(transport::Transport& storage,
+                  const RemoteLayout& layout,
                   const std::filesystem::path& workspace_root) {
     if (!transport::valid(storage) || workspace_root.empty()) {
         return std::unexpected(
@@ -509,21 +511,31 @@ establish_barrier(transport::Transport& storage,
             error(ErrorCode::WorkspaceFailure, token.error()));
     }
     auto bytes = payload("barrier", *token);
-    if (auto published =
-            put_verified(storage, barrier_identifier, bytes, workspace_root);
+    if (auto published = put_verified(
+            storage, layout.barrier_identifier, bytes, workspace_root);
         !published) {
         return std::unexpected(published.error());
     }
     return RegistrationState{.storage = &storage,
                              .workspace_root = workspace_root,
-                             .identifier = std::string{barrier_identifier},
+                             .identifier = layout.barrier_identifier,
                              .payload = std::move(bytes),
                              .verify_owner = true};
 }
 
+RegistrationResult
+establish_barrier(transport::Transport& storage,
+                  const std::filesystem::path& workspace_root) {
+    return establish_barrier(storage, default_remote_layout(), workspace_root);
+}
+
 std::expected<std::vector<std::string>, Error>
-active_writers(transport::Transport& storage) {
-    auto listed = list_children(storage, writers_prefix);
+active_writers(transport::Transport& storage, const RemoteLayout& layout) {
+    const auto writers_dir =
+        layout.writers_prefix.ends_with('/')
+            ? layout.writers_prefix.substr(0, layout.writers_prefix.size() - 1)
+            : layout.writers_prefix;
+    auto listed = list_children(storage, writers_dir);
     if (!listed) {
         return std::unexpected(listed.error());
     }
@@ -538,13 +550,41 @@ active_writers(transport::Transport& storage) {
             return std::unexpected(error(ErrorCode::InvalidControlObject,
                                          "marker de writer inválido: " + name));
         }
-        result.push_back(std::string{writers_prefix} + '/' + name);
+        result.push_back(layout.writers_prefix + name);
+    }
+    if (writers_dir != "history/gc/v1/writers") {
+        for (std::string_view legacy_dir :
+             {"history/gc/v1/writers", "history/gc/writers"}) {
+            auto legacy = list_children(storage, legacy_dir);
+            if (legacy) {
+                for (const auto& name : *legacy) {
+                    if (name.size() != 39 || !name.ends_with(".writer")) {
+                        return std::unexpected(
+                            error(ErrorCode::InvalidControlObject,
+                                  "marker de writer inválido: " + name));
+                    }
+                    const auto token = name.substr(0, 32);
+                    if (!detail::valid_hex_id(token + std::string(32, '0'))) {
+                        return std::unexpected(
+                            error(ErrorCode::InvalidControlObject,
+                                  "marker de writer inválido: " + name));
+                    }
+                    result.push_back(std::string{legacy_dir} + "/" + name);
+                }
+            }
+        }
     }
     return result;
 }
 
+std::expected<std::vector<std::string>, Error>
+active_writers(transport::Transport& storage) {
+    return active_writers(storage, default_remote_layout());
+}
+
 std::expected<bool, Error>
 supports_online_collection(transport::Transport& storage,
+                           const RemoteLayout& layout,
                            const std::filesystem::path& workspace_root) {
     auto token = platform::random::hex_id();
     if (!token) {
@@ -552,7 +592,7 @@ supports_online_collection(transport::Transport& storage,
             error(ErrorCode::WorkspaceFailure, token.error()));
     }
     const auto name = *token + ".probe";
-    const auto identifier = std::string{probes_prefix} + '/' + name;
+    const auto identifier = layout.probes_prefix + name;
     const auto bytes = payload("probe", *token);
     if (auto published =
             put_verified(storage, identifier, bytes, workspace_root);
@@ -567,8 +607,12 @@ supports_online_collection(transport::Transport& storage,
         return {};
     };
 
+    const auto probes_dir =
+        layout.probes_prefix.ends_with('/')
+            ? layout.probes_prefix.substr(0, layout.probes_prefix.size() - 1)
+            : layout.probes_prefix;
     for (int observation = 0; observation < 2; ++observation) {
-        auto listed = list_children(storage, probes_prefix);
+        auto listed = list_children(storage, probes_dir);
         if (!listed) {
             static_cast<void>(cleanup());
             return std::unexpected(listed.error());
@@ -582,7 +626,7 @@ supports_online_collection(transport::Transport& storage,
         return std::unexpected(removed.error());
     }
     for (int observation = 0; observation < 2; ++observation) {
-        auto listed = list_children(storage, probes_prefix);
+        auto listed = list_children(storage, probes_dir);
         if (!listed) {
             return std::unexpected(listed.error());
         }
@@ -593,27 +637,42 @@ supports_online_collection(transport::Transport& storage,
     return true;
 }
 
+std::expected<bool, Error>
+supports_online_collection(transport::Transport& storage,
+                           const std::filesystem::path& workspace_root) {
+    return supports_online_collection(
+        storage, default_remote_layout(), workspace_root);
+}
+
+bool is_epoch_object(const RemoteLayout& layout,
+                     std::string_view identifier) noexcept {
+    return identifier.starts_with(layout.epochs_prefix);
+}
+
+bool is_epoch_object(std::string_view identifier) noexcept {
+    return identifier.starts_with(epoch_namespace_prefix);
+}
+
+bool is_control_object(const RemoteLayout& layout,
+                       std::string_view identifier) noexcept {
+    return history_storage::is_control_object(layout, identifier);
+}
+
 bool is_control_object(std::string_view identifier) noexcept {
-    return identifier == barrier_identifier ||
-           identifier.starts_with(protocol_prefix);
+    return history_storage::is_control_object(default_remote_layout(),
+                                              identifier);
+}
+
+std::optional<std::string>
+quarantine_identifier(const RemoteLayout& layout,
+                      std::string_view original_identifier) {
+    return history_storage::quarantine_identifier(layout, original_identifier);
 }
 
 std::optional<std::string>
 quarantine_identifier(std::string_view original_identifier) {
-    if (is_epoch_object(original_identifier)) {
-        return std::nullopt;
-    }
-    const auto content = hash_from_hex(original_identifier);
-    if (content && hash_hex(*content) == original_identifier) {
-        return std::string{quarantine_content_prefix} +
-               std::string{original_identifier};
-    }
-    if (!detail::parse_commit_object(original_identifier)) {
-        return std::nullopt;
-    }
-    return std::string{quarantine_commit_prefix} +
-           std::string{
-               original_identifier.substr(detail::commit_prefix.size())};
+    return history_storage::quarantine_identifier(default_remote_layout(),
+                                                  original_identifier);
 }
 
 namespace {
@@ -623,6 +682,7 @@ std::expected<std::vector<QuarantineEntry>, Error> inventory_quarantine_impl(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     std::optional<std::span<const std::string>> identifiers,
     const std::filesystem::path& workspace_root) {
+    const auto layout = derive_remote_layout(key);
     std::span<const std::string> listing_span;
     std::vector<std::string> fallback_listing;
     if (identifiers) {
@@ -639,26 +699,32 @@ std::expected<std::vector<QuarantineEntry>, Error> inventory_quarantine_impl(
     std::map<std::string, QuarantineEntry> entries;
     std::map<std::string, std::string> metadata;
     for (const auto& identifier : listing_span) {
-        if (!is_control_object(identifier) ||
-            identifier == barrier_identifier ||
-            (identifier.starts_with(writers_prefix) &&
-             identifier.size() > writers_prefix.size() &&
-             identifier[writers_prefix.size()] == '/') ||
-            (identifier.starts_with(probes_prefix) &&
-             identifier.size() > probes_prefix.size() &&
-             identifier[probes_prefix.size()] == '/')) {
+        if (!history_storage::is_control_object(layout, identifier) ||
+            identifier == layout.barrier_identifier ||
+            identifier == "history/gc/v1/barrier" ||
+            identifier == "history/gc/barrier" ||
+            identifier.starts_with(layout.writers_prefix) ||
+            identifier.starts_with("history/gc/v1/writers/") ||
+            identifier.starts_with("history/gc/writers/") ||
+            identifier.starts_with(layout.probes_prefix) ||
+            identifier.starts_with("history/gc/v1/probes/") ||
+            identifier.starts_with("history/gc/probes/")) {
             continue;
         }
-        if (!identifier.starts_with(quarantine_prefix)) {
+        const bool is_quarantine =
+            identifier.starts_with(layout.quarantine_prefix) ||
+            identifier.starts_with("history/gc/v1/quarantine/") ||
+            identifier.starts_with("history/gc/quarantine/");
+        if (!is_quarantine) {
             return std::unexpected(
                 error(ErrorCode::InvalidControlObject,
-                      "objeto de controle inesperado: " + identifier));
+                      "unexpected control object: " + identifier));
         }
-        if (auto quarantine = quarantine_from_metadata(identifier)) {
+        if (auto quarantine = quarantine_from_metadata(layout, identifier)) {
             metadata.emplace(std::move(*quarantine), identifier);
             continue;
         }
-        auto original = original_from_quarantine(identifier);
+        auto original = restore_destination(layout, identifier);
         if (!original) {
             return std::unexpected(
                 error(ErrorCode::InvalidControlObject,
@@ -725,7 +791,8 @@ record_quarantine(transport::Transport& storage,
                   std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                   const std::filesystem::path& workspace_root,
                   std::string_view verified_sha256) {
-    auto original = original_from_quarantine(quarantine_identifier);
+    const auto layout = derive_remote_layout(key);
+    auto original = restore_destination(layout, quarantine_identifier);
     if (!original || quarantined_at < 0) {
         return std::unexpected(
             error(ErrorCode::InvalidInput, "registro de quarentena inválido"));

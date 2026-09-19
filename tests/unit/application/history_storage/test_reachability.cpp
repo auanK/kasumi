@@ -575,16 +575,19 @@ TEST(ReachabilityTest, UnknownHistoryObjectsAreReported) {
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
-    state->objects["history/foo"] = {0};
-    state->objects["history/commits/x"] = {0};
-    state->objects["history/random/object"] = {0};
-    state->objects["history/heads/bad.head"] = {0};
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    state->objects[layout.history_prefix + "foo"] = {0};
+    state->objects[layout.commits_prefix + "x"] = {0};
+    state->objects[layout.history_prefix + "random/object"] = {0};
+    state->objects[layout.heads_prefix + "bad.head"] = {0};
     const auto result = fake_inventory(transport, workspace);
-    EXPECT_EQ(result.unknown_history_objects,
-              (std::vector<std::string>{"history/commits/x",
-                                        "history/foo",
-                                        "history/heads/bad.head",
-                                        "history/random/object"}));
+    std::vector<std::string> expected{layout.history_prefix + "foo",
+                                      layout.commits_prefix + "x",
+                                      layout.history_prefix + "random/object",
+                                      layout.heads_prefix + "bad.head"};
+    std::ranges::sort(expected);
+    EXPECT_EQ(result.unknown_history_objects, expected);
     EXPECT_TRUE(result.markers.empty());
 }
 

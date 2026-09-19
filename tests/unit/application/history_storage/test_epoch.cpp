@@ -1,4 +1,5 @@
 #include "application/history_storage/epoch.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "core/history.hpp"
 #define KASUMI_TEST_HISTORY_STORAGE_NO_ERROR_CODE_ALIAS
 #include "kasumi/test/history_storage.hpp"
@@ -18,6 +19,7 @@
 namespace {
 
 namespace epoch = kasumi::application::history_storage::epoch;
+namespace history_storage = kasumi::application::history_storage;
 using epoch::Anchor;
 using epoch::Epoch;
 using epoch::ErrorCode;
@@ -81,9 +83,11 @@ epoch::SealedEpoch seal_from(const epoch::VerifiedEpoch& value) {
 
 void install_chain(FakeState& state,
                    std::span<const epoch::VerifiedEpoch> chain) {
+    const auto layout = history_storage::derive_remote_layout(epoch_test_key());
     for (const auto& value : chain) {
         const auto sealed = epoch::seal(value.value, epoch_test_key()).value();
-        const auto identifier = epoch::object_identifier(sealed.reference);
+        const auto identifier =
+            epoch::object_identifier(layout, sealed.reference);
         ASSERT_TRUE(identifier.has_value());
         state.objects[*identifier] = sealed.bytes;
     }
@@ -368,7 +372,7 @@ TEST(EpochLoadByIdTest, ReturnsExactAuthenticatedEpoch) {
     const auto sealed = epoch::seal(value, key);
     ASSERT_TRUE(sealed.has_value());
     ASSERT_TRUE(epoch::publish(
-        *storage, *sealed, kasumi::test::workspace_root(workspace)));
+        *storage, key, *sealed, kasumi::test::workspace_root(workspace)));
 
     const auto loaded =
         epoch::load_by_id(*storage,
@@ -391,8 +395,10 @@ TEST(EpochLoadChainTest, ReturnsEveryAuthenticatedEpochInSequence) {
     const auto expected = valid_chain(3);
     for (const auto& value : expected) {
         const auto sealed = seal_from(value);
-        ASSERT_TRUE(epoch::publish(
-            *storage, sealed, kasumi::test::workspace_root(workspace)));
+        ASSERT_TRUE(epoch::publish(*storage,
+                                   epoch_test_key(),
+                                   sealed,
+                                   kasumi::test::workspace_root(workspace)));
     }
 
     const auto loaded = epoch::load_chain(
@@ -412,14 +418,18 @@ TEST(EpochLoadChainTest, ReusesObservedIdentifiersWithoutRelisting) {
     const auto expected = valid_chain(3);
     for (const auto& value : expected) {
         const auto sealed = seal_from(value);
-        ASSERT_TRUE(epoch::publish(
-            *storage, sealed, kasumi::test::workspace_root(workspace)));
+        ASSERT_TRUE(epoch::publish(*storage,
+                                   epoch_test_key(),
+                                   sealed,
+                                   kasumi::test::workspace_root(workspace)));
     }
     const auto identifiers = kasumi::transport::list(*storage);
     ASSERT_TRUE(identifiers.has_value());
 
+    const auto layout = history_storage::derive_remote_layout(epoch_test_key());
     const epoch::Reference late_reference{.sequence = 3, .epoch_id = id('f')};
-    const auto late_identifier = epoch::object_identifier(late_reference);
+    const auto late_identifier =
+        epoch::object_identifier(layout, late_reference);
     ASSERT_TRUE(late_identifier.has_value());
     kasumi::test::write_text(storage_path /
                                  std::filesystem::path{*late_identifier},
@@ -470,11 +480,13 @@ TEST(EpochLoadByIdTest, RejectsTamperedEpoch) {
     ASSERT_TRUE(kasumi::transport::initialize(*storage));
 
     const auto key = epoch_test_key();
+    const auto layout = history_storage::derive_remote_layout(key);
     const auto sealed = epoch::seal(representative_epoch(), key);
     ASSERT_TRUE(sealed.has_value());
     ASSERT_TRUE(epoch::publish(
-        *storage, *sealed, kasumi::test::workspace_root(workspace)));
-    const auto identifier = epoch::object_identifier(sealed->reference).value();
+        *storage, key, *sealed, kasumi::test::workspace_root(workspace)));
+    const auto identifier =
+        epoch::object_identifier(layout, sealed->reference).value();
     auto bytes = kasumi::test::read_binary(storage_path /
                                            std::filesystem::path{identifier});
     ASSERT_FALSE(bytes.empty());
@@ -511,9 +523,11 @@ TEST(EpochLoadByIdTest, DoesNotSubstituteDifferentLatestEpoch) {
     ASSERT_TRUE(sealed_first.has_value());
     ASSERT_TRUE(sealed_second.has_value());
     ASSERT_TRUE(epoch::publish(
-        *storage, *sealed_first, kasumi::test::workspace_root(workspace)));
-    ASSERT_TRUE(epoch::publish(
-        *storage, *sealed_second, kasumi::test::workspace_root(workspace)));
+        *storage, key, *sealed_first, kasumi::test::workspace_root(workspace)));
+    ASSERT_TRUE(epoch::publish(*storage,
+                               key,
+                               *sealed_second,
+                               kasumi::test::workspace_root(workspace)));
 
     const auto loaded =
         epoch::load_by_id(*storage,
@@ -533,13 +547,13 @@ TEST(EpochLoadByIdTest, RejectsMultipleReferencesForSameId) {
     ASSERT_TRUE(kasumi::transport::initialize(*storage));
 
     const auto key = epoch_test_key();
+    const auto layout = history_storage::derive_remote_layout(key);
     const auto sealed = epoch::seal(representative_epoch(), key);
     ASSERT_TRUE(sealed.has_value());
     ASSERT_TRUE(epoch::publish(
-        *storage, *sealed, kasumi::test::workspace_root(workspace)));
-    const auto conflicting =
-        std::string{"history/epochs/v1/00000000000000000003-"} +
-        sealed->reference.epoch_id + ".epoch";
+        *storage, key, *sealed, kasumi::test::workspace_root(workspace)));
+    const auto conflicting = layout.epochs_prefix + "00000000000000000003-" +
+                             sealed->reference.epoch_id + ".epoch";
     const auto source = kasumi::test::workspace_path(workspace, "copy.epoch");
     kasumi::test::write_binary(
         source,
@@ -568,9 +582,11 @@ TEST(EpochLoadLatestTest,
 
     const auto chain = valid_chain(3);
     ASSERT_TRUE(epoch::publish(*storage,
+                               epoch_test_key(),
                                seal_from(chain[0]),
                                kasumi::test::workspace_root(workspace)));
     ASSERT_TRUE(epoch::publish(*storage,
+                               epoch_test_key(),
                                seal_from(chain[2]),
                                kasumi::test::workspace_root(workspace)));
 
@@ -595,10 +611,13 @@ TEST(EpochLoadLatestTest, RejectsBrokenHistoricalPointer) {
     const auto broken_sealed = epoch::seal(broken, epoch_test_key());
     ASSERT_TRUE(broken_sealed.has_value());
     ASSERT_TRUE(epoch::publish(*storage,
+                               epoch_test_key(),
                                seal_from(chain[0]),
                                kasumi::test::workspace_root(workspace)));
-    ASSERT_TRUE(epoch::publish(
-        *storage, *broken_sealed, kasumi::test::workspace_root(workspace)));
+    ASSERT_TRUE(epoch::publish(*storage,
+                               epoch_test_key(),
+                               *broken_sealed,
+                               kasumi::test::workspace_root(workspace)));
 
     const auto latest = epoch::load_latest(
         *storage, epoch_test_key(), kasumi::test::workspace_root(workspace));
@@ -697,9 +716,11 @@ TEST(EpochLoadLatestTest, CheckpointRequiresExactEpochId) {
     ++alternate.issued_at;
     alternate.previous_epoch_id = base[1].reference.epoch_id;
     auto current = verified(alternate);
+    const auto layout = history_storage::derive_remote_layout(epoch_test_key());
     {
         const auto sealed = seal_from(current);
-        const auto identifier = epoch::object_identifier(sealed.reference);
+        const auto identifier =
+            epoch::object_identifier(layout, sealed.reference);
         ASSERT_TRUE(identifier.has_value());
         state->objects[*identifier] = sealed.bytes;
     }
@@ -708,7 +729,8 @@ TEST(EpochLoadLatestTest, CheckpointRequiresExactEpochId) {
         next.previous_epoch_id = current.reference.epoch_id;
         current = verified(next);
         const auto sealed = seal_from(current);
-        const auto identifier = epoch::object_identifier(sealed.reference);
+        const auto identifier =
+            epoch::object_identifier(layout, sealed.reference);
         ASSERT_TRUE(identifier.has_value());
         state->objects[*identifier] = sealed.bytes;
     }
@@ -728,8 +750,11 @@ TEST(EpochLoadLatestTest, CollapsesExactDuplicateInventoryEntries) {
     auto workspace = kasumi::test::make_temp_workspace("epoch-duplicate-list");
     const auto chain = valid_chain(2);
     install_chain(*state, chain);
-    const auto first = epoch::object_identifier(chain[0].reference).value();
-    const auto second = epoch::object_identifier(chain[1].reference).value();
+    const auto layout = history_storage::derive_remote_layout(epoch_test_key());
+    const auto first =
+        epoch::object_identifier(layout, chain[0].reference).value();
+    const auto second =
+        epoch::object_identifier(layout, chain[1].reference).value();
     const std::vector identifiers{first, second, second};
 
     const auto loaded =
@@ -752,13 +777,17 @@ TEST(EpochLoadLatestTest, RejectsConflictingInventoryReferences) {
         return value;
     }();
     const auto alternate = verified(alternate_value);
-    const auto first = epoch::object_identifier(chain[0].reference).value();
-    const auto second = epoch::object_identifier(chain[1].reference).value();
-    const auto fork = epoch::object_identifier(alternate.reference).value();
+    const auto layout = history_storage::derive_remote_layout(epoch_test_key());
+    const auto first =
+        epoch::object_identifier(layout, chain[0].reference).value();
+    const auto second =
+        epoch::object_identifier(layout, chain[1].reference).value();
+    const auto fork =
+        epoch::object_identifier(layout, alternate.reference).value();
     const std::vector fork_identifiers{first, second, fork};
     const auto same_id_different_sequence =
         epoch::object_identifier(
-            {.sequence = 2, .epoch_id = chain[0].reference.epoch_id})
+            layout, {.sequence = 2, .epoch_id = chain[0].reference.epoch_id})
             .value();
 
     auto fork_result =

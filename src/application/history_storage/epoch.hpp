@@ -15,6 +15,10 @@
 #include <string_view>
 #include <vector>
 
+namespace kasumi::application::history_storage {
+struct RemoteLayout;
+}
+
 namespace kasumi::application::history_storage::epoch {
 
 inline constexpr std::uint32_t default_min_history_depth = 5;
@@ -117,13 +121,19 @@ seal(const Epoch& value,
      std::span<const std::uint8_t, crypto::KEY_SIZE> master_key);
 
 // Authenticates, decrypts, and confirms that content and naming match.
+
 std::expected<VerifiedEpoch, Error>
 open(std::span<const std::uint8_t> bytes,
      const Reference& reference,
      std::span<const std::uint8_t, crypto::KEY_SIZE> master_key);
 
-// history/epochs/v1/<fixed-width decimal sequence>-<epoch ID>.epoch
+std::expected<std::string, Error> object_identifier(const RemoteLayout& layout,
+                                                    const Reference& reference);
 std::expected<std::string, Error> object_identifier(const Reference& reference);
+
+std::expected<Reference, Error>
+parse_object_identifier(const RemoteLayout& layout,
+                        std::string_view identifier);
 std::expected<Reference, Error>
 parse_object_identifier(std::string_view identifier);
 
@@ -133,6 +143,15 @@ std::expected<VerifiedEpoch, Error>
 select_latest(std::span<const VerifiedEpoch> epochs);
 
 // Publishes the immutable object at the identifier derived from its content.
+std::expected<void, Error> publish(transport::Transport& storage,
+                                   const RemoteLayout& layout,
+                                   const SealedEpoch& sealed,
+                                   const std::filesystem::path& workspace_root);
+std::expected<void, Error>
+publish(transport::Transport& storage,
+        std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
+        const SealedEpoch& sealed,
+        const std::filesystem::path& workspace_root);
 std::expected<void, Error> publish(transport::Transport& storage,
                                    const SealedEpoch& sealed,
                                    const std::filesystem::path& workspace_root);

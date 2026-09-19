@@ -1,5 +1,6 @@
 #include "application/sync/publication.hpp"
 
+#include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
 
 #include <algorithm>
@@ -55,6 +56,7 @@ commit_identifier(std::span<const std::uint8_t, crypto::KEY_SIZE> key,
 
 PublishObjectResult
 publish_commit_object(transport::Transport& storage,
+                      const history_storage::RemoteLayout& layout,
                       std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                       const PreparedCommit& prepared,
                       const std::filesystem::path& workspace_root) {
@@ -65,7 +67,7 @@ publish_commit_object(transport::Transport& storage,
                                      .detail = "invalid commit"});
     }
     auto published = history_storage::publish_commit_object_scoped(
-        storage, key, prepared.commit, workspace_root);
+        storage, layout, key, prepared.commit, workspace_root);
     if (!published) {
         return std::unexpected(storage_error(published.error()));
     }
@@ -76,16 +78,40 @@ publish_commit_object(transport::Transport& storage,
     return std::move(*published);
 }
 
+PublishObjectResult
+publish_commit_object(transport::Transport& storage,
+                      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                      const PreparedCommit& prepared,
+                      const std::filesystem::path& workspace_root) {
+    return publish_commit_object(storage,
+                                 history_storage::derive_remote_layout(key),
+                                 key,
+                                 prepared,
+                                 workspace_root);
+}
+
 PublishHeadResult
 publish_head_marker(transport::Transport& storage,
+                    const history_storage::RemoteLayout& layout,
                     const history_storage::HeadReference& reference,
                     const std::filesystem::path& workspace_root) {
     auto published = history_storage::publish_head_marker_scoped(
-        storage, reference, workspace_root);
+        storage, layout, reference, workspace_root);
     if (!published) {
         return std::unexpected(storage_error(published.error()));
     }
     return std::move(*published);
+}
+
+PublishHeadResult
+publish_head_marker(transport::Transport& storage,
+                    const history_storage::HeadReference& reference,
+                    const std::filesystem::path& workspace_root) {
+    return sync::publication::publish_head_marker(
+        storage,
+        history_storage::default_remote_layout(),
+        reference,
+        workspace_root);
 }
 
 PrepareResult
@@ -145,12 +171,14 @@ prepare_commit(Snapshot tree,
 
 std::expected<void, Error>
 verify_commit_object(transport::Transport& storage,
+                     const history_storage::RemoteLayout& layout,
                      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                      const PreparedCommit& prepared,
                      const history_storage::HeadReference& reference,
                      const std::filesystem::path& workspace_root,
                      std::string_view local_physical_hash) {
     auto verified = history_storage::verify_commit_object(storage,
+                                                          layout,
                                                           key,
                                                           prepared.commit,
                                                           reference,
@@ -163,28 +191,71 @@ verify_commit_object(transport::Transport& storage,
 }
 
 std::expected<void, Error>
+verify_commit_object(transport::Transport& storage,
+                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                     const PreparedCommit& prepared,
+                     const history_storage::HeadReference& reference,
+                     const std::filesystem::path& workspace_root,
+                     std::string_view local_physical_hash) {
+    return sync::publication::verify_commit_object(
+        storage,
+        history_storage::derive_remote_layout(key),
+        key,
+        prepared,
+        reference,
+        workspace_root,
+        local_physical_hash);
+}
+
+std::expected<void, Error>
 verify_head_marker(transport::Transport& storage,
+                   const history_storage::RemoteLayout& layout,
                    const history_storage::HeadReference& reference,
                    const std::filesystem::path& workspace_root,
                    std::string_view local_physical_hash) {
     auto verified = history_storage::verify_head_marker(
-        storage, reference, workspace_root, local_physical_hash);
+        storage, layout, reference, workspace_root, local_physical_hash);
     if (!verified) {
         return std::unexpected(storage_error(verified.error()));
     }
     return {};
 }
 
+std::expected<void, Error>
+verify_head_marker(transport::Transport& storage,
+                   const history_storage::HeadReference& reference,
+                   const std::filesystem::path& workspace_root,
+                   std::string_view local_physical_hash) {
+    return sync::publication::verify_head_marker(
+        storage,
+        history_storage::default_remote_layout(),
+        reference,
+        workspace_root,
+        local_physical_hash);
+}
+
 HeadMarkerInspection
 inspect_head_marker(transport::Transport& storage,
+                    const history_storage::RemoteLayout& layout,
                     const history_storage::HeadReference& reference,
                     const std::filesystem::path& workspace_root) {
     auto inspected = history_storage::inspect_head_marker(
-        storage, reference, workspace_root);
+        storage, layout, reference, workspace_root);
     if (!inspected) {
         return std::unexpected(storage_error(inspected.error()));
     }
     return std::move(*inspected);
+}
+
+HeadMarkerInspection
+inspect_head_marker(transport::Transport& storage,
+                    const history_storage::HeadReference& reference,
+                    const std::filesystem::path& workspace_root) {
+    return sync::publication::inspect_head_marker(
+        storage,
+        history_storage::default_remote_layout(),
+        reference,
+        workspace_root);
 }
 
 PublishResult
@@ -198,27 +269,34 @@ publish_commit(transport::Transport& storage,
         return std::unexpected(Error{.code = ErrorCode::InvalidCommit,
                                      .detail = "invalid commit"});
     }
-    auto object = publish_commit_object(storage, key, prepared, workspace_root);
+    const auto layout = history_storage::derive_remote_layout(key);
+    auto object = sync::publication::publish_commit_object(
+        storage, layout, key, prepared, workspace_root);
     if (!object) {
         return std::unexpected(object.error());
     }
-    if (auto verified = verify_commit_object(storage,
-                                             key,
-                                             prepared,
-                                             object->head,
-                                             workspace_root,
-                                             object->physical_hash);
+    if (auto verified =
+            sync::publication::verify_commit_object(storage,
+                                                    layout,
+                                                    key,
+                                                    prepared,
+                                                    object->head,
+                                                    workspace_root,
+                                                    object->physical_hash);
         !verified) {
         return std::unexpected(verified.error());
     }
-    auto marker = kasumi::application::sync::publication::publish_head_marker(
-        storage, object->head, workspace_root);
+    auto marker = sync::publication::publish_head_marker(
+        storage, layout, object->head, workspace_root);
     if (!marker) {
         return std::unexpected(marker.error());
     }
     if (auto verified =
-            kasumi::application::sync::publication::verify_head_marker(
-                storage, object->head, workspace_root, marker->physical_hash);
+            sync::publication::verify_head_marker(storage,
+                                                  layout,
+                                                  object->head,
+                                                  workspace_root,
+                                                  marker->physical_hash);
         !verified) {
         return std::unexpected(verified.error());
     }
@@ -273,8 +351,22 @@ PruneMarkersResult prune_current_ancestral_markers(
     if (observed->ancestral_marked_heads.empty()) {
         return PruneResult{};
     }
+    const auto layout = history_storage::derive_remote_layout(key);
     auto removed = history_storage::remove_marker_variants(
-        storage, observed->ancestral_marked_heads);
+        storage, layout, observed->ancestral_marked_heads);
+    if (!removed) {
+        return std::unexpected(storage_error(removed.error()));
+    }
+    return PruneResult{.removed_markers = removed->removed};
+}
+
+PruneMarkersResult prune_observed_parent_markers(
+    transport::Transport& storage,
+    const history_storage::RemoteLayout& layout,
+    std::span<const std::string> parent_ids,
+    std::span<const std::string> observed_marker_identifiers) {
+    auto removed = history_storage::remove_marker_variants(
+        storage, layout, parent_ids, observed_marker_identifiers);
     if (!removed) {
         return std::unexpected(storage_error(removed.error()));
     }
@@ -285,12 +377,11 @@ PruneMarkersResult prune_observed_parent_markers(
     transport::Transport& storage,
     std::span<const std::string> parent_ids,
     std::span<const std::string> observed_marker_identifiers) {
-    auto removed = history_storage::remove_marker_variants(
-        storage, parent_ids, observed_marker_identifiers);
-    if (!removed) {
-        return std::unexpected(storage_error(removed.error()));
-    }
-    return PruneResult{.removed_markers = removed->removed};
+    return prune_observed_parent_markers(
+        storage,
+        history_storage::default_remote_layout(),
+        parent_ids,
+        observed_marker_identifiers);
 }
 
 } // namespace kasumi::application::sync::publication

@@ -3,6 +3,7 @@
 #include "application/history_storage/content_reachability.hpp"
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "application/observation/state.hpp"
 #include "core/maintenance.hpp"
 #include "crypto/content.hpp"
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <exception>
 #include <filesystem>
+#include <iostream>
 #include <iterator>
 #include <limits>
 #include <ranges>
@@ -285,6 +287,7 @@ collect_garbage_collection_snapshot(
         .physical_namespace = std::move(*listing),
     };
 
+    const auto layout = history_storage::derive_remote_layout(key);
     std::vector<std::string> marked_commits;
     for (const auto& marker : history->markers) {
         if (marker.state != history_storage::ReachabilityMarkerState::Valid ||
@@ -293,7 +296,7 @@ collect_garbage_collection_snapshot(
         }
         marked_commits.push_back(marker.reference->commit_id);
         result.required_commit_objects.push_back(
-            history_storage::detail::commit_object(*marker.reference));
+            history_storage::commit_object(layout, *marker.reference));
     }
     std::ranges::sort(marked_commits);
     marked_commits.erase(std::ranges::unique(marked_commits).begin(),
@@ -404,14 +407,16 @@ std::expected<std::size_t, Error> restore_reachable_quarantine(
     }
     std::ranges::sort(*listing);
 
+    const auto layout = history_storage::derive_remote_layout(key);
     bool marker_restored = false;
     for (const auto& identifier : *listing) {
-        const auto reference = history_storage::parse_marker_object(identifier);
+        const auto reference =
+            history_storage::parse_marker_object(layout, identifier);
         if (!reference) {
             continue;
         }
         const auto original =
-            history_storage::detail::commit_object(*reference);
+            history_storage::commit_object(layout, *reference);
         const auto* quarantined = find_quarantined(entries, original);
         if (!quarantined) {
             continue;
@@ -449,8 +454,8 @@ std::expected<std::size_t, Error> restore_reachable_quarantine(
                           unavailable.end());
         bool changed = false;
         for (const auto& entry : entries) {
-            const auto reference = history_storage::detail::parse_commit_object(
-                entry.original_identifier);
+            const auto reference = history_storage::parse_commit_object(
+                layout, entry.original_identifier);
             if (!reference || !std::ranges::binary_search(
                                   unavailable, reference->commit_id)) {
                 continue;
@@ -504,6 +509,7 @@ std::expected<std::size_t, Error> restore_reachable_quarantine(
 }
 
 bool quarantine_is_reachable(
+    const history_storage::RemoteLayout& layout,
     const history_storage::maintenance_protocol::QuarantineEntry& entry,
     const GarbageCollectionSnapshot& snapshot) {
     if (const auto content = hash_from_hex(entry.original_identifier);
@@ -512,7 +518,7 @@ bool quarantine_is_reachable(
                                           entry.original_identifier);
     }
     const auto reference =
-        history_storage::detail::parse_commit_object(entry.original_identifier);
+        history_storage::parse_commit_object(layout, entry.original_identifier);
     return !reference ||
            std::ranges::binary_search(snapshot.required_commit_objects,
                                       entry.original_identifier);
@@ -548,6 +554,7 @@ std::expected<void, Error> initialize_quarantine_metadata(
 
 std::expected<std::size_t, Error> purge_expired_quarantine(
     transport::Transport& storage,
+    const history_storage::RemoteLayout& layout,
     const std::filesystem::path& workspace_root,
     std::int64_t now,
     const GarbageCollectionSnapshot& snapshot,
@@ -557,12 +564,12 @@ std::expected<std::size_t, Error> purge_expired_quarantine(
     std::size_t purged = 0;
     for (const auto& entry : entries) {
         if (history_storage::maintenance_protocol::is_epoch_object(
-                entry.original_identifier) ||
+                layout, entry.original_identifier) ||
             !entry.quarantined_at || now < *entry.quarantined_at ||
             now - *entry.quarantined_at <
                 history_storage::maintenance_protocol::
                     quarantine_retention_seconds ||
-            quarantine_is_reachable(entry, snapshot)) {
+            quarantine_is_reachable(layout, entry, snapshot)) {
             continue;
         }
         auto original = transport::presence(storage, entry.original_identifier);
@@ -842,9 +849,10 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
     if (!listing) {
         return std::unexpected(transport_error(listing.error()));
     }
+    const auto layout = history_storage::derive_remote_layout(key);
     std::vector<std::string> unknown_storage_identifiers;
     for (const auto& identifier : *listing) {
-        if (identifier.starts_with("history/") ||
+        if (history_storage::is_history_object(layout, identifier) ||
             kasumi::hash_from_hex(identifier).has_value()) {
             continue;
         }
@@ -928,9 +936,10 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
     }
 
     try {
+        const auto layout = history_storage::derive_remote_layout(key);
         const auto workspace_root = maintenance_workspace_root(runtime_data);
         auto barrier = history_storage::maintenance_protocol::establish_barrier(
-            storage, workspace_root);
+            storage, layout, workspace_root);
         if (!barrier) {
             return std::unexpected(protocol_error(barrier.error()));
         }
@@ -939,7 +948,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                 for (int observation = 0; observation < 2; ++observation) {
                     auto writers =
                         history_storage::maintenance_protocol::active_writers(
-                            storage);
+                            storage, layout);
                     if (!writers) {
                         return std::unexpected(protocol_error(writers.error()));
                     }
@@ -957,7 +966,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                 }
 
                 auto online = history_storage::maintenance_protocol::
-                    supports_online_collection(storage, workspace_root);
+                    supports_online_collection(storage, layout, workspace_root);
                 if (!online) {
                     return std::unexpected(protocol_error(online.error()));
                 }
@@ -1028,6 +1037,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                         "remote storage changed prior to destructive phase"));
                 }
                 auto purged = purge_expired_quarantine(storage,
+                                                       layout,
                                                        workspace_root,
                                                        *now,
                                                        *confirmed,
@@ -1039,7 +1049,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                 result.purged_objects = *purged;
                 for (const auto& identifier : confirmed->candidates) {
                     if (history_storage::maintenance_protocol::is_epoch_object(
-                            identifier)) {
+                            layout, identifier)) {
                         return std::unexpected(make_error(
                             ErrorCode::IntegrityFailure,
                             "epoch candidate blocked from quarantine",
@@ -1050,8 +1060,9 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     if (!owned) {
                         return std::unexpected(protocol_error(owned.error()));
                     }
-                    auto quarantine_identifier = history_storage::
-                        maintenance_protocol::quarantine_identifier(identifier);
+                    auto quarantine_identifier =
+                        history_storage::maintenance_protocol::
+                            quarantine_identifier(layout, identifier);
                     if (!quarantine_identifier) {
                         return std::unexpected(
                             make_error(ErrorCode::IntegrityFailure,

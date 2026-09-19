@@ -1,6 +1,7 @@
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/history_storage.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "application/sync/coordinator.hpp"
 #include "application/sync/journal.hpp"
 #include "application/sync/mutation.hpp"
@@ -171,8 +172,10 @@ load_published_commit(const journal::Paths& paths,
     }
     const publication::PreparedCommit prepared{.commit = (*reachable)->commit,
                                                .commit_id = record.commit_id};
+    const auto layout = history_storage::derive_remote_layout(key);
     auto verified = publication::verify_commit_object(
         storage,
+        layout,
         key,
         prepared,
         reference,
@@ -252,7 +255,8 @@ bool is_publication_transaction_resumable(
     const transaction::Record& record,
     const std::optional<platform::Workspace>& workspace,
     const runtime::RuntimeData& runtime_data,
-    transport::Transport& storage) {
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
     if (!record.publication_required || !workspace) {
         return false;
     }
@@ -305,7 +309,9 @@ bool is_publication_transaction_resumable(
     }
 
     // 3. Check that remote heads have not advanced concurrently
-    auto remote_heads = publication::list_remote_head_commit_ids(storage);
+    const auto layout = history_storage::derive_remote_layout(key);
+    auto remote_heads =
+        publication::list_remote_head_commit_ids(storage, layout);
     if (!remote_heads) {
         return false;
     }
@@ -575,8 +581,12 @@ roll_forward(const journal::Paths& paths,
         }
     }
     if (record.phase < transaction::Phase::HeadVerified) {
+        const auto layout = history_storage::derive_remote_layout(key);
         auto marker_verified = publication::verify_head_marker(
-            storage, reference, runtime_data.database_path.parent_path());
+            storage,
+            layout,
+            reference,
+            runtime_data.database_path.parent_path());
         if (!marker_verified) {
             return std::unexpected(detail::indeterminate_publication(
                 marker_verified.error(), "published head marker"));
@@ -606,7 +616,7 @@ roll_forward(const journal::Paths& paths,
         }
         if (record.phase < transaction::Phase::EpochUploaded) {
             auto published = history_storage::epoch::publish(
-                storage, *epoch, runtime_data.database_path.parent_path());
+                storage, key, *epoch, runtime_data.database_path.parent_path());
             if (!published) {
                 auto visible = history_storage::epoch::verify(
                     storage,
@@ -755,6 +765,7 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
     }
 
     history_storage::maintenance_protocol::RegistrationState writer;
+    const auto layout = history_storage::derive_remote_layout(key);
     const bool remote_write_required =
         has_pending_storage_repair(**record) ||
         ((*record)->publication_required &&
@@ -762,7 +773,7 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
     if (remote_write_required) {
         auto registered =
             history_storage::maintenance_protocol::register_writer(
-                storage, runtime_data.database_path.parent_path());
+                storage, layout, runtime_data.database_path.parent_path());
         if (!registered) {
             return std::unexpected(detail::make_error(
                 registered.error().code ==
@@ -819,8 +830,12 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
             }
 
             if ((*record)->phase <= transaction::Phase::CommitPrepared) {
-                if (is_publication_transaction_resumable(
-                        *paths, **record, *workspace, runtime_data, storage)) {
+                if (is_publication_transaction_resumable(*paths,
+                                                         **record,
+                                                         *workspace,
+                                                         runtime_data,
+                                                         storage,
+                                                         key)) {
                     std::error_code ec;
                     std::filesystem::remove_all(
                         (*workspace)->root / "upload-batches", ec);
@@ -834,7 +849,10 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
                 .commit_id = (*record)->commit_id,
                 .ciphertext_id = (*record)->ciphertext_id};
             auto marker = publication::inspect_head_marker(
-                storage, reference, runtime_data.database_path.parent_path());
+                storage,
+                layout,
+                reference,
+                runtime_data.database_path.parent_path());
             if (!marker) {
                 return std::unexpected(detail::indeterminate_publication(
                     marker.error(), "head marker visibility"));
