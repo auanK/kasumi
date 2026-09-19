@@ -30,7 +30,7 @@ std::string hash_hex(const Hash& hash) {
 
 std::expected<Hash, std::string> hash_from_hex(std::string_view text) {
     if (text.size() != HASH_HEX_SIZE)
-        return std::unexpected("hash BLAKE3 inválido");
+        return std::unexpected("invalid BLAKE3 hash");
     Hash result{};
     const auto digit = [](char value) -> int {
         if (value >= '0' && value <= '9')
@@ -45,7 +45,7 @@ std::expected<Hash, std::string> hash_from_hex(std::string_view text) {
         const int high = digit(text[i * 2]);
         const int low = digit(text[i * 2 + 1]);
         if (high < 0 || low < 0)
-            return std::unexpected("hash BLAKE3 inválido");
+            return std::unexpected("invalid BLAKE3 hash");
         result[i] = static_cast<std::byte>((high << 4) | low);
     }
     return result;

@@ -33,13 +33,13 @@ Error make_error(const std::error_code& error, ErrorCode fallback) {
 
 Error invalid_context_error() {
     return Error{.code = ErrorCode::InvalidContext,
-                 .message = "estado do transporte local ausente ou inválido",
+                 .message = "local transport state is missing or invalid",
                  .native_code = 0};
 }
 
 Error invalid_identifier_error() {
     return Error{.code = ErrorCode::InvalidIdentifier,
-                 .message = "identificador de objeto inválido",
+                 .message = "invalid object identifier",
                  .native_code = 0};
 }
 
@@ -175,7 +175,7 @@ Result local_put(void* context,
     if (!source_exists) {
         return std::unexpected(Error{
             .code = ErrorCode::ObjectNotFound,
-            .message = "arquivo de origem não existe",
+            .message = "source file does not exist",
             .native_code = 0,
         });
     }
@@ -250,7 +250,7 @@ ListingResult local_list(void* context) {
     if (!exists) {
         return std::unexpected(Error{
             .code = ErrorCode::StorageNotFound,
-            .message = "diretório de objetos não existe",
+            .message = "objects directory does not exist",
             .native_code = 0,
         });
     }
@@ -313,7 +313,7 @@ ListingResult local_list_prefix(void* context, std::string_view prefix) {
         if (error == std::errc::no_such_file_or_directory || !error) {
             return std::unexpected(Error{
                 .code = ErrorCode::StorageNotFound,
-                .message = "diretório de objetos não existe",
+                .message = "objects directory does not exist",
                 .native_code = 0,
             });
         }

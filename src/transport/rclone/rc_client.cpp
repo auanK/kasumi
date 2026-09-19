@@ -78,7 +78,7 @@ Error with_request_context(const State& state,
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started);
     error.message = std::format(
-        "endpoint={}, duração={} ms, tentativa RC={}/{}, rclone={}: {}",
+        "endpoint={}, duration={} ms, RC attempt={}/{}, rclone={}: {}",
         endpoint,
         elapsed.count(),
         attempt,
@@ -116,7 +116,7 @@ post_rc_impl(State& state,
         path_suffix.find("..") != std::string_view::npos ||
         path_suffix.find_first_of("?#") != std::string_view::npos) {
         return std::unexpected(
-            make_error(ErrorCode::ProtocolFailure, "endpoint RC inválido"));
+            make_error(ErrorCode::ProtocolFailure, "invalid RC endpoint"));
     }
     const std::string path = state.base_url + "/" + std::string{path_suffix};
     httplib::Client client("127.0.0.1", state.port);
@@ -145,10 +145,10 @@ post_rc_impl(State& state,
                 std::chrono::steady_clock::now() - started >=
                     std::chrono::seconds{1}) {
                 const auto operation = path_suffix == "operations/list"
-                                           ? "LIST remoto"
-                                           : "resposta remota";
+                                           ? "remote LIST"
+                                           : "remote response";
                 state.report_status(std::format(
-                    "[Rede] aguardando {} (tentativa RC {}/{}, endpoint={})",
+                    "[Network] waiting for {} (RC attempt {}/{}, endpoint={})",
                     operation,
                     attempt,
                     attempts,
@@ -163,20 +163,20 @@ post_rc_impl(State& state,
         client.Post(path, std::string{request_body}, "application/json");
     watcher.request_stop();
     if (platform::cancellation::requested()) {
-        return std::unexpected(make_error(ErrorCode::Cancelled,
-                                          "operação cancelada pelo usuário"));
+        return std::unexpected(
+            make_error(ErrorCode::Cancelled, "operation cancelled by user"));
     }
     if (!response) {
         return std::unexpected(
             make_error(ErrorCode::Io,
-                       std::string{"falha HTTP RC: "} +
+                       std::string{"RC HTTP failure: "} +
                            httplib::to_string(response.error()),
                        static_cast<int>(response.error())));
     }
     if (response->body.size() > response_limit) {
         return std::unexpected(make_error(
             ErrorCode::ProtocolFailure,
-            "resposta RC excede o limite",
+            "RC response exceeds limit",
             static_cast<int>(std::min(
                 response->body.size(),
                 static_cast<std::size_t>((std::numeric_limits<int>::max)())))));
@@ -220,32 +220,31 @@ std::expected<void, Error> validate_rc_handshake(State& state, int child_pid) {
             (!json["pid"].is_number_integer() &&
              !json["pid"].is_number_unsigned())) {
             return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                              "resposta core/pid inválida"));
+                                              "invalid core/pid response"));
         }
         std::uint64_t remote_pid = 0;
         if (json["pid"].is_number_integer()) {
             const auto signed_pid = json["pid"].get<std::int64_t>();
             if (signed_pid <= 0) {
-                return std::unexpected(make_error(
-                    ErrorCode::ProtocolFailure, "resposta core/pid inválida"));
+                return std::unexpected(make_error(ErrorCode::ProtocolFailure,
+                                                  "invalid core/pid response"));
             }
             remote_pid = static_cast<std::uint64_t>(signed_pid);
         } else {
             remote_pid = json["pid"].get<std::uint64_t>();
             if (remote_pid == 0) {
-                return std::unexpected(make_error(
-                    ErrorCode::ProtocolFailure, "resposta core/pid inválida"));
+                return std::unexpected(make_error(ErrorCode::ProtocolFailure,
+                                                  "invalid core/pid response"));
             }
         }
         if (remote_pid != static_cast<std::uint64_t>(child_pid)) {
             return std::unexpected(
                 make_error(ErrorCode::ProtocolFailure,
-                           "PID RC não corresponde ao processo iniciado"));
+                           "RC PID does not match started process"));
         }
     } catch (const std::exception&) {
-        return std::unexpected(
-            make_error(ErrorCode::ProtocolFailure,
-                       "JSON core/pid inválido; corpo omitido"));
+        return std::unexpected(make_error(
+            ErrorCode::ProtocolFailure, "invalid core/pid JSON; body omitted"));
     }
     return {};
 }
@@ -257,9 +256,9 @@ std::expected<void, Error> wait_for_rc_readiness(State& state, int child_pid) {
     bool first_attempt_finished = false;
     while (std::chrono::steady_clock::now() < deadline) {
         if (drain_finished(state)) {
-            return std::unexpected(make_error(
-                ErrorCode::ProcessFailure,
-                "a drenagem do processo rclone terminou durante o startup"));
+            return std::unexpected(
+                make_error(ErrorCode::ProcessFailure,
+                           "rclone process drain finished during startup"));
         }
         platform::perf_trace::count("RC readiness attempts");
         const auto handshake = validate_rc_handshake(state, child_pid);
@@ -281,7 +280,7 @@ std::expected<void, Error> wait_for_rc_readiness(State& state, int child_pid) {
         std::this_thread::sleep_for(std::chrono::milliseconds(75));
     }
     return std::unexpected(make_error(
-        ErrorCode::Timeout, "timeout aguardando o rclone ficar pronto"));
+        ErrorCode::Timeout, "timed out waiting for rclone readiness"));
 }
 
 } // namespace
@@ -328,8 +327,7 @@ post_rc_read_only(State& state,
             finish();
             return std::unexpected(with_request_context(
                 state,
-                make_error(ErrorCode::Cancelled,
-                           "operação cancelada pelo usuário"),
+                make_error(ErrorCode::Cancelled, "operation cancelled by user"),
                 endpoint,
                 started,
                 attempt + 1,
@@ -340,8 +338,7 @@ post_rc_read_only(State& state,
             finish();
             return std::unexpected(with_request_context(
                 state,
-                make_error(ErrorCode::Timeout,
-                           "prazo global da leitura RC esgotado"),
+                make_error(ErrorCode::Timeout, "RC read deadline exceeded"),
                 endpoint,
                 started,
                 attempt + 1,
@@ -380,8 +377,7 @@ post_rc_read_only(State& state,
             finish();
             return std::unexpected(with_request_context(
                 state,
-                make_error(ErrorCode::Timeout,
-                           "prazo global da leitura RC esgotado"),
+                make_error(ErrorCode::Timeout, "RC read deadline exceeded"),
                 endpoint,
                 started,
                 attempt + 1,

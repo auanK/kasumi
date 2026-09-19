@@ -14,9 +14,8 @@ std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
     try {
         std::ifstream input(path, std::ios::binary);
         if (!input) {
-            return std::unexpected(
-                "não foi possível abrir o arquivo para hash: " +
-                platform::path::to_utf8(path));
+            return std::unexpected("could not open file for hashing: " +
+                                   platform::path::to_utf8(path));
         }
 
         blake3_hasher state;
@@ -34,7 +33,7 @@ std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
         }
 
         if (input.bad()) {
-            return std::unexpected("falha ao ler o arquivo para hash: " +
+            return std::unexpected("failed to read file for hashing: " +
                                    platform::path::to_utf8(path));
         }
 
@@ -44,9 +43,8 @@ std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
                                result.size());
         return result;
     } catch (const std::exception& exception) {
-        return std::unexpected(
-            std::string{"não foi possível calcular o hash do arquivo: "} +
-            exception.what());
+        return std::unexpected(std::string{"could not compute file hash: "} +
+                               exception.what());
     }
 }
 
@@ -56,7 +54,7 @@ verify_file(const std::filesystem::path& path,
             std::optional<std::uint64_t> expected_size) {
     auto decoded_hash = hash_from_hex(expected_hash);
     if (!decoded_hash) {
-        return std::unexpected("hash esperado inválido: " +
+        return std::unexpected("invalid expected hash: " +
                                decoded_hash.error());
     }
 
@@ -64,30 +62,27 @@ verify_file(const std::filesystem::path& path,
         std::error_code error;
         const auto file_status = std::filesystem::symlink_status(path, error);
         if (error) {
-            return std::unexpected("não foi possível consultar o arquivo: " +
-                                   error.message());
+            return std::unexpected("could not query file: " + error.message());
         }
         if (std::filesystem::is_symlink(file_status)) {
-            return std::unexpected(
-                "o caminho é um symlink e não pode ser verificado");
+            return std::unexpected("path is a symlink and cannot be verified");
         }
         if (file_status.type() == std::filesystem::file_type::not_found) {
-            return std::unexpected("o arquivo não existe");
+            return std::unexpected("file does not exist");
         }
         if (!std::filesystem::is_regular_file(file_status)) {
-            return std::unexpected("o caminho não é um arquivo regular");
+            return std::unexpected("path is not a regular file");
         }
 
         if (expected_size) {
             const auto actual_size = std::filesystem::file_size(path, error);
             if (error) {
-                return std::unexpected(
-                    "não foi possível ler o tamanho do arquivo: " +
-                    error.message());
+                return std::unexpected("could not read file size: " +
+                                       error.message());
             }
             if (actual_size != *expected_size) {
                 return std::unexpected(
-                    "o tamanho do arquivo não corresponde ao esperado");
+                    "file size does not match expected size");
             }
         }
 
@@ -96,14 +91,12 @@ verify_file(const std::filesystem::path& path,
             return std::unexpected(actual_hash.error());
         }
         if (*actual_hash != *decoded_hash) {
-            return std::unexpected(
-                "o conteúdo do arquivo não corresponde ao hash esperado");
+            return std::unexpected("file content does not match expected hash");
         }
         return {};
     } catch (const std::exception& exception) {
-        return std::unexpected(
-            std::string{"não foi possível verificar o arquivo: "} +
-            exception.what());
+        return std::unexpected(std::string{"could not verify file: "} +
+                               exception.what());
     }
 }
 

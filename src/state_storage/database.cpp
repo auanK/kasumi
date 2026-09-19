@@ -132,7 +132,7 @@ int read_schema_version(sqlite3* database) {
     auto query =
         require_statement(sqlite::prepare(database, "PRAGMA user_version"));
     if (!require_step(query)) {
-        throw std::runtime_error("Nao foi possivel ler a versao do schema");
+        throw std::runtime_error("could not read schema version");
     }
     return static_cast<int>(sqlite::integer(query, 0));
 }
@@ -408,8 +408,8 @@ std::expected<Snapshot, std::string> load_tree(sqlite3* database) {
         std::ranges::sort(snapshot.rows, path_less, &NodeRow::path);
         return snapshot;
     } catch (const std::exception& exception) {
-        return std::unexpected(std::string{"não foi possível carregar "
-                                           "a árvore do banco local: "} +
+        return std::unexpected(std::string{"could not load tree "
+                                           "from local database: "} +
                                exception.what());
     }
 }
@@ -730,9 +730,8 @@ load_state(const std::filesystem::path& database_path) {
         platform::perf_trace::finish("state db load wall", state_trace);
         return state;
     } catch (const std::exception& exception) {
-        return std::unexpected(
-            std::string{"não foi possível carregar state.db: "} +
-            exception.what());
+        return std::unexpected(std::string{"could not load state.db: "} +
+                               exception.what());
     }
 }
 
@@ -842,9 +841,8 @@ load_file_cache(const std::filesystem::path& database_path) {
         platform::perf_trace::count("file cache rows loaded", result.size());
         return result;
     } catch (const std::exception& exception) {
-        return std::unexpected(
-            std::string{"não foi possível carregar o cache de arquivos: "} +
-            exception.what());
+        return std::unexpected(std::string{"could not load file cache: "} +
+                               exception.what());
     }
 }
 
@@ -988,8 +986,8 @@ load_observation_checkpoint(const std::filesystem::path& database_path) {
         platform::perf_trace::finish("checkpoint load wall", checkpoint_trace);
         return loaded;
     } catch (const std::exception& exception) {
-        return std::unexpected(std::string{"não foi possível carregar o ponto "
-                                           "de controle de observação: "} +
+        return std::unexpected(std::string{"could not load "
+                                           "observation checkpoint: "} +
                                exception.what());
     }
 }

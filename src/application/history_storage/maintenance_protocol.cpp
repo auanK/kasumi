@@ -123,9 +123,9 @@ put_verified(transport::Transport& storage,
     if (remote_hash) {
         platform::perf_trace::finish("writer verification", verification_trace);
         if (*remote_hash != *local_hash) {
-            return std::unexpected(error(
-                ErrorCode::VerificationFailure,
-                "o hash físico remoto não corresponde ao marker publicado"));
+            return std::unexpected(
+                error(ErrorCode::VerificationFailure,
+                      "remote physical hash does not match published marker"));
         }
         return {};
     }
@@ -148,7 +148,7 @@ put_verified(transport::Transport& storage,
         platform::perf_trace::finish("writer verification", verification_trace);
         return std::unexpected(
             error(ErrorCode::VerificationFailure,
-                  "o marker remoto não corresponde ao marker publicado"));
+                  "remote marker does not match published marker"));
     }
     platform::perf_trace::finish("writer verification", verification_trace);
     return {};
@@ -262,13 +262,13 @@ decode_metadata(std::span<const std::uint8_t> bytes) {
         reinterpret_cast<const char*>(bytes.data()), bytes.size()};
     if (!text.starts_with(metadata_magic)) {
         return std::unexpected(error(ErrorCode::InvalidControlObject,
-                                     "metadata de quarentena inválido"));
+                                     "invalid quarantine metadata"));
     }
     const auto body = text.substr(metadata_magic.size());
     const auto separator = body.find('\n');
     if (separator == std::string_view::npos) {
         return std::unexpected(error(ErrorCode::InvalidControlObject,
-                                     "metadata de quarentena inválido"));
+                                     "invalid quarantine metadata"));
     }
     std::int64_t quarantined_at = -1;
     const auto timestamp = body.substr(0, separator);
@@ -280,7 +280,7 @@ decode_metadata(std::span<const std::uint8_t> bytes) {
         physical_sha256.size() != 65 || !physical_sha256.ends_with('\n') ||
         !valid_sha256(physical_sha256.substr(0, 64))) {
         return std::unexpected(error(ErrorCode::InvalidControlObject,
-                                     "metadata de quarentena inválido"));
+                                     "invalid quarantine metadata"));
     }
     return std::pair{quarantined_at,
                      std::string{physical_sha256.substr(0, 64)}};
@@ -306,12 +306,12 @@ load_metadata(transport::Transport& storage,
             maximum_marker_size ||
         file_error) {
         return std::unexpected(error(ErrorCode::InvalidControlObject,
-                                     "metadata de quarentena muito grande"));
+                                     "quarantine metadata too large"));
     }
     if (!crypto::decrypt_file(
             encrypted, plaintext, key, crypto::FilePurpose::History)) {
         return std::unexpected(error(ErrorCode::VerificationFailure,
-                                     "metadata de quarentena não autenticado"));
+                                     "quarantine metadata not authenticated"));
     }
     auto bytes = detail::read_file(plaintext, maximum_metadata_plaintext_size);
     if (!bytes) {
@@ -339,8 +339,8 @@ publish_metadata(transport::Transport& storage,
     }
     if (!crypto::encrypt_file(
             plaintext, encrypted, key, crypto::FilePurpose::History)) {
-        return std::unexpected(error(ErrorCode::WorkspaceFailure,
-                                     "não foi possível cifrar o metadata"));
+        return std::unexpected(
+            error(ErrorCode::WorkspaceFailure, "failed to encrypt metadata"));
     }
     auto ciphertext = detail::read_file(encrypted, maximum_marker_size);
     if (!ciphertext) {
@@ -407,7 +407,7 @@ register_writer(transport::Transport& storage,
                 const std::filesystem::path& workspace_root) {
     if (!transport::valid(storage) || workspace_root.empty()) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "contexto de writer inválido"));
+            error(ErrorCode::InvalidInput, "invalid writer context"));
     }
     auto token = platform::random::hex_id();
     if (!token) {
@@ -444,7 +444,7 @@ register_writer(transport::Transport& storage,
         if (control_reads->listings.size() != 1 ||
             control_reads->presences.size() != 1) {
             auto failure = error(ErrorCode::InvalidControlObject,
-                                 "resposta incompleta do batch de admissão");
+                                 "incomplete admission batch response");
             static_cast<void>(release_registration(registration));
             return std::unexpected(std::move(failure));
         }
@@ -477,14 +477,13 @@ register_writer(transport::Transport& storage,
         return std::unexpected(std::move(failure));
     }
     if (!contains_name(listed, name)) {
-        auto failure =
-            error(ErrorCode::BackendUnsafe,
-                  "o backend não tornou o writer visível na listagem");
+        auto failure = error(ErrorCode::BackendUnsafe,
+                             "backend did not make writer visible in listing");
         static_cast<void>(release_registration(registration));
         return std::unexpected(std::move(failure));
     }
     if (barrier == transport::Presence::Present) {
-        auto failure = error(ErrorCode::Blocked, "GC ativo no destino");
+        auto failure = error(ErrorCode::Blocked, "GC active on destination");
         static_cast<void>(release_registration(registration));
         return std::unexpected(std::move(failure));
     }
@@ -503,7 +502,7 @@ establish_barrier(transport::Transport& storage,
                   const std::filesystem::path& workspace_root) {
     if (!transport::valid(storage) || workspace_root.empty()) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "contexto de barreira inválido"));
+            error(ErrorCode::InvalidInput, "invalid barrier context"));
     }
     auto token = platform::random::hex_id();
     if (!token) {
@@ -543,12 +542,12 @@ active_writers(transport::Transport& storage, const RemoteLayout& layout) {
     for (const auto& name : *listed) {
         if (name.size() != 39 || !name.ends_with(".writer")) {
             return std::unexpected(error(ErrorCode::InvalidControlObject,
-                                         "marker de writer inválido: " + name));
+                                         "invalid writer marker: " + name));
         }
         const auto token = name.substr(0, 32);
         if (!detail::valid_hex_id(token + std::string(32, '0'))) {
             return std::unexpected(error(ErrorCode::InvalidControlObject,
-                                         "marker de writer inválido: " + name));
+                                         "invalid writer marker: " + name));
         }
         result.push_back(layout.writers_prefix + name);
     }
@@ -561,13 +560,13 @@ active_writers(transport::Transport& storage, const RemoteLayout& layout) {
                     if (name.size() != 39 || !name.ends_with(".writer")) {
                         return std::unexpected(
                             error(ErrorCode::InvalidControlObject,
-                                  "marker de writer inválido: " + name));
+                                  "invalid writer marker: " + name));
                     }
                     const auto token = name.substr(0, 32);
                     if (!detail::valid_hex_id(token + std::string(32, '0'))) {
                         return std::unexpected(
                             error(ErrorCode::InvalidControlObject,
-                                  "marker de writer inválido: " + name));
+                                  "invalid writer marker: " + name));
                     }
                     result.push_back(std::string{legacy_dir} + "/" + name);
                 }
@@ -728,7 +727,7 @@ std::expected<std::vector<QuarantineEntry>, Error> inventory_quarantine_impl(
         if (!original) {
             return std::unexpected(
                 error(ErrorCode::InvalidControlObject,
-                      "objeto de quarentena inválido: " + identifier));
+                      "invalid quarantine object: " + identifier));
         }
         entries.emplace(identifier,
                         QuarantineEntry{
@@ -743,9 +742,9 @@ std::expected<std::vector<QuarantineEntry>, Error> inventory_quarantine_impl(
     for (const auto& [quarantine_identifier, metadata_identifier] : metadata) {
         const auto entry = entries.find(quarantine_identifier);
         if (entry == entries.end()) {
-            return std::unexpected(error(ErrorCode::InvalidControlObject,
-                                         "metadata sem objeto de quarentena: " +
-                                             metadata_identifier));
+            return std::unexpected(error(
+                ErrorCode::InvalidControlObject,
+                "metadata without quarantine object: " + metadata_identifier));
         }
         auto loaded =
             load_metadata(storage, metadata_identifier, key, workspace_root);
@@ -795,7 +794,7 @@ record_quarantine(transport::Transport& storage,
     auto original = restore_destination(layout, quarantine_identifier);
     if (!original || quarantined_at < 0) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "registro de quarentena inválido"));
+            error(ErrorCode::InvalidInput, "invalid quarantine record"));
     }
     std::string physical_sha256{verified_sha256};
     if (physical_sha256.empty()) {
@@ -807,7 +806,7 @@ record_quarantine(transport::Transport& storage,
         physical_sha256 = std::move(*observed);
     } else if (!valid_sha256(physical_sha256)) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "SHA-256 de quarentena inválido"));
+            error(ErrorCode::InvalidInput, "invalid quarantine SHA-256"));
     }
     const auto metadata_identifier = metadata_for(quarantine_identifier);
     auto published = publish_metadata(storage,
@@ -836,7 +835,7 @@ verify_quarantine(transport::Transport& storage,
         metadata_for(entry.quarantine_identifier) !=
             entry.metadata_identifier) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "metadata de quarentena ausente"));
+            error(ErrorCode::InvalidInput, "missing quarantine metadata"));
     }
     auto physical_sha256 =
         object_sha256(storage, entry.quarantine_identifier, workspace_root);
@@ -855,7 +854,7 @@ copy_verified(transport::Transport& storage,
         is_epoch_object(destination_identifier)) {
         return std::unexpected(
             error(ErrorCode::Blocked,
-                  "objetos Epoch não podem ser copiados pela coleta"));
+                  "epoch objects cannot be copied by collection"));
     }
     auto temporary = detail::make_workspace(workspace_root);
     if (!temporary) {
@@ -883,7 +882,7 @@ copy_verified(transport::Transport& storage,
         if (*remote_hash != *source_hash) {
             return std::unexpected(
                 error(ErrorCode::VerificationFailure,
-                      "a cópia remota não corresponde ao objeto de origem"));
+                      "remote copy does not match source object"));
         }
         return std::move(*source_hash);
     }
@@ -904,7 +903,7 @@ copy_verified(transport::Transport& storage,
     if (*destination_hash != *source_hash) {
         return std::unexpected(
             error(ErrorCode::VerificationFailure,
-                  "a cópia baixada não corresponde ao objeto de origem"));
+                  "downloaded copy does not match source object"));
     }
     return std::move(*source_hash);
 }

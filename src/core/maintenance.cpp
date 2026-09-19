@@ -26,14 +26,14 @@ AnalyzeResult analyze(const Snapshot& history_tree,
     if (!kasumi::valid_snapshot(history_tree, false)) {
         return std::unexpected(Error{
             .code = ErrorCode::InvalidHistoryTree,
-            .detail = "árvore do histórico inválida",
+            .detail = "invalid history tree",
             .paths = {},
         });
     }
     if (!kasumi::valid_snapshot(local_tree, true)) {
         return std::unexpected(Error{
             .code = ErrorCode::InvalidLocalTree,
-            .detail = "árvore local inválida",
+            .detail = "invalid local tree",
             .paths = {},
         });
     }
@@ -59,7 +59,7 @@ AnalyzeResult analyze(const Snapshot& history_tree,
             paths.push_back(platform::path::from_utf8(row.path));
             return std::unexpected(Error{
                 .code = ErrorCode::ConflictingReference,
-                .detail = "o mesmo objeto possui tamanhos conflitantes",
+                .detail = "the same object has conflicting sizes",
                 .paths = std::move(paths),
             });
         }

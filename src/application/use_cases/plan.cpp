@@ -38,7 +38,7 @@ core_action_to_plan_action(Action action) {
         case Action::DeleteRemoteDirectory:
             return PlanAction::DeleteRemoteDirectory;
         case Action::Count:
-            return std::unexpected("ação de contagem não é um plano válido");
+            return std::unexpected("count action is not a valid plan");
     }
     std::unreachable();
 }
@@ -77,7 +77,7 @@ reconciliation_to_report(const reconciliation::Result& result) {
 std::string describe_reconciliation_error(const reconciliation::Error& error) {
     std::string detail = error.detail;
     if (!error.paths.empty()) {
-        detail += " (caminhos: ";
+        detail += " (paths: ";
         for (std::size_t index = 0; index < error.paths.size(); ++index) {
             if (index != 0) {
                 detail += ", ";
@@ -94,7 +94,7 @@ describe_unrecoverable_paths(std::span<const std::filesystem::path> paths) {
     constexpr std::size_t path_limit = 20;
     const auto displayed = std::min(paths.size(), path_limit);
     std::string detail =
-        "objetos remotos ausentes sem fonte local recuperável (caminhos: ";
+        "remote objects missing without recoverable local source (paths: ";
     for (std::size_t index = 0; index < displayed; ++index) {
         if (index != 0) {
             detail += ", ";
@@ -102,8 +102,9 @@ describe_unrecoverable_paths(std::span<const std::filesystem::path> paths) {
         detail += platform::path::to_utf8(paths[index]);
     }
     if (paths.size() > path_limit) {
-        detail += "; e mais ";
+        detail += "; and ";
         detail += std::to_string(paths.size() - path_limit);
+        detail += " more";
     }
     detail += ')';
     return detail;

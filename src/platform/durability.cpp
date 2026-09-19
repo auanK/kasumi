@@ -35,7 +35,7 @@ validate_parent(const std::filesystem::path& path, std::string_view operation) {
     const auto parent = path.parent_path();
     if (parent.empty()) {
         return std::unexpected(std::string{operation} +
-                               ": diretório pai vazio para '" +
+                               ": empty parent directory for '" +
                                platform::path::to_utf8(path) + "'");
     }
 
@@ -44,12 +44,12 @@ validate_parent(const std::filesystem::path& path, std::string_view operation) {
     if (error) {
         return std::unexpected(
             std::string{operation} +
-            ": não foi possível consultar o diretório pai: " + error.message());
+            ": could not query parent directory: " + error.message());
     }
     if (std::filesystem::is_symlink(status) ||
         !std::filesystem::is_directory(status)) {
         return std::unexpected(std::string{operation} +
-                               ": diretório pai inválido para '" +
+                               ": invalid parent directory for '" +
                                platform::path::to_utf8(path) + "'");
     }
     return {};
@@ -61,14 +61,14 @@ validate_regular_file(const std::filesystem::path& path,
     std::error_code error;
     const auto status = std::filesystem::symlink_status(path, error);
     if (error) {
-        return std::unexpected(
-            std::string{operation} + ": não foi possível consultar '" +
-            platform::path::to_utf8(path) + "': " + error.message());
+        return std::unexpected(std::string{operation} + ": could not query '" +
+                               platform::path::to_utf8(path) +
+                               "': " + error.message());
     }
     if (std::filesystem::is_symlink(status) ||
         !std::filesystem::is_regular_file(status)) {
         return std::unexpected(std::string{operation} +
-                               ": arquivo regular esperado em '" +
+                               ": regular file expected at '" +
                                platform::path::to_utf8(path) + "'");
     }
     return {};
@@ -79,7 +79,7 @@ validate_replace_paths(const std::filesystem::path& source,
                        const std::filesystem::path& target) {
     if (source.empty() || target.empty()) {
         return std::unexpected(
-            "replace_atomically: source e target não podem ser vazios");
+            "replace_atomically: source and target cannot be empty");
     }
 
     auto source_file = validate_regular_file(source, "replace_atomically");
@@ -99,8 +99,8 @@ validate_replace_paths(const std::filesystem::path& source,
     if (source.parent_path().lexically_normal() !=
         target.parent_path().lexically_normal()) {
         return std::unexpected(
-            "replace_atomically: source e target precisam compartilhar "
-            "o diretório pai");
+            "replace_atomically: source and target must share "
+            "the parent directory");
     }
 
     std::error_code error;
@@ -111,20 +111,19 @@ validate_replace_paths(const std::filesystem::path& source,
         effective_target_status =
             std::filesystem::file_status{std::filesystem::file_type::not_found};
     } else if (error) {
-        return std::unexpected(
-            "replace_atomically: não foi possível consultar target: " +
-            error.message());
+        return std::unexpected("replace_atomically: could not query target: " +
+                               error.message());
     }
     if (std::filesystem::is_symlink(effective_target_status) ||
         std::filesystem::is_directory(effective_target_status)) {
         return std::unexpected(
-            "replace_atomically: target não pode ser symlink ou diretório");
+            "replace_atomically: target cannot be symlink or directory");
     }
     if (!std::filesystem::is_regular_file(effective_target_status) &&
         effective_target_status.type() !=
             std::filesystem::file_type::not_found) {
         return std::unexpected(
-            "replace_atomically: target não é arquivo regular");
+            "replace_atomically: target is not a regular file");
     }
     return {};
 }
@@ -145,13 +144,13 @@ replace_atomically(const std::filesystem::path& source,
                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
         const auto error = GetLastError();
         return std::unexpected(
-            native_error("replace_atomically falhou", error));
+            native_error("replace_atomically failed", error));
     }
 #else
     std::error_code error;
     std::filesystem::rename(source, target, error);
     if (error) {
-        return std::unexpected("replace_atomically falhou: " + error.message());
+        return std::unexpected("replace_atomically failed: " + error.message());
     }
 #endif
     return {};
@@ -159,7 +158,7 @@ replace_atomically(const std::filesystem::path& source,
 
 std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
     if (path.empty()) {
-        return std::unexpected("sync_file: path não pode ser vazio");
+        return std::unexpected("sync_file: path cannot be empty");
     }
     auto parent_validation = validate_parent(path, "sync_file");
     if (!parent_validation) {
@@ -181,7 +180,7 @@ std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
                     nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         return std::unexpected(
-            native_error("sync_file: CreateFileW falhou", GetLastError()));
+            native_error("sync_file: CreateFileW failed", GetLastError()));
     }
 
     const bool flushed = FlushFileBuffers(file) != 0;
@@ -190,11 +189,11 @@ std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
     const auto close_error = closed ? 0UL : GetLastError();
     if (!flushed) {
         return std::unexpected(
-            native_error("sync_file: FlushFileBuffers falhou", flush_error));
+            native_error("sync_file: FlushFileBuffers failed", flush_error));
     }
     if (!closed) {
         return std::unexpected(
-            native_error("sync_file: CloseHandle falhou", close_error));
+            native_error("sync_file: CloseHandle failed", close_error));
     }
 #else
     int flags = O_RDONLY;
@@ -206,7 +205,7 @@ std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
 #endif
     const int file = ::open(path.c_str(), flags);
     if (file < 0) {
-        return std::unexpected("sync_file: open falhou: " +
+        return std::unexpected("sync_file: open failed: " +
                                std::string{std::strerror(errno)});
     }
 
@@ -219,11 +218,11 @@ std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
     const bool closed = ::close(file) == 0;
     const auto close_error = closed ? 0 : errno;
     if (!synced) {
-        return std::unexpected("sync_file: fsync falhou: " +
+        return std::unexpected("sync_file: fsync failed: " +
                                std::string{std::strerror(sync_error)});
     }
     if (!closed) {
-        return std::unexpected("sync_file: close falhou: " +
+        return std::unexpected("sync_file: close failed: " +
                                std::string{std::strerror(close_error)});
     }
 #endif
@@ -233,8 +232,7 @@ std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
 std::expected<void, std::string>
 sync_parent_directory(const std::filesystem::path& path) {
     if (path.empty()) {
-        return std::unexpected(
-            "sync_parent_directory: path não pode ser vazio");
+        return std::unexpected("sync_parent_directory: path cannot be empty");
     }
     auto validation = validate_parent(path, "sync_parent_directory");
     if (!validation) {
@@ -257,7 +255,7 @@ sync_parent_directory(const std::filesystem::path& path) {
     const auto parent = path.parent_path();
     const int directory = ::open(parent.c_str(), flags);
     if (directory < 0) {
-        return std::unexpected("sync_parent_directory: open falhou: " +
+        return std::unexpected("sync_parent_directory: open failed: " +
                                std::string{std::strerror(errno)});
     }
 
@@ -270,11 +268,11 @@ sync_parent_directory(const std::filesystem::path& path) {
     const bool closed = ::close(directory) == 0;
     const auto close_error = closed ? 0 : errno;
     if (!synced) {
-        return std::unexpected("sync_parent_directory: fsync falhou: " +
+        return std::unexpected("sync_parent_directory: fsync failed: " +
                                std::string{std::strerror(sync_error)});
     }
     if (!closed) {
-        return std::unexpected("sync_parent_directory: close falhou: " +
+        return std::unexpected("sync_parent_directory: close failed: " +
                                std::string{std::strerror(close_error)});
     }
     return {};

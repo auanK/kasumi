@@ -19,24 +19,23 @@ std::expected<std::uint32_t, Error>
 read_retention_value(const toml::table& profile, std::string_view name) {
     const auto field = profile[name];
     if (!field) {
-        return std::unexpected(Error{
-            .code = ErrorCode::ProfileInvalid,
-            .detail = "campo de retenção obrigatório: " + std::string{name}});
+        return std::unexpected(Error{.code = ErrorCode::ProfileInvalid,
+                                     .detail = "retention field is required: " +
+                                               std::string{name}});
     }
     if (!field.is_integer()) {
         return std::unexpected(
             Error{.code = ErrorCode::ProfileInvalid,
-                  .detail = "campo de retenção deve ser um inteiro positivo: " +
+                  .detail = "retention field must be a positive integer: " +
                             std::string{name}});
     }
     const auto value = field.value_exact<std::int64_t>();
     if (!value || *value <= 0 ||
         static_cast<std::uint64_t>(*value) >
             std::numeric_limits<std::uint32_t>::max()) {
-        return std::unexpected(
-            Error{.code = ErrorCode::ProfileInvalid,
-                  .detail = "campo de retenção fora do intervalo: " +
-                            std::string{name}});
+        return std::unexpected(Error{
+            .code = ErrorCode::ProfileInvalid,
+            .detail = "retention field out of range: " + std::string{name}});
     }
     return static_cast<std::uint32_t>(*value);
 }
@@ -56,7 +55,7 @@ load_profile(const std::filesystem::path& config_path,
              std::string_view profile_name) {
     if (!is_valid_profile_name(profile_name)) {
         return std::unexpected(Error{.code = ErrorCode::InvalidProfileName,
-                                     .detail = "nome de perfil inválido"});
+                                     .detail = "invalid profile name"});
     }
 
     auto profiles = load_profiles(config_path);
@@ -69,7 +68,7 @@ load_profile(const std::filesystem::path& config_path,
     }
 
     return std::unexpected(Error{.code = ErrorCode::ProfileNotFound,
-                                 .detail = "perfil não encontrado"});
+                                 .detail = "profile not found"});
 }
 
 std::expected<std::vector<ProfileData>, Error>
@@ -78,15 +77,15 @@ load_profiles(const std::filesystem::path& config_path) {
     const auto status =
         std::filesystem::symlink_status(config_path, status_error);
     if (status.type() == std::filesystem::file_type::not_found) {
-        return std::unexpected(Error{
-            .code = ErrorCode::ConfigNotFound,
-            .detail =
-                "arquivo global não existe; use primeiro: kasumi config"});
+        return std::unexpected(
+            Error{.code = ErrorCode::ConfigNotFound,
+                  .detail = "global configuration file does not exist; run "
+                            "'kasumi config' first"});
     }
     if (status_error) {
         return std::unexpected(
             Error{.code = ErrorCode::IoFailure,
-                  .detail = "falha ao inspecionar a configuração global: " +
+                  .detail = "failed to inspect global configuration: " +
                             status_error.message()});
     }
     auto parent =
@@ -106,13 +105,13 @@ load_profiles(const std::filesystem::path& config_path) {
         if (!input) {
             return std::unexpected(
                 Error{.code = ErrorCode::IoFailure,
-                      .detail = "falha ao abrir a configuração global"});
+                      .detail = "failed to open global configuration"});
         }
         config = toml::parse(input, platform::path::to_utf8(config_path));
     } catch (const toml::parse_error& error) {
         return std::unexpected(
             Error{.code = ErrorCode::ConfigInvalid,
-                  .detail = "falha ao ler a configuração global: " +
+                  .detail = "failed to read global configuration: " +
                             std::string(error.description())});
     }
 
@@ -144,12 +143,12 @@ load_profiles(const std::filesystem::path& config_path) {
                     return std::unexpected(Error{
                         .code = ErrorCode::ProfileInvalid,
                         .detail =
-                            "perfil precisa ter 'local_dir' e 'remote_dir'"});
+                            "profile must have 'local_dir' and 'remote_dir'"});
                 }
             } else {
                 return std::unexpected(
                     Error{.code = ErrorCode::ProfileInvalid,
-                          .detail = "perfil possui formato inválido"});
+                          .detail = "profile has invalid format"});
             }
         }
     }
@@ -163,7 +162,7 @@ save_profiles(const std::filesystem::path& config_path,
         if (prof.min_history_depth == 0 || prof.min_history_age_hours == 0) {
             return std::unexpected(
                 Error{.code = ErrorCode::ProfileInvalid,
-                      .detail = "política de retenção deve ser positiva"});
+                      .detail = "retention policy must be positive"});
         }
     }
     toml::table config;
@@ -188,7 +187,7 @@ save_profiles(const std::filesystem::path& config_path,
     output << config;
     if (!output)
         return std::unexpected(Error{.code = ErrorCode::IoFailure,
-                                     .detail = "falha ao escrever config"});
+                                     .detail = "failed to write config"});
     auto saved =
         platform::private_storage::write_atomically(config_path, output.str());
     if (!saved) {

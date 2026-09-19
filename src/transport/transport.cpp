@@ -69,19 +69,17 @@ bool valid_remote_root(std::string_view root) noexcept {
 std::expected<void, Error> validate_location_text(std::string_view location) {
     if (location.empty()) {
         return std::unexpected(
-            make_error(ErrorCode::InvalidContext,
-                       "localização do armazenamento está vazia"));
+            make_error(ErrorCode::InvalidContext, "storage location is empty"));
     }
     if (std::any_of(location.begin(), location.end(), forbidden_character)) {
-        return std::unexpected(make_error(
-            ErrorCode::InvalidContext,
-            "localização do armazenamento contém caracteres inválidos"));
-    }
-    if (outer_whitespace(location)) {
         return std::unexpected(
             make_error(ErrorCode::InvalidContext,
-                       "localização do armazenamento não pode começar ou "
-                       "terminar com whitespace"));
+                       "storage location contains invalid characters"));
+    }
+    if (outer_whitespace(location)) {
+        return std::unexpected(make_error(ErrorCode::InvalidContext,
+                                          "storage location cannot begin or "
+                                          "end with whitespace"));
     }
     return {};
 }
@@ -89,7 +87,7 @@ std::expected<void, Error> validate_location_text(std::string_view location) {
 Error invalid_transport_error() {
     return Error{
         .code = ErrorCode::InvalidContext,
-        .message = "tabela de operações de transporte incompleta",
+        .message = "incomplete transport operations table",
         .native_code = 0,
     };
 }
@@ -133,7 +131,7 @@ std::expected<BackendConfiguration, Error> parse_backend_configuration(
         if (!root.is_absolute()) {
             return std::unexpected(
                 make_error(ErrorCode::InvalidContext,
-                           "o destino local deve usar um caminho absoluto"));
+                           "local destination must use an absolute path"));
         }
         return detail::LocalConfiguration{
             .root = root,
@@ -144,13 +142,13 @@ std::expected<BackendConfiguration, Error> parse_backend_configuration(
     const auto remote_name = location.substr(0, separator);
     const auto remote_root = location.substr(separator + 1);
     if (!valid_remote_name(remote_name)) {
-        return std::unexpected(make_error(
-            ErrorCode::InvalidIdentifier,
-            "somente remotes previamente configurados são permitidos"));
+        return std::unexpected(
+            make_error(ErrorCode::InvalidIdentifier,
+                       "only previously configured remotes are permitted"));
     }
     if (!valid_remote_root(remote_root)) {
-        return std::unexpected(make_error(ErrorCode::InvalidIdentifier,
-                                          "a raiz remota é inválida"));
+        return std::unexpected(
+            make_error(ErrorCode::InvalidIdentifier, "remote root is invalid"));
     }
 
     return detail::RcloneConfiguration{
@@ -170,7 +168,7 @@ std::expected<Transport, Error> accept_backend_transport(Transport transport) {
     if (!valid(transport)) {
         return std::unexpected(
             make_error(ErrorCode::InvalidContext,
-                       "backend retornou um transporte incompleto"));
+                       "backend returned an incomplete transport"));
     }
     return transport;
 }
@@ -195,38 +193,35 @@ bool valid_batch_identifier(std::string_view identifier) noexcept {
 std::expected<void, Error> validate_batch(const PutBatch& batch) {
     std::error_code error;
     if (!std::filesystem::is_directory(batch.source_root, error)) {
-        return std::unexpected(
-            make_error(ErrorCode::InvalidContext,
-                       "source_root não é um diretório válido"));
+        return std::unexpected(make_error(
+            ErrorCode::InvalidContext, "source_root is not a valid directory"));
     }
     if (std::filesystem::is_symlink(batch.source_root, error)) {
         return std::unexpected(make_error(ErrorCode::InvalidContext,
-                                          "source_root não pode ser symlink"));
+                                          "source_root cannot be a symlink"));
     }
 
     std::unordered_set<std::string> unique_identifiers;
     for (const auto& identifier : batch.identifiers) {
         if (!valid_batch_identifier(identifier)) {
-            return std::unexpected(
-                make_error(ErrorCode::InvalidIdentifier,
-                           "identificador inválido no batch"));
+            return std::unexpected(make_error(ErrorCode::InvalidIdentifier,
+                                              "invalid identifier in batch"));
         }
         if (!unique_identifiers.insert(identifier).second) {
             return std::unexpected(
                 make_error(ErrorCode::InvalidIdentifier,
-                           "identificadores duplicados no batch"));
+                           "duplicate identifiers in batch"));
         }
 
         auto path = batch.source_root / platform::path::from_utf8(identifier);
         if (std::filesystem::is_symlink(path, error)) {
-            return std::unexpected(
-                make_error(ErrorCode::InvalidContext,
-                           "arquivos do batch não podem ser symlinks"));
+            return std::unexpected(make_error(
+                ErrorCode::InvalidContext, "batch files cannot be symlinks"));
         }
         if (!std::filesystem::is_regular_file(path, error)) {
             return std::unexpected(
                 make_error(ErrorCode::ObjectNotFound,
-                           "arquivo do batch não existe ou não é regular"));
+                           "batch file does not exist or is not regular"));
         }
     }
 
@@ -234,32 +229,32 @@ std::expected<void, Error> validate_batch(const PutBatch& batch) {
         batch.source_root, std::filesystem::directory_options::none, error);
     if (error) {
         return std::unexpected(
-            make_error(ErrorCode::Io, "falha ao acessar source_root"));
+            make_error(ErrorCode::Io, "failed to access source_root"));
     }
 
     const std::filesystem::recursive_directory_iterator end;
     for (; iterator != end; iterator.increment(error)) {
         if (error) {
             return std::unexpected(
-                make_error(ErrorCode::Io, "falha ao iterar source_root"));
+                make_error(ErrorCode::Io, "failed to iterate source_root"));
         }
         if (iterator->is_symlink(error)) {
-            return std::unexpected(make_error(
-                ErrorCode::InvalidContext, "symlinks encontrados no staging"));
+            return std::unexpected(make_error(ErrorCode::InvalidContext,
+                                              "symlinks found in staging"));
         }
         if (iterator->is_regular_file(error)) {
             auto relative = std::filesystem::relative(
                 iterator->path(), batch.source_root, error);
             if (error) {
-                return std::unexpected(make_error(
-                    ErrorCode::Io,
-                    "falha ao calcular caminho relativo no staging"));
+                return std::unexpected(
+                    make_error(ErrorCode::Io,
+                               "failed to compute relative path in staging"));
             }
             if (!unique_identifiers.contains(
                     platform::path::to_logical_utf8(relative))) {
                 return std::unexpected(make_error(
                     ErrorCode::InvalidContext,
-                    "staging contém arquivos não especificados no manifest"));
+                    "staging contains files not specified in manifest"));
             }
         }
     }
@@ -272,13 +267,13 @@ std::expected<void, Error> validate_batch(const GetBatch& batch) {
     if (!batch.source_prefix.empty() &&
         !valid_list_prefix(batch.source_prefix)) {
         return std::unexpected(make_error(ErrorCode::InvalidIdentifier,
-                                          "prefixo inválido no batch"));
+                                          "invalid prefix in batch"));
     }
     if (!std::filesystem::is_directory(batch.destination_root, error) ||
         std::filesystem::is_symlink(batch.destination_root, error)) {
         return std::unexpected(
             make_error(ErrorCode::InvalidContext,
-                       "destination_root não é um diretório válido"));
+                       "destination_root is not a valid directory"));
     }
 
     std::unordered_set<std::string> unique_identifiers;
@@ -287,7 +282,7 @@ std::expected<void, Error> validate_batch(const GetBatch& batch) {
             !unique_identifiers.insert(identifier).second) {
             return std::unexpected(
                 make_error(ErrorCode::InvalidIdentifier,
-                           "identificador duplicado ou inválido no batch"));
+                           "duplicate or invalid identifier in batch"));
         }
     }
     return {};
@@ -298,31 +293,30 @@ validate_physical_hash_batch_request(const PhysicalHashBatchRequest& request) {
     if (request.scratch_root.empty() || request.algorithm.empty()) {
         return std::unexpected(
             make_error(ErrorCode::InvalidContext,
-                       "requisição de hash físico em lote incompleta"));
+                       "incomplete batch physical hash request"));
     }
     if (request.objects.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::InvalidIdentifier,
-                       "requisição de hash físico em lote vazia"));
+        return std::unexpected(make_error(ErrorCode::InvalidIdentifier,
+                                          "empty batch physical hash request"));
     }
 
     std::unordered_set<std::string> identifiers;
     for (const auto& object : request.objects) {
         if (!valid_batch_identifier(object.identifier) ||
             object.identifier.find_first_of("\r\n") != std::string_view::npos) {
-            return std::unexpected(make_error(
-                ErrorCode::InvalidIdentifier,
-                "identificador inválido na requisição de hash físico"));
+            return std::unexpected(
+                make_error(ErrorCode::InvalidIdentifier,
+                           "invalid identifier in physical hash request"));
         }
         if (object.expected_hash.empty()) {
             return std::unexpected(
                 make_error(ErrorCode::InvalidIdentifier,
-                           "hash esperado vazio na requisição de hash físico"));
+                           "empty expected hash in physical hash request"));
         }
         if (!identifiers.insert(object.identifier).second) {
-            return std::unexpected(make_error(
-                ErrorCode::InvalidIdentifier,
-                "identificadores duplicados na requisição de hash físico"));
+            return std::unexpected(
+                make_error(ErrorCode::InvalidIdentifier,
+                           "duplicate identifiers in physical hash request"));
         }
     }
     return {};
@@ -331,24 +325,24 @@ validate_physical_hash_batch_request(const PhysicalHashBatchRequest& request) {
 std::expected<void, Error>
 validate_control_read_batch_request(const ControlReadBatchRequest& request) {
     if (request.list_prefixes.empty() && request.presence_identifiers.empty()) {
-        return std::unexpected(make_error(
-            ErrorCode::InvalidContext, "batch de leituras de controle vazio"));
+        return std::unexpected(
+            make_error(ErrorCode::InvalidContext, "empty control read batch"));
     }
     std::unordered_set<std::string> prefixes;
     for (const auto& prefix : request.list_prefixes) {
         if (!valid_list_prefix(prefix) || !prefixes.insert(prefix).second) {
-            return std::unexpected(make_error(
-                ErrorCode::InvalidIdentifier,
-                "prefixo duplicado ou inválido no batch de controle"));
+            return std::unexpected(
+                make_error(ErrorCode::InvalidIdentifier,
+                           "duplicate or invalid prefix in control batch"));
         }
     }
     std::unordered_set<std::string> identifiers;
     for (const auto& identifier : request.presence_identifiers) {
         if (!valid_batch_identifier(identifier) ||
             !identifiers.insert(identifier).second) {
-            return std::unexpected(make_error(
-                ErrorCode::InvalidIdentifier,
-                "identificador duplicado ou inválido no batch de controle"));
+            return std::unexpected(
+                make_error(ErrorCode::InvalidIdentifier,
+                           "duplicate or invalid identifier in control batch"));
         }
     }
     return {};
@@ -392,7 +386,7 @@ open_transport(std::string_view location,
     }
 
     return std::unexpected(
-        make_error(ErrorCode::InvalidContext, "backend não reconhecido"));
+        make_error(ErrorCode::InvalidContext, "unrecognized backend"));
 }
 
 bool valid(const Transport& transport) noexcept {
@@ -523,8 +517,8 @@ ListingResult list(Transport& transport, std::string_view prefix) {
         return std::unexpected(invalid_transport_error());
     }
     if (!valid_list_prefix(prefix)) {
-        return std::unexpected(make_error(ErrorCode::InvalidIdentifier,
-                                          "prefixo de listagem inválido"));
+        return std::unexpected(
+            make_error(ErrorCode::InvalidIdentifier, "invalid listing prefix"));
     }
 
     platform::perf_trace::count("transport list prefix");
@@ -538,7 +532,7 @@ std::expected<std::string, Error> physical_hash(Transport& transport,
     if (state == nullptr || transport.storage.physical_hash == nullptr) {
         return std::unexpected(
             make_error(ErrorCode::Unsupported,
-                       "transporte não oferece hash físico remoto"));
+                       "transport does not support remote physical hash"));
     }
     return transport.storage.physical_hash(state, identifier, algorithm);
 }
@@ -554,9 +548,9 @@ physical_hash_batch(Transport& transport,
         return std::unexpected(validation.error());
     }
     if (transport.storage.physical_hash_batch == nullptr) {
-        return std::unexpected(
-            make_error(ErrorCode::Unsupported,
-                       "transporte não oferece hash físico remoto em lote"));
+        return std::unexpected(make_error(
+            ErrorCode::Unsupported,
+            "transport does not support batch remote physical hash"));
     }
     return transport.storage.physical_hash_batch(transport.state.get(),
                                                  request);
@@ -583,7 +577,7 @@ control_read_batch(Transport& transport,
     if (transport.storage.control_read_batch == nullptr) {
         return std::unexpected(
             make_error(ErrorCode::Unsupported,
-                       "transporte não oferece batch de leituras de controle"));
+                       "transport does not support control read batch"));
     }
     return transport.storage.control_read_batch(transport.state.get(), request);
 }

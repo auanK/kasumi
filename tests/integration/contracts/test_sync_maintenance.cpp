@@ -698,7 +698,7 @@ TEST(ApplicationMaintenanceContract, ActiveBarrierBlocksSyncBeforePublication) {
     ASSERT_FALSE(blocked.has_value());
     EXPECT_EQ(blocked.error().code,
               kasumi::application::ErrorCode::SynchronizationFailure);
-    EXPECT_NE(blocked.error().detail.find("GC ativo"), std::string::npos);
+    EXPECT_NE(blocked.error().detail.find("GC active"), std::string::npos);
 
     const auto released = protocol::release_registration(*barrier);
     ASSERT_TRUE(released.has_value()) << released.error().detail;

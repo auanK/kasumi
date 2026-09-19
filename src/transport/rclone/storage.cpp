@@ -33,12 +33,12 @@ Error make_error(ErrorCode code, std::string message, int native_code = 0) {
 }
 
 Error invalid_context_error() {
-    return make_error(ErrorCode::InvalidContext, "sessão RC não está pronta");
+    return make_error(ErrorCode::InvalidContext, "RC session is not ready");
 }
 
 Error invalid_identifier_error() {
     return make_error(ErrorCode::InvalidIdentifier,
-                      "identificador de objeto inválido");
+                      "invalid object identifier");
 }
 
 Error filesystem_error(const std::error_code& error) {
@@ -147,7 +147,7 @@ request_json_impl(State& state,
     } catch (const std::exception&) {
         return std::unexpected(make_error(
             ErrorCode::ProtocolFailure,
-            std::string{"resposta "} + std::string{endpoint} + " inválida"));
+            std::string{"invalid "} + std::string{endpoint} + " response"));
     }
 }
 
@@ -179,21 +179,21 @@ check_entries(const nlohmann::json& response,
     if (!response.contains(name) || !response.at(name).is_array()) {
         return std::unexpected(make_error(
             ErrorCode::ProtocolFailure,
-            "resposta operations/check sem lista " + std::string{name}));
+            "operations/check response missing list " + std::string{name}));
     }
 
     std::vector<std::string> entries;
     for (const auto& item : response.at(name)) {
         if (!item.is_string()) {
-            return std::unexpected(make_error(
-                ErrorCode::ProtocolFailure,
-                "resposta operations/check contém entrada inválida"));
+            return std::unexpected(
+                make_error(ErrorCode::ProtocolFailure,
+                           "operations/check response contains invalid entry"));
         }
         auto identifier = item.get<std::string>();
         if (!expected.contains(identifier) || !seen.insert(identifier).second) {
             return std::unexpected(make_error(
                 ErrorCode::ProtocolFailure,
-                "resposta operations/check contém identificador inesperado"));
+                "operations/check response contains unexpected identifier"));
         }
         entries.push_back(std::move(identifier));
     }
@@ -227,8 +227,8 @@ absolute_path(const std::filesystem::path& path) {
 Result ensure_parent_directory(const std::filesystem::path& path) {
     const auto parent = path.parent_path();
     if (parent.empty()) {
-        return std::unexpected(make_error(ErrorCode::InvalidContext,
-                                          "caminho local sem diretório pai"));
+        return std::unexpected(make_error(
+            ErrorCode::InvalidContext, "local path has no parent directory"));
     }
 
     std::error_code error;
@@ -245,13 +245,13 @@ Result require_regular_source(const std::filesystem::path& source) {
     if (error) {
         if (error == std::errc::no_such_file_or_directory) {
             return std::unexpected(make_error(ErrorCode::ObjectNotFound,
-                                              "arquivo de origem não existe"));
+                                              "source file does not exist"));
         }
         return std::unexpected(filesystem_error(error));
     }
     if (!regular) {
         return std::unexpected(make_error(ErrorCode::ObjectNotFound,
-                                          "arquivo de origem não existe"));
+                                          "source file does not exist"));
     }
     return {};
 }
@@ -331,8 +331,8 @@ Result rclone_put(void* context,
     const auto source_parent =
         platform::path::to_utf8(absolute_source->parent_path());
     if (source_name.empty() || source_parent.empty()) {
-        return std::unexpected(make_error(ErrorCode::InvalidContext,
-                                          "arquivo de origem inválido"));
+        return std::unexpected(
+            make_error(ErrorCode::InvalidContext, "invalid source file"));
     }
 
     const auto copy_trace = platform::perf_trace::begin();
@@ -414,7 +414,7 @@ Result rclone_get(void* context,
         platform::path::to_utf8(absolute_destination->parent_path());
     if (destination_name.empty() || destination_parent.empty()) {
         return std::unexpected(
-            make_error(ErrorCode::InvalidContext, "destino local inválido"));
+            make_error(ErrorCode::InvalidContext, "invalid local destination"));
     }
 
     const auto copy_trace = platform::perf_trace::begin();
@@ -433,7 +433,7 @@ Result rclone_get(void* context,
     if (!copied) {
         if (not_found(copied.error())) {
             return std::unexpected(make_error(ErrorCode::ObjectNotFound,
-                                              "objeto remoto não existe"));
+                                              "remote object does not exist"));
         }
         return std::unexpected(copied.error());
     }
@@ -445,7 +445,7 @@ Result rclone_get(void* context,
         }
         return std::unexpected(
             make_error(ErrorCode::ProtocolFailure,
-                       "destino local não virou arquivo regular"));
+                       "local destination did not become regular file"));
     }
     return {};
 }
@@ -507,7 +507,7 @@ ListingResult parse_list_response_json(const nlohmann::json& response,
     if (!response.is_object() || !response.contains("list") ||
         !response["list"].is_array()) {
         return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                          "resposta operations/list inválida"));
+                                          "invalid operations/list response"));
     }
 
     std::vector<std::string> identifiers;
@@ -516,7 +516,7 @@ ListingResult parse_list_response_json(const nlohmann::json& response,
         if (!item.is_object() || !item.contains("Path") ||
             !item["Path"].is_string()) {
             return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                              "item operations/list inválido"));
+                                              "invalid operations/list item"));
         }
         auto identifier = item["Path"].get<std::string>();
         if (!remote_prefix.empty()) {
@@ -528,12 +528,12 @@ ListingResult parse_list_response_json(const nlohmann::json& response,
         if (!valid_identifier(identifier)) {
             return std::unexpected(
                 make_error(ErrorCode::ProtocolFailure,
-                           "operations/list retornou um Path inválido"));
+                           "operations/list returned invalid Path"));
         }
         if (!seen.insert(identifier).second) {
             return std::unexpected(
                 make_error(ErrorCode::ProtocolFailure,
-                           "o remote retornou identificadores duplicados"));
+                           "remote returned duplicate identifiers"));
         }
         identifiers.push_back(std::move(identifier));
     }
@@ -562,7 +562,7 @@ PresenceResult rclone_presence(void* context, std::string_view identifier) {
     }
     if (!response->is_object() || !response->contains("item")) {
         return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                          "resposta operations/stat inválida"));
+                                          "invalid operations/stat response"));
     }
     const auto& item = (*response)["item"];
     if (item.is_null()) {
@@ -570,17 +570,17 @@ PresenceResult rclone_presence(void* context, std::string_view identifier) {
     }
     if (!item.is_object()) {
         return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                          "resposta operations/stat inválida"));
+                                          "invalid operations/stat response"));
     }
     if (item.contains("IsDir")) {
         if (!item["IsDir"].is_boolean()) {
             return std::unexpected(
                 make_error(ErrorCode::ProtocolFailure,
-                           "resposta operations/stat inválida"));
+                           "invalid operations/stat response"));
         }
         if (item["IsDir"].get<bool>()) {
             return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                              "objeto remoto é um diretório"));
+                                              "remote object is a directory"));
         }
     }
     return Presence::Present;
@@ -612,7 +612,7 @@ ListingResult rclone_list(void* context) {
         if (not_found(response.error())) {
             return std::unexpected(
                 make_error(ErrorCode::StorageNotFound,
-                           "diretório remoto de objetos não existe"));
+                           "remote objects directory does not exist"));
         }
         return std::unexpected(response.error());
     }
@@ -648,7 +648,7 @@ ListingResult rclone_list_prefix(void* context, std::string_view prefix) {
         if (not_found(response.error())) {
             return std::unexpected(
                 make_error(ErrorCode::StorageNotFound,
-                           "diretório remoto de objetos não existe"));
+                           "remote objects directory does not exist"));
         }
         return std::unexpected(response.error());
     }
@@ -692,7 +692,7 @@ std::expected<std::string, Error> rclone_physical_hash(
     if (!response) {
         if (not_found(response.error())) {
             return std::unexpected(make_error(ErrorCode::ObjectNotFound,
-                                              "objeto remoto não existe"));
+                                              "remote object does not exist"));
         }
         if (response.error().code == ErrorCode::Unsupported ||
             response.error().native_code == 400 ||
@@ -749,7 +749,7 @@ rclone_physical_hash_batch(void* context,
         state->sha256_unsupported.load(std::memory_order_relaxed)) {
         return std::unexpected(
             make_error(ErrorCode::Unsupported,
-                       "rclone backend does not expose algorithm em lote"));
+                       "rclone backend does not expose algorithm for batch"));
     }
 
     std::unordered_set<std::string> identifiers;
@@ -763,7 +763,7 @@ rclone_physical_hash_batch(void* context,
         if (!valid_sha256(object.expected_hash)) {
             return std::unexpected(
                 make_error(ErrorCode::InvalidIdentifier,
-                           "hash esperado não é SHA-256 válido"));
+                           "expected hash is not valid SHA-256"));
         }
         expectations.push_back(object);
     }
@@ -779,7 +779,7 @@ rclone_physical_hash_batch(void* context,
         !std::filesystem::is_directory(root_status)) {
         return std::unexpected(
             make_error(ErrorCode::InvalidContext,
-                       "scratch_root não é um diretório local real"));
+                       "scratch_root is not a real local directory"));
     }
 
     std::ranges::sort(expectations, {}, &PhysicalHashExpectation::identifier);
@@ -791,15 +791,14 @@ rclone_physical_hash_batch(void* context,
     }
     if (!status_error && std::filesystem::exists(manifest_status)) {
         return std::unexpected(make_error(
-            ErrorCode::InvalidContext, "manifesto de verificação já existe"));
+            ErrorCode::InvalidContext, "verification manifest already exists"));
     }
 
     {
         std::ofstream output(manifest, std::ios::binary);
         if (!output) {
             return std::unexpected(make_error(
-                ErrorCode::Io,
-                "não foi possível criar o manifesto de verificação"));
+                ErrorCode::Io, "failed to create verification manifest"));
         }
         for (const auto& object : expectations) {
             output << object.expected_hash << "  " << object.identifier << '\n';
@@ -808,8 +807,7 @@ rclone_physical_hash_batch(void* context,
             std::error_code ignored;
             std::filesystem::remove(manifest, ignored);
             return std::unexpected(make_error(
-                ErrorCode::Io,
-                "não foi possível gravar o manifesto de verificação"));
+                ErrorCode::Io, "failed to write verification manifest"));
         }
     }
 
@@ -835,9 +833,8 @@ rclone_physical_hash_batch(void* context,
     const bool manifest_removed =
         std::filesystem::remove(manifest, manifest_error);
     if (manifest_error || !manifest_removed) {
-        return std::unexpected(
-            make_error(ErrorCode::Io,
-                       "não foi possível remover o manifesto de verificação"));
+        return std::unexpected(make_error(
+            ErrorCode::Io, "failed to remove verification manifest"));
     }
     if (!response) {
         if (unsupported_check_endpoint(response.error()) ||
@@ -847,7 +844,7 @@ rclone_physical_hash_batch(void* context,
             state->sha256_unsupported.store(true, std::memory_order_relaxed);
             return std::unexpected(
                 make_error(ErrorCode::Unsupported,
-                           "rclone não oferece operations/check",
+                           "rclone does not support operations/check",
                            response.error().native_code));
         }
         return std::unexpected(response.error());
@@ -904,9 +901,10 @@ rclone_control_read_batch(void* context,
         control_read_deadline);
     if (!response) {
         if (unsupported_job_batch_endpoint(response.error())) {
-            return std::unexpected(make_error(ErrorCode::Unsupported,
-                                              "rclone não oferece job/batch",
-                                              response.error().native_code));
+            return std::unexpected(
+                make_error(ErrorCode::Unsupported,
+                           "rclone does not support job/batch",
+                           response.error().native_code));
         }
         return std::unexpected(response.error());
     }
@@ -962,22 +960,21 @@ parse_control_read_batch_response(std::string_view response_body,
             response.at("results").size() != expected_size) {
             return std::unexpected(
                 make_error(ErrorCode::ProtocolFailure,
-                           "resposta job/batch de controle inválida"));
+                           "invalid control job/batch response"));
         }
 
         const auto missing =
             [](const nlohmann::json& item) -> std::expected<bool, Error> {
             if (!item.is_object()) {
-                return std::unexpected(
-                    make_error(ErrorCode::ProtocolFailure,
-                               "resultado job/batch inválido"));
+                return std::unexpected(make_error(ErrorCode::ProtocolFailure,
+                                                  "invalid job/batch result"));
             }
             std::optional<int> status;
             if (item.contains("status")) {
                 if (!item.at("status").is_number_integer()) {
                     return std::unexpected(
                         make_error(ErrorCode::ProtocolFailure,
-                                   "status job/batch inválido"));
+                                   "invalid job/batch status"));
                 }
                 status = item.at("status").get<int>();
             }
@@ -986,19 +983,19 @@ parse_control_read_batch_response(std::string_view response_body,
                     item.at("error").get<std::string>().empty() || !status) {
                     return std::unexpected(
                         make_error(ErrorCode::ProtocolFailure,
-                                   "erro de subcomando job/batch inválido"));
+                                   "invalid job/batch subcommand error"));
                 }
                 if (*status == 404) {
                     return true;
                 }
                 return std::unexpected(make_error(
                     ErrorCode::ProtocolFailure,
-                    "subcomando job/batch falhou; detalhe remoto omitido"));
+                    "job/batch subcommand failed; remote detail omitted"));
             }
             if (status && (*status < 200 || *status >= 300)) {
-                return std::unexpected(
-                    make_error(ErrorCode::ProtocolFailure,
-                               "status de subcomando job/batch indica falha"));
+                return std::unexpected(make_error(
+                    ErrorCode::ProtocolFailure,
+                    "job/batch subcommand status indicates failure"));
             }
             return false;
         };
@@ -1018,7 +1015,7 @@ parse_control_read_batch_response(std::string_view response_body,
                     (!item.at("list").is_array() || !item.at("list").empty())) {
                     return std::unexpected(
                         make_error(ErrorCode::ProtocolFailure,
-                                   "resultado 404 job/batch contraditório"));
+                                   "contradictory 404 job/batch result"));
                 }
                 result.listings.emplace_back();
                 continue;
@@ -1045,7 +1042,7 @@ parse_control_read_batch_response(std::string_view response_body,
                 if (item.contains("item") && !item.at("item").is_null()) {
                     return std::unexpected(
                         make_error(ErrorCode::ProtocolFailure,
-                                   "resultado 404 job/batch contraditório"));
+                                   "contradictory 404 job/batch result"));
                 }
                 result.presences.push_back(Presence::Absent);
                 continue;
@@ -1053,7 +1050,7 @@ parse_control_read_batch_response(std::string_view response_body,
             if (!item.contains("item")) {
                 return std::unexpected(make_error(
                     ErrorCode::ProtocolFailure,
-                    "resposta operations/stat inválida no job/batch"));
+                    "invalid operations/stat response in job/batch"));
             }
             const auto& remote_item = item.at("item");
             if (remote_item.is_null()) {
@@ -1065,20 +1062,19 @@ parse_control_read_batch_response(std::string_view response_body,
                  !remote_item.at("IsDir").is_boolean())) {
                 return std::unexpected(make_error(
                     ErrorCode::ProtocolFailure,
-                    "resposta operations/stat inválida no job/batch"));
+                    "invalid operations/stat response in job/batch"));
             }
             if (remote_item.value("IsDir", false)) {
                 return std::unexpected(
                     make_error(ErrorCode::ProtocolFailure,
-                               "objeto de controle remoto é um diretório"));
+                               "remote control object is a directory"));
             }
             result.presences.push_back(Presence::Present);
         }
         return result;
     } catch (const std::exception&) {
-        return std::unexpected(
-            make_error(ErrorCode::ProtocolFailure,
-                       "resposta job/batch de controle inválida"));
+        return std::unexpected(make_error(
+            ErrorCode::ProtocolFailure, "invalid control job/batch response"));
     }
 }
 
@@ -1093,7 +1089,7 @@ parse_physical_hash_batch_response(std::string_view response_body,
             !response.at("hashType").is_string()) {
             return std::unexpected(
                 make_error(ErrorCode::ProtocolFailure,
-                           "resposta operations/check inválida"));
+                           "invalid operations/check response"));
         }
 
         auto hash_type = response.at("hashType").get<std::string>();
@@ -1104,7 +1100,7 @@ parse_physical_hash_batch_response(std::string_view response_body,
         if (hash_type != "sha256") {
             return std::unexpected(
                 make_error(ErrorCode::ProtocolFailure,
-                           "operations/check retornou algoritmo inesperado"));
+                           "operations/check returned unexpected algorithm"));
         }
 
         std::unordered_set<std::string> expected;
@@ -1112,7 +1108,7 @@ parse_physical_hash_batch_response(std::string_view response_body,
             if (!expected.insert(object.identifier).second) {
                 return std::unexpected(make_error(
                     ErrorCode::InvalidIdentifier,
-                    "identificadores duplicados na requisição de hash físico"));
+                    "duplicate identifiers in physical hash request"));
             }
         }
 
@@ -1137,7 +1133,7 @@ parse_physical_hash_batch_response(std::string_view response_body,
             (!success && !has_failures)) {
             return std::unexpected(
                 make_error(ErrorCode::ProtocolFailure,
-                           "resposta operations/check inconsistente"));
+                           "inconsistent operations/check response"));
         }
 
         return PhysicalHashBatchReport{
@@ -1146,8 +1142,8 @@ parse_physical_hash_batch_response(std::string_view response_body,
             .errors = std::move(*errors),
         };
     } catch (const std::exception&) {
-        return std::unexpected(make_error(
-            ErrorCode::ProtocolFailure, "resposta operations/check inválida"));
+        return std::unexpected(make_error(ErrorCode::ProtocolFailure,
+                                          "invalid operations/check response"));
     }
 }
 
@@ -1156,7 +1152,7 @@ ListingResult parse_list_response(std::string_view response_body) {
         return parse_list_response_json(nlohmann::json::parse(response_body));
     } catch (const std::exception&) {
         return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                          "resposta operations/list inválida"));
+                                          "invalid operations/list response"));
     }
 }
 

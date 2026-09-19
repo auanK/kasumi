@@ -47,43 +47,42 @@ bool valid_id(std::string_view value) noexcept {
 std::expected<void, Error> validate(const Epoch& value) {
     if (!valid_id(value.vault_id)) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "vault ID inválido"));
+            error(ErrorCode::InvalidInput, "invalid vault ID"));
     }
     if (value.issued_at < 0) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "timestamp do Epoch inválido"));
+            error(ErrorCode::InvalidInput, "invalid epoch timestamp"));
     }
     if (value.policy.min_history_depth == 0 ||
         value.policy.min_history_depth > history::maximum_graph_depth ||
         value.policy.min_history_age_hours == 0) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "política de retenção inválida"));
+            error(ErrorCode::InvalidInput, "invalid retention policy"));
     }
     if (value.anchors.empty()) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "Epoch sem âncoras"));
+            error(ErrorCode::InvalidInput, "epoch has no anchors"));
     }
     if (value.anchors.size() > maximum_anchor_count) {
         return std::unexpected(
-            error(ErrorCode::LimitExceeded, "Epoch possui âncoras demais"));
+            error(ErrorCode::LimitExceeded, "epoch has too many anchors"));
     }
     std::string_view previous;
     for (const auto& anchor : value.anchors) {
         if (!valid_id(anchor.commit_id)) {
             return std::unexpected(
-                error(ErrorCode::InvalidInput, "commit ID de âncora inválido"));
+                error(ErrorCode::InvalidInput, "invalid anchor commit ID"));
         }
         if (!previous.empty() && anchor.commit_id <= previous) {
-            return std::unexpected(
-                error(ErrorCode::InvalidInput,
-                      "âncoras não estão estritamente ordenadas"));
+            return std::unexpected(error(ErrorCode::InvalidInput,
+                                         "anchors are not strictly ordered"));
         }
         previous = anchor.commit_id;
     }
     if ((value.sequence == 0 && !value.previous_epoch_id.empty()) ||
         (value.sequence != 0 && !valid_id(value.previous_epoch_id))) {
-        return std::unexpected(error(ErrorCode::InvalidInput,
-                                     "referência ao Epoch anterior inválida"));
+        return std::unexpected(
+            error(ErrorCode::InvalidInput, "invalid previous epoch reference"));
     }
     return {};
 }
@@ -91,12 +90,12 @@ std::expected<void, Error> validate(const Epoch& value) {
 std::expected<Hash, Error> id_bytes(std::string_view identifier) {
     if (!valid_id(identifier)) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "Epoch ID inválido"));
+            error(ErrorCode::InvalidInput, "invalid epoch ID"));
     }
     auto parsed = hash_from_hex(identifier);
     if (!parsed) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "Epoch ID inválido"));
+            error(ErrorCode::InvalidInput, "invalid epoch ID"));
     }
     return *parsed;
 }
@@ -121,7 +120,7 @@ std::expected<std::string, Error> read_id(wire::Reader& reader) {
     auto value = wire::read_array<HASH_SIZE>(reader);
     if (!value) {
         return std::unexpected(
-            error(ErrorCode::InvalidEncoding, "identificador truncado"));
+            error(ErrorCode::InvalidEncoding, "truncated identifier"));
     }
     return hash_hex(*value);
 }
@@ -130,7 +129,7 @@ std::expected<void, Error> validate_verified(const VerifiedEpoch& value) {
     if (value.reference.sequence != value.value.sequence ||
         !valid_id(value.reference.epoch_id)) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "Epoch verificado inconsistente"));
+            error(ErrorCode::InvalidInput, "inconsistent verified epoch"));
     }
     auto canonical = encode(value.value);
     if (!canonical) {
@@ -192,17 +191,17 @@ std::expected<EpochInventory, Error> discover_epoch_inventory(
         const auto sequence = ids_by_sequence.find(reference->sequence);
         if (sequence != ids_by_sequence.end()) {
             if (sequence->second != reference->epoch_id) {
-                return std::unexpected(error(
-                    ErrorCode::Conflict,
-                    "sequência de Epoch possui múltiplos identificadores"));
+                return std::unexpected(
+                    error(ErrorCode::Conflict,
+                          "epoch sequence has multiple identifiers"));
             }
             continue;
         }
         const auto id = sequences_by_id.find(reference->epoch_id);
         if (id != sequences_by_id.end() && id->second != reference->sequence) {
-            return std::unexpected(error(
-                ErrorCode::Conflict,
-                "identificador de Epoch aparece em múltiplas sequências"));
+            return std::unexpected(
+                error(ErrorCode::Conflict,
+                      "epoch identifier appears in multiple sequences"));
         }
         ids_by_sequence.emplace(reference->sequence, reference->epoch_id);
         sequences_by_id.emplace(reference->epoch_id, reference->sequence);
@@ -218,14 +217,14 @@ std::expected<EpochInventory, Error> discover_epoch_inventory(
     }
     if (inventory.references.front().sequence != 0) {
         return std::unexpected(
-            error(ErrorCode::Conflict, "cadeia de Epoch não possui genesis"));
+            error(ErrorCode::Conflict, "epoch chain missing genesis"));
     }
     for (std::size_t index = 1; index < inventory.references.size(); ++index) {
         const auto previous = inventory.references[index - 1].sequence;
         if (previous == std::numeric_limits<std::uint64_t>::max() ||
             inventory.references[index].sequence != previous + 1) {
             return std::unexpected(
-                error(ErrorCode::Conflict, "cadeia de Epoch possui lacuna"));
+                error(ErrorCode::Conflict, "epoch chain has gap"));
         }
     }
     return inventory;
@@ -293,7 +292,7 @@ load_latest_impl(transport::Transport& storage,
           trusted_ancestor->epoch_id != latest_reference.epoch_id))) {
         return std::unexpected(
             error(ErrorCode::Conflict,
-                  "remote Epoch regrediu do checkpoint local exato"));
+                  "remote epoch regressed from exact local checkpoint"));
     }
     auto temporary = detail::make_workspace(workspace_root);
     if (!temporary) {
@@ -319,9 +318,8 @@ load_latest_impl(transport::Transport& storage,
             current.reference.sequence > trusted_ancestor->sequence)) {
         if (index == 0 || current.value.previous_epoch_id !=
                               inventory->references[index - 1].epoch_id) {
-            return std::unexpected(
-                error(ErrorCode::Conflict,
-                      "ancestralidade do Epoch possui predecessor inválido"));
+            return std::unexpected(error(
+                ErrorCode::Conflict, "epoch ancestry has invalid predecessor"));
         }
         --index;
         auto previous = load_exact_reference(storage,
@@ -335,16 +333,15 @@ load_latest_impl(transport::Transport& storage,
         }
         if (previous->value.vault_id != contract.vault_id ||
             previous->value.policy != contract.policy) {
-            return std::unexpected(error(
-                ErrorCode::Conflict,
-                "ancestralidade do Epoch diverge do contrato autenticado"));
+            return std::unexpected(
+                error(ErrorCode::Conflict,
+                      "epoch ancestry diverges from authenticated contract"));
         }
         current = std::move(*previous);
     }
     if (trusted_ancestor && current.reference != *trusted_ancestor) {
-        return std::unexpected(
-            error(ErrorCode::Conflict,
-                  "ancestralidade não alcança o checkpoint exato"));
+        return std::unexpected(error(
+            ErrorCode::Conflict, "ancestry does not reach exact checkpoint"));
     }
     return std::optional<VerifiedEpoch>{std::move(*latest)};
 }
@@ -412,8 +409,8 @@ BytesResult encode(const Epoch& value) {
             wire::write(writer, anchor.height);
         }
         if (writer.buffer.size() > maximum_encoded_size) {
-            return std::unexpected(error(ErrorCode::LimitExceeded,
-                                         "Epoch excede o tamanho máximo"));
+            return std::unexpected(
+                error(ErrorCode::LimitExceeded, "epoch exceeds maximum size"));
         }
         std::vector<std::uint8_t> result(writer.buffer.size());
         std::transform(writer.buffer.begin(),
@@ -426,31 +423,30 @@ BytesResult encode(const Epoch& value) {
     } catch (const std::exception& exception) {
         return std::unexpected(
             error(ErrorCode::LimitExceeded,
-                  std::string{"não foi possível codificar o Epoch: "} +
-                      exception.what()));
+                  std::string{"failed to encode epoch: "} + exception.what()));
     }
 }
 
 std::expected<Epoch, Error> decode(std::span<const std::uint8_t> bytes) {
     if (bytes.size() > maximum_encoded_size) {
         return std::unexpected(
-            error(ErrorCode::LimitExceeded, "Epoch excede o tamanho máximo"));
+            error(ErrorCode::LimitExceeded, "epoch exceeds maximum size"));
     }
     try {
         wire::Reader reader{std::as_bytes(bytes)};
         auto magic = wire::read_array<epoch_magic.size()>(reader);
         if (!magic || *magic != epoch_magic) {
             return std::unexpected(
-                error(ErrorCode::InvalidEncoding, "magic do Epoch inválida"));
+                error(ErrorCode::InvalidEncoding, "invalid epoch magic"));
         }
         auto version = wire::read<std::uint8_t>(reader);
         if (!version) {
             return std::unexpected(
-                error(ErrorCode::InvalidEncoding, "versão do Epoch ausente"));
+                error(ErrorCode::InvalidEncoding, "missing epoch version"));
         }
         if (*version != format_version) {
             return std::unexpected(error(ErrorCode::UnsupportedVersion,
-                                         "versão do Epoch não suportada"));
+                                         "unsupported epoch version"));
         }
         auto vault_id = read_id(reader);
         auto sequence = wire::read<std::uint64_t>(reader);
@@ -459,7 +455,7 @@ std::expected<Epoch, Error> decode(std::span<const std::uint8_t> bytes) {
         auto age = wire::read<std::uint32_t>(reader);
         if (!vault_id || !sequence || !issued_at || !depth || !age) {
             return std::unexpected(
-                error(ErrorCode::InvalidEncoding, "Epoch truncado"));
+                error(ErrorCode::InvalidEncoding, "truncated epoch"));
         }
 
         std::string previous_epoch_id;
@@ -473,12 +469,12 @@ std::expected<Epoch, Error> decode(std::span<const std::uint8_t> bytes) {
 
         auto anchor_count = wire::read<std::uint32_t>(reader);
         if (!anchor_count) {
-            return std::unexpected(error(ErrorCode::InvalidEncoding,
-                                         "quantidade de âncoras ausente"));
+            return std::unexpected(
+                error(ErrorCode::InvalidEncoding, "missing anchor count"));
         }
         if (*anchor_count > maximum_anchor_count) {
             return std::unexpected(
-                error(ErrorCode::LimitExceeded, "Epoch possui âncoras demais"));
+                error(ErrorCode::LimitExceeded, "epoch has too many anchors"));
         }
 
         Epoch value{
@@ -496,14 +492,14 @@ std::expected<Epoch, Error> decode(std::span<const std::uint8_t> bytes) {
             auto height = wire::read<std::uint64_t>(reader);
             if (!commit_id || !height) {
                 return std::unexpected(
-                    error(ErrorCode::InvalidEncoding, "âncora truncada"));
+                    error(ErrorCode::InvalidEncoding, "truncated anchor"));
             }
             value.anchors.push_back(
                 Anchor{.commit_id = std::move(*commit_id), .height = *height});
         }
         if (!reader.data.empty()) {
             return std::unexpected(error(ErrorCode::InvalidEncoding,
-                                         "bytes residuais após o Epoch"));
+                                         "residual bytes after epoch"));
         }
         if (auto valid = validate(value); !valid) {
             return std::unexpected(valid.error());
@@ -512,8 +508,7 @@ std::expected<Epoch, Error> decode(std::span<const std::uint8_t> bytes) {
     } catch (const std::exception& exception) {
         return std::unexpected(
             error(ErrorCode::LimitExceeded,
-                  std::string{"não foi possível decodificar o Epoch: "} +
-                      exception.what()));
+                  std::string{"failed to decode epoch: "} + exception.what()));
     }
 }
 
@@ -549,8 +544,7 @@ seal(const Epoch& value,
     } catch (const std::exception& exception) {
         return std::unexpected(
             error(ErrorCode::LimitExceeded,
-                  std::string{"não foi possível proteger o Epoch: "} +
-                      exception.what()));
+                  std::string{"failed to seal epoch: "} + exception.what()));
     }
 }
 
@@ -565,14 +559,13 @@ open(std::span<const std::uint8_t> bytes,
     if (bytes.size() < envelope_header.size() + mac_size ||
         bytes.size() >
             envelope_header.size() + mac_size + maximum_encoded_size) {
-        return std::unexpected(
-            error(ErrorCode::InvalidEncoding,
-                  "envelope do Epoch possui tamanho inválido"));
+        return std::unexpected(error(ErrorCode::InvalidEncoding,
+                                     "epoch envelope has invalid size"));
     }
     if (!std::ranges::equal(envelope_header,
                             bytes.first(envelope_header.size()))) {
-        return std::unexpected(error(ErrorCode::UnsupportedVersion,
-                                     "envelope do Epoch não suportado"));
+        return std::unexpected(
+            error(ErrorCode::UnsupportedVersion, "unsupported epoch envelope"));
     }
 
     try {
@@ -594,15 +587,14 @@ open(std::span<const std::uint8_t> bytes,
         if (unlocked != 0) {
             crypto_wipe(plaintext.data(), plaintext.size());
             return std::unexpected(error(ErrorCode::AuthenticationFailure,
-                                         "autenticação do Epoch falhou"));
+                                         "epoch authentication failed"));
         }
 
         const auto identifier = crypto::epoch_identifier(master_key, plaintext);
         if (identifier != reference.epoch_id) {
             crypto_wipe(plaintext.data(), plaintext.size());
-            return std::unexpected(
-                error(ErrorCode::AuthenticationFailure,
-                      "Epoch não corresponde ao identificador"));
+            return std::unexpected(error(ErrorCode::AuthenticationFailure,
+                                         "epoch does not match identifier"));
         }
         auto value = decode(plaintext);
         crypto_wipe(plaintext.data(), plaintext.size());
@@ -611,15 +603,14 @@ open(std::span<const std::uint8_t> bytes,
         }
         if (value->sequence != reference.sequence) {
             return std::unexpected(error(ErrorCode::AuthenticationFailure,
-                                         "Epoch não corresponde à sequência"));
+                                         "epoch does not match sequence"));
         }
         return VerifiedEpoch{.reference = reference,
                              .value = std::move(*value)};
     } catch (const std::exception& exception) {
         return std::unexpected(
             error(ErrorCode::LimitExceeded,
-                  std::string{"não foi possível abrir o Epoch: "} +
-                      exception.what()));
+                  std::string{"failed to open epoch: "} + exception.what()));
     }
 }
 
@@ -627,7 +618,7 @@ std::expected<std::string, Error>
 object_identifier(const RemoteLayout& layout, const Reference& reference) {
     if (!valid_id(reference.epoch_id)) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "referência de Epoch inválida"));
+            error(ErrorCode::InvalidInput, "invalid epoch reference"));
     }
     return epoch_object(layout, reference.sequence, reference.epoch_id);
 }
@@ -643,7 +634,7 @@ parse_object_identifier(const RemoteLayout& layout,
     auto parsed = parse_epoch_object(layout, identifier);
     if (!parsed) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "nome de objeto Epoch inválido"));
+            error(ErrorCode::InvalidInput, "invalid epoch object name"));
     }
     return Reference{.sequence = parsed->sequence,
                      .epoch_id = std::move(parsed->epoch_id)};
@@ -658,7 +649,7 @@ std::expected<VerifiedEpoch, Error>
 select_latest(std::span<const VerifiedEpoch> epochs) {
     if (epochs.empty()) {
         return std::unexpected(
-            error(ErrorCode::NotFound, "nenhum Epoch disponível"));
+            error(ErrorCode::NotFound, "no epochs available"));
     }
     const auto& contract = epochs.front().value;
     std::vector<const VerifiedEpoch*> unique;
@@ -671,16 +662,15 @@ select_latest(std::span<const VerifiedEpoch> epochs) {
         }
         if (candidate.value.vault_id != contract.vault_id ||
             candidate.value.policy != contract.policy) {
-            return std::unexpected(
-                error(ErrorCode::Conflict,
-                      "Epochs pertencem a contratos diferentes"));
+            return std::unexpected(error(
+                ErrorCode::Conflict, "epochs belong to different contracts"));
         }
         const auto [known, inserted] =
             sequences.emplace(candidate.reference.sequence, &candidate);
         if (!inserted) {
             if (candidate != *known->second) {
-                return std::unexpected(error(
-                    ErrorCode::Conflict, "sequência de Epoch possui conflito"));
+                return std::unexpected(
+                    error(ErrorCode::Conflict, "epoch sequence has conflict"));
             }
             continue;
         }
@@ -691,21 +681,20 @@ select_latest(std::span<const VerifiedEpoch> epochs) {
     });
     if (unique.front()->reference.sequence != 0) {
         return std::unexpected(
-            error(ErrorCode::Conflict, "cadeia de Epoch não possui genesis"));
+            error(ErrorCode::Conflict, "epoch chain missing genesis"));
     }
     for (std::size_t index = 1; index < unique.size(); ++index) {
         const auto previous = unique[index - 1];
         const auto current = unique[index];
         if (previous->reference.sequence ==
             std::numeric_limits<std::uint64_t>::max()) {
-            return std::unexpected(
-                error(ErrorCode::Conflict,
-                      "cadeia de Epoch excede a sequência máxima"));
+            return std::unexpected(error(
+                ErrorCode::Conflict, "epoch chain exceeds maximum sequence"));
         }
         if (current->reference.sequence != previous->reference.sequence + 1 ||
             current->value.previous_epoch_id != previous->reference.epoch_id) {
-            return std::unexpected(error(
-                ErrorCode::Conflict, "cadeia de Epoch possui descontinuidade"));
+            return std::unexpected(
+                error(ErrorCode::Conflict, "epoch chain has discontinuity"));
         }
     }
     return *unique.back();
@@ -719,7 +708,7 @@ publish(transport::Transport& storage,
     auto identifier = object_identifier(layout, sealed.reference);
     if (!identifier || sealed.bytes.empty()) {
         return std::unexpected(
-            identifier ? error(ErrorCode::InvalidInput, "Epoch selado vazio")
+            identifier ? error(ErrorCode::InvalidInput, "empty sealed epoch")
                        : identifier.error());
     }
     auto temporary = detail::make_workspace(workspace_root);
@@ -788,7 +777,7 @@ verify(transport::Transport& storage,
     if (!verified || verified->value != expected) {
         return std::unexpected(error(ErrorCode::VerificationFailure,
                                      verified
-                                         ? "Epoch remoto diverge do esperado"
+                                         ? "remote epoch diverges from expected"
                                          : verified.error().detail));
     }
     return {};
@@ -891,7 +880,7 @@ load_by_id(transport::Transport& storage,
     try {
         if (!valid_id(epoch_id)) {
             return std::unexpected(
-                error(ErrorCode::InvalidInput, "Epoch ID inválido"));
+                error(ErrorCode::InvalidInput, "invalid epoch ID"));
         }
 
         const auto layout = derive_remote_layout(master_key);

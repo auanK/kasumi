@@ -128,7 +128,7 @@ def rclone_digest(storage, rclone_config, timeout):
     )
     if result.returncode != 0:
         raise RuntimeError(
-            "não foi possível autenticar o inventário remoto: " + result.stderr
+            "failed to authenticate remote inventory: " + result.stderr
         )
     items = json.loads(result.stdout)
     inventory = sorted(
@@ -136,7 +136,7 @@ def rclone_digest(storage, rclone_config, timeout):
         for item in items
     )
     if any(not item[2] for item in inventory):
-        raise RuntimeError("o remote não forneceu SHA-256 para todos os objetos")
+        raise RuntimeError("remote did not provide SHA-256 for all objects")
     listing = json.dumps(inventory, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(listing).hexdigest()
 
@@ -154,7 +154,7 @@ def prepare_remote(storage, rclone_config, timeout):
         check=False,
     )
     if result.returncode != 0:
-        raise RuntimeError("não foi possível preparar o remote: " + result.stderr)
+        raise RuntimeError("failed to prepare remote: " + result.stderr)
 
 
 def copy_seed_to_remote(seed_storage, storage, rclone_config, timeout):
@@ -179,7 +179,7 @@ def copy_seed_to_remote(seed_storage, storage, rclone_config, timeout):
         check=False,
     )
     if result.returncode != 0:
-        raise RuntimeError("não foi possível copiar o seed: " + result.stderr)
+        raise RuntimeError("failed to copy seed: " + result.stderr)
 
 
 def protected_state(app_data, local, storage, rclone_config, timeout):
@@ -241,26 +241,26 @@ def inspect_phase(
     batch_downloads = metrics.get("rclone batch download", {"calls": 0})["calls"]
     failures = []
     if before != after:
-        failures.append("a inspeção alterou configuração, banco, local ou remoto")
+        failures.append("inspection modified config, database, local or remote")
     if not reported or int(reported.group(1)) != expected_commits:
-        failures.append("a quantidade apresentada de commits está incorreta")
+        failures.append("reported commit count is incorrect")
     if commit_gets != expected_gets:
         failures.append(
-            f"GETs de commit: esperado {expected_gets}, observado {commit_gets}"
+            f"commit GETs: expected {expected_gets}, observed {commit_gets}"
         )
     if batch_downloads != expected_batches:
         failures.append(
-            "lotes de commit: "
-            f"esperado {expected_batches}, observado {batch_downloads}"
+            "commit batches: "
+            f"expected {expected_batches}, observed {batch_downloads}"
         )
     if (cache_before != cache_after) != expected_cache_change:
-        failures.append("a política de atualização do cache não foi preservada")
+        failures.append("cache update policy was not preserved")
     if "[Rede]" in result.stdout or "[Rede]" in result.stderr:
-        failures.append("a saída contém mensagem [Rede]")
+        failures.append("output contains [Rede] message")
     if failures:
         raise RuntimeError(
             "; ".join(failures)
-            + "; métricas="
+            + "; metrics="
             + json.dumps(metrics, ensure_ascii=False)
         )
     return {
@@ -455,7 +455,7 @@ def main():
     parser.add_argument("--rclone-config", type=Path)
     arguments = parser.parse_args()
     if arguments.delta < 1 or arguments.repetitions < 1:
-        parser.error("delta e repetições devem ser positivos")
+        parser.error("delta and repetitions must be positive")
 
     kasumi = arguments.kasumi.resolve()
     rclone_config = (
@@ -471,7 +471,7 @@ def main():
     if arguments.output.exists():
         previous = json.loads(arguments.output.read_text(encoding="utf-8"))
         if previous.get("request") != request:
-            parser.error("o checkpoint existente pertence a outra execução")
+            parser.error("existing checkpoint belongs to another run")
         scenarios = previous.get("scenarios", [])
     completed = {
         (scenario["commits"], scenario["repetition"]) for scenario in scenarios
@@ -482,7 +482,7 @@ def main():
             if (commits, repetition) in completed:
                 continue
             print(
-                f"iniciando commits={commits} repetição={repetition} "
+                f"starting commits={commits} repetition={repetition} "
                 f"({len(scenarios) + 1}/{total})",
                 flush=True,
             )
@@ -502,7 +502,7 @@ def main():
                 make_artifact("running", kasumi, request, scenarios),
             )
             print(
-                f"concluído commits={commits} repetição={repetition}",
+                f"completed commits={commits} repetition={repetition}",
                 flush=True,
             )
     artifact = make_artifact("pass", kasumi, request, scenarios)

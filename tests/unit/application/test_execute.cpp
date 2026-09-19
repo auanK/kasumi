@@ -187,7 +187,7 @@ TEST(ApplicationExecuteTest, ProfileLockRejectsOverlappingExecution) {
     ASSERT_FALSE(blocked.has_value());
     EXPECT_EQ(blocked.error().code, ErrorCode::RuntimeFailure);
     EXPECT_EQ(blocked.error().detail,
-              "perfil já está em uso por outra execução");
+              "profile is already in use by another execution");
 
     kasumi::platform::release_profile_lock(held);
     const auto allowed = kasumi::application::execute(

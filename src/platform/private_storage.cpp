@@ -45,7 +45,7 @@ security_descriptor(bool directory) {
     HANDLE token = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
         return std::unexpected(
-            windows_error("OpenProcessToken falhou", GetLastError()));
+            windows_error("OpenProcessToken failed", GetLastError()));
     }
 
     DWORD size = 0;
@@ -56,7 +56,7 @@ security_descriptor(bool directory) {
         const auto code = GetLastError();
         CloseHandle(token);
         return std::unexpected(
-            windows_error("GetTokenInformation falhou", code));
+            windows_error("GetTokenInformation failed", code));
     }
     CloseHandle(token);
 
@@ -65,14 +65,14 @@ security_descriptor(bool directory) {
         reinterpret_cast<const TOKEN_USER*>(token_data.data());
     if (!ConvertSidToStringSidW(token_user->User.Sid, &sid_text)) {
         return std::unexpected(
-            windows_error("ConvertSidToStringSidW falhou", GetLastError()));
+            windows_error("ConvertSidToStringSidW failed", GetLastError()));
     }
     std::wstring sid;
     try {
         sid = sid_text;
     } catch (...) {
         LocalFree(sid_text);
-        return std::unexpected("não foi possível copiar o SID do usuário");
+        return std::unexpected("could not copy user SID");
     }
     LocalFree(sid_text);
     const std::wstring inherit = directory ? L"OICI" : L"";
@@ -83,7 +83,7 @@ security_descriptor(bool directory) {
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl.c_str(), SDDL_REVISION_1, &descriptor, nullptr)) {
         return std::unexpected(windows_error(
-            "ConvertStringSecurityDescriptorToSecurityDescriptorW falhou",
+            "ConvertStringSecurityDescriptorToSecurityDescriptorW failed",
             GetLastError()));
     }
     return descriptor;
@@ -101,7 +101,7 @@ std::expected<void, std::string> apply_acl(const std::filesystem::path& path,
     if (!GetSecurityDescriptorDacl(*descriptor, &present, &dacl, &defaulted) ||
         !present) {
         const auto error =
-            windows_error("GetSecurityDescriptorDacl falhou", GetLastError());
+            windows_error("GetSecurityDescriptorDacl failed", GetLastError());
         LocalFree(*descriptor);
         return std::unexpected(error);
     }
@@ -117,7 +117,7 @@ std::expected<void, std::string> apply_acl(const std::filesystem::path& path,
     LocalFree(*descriptor);
     if (result != ERROR_SUCCESS) {
         return std::unexpected(
-            windows_error("SetNamedSecurityInfoW falhou", result));
+            windows_error("SetNamedSecurityInfoW failed", result));
     }
     return {};
 }
@@ -127,10 +127,10 @@ checked_attributes(const std::filesystem::path& path) {
     const auto attributes = GetFileAttributesW(path.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
         return std::unexpected(
-            windows_error("GetFileAttributesW falhou", GetLastError()));
+            windows_error("GetFileAttributesW failed", GetLastError()));
     }
     if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return std::unexpected("reparse point não é permitido em '" +
+        return std::unexpected("reparse point is not allowed in '" +
                                platform::path::to_utf8(path) + "'");
     }
     return attributes;
@@ -143,10 +143,10 @@ checked_status(const std::filesystem::path& path) {
     struct stat status{};
     if (::lstat(path.c_str(), &status) != 0) {
         return std::unexpected(system_error(
-            "lstat falhou", std::error_code{errno, std::generic_category()}));
+            "lstat failed", std::error_code{errno, std::generic_category()}));
     }
     if (S_ISLNK(status.st_mode)) {
-        return std::unexpected("link simbólico não é permitido em '" +
+        return std::unexpected("symlink is not allowed in '" +
                                platform::path::to_utf8(path) + "'");
     }
     return status;
@@ -164,7 +164,7 @@ void remove_temporary(const std::filesystem::path& path) noexcept {
 std::expected<void, std::string>
 create_directory(const std::filesystem::path& path) {
     if (path.empty()) {
-        return std::unexpected("diretório privado vazio");
+        return std::unexpected("empty private directory path");
     }
 #if defined(_WIN32)
     auto descriptor = security_descriptor(true);
@@ -178,7 +178,7 @@ create_directory(const std::filesystem::path& path) {
     };
     if (!CreateDirectoryW(path.c_str(), &attributes)) {
         const auto error =
-            windows_error("CreateDirectoryW falhou", GetLastError());
+            windows_error("CreateDirectoryW failed", GetLastError());
         LocalFree(*descriptor);
         return std::unexpected(error);
     }
@@ -186,7 +186,7 @@ create_directory(const std::filesystem::path& path) {
 #else
     if (::mkdir(path.c_str(), 0700) != 0) {
         return std::unexpected(system_error(
-            "mkdir falhou", std::error_code{errno, std::generic_category()}));
+            "mkdir failed", std::error_code{errno, std::generic_category()}));
     }
 #endif
     return {};
@@ -195,7 +195,7 @@ create_directory(const std::filesystem::path& path) {
 std::expected<void, std::string>
 protect_directory(const std::filesystem::path& path) {
     if (path.empty()) {
-        return std::unexpected("diretório privado vazio");
+        return std::unexpected("empty private directory path");
     }
 #if defined(_WIN32)
     auto attributes = checked_attributes(path);
@@ -203,7 +203,7 @@ protect_directory(const std::filesystem::path& path) {
         return std::unexpected(attributes.error());
     }
     if ((*attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-        return std::unexpected("diretório esperado em '" +
+        return std::unexpected("directory expected at '" +
                                platform::path::to_utf8(path) + "'");
     }
     return apply_acl(path, true);
@@ -213,12 +213,12 @@ protect_directory(const std::filesystem::path& path) {
         return std::unexpected(status.error());
     }
     if (!S_ISDIR(status->st_mode)) {
-        return std::unexpected("diretório esperado em '" +
+        return std::unexpected("directory expected at '" +
                                platform::path::to_utf8(path) + "'");
     }
     if (::chmod(path.c_str(), 0700) != 0) {
         return std::unexpected(
-            system_error("chmod 0700 falhou",
+            system_error("chmod 0700 failed",
                          std::error_code{errno, std::generic_category()}));
     }
     return {};
@@ -233,7 +233,7 @@ ensure_directory(const std::filesystem::path& path) {
         return private_storage::create_directory(path);
     }
     if (error) {
-        return std::unexpected(system_error("symlink_status falhou", error));
+        return std::unexpected(system_error("symlink_status failed", error));
     }
     if (status.type() == std::filesystem::file_type::not_found) {
         return private_storage::create_directory(path);
@@ -303,7 +303,7 @@ protect_tree(const std::filesystem::path& root) {
 std::expected<void, std::string>
 create_file(const std::filesystem::path& path) {
     if (path.empty()) {
-        return std::unexpected("arquivo privado vazio");
+        return std::unexpected("empty private file path");
     }
 #if defined(_WIN32)
     auto descriptor = security_descriptor(false);
@@ -323,14 +323,14 @@ create_file(const std::filesystem::path& path) {
                                   FILE_ATTRIBUTE_NORMAL,
                                   nullptr);
     if (file == INVALID_HANDLE_VALUE) {
-        const auto error = windows_error("CreateFileW falhou", GetLastError());
+        const auto error = windows_error("CreateFileW failed", GetLastError());
         LocalFree(*descriptor);
         return std::unexpected(error);
     }
     LocalFree(*descriptor);
     if (!CloseHandle(file)) {
         return std::unexpected(
-            windows_error("CloseHandle falhou", GetLastError()));
+            windows_error("CloseHandle failed", GetLastError()));
     }
 #else
     int flags = O_WRONLY | O_CREAT | O_EXCL;
@@ -343,19 +343,19 @@ create_file(const std::filesystem::path& path) {
     const int file = ::open(path.c_str(), flags, 0600);
     if (file < 0) {
         return std::unexpected(system_error(
-            "open falhou", std::error_code{errno, std::generic_category()}));
+            "open failed", std::error_code{errno, std::generic_category()}));
     }
     if (::fchmod(file, 0600) != 0) {
         const auto error = errno;
         ::close(file);
         remove_temporary(path);
         return std::unexpected(
-            system_error("fchmod 0600 falhou",
+            system_error("fchmod 0600 failed",
                          std::error_code{error, std::generic_category()}));
     }
     if (::close(file) != 0) {
         return std::unexpected(system_error(
-            "close falhou", std::error_code{errno, std::generic_category()}));
+            "close failed", std::error_code{errno, std::generic_category()}));
     }
 #endif
     return {};
@@ -364,7 +364,7 @@ create_file(const std::filesystem::path& path) {
 std::expected<void, std::string>
 protect_file(const std::filesystem::path& path) {
     if (path.empty()) {
-        return std::unexpected("arquivo privado vazio");
+        return std::unexpected("empty private file path");
     }
 #if defined(_WIN32)
     auto attributes = checked_attributes(path);
@@ -372,7 +372,7 @@ protect_file(const std::filesystem::path& path) {
         return std::unexpected(attributes.error());
     }
     if ((*attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-        return std::unexpected("arquivo regular esperado em '" +
+        return std::unexpected("regular file expected at '" +
                                platform::path::to_utf8(path) + "'");
     }
     return apply_acl(path, false);
@@ -382,12 +382,12 @@ protect_file(const std::filesystem::path& path) {
         return std::unexpected(status.error());
     }
     if (!S_ISREG(status->st_mode)) {
-        return std::unexpected("arquivo regular esperado em '" +
+        return std::unexpected("regular file expected at '" +
                                platform::path::to_utf8(path) + "'");
     }
     if (::chmod(path.c_str(), 0600) != 0) {
         return std::unexpected(
-            system_error("chmod 0600 falhou",
+            system_error("chmod 0600 failed",
                          std::error_code{errno, std::generic_category()}));
     }
     return {};
@@ -397,7 +397,7 @@ protect_file(const std::filesystem::path& path) {
 std::expected<void, std::string>
 write_atomically(const std::filesystem::path& path, std::string_view bytes) {
     if (path.empty() || path.parent_path().empty()) {
-        return std::unexpected("caminho privado inválido");
+        return std::unexpected("invalid private path");
     }
     auto parent = protect_directory(path.parent_path());
     if (!parent) {
@@ -414,7 +414,7 @@ write_atomically(const std::filesystem::path& path, std::string_view bytes) {
         }
     } else if (target_error != std::errc::no_such_file_or_directory) {
         return std::unexpected(
-            system_error("não foi possível consultar o destino", target_error));
+            system_error("could not query destination", target_error));
     }
 
     for (std::size_t attempt = 0; attempt < 16; ++attempt) {
@@ -442,12 +442,12 @@ write_atomically(const std::filesystem::path& path, std::string_view bytes) {
             !output.flush()) {
             output.close();
             remove_temporary(temporary);
-            return std::unexpected("falha ao escrever arquivo privado");
+            return std::unexpected("failed to write private file");
         }
         output.close();
         if (output.fail()) {
             remove_temporary(temporary);
-            return std::unexpected("falha ao fechar arquivo privado");
+            return std::unexpected("failed to close private file");
         }
         auto synced = durability::sync_file(temporary);
         if (!synced) {
@@ -461,7 +461,7 @@ write_atomically(const std::filesystem::path& path, std::string_view bytes) {
         }
         return durability::sync_parent_directory(path);
     }
-    return std::unexpected("não foi possível reservar arquivo temporário");
+    return std::unexpected("could not reserve temporary file");
 }
 
 } // namespace kasumi::platform::private_storage

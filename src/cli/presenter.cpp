@@ -960,7 +960,6 @@ std::string sanitize_error_detail(std::string_view detail) {
 
 int present(const application::Error& error) {
     if (platform::cancellation::requested() ||
-        error.detail.find("cancelada pelo usuário") != std::string::npos ||
         error.detail.find("cancelled by user") != std::string::npos) {
         return present_cancellation(error.operation);
     }

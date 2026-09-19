@@ -134,8 +134,9 @@ std::string list_detail(std::string_view prefix,
         result += values[index];
     }
     if (values.size() > limit) {
-        result += "; e mais ";
+        result += "; and ";
         result += std::to_string(values.size() - limit);
+        result += " more";
     }
     return result;
 }
@@ -143,9 +144,8 @@ std::string list_detail(std::string_view prefix,
 std::string path_detail(const std::vector<std::filesystem::path>& paths) {
     constexpr std::size_t limit = 20;
     const auto displayed = std::min(paths.size(), limit);
-    std::string result =
-        "objetos referenciados ausentes ou corrompidos; reparo do fsck "
-        "indisponível nesta etapa (caminhos: ";
+    std::string result = "referenced objects missing or corrupted; fsck repair "
+                         "unavailable at this stage (paths: ";
     for (std::size_t index = 0; index < displayed; ++index) {
         if (index != 0) {
             result += ", ";
@@ -153,8 +153,9 @@ std::string path_detail(const std::vector<std::filesystem::path>& paths) {
         result += platform::path::to_utf8(paths[index]);
     }
     if (paths.size() > limit) {
-        result += "; e mais ";
+        result += "; and ";
         result += std::to_string(paths.size() - limit);
+        result += " more";
     }
     result += ')';
     return result;
@@ -681,9 +682,9 @@ remove_temporary_file(const std::filesystem::path& path) {
     std::error_code error;
     std::filesystem::remove(path, error);
     if (error) {
-        return std::unexpected(make_error(
-            ErrorCode::WorkspaceFailure,
-            "não foi possível remover temporário: " + error.message()));
+        return std::unexpected(
+            make_error(ErrorCode::WorkspaceFailure,
+                       "failed to remove temporary file: " + error.message()));
     }
     return {};
 }

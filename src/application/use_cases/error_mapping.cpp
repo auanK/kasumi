@@ -44,7 +44,7 @@ resolve_key_into(Operation operation,
             return std::unexpected(Error{
                 .operation = operation,
                 .code = ErrorCode::CredentialFailure,
-                .detail = "chave não encontrada e credenciais não fornecidas",
+                .detail = "key not found and credentials not provided",
                 .runtime = summary,
             });
         }
@@ -91,7 +91,7 @@ resolve_key_into(Operation operation,
             return std::unexpected(Error{
                 .operation = operation,
                 .code = ErrorCode::RuntimeFailure,
-                .detail = "a credencial não corresponde ao perfil",
+                .detail = "credential does not match profile",
                 .runtime = summary,
             });
         }

@@ -90,7 +90,7 @@ def delete_files(target_dir: Path, count: int):
 def main():
     parser = argparse.ArgumentParser(description="Kasumi GC & FSCK Live Benchmark")
     parser.add_argument("--kasumi", default="build/kasumi.exe", help="Path to kasumi executable")
-    parser.add_argument("--remote", default="kasumi:kasumi/testes_gc", help="Remote storage path")
+    parser.add_argument("--remote", default="kasumi:kasumi/gc_tests", help="Remote storage path")
     parser.add_argument("--total-files", type=int, default=2000, help="Total files to seed (default 2000)")
     parser.add_argument("--delete-files", type=int, default=1000, help="Files to delete (default 1000)")
     parser.add_argument("--file-size", type=int, default=1024, help="File size in bytes (default 1024)")
@@ -122,57 +122,57 @@ def main():
         subprocess.run(["rclone", "mkdir", f"{args.remote}/history/commits"], capture_output=True, text=True)
 
         # Step 1: Generate initial files
-        print(f"\n--- ETAPA 1: Gerar {args.total_files} arquivos de {args.file_size} bytes ---")
+        print(f"\n--- STEP 1: Generate {args.total_files} files of {args.file_size} bytes ---")
         generate_files(local_dir, args.total_files, args.file_size)
 
         # Step 2: Sync initial files
-        print(f"\n--- ETAPA 2: Sync Inicial ({args.total_files} arquivos) ---")
+        print(f"\n--- STEP 2: Initial Sync ({args.total_files} files) ---")
         t_sync1, code, out, err = run_cmd([kasumi_bin, "sync", "test_gc"], env=env, cwd=local_dir)
-        results.append(("Sync Inicial (2k arquivos)", t_sync1, f"OK (code {code})", out.strip()))
+        results.append(("Initial Sync (2k files)", t_sync1, f"OK (code {code})", out.strip()))
 
         # Step 3: Baseline FSCK (2k active files)
-        print(f"\n--- ETAPA 3: FSCK Baseline (2k arquivos ativos) ---")
+        print(f"\n--- STEP 3: Baseline FSCK (2k active files) ---")
         t_fsck1, code, out, err = run_cmd([kasumi_bin, "fsck", "test_gc"], env=env, cwd=local_dir)
-        results.append(("FSCK Baseline (2k arquivos)", t_fsck1, f"OK (code {code})", out.strip()))
+        results.append(("Baseline FSCK (2k files)", t_fsck1, f"OK (code {code})", out.strip()))
 
         # Step 4: Baseline GC (2k files, Q=0, C=0)
-        print(f"\n--- ETAPA 4: GC Baseline (Q=0, C=0, 2k arquivos) ---")
+        print(f"\n--- STEP 4: Baseline GC (Q=0, C=0, 2k files) ---")
         t_gc1, code, out, err = run_cmd([kasumi_bin, "gc", "test_gc"], env=env, cwd=local_dir)
-        results.append(("GC Baseline (Q=0, C=0)", t_gc1, f"OK (code {code})", out.strip()))
+        results.append(("Baseline GC (Q=0, C=0)", t_gc1, f"OK (code {code})", out.strip()))
 
         # Step 5: Delete 1,000 files and Sync to create orphans
-        print(f"\n--- ETAPA 5: Apagar {args.delete_files} arquivos e Sync ---")
+        print(f"\n--- STEP 5: Delete {args.delete_files} files and Sync ---")
         delete_files(local_dir, args.delete_files)
         t_sync2, code, out, err = run_cmd([kasumi_bin, "sync", "test_gc"], env=env, cwd=local_dir)
-        results.append(("Sync Remoção (1k arquivos)", t_sync2, f"OK (code {code})", out.strip()))
+        results.append(("Deletion Sync (1k files)", t_sync2, f"OK (code {code})", out.strip()))
 
         # Step 6: GC with 1,000 orphans
-        print(f"\n--- ETAPA 6: GC com {args.delete_files} órfãos ---")
+        print(f"\n--- STEP 6: GC with {args.delete_files} orphans ---")
         t_gc2, code, out, err = run_cmd([kasumi_bin, "gc", "test_gc"], env=env, cwd=local_dir)
-        results.append((f"GC Coleta ({args.delete_files} órfãos)", t_gc2, f"OK (code {code})", out.strip()))
+        results.append((f"GC Collection ({args.delete_files} orphans)", t_gc2, f"OK (code {code})", out.strip()))
 
         # Step 7: FSCK after GC (1,000 active files, 1,000 quarantined)
-        print(f"\n--- ETAPA 7: FSCK pós-GC (1k arquivos ativos restantes) ---")
+        print(f"\n--- STEP 7: FSCK post-GC (1k active files remaining) ---")
         t_fsck2, code, out, err = run_cmd([kasumi_bin, "fsck", "test_gc"], env=env, cwd=local_dir)
-        results.append(("FSCK pós-GC (1k arquivos)", t_fsck2, f"OK (code {code})", out.strip()))
+        results.append(("FSCK post-GC (1k files)", t_fsck2, f"OK (code {code})", out.strip()))
 
         # Step 8: Stable GC with Q=1000
-        print(f"\n--- ETAPA 8: GC Estável com Q={args.delete_files}, C=0 ---")
+        print(f"\n--- STEP 8: Stable GC with Q={args.delete_files}, C=0 ---")
         t_gc3, code, out, err = run_cmd([kasumi_bin, "gc", "test_gc"], env=env, cwd=local_dir)
-        results.append(("GC Estável (Q=1k, C=0)", t_gc3, f"OK (code {code})", out.strip()))
+        results.append(("Stable GC (Q=1k, C=0)", t_gc3, f"OK (code {code})", out.strip()))
 
     finally:
         if not args.skip_cleanup:
-            print(f"\n[{time.strftime('%X')}] Limpando remoto {args.remote}...")
+            print(f"\n[{time.strftime('%X')}] Cleaning remote {args.remote}...")
             subprocess.run(["rclone", "delete", args.remote], capture_output=True, text=True)
-            print(f"[{time.strftime('%X')}] Limpeza remota concluída.")
+            print(f"[{time.strftime('%X')}] Remote cleanup completed.")
         shutil.rmtree(work_dir, ignore_errors=True)
 
     # Print summary
     print("\n" + "=" * 70)
-    print("RESUMO DO BENCHMARK (GC & FSCK)")
+    print("BENCHMARK SUMMARY (GC & FSCK)")
     print("=" * 70)
-    print(f"{'Operação':<32} | {'Tempo (s)':<10} | {'Status':<12} | {'Detalhes'}")
+    print(f"{'Operation':<32} | {'Time (s)':<10} | {'Status':<12} | {'Details'}")
     print("-" * 70)
     for op, elapsed, status, details in results:
         # shorten details for table

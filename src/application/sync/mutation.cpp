@@ -34,7 +34,7 @@ replace_local_file(const std::filesystem::path& source,
                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
         return std::unexpected(
             make_error(MutationErrorCode::LocalIo,
-                       "falha ao substituir arquivo local atomicamente",
+                       "failed to atomically replace local file",
                        destination,
                        operation_index));
     }
@@ -42,12 +42,11 @@ replace_local_file(const std::filesystem::path& source,
     std::error_code error;
     std::filesystem::rename(source, destination, error);
     if (error) {
-        return std::unexpected(
-            make_error(MutationErrorCode::LocalIo,
-                       "falha ao substituir arquivo local atomicamente: " +
-                           error.message(),
-                       destination,
-                       operation_index));
+        return std::unexpected(make_error(
+            MutationErrorCode::LocalIo,
+            "failed to atomically replace local file: " + error.message(),
+            destination,
+            operation_index));
     }
 #endif
     return {};
@@ -69,7 +68,7 @@ move_local_without_replace(const std::filesystem::path& source,
                               : MutationErrorCode::LocalIo;
         return std::unexpected(
             make_error(code,
-                       "falha ao mover arquivo sem substituição (native_code=" +
+                       "failed to move file without replacement (native_code=" +
                            std::to_string(native_error) + ")",
                        destination,
                        operation_index));
@@ -83,7 +82,7 @@ move_local_without_replace(const std::filesystem::path& source,
         !std::filesystem::is_regular_file(*source_status)) {
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,
-                       "a origem não é um arquivo regular sem symlink",
+                       "source is not a regular file without symlink",
                        source,
                        operation_index));
     }
@@ -94,13 +93,13 @@ move_local_without_replace(const std::filesystem::path& source,
         if (error == std::errc::file_exists) {
             return std::unexpected(
                 make_error(MutationErrorCode::DestinationConflict,
-                           "o destino do rename já existe",
+                           "rename destination already exists",
                            destination,
                            operation_index));
         }
         return std::unexpected(make_error(
             MutationErrorCode::LocalIo,
-            "não foi possível criar link do rename: " + error.message(),
+            "failed to create hard link for rename: " + error.message(),
             destination,
             operation_index));
     }
@@ -111,9 +110,9 @@ move_local_without_replace(const std::filesystem::path& source,
         remove_temporary_file(destination);
         return std::unexpected(
             make_error(MutationErrorCode::LocalIo,
-                       "não foi possível remover a origem do rename: " +
+                       "failed to remove rename source: " +
                            (remove_error ? remove_error.message()
-                                         : std::string{"origem ausente"}),
+                                         : std::string{"missing source"}),
                        source,
                        operation_index));
     }
@@ -183,7 +182,7 @@ std::expected<void, MutationError> verify_uploaded_content_object(
         }
         return std::unexpected(make_error(
             MutationErrorCode::IntegrityMismatch,
-            "o hash físico remoto não corresponde ao ciphertext publicado",
+            "remote physical hash does not match published ciphertext",
             {},
             operation_index));
     }
@@ -191,7 +190,7 @@ std::expected<void, MutationError> verify_uploaded_content_object(
         if (remote_hash.error().code == transport::ErrorCode::ObjectNotFound) {
             return std::unexpected(
                 make_error(MutationErrorCode::IntegrityMismatch,
-                           "objeto remoto ausente após upload",
+                           "remote object missing after upload",
                            {},
                            operation_index));
         }
@@ -210,7 +209,7 @@ std::expected<void, MutationError> verify_uploaded_content_object(
     if (encrypted.empty() || plaintext.empty()) {
         return std::unexpected(
             make_error(MutationErrorCode::LocalIo,
-                       "caminho temporário inválido para verificar upload",
+                       "invalid temporary path to verify upload",
                        encrypted,
                        operation_index));
     }
@@ -222,11 +221,10 @@ std::expected<void, MutationError> verify_uploaded_content_object(
     cleanup();
 
     if (!hash_from_hex(identifier) || !hash_from_hex(plaintext_hash)) {
-        return std::unexpected(
-            make_error(MutationErrorCode::IntegrityMismatch,
-                       "identificador do objeto criptografado inválido",
-                       encrypted,
-                       operation_index));
+        return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
+                                          "invalid encrypted object identifier",
+                                          encrypted,
+                                          operation_index));
     }
 
     const auto get_trace = platform::perf_trace::begin();
@@ -237,7 +235,7 @@ std::expected<void, MutationError> verify_uploaded_content_object(
         if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
             return std::unexpected(
                 make_error(MutationErrorCode::IntegrityMismatch,
-                           "objeto remoto ausente após upload",
+                           "remote object missing after upload",
                            encrypted,
                            operation_index));
         }
@@ -252,11 +250,11 @@ std::expected<void, MutationError> verify_uploaded_content_object(
     if (!status || std::filesystem::is_symlink(*status) ||
         !std::filesystem::is_regular_file(*status)) {
         cleanup();
-        return std::unexpected(make_error(
-            MutationErrorCode::IntegrityMismatch,
-            "o objeto criptografado baixado não é um arquivo regular",
-            encrypted,
-            operation_index));
+        return std::unexpected(
+            make_error(MutationErrorCode::IntegrityMismatch,
+                       "downloaded encrypted object is not a regular file",
+                       encrypted,
+                       operation_index));
     }
 
     const auto expected_ciphertext_size = encoded_content_size(expected_size);
@@ -266,20 +264,19 @@ std::expected<void, MutationError> verify_uploaded_content_object(
     if (size_error || !expected_ciphertext_size ||
         actual_ciphertext_size != *expected_ciphertext_size) {
         cleanup();
-        return std::unexpected(make_error(
-            MutationErrorCode::IntegrityMismatch,
-            "o tamanho do ciphertext não corresponde ao plaintext esperado",
-            encrypted,
-            operation_index));
+        return std::unexpected(
+            make_error(MutationErrorCode::IntegrityMismatch,
+                       "ciphertext size does not match expected plaintext",
+                       encrypted,
+                       operation_index));
     }
 
     if (!crypto::decrypt_file(encrypted, plaintext, key)) {
         cleanup();
-        return std::unexpected(
-            make_error(MutationErrorCode::CryptoFailure,
-                       "não foi possível descriptografar o objeto publicado",
-                       encrypted,
-                       operation_index));
+        return std::unexpected(make_error(MutationErrorCode::CryptoFailure,
+                                          "failed to decrypt published object",
+                                          encrypted,
+                                          operation_index));
     }
 
     auto plaintext_status = read_status(plaintext, operation_index);
@@ -288,7 +285,7 @@ std::expected<void, MutationError> verify_uploaded_content_object(
         cleanup();
         return std::unexpected(
             make_error(MutationErrorCode::IntegrityMismatch,
-                       "o plaintext descriptografado não é um arquivo regular",
+                       "decrypted plaintext is not a regular file",
                        plaintext,
                        operation_index));
     }
@@ -325,7 +322,7 @@ apply_upload(const Operation& operation,
         !std::filesystem::is_regular_file(*source_status)) {
         return std::unexpected(
             make_error(MutationErrorCode::IntegrityMismatch,
-                       "a origem do upload não é um arquivo regular válido",
+                       "upload source is not a valid regular file",
                        source,
                        operation_index));
     }
@@ -336,7 +333,7 @@ apply_upload(const Operation& operation,
         platform::workspace_file(workspace, operation_index, ".upload.enc");
     if (encrypted.empty()) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "caminho temporário inválido",
+                                          "invalid temporary path",
                                           source,
                                           operation_index));
     }
@@ -345,12 +342,11 @@ apply_upload(const Operation& operation,
     std::filesystem::remove(encrypted, cleanup_error);
     if (cleanup_error) {
         remove_temporary_file(encrypted);
-        return std::unexpected(
-            make_error(MutationErrorCode::LocalIo,
-                       "não foi possível remover ciphertext anterior: " +
-                           cleanup_error.message(),
-                       encrypted,
-                       operation_index));
+        return std::unexpected(make_error(
+            MutationErrorCode::LocalIo,
+            "failed to remove previous ciphertext: " + cleanup_error.message(),
+            encrypted,
+            operation_index));
     }
 
     auto prepared = detail::prepare_upload_ciphertext(
@@ -394,12 +390,11 @@ apply_upload(const Operation& operation,
 
     if (encrypted_remove_error) {
         remove_temporary_file(encrypted);
-        return std::unexpected(
-            make_error(MutationErrorCode::LocalIo,
-                       "não foi possível remover o arquivo temporário: " +
-                           encrypted_remove_error.message(),
-                       encrypted,
-                       operation_index));
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "failed to remove temporary file: " +
+                                              encrypted_remove_error.message(),
+                                          encrypted,
+                                          operation_index));
     }
 
     return {};
@@ -429,7 +424,7 @@ apply_download(const Operation& operation,
     }
     if (std::filesystem::is_symlink(*destination_status)) {
         return std::unexpected(make_error(MutationErrorCode::UnsafePath,
-                                          "o destino é um symlink",
+                                          "destination is a symlink",
                                           destination,
                                           operation_index));
     }
@@ -442,7 +437,7 @@ apply_download(const Operation& operation,
     } else if (!missing(*destination_status)) {
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,
-                       "o destino não é um arquivo regular",
+                       "destination is not a regular file",
                        destination,
                        operation_index));
     }
@@ -456,7 +451,7 @@ apply_download(const Operation& operation,
         !std::filesystem::is_directory(*parent_status)) {
         return std::unexpected(
             make_error(MutationErrorCode::UnsafePath,
-                       "o diretório pai do destino é inválido",
+                       "destination parent directory is invalid",
                        parent,
                        operation_index));
     }
@@ -477,7 +472,7 @@ apply_download(const Operation& operation,
     if (!missing(*candidate_status)) {
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,
-                       "o candidato local já existe",
+                       "local candidate already exists",
                        candidate,
                        operation_index));
     }
@@ -491,7 +486,7 @@ apply_download(const Operation& operation,
             : std::filesystem::path{};
     if (cache_plaintext && plaintext.empty()) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "caminho temporário inválido",
+                                          "invalid temporary path",
                                           destination,
                                           operation_index));
     }
@@ -507,7 +502,7 @@ apply_download(const Operation& operation,
              !std::filesystem::is_regular_file(*plaintext_status))) {
             return std::unexpected(
                 make_error(MutationErrorCode::UnsafePath,
-                           "o cache plaintext transacional é inválido",
+                           "transactional plaintext cache is invalid",
                            plaintext,
                            operation_index));
         }
@@ -541,7 +536,7 @@ apply_download(const Operation& operation,
                                        "download-" + operation.hash + ".enc");
     if (encrypted.empty()) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "caminho temporário inválido",
+                                          "invalid temporary path",
                                           destination,
                                           operation_index));
     }
@@ -554,7 +549,7 @@ apply_download(const Operation& operation,
         if (std::filesystem::is_symlink(*encrypted_status)) {
             return std::unexpected(
                 make_error(MutationErrorCode::UnsafePath,
-                           "o arquivo temporário criptografado é um symlink",
+                           "temporary encrypted file is a symlink",
                            encrypted,
                            operation_index));
         }
@@ -588,7 +583,7 @@ apply_download(const Operation& operation,
             std::filesystem::remove(encrypted, cleanup_error);
             return std::unexpected(
                 make_error(MutationErrorCode::LocalIo,
-                           "o objeto criptografado baixado é inválido",
+                           "downloaded encrypted object is invalid",
                            encrypted,
                            operation_index));
         }
@@ -601,11 +596,10 @@ apply_download(const Operation& operation,
             std::filesystem::remove(encrypted, encrypted_cleanup_error);
             std::error_code candidate_cleanup_error;
             std::filesystem::remove(candidate, candidate_cleanup_error);
-            return std::unexpected(
-                make_error(MutationErrorCode::CryptoFailure,
-                           "não foi possível descriptografar o objeto",
-                           destination,
-                           operation_index));
+            return std::unexpected(make_error(MutationErrorCode::CryptoFailure,
+                                              "failed to decrypt object",
+                                              destination,
+                                              operation_index));
         }
 
         auto verified =
@@ -651,7 +645,7 @@ apply_download(const Operation& operation,
         if (encrypted_cleanup_error) {
             return std::unexpected(
                 make_error(MutationErrorCode::LocalIo,
-                           "não foi possível remover o objeto temporário: " +
+                           "failed to remove temporary object: " +
                                encrypted_cleanup_error.message(),
                            encrypted,
                            operation_index));
@@ -677,7 +671,7 @@ MutationResult apply_rename(const Operation& operation,
         std::filesystem::is_symlink(*destination_status)) {
         return std::unexpected(make_error(
             MutationErrorCode::UnsafePath,
-            "rename não aceita symlink",
+            "rename does not accept symlink",
             std::filesystem::is_symlink(*source_status) ? source : destination,
             operation_index));
     }
@@ -698,14 +692,15 @@ MutationResult apply_rename(const Operation& operation,
     if (!source_missing && !destination_missing) {
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,
-                       "o destino do rename já existe",
+                       "rename destination already exists",
                        destination,
                        operation_index));
     }
-    return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                      "origem e destino do rename não existem",
-                                      operation.path,
-                                      operation_index));
+    return std::unexpected(
+        make_error(MutationErrorCode::LocalIo,
+                   "rename source and destination do not exist",
+                   operation.path,
+                   operation_index));
 }
 
 std::string mutation_code_name(MutationErrorCode code) noexcept {
@@ -745,7 +740,7 @@ apply_operation(const Operation& operation,
             make_error(!is_valid_action(operation.action)
                            ? MutationErrorCode::InvalidOperation
                            : MutationErrorCode::UnsafePath,
-                       "operação ou caminho inválido",
+                       "invalid operation or path",
                        operation.path,
                        operation_index));
     }
@@ -790,7 +785,7 @@ apply_operation(const Operation& operation,
                 if (std::filesystem::is_symlink(*status)) {
                     return std::unexpected(
                         make_error(MutationErrorCode::UnsafePath,
-                                   "o diretório de destino é um symlink",
+                                   "destination directory is a symlink",
                                    *path,
                                    operation_index));
                 }
@@ -799,18 +794,18 @@ apply_operation(const Operation& operation,
                 }
                 return std::unexpected(
                     make_error(MutationErrorCode::DestinationConflict,
-                               "o destino não é um diretório",
+                               "destination is not a directory",
                                *path,
                                operation_index));
             }
             std::error_code error;
             std::filesystem::create_directories(*path, error);
             if (error) {
-                return std::unexpected(make_error(
-                    MutationErrorCode::LocalIo,
-                    "não foi possível criar diretório: " + error.message(),
-                    *path,
-                    operation_index));
+                return std::unexpected(
+                    make_error(MutationErrorCode::LocalIo,
+                               "failed to create directory: " + error.message(),
+                               *path,
+                               operation_index));
             }
             return {};
         }
@@ -819,7 +814,7 @@ apply_operation(const Operation& operation,
             if (operation.path.empty() || operation.path == ".") {
                 return std::unexpected(
                     make_error(MutationErrorCode::InvalidOperation,
-                               "diretório remoto sem caminho",
+                               "remote directory without path",
                                operation.path,
                                operation_index));
             }
@@ -856,25 +851,25 @@ apply_operation(const Operation& operation,
             if (std::filesystem::is_symlink(*status)) {
                 return std::unexpected(
                     make_error(MutationErrorCode::UnsafePath,
-                               "não é permitido remover symlink",
+                               "removing symlinks is not allowed",
                                *path,
                                operation_index));
             }
             if (!std::filesystem::is_regular_file(*status)) {
                 return std::unexpected(
                     make_error(MutationErrorCode::DestinationConflict,
-                               "o caminho não é um arquivo regular",
+                               "path is not a regular file",
                                *path,
                                operation_index));
             }
             std::error_code error;
             std::filesystem::remove(*path, error);
             if (error) {
-                return std::unexpected(make_error(
-                    MutationErrorCode::LocalIo,
-                    "não foi possível remover arquivo: " + error.message(),
-                    *path,
-                    operation_index));
+                return std::unexpected(
+                    make_error(MutationErrorCode::LocalIo,
+                               "failed to remove file: " + error.message(),
+                               *path,
+                               operation_index));
             }
             return {};
         }
@@ -895,25 +890,25 @@ apply_operation(const Operation& operation,
             if (std::filesystem::is_symlink(*status)) {
                 return std::unexpected(
                     make_error(MutationErrorCode::UnsafePath,
-                               "não é permitido remover symlink",
+                               "removing symlinks is not allowed",
                                *path,
                                operation_index));
             }
             if (!std::filesystem::is_directory(*status)) {
                 return std::unexpected(
                     make_error(MutationErrorCode::DestinationConflict,
-                               "o caminho não é um diretório",
+                               "path is not a directory",
                                *path,
                                operation_index));
             }
             std::error_code error;
             std::filesystem::remove(*path, error);
             if (error) {
-                return std::unexpected(make_error(
-                    MutationErrorCode::LocalIo,
-                    "não foi possível remover diretório: " + error.message(),
-                    *path,
-                    operation_index));
+                return std::unexpected(
+                    make_error(MutationErrorCode::LocalIo,
+                               "failed to remove directory: " + error.message(),
+                               *path,
+                               operation_index));
             }
             return {};
         }
@@ -925,7 +920,7 @@ apply_operation(const Operation& operation,
             if (operation.path.empty() || operation.path == ".") {
                 return std::unexpected(
                     make_error(MutationErrorCode::InvalidOperation,
-                               "diretório remoto sem caminho",
+                               "remote directory without path",
                                operation.path,
                                operation_index));
             }
@@ -935,16 +930,15 @@ apply_operation(const Operation& operation,
             break;
     }
 
-    return std::unexpected(
-        make_error(MutationErrorCode::InvalidOperation,
-                   "ação de contagem não é uma operação mutável",
-                   operation.path,
-                   operation_index));
+    return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
+                                      "count action is not a mutable operation",
+                                      operation.path,
+                                      operation_index));
 }
 
 std::string describe(const MutationError& error) {
     std::string result = mutation_code_name(error.code);
-    result += " na operação ";
+    result += " in operation ";
     result += std::to_string(error.operation_index);
     if (!error.path.empty()) {
         result += " ('";

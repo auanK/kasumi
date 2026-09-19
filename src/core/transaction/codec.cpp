@@ -32,7 +32,7 @@ bool valid_operation_strings(const kasumi::Operation& operation,
 
 EncodeResult encode(const Record& record) {
     if (!valid(record)) {
-        return std::unexpected("registro transacional inválido");
+        return std::unexpected("invalid transaction record");
     }
     try {
         if (sync_plan_size(record.plan) > maximum_operation_count ||
@@ -44,15 +44,13 @@ EncodeResult encode(const Record& record) {
             !valid_string(record.epoch_vault_id) ||
             !valid_string(record.epoch_id) ||
             record.parent_ids.size() > history::maximum_parent_count) {
-            return std::unexpected(
-                "registro transacional excede os limites do codec");
+            return std::unexpected("transaction record exceeds codec limits");
         }
         for (std::size_t index = 0; index < sync_plan_size(record.plan);
              ++index) {
             if (!valid_operation_strings(record.plan.operations[index],
                                          record.progress[index])) {
-                return std::unexpected(
-                    "string de operação excede o limite do codec");
+                return std::unexpected("operation string exceeds codec limit");
             }
         }
 
@@ -78,7 +76,7 @@ EncodeResult encode(const Record& record) {
             writer, static_cast<std::uint32_t>(record.parent_ids.size()));
         for (const auto& parent_id : record.parent_ids) {
             if (!valid_string(parent_id)) {
-                return std::unexpected("parent ID excede o limite do codec");
+                return std::unexpected("parent ID exceeds codec limit");
             }
             wire::write_string(writer, parent_id);
         }
@@ -110,7 +108,7 @@ EncodeResult encode(const Record& record) {
         return std::move(writer.buffer);
     } catch (const std::exception& exception) {
         return std::unexpected(
-            std::string{"falha ao codificar registro transacional: "} +
+            std::string{"failed to encode transaction record: "} +
             exception.what());
     }
 }
@@ -121,7 +119,7 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
 
         auto version = wire::read<std::uint8_t>(reader);
         if (!version || *version != format_version) {
-            return std::unexpected("versão inválida ou legado (removido)");
+            return std::unexpected("invalid or legacy format version");
         }
 
         auto id = wire::read_string(reader, maximum_string_size);
@@ -145,15 +143,15 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
             !marker_id || !epoch_vault_id || !epoch_id || !epoch_issued_at ||
             !epoch_min_history_depth || !epoch_min_history_age_hours ||
             !parent_count) {
-            return std::unexpected("campos ausentes");
+            return std::unexpected("missing fields");
         }
         if (*publication_required > 1) {
-            return std::unexpected("booleano de publicação inválido");
+            return std::unexpected("invalid publication boolean");
         }
 
         const auto phase = static_cast<Phase>(*phase_raw);
         if (!valid(phase)) {
-            return std::unexpected("fase desconhecida");
+            return std::unexpected("unknown phase");
         }
 
         Record record;
@@ -173,23 +171,23 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
         record.epoch_min_history_depth = *epoch_min_history_depth;
         record.epoch_min_history_age_hours = *epoch_min_history_age_hours;
         if (*parent_count > history::maximum_parent_count) {
-            return std::unexpected("tamanho de parents excede o limite");
+            return std::unexpected("parent count exceeds limit");
         }
         record.parent_ids.reserve(*parent_count);
         for (std::uint32_t index = 0; index < *parent_count; ++index) {
             auto parent_id = wire::read_string(reader, maximum_string_size);
             if (!parent_id) {
-                return std::unexpected("parent ID ausente");
+                return std::unexpected("missing parent ID");
             }
             record.parent_ids.push_back(std::move(*parent_id));
         }
 
         auto count = wire::read<std::uint32_t>(reader);
         if (!count) {
-            return std::unexpected("truncado no ops count");
+            return std::unexpected("truncated at operation count");
         }
         if (*count > maximum_operation_count) {
-            return std::unexpected("tamanho de ops excede o limite");
+            return std::unexpected("operation count exceeds limit");
         }
 
         record.plan.operations.reserve(*count);
@@ -209,18 +207,18 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
             if (!action_raw || !path || !alt_path || !hash || !size ||
                 !exclusive || !previous_hash || !backup || !state_raw ||
                 !had_original) {
-                return std::unexpected("operação truncada");
+                return std::unexpected("truncated operation");
             }
             if (!is_valid_action(static_cast<kasumi::Action>(*action_raw))) {
-                return std::unexpected("ação inválida");
+                return std::unexpected("invalid action");
             }
             if (*exclusive > 1 || *had_original > 1) {
-                return std::unexpected("booleano inválido");
+                return std::unexpected("invalid boolean");
             }
 
             const auto state = static_cast<OperationState>(*state_raw);
             if (!valid(state)) {
-                return std::unexpected("estado inválido");
+                return std::unexpected("invalid state");
             }
 
             record.plan.operations.push_back(kasumi::Operation{
@@ -244,20 +242,20 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
                                     [](const kasumi::Operation& operation) {
                                         return action_index(operation.action);
                                     })) {
-            return std::unexpected("ordem canônica inválida");
+            return std::unexpected("invalid canonical order");
         }
 
         rebuild_sync_plan_offsets(record.plan);
         if (!reader.data.empty()) {
-            return std::unexpected("bytes residuais após o registro");
+            return std::unexpected("trailing bytes after record completion");
         }
         if (!valid(record)) {
-            return std::unexpected("registro inválido");
+            return std::unexpected("invalid record");
         }
         return record;
     } catch (const std::exception& exception) {
         return std::unexpected(
-            std::string{"falha ao decodificar registro transacional: "} +
+            std::string{"failed to decode transaction record: "} +
             exception.what());
     }
 }

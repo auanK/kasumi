@@ -182,7 +182,7 @@ TEST(LocalTransportTest, PutBatchFallbackAndValidation) {
     kasumi::test::write_text(source_root / "a", "alpha");
     kasumi::test::write_text(source_root / "b", "beta");
 
-    // Teste 1 - batch vazio
+    // Test 1 - empty batch
     const auto empty_root =
         kasumi::test::workspace_path(workspace, "empty-batch");
     std::filesystem::create_directories(empty_root);
@@ -191,7 +191,7 @@ TEST(LocalTransportTest, PutBatchFallbackAndValidation) {
     EXPECT_TRUE(
         kasumi::transport::put_batch(transport, empty_batch).has_value());
 
-    // Teste 3 - múltiplos arquivos
+    // Test 3 - multiple files
     kasumi::transport::PutBatch valid_batch{.source_root = source_root,
                                             .identifiers = {"a", "b"}};
     EXPECT_TRUE(
@@ -201,32 +201,32 @@ TEST(LocalTransportTest, PutBatchFallbackAndValidation) {
     EXPECT_EQ(kasumi::transport::presence(transport, "b").value(),
               Presence::Present);
 
-    // Teste 4 - identifier duplicado
+    // Test 4 - duplicate identifier
     kasumi::transport::PutBatch duplicate_batch{.source_root = source_root,
                                                 .identifiers = {"a", "a"}};
     EXPECT_FALSE(
         kasumi::transport::put_batch(transport, duplicate_batch).has_value());
 
-    // Teste 5 - path traversal
+    // Test 5 - path traversal
     kasumi::transport::PutBatch traversal_batch{.source_root = source_root,
                                                 .identifiers = {"../a"}};
     EXPECT_FALSE(
         kasumi::transport::put_batch(transport, traversal_batch).has_value());
 
-    // Teste 6 - arquivo ausente
+    // Test 6 - missing file
     kasumi::transport::PutBatch missing_batch{.source_root = source_root,
                                               .identifiers = {"a", "c"}};
     EXPECT_FALSE(
         kasumi::transport::put_batch(transport, missing_batch).has_value());
 
-    // Teste 7 - arquivo inesperado
+    // Test 7 - unexpected file
     kasumi::test::write_text(source_root / "unexpected", "surprise");
     EXPECT_FALSE(
         kasumi::transport::put_batch(transport, valid_batch).has_value());
     std::filesystem::remove(source_root / "unexpected");
 
-    // Teste 8 - symlink (somente se suportado, fallback seguro via omitir no
-    // Windows se der erro)
+    // Test 8 - symlink (only if supported, safe fallback via omission on
+    // Windows if error)
     std::error_code ec;
     std::filesystem::create_symlink(
         source_root / "a", source_root / "symlink", ec);

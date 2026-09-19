@@ -223,12 +223,13 @@ TEST(CliPresenterTest, PresentsRemoteTreeSelectionErrorsWithCandidates) {
     const InspectionError multiple{
         .operation = InspectionOperation::RemoteTree,
         .code = InspectionErrorCode::HeadSelectionRequired,
-        .detail = "O histórico remoto possui múltiplas heads lógicas.",
+        .detail = "Remote history has multiple logical heads.",
         .candidate_ids = {"head-a", "head-b"}};
     testing::internal::CaptureStdout();
     EXPECT_EQ(kasumi::cli::present(multiple), 1);
     const auto multiple_output = testing::internal::GetCapturedStdout();
-    EXPECT_NE(multiple_output.find("múltiplas heads"), std::string::npos);
+    EXPECT_NE(multiple_output.find("multiple logical heads"),
+              std::string::npos);
     EXPECT_NE(multiple_output.find("head-a"), std::string::npos);
     EXPECT_NE(multiple_output.find("head-b"), std::string::npos);
     EXPECT_NE(multiple_output.find("--head"), std::string::npos);
@@ -236,12 +237,13 @@ TEST(CliPresenterTest, PresentsRemoteTreeSelectionErrorsWithCandidates) {
     const InspectionError missing{
         .operation = InspectionOperation::RemoteTree,
         .code = InspectionErrorCode::RemoteHeadNotFound,
-        .detail = "a head solicitada não está entre as heads lógicas atuais",
+        .detail = "requested head is not among current logical heads",
         .candidate_ids = {"head-a"}};
     testing::internal::CaptureStdout();
     EXPECT_EQ(kasumi::cli::present(missing), 1);
     const auto missing_output = testing::internal::GetCapturedStdout();
-    EXPECT_NE(missing_output.find("não está entre as heads lógicas atuais"),
+    EXPECT_NE(missing_output.find(
+                  "requested head is not among current logical heads"),
               std::string::npos);
     EXPECT_NE(missing_output.find("head-a"), std::string::npos);
 }
@@ -485,10 +487,10 @@ TEST(CliPresenterTest, PresentsEveryPhysicalInspectionReportInPortuguese) {
             .unknown_count = 1,
             .objects = {{.identifier = "objeto-x",
                          .category = RemoteObjectCategory::Unknown,
-                         .relation = "não auditado"}}}});
+                         .relation = "not audited"}}}});
     EXPECT_NE(objects.find("Namespace físico remoto"), std::string::npos);
     EXPECT_NE(objects.find("desconhecido"), std::string::npos);
-    EXPECT_NE(objects.find("não auditado"), std::string::npos);
+    EXPECT_NE(objects.find("not audited"), std::string::npos);
 
     const auto orphans = present_and_capture(InspectionResponse{
         .operation = InspectionOperation::RemoteOrphans,
@@ -508,7 +510,7 @@ TEST(CliPresenterTest, PresentsEveryPhysicalInspectionReportInPortuguese) {
             .entries = {{.original_identifier = "original",
                          .quarantine_identifier = "quarentena",
                          .metadata_identifier = "metadata",
-                         .category = "conteúdo",
+                         .category = "content",
                          .metadata_authenticated = true,
                          .quarantined_at = 7}}}});
     EXPECT_NE(quarantine.find("Metadata autenticada: sim"), std::string::npos);
@@ -634,9 +636,9 @@ TEST(CliPresenterTest, PresentsRemoteLookupErrors) {
         EXPECT_EQ(kasumi::cli::present(InspectionError{
                       .operation = InspectionOperation::RemoteStat,
                       .code = code,
-                      .detail = "não encontrado"}),
+                      .detail = "not found"}),
                   1);
-        EXPECT_NE(testing::internal::GetCapturedStdout().find("não encontrado"),
+        EXPECT_NE(testing::internal::GetCapturedStdout().find("not found"),
                   std::string::npos);
     }
 }
@@ -938,7 +940,7 @@ TEST(CliPresenterTest, PresentsCancellationAsWarningWithExitCode130) {
         const kasumi::application::Error error{
             .operation = kasumi::application::Operation::Sync,
             .code = kasumi::application::ErrorCode::SynchronizationFailure,
-            .detail = "operação cancelada pelo usuário"};
+            .detail = "operation cancelled by user"};
         const int code = kasumi::cli::present(error);
         const auto output = testing::internal::GetCapturedStdout();
         EXPECT_EQ(code, 130);

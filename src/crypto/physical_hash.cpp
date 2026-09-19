@@ -145,13 +145,13 @@ std::string sha256_finish(Sha256State state) {
 std::expected<std::string, std::string>
 hash_file(const std::filesystem::path& path, std::string_view algorithm) {
     if (algorithm != "sha256") {
-        return std::unexpected("algoritmo de hash físico não suportado");
+        return std::unexpected("unsupported physical hash algorithm");
     }
 
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         return std::unexpected(
-            "não foi possível abrir o arquivo para cálculo de hash físico");
+            "could not open file for physical hash calculation");
     }
 
     auto state = sha256_init();
@@ -168,7 +168,7 @@ hash_file(const std::filesystem::path& path, std::string_view algorithm) {
 
     if (!input.eof() && input.fail()) {
         return std::unexpected(
-            "não foi possível ler o arquivo para cálculo de hash físico");
+            "could not read file for physical hash calculation");
     }
 
     return sha256_finish(state);

@@ -86,7 +86,7 @@ TEST(PlatformMetadataTest, RejectsMissingPathAndSymlink) {
     std::error_code error;
     std::filesystem::create_symlink(target, link, error);
     if (error) {
-        GTEST_SKIP() << "criação de links simbólicos não suportada: "
+        GTEST_SKIP() << "symbolic link creation not supported: "
                      << error.message();
     }
     const auto symlink_result = kasumi::platform::metadata::set_last_write_time(
@@ -135,8 +135,7 @@ TEST(PlatformMetadataTest, RejectsTimestampBeforeWindowsFiletimeEpoch) {
     if (before_epoch.time_since_epoch() <
         std::chrono::duration_cast<std::chrono::seconds>(
             std::filesystem::file_time_type::duration::min())) {
-        GTEST_SKIP() << "file_time_type não pode representar um valor anterior "
-                        "ao FILETIME";
+        GTEST_SKIP() << "file_time_type cannot represent value before FILETIME";
     }
     const auto representable = std::filesystem::file_time_type{
         std::chrono::duration_cast<std::filesystem::file_time_type::duration>(

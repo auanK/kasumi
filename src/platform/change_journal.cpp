@@ -261,7 +261,7 @@ std::expected<JournalInfo, std::string>
 query(const std::filesystem::path& root_path, HANDLE volume) {
     auto root = open_root(root_path);
     if (!valid_handle(root))
-        return std::unexpected("não foi possível abrir a raiz local");
+        return std::unexpected("could not open local root");
     JournalInfo result{.root_path = handle_path(root),
                        .root = file_reference(root),
                        .volume = volume_serial(root)};
@@ -275,12 +275,11 @@ query(const std::filesystem::path& root_path, HANDLE volume) {
                          sizeof(result.data),
                          &returned,
                          nullptr))
-        return std::unexpected("não foi possível consultar o USN journal: " +
+        return std::unexpected("could not query USN journal: " +
                                native_error(GetLastError()));
     if (returned < offsetof(JournalDataV1, max) + sizeof(USN) ||
         result.root == 0 || result.volume == 0 || result.root_path.empty())
-        return std::unexpected(
-            "a consulta ao USN journal retornou dados inválidos");
+        return std::unexpected("USN journal query returned invalid data");
     return result;
 }
 
@@ -666,12 +665,11 @@ capture_change_journal_checkpoint(const std::filesystem::path& local_root) {
 #if !defined(_WIN32)
     static_cast<void>(local_root);
     static_cast<void>(trace);
-    return std::unexpected("o USN journal só está disponível no Windows");
+    return std::unexpected("USN journal is only available on Windows");
 #else
     const auto volume = open_volume(local_root);
     if (!valid_handle(volume))
-        return std::unexpected(
-            "não foi possível abrir o volume local para o USN journal");
+        return std::unexpected("could not open local volume for USN journal");
     auto journal = query(local_root, volume);
     close_handle(volume);
     if (!journal)
@@ -683,7 +681,7 @@ capture_change_journal_checkpoint(const std::filesystem::path& local_root) {
         .next_usn = journal->data.next,
         .root_file_reference = journal->root};
     if (!valid_change_journal_checkpoint(result))
-        return std::unexpected("o ponto de controle do USN é inválido");
+        return std::unexpected("USN checkpoint is invalid");
     perf_trace::finish("USN checkpoint wall", trace);
     return result;
 #endif
@@ -698,14 +696,13 @@ probe_change_journal(const std::filesystem::path& local_root,
     static_cast<void>(local_root);
     static_cast<void>(checkpoint);
     static_cast<void>(trace);
-    return std::unexpected("o USN journal só está disponível no Windows");
+    return std::unexpected("USN journal is only available on Windows");
 #else
     if (!valid_change_journal_checkpoint(checkpoint))
-        return std::unexpected("o ponto de controle do USN é inválido");
+        return std::unexpected("USN checkpoint is invalid");
     const auto volume = open_volume(local_root);
     if (!valid_handle(volume))
-        return std::unexpected(
-            "não foi possível abrir o volume local para o USN journal");
+        return std::unexpected("could not open local volume for USN journal");
     auto journal = query(local_root, volume);
     if (!journal) {
         close_handle(volume);
@@ -746,14 +743,13 @@ probe_change_journal(const std::filesystem::path& local_root,
     static_cast<void>(lineage);
     static_cast<void>(diagnostics);
     static_cast<void>(trace);
-    return std::unexpected("o USN journal só está disponível no Windows");
+    return std::unexpected("USN journal is only available on Windows");
 #else
     if (!valid_change_journal_checkpoint(checkpoint))
-        return std::unexpected("o ponto de controle do USN é inválido");
+        return std::unexpected("USN checkpoint is invalid");
     const auto volume = open_volume(local_root);
     if (!valid_handle(volume))
-        return std::unexpected(
-            "não foi possível abrir o volume local para o USN journal");
+        return std::unexpected("could not open local volume for USN journal");
     auto journal = query(local_root, volume);
     if (!journal) {
         close_handle(volume);
@@ -783,15 +779,14 @@ probe_change_journal_delta(const std::filesystem::path& local_root,
     static_cast<void>(lineage);
     static_cast<void>(diagnostics);
     static_cast<void>(trace);
-    return std::unexpected("o USN journal só está disponível no Windows");
+    return std::unexpected("USN journal is only available on Windows");
 #else
     DeltaAccumulator delta;
     if (!valid_change_journal_checkpoint(checkpoint))
-        return std::unexpected("o ponto de controle de state.db é inválido");
+        return std::unexpected("state.db checkpoint is invalid");
     const auto volume = open_volume(local_root);
     if (!valid_handle(volume))
-        return std::unexpected(
-            "não foi possível abrir o volume local para o USN journal");
+        return std::unexpected("could not open local volume for USN journal");
     auto journal = query(local_root, volume);
     if (!journal) {
         close_handle(volume);
@@ -821,14 +816,13 @@ probe_change_journal_diagnostic(const std::filesystem::path& local_root,
     static_cast<void>(local_root);
     static_cast<void>(checkpoint);
     static_cast<void>(diagnostics);
-    return std::unexpected("o USN journal só está disponível no Windows");
+    return std::unexpected("USN journal is only available on Windows");
 #else
     if (!valid_change_journal_checkpoint(checkpoint))
-        return std::unexpected("o ponto de controle do USN é inválido");
+        return std::unexpected("USN checkpoint is invalid");
     const auto volume = open_volume(local_root);
     if (!valid_handle(volume))
-        return std::unexpected(
-            "não foi possível abrir o volume local para o USN journal");
+        return std::unexpected("could not open local volume for USN journal");
     auto journal = query(local_root, volume);
     if (!journal) {
         close_handle(volume);

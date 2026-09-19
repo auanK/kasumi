@@ -40,7 +40,7 @@ std::expected<std::string, std::string> machine_name() {
     if (GetComputerNameW(buffer.data(), &size) == 0) {
         const auto native_code = GetLastError();
         return std::unexpected(
-            "falha ao obter nome da máquina (native_code=" +
+            "failed to get host name (native_code=" +
             std::to_string(static_cast<unsigned long>(native_code)) + ")");
     }
 
@@ -60,7 +60,7 @@ std::expected<std::string, std::string> machine_name() {
     char buffer[256]{};
     if (::gethostname(buffer, sizeof(buffer) - 1) != 0) {
         const auto native_code = errno;
-        return std::unexpected("falha ao obter nome da máquina (native_code=" +
+        return std::unexpected("failed to get host name (native_code=" +
                                std::to_string(native_code) + ")");
     }
     buffer[sizeof(buffer) - 1] = '\0';
@@ -89,12 +89,12 @@ std::expected<Identity, std::string> current() {
 #if defined(_WIN32)
     const auto process_id = static_cast<std::uint64_t>(GetCurrentProcessId());
     if (process_id == 0) {
-        return std::unexpected("PID do processo inválido");
+        return std::unexpected("invalid process PID");
     }
 #else
     const auto native_process_id = ::getpid();
     if (native_process_id <= 0) {
-        return std::unexpected("PID do processo inválido");
+        return std::unexpected("invalid process PID");
     }
     const auto process_id = static_cast<std::uint64_t>(native_process_id);
 #endif
@@ -113,7 +113,7 @@ std::expected<Identity, std::string> current() {
         .process_id = process_id,
     };
     if (!valid(result)) {
-        return std::unexpected("identidade do processo inválida");
+        return std::unexpected("invalid process identity");
     }
     return result;
 }

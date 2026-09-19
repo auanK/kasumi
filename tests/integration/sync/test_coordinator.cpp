@@ -6857,9 +6857,9 @@ TEST(SyncCoordinatorTest,
         EXPECT_EQ(first.error().code,
                   kasumi::application::sync::coordinator::ErrorCode::
                       WorkspaceFailure);
-        EXPECT_NE(first.error().detail.find(
-                      "remover o espaço de trabalho da transação"),
-                  std::string::npos);
+        EXPECT_NE(
+            first.error().detail.find("failed to remove transaction workspace"),
+            std::string::npos);
         EXPECT_NE(first.error().detail.find(transaction_root.string()),
                   std::string::npos);
     }

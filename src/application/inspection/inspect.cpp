@@ -404,8 +404,7 @@ key_file_present(const std::filesystem::path& path,
         filesystem_error != std::errc::no_such_file_or_directory) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::RuntimeFailure,
-                                     "não foi possível verificar a chave "
-                                     "persistida"));
+                                     "failed to verify persisted key"));
     }
     return status.type() != std::filesystem::file_type::not_found;
 }
@@ -422,18 +421,17 @@ resolve_key(const Credentials& credentials,
 
     if (std::holds_alternative<NoCredentials>(credentials)) {
         if (!*present) {
-            return std::unexpected(error(
-                operation,
-                InspectionErrorCode::CredentialsRequired,
-                "credenciais são necessárias para inspecionar o histórico "
-                "remoto"));
+            return std::unexpected(
+                error(operation,
+                      InspectionErrorCode::CredentialsRequired,
+                      "credentials are required to inspect remote history"));
         }
         auto stored = runtime::vault::read_only(runtime_data.key_path);
         if (!stored) {
             return std::unexpected(
                 error(operation,
                       InspectionErrorCode::CredentialFailure,
-                      "não foi possível ler a chave persistida do perfil"));
+                      "failed to read profile persisted key"));
         }
         output = *stored;
         crypto::secure_memory::wipe(stored->data(), stored->size());
@@ -455,7 +453,7 @@ resolve_key(const Credentials& credentials,
             return std::unexpected(
                 error(operation,
                       InspectionErrorCode::CredentialFailure,
-                      "não foi possível ler a chave persistida do perfil"));
+                      "failed to read profile persisted key"));
         }
         const bool matches = *stored == *resolved;
         crypto::secure_memory::wipe(stored->data(), stored->size());
@@ -463,8 +461,7 @@ resolve_key(const Credentials& credentials,
             crypto::secure_memory::wipe(resolved->data(), resolved->size());
             return std::unexpected(error(operation,
                                          InspectionErrorCode::CredentialFailure,
-                                         "a credencial não corresponde ao "
-                                         "perfil"));
+                                         "credential does not match profile"));
         }
     }
 
@@ -560,7 +557,7 @@ std::expected<ObservedCommitIndex, InspectionError> index_observed_commits(
             return std::unexpected(
                 error(operation,
                       InspectionErrorCode::RemoteObservationFailure,
-                      "o histórico remoto contém um commit duplicado"));
+                      "remote history contains duplicate commit"));
         }
     }
     platform::perf_trace::count("inspection commit index builds");
@@ -580,7 +577,7 @@ make_head_info(std::string_view id,
         return std::unexpected(
             error(operation,
                   InspectionErrorCode::RemoteObservationFailure,
-                  "a head lógica não possui um commit observado válido"));
+                  "logical head does not have a valid observed commit"));
     }
     const auto* match = observed->second;
 
@@ -646,10 +643,10 @@ make_tree_report(const InspectionRequest& request,
     RemoteTreeReport report{.history_present = observed.history_present};
     if (!observed.history_present) {
         if (request.head_commit_id) {
-            return std::unexpected(error(
-                operation,
-                InspectionErrorCode::RemoteHeadNotFound,
-                "a head solicitada não está entre as heads lógicas atuais"));
+            return std::unexpected(
+                error(operation,
+                      InspectionErrorCode::RemoteHeadNotFound,
+                      "requested head is not among current logical heads"));
         }
         return report;
     }
@@ -658,7 +655,7 @@ make_tree_report(const InspectionRequest& request,
         return std::unexpected(
             error(operation,
                   InspectionErrorCode::RemoteObservationFailure,
-                  "o histórico remoto não possui head lógica observada"));
+                  "remote history has no observed logical head"));
     }
 
     std::string selected_id;
@@ -666,11 +663,11 @@ make_tree_report(const InspectionRequest& request,
         const auto selected =
             std::ranges::find(observed.logical_heads, *request.head_commit_id);
         if (selected == observed.logical_heads.end()) {
-            return std::unexpected(error(
-                operation,
-                InspectionErrorCode::RemoteHeadNotFound,
-                "a head solicitada não está entre as heads lógicas atuais",
-                head_ids(heads)));
+            return std::unexpected(
+                error(operation,
+                      InspectionErrorCode::RemoteHeadNotFound,
+                      "requested head is not among current logical heads",
+                      head_ids(heads)));
         }
         selected_id = *selected;
     } else {
@@ -678,7 +675,7 @@ make_tree_report(const InspectionRequest& request,
             return std::unexpected(
                 error(operation,
                       InspectionErrorCode::HeadSelectionRequired,
-                      "O histórico remoto possui múltiplas heads lógicas.",
+                      "Remote history has multiple logical heads.",
                       head_ids(heads)));
         }
         selected_id = heads.front().commit_id;
@@ -692,7 +689,7 @@ make_tree_report(const InspectionRequest& request,
         return std::unexpected(
             error(operation,
                   InspectionErrorCode::RemoteObservationFailure,
-                  "a head lógica não possui um commit observado válido"));
+                  "logical head does not have a valid observed commit"));
     }
 
     const auto& tree = selected->commit.tree;
@@ -730,10 +727,10 @@ make_commits_report(const observation::history::StorageView& observed,
         return report;
     }
     if (observed.reachable_commits.empty()) {
-        return std::unexpected(error(
-            operation,
-            InspectionErrorCode::RemoteObservationFailure,
-            "o histórico remoto não possui commits alcançáveis observados"));
+        return std::unexpected(
+            error(operation,
+                  InspectionErrorCode::RemoteObservationFailure,
+                  "remote history has no observed reachable commits"));
     }
 
     const std::unordered_set<std::string_view> logical_head_ids(
@@ -759,7 +756,7 @@ make_commits_report(const observation::history::StorageView& observed,
             return std::unexpected(
                 error(operation,
                       InspectionErrorCode::RemoteObservationFailure,
-                      "o histórico remoto contém um commit sem árvore"));
+                      "remote history contains commit without tree"));
         }
 
         const bool logical_head = logical_head_ids.contains(loaded.id);
@@ -784,7 +781,7 @@ make_commits_report(const observation::history::StorageView& observed,
         return std::unexpected(
             error(operation,
                   InspectionErrorCode::RemoteObservationFailure,
-                  "a resolução remota referencia uma head não alcançável"));
+                  "remote resolution references unreachable head"));
     }
     std::ranges::sort(logical_heads, [](const auto& left, const auto& right) {
         if (left.first != right.first) {
@@ -853,7 +850,7 @@ make_stat_report(const InspectionRequest& request,
     if (!valid_logical_path(requested)) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::InvalidRequest,
-                                     "o caminho lógico solicitado é inválido"));
+                                     "requested logical path is invalid"));
     }
     const auto canonical = requested == "/" ? std::string_view{} : requested;
     const auto* row = observed.history_present
@@ -862,8 +859,8 @@ make_stat_report(const InspectionRequest& request,
     if (row == nullptr) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::RemotePathNotFound,
-                                     "o caminho não existe na árvore lógica "
-                                     "remota"));
+                                     "path does not exist in remote logical "
+                                     "tree"));
     }
     return RemoteStatReport{
         .observed_height = observed.observed_height,
@@ -884,7 +881,7 @@ resolve_destination(const InspectionRequest& request,
     if (requested.empty()) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::InvalidRequest,
-                                     "o destino solicitado é inválido"));
+                                     "requested destination is invalid"));
     }
     std::error_code filesystem_error;
     auto destination =
@@ -894,16 +891,16 @@ resolve_destination(const InspectionRequest& request,
     if (filesystem_error || destination.filename().empty()) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::DestinationFailure,
-                                     "não foi possível resolver o destino"));
+                                     "failed to resolve destination"));
     }
     const auto parent_status = std::filesystem::symlink_status(
         destination.parent_path(), filesystem_error);
     if (filesystem_error || std::filesystem::is_symlink(parent_status) ||
         !std::filesystem::is_directory(parent_status)) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::DestinationFailure,
-                  "o diretório pai do destino não existe ou não é seguro"));
+        return std::unexpected(error(
+            operation,
+            InspectionErrorCode::DestinationFailure,
+            "destination parent directory does not exist or is not safe"));
     }
     const auto destination_status =
         std::filesystem::symlink_status(destination, filesystem_error);
@@ -915,10 +912,9 @@ resolve_destination(const InspectionRequest& request,
                (!std::filesystem::is_regular_file(destination_status) &&
                 destination_status.type() !=
                     std::filesystem::file_type::not_found)) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::DestinationFailure,
-                  "o destino não é um arquivo regular seguro"));
+        return std::unexpected(error(operation,
+                                     InspectionErrorCode::DestinationFailure,
+                                     "destination is not a safe regular file"));
     }
     return destination;
 }
@@ -931,7 +927,7 @@ install_remote_file(const std::filesystem::path& plaintext,
     if (!token) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::DestinationFailure,
-                                     "não foi possível preparar o destino"));
+                                     "failed to prepare destination"));
     }
     const auto temporary =
         destination.parent_path() / (".kasumi-download-" + *token + ".tmp");
@@ -947,14 +943,13 @@ install_remote_file(const std::filesystem::path& plaintext,
         cleanup();
         return std::unexpected(error(operation,
                                      InspectionErrorCode::DestinationFailure,
-                                     "não foi possível preparar o arquivo de "
-                                     "destino"));
+                                     "failed to prepare destination file"));
     }
     if (auto synced = platform::durability::sync_file(temporary); !synced) {
         cleanup();
         return std::unexpected(error(operation,
                                      InspectionErrorCode::DestinationFailure,
-                                     "não foi possível persistir o download"));
+                                     "failed to persist download"));
     }
     if (auto replaced =
             platform::durability::replace_atomically(temporary, destination);
@@ -962,13 +957,13 @@ install_remote_file(const std::filesystem::path& plaintext,
         cleanup();
         return std::unexpected(error(operation,
                                      InspectionErrorCode::DestinationFailure,
-                                     "não foi possível instalar o download"));
+                                     "failed to install download"));
     }
     if (auto synced = platform::durability::sync_parent_directory(destination);
         !synced) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::DestinationFailure,
-                                     "não foi possível persistir o destino"));
+                                     "failed to persist destination"));
     }
     return {};
 }
@@ -985,13 +980,13 @@ download_remote_file(const InspectionRequest& request,
     if (row == nullptr) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::RemotePathNotFound,
-                                     "o caminho não existe na árvore lógica "
-                                     "remota"));
+                                     "path does not exist in remote logical "
+                                     "tree"));
     }
     if (row->is_directory) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::RemotePathIsDirectory,
-                                     "o caminho remoto é um diretório"));
+                                     "remote path is a directory"));
     }
     auto destination = resolve_destination(request, operation);
     if (!destination) {
@@ -1012,15 +1007,15 @@ download_remote_file(const InspectionRequest& request,
             error(operation,
                   code,
                   code == InspectionErrorCode::RemoteContentNotFound
-                      ? "o conteúdo remoto do arquivo não foi encontrado"
-                      : "não foi possível baixar o conteúdo remoto"));
+                      ? "remote file content not found"
+                      : "failed to download remote content"));
     }
     if (!crypto::decrypt_file(encrypted, plaintext, context.key) ||
         !crypto::content::verify_file(plaintext, logical_hash, row->size)) {
         return std::unexpected(
             error(operation,
                   InspectionErrorCode::RemoteContentInvalid,
-                  "o conteúdo remoto falhou na autenticação criptográfica"));
+                  "remote content failed cryptographic authentication"));
     }
     if (auto installed =
             install_remote_file(plaintext, *destination, operation);
@@ -1080,7 +1075,7 @@ inspect_epochs(const InspectionRequest& request,
         return std::unexpected(
             error(operation,
                   InspectionErrorCode::RemoteObservationFailure,
-                  "não foi possível autenticar a cadeia remota de Epochs"));
+                  "failed to authenticate remote Epoch chain"));
     }
     if (operation == InspectionOperation::RemoteEpochs) {
         RemoteEpochsReport report;
@@ -1102,7 +1097,7 @@ inspect_epochs(const InspectionRequest& request,
     if (selected == chain->end()) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::RemoteEpochNotFound,
-                                     "o Epoch remoto solicitado não existe"));
+                                     "requested remote Epoch does not exist"));
     }
     const auto index = static_cast<std::size_t>(selected - chain->begin());
     return InspectionResponse{
@@ -1143,14 +1138,14 @@ inspect_contents(const observation::history::StorageView& observed,
         return std::unexpected(
             error(operation,
                   InspectionErrorCode::RemoteObservationFailure,
-                  "o inventário lógico de conteúdo é inconsistente"));
+                  "logical content inventory is inconsistent"));
     }
     for (const auto& commit : observed.reachable_commits) {
         if (!add_rows(commit.commit.tree, false)) {
-            return std::unexpected(error(
-                operation,
-                InspectionErrorCode::RemoteObservationFailure,
-                "o histórico possui metadados de conteúdo inconsistentes"));
+            return std::unexpected(
+                error(operation,
+                      InspectionErrorCode::RemoteObservationFailure,
+                      "history has inconsistent content metadata"));
         }
     }
     for (const auto& content_id : observed.content_object_identifiers) {
@@ -1190,7 +1185,7 @@ inspect_contents(const observation::history::StorageView& observed,
             return std::unexpected(
                 error(operation,
                       InspectionErrorCode::RemoteObservationFailure,
-                      "não foi possível baixar um objeto durante a auditoria"));
+                      "failed to download object during audit"));
         }
         if (!crypto::decrypt_file(encrypted, plaintext, context.key)) {
             content.state = RemoteContentState::Invalid;
@@ -1250,13 +1245,13 @@ physical_objects(InspectionContext& context, InspectionOperation operation) {
         return std::unexpected(
             error(operation,
                   InspectionErrorCode::RemoteObservationFailure,
-                  "não foi possível listar os objetos remotos"));
+                  "failed to list remote objects"));
     }
     if (listed->size() > maximum_physical_object_count) {
         return std::unexpected(
             error(operation,
                   InspectionErrorCode::RemoteObservationFailure,
-                  "o namespace remoto excede o limite defensivo"));
+                  "remote namespace exceeds defensive limit"));
     }
     std::ranges::sort(*listed);
     listed->erase(std::ranges::unique(*listed).begin(), listed->end());
@@ -1286,7 +1281,7 @@ bool valid_writer(const history_storage::RemoteLayout& layout,
 RemoteObjectInfo classify_object(const history_storage::RemoteLayout& layout,
                                  std::string identifier) {
     RemoteObjectInfo result{.identifier = std::move(identifier),
-                            .relation = "não auditado"};
+                            .relation = "not audited"};
     const auto& id = result.identifier;
     if (history::valid_commit_id(id)) {
         result.category = RemoteObjectCategory::Content;
@@ -1309,13 +1304,13 @@ RemoteObjectInfo classify_object(const history_storage::RemoteLayout& layout,
                id == "history/gc/v1/barrier" || id == "history/gc/barrier") {
         result.category = RemoteObjectCategory::Barrier;
         result.structurally_valid = true;
-        result.relation = "barreira de manutenção";
+        result.relation = "maintenance barrier";
     } else if (id.starts_with(layout.writers_prefix) ||
                id.starts_with("history/gc/v1/writers/") ||
                id.starts_with("history/gc/writers/")) {
         result.category = RemoteObjectCategory::Writer;
         result.structurally_valid = valid_writer(layout, id);
-        result.relation = "bloqueia manutenção enquanto presente";
+        result.relation = "blocks maintenance while present";
     } else if ((id.starts_with(layout.quarantine_prefix) ||
                 id.starts_with("history/gc/v1/quarantine/") ||
                 id.starts_with("history/gc/quarantine/")) &&
@@ -1377,10 +1372,10 @@ reachability(
             : history_storage::inventory_reachability(
                   context.storage, context.key, context.workspace->root);
     if (!inventory) {
-        return std::unexpected(error(
-            operation,
-            InspectionErrorCode::RemoteObservationFailure,
-            "não foi possível autenticar o inventário físico do histórico"));
+        return std::unexpected(
+            error(operation,
+                  InspectionErrorCode::RemoteObservationFailure,
+                  "failed to authenticate physical history inventory"));
     }
     return std::move(*inventory);
 }
@@ -1499,7 +1494,7 @@ content_reachability(
         return std::unexpected(
             error(operation,
                   InspectionErrorCode::RemoteObservationFailure,
-                  "não foi possível auditar o alcance dos conteúdos remotos"));
+                  "failed to audit remote content reachability"));
     }
     return std::move(*inventory);
 }
@@ -1643,11 +1638,11 @@ std::expected<RemoteQuarantineReport, InspectionError> make_quarantine_report(
             : history_storage::maintenance_protocol::inventory_quarantine(
                   context.storage, context.key, context.workspace->root);
     if (!inventory) {
-        return std::unexpected(error(
-            operation,
-            InspectionErrorCode::RemoteObservationFailure,
-            "a quarentena remota possui metadata inválida ou inacessível: " +
-                inventory.error().detail));
+        return std::unexpected(
+            error(operation,
+                  InspectionErrorCode::RemoteObservationFailure,
+                  "remote quarantine has invalid or inaccessible metadata: " +
+                      inventory.error().detail));
     }
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(
                          std::chrono::system_clock::now().time_since_epoch())
@@ -1664,7 +1659,7 @@ std::expected<RemoteQuarantineReport, InspectionError> make_quarantine_report(
             .category = entry.original_identifier.starts_with(
                             context.layout.commits_prefix)
                             ? "commit"
-                            : "conteúdo",
+                            : "content",
             .metadata_authenticated = authenticated,
             .quarantined_at = entry.quarantined_at.value_or(0),
             .retention_elapsed =
@@ -1686,7 +1681,7 @@ make_health_report(InspectionContext& context,
         return std::unexpected(
             error(operation,
                   InspectionErrorCode::RemoteObservationFailure,
-                  "não foi possível autenticar a continuidade dos Epochs"));
+                  "failed to authenticate Epoch continuity"));
     }
     auto history_inventory =
         reachability(context, operation, identifiers, *epochs);
@@ -1735,31 +1730,31 @@ make_health_report(InspectionContext& context,
         }
     };
     add_reason(markers.invalid_count != 0,
-               "markers físicos inválidos: " +
+               "invalid physical markers: " +
                    std::to_string(markers.invalid_count));
     add_reason(
         !history_inventory->missing_parent_ids.empty(),
-        "pais de commit ausentes: " +
+        "missing commit parents: " +
             std::to_string(history_inventory->missing_parent_ids.size()));
     add_reason(
         !history_inventory->invalid_parent_ids.empty(),
-        "pais de commit inválidos: " +
+        "invalid commit parents: " +
             std::to_string(history_inventory->invalid_parent_ids.size()));
     add_reason(report.missing_content_count != 0,
-               "conteúdos necessários ausentes: " +
+               "missing required contents: " +
                    std::to_string(report.missing_content_count));
     add_reason(report.invalid_content_count != 0,
-               "conteúdos necessários inválidos: " +
+               "invalid required contents: " +
                    std::to_string(report.invalid_content_count));
     add_reason(!writers.protocol_consistent,
-               "protocolo de manutenção inconsistente");
+               "inconsistent maintenance protocol");
     const auto critical_reason_count = report.reasons.size();
     add_reason(report.orphan_count != 0,
-               "objetos sem alcance: " + std::to_string(report.orphan_count));
+               "unreachable objects: " + std::to_string(report.orphan_count));
     add_reason(report.unknown_object_count != 0,
-               "objetos desconhecidos: " +
+               "unknown objects: " +
                    std::to_string(report.unknown_object_count));
-    add_reason(writers.maintenance_blocked, "manutenção atualmente bloqueada");
+    add_reason(writers.maintenance_blocked, "maintenance currently blocked");
     report.state = critical_reason_count != 0 ? RemoteHealthState::Critical
                    : report.reasons.empty()   ? RemoteHealthState::Healthy
                                               : RemoteHealthState::Degraded;
@@ -1860,15 +1855,15 @@ make_commit_report(const InspectionRequest& request,
     if (selected == observed.reachable_commits.end()) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::RemoteCommitNotFound,
-                                     "o commit não é alcançável no histórico "
-                                     "remoto atual"));
+                                     "commit is not reachable in current "
+                                     "remote history"));
     }
     if (selected->commit.tree.rows.empty() ||
         !valid_snapshot(selected->commit.tree, false)) {
         return std::unexpected(
             error(operation,
                   InspectionErrorCode::RemoteObservationFailure,
-                  "o commit remoto não possui uma árvore válida"));
+                  "remote commit does not have a valid tree"));
     }
 
     const auto authenticated =
@@ -1884,10 +1879,10 @@ make_commit_report(const InspectionRequest& request,
             ? std::nullopt
             : std::optional{*authenticated});
     if (!inspected) {
-        return std::unexpected(error(
-            operation,
-            InspectionErrorCode::RemoteObservationFailure,
-            "não foi possível autenticar as variantes físicas do commit"));
+        return std::unexpected(
+            error(operation,
+                  InspectionErrorCode::RemoteObservationFailure,
+                  "failed to authenticate physical commit variants"));
     }
 
     RemoteCommitReport report{.commit = commit_info(*selected, observed)};
@@ -1925,17 +1920,17 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
          operation != InspectionOperation::RemoteEpoch) ||
         (input.request.content_id &&
          operation != InspectionOperation::RemoteContent)) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::InvalidRequest,
-                  "o seletor não pertence à operação de inspeção solicitada"));
+        return std::unexpected(error(
+            operation,
+            InspectionErrorCode::InvalidRequest,
+            "selector does not belong to requested inspection operation"));
     }
     if (operation == InspectionOperation::RemoteStat &&
         (!input.request.logical_path ||
          !valid_logical_path(*input.request.logical_path))) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::InvalidRequest,
-                                     "o caminho lógico solicitado é inválido"));
+                                     "requested logical path is invalid"));
     }
     if (operation == InspectionOperation::RemoteGet &&
         (!input.request.logical_path ||
@@ -1945,29 +1940,30 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
          input.request.destination_path->empty())) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::InvalidRequest,
-                                     "o caminho remoto ou destino é inválido"));
+                                     "remote path or destination is invalid"));
     }
     if (operation == InspectionOperation::RemoteCommit &&
         (!input.request.commit_id ||
          !history::valid_commit_id(*input.request.commit_id))) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::InvalidRequest,
-                                     "o ID de commit solicitado é inválido"));
+                                     "requested commit ID is invalid"));
     }
     if (operation == InspectionOperation::RemoteEpoch &&
         (!input.request.epoch_selector ||
          (!history::valid_commit_id(*input.request.epoch_selector) &&
           !epoch_sequence(*input.request.epoch_selector)))) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::InvalidRequest,
-                                     "o ID ou sequência de Epoch é inválido"));
+        return std::unexpected(
+            error(operation,
+                  InspectionErrorCode::InvalidRequest,
+                  "requested Epoch ID or sequence is invalid"));
     }
     if (operation == InspectionOperation::RemoteContent &&
         (!input.request.content_id ||
          !history::valid_commit_id(*input.request.content_id))) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::InvalidRequest,
-                                     "o content ID solicitado é inválido"));
+                                     "requested content ID is invalid"));
     }
     if (operation != InspectionOperation::RemoteHeads &&
         operation != InspectionOperation::RemoteTree &&
@@ -1989,7 +1985,7 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
         operation != InspectionOperation::RemoteHealth) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::RuntimeFailure,
-                                     "operação de inspeção desconhecida"));
+                                     "unknown inspection operation"));
     }
 
     const auto runtime_trace = platform::perf_trace::begin();
@@ -2028,10 +2024,9 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
                                             context.runtime.local_dir);
     platform::perf_trace::finish("inspection transport open", transport_trace);
     if (!opened) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RuntimeFailure,
-                  "não foi possível abrir o armazenamento remoto"));
+        return std::unexpected(error(operation,
+                                     InspectionErrorCode::RuntimeFailure,
+                                     "failed to open remote storage"));
     }
     context.storage = std::move(*opened);
 
@@ -2042,7 +2037,7 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
         return std::unexpected(
             error(operation,
                   InspectionErrorCode::RemoteObservationFailure,
-                  "não foi possível preparar a observação remota"));
+                  "failed to prepare remote observation"));
     }
     context.workspace = std::move(*workspace);
 
@@ -2090,7 +2085,7 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
         return std::unexpected(
             error(operation,
                   InspectionErrorCode::RemoteObservationFailure,
-                  "não foi possível observar o histórico remoto"));
+                  "failed to observe remote history"));
     }
     if (requires_complete_history(operation)) {
         if (context.hints.history_cache &&
@@ -2126,7 +2121,7 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
             return std::unexpected(error(
                 operation,
                 InspectionErrorCode::RemoteContentNotFound,
-                "o content ID solicitado não existe no inventário remoto"));
+                "requested content ID does not exist in remote inventory"));
         }
         return InspectionResponse{
             .operation = operation,
@@ -2183,7 +2178,7 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
             return std::unexpected(
                 error(operation,
                       InspectionErrorCode::RemoteObservationFailure,
-                      "não foi possível observar os writers remotos"));
+                      "failed to observe remote writers"));
         }
         RemoteSummaryReport report{
             .history_present = observed->history_present,
@@ -2269,17 +2264,17 @@ inspect(InspectionInput input) {
     std::expected<InspectionResponse, InspectionError> result =
         std::unexpected(error(input.request.operation,
                               InspectionErrorCode::RuntimeFailure,
-                              "falha na inspeção remota"));
+                              "remote inspection failure"));
     try {
         result = run_inspection(input, context);
     } catch (const std::exception&) {
         result = std::unexpected(error(input.request.operation,
                                        InspectionErrorCode::RuntimeFailure,
-                                       "exceção durante a inspeção remota"));
+                                       "exception during remote inspection"));
     } catch (...) {
         result = std::unexpected(error(input.request.operation,
                                        InspectionErrorCode::RuntimeFailure,
-                                       "exceção durante a inspeção remota"));
+                                       "exception during remote inspection"));
     }
     finish_inspection(input, context);
     platform::perf_trace::finish("total inspection", total_trace);
@@ -2294,7 +2289,7 @@ read_remote_file(InspectionInput input) {
         const auto result = std::unexpected(
             error(input.request.operation,
                   InspectionErrorCode::InvalidRequest,
-                  "read_remote_file exige a operação RemoteGet"));
+                  "read_remote_file requires RemoteGet operation"));
         wipe_credentials(input.credentials);
         return result;
     }

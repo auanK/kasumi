@@ -35,7 +35,7 @@ backup_path(const platform::Workspace& workspace,
             std::size_t operation_index) {
     if (workspace.root.empty() || progress.backup_slot == no_backup_slot) {
         return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
-                                          "slot de backup inválido",
+                                          "invalid backup slot",
                                           path,
                                           operation_index));
     }
@@ -43,7 +43,7 @@ backup_path(const platform::Workspace& workspace,
         platform::workspace_file(workspace, progress.backup_slot, ".backup");
     if (result.empty()) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "caminho de backup inválido",
+                                          "invalid backup path",
                                           path,
                                           operation_index));
     }
@@ -55,7 +55,7 @@ validate_workspace(const platform::Workspace& workspace,
                    std::size_t operation_index) {
     if (workspace.root.empty()) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "workspace vazio",
+                                          "empty workspace",
                                           workspace.root,
                                           operation_index));
     }
@@ -63,21 +63,21 @@ validate_workspace(const platform::Workspace& workspace,
     const auto status = std::filesystem::symlink_status(workspace.root, error);
     if (error == std::errc::no_such_file_or_directory) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "workspace não existe",
+                                          "workspace does not exist",
                                           workspace.root,
                                           operation_index));
     }
     if (error) {
-        return std::unexpected(make_error(
-            MutationErrorCode::LocalIo,
-            "não foi possível consultar o workspace: " + error.message(),
-            workspace.root,
-            operation_index));
+        return std::unexpected(
+            make_error(MutationErrorCode::LocalIo,
+                       "failed to query workspace: " + error.message(),
+                       workspace.root,
+                       operation_index));
     }
     if (std::filesystem::is_symlink(status) ||
         !std::filesystem::is_directory(status)) {
         return std::unexpected(make_error(MutationErrorCode::UnsafePath,
-                                          "workspace inválido",
+                                          "invalid workspace",
                                           workspace.root,
                                           operation_index));
     }
@@ -112,7 +112,7 @@ validate_backup(const std::filesystem::path& backup,
     if (missing(*status) || std::filesystem::is_symlink(*status) ||
         !std::filesystem::is_regular_file(*status)) {
         return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
-                                          "backup ausente ou inválido",
+                                          "backup is missing or invalid",
                                           backup,
                                           operation_index));
     }
@@ -129,7 +129,7 @@ validate_backup(const std::filesystem::path& backup,
     }
     if (*actual != expected_hash) {
         return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
-                                          "hash do backup não corresponde",
+                                          "backup hash mismatch",
                                           backup,
                                           operation_index));
     }
@@ -176,11 +176,11 @@ create_backup(const std::filesystem::path& source,
     std::error_code error;
     const auto source_mtime = std::filesystem::last_write_time(source, error);
     if (error) {
-        return std::unexpected(make_error(
-            MutationErrorCode::LocalIo,
-            "não foi possível ler o mtime do backup: " + error.message(),
-            source,
-            operation_index));
+        return std::unexpected(
+            make_error(MutationErrorCode::LocalIo,
+                       "failed to read backup mtime: " + error.message(),
+                       source,
+                       operation_index));
     }
     if (!std::filesystem::copy_file(
             source, backup, std::filesystem::copy_options::none, error) ||
@@ -192,12 +192,12 @@ create_backup(const std::filesystem::path& source,
                 return validated;
             return make_backup_durable(backup, operation_index);
         }
-        return std::unexpected(make_error(
-            MutationErrorCode::LocalIo,
-            error ? "não foi possível criar backup: " + error.message()
-                  : "não foi possível criar backup",
-            backup,
-            operation_index));
+        return std::unexpected(
+            make_error(MutationErrorCode::LocalIo,
+                       error ? "failed to create backup: " + error.message()
+                             : "failed to create backup",
+                       backup,
+                       operation_index));
     }
 
     auto secured = platform::private_storage::protect_file(backup);
@@ -213,12 +213,11 @@ create_backup(const std::filesystem::path& source,
         platform::metadata::set_last_write_time(backup, source_mtime);
     if (!backup_metadata) {
         remove_temporary_file(backup);
-        return std::unexpected(
-            make_error(MutationErrorCode::LocalIo,
-                       "não foi possível preservar o mtime do backup: " +
-                           backup_metadata.error(),
-                       backup,
-                       operation_index));
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "failed to preserve backup mtime: " +
+                                              backup_metadata.error(),
+                                          backup,
+                                          operation_index));
     }
 
     auto verified = validate_backup(backup, expected_hash, operation_index);
@@ -240,7 +239,7 @@ validate_progress(const Operation& operation,
                   std::size_t operation_index) {
     if (!transaction::valid(progress.state)) {
         return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
-                                          "estado de progresso inválido",
+                                          "invalid progress state",
                                           operation.path,
                                           operation_index));
     }
@@ -248,7 +247,7 @@ validate_progress(const Operation& operation,
         (progress.had_original || !progress.previous_hash.empty())) {
         return std::unexpected(
             make_error(MutationErrorCode::InvalidOperation,
-                       "progresso Pending possui dados residuais",
+                       "Pending progress contains residual data",
                        operation.path,
                        operation_index));
     }
@@ -271,7 +270,7 @@ validate_progress(const Operation& operation,
                 progress.had_original || !progress.previous_hash.empty()) {
                 return std::unexpected(
                     make_error(MutationErrorCode::InvalidOperation,
-                               "operação remota possui progresso local",
+                               "remote operation contains local progress",
                                operation.path,
                                operation_index));
             }
@@ -281,7 +280,7 @@ validate_progress(const Operation& operation,
             if (!require_slot() || !require_file_hash()) {
                 return std::unexpected(
                     make_error(MutationErrorCode::InvalidOperation,
-                               "progresso de arquivo local inválido",
+                               "invalid local file progress",
                                operation.path,
                                operation_index));
             }
@@ -292,7 +291,7 @@ validate_progress(const Operation& operation,
                  !valid_hash(progress.previous_hash))) {
                 return std::unexpected(
                     make_error(MutationErrorCode::InvalidOperation,
-                               "progresso de rename inválido",
+                               "invalid rename progress",
                                operation.path,
                                operation_index));
             }
@@ -302,7 +301,7 @@ validate_progress(const Operation& operation,
             if (!require_slot() || !progress.previous_hash.empty()) {
                 return std::unexpected(
                     make_error(MutationErrorCode::InvalidOperation,
-                               "progresso de diretório local inválido",
+                               "invalid local directory progress",
                                operation.path,
                                operation_index));
             }
@@ -310,7 +309,7 @@ validate_progress(const Operation& operation,
         case Action::Count:
             return std::unexpected(
                 make_error(MutationErrorCode::InvalidOperation,
-                           "ação de contagem não é transacional",
+                           "count action is not transactional",
                            operation.path,
                            operation_index));
     }
@@ -330,14 +329,14 @@ prepare_file_progress(std::size_t operation_index,
     }
     if (std::filesystem::is_symlink(*status)) {
         return std::unexpected(make_error(MutationErrorCode::UnsafePath,
-                                          "caminho local é um symlink",
+                                          "local path is a symlink",
                                           path,
                                           operation_index));
     }
     if (missing(*status)) {
         if (!allow_missing) {
             return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                              "arquivo local não existe",
+                                              "local file does not exist",
                                               path,
                                               operation_index));
         }
@@ -349,7 +348,7 @@ prepare_file_progress(std::size_t operation_index,
     if (!std::filesystem::is_regular_file(*status)) {
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,
-                       "caminho local não é um arquivo regular",
+                       "local path is not a regular file",
                        path,
                        operation_index));
     }
@@ -384,7 +383,7 @@ current_file_hash(const std::filesystem::path& path,
         !std::filesystem::is_regular_file(status)) {
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,
-                       "objeto local inesperado durante rollback",
+                       "unexpected local object during rollback",
                        path,
                        operation_index));
     }
@@ -406,7 +405,7 @@ remove_file_if_hash(const std::filesystem::path& path,
         !std::filesystem::is_regular_file(*status)) {
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,
-                       "objeto local inesperado durante rollback",
+                       "unexpected local object during rollback",
                        path,
                        operation_index));
     }
@@ -417,17 +416,17 @@ remove_file_if_hash(const std::filesystem::path& path,
     if (*actual != expected_hash) {
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,
-                       "arquivo local foi alterado externamente",
+                       "local file was externally modified",
                        path,
                        operation_index));
     }
     std::error_code error;
     if (!std::filesystem::remove(path, error) || error) {
-        return std::unexpected(make_error(
-            MutationErrorCode::LocalIo,
-            error ? error.message() : "arquivo não pôde ser removido",
-            path,
-            operation_index));
+        return std::unexpected(
+            make_error(MutationErrorCode::LocalIo,
+                       error ? error.message() : "file could not be removed",
+                       path,
+                       operation_index));
     }
     auto synced = platform::durability::sync_parent_directory(path);
     if (!synced) {
@@ -450,12 +449,11 @@ restore_backup(const std::filesystem::path& backup,
     const auto backup_mtime =
         std::filesystem::last_write_time(backup, backup_mtime_error);
     if (backup_mtime_error) {
-        return std::unexpected(
-            make_error(MutationErrorCode::LocalIo,
-                       "não foi possível ler o mtime do backup: " +
-                           backup_mtime_error.message(),
-                       backup,
-                       operation_index));
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "failed to read backup mtime: " +
+                                              backup_mtime_error.message(),
+                                          backup,
+                                          operation_index));
     }
     const auto parent = destination.parent_path();
     auto parent_status = read_status(parent, operation_index);
@@ -466,7 +464,7 @@ restore_backup(const std::filesystem::path& backup,
         !std::filesystem::is_directory(*parent_status)) {
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,
-                       "diretório de restauração inválido",
+                       "invalid restore directory",
                        parent,
                        operation_index));
     }
@@ -479,7 +477,7 @@ restore_backup(const std::filesystem::path& backup,
          !std::filesystem::is_regular_file(*destination_status))) {
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,
-                       "destino da restauração é um objeto inesperado",
+                       "restore destination is an unexpected object",
                        destination,
                        operation_index));
     }
@@ -500,7 +498,7 @@ restore_backup(const std::filesystem::path& backup,
     if (!missing(*candidate_status)) {
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,
-                       "candidato de restauração já existe",
+                       "restore candidate already exists",
                        candidate,
                        operation_index));
     }
@@ -510,11 +508,11 @@ restore_backup(const std::filesystem::path& backup,
             backup, candidate, std::filesystem::copy_options::none, error) ||
         error) {
         remove_temporary_file(candidate);
-        return std::unexpected(make_error(
-            MutationErrorCode::LocalIo,
-            error ? error.message() : "não foi possível copiar o backup",
-            candidate,
-            operation_index));
+        return std::unexpected(
+            make_error(MutationErrorCode::LocalIo,
+                       error ? error.message() : "failed to copy backup",
+                       candidate,
+                       operation_index));
     }
     auto candidate_valid =
         validate_backup(candidate, expected_hash, operation_index);
@@ -542,12 +540,11 @@ restore_backup(const std::filesystem::path& backup,
     auto destination_metadata =
         platform::metadata::set_last_write_time(destination, backup_mtime);
     if (!destination_metadata) {
-        return std::unexpected(
-            make_error(MutationErrorCode::LocalIo,
-                       "não foi possível restaurar o mtime do arquivo: " +
-                           destination_metadata.error(),
-                       destination,
-                       operation_index));
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "failed to restore file mtime: " +
+                                              destination_metadata.error(),
+                                          destination,
+                                          operation_index));
     }
     auto parent_synced =
         platform::durability::sync_parent_directory(destination);
@@ -591,7 +588,7 @@ rollback_file_operation(const Operation& operation,
             std::filesystem::is_symlink(*destination_status)) {
             return std::unexpected(
                 make_error(MutationErrorCode::DestinationConflict,
-                           "rename contém symlink durante rollback",
+                           "rename contains symlink during rollback",
                            operation.path,
                            operation_index));
         }
@@ -643,7 +640,7 @@ rollback_file_operation(const Operation& operation,
         }
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,
-                       "rename foi alterado externamente",
+                       "rename was externally modified",
                        operation.path,
                        operation_index));
     }
@@ -654,7 +651,7 @@ rollback_file_operation(const Operation& operation,
     if (std::filesystem::is_symlink(*status)) {
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,
-                       "caminho local é um symlink durante rollback",
+                       "local path is a symlink during rollback",
                        *path,
                        operation_index));
     }
@@ -678,7 +675,7 @@ rollback_file_operation(const Operation& operation,
             }
             return std::unexpected(
                 make_error(MutationErrorCode::DestinationConflict,
-                           "arquivo local foi alterado externamente",
+                           "local file was externally modified",
                            *path,
                            operation_index));
         }
@@ -694,7 +691,7 @@ rollback_file_operation(const Operation& operation,
             }
             return std::unexpected(
                 make_error(MutationErrorCode::DestinationConflict,
-                           "arquivo criado durante a transação foi alterado",
+                           "file created during transaction was modified",
                            *path,
                            operation_index));
         }
@@ -712,7 +709,7 @@ prepare_operation_impl(const Operation& operation,
     if (operation_index == std::numeric_limits<std::size_t>::max() ||
         !is_valid_action(operation.action) || !has_safe_paths(operation)) {
         return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
-                                          "operação ou índice inválido",
+                                          "invalid operation or index",
                                           operation.path,
                                           operation_index));
     }
@@ -752,7 +749,7 @@ prepare_operation_impl(const Operation& operation,
     }
     if (current_progress.backup_slot == no_backup_slot) {
         return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
-                                          "operação local sem slot de backup",
+                                          "local operation without backup slot",
                                           operation.path,
                                           operation_index));
     }
@@ -775,7 +772,7 @@ prepare_operation_impl(const Operation& operation,
         if (std::filesystem::is_symlink(*source_status) ||
             std::filesystem::is_symlink(*destination_status)) {
             return std::unexpected(make_error(MutationErrorCode::UnsafePath,
-                                              "rename não aceita symlink",
+                                              "rename does not accept symlink",
                                               operation.path,
                                               operation_index));
         }
@@ -787,7 +784,7 @@ prepare_operation_impl(const Operation& operation,
             if (!std::filesystem::is_regular_file(*source_status)) {
                 return std::unexpected(
                     make_error(MutationErrorCode::DestinationConflict,
-                               "origem do rename não é arquivo regular",
+                               "rename source is not a regular file",
                                *source,
                                operation_index));
             }
@@ -795,11 +792,11 @@ prepare_operation_impl(const Operation& operation,
             if (!actual)
                 return std::unexpected(actual.error());
             if (!operation.hash.empty() && *actual != operation.hash) {
-                return std::unexpected(make_error(
-                    MutationErrorCode::IntegrityMismatch,
-                    "origem do rename não corresponde ao hash esperado",
-                    *source,
-                    operation_index));
+                return std::unexpected(
+                    make_error(MutationErrorCode::IntegrityMismatch,
+                               "rename source does not match expected hash",
+                               *source,
+                               operation_index));
             }
             result.had_original = true;
             result.previous_hash = *actual;
@@ -821,7 +818,7 @@ prepare_operation_impl(const Operation& operation,
             if (!operation.hash.empty() && *actual != operation.hash) {
                 return std::unexpected(make_error(
                     MutationErrorCode::IntegrityMismatch,
-                    "destino do rename não corresponde ao hash esperado",
+                    "rename destination does not match expected hash",
                     *destination,
                     operation_index));
             }
@@ -831,7 +828,7 @@ prepare_operation_impl(const Operation& operation,
         }
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,
-                       "estado inicial do rename é ambíguo",
+                       "initial rename state is ambiguous",
                        operation.path,
                        operation_index));
     }
@@ -846,14 +843,14 @@ prepare_operation_impl(const Operation& operation,
             return std::unexpected(status.error());
         if (std::filesystem::is_symlink(*status)) {
             return std::unexpected(make_error(MutationErrorCode::UnsafePath,
-                                              "diretório local é um symlink",
+                                              "local directory is a symlink",
                                               *path,
                                               operation_index));
         }
         if (!missing(*status) && !std::filesystem::is_directory(*status)) {
             return std::unexpected(
                 make_error(MutationErrorCode::DestinationConflict,
-                           "objeto local não é diretório",
+                           "local object is not a directory",
                            *path,
                            operation_index));
         }
@@ -876,7 +873,7 @@ rollback_operation_impl(const Operation& operation,
     if (operation_index == std::numeric_limits<std::size_t>::max() ||
         !is_valid_action(operation.action) || !has_safe_paths(operation)) {
         return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
-                                          "operação ou índice inválido",
+                                          "invalid operation or index",
                                           operation.path,
                                           operation_index));
     }
@@ -909,7 +906,7 @@ rollback_operation_impl(const Operation& operation,
             !std::filesystem::is_directory(*status)) {
             return std::unexpected(
                 make_error(MutationErrorCode::DestinationConflict,
-                           "objeto criado não é diretório regular",
+                           "created object is not a regular directory",
                            *path,
                            operation_index));
         }
@@ -918,14 +915,14 @@ rollback_operation_impl(const Operation& operation,
         if (error || iterator != std::filesystem::directory_iterator{}) {
             return std::unexpected(
                 make_error(MutationErrorCode::DestinationConflict,
-                           "diretório criado não está vazio",
+                           "created directory is not empty",
                            *path,
                            operation_index));
         }
         if (!std::filesystem::remove(*path, error) || error) {
             return std::unexpected(make_error(
                 MutationErrorCode::LocalIo,
-                error ? error.message() : "não foi possível remover diretório",
+                error ? error.message() : "failed to remove directory",
                 *path,
                 operation_index));
         }
@@ -946,7 +943,7 @@ rollback_operation_impl(const Operation& operation,
                 !std::filesystem::is_directory(*status)) {
                 return std::unexpected(
                     make_error(MutationErrorCode::DestinationConflict,
-                               "objeto restaurado não é diretório regular",
+                               "restored object is not a regular directory",
                                *path,
                                operation_index));
             }
@@ -956,7 +953,7 @@ rollback_operation_impl(const Operation& operation,
         if (!std::filesystem::create_directory(*path, error) || error) {
             return std::unexpected(make_error(
                 MutationErrorCode::LocalIo,
-                error ? error.message() : "não foi possível recriar diretório",
+                error ? error.message() : "failed to recreate directory",
                 *path,
                 operation_index));
         }

@@ -26,28 +26,28 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Instalar dependências
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build gcc-14 g++-14 git
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 --slave /usr/bin/g++ g++ /usr/bin/g++-14
           sudo update-alternatives --set gcc /usr/bin/gcc-14
 
-      - name: Compilar (Release)
+      - name: Build (Release)
         run: |
           cmake --preset default
           cmake --build --preset default -j$(nproc)
 
-      - name: Release Gate - Testes Críticos
+      - name: Release Gate - Critical Tests
         run: |
           ctest --test-dir build -L release-critical --output-on-failure
 
-      - name: Release Gate - Smoke Test (Binário)
+      - name: Release Gate - Smoke Test (Binary)
         run: |
           ./build/kasumi --version
           ./build/kasumi --help
 
-      - name: Empacotar
+      - name: Package
         run: |
           mkdir -p package
           cp build/kasumi package/
@@ -57,7 +57,7 @@ jobs:
           cd ..
           sha256sum kasumi-linux-x86_64.tar.gz > kasumi-linux-x86_64.tar.gz.sha256
 
-      - name: Release Gate - Smoke Test (Pacote Extraído)
+      - name: Release Gate - Smoke Test (Extracted Package)
         run: |
           mkdir -p /tmp/smoke-package
           tar -xzvf kasumi-linux-x86_64.tar.gz -C /tmp/smoke-package
@@ -89,27 +89,27 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Compilar (Release MSVC)
+      - name: Build (Release MSVC)
         shell: powershell
         run: |
           cmake -S . -B build-release -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
           cmake --build build-release --config Release --parallel
 
-      - name: Release Gate - Testes Críticos
+      - name: Release Gate - Critical Tests
         shell: powershell
         run: |
           ctest --test-dir build-release -C Release -L release-critical --output-on-failure
 
-      - name: Release Gate - Smoke Test (Binário)
+      - name: Release Gate - Smoke Test (Binary)
         shell: powershell
         run: |
           $exe = ".\build-release\Release\kasumi.exe"
           & $exe --version
-          if ($LASTEXITCODE -ne 0) { throw "Smoke test binário --version falhou com código $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "Binary smoke test --version failed with code $LASTEXITCODE" }
           & $exe --help
-          if ($LASTEXITCODE -ne 0) { throw "Smoke test binário --help falhou com código $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "Binary smoke test --help failed with code $LASTEXITCODE" }
 
-      - name: Release Gate - Verificar Dependências de Runtime (MSVC Estático)
+      - name: Release Gate - Verify Runtime Dependencies (Static MSVC)
         shell: powershell
         run: |
           if (-not (Get-Command dumpbin -ErrorAction SilentlyContinue)) {
@@ -124,17 +124,17 @@ jobs:
           }
           $exe = ".\build-release\Release\kasumi.exe"
           $deps = & dumpbin /DEPENDENTS $exe
-          Write-Host "--- DLL Dependencies de $exe ---"
+          Write-Host "--- DLL Dependencies for $exe ---"
           $deps | Write-Host
           $prohibited = @("VCRUNTIME", "MSVCP", "utf8proc", "sqlite3", "monocypher", "blake3", "reproc")
           foreach ($pattern in $prohibited) {
               $match = $deps | Select-String -Pattern $pattern
               if ($match) {
-                  throw "ERRO: Dependência proibida detectada no binário Release Windows: $pattern"
+                  throw "ERROR: Prohibited dependency detected in Windows Release binary: $pattern"
               }
           }
 
-      - name: Empacotar
+      - name: Package
         shell: powershell
         run: |
           New-Item -ItemType Directory -Path package
@@ -144,7 +144,7 @@ jobs:
           $hash = (Get-FileHash kasumi-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
           "$hash *kasumi-windows-x86_64.zip" | Out-File -FilePath kasumi-windows-x86_64.zip.sha256 -Encoding ascii
 
-      - name: Release Gate - Smoke Test (Pacote Extraído)
+      - name: Release Gate - Smoke Test (Extracted Package)
         shell: powershell
         run: |
           $tempExtractDir = Join-Path $env:RUNNER_TEMP "smoke-package"
@@ -152,16 +152,16 @@ jobs:
           Expand-Archive -Path kasumi-windows-x86_64.zip -DestinationPath $tempExtractDir
           $extractedExe = Join-Path $tempExtractDir "kasumi.exe"
           if (-not (Test-Path $extractedExe)) {
-              throw "kasumi.exe não encontrado no pacote extraído!"
+              throw "kasumi.exe not found in extracted package!"
           }
           $extractedNotices = Join-Path $tempExtractDir "THIRD_PARTY_NOTICES.md"
           if (-not (Test-Path $extractedNotices)) {
-              throw "THIRD_PARTY_NOTICES.md não encontrado no pacote extraído!"
+              throw "THIRD_PARTY_NOTICES.md not found in extracted package!"
           }
           & $extractedExe --version
-          if ($LASTEXITCODE -ne 0) { throw "Smoke test pacote extraído --version falhou com código $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "Extracted package smoke test --version failed with code $LASTEXITCODE" }
           & $extractedExe --help
-          if ($LASTEXITCODE -ne 0) { throw "Smoke test pacote extraído --help falhou com código $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "Extracted package smoke test --help failed with code $LASTEXITCODE" }
           Remove-Item -Recurse -Force $tempExtractDir
 
       - name: Upload Artifact
@@ -173,7 +173,7 @@ jobs:
             kasumi-windows-x86_64.zip.sha256
 
   publish:
-    name: Publicar Release
+    name: Publish Release
     needs: [build-linux, build-windows]
     runs-on: ubuntu-latest
     permissions:
@@ -187,7 +187,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Validar metadados da Release
+      - name: Validate Release metadata
         run: |
           test -f RELEASE_NOTES.md
           test -s RELEASE_NOTES.md
@@ -198,7 +198,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Validar e consolidar checksums SHA-256
+      - name: Validate and consolidate SHA-256 checksums
         run: |
           cd dist
           sha256sum -c kasumi-linux-x86_64.tar.gz.sha256
@@ -207,7 +207,7 @@ jobs:
           sha256sum -c SHA256SUMS.txt
           ls -la
 
-      - name: Gerar Artifact Attestations (Build Provenance)
+      - name: Generate Artifact Attestations (Build Provenance)
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
@@ -215,7 +215,7 @@ jobs:
             dist/kasumi-windows-x86_64.zip
             dist/SHA256SUMS.txt
 
-      - name: Criar GitHub Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
         if: startsWith(github.ref, 'refs/tags/')
         with:

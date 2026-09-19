@@ -223,9 +223,9 @@ stabilize(const runtime::RuntimeData& runtime_data,
         input = std::move(*observed);
         result = std::move(*recalculated);
         if (!result.unrecoverable_paths.empty()) {
-            return std::unexpected(detail::make_error(
-                ErrorCode::ObservationFailure,
-                "a observação encontrou caminhos irrecuperáveis"));
+            return std::unexpected(
+                detail::make_error(ErrorCode::ObservationFailure,
+                                   "observation found unrecoverable paths"));
         }
     }
 

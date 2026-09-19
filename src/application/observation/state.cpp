@@ -23,7 +23,7 @@ scan_local_tree(const std::filesystem::path& local_root) {
     const auto status = std::filesystem::symlink_status(local_root, error);
     if (error || std::filesystem::is_symlink(status) ||
         !std::filesystem::is_directory(status)) {
-        return std::unexpected("diretório local ausente ou inválido");
+        return std::unexpected("missing or invalid local directory");
     }
     auto current =
         scanner::scan_result(local_root, {}, scanner::ScanPolicy::FullHash);
@@ -31,7 +31,7 @@ scan_local_tree(const std::filesystem::path& local_root) {
         return std::unexpected(scanner::describe(current.error()));
     }
     if (!valid_snapshot(current->snapshot, false)) {
-        return std::unexpected("o snapshot local não possui raiz válida");
+        return std::unexpected("local snapshot has no valid root");
     }
     return std::move(current->snapshot);
 }
@@ -126,7 +126,7 @@ apply_selective_delta(const std::filesystem::path& local_root,
                       const platform::LocalDeltaProbe& delta) {
     if (delta.entries.empty() ||
         delta.entries.size() > maximum_selective_entries)
-        return std::unexpected("delta seletivo excede o limite");
+        return std::unexpected("selective delta exceeds limit");
     ensure_file_cache_loaded(session);
     std::vector<ObservedFileDelta> observations;
     observations.reserve(delta.entries.size());
@@ -135,7 +135,7 @@ apply_selective_delta(const std::filesystem::path& local_root,
     for (const auto& entry : delta.entries) {
         if (entry.kind != platform::LocalDeltaKind::ModifyExistingFile ||
             entry.current_relative_path.empty())
-            return std::unexpected("delta não suportado");
+            return std::unexpected("unsupported delta");
         const auto relative =
             platform::path::to_logical_utf8(entry.current_relative_path);
         const auto* cached = find_cached_row(session, relative);
@@ -164,7 +164,7 @@ apply_selective_delta(const std::filesystem::path& local_root,
                                        .complete = true,
                                        .checkpoint_bound = true});
     if (!post || post->disposition != platform::LocalDeltaDisposition::Clean)
-        return std::unexpected("janela seletiva mudou durante a observação");
+        return std::unexpected("selective window changed during observation");
 
     for (const auto& row : cache_updates)
         upsert_cached_row(session, row);

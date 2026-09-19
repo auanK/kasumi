@@ -162,7 +162,7 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
         if (!plaintext_hash) {
             return std::unexpected(
                 make_error(MutationErrorCode::InvalidOperation,
-                           "identificador de conteúdo inválido",
+                           "invalid content identifier",
                            {},
                            index));
         }
@@ -175,11 +175,11 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
 
         if (it != batch.objects.end()) {
             if (it->plaintext_size != operation.size) {
-                return std::unexpected(make_error(
-                    MutationErrorCode::IntegrityMismatch,
-                    "operações duplicadas possuem tamanhos diferentes",
-                    {},
-                    index));
+                return std::unexpected(
+                    make_error(MutationErrorCode::IntegrityMismatch,
+                               "duplicate operations have different sizes",
+                               {},
+                               index));
             }
 
             auto source = resolve_local_path(local_root, operation.path, index);
@@ -192,7 +192,7 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
                 !std::filesystem::is_regular_file(*source_status)) {
                 return std::unexpected(
                     make_error(MutationErrorCode::IntegrityMismatch,
-                               "a origem duplicada não é arquivo regular",
+                               "duplicate source is not a regular file",
                                *source,
                                index));
             }
@@ -202,7 +202,7 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
             if (!verified) {
                 return std::unexpected(
                     make_error(MutationErrorCode::IntegrityMismatch,
-                               "conteúdo mudou: " + verified.error(),
+                               "content changed: " + verified.error(),
                                *source,
                                index));
             }
@@ -361,8 +361,8 @@ bulk_verification_error(const StagedUploadBatch& batch,
             if (!identifiers.contains(identifier)) {
                 return make_error(
                     MutationErrorCode::TransportFailure,
-                    "rclone retornou identificador inesperado na verificação "
-                    "em lote",
+                    "rclone returned unexpected identifier during batch "
+                    "verification",
                     {},
                     batch.objects.front().operation_indices.front());
             }
@@ -386,19 +386,17 @@ bulk_verification_error(const StagedUploadBatch& batch,
             return std::ranges::find(values, object.identifier) != values.end();
         };
         if (has(report.mismatched)) {
-            choose(
-                object,
-                MutationErrorCode::IntegrityMismatch,
-                "o hash físico remoto não corresponde ao ciphertext publicado");
+            choose(object,
+                   MutationErrorCode::IntegrityMismatch,
+                   "remote physical hash does not match published ciphertext");
         } else if (has(report.missing)) {
             choose(object,
                    MutationErrorCode::IntegrityMismatch,
-                   "objeto remoto ausente após upload em batch");
+                   "remote object missing after batch upload");
         } else if (has(report.errors)) {
-            choose(
-                object,
-                MutationErrorCode::TransportFailure,
-                "rclone não conseguiu verificar fisicamente o objeto remoto");
+            choose(object,
+                   MutationErrorCode::TransportFailure,
+                   "rclone failed to physically verify remote object");
         }
     }
     return selected;

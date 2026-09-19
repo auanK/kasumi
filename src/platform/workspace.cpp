@@ -57,32 +57,30 @@ clear_read_only(const std::filesystem::path& root) {
     {
         std::filesystem::recursive_directory_iterator entries(root, error);
         if (error) {
-            return std::unexpected(
-                "não foi possível enumerar o espaço de trabalho '" +
-                platform::path::to_utf8(root) + "': " + error.message());
+            return std::unexpected("could not enumerate workspace '" +
+                                   platform::path::to_utf8(root) +
+                                   "': " + error.message());
         }
         const std::filesystem::recursive_directory_iterator end;
         while (entries != end) {
             const auto path = entries->path();
             const auto attributes = GetFileAttributesW(path.c_str());
             if (attributes == INVALID_FILE_ATTRIBUTES) {
-                return std::unexpected("não foi possível inspecionar o caminho "
-                                       "do espaço de trabalho '" +
+                return std::unexpected("could not inspect workspace path '" +
                                        platform::path::to_utf8(path) +
                                        "': " + windows_error(GetLastError()));
             }
             if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                return std::unexpected(
-                    "caminho inválido do espaço de trabalho '" +
-                    platform::path::to_utf8(path) +
-                    "': ponto de nova análise (reparse point) não é permitido");
+                return std::unexpected("invalid workspace path '" +
+                                       platform::path::to_utf8(path) +
+                                       "': reparse point is not allowed");
             }
             paths.push_back(path);
             entries.increment(error);
             if (error) {
-                return std::unexpected(
-                    "não foi possível enumerar o espaço de trabalho '" +
-                    platform::path::to_utf8(root) + "': " + error.message());
+                return std::unexpected("could not enumerate workspace '" +
+                                       platform::path::to_utf8(root) +
+                                       "': " + error.message());
             }
         }
     }
@@ -94,8 +92,7 @@ clear_read_only(const std::filesystem::path& root) {
             if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
                 continue;
             }
-            return std::unexpected("não foi possível inspecionar o caminho do "
-                                   "espaço de trabalho '" +
+            return std::unexpected("could not inspect workspace path '" +
                                    platform::path::to_utf8(path) +
                                    "': " + windows_error(code));
         }
@@ -106,10 +103,9 @@ clear_read_only(const std::filesystem::path& root) {
             !SetFileAttributesW(
                 path.c_str(),
                 attributes & ~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY))) {
-            return std::unexpected(
-                "não foi possível limpar o atributo somente leitura em '" +
-                platform::path::to_utf8(path) +
-                "': " + windows_error(GetLastError()));
+            return std::unexpected("could not clear read-only attribute on '" +
+                                   platform::path::to_utf8(path) +
+                                   "': " + windows_error(GetLastError()));
         }
     }
     return {};
@@ -127,8 +123,7 @@ bool retryable_lock(std::error_code error) noexcept {
 std::expected<Workspace, std::string>
 create_workspace(std::string_view purpose) {
     if (!valid_purpose(purpose)) {
-        return std::unexpected(
-            "o propósito do workspace contém caracteres inválidos");
+        return std::unexpected("workspace purpose contains invalid characters");
     }
 
     try {
@@ -148,17 +143,16 @@ create_workspace(std::string_view purpose) {
             std::error_code exists_error;
             if (!std::filesystem::exists(root, exists_error) || exists_error) {
                 return std::unexpected(
-                    "não foi possível criar workspace temporário: " +
-                    created.error());
+                    "could not create temporary workspace: " + created.error());
             }
         }
     } catch (const std::exception& exception) {
         return std::unexpected(
-            std::string{"não foi possível criar workspace temporário: "} +
+            std::string{"could not create temporary workspace: "} +
             exception.what());
     }
 
-    return std::unexpected("não foi possível criar workspace temporário único");
+    return std::unexpected("could not create unique temporary workspace");
 }
 
 std::filesystem::path workspace_file(const Workspace& workspace,
@@ -189,13 +183,13 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
         return {};
     }
     if (error) {
-        return std::unexpected(
-            "não foi possível inspecionar o espaço de trabalho '" +
-            platform::path::to_utf8(workspace.root) + "': " + error.message());
+        return std::unexpected("could not inspect workspace '" +
+                               platform::path::to_utf8(workspace.root) +
+                               "': " + error.message());
     }
     if (std::filesystem::is_symlink(status) ||
         !std::filesystem::is_directory(status)) {
-        return std::unexpected("espaço de trabalho inválido '" +
+        return std::unexpected("invalid workspace '" +
                                platform::path::to_utf8(workspace.root) + "'");
     }
     auto secured = private_storage::protect_tree(workspace.root);
@@ -206,13 +200,12 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
 #ifdef _WIN32
     const auto attributes = GetFileAttributesW(workspace.root.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
-        return std::unexpected(
-            "não foi possível inspecionar o espaço de trabalho '" +
-            platform::path::to_utf8(workspace.root) +
-            "': " + windows_error(GetLastError()));
+        return std::unexpected("could not inspect workspace '" +
+                               platform::path::to_utf8(workspace.root) +
+                               "': " + windows_error(GetLastError()));
     }
     if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return std::unexpected("espaço de trabalho inválido '" +
+        return std::unexpected("invalid workspace '" +
                                platform::path::to_utf8(workspace.root) + "'");
     }
     auto writable = clear_read_only(workspace.root);
@@ -236,9 +229,9 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
     std::filesystem::remove_all(workspace.root, error);
 #endif
     if (error) {
-        return std::unexpected(
-            "não foi possível remover o espaço de trabalho '" +
-            platform::path::to_utf8(workspace.root) + "': " + error.message());
+        return std::unexpected("could not remove workspace '" +
+                               platform::path::to_utf8(workspace.root) +
+                               "': " + error.message());
     }
     return {};
 }

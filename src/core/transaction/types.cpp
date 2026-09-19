@@ -152,35 +152,32 @@ std::expected<Record, std::string> make_record(std::string transaction_id,
                                                bool publication_required,
                                                std::string observed_head_id) {
     if (!valid_transaction_id(transaction_id)) {
-        return std::unexpected("identificador transacional inválido");
+        return std::unexpected("invalid transaction identifier");
     }
     if (!valid_sync_plan(plan)) {
-        return std::unexpected("plano transacional inválido");
+        return std::unexpected("invalid transaction plan");
     }
     for (const auto& operation : plan.operations) {
         if (!has_safe_paths(operation)) {
-            return std::unexpected(
-                "plano transacional contém caminho inseguro");
+            return std::unexpected("transaction plan contains unsafe path");
         }
     }
     if (local_generation > storage_generation) {
-        return std::unexpected(
-            "geração local superior à geração do armazenamento");
+        return std::unexpected("local generation exceeds storage generation");
     }
     if (storage_generation == std::numeric_limits<std::uint64_t>::max()) {
-        return std::unexpected(
-            "geração do armazenamento não pode atingir o máximo");
+        return std::unexpected("storage generation cannot reach maximum");
     }
     if (publication_required &&
         (storage_generation != 0 || plan.target_generation != 0) &&
         plan.target_generation != storage_generation + 1) {
-        return std::unexpected("geração alvo incompatível com o armazenamento");
+        return std::unexpected("target generation incompatible with storage");
     }
     if (!publication_required && plan.target_generation != storage_generation) {
-        return std::unexpected("geração local não pode publicar estado");
+        return std::unexpected("local generation cannot publish state");
     }
     if (!publication_required && !history::valid_commit_id(observed_head_id)) {
-        return std::unexpected("logical head observada inválida");
+        return std::unexpected("invalid observed logical head");
     }
 
     Record record{
@@ -214,7 +211,7 @@ std::expected<Record, std::string> make_record(std::string transaction_id,
     }
 
     if (!valid(record)) {
-        return std::unexpected("registro transacional inválido");
+        return std::unexpected("invalid transaction record");
     }
     return record;
 }

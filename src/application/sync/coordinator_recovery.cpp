@@ -108,9 +108,8 @@ ensure_state(const runtime::RuntimeData& runtime_data,
              const std::string& epoch_id,
              std::uint64_t epoch_sequence) {
     if (!state_storage::initialize(runtime_data.database_path)) {
-        return std::unexpected(
-            detail::make_error(ErrorCode::DatabaseFailure,
-                               "não foi possível inicializar state.db"));
+        return std::unexpected(detail::make_error(
+            ErrorCode::DatabaseFailure, "failed to initialize state.db"));
     }
     auto current = state_storage::load_state(runtime_data.database_path);
     if (!current) {
@@ -123,7 +122,7 @@ ensure_state(const runtime::RuntimeData& runtime_data,
           epoch_id != (*current)->epoch_id))) {
         return std::unexpected(detail::make_error(
             ErrorCode::RecoveryConflict,
-            "o Epoch remoto regrediu em relação ao Epoch aceito localmente"));
+            "remote Epoch regressed relative to locally accepted Epoch"));
     }
     if (*current && (*current)->commit_id == commit.id &&
         (*current)->height == commit.commit.height &&
@@ -139,8 +138,8 @@ ensure_state(const runtime::RuntimeData& runtime_data,
                                        .ciphertext_id = ciphertext_id,
                                        .epoch_id = epoch_id,
                                        .epoch_sequence = epoch_sequence})) {
-        return std::unexpected(detail::make_error(
-            ErrorCode::DatabaseFailure, "não foi possível salvar state.db"));
+        return std::unexpected(detail::make_error(ErrorCode::DatabaseFailure,
+                                                  "failed to save state.db"));
     }
     return {};
 }
@@ -352,7 +351,7 @@ std::expected<void, Error> resume_pending_local_mutations(
             if (!prepared) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::MutationFailure,
-                    "falha ao preparar mutação local pendente: " +
+                    "failed to prepare pending local mutation: " +
                         prepared.error().detail,
                     index));
             }
@@ -366,7 +365,7 @@ std::expected<void, Error> resume_pending_local_mutations(
         if (!applied) {
             return std::unexpected(detail::make_error(
                 ErrorCode::MutationFailure,
-                "falha ao repetir mutação local: " + applied.error().detail,
+                "failed to replay local mutation: " + applied.error().detail,
                 index));
         }
         record.progress[index].state = transaction::OperationState::Applied;
@@ -389,9 +388,9 @@ std::expected<void, Error> resume_pending_storage_repairs(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
     if (!workspace) {
-        return std::unexpected(detail::make_error(
-            ErrorCode::RecoveryConflict,
-            "reparo pendente não possui workspace de recuperação"));
+        return std::unexpected(
+            detail::make_error(ErrorCode::RecoveryConflict,
+                               "pending repair is missing recovery workspace"));
     }
 
     std::vector<std::size_t> pending_uploads;
@@ -434,10 +433,10 @@ std::expected<void, Error> resume_pending_storage_repairs(
         platform::perf_trace::finish("content stage", stage_trace);
 
         if (!staged_batch) {
-            return std::unexpected(detail::make_error(
-                ErrorCode::MutationFailure,
-                "falha ao preparar batch de reparos pendentes",
-                staged_batch.error().operation_index));
+            return std::unexpected(
+                detail::make_error(ErrorCode::MutationFailure,
+                                   "failed to prepare pending repairs batch",
+                                   staged_batch.error().operation_index));
         }
 
         const auto transfer_trace = platform::perf_trace::begin();
@@ -450,10 +449,10 @@ std::expected<void, Error> resume_pending_storage_repairs(
             transferred.error().code ==
                 mutation::MutationErrorCode::RemoteResultUnknown;
         if (!transferred && !transfer_unknown) {
-            return std::unexpected(detail::make_error(
-                ErrorCode::MutationFailure,
-                "falha ao transferir batch de reparos pendentes",
-                transferred.error().operation_index));
+            return std::unexpected(
+                detail::make_error(ErrorCode::MutationFailure,
+                                   "failed to transfer pending repairs batch",
+                                   transferred.error().operation_index));
         }
 
         const auto verification_trace = platform::perf_trace::begin();
@@ -463,10 +462,10 @@ std::expected<void, Error> resume_pending_storage_repairs(
                                      verification_trace);
 
         if (!verified) {
-            return std::unexpected(detail::make_error(
-                ErrorCode::MutationFailure,
-                "falha ao verificar batch de reparos pendentes",
-                verified.error().operation_index));
+            return std::unexpected(
+                detail::make_error(ErrorCode::MutationFailure,
+                                   "failed to verify pending repairs batch",
+                                   verified.error().operation_index));
         }
 
         const auto checkpoint_trace = platform::perf_trace::begin();
@@ -485,10 +484,10 @@ std::expected<void, Error> resume_pending_storage_repairs(
              * Checkpoint is already durable.
              * DO NOT revert Applied.
              */
-            return std::unexpected(detail::make_error(
-                ErrorCode::MutationFailure,
-                "falha ao limpar staging do batch de reparos",
-                cleaned.error().operation_index));
+            return std::unexpected(
+                detail::make_error(ErrorCode::MutationFailure,
+                                   "failed to clean repairs batch staging",
+                                   cleaned.error().operation_index));
         }
     }
     return {};
@@ -519,19 +518,18 @@ roll_forward(const journal::Paths& paths,
                     : ErrorCode::RecoveryConflict;
             return std::unexpected(detail::make_error(
                 code,
-                "não foi possível carregar o Epoch de poda: " +
-                    recovered.error().detail));
+                "failed to load pruning Epoch: " + recovered.error().detail));
         }
         if (!*recovered) {
             return std::unexpected(
                 detail::make_error(ErrorCode::RecoveryConflict,
-                                   "o Epoch de poda enviado está ausente"));
+                                   "uploaded pruning Epoch is missing"));
         }
         if ((**recovered).value.vault_id != record.epoch_vault_id ||
             (**recovered).reference.sequence == 0) {
             return std::unexpected(
                 detail::make_error(ErrorCode::RecoveryConflict,
-                                   "o Epoch de poda diverge do journal"));
+                                   "pruning Epoch diverges from journal"));
         }
         auto latest_epoch = history_storage::epoch::load_latest(
             storage,
@@ -545,15 +543,14 @@ roll_forward(const journal::Paths& paths,
                         history_storage::epoch::ErrorCode::TransportFailure
                     ? ErrorCode::RecoveryIndeterminate
                     : ErrorCode::RecoveryConflict;
-            return std::unexpected(detail::make_error(
-                code,
-                "não foi possível validar a cadeia do Epoch de poda: " +
-                    latest_epoch.error().detail));
+            return std::unexpected(
+                detail::make_error(code,
+                                   "failed to validate pruning Epoch chain: " +
+                                       latest_epoch.error().detail));
         }
         if (!*latest_epoch) {
-            return std::unexpected(
-                detail::make_error(ErrorCode::RecoveryConflict,
-                                   "a cadeia remota de Epoch está vazia"));
+            return std::unexpected(detail::make_error(
+                ErrorCode::RecoveryConflict, "remote Epoch chain is empty"));
         }
         recovered_pruning_epoch = std::move(**recovered);
     }
@@ -625,10 +622,10 @@ roll_forward(const journal::Paths& paths,
                     key,
                     runtime_data.database_path.parent_path());
                 if (!visible) {
-                    return std::unexpected(detail::make_error(
-                        ErrorCode::RecoveryIndeterminate,
-                        "não foi possível publicar o Epoch gênesis: " +
-                            published.error().detail));
+                    return std::unexpected(
+                        detail::make_error(ErrorCode::RecoveryIndeterminate,
+                                           "failed to publish genesis Epoch: " +
+                                               published.error().detail));
                 }
             }
             if (auto saved = save_phase(
@@ -644,10 +641,9 @@ roll_forward(const journal::Paths& paths,
             key,
             runtime_data.database_path.parent_path());
         if (!verified) {
-            return std::unexpected(
-                detail::make_error(ErrorCode::RecoveryConflict,
-                                   "falha na verificação do Epoch gênesis: " +
-                                       verified.error().detail));
+            return std::unexpected(detail::make_error(
+                ErrorCode::RecoveryConflict,
+                "failed to verify genesis Epoch: " + verified.error().detail));
         }
         if (auto saved = save_phase(
                 paths, record, transaction::Phase::EpochVerified, key);
@@ -661,8 +657,8 @@ roll_forward(const journal::Paths& paths,
                record.phase < transaction::Phase::EpochUploaded) {
         return std::unexpected(
             detail::make_error(ErrorCode::RecoveryConflict,
-                               "o Epoch de poda não possui um ponto de "
-                               "verificação durável de upload"));
+                               "pruning Epoch is missing a durable upload "
+                               "checkpoint"));
     } else if (recovered_pruning_epoch) {
         if (record.phase < transaction::Phase::EpochVerified) {
             if (auto saved = save_phase(
@@ -680,10 +676,10 @@ roll_forward(const journal::Paths& paths,
             auto latest_epoch = history_storage::epoch::load_latest(
                 storage, key, runtime_data.database_path.parent_path());
             if (!latest_epoch) {
-                return std::unexpected(detail::make_error(
-                    ErrorCode::RecoveryIndeterminate,
-                    "não foi possível carregar o Epoch mais recente: " +
-                        latest_epoch.error().detail));
+                return std::unexpected(
+                    detail::make_error(ErrorCode::RecoveryIndeterminate,
+                                       "failed to load latest Epoch: " +
+                                           latest_epoch.error().detail));
             }
             if (*latest_epoch) {
                 accepted_epoch = (**latest_epoch).reference;

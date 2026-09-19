@@ -107,9 +107,7 @@ def preview(kasumi, local, environment):
         check=False,
     )
     elapsed = time.perf_counter() - started
-    if result.returncode != 0 or not (
-        "Nothing to do" in result.stdout or "Nada a fazer" in result.stdout
-    ):
+    if result.returncode != 0 or not ("Nothing to do" in result.stdout):
         raise RuntimeError(
             json.dumps(
                 {
@@ -308,9 +306,7 @@ def run_r11_state_scenario(
         "publication_verified": bool(remote and change == "delete"),
         "second_client_verified": bool(remote and change == "delete"),
         "immediate_preview_elapsed_seconds": round(preview_elapsed, 6),
-        "immediate_preview_nothing_to_do": (
-            "Nothing to do" in preview_stdout or "Nada a fazer" in preview_stdout
-        ),
+        "immediate_preview_nothing_to_do": ("Nothing to do" in preview_stdout),
         "journal_saves": journal_metric["calls"],
         "journal_save_wall_seconds": round(
             journal_metric["total_ms"] / 1000, 6
@@ -492,9 +488,7 @@ def run_r21_mutation_scenario(
             6,
         ),
         "immediate_preview_elapsed_seconds": round(preview_elapsed, 6),
-        "immediate_preview_nothing_to_do": (
-            "Nothing to do" in preview_stdout or "Nada a fazer" in preview_stdout
-        ),
+        "immediate_preview_nothing_to_do": ("Nothing to do" in preview_stdout),
         "local_scanner_invocations": metrics.get(
             "local scanner invocations", {"calls": 0}
         )["calls"],
@@ -686,9 +680,7 @@ def run_scenario(
             "content peak in-flight", {"calls": 0}
         )["calls"],
         "immediate_preview_elapsed_seconds": round(preview_elapsed, 6),
-        "immediate_preview_nothing_to_do": (
-            "Nothing to do" in preview_stdout or "Nada a fazer" in preview_stdout
-        ),
+        "immediate_preview_nothing_to_do": ("Nothing to do" in preview_stdout),
         "content_concurrency_bound": configured_concurrency,
         "effective_max_concurrent_remote_content_operations": effective_concurrency,
         "content_completion_count": completion_count,

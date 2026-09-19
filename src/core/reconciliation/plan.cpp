@@ -97,7 +97,7 @@ synchronize_ancestor_rows(Snapshot& candidate,
         if (local_row == nullptr || !local_row->is_directory) {
             return std::unexpected(Error{
                 .code = ErrorCode::UnsafePlan,
-                .detail = "ancestor não observado como diretório",
+                .detail = "ancestor not observed as directory",
                 .paths = {platform::path::from_utf8(directory)},
             });
         }
@@ -333,7 +333,7 @@ candidate_shared_tree(const Input& input,
                 if (!expected_hash) {
                     return std::unexpected(Error{
                         .code = ErrorCode::UnsafePlan,
-                        .detail = "upload contém hash inválido",
+                        .detail = "upload contains invalid hash",
                         .paths = {operation.path},
                     });
                 }
@@ -344,8 +344,7 @@ candidate_shared_tree(const Input& input,
                     source->size != operation.size) {
                     return std::unexpected(Error{
                         .code = ErrorCode::UnsafePlan,
-                        .detail =
-                            "upload não corresponde à linha local observada",
+                        .detail = "upload does not match observed local row",
                         .paths = {operation.path},
                     });
                 }
@@ -367,8 +366,7 @@ candidate_shared_tree(const Input& input,
                     !operation.hash.empty() || operation.size != 0) {
                     return std::unexpected(Error{
                         .code = ErrorCode::UnsafePlan,
-                        .detail =
-                            "diretório remoto não corresponde à árvore local",
+                        .detail = "remote directory does not match local tree",
                         .paths = {operation.path},
                     });
                 }
@@ -377,7 +375,7 @@ candidate_shared_tree(const Input& input,
                     return std::unexpected(Error{
                         .code = ErrorCode::UnsafePlan,
                         .detail =
-                            "criação de diretório remoto conflita com arquivo",
+                            "remote directory creation conflicts with file",
                         .paths = {operation.path},
                     });
                 }
@@ -401,7 +399,7 @@ candidate_shared_tree(const Input& input,
                 if (find_row(result.tree, path) == nullptr) {
                     return std::unexpected(Error{
                         .code = ErrorCode::UnsafePlan,
-                        .detail = "remoção remota não corresponde à árvore",
+                        .detail = "remote removal does not match tree",
                         .paths = {operation.path},
                     });
                 }
@@ -455,8 +453,8 @@ merge_pending_references(Snapshot& publication_tree,
         if (pending.is_directory) {
             return std::unexpected(Error{
                 .code = ErrorCode::InvalidStorageTree,
-                .detail = "referência pendente não "
-                          "pode representar diretório",
+                .detail = "pending reference cannot "
+                          "represent directory",
                 .paths = {platform::path::from_utf8(pending.path)},
             });
         }
@@ -504,8 +502,8 @@ build_publication_tree(Snapshot publication_tree,
     if (!kasumi::valid_snapshot(publication_tree, false)) {
         return std::unexpected(Error{
             .code = ErrorCode::InvalidExecutedTree,
-            .detail = "árvore local observada "
-                      "após a execução é inválida",
+            .detail = "observed local tree "
+                      "after execution is invalid",
             .paths = {},
         });
     }
@@ -513,7 +511,7 @@ build_publication_tree(Snapshot publication_tree,
     if (!kasumi::valid_snapshot(candidate_shared_tree, false)) {
         return std::unexpected(Error{
             .code = ErrorCode::UnsafePlan,
-            .detail = "árvore candidata inválida",
+            .detail = "invalid candidate tree",
             .paths = {},
         });
     }
@@ -531,26 +529,24 @@ build_publication_tree(Snapshot publication_tree,
 ReconcileResult reconcile(const Input& input) {
     if (!kasumi::valid_snapshot(input.local_tree, false)) {
         return std::unexpected(invalid_tree_error(ErrorCode::InvalidLocalTree,
-                                                  "árvore local inválida"));
+                                                  "invalid local tree"));
     }
 
     if (!kasumi::valid_snapshot(input.base_tree, true)) {
         return std::unexpected(invalid_tree_error(ErrorCode::InvalidBaseTree,
-                                                  "árvore base inválida"));
+                                                  "invalid base tree"));
     }
 
     if (input.storage.history_present &&
         !kasumi::valid_snapshot(input.storage.tree, false)) {
         return std::unexpected(invalid_tree_error(ErrorCode::InvalidStorageTree,
-                                                  "árvore do armazenamento "
-                                                  "inválida"));
+                                                  "invalid storage tree"));
     }
 
     if (!input.storage.history_present &&
         !kasumi::valid_snapshot(input.storage.tree, true)) {
         return std::unexpected(invalid_tree_error(ErrorCode::InvalidStorageTree,
-                                                  "árvore do armazenamento "
-                                                  "inválida"));
+                                                  "invalid storage tree"));
     }
 
     if (input.base_state_present && !input.storage.history_present) {
@@ -592,7 +588,7 @@ ReconcileResult reconcile(const Input& input) {
             std::numeric_limits<std::uint64_t>::max()) {
         return std::unexpected(Error{
             .code = ErrorCode::StorageGenerationOverflow,
-            .detail = "a altura máxima não pode receber outro commit",
+            .detail = "maximum height cannot receive another commit",
             .paths = {},
         });
     }
@@ -653,8 +649,8 @@ ReconcileResult reconcile(const Input& input) {
     if (!valid_sync_plan(plan) || !has_safe_paths(plan)) {
         return std::unexpected(Error{
             .code = ErrorCode::UnsafePlan,
-            .detail = "plano contém caminhos "
-                      "ou fases inválidas",
+            .detail = "plan contains invalid paths "
+                      "or phases",
             .paths = {},
         });
     }

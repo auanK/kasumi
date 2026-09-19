@@ -1068,9 +1068,9 @@ TEST(HistoryTest, Resolve33LogicalHeadsFailsClosed) {
     const auto result = resolve(loaded, marked);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ErrorCode::LimitExceeded);
-    EXPECT_NE(result.error().detail.find("heads lógicas"), std::string::npos);
+    EXPECT_NE(result.error().detail.find("logical heads"), std::string::npos);
     EXPECT_NE(result.error().detail.find("merge"), std::string::npos);
-    EXPECT_NE(result.error().detail.find("limite"), std::string::npos);
+    EXPECT_NE(result.error().detail.find("limit"), std::string::npos);
 }
 
 TEST(HistoryTest, MoreThan32AncestralMarkersLeaveOneLogicalHead) {

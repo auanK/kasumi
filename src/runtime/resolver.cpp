@@ -21,7 +21,7 @@ resolve(const std::filesystem::path& app_data_dir,
     if (!profile->local_dir.is_absolute()) {
         return std::unexpected(
             Error{.code = ErrorCode::ProfileInvalid,
-                  .detail = "o caminho local do perfil deve ser absoluto"});
+                  .detail = "profile local path must be absolute"});
     }
 
     auto profile_paths = resolve_profile_paths(app_data_dir, profile_name);

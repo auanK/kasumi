@@ -91,7 +91,7 @@ resolve_profile_paths(const std::filesystem::path& app_data_dir,
                       std::string_view profile_name) {
     if (!is_valid_profile_name(profile_name)) {
         return std::unexpected(Error{.code = ErrorCode::InvalidProfileName,
-                                     .detail = "nome de perfil inválido"});
+                                     .detail = "invalid profile name"});
     }
 
     auto paths = global_paths_from_root(app_data_dir);
@@ -110,7 +110,7 @@ resolve_profile_paths(const std::filesystem::path& app_data_dir,
         *relative.begin() == "..") {
         return std::unexpected(
             Error{.code = ErrorCode::PathEscape,
-                  .detail = "diretório do perfil escapa da pasta profiles"});
+                  .detail = "profile directory escapes profiles directory"});
     }
 
     return ProfilePaths{.profile_dir = candidate,

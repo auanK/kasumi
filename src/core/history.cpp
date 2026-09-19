@@ -360,9 +360,8 @@ std::expected<void, Error> validate_dag(const Index& index) {
         while (!stack.empty()) {
             auto& frame = stack.back();
             if (frame.depth > maximum_graph_depth) {
-                return std::unexpected(
-                    Error{ErrorCode::LimitExceeded,
-                          "profundidade máxima do grafo excedida"});
+                return std::unexpected(Error{ErrorCode::LimitExceeded,
+                                             "maximum graph depth exceeded"});
             }
             colors.at(frame.id) = Color::Gray;
             const auto& parents = index.at(frame.id)->commit.parents;
@@ -375,14 +374,13 @@ std::expected<void, Error> validate_dag(const Index& index) {
             const auto& parent = parents[frame.next_parent++];
             if (index.at(parent)->commit.created_at >
                 index.at(frame.id)->commit.created_at) {
-                return std::unexpected(
-                    Error{ErrorCode::InvalidCommit,
-                          "regressão de timestamp detectada"});
+                return std::unexpected(Error{ErrorCode::InvalidCommit,
+                                             "timestamp regression detected"});
             }
             switch (colors.at(parent)) {
                 case Color::Gray:
                     return std::unexpected(
-                        Error{ErrorCode::Cycle, "ciclo detectado no grafo"});
+                        Error{ErrorCode::Cycle, "cycle detected in graph"});
                 case Color::Black:
                     break;
                 case Color::White:
@@ -771,12 +769,12 @@ BytesResult serialize(const Commit& commit) {
         try {
             tree_bytes = serialize_tree(commit.tree, commit.height);
         } catch (const std::exception& e) {
-            return std::unexpected(Error{
-                ErrorCode::InvalidEncoding,
-                std::string("falha na serialização da árvore: ") + e.what()});
+            return std::unexpected(
+                Error{ErrorCode::InvalidEncoding,
+                      std::string("tree serialization failed: ") + e.what()});
         } catch (...) {
-            return std::unexpected(Error{ErrorCode::InvalidEncoding,
-                                         "falha na serialização da árvore"});
+            return std::unexpected(
+                Error{ErrorCode::InvalidEncoding, "tree serialization failed"});
         }
         if (tree_bytes.size() > maximum_commit_plaintext_size) {
             return std::unexpected(Error{ErrorCode::LimitExceeded,
@@ -974,15 +972,15 @@ resolve_impl(std::span<const LoadedCommit> commits,
     try {
         if (commits.size() > maximum_loaded_commit_count) {
             return std::unexpected(
-                Error{ErrorCode::LimitExceeded, "limite de commits excedido"});
+                Error{ErrorCode::LimitExceeded, "commit limit exceeded"});
         }
         if (marked_heads.empty()) {
             return std::unexpected(
-                Error{ErrorCode::InvalidHead, "lista de heads marcadas vazia"});
+                Error{ErrorCode::InvalidHead, "marked heads list is empty"});
         }
         if (marked_heads.size() > maximum_marked_head_count) {
             return std::unexpected(
-                Error{ErrorCode::LimitExceeded, "muitas heads marcadas"});
+                Error{ErrorCode::LimitExceeded, "too many marked heads"});
         }
 
         std::vector<std::string> unique_heads(marked_heads.begin(),
@@ -992,8 +990,8 @@ resolve_impl(std::span<const LoadedCommit> commits,
                            unique_heads.end());
         for (const auto& head : unique_heads) {
             if (!valid_commit_id(head))
-                return std::unexpected(Error{ErrorCode::InvalidHead,
-                                             "identificador de head inválido"});
+                return std::unexpected(
+                    Error{ErrorCode::InvalidHead, "invalid head identifier"});
         }
 
         std::unordered_set<std::string> trusted_anchors;
@@ -1001,7 +999,7 @@ resolve_impl(std::span<const LoadedCommit> commits,
             if (!valid_commit_id(trusted_anchor_id) ||
                 !trusted_anchors.insert(trusted_anchor_id).second) {
                 return std::unexpected(Error{ErrorCode::InvalidCommitId,
-                                             "fronteira confiável inválida"});
+                                             "invalid trusted frontier"});
             }
         }
 
@@ -1010,16 +1008,16 @@ resolve_impl(std::span<const LoadedCommit> commits,
         for (const auto& loaded : commits) {
             if (!index.emplace(loaded.id, &loaded).second) {
                 return std::unexpected(Error{ErrorCode::DuplicateCommit,
-                                             "commit duplicado na entrada"});
+                                             "duplicate commit in input"});
             }
             auto valid = validate_snapshot_structure(loaded.commit.tree);
             if (!valid)
                 return std::unexpected(valid.error());
             if (trusted_anchors.contains(loaded.id)) {
                 if (!loaded.commit.parents.empty()) {
-                    return std::unexpected(Error{
-                        ErrorCode::InvalidParent,
-                        "a âncora confiável deve encerrar o grafo carregado"});
+                    return std::unexpected(
+                        Error{ErrorCode::InvalidParent,
+                              "trusted anchor must terminate loaded graph"});
                 }
                 ++found_trusted_anchors;
             } else if (!identifiers_authenticated) {
@@ -1029,24 +1027,24 @@ resolve_impl(std::span<const LoadedCommit> commits,
                 if (*computed != loaded.id)
                     return std::unexpected(
                         Error{ErrorCode::InvalidCommitId,
-                              "o id não corresponde ao conteúdo do commit"});
+                              "id does not match commit content"});
             }
         }
         if (found_trusted_anchors != trusted_anchors.size()) {
             return std::unexpected(
-                Error{ErrorCode::MissingParent, "fronteira confiável ausente"});
+                Error{ErrorCode::MissingParent, "trusted frontier missing"});
         }
         for (const auto& head : unique_heads) {
             if (!index.contains(head))
                 return std::unexpected(
                     Error{ErrorCode::InvalidHead,
-                          "head não encontrada nos commits carregados"});
+                          "head not found in loaded commits"});
         }
 
         for (const auto& [id, loaded] : index) {
             if (loaded->commit.parents.size() > maximum_parent_count) {
-                return std::unexpected(
-                    Error{ErrorCode::LimitExceeded, "muitos pais no commit"});
+                return std::unexpected(Error{ErrorCode::LimitExceeded,
+                                             "too many parents in commit"});
             }
             if (loaded->commit.parents.empty())
                 continue;
@@ -1056,7 +1054,7 @@ resolve_impl(std::span<const LoadedCommit> commits,
                 if (it == index.end())
                     return std::unexpected(
                         Error{ErrorCode::MissingParent,
-                              "pai não encontrado nos commits carregados"});
+                              "parent not found in loaded commits"});
                 max_parent_height =
                     std::max(max_parent_height, it->second->commit.height);
             }
@@ -1064,12 +1062,12 @@ resolve_impl(std::span<const LoadedCommit> commits,
                 std::numeric_limits<std::uint64_t>::max()) {
                 return std::unexpected(
                     Error{ErrorCode::HeightMismatch,
-                          "altura do pai transborda a altura do commit"});
+                          "parent height overflows commit height"});
             }
             if (loaded->commit.height != max_parent_height + 1) {
                 return std::unexpected(
                     Error{ErrorCode::HeightMismatch,
-                          "a altura não corresponde a max(pais) + 1"});
+                          "height does not match max(parents) + 1"});
             }
             static_cast<void>(id);
         }
@@ -1102,8 +1100,8 @@ resolve_impl(std::span<const LoadedCommit> commits,
         if (logical_heads.size() > maximum_parent_count)
             return std::unexpected(
                 Error{ErrorCode::LimitExceeded,
-                      "muitas heads lógicas para um único commit de merge "
-                      "(limite de pais excedido)"});
+                      "too many logical heads for a single merge commit "
+                      "(parent limit exceeded)"});
 
         if (logical_heads.size() == 1) {
             const auto& head = logical_heads.front();
@@ -1126,8 +1124,8 @@ resolve_impl(std::span<const LoadedCommit> commits,
             }
         }
         if (common_ancestors.empty())
-            return std::unexpected(Error{ErrorCode::NoCommonAncestor,
-                                         "nenhum ancestral comum encontrado"});
+            return std::unexpected(
+                Error{ErrorCode::NoCommonAncestor, "no common ancestor found"});
 
         std::uint64_t max_height = 0;
         for (const auto& ancestor : common_ancestors) {
@@ -1140,9 +1138,8 @@ resolve_impl(std::span<const LoadedCommit> commits,
                 merge_bases.push_back(ancestor);
         }
         if (merge_bases.size() > 1)
-            return std::unexpected(Error{
-                ErrorCode::AmbiguousMergeBase,
-                "base de merge ambígua (criss-cross / ambiguous merge base)"});
+            return std::unexpected(Error{ErrorCode::AmbiguousMergeBase,
+                                         "ambiguous merge base (criss-cross)"});
 
         const auto& base = index.at(merge_bases.front())->commit.tree;
         std::vector<HeadChanges> changes;
@@ -1170,10 +1167,10 @@ resolve_impl(std::span<const LoadedCommit> commits,
                           .has_conflicts = has_conflicts};
     } catch (const std::bad_alloc&) {
         return std::unexpected(
-            Error{ErrorCode::LimitExceeded, "falha de alocação de memória"});
+            Error{ErrorCode::LimitExceeded, "memory allocation failed"});
     } catch (...) {
         return std::unexpected(Error{ErrorCode::InvalidCommit,
-                                     "exceção durante resolução de histórico"});
+                                     "exception during history resolution"});
     }
 }
 

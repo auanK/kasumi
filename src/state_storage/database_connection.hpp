@@ -32,7 +32,7 @@ open_state_database_readwrite(const std::filesystem::path& database_path,
         sqlite::execute(opened->get(), "PRAGMA synchronous=NORMAL");
     if (!configured) {
         return std::unexpected(
-            std::string{"não foi possível configurar synchronous no banco: "} +
+            std::string{"failed to configure database synchronous PRAGMA: "} +
             configured.error());
     }
     return opened;

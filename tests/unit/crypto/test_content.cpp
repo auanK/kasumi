@@ -49,7 +49,7 @@ TEST(CryptoContentTest, MissingFileReturnsAControlledError) {
         kasumi::test::workspace_path(workspace, "missing.bin"));
     ASSERT_FALSE(result.has_value());
     EXPECT_FALSE(result.error().empty());
-    EXPECT_NE(result.error().find("abrir"), std::string::npos);
+    EXPECT_NE(result.error().find("could not open file"), std::string::npos);
 }
 
 TEST(CryptoPhysicalHashTest, Sha256MatchesKnownVector) {

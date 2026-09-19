@@ -86,17 +86,17 @@ create_profile(const ExecutionEnvironment& environment,
         if (!runtime::is_valid_profile_name(profile.name)) {
             return std::unexpected(
                 ProfileError{.code = ProfileErrorCode::InvalidName,
-                             .detail = "nome de perfil inválido"});
+                             .detail = "invalid profile name"});
         }
         if (!valid_retention_policy(profile)) {
             return std::unexpected(
                 ProfileError{.code = ProfileErrorCode::ConfigFailure,
-                             .detail = "política de retenção inválida"});
+                             .detail = "invalid retention policy"});
         }
         if (!profile.local_dir.is_absolute()) {
             return std::unexpected(
                 ProfileError{.code = ProfileErrorCode::StorageFailure,
-                             .detail = "o caminho local deve ser absoluto"});
+                             .detail = "local path must be absolute"});
         }
 
         const auto valid_storage =
@@ -137,7 +137,7 @@ create_profile(const ExecutionEnvironment& environment,
         if (it != profiles.end()) {
             return std::unexpected(
                 ProfileError{.code = ProfileErrorCode::AlreadyExists,
-                             .detail = "perfil já existe"});
+                             .detail = "profile already exists"});
         }
 
         auto paths_res = runtime::resolve_profile_paths(
@@ -151,7 +151,7 @@ create_profile(const ExecutionEnvironment& environment,
             std::filesystem::exists(paths_res->key_path, ec)) {
             return std::unexpected(ProfileError{
                 .code = ProfileErrorCode::StorageFailure,
-                .detail = "infraestrutura de perfil já existe no disco"});
+                .detail = "profile infrastructure already exists on disk"});
         }
 
         auto ensure_res = runtime::ensure_profile_directory(*paths_res);
@@ -163,7 +163,7 @@ create_profile(const ExecutionEnvironment& environment,
             (void)runtime::remove_profile_directory(*paths_res);
             return std::unexpected(
                 ProfileError{.code = ProfileErrorCode::StorageFailure,
-                             .detail = "não foi possível salvar o cofre"});
+                             .detail = "failed to save vault"});
         }
 
         profiles.push_back(runtime::ProfileData{profile.name,
@@ -197,7 +197,7 @@ update_profile(const ExecutionEnvironment& environment, Profile profile) {
     if (!profile.local_dir.is_absolute()) {
         return std::unexpected(
             ProfileError{.code = ProfileErrorCode::StorageFailure,
-                         .detail = "o caminho local deve ser absoluto"});
+                         .detail = "local path must be absolute"});
     }
     const auto valid_storage =
         transport::validate_transport_location(profile.remote_dir);
@@ -219,7 +219,7 @@ update_profile(const ExecutionEnvironment& environment, Profile profile) {
     });
     if (it == profiles_res->end()) {
         return std::unexpected(ProfileError{.code = ProfileErrorCode::NotFound,
-                                            .detail = "perfil não encontrado"});
+                                            .detail = "profile not found"});
     }
 
     it->local_dir = profile.local_dir;
@@ -247,7 +247,7 @@ delete_profile(const ExecutionEnvironment& environment,
     });
     if (it == profiles_res->end()) {
         return std::unexpected(ProfileError{.code = ProfileErrorCode::NotFound,
-                                            .detail = "perfil não encontrado"});
+                                            .detail = "profile not found"});
     }
 
     auto original_profiles = *profiles_res;
@@ -267,8 +267,9 @@ delete_profile(const ExecutionEnvironment& environment,
                 runtime::save_profiles(config_path, original_profiles);
             std::string detail = remove_res.error().detail;
             if (!rollback_res) {
-                detail += " (rollback da config falhou: " +
-                          rollback_res.error().detail + ")";
+                detail +=
+                    " (config rollback failed: " + rollback_res.error().detail +
+                    ")";
             }
             return std::unexpected(ProfileError{
                 .code = ProfileErrorCode::StorageFailure, .detail = detail});
@@ -285,7 +286,7 @@ rename_profile(const ExecutionEnvironment& environment,
     if (!runtime::is_valid_profile_name(new_name)) {
         return std::unexpected(
             ProfileError{.code = ProfileErrorCode::InvalidName,
-                         .detail = "nome de perfil inválido"});
+                         .detail = "invalid profile name"});
     }
 
     auto config_path = environment.app_data_dir / "config.toml";
@@ -299,7 +300,7 @@ rename_profile(const ExecutionEnvironment& environment,
     });
     if (it_current == profiles_res->end()) {
         return std::unexpected(ProfileError{.code = ProfileErrorCode::NotFound,
-                                            .detail = "perfil não encontrado"});
+                                            .detail = "profile not found"});
     }
 
     auto it_new = std::ranges::find_if(*profiles_res, [&](const auto& p) {
@@ -308,7 +309,7 @@ rename_profile(const ExecutionEnvironment& environment,
     if (it_new != profiles_res->end()) {
         return std::unexpected(
             ProfileError{.code = ProfileErrorCode::AlreadyExists,
-                         .detail = "já existe um perfil com esse nome"});
+                         .detail = "a profile with this name already exists"});
     }
 
     auto old_paths_res =
@@ -319,14 +320,14 @@ rename_profile(const ExecutionEnvironment& environment,
     if (!old_paths_res || !new_paths_res) {
         return std::unexpected(
             ProfileError{.code = ProfileErrorCode::StorageFailure,
-                         .detail = "erro ao resolver caminhos"});
+                         .detail = "failed to resolve paths"});
     }
 
     std::error_code ec;
     if (std::filesystem::exists(new_paths_res->profile_dir, ec)) {
         return std::unexpected(
             ProfileError{.code = ProfileErrorCode::StorageFailure,
-                         .detail = "destino físico já existe"});
+                         .detail = "physical destination already exists"});
     }
 
     bool phys_renamed = false;
@@ -349,7 +350,8 @@ rename_profile(const ExecutionEnvironment& environment,
                                                             *old_paths_res);
             if (!rb_res) {
                 detail +=
-                    " (rollback do dir falhou: " + rb_res.error().detail + ")";
+                    " (directory rollback failed: " + rb_res.error().detail +
+                    ")";
             }
         }
         return std::unexpected(ProfileError{

@@ -75,15 +75,15 @@ process_file(const std::filesystem::path& file_path,
     const auto modified = std::filesystem::last_write_time(file_path, error);
     if (error) {
         return std::unexpected(scan_error(file_path,
-                                          "ler data de modificação",
+                                          "read modification time",
                                           error,
                                           ScanErrorCode::Metadata));
     }
     row.mtime = modified;
     row.size = std::filesystem::file_size(file_path, error);
     if (error) {
-        return std::unexpected(scan_error(
-            file_path, "ler tamanho", error, ScanErrorCode::Metadata));
+        return std::unexpected(
+            scan_error(file_path, "read size", error, ScanErrorCode::Metadata));
     }
     platform::perf_trace::count("local regular files observed");
     const auto fingerprint_trace = platform::perf_trace::begin();
@@ -96,7 +96,7 @@ process_file(const std::filesystem::path& file_path,
     if (!fingerprint) {
         return std::unexpected(ScanError{ScanErrorCode::Metadata,
                                          file_path,
-                                         "obter identidade do arquivo",
+                                         "get file identity",
                                          fingerprint.error()});
     }
     if (!*fingerprint)
@@ -159,7 +159,7 @@ process_file(const std::filesystem::path& file_path,
             if (!after_fingerprint)
                 return std::unexpected(ScanError{ScanErrorCode::Metadata,
                                                  file_path,
-                                                 "obter identidade após hash",
+                                                 "get identity after hash",
                                                  after_fingerprint.error()});
             if (!*after_fingerprint)
                 cache_allowed = false;
@@ -205,7 +205,7 @@ process_file(const std::filesystem::path& file_path,
 } // namespace
 
 std::string describe(const ScanError& error) {
-    return error.operation + " em '" + platform::path::to_utf8(error.path) +
+    return error.operation + " at '" + platform::path::to_utf8(error.path) +
            "': " + error.detail;
 }
 
@@ -230,10 +230,8 @@ scan_result(const std::filesystem::path& local_root,
     std::error_code error;
     const auto status = std::filesystem::symlink_status(local_root, error);
     if (error)
-        return std::unexpected(scan_error(local_root,
-                                          "consultar tipo da entrada",
-                                          error,
-                                          ScanErrorCode::Metadata));
+        return std::unexpected(scan_error(
+            local_root, "query entry type", error, ScanErrorCode::Metadata));
     const bool directory = std::filesystem::is_directory(status);
     if (std::filesystem::is_symlink(status) ||
         is_ignored(".", ignore_list, directory))
@@ -260,7 +258,7 @@ scan_result(const std::filesystem::path& local_root,
     const auto modified = std::filesystem::last_write_time(local_root, error);
     if (error)
         return std::unexpected(scan_error(local_root,
-                                          "ler data de modificação",
+                                          "read modification time",
                                           error,
                                           ScanErrorCode::Metadata));
     // The parent must precede its descendants.
@@ -269,8 +267,8 @@ scan_result(const std::filesystem::path& local_root,
 
     std::filesystem::directory_iterator iterator(local_root, error);
     if (error)
-        return std::unexpected(scan_error(
-            local_root, "listar diretório", error, ScanErrorCode::Io));
+        return std::unexpected(
+            scan_error(local_root, "list directory", error, ScanErrorCode::Io));
     std::vector<ScanFrame> stack;
     stack.push_back({iterator, {}, ""});
     while (!stack.empty()) {
@@ -283,13 +281,13 @@ scan_result(const std::filesystem::path& local_root,
         frame.iterator.increment(error);
         if (error)
             return std::unexpected(scan_error(entry.path().parent_path(),
-                                              "continuar listagem",
+                                              "continue listing",
                                               error,
                                               ScanErrorCode::Io));
         const auto entry_status = entry.symlink_status(error);
         if (error)
             return std::unexpected(scan_error(entry.path(),
-                                              "consultar tipo da entrada",
+                                              "query entry type",
                                               error,
                                               ScanErrorCode::Metadata));
         const bool entry_directory =
@@ -306,7 +304,7 @@ scan_result(const std::filesystem::path& local_root,
             return std::unexpected(ScanError{
                 .code = ScanErrorCode::Io,
                 .path = entry.path(),
-                .operation = "validar nome portável",
+                .operation = "validate portable name",
                 .detail = "unsupported non-portable path component: '" +
                           entry_name + "'",
             });
@@ -321,7 +319,7 @@ scan_result(const std::filesystem::path& local_root,
         const auto mtime = entry.last_write_time(error);
         if (error)
             return std::unexpected(scan_error(entry.path(),
-                                              "ler data de modificação",
+                                              "read modification time",
                                               error,
                                               ScanErrorCode::Metadata));
         snapshot.rows.push_back(
@@ -330,7 +328,7 @@ scan_result(const std::filesystem::path& local_root,
         std::filesystem::directory_iterator nested(entry.path(), error);
         if (error)
             return std::unexpected(scan_error(
-                entry.path(), "listar diretório", error, ScanErrorCode::Io));
+                entry.path(), "list directory", error, ScanErrorCode::Io));
         stack.push_back({nested, {}, relative});
     }
     finalize_snapshot(snapshot);
@@ -338,7 +336,7 @@ scan_result(const std::filesystem::path& local_root,
         return std::unexpected(ScanError{
             .code = ScanErrorCode::Metadata,
             .path = local_root,
-            .operation = "validar snapshot",
+            .operation = "validate snapshot",
             .detail =
                 "logical snapshot contains case collision or invalid structure",
         });
@@ -370,8 +368,8 @@ observe_file(const std::filesystem::path& local_root,
         return std::unexpected(
             ScanError{ScanErrorCode::Metadata,
                       platform::path::from_utf8(relative_path),
-                      "observar arquivo direcionado",
-                      "caminho relativo inválido"});
+                      "observe targeted file",
+                      "invalid relative path"});
     }
 
     std::size_t comp_start = 0;
@@ -385,7 +383,7 @@ observe_file(const std::filesystem::path& local_root,
             return std::unexpected(
                 ScanError{ScanErrorCode::Metadata,
                           platform::path::from_utf8(relative_path),
-                          "observar arquivo direcionado",
+                          "observe targeted file",
                           "unsupported non-portable path component: '" +
                               std::string(component) + "'"});
         }
@@ -402,8 +400,8 @@ observe_file(const std::filesystem::path& local_root,
             relative.end()) {
         return std::unexpected(ScanError{ScanErrorCode::Metadata,
                                          relative,
-                                         "observar arquivo direcionado",
-                                         "caminho relativo inválido"});
+                                         "observe targeted file",
+                                         "invalid relative path"});
     }
     const auto file_path = local_root / relative;
     std::error_code error;
@@ -411,7 +409,7 @@ observe_file(const std::filesystem::path& local_root,
     if (error || std::filesystem::is_symlink(status) ||
         !std::filesystem::is_regular_file(status)) {
         return std::unexpected(scan_error(file_path,
-                                          "observar arquivo direcionado",
+                                          "observe targeted file",
                                           error,
                                           ScanErrorCode::Metadata));
     }
@@ -420,8 +418,8 @@ observe_file(const std::filesystem::path& local_root,
     if (is_ignored(normalized, ignore_list, false)) {
         return std::unexpected(ScanError{ScanErrorCode::Metadata,
                                          file_path,
-                                         "observar arquivo direcionado",
-                                         "arquivo ignorado"});
+                                         "observe targeted file",
+                                         "ignored file"});
     }
 
     std::vector<state_storage::FileCacheRow> previous;

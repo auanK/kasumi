@@ -256,7 +256,7 @@ ObserveResult observe(transport::Transport& storage,
                     remote_content_identifiers)) {
                 return std::unexpected(Error{
                     .code = ErrorCode::LimitExceeded,
-                    .detail = "muitos identificadores de conteúdo",
+                    .detail = "too many content identifiers",
                 });
             }
             result.content_object_identifiers.assign(

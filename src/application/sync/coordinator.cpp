@@ -69,8 +69,8 @@ Error journal_error(std::string detail) {
 Error indeterminate_publication(const publication::Error& error,
                                 std::string_view operation) {
     return make_error(ErrorCode::RecoveryIndeterminate,
-                      "não foi possível determinar " + std::string{operation} +
-                          ": " + error.detail);
+                      "failed to determine " + std::string{operation} + ": " +
+                          error.detail);
 }
 
 bool missing(std::filesystem::file_status status) noexcept {
@@ -96,9 +96,7 @@ read_status(const std::filesystem::path& path) {
     }
     if (error) {
         return std::unexpected(workspace_error(
-            "não foi possível inspecionar o caminho no sistema de arquivos",
-            path,
-            error.message()));
+            "failed to inspect path in file system", path, error.message()));
     }
     return status;
 }
@@ -137,24 +135,24 @@ transactions_directory(const std::filesystem::path& profile, bool create) {
         }
         auto created = platform::private_storage::create_directory(directory);
         if (!created) {
-            return std::unexpected(workspace_error(
-                "não foi possível criar o diretório de transações",
-                directory,
-                created.error()));
+            return std::unexpected(
+                workspace_error("failed to create transactions directory",
+                                directory,
+                                created.error()));
         }
         return directory;
     }
     if (std::filesystem::is_symlink(*status) ||
         !std::filesystem::is_directory(*status)) {
         return std::unexpected(
-            workspace_error("diretório de transações inválido",
+            workspace_error("invalid transactions directory",
                             directory,
-                            "esperava-se um diretório físico"));
+                            "expected a physical directory"));
     }
     auto secured = platform::private_storage::protect_directory(directory);
     if (!secured) {
         return std::unexpected(workspace_error(
-            "diretório de transações inválido", directory, secured.error()));
+            "invalid transactions directory", directory, secured.error()));
     }
     return directory;
 }
@@ -163,9 +161,8 @@ std::expected<platform::Workspace, Error>
 create_transaction_workspace(const std::filesystem::path& profile,
                              std::string_view id) {
     if (!transaction::valid_transaction_id(id)) {
-        return std::unexpected(
-            make_error(ErrorCode::WorkspaceFailure,
-                       "identificador de transação inválido"));
+        return std::unexpected(make_error(ErrorCode::WorkspaceFailure,
+                                          "invalid transaction identifier"));
     }
     auto directory = transactions_directory(profile, true);
     if (!directory) {
@@ -177,18 +174,16 @@ create_transaction_workspace(const std::filesystem::path& profile,
         if (std::filesystem::is_symlink(*status) ||
             !std::filesystem::is_directory(*status)) {
             return std::unexpected(
-                workspace_error("espaço de trabalho da transação inválido",
+                workspace_error("invalid transaction workspace",
                                 root,
-                                "esperava-se um diretório físico"));
+                                "expected a physical directory"));
         }
         return platform::Workspace{.root = root};
     }
     auto created = platform::private_storage::create_directory(root);
     if (!created) {
         return std::unexpected(workspace_error(
-            "não foi possível criar o espaço de trabalho da transação",
-            root,
-            created.error()));
+            "failed to create transaction workspace", root, created.error()));
     }
     return platform::Workspace{.root = root};
 }
@@ -208,22 +203,22 @@ std::expected<void, Error> remove_transaction_workspace(
     if (std::filesystem::is_symlink(*status) ||
         !std::filesystem::is_directory(*status)) {
         return std::unexpected(
-            workspace_error("espaço de trabalho da transação inválido",
+            workspace_error("invalid transaction workspace",
                             workspace->root,
-                            "esperava-se um diretório físico"));
+                            "expected a physical directory"));
     }
     auto removed = platform::remove_workspace(*workspace);
     if (!removed) {
-        return std::unexpected(workspace_error(
-            "não foi possível remover o espaço de trabalho da transação",
-            workspace->root,
-            removed.error()));
+        return std::unexpected(
+            workspace_error("failed to remove transaction workspace",
+                            workspace->root,
+                            removed.error()));
     }
     auto synced = platform::durability::sync_parent_directory(workspace->root);
     if (!synced) {
         return std::unexpected(
-            workspace_error("não foi possível sincronizar o diretório pai do "
-                            "espaço de trabalho da transação",
+            workspace_error("failed to sync parent directory of "
+                            "transaction workspace",
                             workspace->root.parent_path(),
                             synced.error()));
     }
@@ -260,9 +255,9 @@ cleanup_orphan_workspaces(const std::filesystem::path& profile) {
     if (std::filesystem::is_symlink(*status) ||
         !std::filesystem::is_directory(*status)) {
         return std::unexpected(
-            workspace_error("diretório de transações inválido",
+            workspace_error("invalid transactions directory",
                             *directory,
-                            "esperava-se um diretório físico"));
+                            "expected a physical directory"));
     }
 
     std::vector<std::filesystem::path> candidates;
@@ -270,10 +265,10 @@ cleanup_orphan_workspaces(const std::filesystem::path& profile) {
     {
         std::filesystem::directory_iterator entry(*directory, error);
         if (error) {
-            return std::unexpected(workspace_error(
-                "não foi possível enumerar os espaços de trabalho de transação",
-                *directory,
-                error.message()));
+            return std::unexpected(
+                workspace_error("failed to enumerate transaction workspaces",
+                                *directory,
+                                error.message()));
         }
         const std::filesystem::directory_iterator end;
         while (entry != end) {
@@ -281,36 +276,34 @@ cleanup_orphan_workspaces(const std::filesystem::path& profile) {
             const auto name = platform::path::to_utf8(candidate.filename());
             if (transaction::valid_transaction_id(name)) {
                 if (candidate.parent_path() != directory->lexically_normal()) {
-                    return std::unexpected(workspace_error(
-                        "caminho inseguro de espaço de trabalho de transação",
-                        candidate,
-                        "o caminho escapa do diretório de transações"));
+                    return std::unexpected(
+                        workspace_error("unsafe transaction workspace path",
+                                        candidate,
+                                        "path escapes transactions directory"));
                 }
                 const auto child_status =
                     std::filesystem::symlink_status(candidate, error);
                 if (error) {
-                    return std::unexpected(
-                        workspace_error("não foi possível inspecionar o espaço "
-                                        "de trabalho da transação",
-                                        candidate,
-                                        error.message()));
+                    return std::unexpected(workspace_error(
+                        "failed to inspect transaction workspace",
+                        candidate,
+                        error.message()));
                 }
                 if (std::filesystem::is_symlink(child_status) ||
                     !std::filesystem::is_directory(child_status)) {
-                    return std::unexpected(workspace_error(
-                        "espaço de trabalho de transação inválido",
-                        candidate,
-                        "esperava-se um diretório físico"));
+                    return std::unexpected(
+                        workspace_error("invalid transaction workspace",
+                                        candidate,
+                                        "expected a physical directory"));
                 }
                 candidates.push_back(candidate);
             }
             entry.increment(error);
             if (error) {
-                return std::unexpected(
-                    workspace_error("não foi possível enumerar os espaços de "
-                                    "trabalho de transação",
-                                    *directory,
-                                    error.message()));
+                return std::unexpected(workspace_error(
+                    "failed to enumerate transaction workspaces",
+                    *directory,
+                    error.message()));
             }
         }
     }
@@ -397,7 +390,7 @@ prepare_genesis_epoch(transaction::Record& record,
                       std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
     if (record.plan.target_generation != 0 || !record.parent_ids.empty()) {
         return std::unexpected(
-            make_error(ErrorCode::InvalidInput, "commit não é genesis"));
+            make_error(ErrorCode::InvalidInput, "commit is not genesis"));
     }
     if (record.epoch_vault_id.empty()) {
         auto vault_id = platform::random::hex_id(HASH_SIZE);
@@ -420,7 +413,7 @@ prepare_genesis_epoch(transaction::Record& record,
     if (!record.epoch_id.empty() &&
         record.epoch_id != sealed->reference.epoch_id) {
         return std::unexpected(make_error(ErrorCode::RecoveryConflict,
-                                          "Epoch genesis do journal diverge"));
+                                          "journal genesis Epoch mismatch"));
     }
     record.epoch_id = sealed->reference.epoch_id;
     return *sealed;
@@ -464,8 +457,8 @@ prepare_pruning_epoch(transaction::Record& record,
     }
     if (!record.epoch_id.empty() &&
         record.epoch_id != sealed->reference.epoch_id) {
-        return std::unexpected(make_error(ErrorCode::RecoveryConflict,
-                                          "Epoch do journal diverge"));
+        return std::unexpected(
+            make_error(ErrorCode::RecoveryConflict, "journal Epoch mismatch"));
     }
     record.epoch_id = sealed->reference.epoch_id;
     return *sealed;
@@ -496,7 +489,7 @@ validate_epoch_policy_presence(const reconciliation::StorageState& observed) {
             observed.epoch_policy) {
             return std::unexpected(make_error(
                 ErrorCode::InvalidInput,
-                "estado de Epoch parcial sem uma identidade autenticada"));
+                "partial Epoch state without authenticated identity"));
         }
         return {};
     }
@@ -507,9 +500,9 @@ validate_epoch_policy_presence(const reconciliation::StorageState& observed) {
         observed.epoch_policy->min_history_depth >
             history::maximum_graph_depth ||
         observed.epoch_policy->min_history_age_hours == 0) {
-        return std::unexpected(make_error(
-            ErrorCode::InvalidInput,
-            "estado de Epoch autenticado é estruturalmente inválido"));
+        return std::unexpected(
+            make_error(ErrorCode::InvalidInput,
+                       "authenticated Epoch state is structurally invalid"));
     }
     return {};
 }
@@ -838,8 +831,7 @@ run_content_window(std::span<const std::size_t> indices,
     } catch (const std::exception& exception) {
         return std::unexpected(detail::make_error(
             ErrorCode::MutationFailure,
-            std::string{"não foi possível iniciar o worker de conteúdo: "} +
-                exception.what(),
+            std::string{"failed to start content worker: "} + exception.what(),
             indices.front()));
     }
 
@@ -1008,16 +1000,16 @@ restore_transaction_metadata(const Snapshot& expected_tree,
         if (error) {
             return std::unexpected(detail::make_error(
                 ErrorCode::MutationFailure,
-                "não foi possível restaurar o timestamp materializado para " +
-                    path_name + ": " + error.message()));
+                "failed to restore materialized timestamp for " + path_name +
+                    ": " + error.message()));
         }
         if (std::filesystem::is_symlink(status) ||
             (row->is_directory ? !std::filesystem::is_directory(status)
                                : !std::filesystem::is_regular_file(status))) {
             return std::unexpected(detail::make_error(
                 ErrorCode::MutationFailure,
-                "não foi possível restaurar o timestamp materializado para " +
-                    path_name + ": tipo de sistema de arquivos inesperado"));
+                "failed to restore materialized timestamp for " + path_name +
+                    ": unexpected file system type"));
         }
         const auto observed_only =
             std::ranges::find(*operation_paths, path_name) ==
@@ -1028,13 +1020,13 @@ restore_transaction_metadata(const Snapshot& expected_tree,
             if (error) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::MutationFailure,
-                    "não foi possível confirmar o timestamp observado para " +
-                        path_name + ": " + error.message()));
+                    "failed to confirm observed timestamp for " + path_name +
+                        ": " + error.message()));
             }
             if (observed == nullptr || current != observed->mtime) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::ConcurrentModification,
-                    "diretório alterado após a observação: " + path_name));
+                    "directory modified after observation: " + path_name));
             }
         }
         auto written =
@@ -1042,8 +1034,8 @@ restore_transaction_metadata(const Snapshot& expected_tree,
         if (!written) {
             return std::unexpected(detail::make_error(
                 ErrorCode::MutationFailure,
-                "não foi possível restaurar o timestamp materializado para " +
-                    path_name + ": " + written.error()));
+                "failed to restore materialized timestamp for " + path_name +
+                    ": " + written.error()));
         }
     }
     return {};
@@ -1300,10 +1292,9 @@ execute(const runtime::RuntimeData& runtime_data,
                 return std::unexpected(rolled.error());
             return std::unexpected(detail::make_error(
                 ErrorCode::PublicationFailure,
-                local_now
-                    ? "timestamp de commit local inválido"
-                    : "não foi possível ler o timestamp do commit local: " +
-                          local_now.error()));
+                local_now ? "invalid local commit timestamp"
+                          : "failed to read local commit timestamp: " +
+                                local_now.error()));
         }
         auto chosen_time =
             choose_commit_time(observed_input.storage, *local_now);
@@ -1370,7 +1361,7 @@ execute(const runtime::RuntimeData& runtime_data,
                 return std::unexpected(rolled.error());
             return std::unexpected(detail::make_error(
                 ErrorCode::PublicationFailure,
-                std::string{"não foi possível iniciar o envio do commit: "} +
+                std::string{"failed to start commit upload: "} +
                     exception.what()));
         }
         platform::perf_trace::count("speculative commit uploads");
@@ -1734,13 +1725,13 @@ execute(const runtime::RuntimeData& runtime_data,
         auto rolled = rollback_terminal();
         if (!rolled)
             return std::unexpected(rolled.error());
-        std::string detail_message = "a árvore materializada não corresponde à "
-                                     "árvore candidata reconciliada";
+        std::string detail_message = "materialized tree does not match "
+                                     "reconciled candidate tree";
         if (publication_tree->rows.size() !=
             reconciliation_result.candidate_shared_tree.rows.size()) {
             detail_message +=
-                " (linhas reais=" +
-                std::to_string(publication_tree->rows.size()) + ", esperadas=" +
+                " (actual rows=" +
+                std::to_string(publication_tree->rows.size()) + ", expected=" +
                 std::to_string(
                     reconciliation_result.candidate_shared_tree.rows.size()) +
                 ")";
@@ -1781,8 +1772,7 @@ execute(const runtime::RuntimeData& runtime_data,
                     added_file = publication_tree->rows[count].path;
                 }
                 detail_message +=
-                    " (arquivo adicionado no disco durante sync: " +
-                    added_file + ")";
+                    " (file added on disk during sync: " + added_file + ")";
             } else if (reconciliation_result.candidate_shared_tree.rows.size() >
                        count) {
                 std::string removed_file;
@@ -1804,7 +1794,7 @@ execute(const runtime::RuntimeData& runtime_data,
                             .path;
                 }
                 detail_message +=
-                    " (arquivo ausente do disco durante sync: " + removed_file +
+                    " (file missing from disk during sync: " + removed_file +
                     ")";
             } else {
                 for (std::size_t index = 0; index < count; ++index) {
@@ -1930,13 +1920,13 @@ execute(const runtime::RuntimeData& runtime_data,
                     .epoch_id = observed_input.storage.epoch_id,
                     .epoch_sequence = observed_input.storage.epoch_sequence})) {
             const auto database_error = detail::make_error(
-                ErrorCode::DatabaseFailure, "não foi possível salvar state.db");
+                ErrorCode::DatabaseFailure, "failed to save state.db");
             auto rolled = rollback_terminal();
             if (!rolled) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::RecoveryConflict,
                     database_error.detail +
-                        "; rollback falhou: " + rolled.error().detail));
+                        "; rollback failed: " + rolled.error().detail));
             }
             return std::unexpected(database_error);
         }
@@ -2088,10 +2078,10 @@ execute(const runtime::RuntimeData& runtime_data,
                 key,
                 runtime_data.database_path.parent_path());
             if (!visible) {
-                return std::unexpected(detail::make_error(
-                    ErrorCode::PublicationFailure,
-                    "não foi possível publicar o Epoch gênesis: " +
-                        epoch_published.error().detail));
+                return std::unexpected(
+                    detail::make_error(ErrorCode::PublicationFailure,
+                                       "failed to publish genesis Epoch: " +
+                                           epoch_published.error().detail));
             }
         }
         record->phase = transaction::Phase::EpochUploaded;
@@ -2106,10 +2096,10 @@ execute(const runtime::RuntimeData& runtime_data,
             key,
             runtime_data.database_path.parent_path());
         if (!epoch_verified) {
-            return std::unexpected(detail::make_error(
-                ErrorCode::PublicationFailure,
-                "não foi possível verificar o Epoch gênesis: " +
-                    epoch_verified.error().detail));
+            return std::unexpected(
+                detail::make_error(ErrorCode::PublicationFailure,
+                                   "failed to verify genesis Epoch: " +
+                                       epoch_verified.error().detail));
         }
         record->phase = transaction::Phase::EpochVerified;
         saved = detail::save_record(*paths, *record, key);
@@ -2170,7 +2160,7 @@ execute(const runtime::RuntimeData& runtime_data,
                     if (!visible) {
                         return std::unexpected(detail::make_error(
                             ErrorCode::PublicationFailure,
-                            "não foi possível publicar o Epoch de poda: " +
+                            "failed to publish pruning Epoch: " +
                                 epoch_published.error().detail));
                     }
                 }
@@ -2188,10 +2178,10 @@ execute(const runtime::RuntimeData& runtime_data,
                     key,
                     runtime_data.database_path.parent_path());
                 if (!epoch_verified) {
-                    return std::unexpected(detail::make_error(
-                        ErrorCode::PublicationFailure,
-                        "não foi possível verificar o Epoch de poda: " +
-                            epoch_verified.error().detail));
+                    return std::unexpected(
+                        detail::make_error(ErrorCode::PublicationFailure,
+                                           "failed to verify pruning Epoch: " +
+                                               epoch_verified.error().detail));
                 }
 
                 record->phase = transaction::Phase::EpochVerified;
@@ -2225,8 +2215,8 @@ execute(const runtime::RuntimeData& runtime_data,
                     *epoch_reference ? (**epoch_reference).sequence : 0});
     platform::perf_trace::finish("local DB commit", database_trace);
     if (!database_saved) {
-        return std::unexpected(detail::make_error(
-            ErrorCode::DatabaseFailure, "não foi possível salvar state.db"));
+        return std::unexpected(detail::make_error(ErrorCode::DatabaseFailure,
+                                                  "failed to save state.db"));
     }
     record->phase = transaction::Phase::DatabaseCommitted;
     saved = detail::save_record(*paths, *record, key);

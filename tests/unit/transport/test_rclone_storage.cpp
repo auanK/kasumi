@@ -369,8 +369,8 @@ TEST(RcloneRcClientTest, DoesNotRetryTransientFailureForMutation) {
     EXPECT_NE(diagnostic.find("io:"), std::string::npos);
     EXPECT_NE(diagnostic.find("endpoint=operations/deletefile"),
               std::string::npos);
-    EXPECT_NE(diagnostic.find("duração="), std::string::npos);
-    EXPECT_NE(diagnostic.find("tentativa RC=1/1"), std::string::npos);
+    EXPECT_NE(diagnostic.find("duration="), std::string::npos);
+    EXPECT_NE(diagnostic.find("RC attempt=1/1"), std::string::npos);
 }
 
 TEST(RcloneRcClientTest, ReportsSlowListWithCurrentAttempt) {
@@ -398,9 +398,9 @@ TEST(RcloneRcClientTest, ReportsSlowListWithCurrentAttempt) {
     ASSERT_TRUE(result.has_value());
     std::lock_guard lock(status_mutex);
     ASSERT_EQ(statuses.size(), 1U);
-    EXPECT_NE(statuses.front().find("aguardando LIST remoto"),
+    EXPECT_NE(statuses.front().find("waiting for remote LIST"),
               std::string::npos);
-    EXPECT_NE(statuses.front().find("tentativa RC 1/2"), std::string::npos);
+    EXPECT_NE(statuses.front().find("RC attempt 1/2"), std::string::npos);
     EXPECT_NE(statuses.front().find("endpoint=operations/list"),
               std::string::npos);
 }

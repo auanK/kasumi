@@ -32,7 +32,7 @@ void release_profile_lock(std::intptr_t& lock) noexcept {
 std::expected<std::intptr_t, std::string>
 acquire_profile_lock(const std::filesystem::path& lock_path) {
     if (lock_path.empty()) {
-        return std::unexpected("caminho do lock do perfil vazio");
+        return std::unexpected("empty profile lock path");
     }
     auto parent = private_storage::protect_directory(lock_path.parent_path());
     if (!parent) {
@@ -51,10 +51,11 @@ acquire_profile_lock(const std::filesystem::path& lock_path) {
     if (handle == INVALID_HANDLE_VALUE) {
         const auto code = GetLastError();
         if (code == ERROR_SHARING_VIOLATION || code == ERROR_LOCK_VIOLATION) {
-            return std::unexpected("perfil já está em uso por outra execução");
+            return std::unexpected(
+                "profile is already in use by another execution");
         }
         return std::unexpected(
-            "não foi possível bloquear o perfil: " +
+            "could not lock profile: " +
             std::error_code{static_cast<int>(code), std::system_category()}
                 .message());
     }
@@ -65,7 +66,7 @@ acquire_profile_lock(const std::filesystem::path& lock_path) {
         const auto code = GetLastError();
         CloseHandle(handle);
         return std::unexpected(
-            "lock do perfil não pode ser um reparse point (native_code=" +
+            "profile lock cannot be a reparse point (native_code=" +
             std::to_string(code) + ")");
     }
     auto secured = private_storage::protect_file(lock_path);
@@ -85,17 +86,18 @@ acquire_profile_lock(const std::filesystem::path& lock_path) {
     const int handle = ::open(lock_path.c_str(), flags, 0600);
     if (handle < 0) {
         return std::unexpected(
-            "não foi possível abrir o lock do perfil: " +
+            "could not open profile lock: " +
             std::error_code{errno, std::generic_category()}.message());
     }
     if (::flock(handle, LOCK_EX | LOCK_NB) != 0) {
         const auto code = errno;
         static_cast<void>(::close(handle));
         if (code == EWOULDBLOCK || code == EAGAIN) {
-            return std::unexpected("perfil já está em uso por outra execução");
+            return std::unexpected(
+                "profile is already in use by another execution");
         }
         return std::unexpected(
-            "não foi possível bloquear o perfil: " +
+            "could not lock profile: " +
             std::error_code{code, std::generic_category()}.message());
     }
     auto secured = private_storage::protect_file(lock_path);

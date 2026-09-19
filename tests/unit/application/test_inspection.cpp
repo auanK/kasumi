@@ -590,7 +590,7 @@ TEST(ApplicationInspectionTest,
     kasumi::test::write_text(
         kasumi::test::workspace_path(
             workspace, "app/profiles/demo/inspection-history-v1.cache"),
-        "cache inválido");
+        "invalid cache");
 
     kasumi::platform::perf_trace::force_enable(true);
     const auto recovered = inspect_request(
@@ -1940,7 +1940,7 @@ TEST(ApplicationInspectionTest,
     const auto valid_id = put_content(fixture, "a");
     const auto invalid_id = kasumi::crypto::content_identifier(
         test_key(), kasumi::hasher::hash_string("ccc"));
-    put_object(fixture, invalid_id, "ciphertext inválido");
+    put_object(fixture, invalid_id, "invalid ciphertext");
     const auto orphan_id = put_content(fixture, "conteúdo órfão válido");
     const auto remote_before = kasumi::test::snapshot_tree(remote_root);
 
@@ -2190,7 +2190,7 @@ TEST(
 
     const auto content_id = kasumi::crypto::content_identifier(
         test_key(), commit.tree.rows[2].hash);
-    put_object(fixture, content_id, "ciphertext inválido");
+    put_object(fixture, content_id, "invalid ciphertext");
     const auto corrupt = read("docs/a.txt");
     ASSERT_FALSE(corrupt.has_value());
     EXPECT_EQ(corrupt.error().code, InspectionErrorCode::RemoteContentInvalid);
@@ -2256,7 +2256,7 @@ TEST(ApplicationInspectionTest,
     ASSERT_NE(child.head.ciphertext_id, second_variant.ciphertext_id);
     const auto invalid_marker = "history/heads/" + std::string(64, 'd') + "-" +
                                 std::string(64, 'e') + ".head";
-    put_object(fixture, invalid_marker, "marker inválido");
+    put_object(fixture, invalid_marker, "invalid marker");
     put_object(fixture, "history/gc/v1/barrier");
     put_object(fixture,
                "history/gc/v1/writers/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.writer");
@@ -2311,7 +2311,7 @@ TEST(ApplicationInspectionTest,
         std::ranges::any_of(object_report->objects, [](const auto& item) {
             return item.category ==
                        kasumi::application::RemoteObjectCategory::Unknown &&
-                   item.relation == "não auditado";
+                   item.relation == "not audited";
         }));
     EXPECT_TRUE(std::ranges::is_sorted(
         object_report->objects,
@@ -2492,7 +2492,7 @@ TEST(ApplicationInspectionTest,
 
     const auto invalid_marker = "history/heads/" + std::string(64, 'd') + "-" +
                                 std::string(64, 'e') + ".head";
-    put_object(fixture, invalid_marker, "inválido");
+    put_object(fixture, invalid_marker, "invalid");
     const auto critical = inspect_health();
     const auto critical_list = perf_count("transport list");
     const auto critical_prefix_list = perf_count("transport list prefix");
@@ -2547,7 +2547,7 @@ TEST(ApplicationInspectionTest,
     EXPECT_TRUE(quarantine_report.entries.front().retention_elapsed);
     EXPECT_EQ(kasumi::test::snapshot_tree(remote_root), before);
 
-    put_object(fixture, *quarantined + ".meta", "metadata inválida");
+    put_object(fixture, *quarantined + ".meta", "invalid metadata");
     const auto invalid_quarantine = inspect_request(
         workspace,
         InspectionRequest{InspectionOperation::RemoteQuarantine, "demo"},

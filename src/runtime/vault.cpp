@@ -16,8 +16,7 @@ std::expected<KeyBytes, runtime::Error> decode_hex(std::string_view text) {
     if (text.size() != KEY_SIZE * 2) {
         return std::unexpected(Error{
             .code = ErrorCode::KeyInvalid,
-            .detail =
-                "KASUMI_MASTER_KEY deve possuir 64 caracteres hexadecimais"});
+            .detail = "KASUMI_MASTER_KEY must be 64 hexadecimal characters"});
     }
     const auto digit = [](char value) -> int {
         if (value >= '0' && value <= '9')
@@ -36,7 +35,7 @@ std::expected<KeyBytes, runtime::Error> decode_hex(std::string_view text) {
             return std::unexpected(Error{
                 .code = ErrorCode::KeyInvalid,
                 .detail =
-                    "KASUMI_MASTER_KEY contém caractere não hexadecimal"});
+                    "KASUMI_MASTER_KEY contains non-hexadecimal character"});
         }
         key[index] = static_cast<uint8_t>((high << 4) | low);
     }
@@ -68,7 +67,7 @@ read_impl(const std::filesystem::path& path, bool protect) {
             !std::filesystem::is_regular_file(status)) {
             return std::unexpected(
                 Error{.code = ErrorCode::KeyNotFound,
-                      .detail = "arquivo key.bin ausente ou inválido"});
+                      .detail = "key.bin file is missing or invalid"});
         }
     }
     std::ifstream input(path, std::ios::binary);
@@ -77,12 +76,12 @@ read_impl(const std::filesystem::path& path, bool protect) {
                     static_cast<std::streamsize>(key.size()))) {
         return std::unexpected(
             Error{.code = ErrorCode::KeyNotFound,
-                  .detail = "arquivo key.bin ausente ou corrompido"});
+                  .detail = "key.bin file is missing or corrupted"});
     }
     if (input.peek() != std::ifstream::traits_type::eof()) {
         return std::unexpected(
             Error{.code = ErrorCode::KeyInvalid,
-                  .detail = "arquivo key.bin possui tamanho inválido"});
+                  .detail = "key.bin file has invalid size"});
     }
     obscure(key);
     return key;
@@ -127,8 +126,8 @@ std::expected<KeyBytes, runtime::Error> derive(std::string_view password,
         salt_password.size() > std::numeric_limits<std::uint32_t>::max()) {
         return std::unexpected(Error{
             .code = ErrorCode::KeyDerivationFailure,
-            .detail = "a senha precisa ter ao menos 12 caracteres e o salto da "
-                      "senha, 16 caracteres"});
+            .detail = "password must be at least 12 characters and salt must "
+                      "be at least 16 characters"});
     }
     crypto_argon2_config config = {.algorithm = CRYPTO_ARGON2_ID,
                                    .nb_blocks = ARGON2_MEMORY_BLOCKS,
@@ -137,8 +136,9 @@ std::expected<KeyBytes, runtime::Error> derive(std::string_view password,
 
     void* work_area = std::malloc(config.nb_blocks * 1024);
     if (!work_area) {
-        return std::unexpected(Error{.code = ErrorCode::KeyDerivationFailure,
-                                     .detail = "falha de memória no Argon2"});
+        return std::unexpected(
+            Error{.code = ErrorCode::KeyDerivationFailure,
+                  .detail = "memory allocation failed in Argon2"});
     }
 
     crypto_argon2_inputs inputs = {

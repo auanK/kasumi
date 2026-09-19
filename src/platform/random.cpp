@@ -54,7 +54,7 @@ std::expected<void, std::string> fill_bytes(std::span<std::uint8_t> output) {
                                             BCRYPT_USE_SYSTEM_PREFERRED_RNG);
         if (status != 0) {
             return std::unexpected(
-                "BCryptGenRandom falhou: " +
+                "BCryptGenRandom failed: " +
                 std::to_string(static_cast<unsigned long>(status)));
         }
         offset += count;
@@ -69,10 +69,10 @@ std::expected<void, std::string> fill_bytes(std::span<std::uint8_t> output) {
             if (errno == EINTR) {
                 continue;
             }
-            return std::unexpected(system_error_text("getrandom falhou"));
+            return std::unexpected(system_error_text("getrandom failed"));
         }
         if (count == 0) {
-            return std::unexpected("getrandom retornou preenchimento vazio");
+            return std::unexpected("getrandom returned empty fill");
         }
         offset += static_cast<std::size_t>(count);
     }
@@ -85,7 +85,7 @@ std::expected<void, std::string> fill_bytes(std::span<std::uint8_t> output) {
     const int descriptor = ::open("/dev/urandom", O_RDONLY);
     if (descriptor < 0) {
         return std::unexpected(
-            system_error_text("não foi possível abrir /dev/urandom"));
+            system_error_text("failed to open /dev/urandom"));
     }
 
     std::size_t offset = 0;
@@ -96,36 +96,34 @@ std::expected<void, std::string> fill_bytes(std::span<std::uint8_t> output) {
             if (errno == EINTR) {
                 continue;
             }
-            const auto error = system_error_text("falha ao ler /dev/urandom");
+            const auto error = system_error_text("failed to read /dev/urandom");
             ::close(descriptor);
             return std::unexpected(error);
         }
         if (count == 0) {
             ::close(descriptor);
-            return std::unexpected("/dev/urandom retornou preenchimento vazio");
+            return std::unexpected("/dev/urandom returned empty fill");
         }
         offset += static_cast<std::size_t>(count);
     }
 
     if (::close(descriptor) != 0) {
         return std::unexpected(
-            system_error_text("falha ao fechar /dev/urandom"));
+            system_error_text("failed to close /dev/urandom"));
     }
     return {};
 #else
     return std::unexpected(
-        "fonte CSPRNG do sistema não suportada nesta plataforma");
+        "system CSPRNG source is not supported on this platform");
 #endif
 }
 
 std::expected<std::string, std::string> hex_id(std::size_t byte_count) {
     if (byte_count == 0) {
-        return std::unexpected(
-            "o tamanho do identificador aleatório não pode ser zero");
+        return std::unexpected("random identifier size cannot be zero");
     }
     if (byte_count > (std::numeric_limits<std::size_t>::max)() / 2) {
-        return std::unexpected(
-            "o tamanho do identificador aleatório é grande demais");
+        return std::unexpected("random identifier size is too large");
     }
 
     std::vector<std::uint8_t> bytes;
@@ -150,7 +148,7 @@ std::expected<std::string, std::string> hex_id(std::size_t byte_count) {
             crypto_wipe(bytes.data(), bytes.size());
         }
         return std::unexpected(
-            std::string{"não foi possível gerar identificador aleatório: "} +
+            std::string{"failed to generate random identifier: "} +
             exception.what());
     }
 }

@@ -44,11 +44,11 @@ read_status(const std::filesystem::path& path, std::size_t operation_index) {
     }
 
     if (error) {
-        return std::unexpected(make_error(
-            MutationErrorCode::LocalIo,
-            "não foi possível consultar o caminho: " + error.message(),
-            path,
-            operation_index));
+        return std::unexpected(
+            make_error(MutationErrorCode::LocalIo,
+                       "failed to query path: " + error.message(),
+                       path,
+                       operation_index));
     }
     return status;
 }
@@ -66,7 +66,7 @@ resolve_local_path(const std::filesystem::path& local_root,
         std::ranges::find(relative, std::filesystem::path{".."}) !=
             relative.end()) {
         return std::unexpected(make_error(MutationErrorCode::UnsafePath,
-                                          "caminho relativo inválido",
+                                          "invalid relative path",
                                           relative,
                                           operation_index));
     }
@@ -77,13 +77,13 @@ resolve_local_path(const std::filesystem::path& local_root,
     }
     if (std::filesystem::is_symlink(*root_status)) {
         return std::unexpected(make_error(MutationErrorCode::UnsafePath,
-                                          "a raiz local é um symlink",
+                                          "local root is a symlink",
                                           local_root,
                                           operation_index));
     }
     if (!std::filesystem::is_directory(*root_status)) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "a raiz local não é um diretório",
+                                          "local root is not a directory",
                                           local_root,
                                           operation_index));
     }
@@ -98,7 +98,7 @@ resolve_local_path(const std::filesystem::path& local_root,
         std::ranges::find(relative_candidate, std::filesystem::path{".."}) !=
             relative_candidate.end()) {
         return std::unexpected(make_error(MutationErrorCode::UnsafePath,
-                                          "caminho escapa da raiz local",
+                                          "path escapes local root",
                                           relative,
                                           operation_index));
     }
@@ -118,7 +118,7 @@ resolve_local_path(const std::filesystem::path& local_root,
         }
         if (std::filesystem::is_symlink(*status)) {
             return std::unexpected(make_error(MutationErrorCode::UnsafePath,
-                                              "o caminho contém um symlink",
+                                              "path contains a symlink",
                                               current,
                                               operation_index));
         }
@@ -126,7 +126,7 @@ resolve_local_path(const std::filesystem::path& local_root,
         if (!is_last && !std::filesystem::is_directory(*status)) {
             return std::unexpected(
                 make_error(MutationErrorCode::LocalIo,
-                           "componente intermediário não é um diretório",
+                           "intermediate component is not a directory",
                            current,
                            operation_index));
         }
@@ -144,11 +144,10 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
                           std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
     auto expected_hash = hash_from_hex(operation.hash);
     if (!expected_hash) {
-        return std::unexpected(
-            make_error(MutationErrorCode::InvalidOperation,
-                       "identificador de objeto de conteúdo inválido",
-                       {},
-                       operation_index));
+        return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
+                                          "invalid content object identifier",
+                                          {},
+                                          operation_index));
     }
 
     auto source_status = read_status(source, operation_index);
@@ -156,7 +155,7 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
         !std::filesystem::is_regular_file(*source_status)) {
         return std::unexpected(
             make_error(MutationErrorCode::IntegrityMismatch,
-                       "a origem do upload não é um arquivo regular válido",
+                       "upload source is not a valid regular file",
                        source,
                        operation_index));
     }
@@ -166,18 +165,17 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
         crypto::encrypt_file_with_hashes(source, destination, key);
     platform::perf_trace::finish("content encryption", encryption_trace);
     if (!encrypted_file) {
-        return std::unexpected(
-            make_error(MutationErrorCode::CryptoFailure,
-                       "não foi possível criptografar a origem para upload",
-                       source,
-                       operation_index));
+        return std::unexpected(make_error(MutationErrorCode::CryptoFailure,
+                                          "failed to encrypt source for upload",
+                                          source,
+                                          operation_index));
     }
 
     if (encrypted_file->plaintext_hash != *expected_hash ||
         encrypted_file->plaintext_size != operation.size) {
         remove_temporary_file(destination);
         return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
-                                          "a origem mudou durante o upload",
+                                          "source changed during upload",
                                           source,
                                           operation_index));
     }
@@ -188,7 +186,7 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
         remove_temporary_file(destination);
         return std::unexpected(
             make_error(MutationErrorCode::LocalIo,
-                       "o arquivo criptografado não foi criado corretamente",
+                       "encrypted file was not created properly",
                        destination,
                        operation_index));
     }

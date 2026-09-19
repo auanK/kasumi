@@ -46,7 +46,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         return std::unexpected(Error{
             .operation = operation,
             .code = ErrorCode::RuntimeFailure,
-            .detail = "política de retenção inválida",
+            .detail = "invalid retention policy",
             .runtime = output.summary,
         });
     }

@@ -200,8 +200,8 @@ std::expected<std::string, Error> utf8(std::wstring_view text) {
     }
     if (text.size() >
         static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
-        return std::unexpected(make_error(
-            ErrorCode::ProcessFailure, "variável de ambiente grande demais"));
+        return std::unexpected(make_error(ErrorCode::ProcessFailure,
+                                          "environment variable is too large"));
     }
     const auto size = WideCharToMultiByte(CP_UTF8,
                                           WC_ERR_INVALID_CHARS,
@@ -212,10 +212,9 @@ std::expected<std::string, Error> utf8(std::wstring_view text) {
                                           nullptr,
                                           nullptr);
     if (size <= 0) {
-        return std::unexpected(
-            make_error(ErrorCode::ProcessFailure,
-                       "não foi possível codificar o ambiente do rclone",
-                       static_cast<int>(GetLastError())));
+        return std::unexpected(make_error(ErrorCode::ProcessFailure,
+                                          "could not encode rclone environment",
+                                          static_cast<int>(GetLastError())));
     }
     std::string result(static_cast<std::size_t>(size), '\0');
     if (WideCharToMultiByte(CP_UTF8,
@@ -226,10 +225,9 @@ std::expected<std::string, Error> utf8(std::wstring_view text) {
                             size,
                             nullptr,
                             nullptr) != size) {
-        return std::unexpected(
-            make_error(ErrorCode::ProcessFailure,
-                       "não foi possível codificar o ambiente do rclone",
-                       static_cast<int>(GetLastError())));
+        return std::unexpected(make_error(ErrorCode::ProcessFailure,
+                                          "could not encode rclone environment",
+                                          static_cast<int>(GetLastError())));
     }
     return result;
 }
@@ -239,14 +237,13 @@ std::expected<std::string, Error> utf8(std::wstring_view text) {
 std::expected<void, Error>
 validate_configuration(const detail::RcloneConfiguration& configuration) {
     if (configuration.executable.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::InvalidContext,
-                       "o executável do rclone não pode ser vazio"));
+        return std::unexpected(make_error(ErrorCode::InvalidContext,
+                                          "rclone executable cannot be empty"));
     }
     if (configuration.config_path && configuration.config_path->empty()) {
-        return std::unexpected(make_error(
-            ErrorCode::InvalidContext,
-            "o caminho de configuração do rclone não pode ser vazio"));
+        return std::unexpected(
+            make_error(ErrorCode::InvalidContext,
+                       "rclone configuration path cannot be empty"));
     }
     return {};
 }
@@ -257,14 +254,14 @@ std::expected<std::uint16_t, Error> find_available_loopback_port() {
     const int startup = WSAStartup(MAKEWORD(2, 2), &data);
     if (startup != 0) {
         return std::unexpected(make_error(
-            ErrorCode::ProcessFailure, "WSAStartup falhou", startup));
+            ErrorCode::ProcessFailure, "WSAStartup failed", startup));
     }
     const SOCKET socket_handle = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (socket_handle == INVALID_SOCKET) {
         const int error = WSAGetLastError();
         WSACleanup();
         return std::unexpected(
-            make_error(ErrorCode::ProcessFailure, "socket falhou", error));
+            make_error(ErrorCode::ProcessFailure, "socket failed", error));
     }
     sockaddr_in address{};
     address.sin_family = AF_INET;
@@ -277,7 +274,7 @@ std::expected<std::uint16_t, Error> find_available_loopback_port() {
         closesocket(socket_handle);
         WSACleanup();
         return std::unexpected(make_error(
-            ErrorCode::ProcessFailure, "bind de loopback falhou", error));
+            ErrorCode::ProcessFailure, "loopback bind failed", error));
     }
     int address_length = sizeof(address);
     if (::getsockname(socket_handle,
@@ -288,7 +285,7 @@ std::expected<std::uint16_t, Error> find_available_loopback_port() {
         closesocket(socket_handle);
         WSACleanup();
         return std::unexpected(
-            make_error(ErrorCode::ProcessFailure, "getsockname falhou", error));
+            make_error(ErrorCode::ProcessFailure, "getsockname failed", error));
     }
     const auto port = ntohs(address.sin_port);
     closesocket(socket_handle);
@@ -298,7 +295,7 @@ std::expected<std::uint16_t, Error> find_available_loopback_port() {
     const int socket_handle = ::socket(AF_INET, SOCK_STREAM, 0);
     if (socket_handle < 0) {
         return std::unexpected(
-            make_error(ErrorCode::ProcessFailure, "socket falhou", errno));
+            make_error(ErrorCode::ProcessFailure, "socket failed", errno));
     }
     sockaddr_in address{};
     address.sin_family = AF_INET;
@@ -310,7 +307,7 @@ std::expected<std::uint16_t, Error> find_available_loopback_port() {
         const int error = errno;
         ::close(socket_handle);
         return std::unexpected(make_error(
-            ErrorCode::ProcessFailure, "bind de loopback falhou", error));
+            ErrorCode::ProcessFailure, "loopback bind failed", error));
     }
     socklen_t address_length = sizeof(address);
     if (::getsockname(socket_handle,
@@ -320,7 +317,7 @@ std::expected<std::uint16_t, Error> find_available_loopback_port() {
         const int error = errno;
         ::close(socket_handle);
         return std::unexpected(
-            make_error(ErrorCode::ProcessFailure, "getsockname falhou", error));
+            make_error(ErrorCode::ProcessFailure, "getsockname failed", error));
     }
     const auto port = ntohs(address.sin_port);
     ::close(socket_handle);
@@ -451,17 +448,16 @@ std::expected<int, Error> start_process(State& state) {
     if (result) {
         return std::unexpected(make_error(
             ErrorCode::ProcessFailure,
-            "não foi possível iniciar o processo rclone em " +
+            "could not start rclone process at " +
                 platform::path::to_utf8(state.configuration.executable),
             result.value()));
     }
     state.process_started = true;
     const auto child_pid = state.process.pid();
     if (child_pid.second) {
-        return std::unexpected(
-            make_error(ErrorCode::ProcessFailure,
-                       "não foi possível consultar o PID do rclone",
-                       child_pid.second.value()));
+        return std::unexpected(make_error(ErrorCode::ProcessFailure,
+                                          "could not query rclone PID",
+                                          child_pid.second.value()));
     }
     try {
         state.drain_future = std::async(std::launch::async, [&state]() {
@@ -470,8 +466,7 @@ std::expected<int, Error> start_process(State& state) {
     } catch (const std::exception& exception) {
         return std::unexpected(make_error(
             ErrorCode::ProcessFailure,
-            std::string{"não foi possível drenar a saída do rclone: "} +
-                exception.what()));
+            std::string{"could not drain rclone output: "} + exception.what()));
     }
     return child_pid.first;
 }
@@ -486,9 +481,9 @@ std::expected<void, Error> prepare_attempt(State& state) {
     const auto password = platform::random::hex_id(32);
     const auto base_id = platform::random::hex_id(16);
     if (!username || !password || !base_id) {
-        return std::unexpected(make_error(
-            ErrorCode::ProcessFailure,
-            "não foi possível gerar credenciais efêmeras para o RC"));
+        return std::unexpected(
+            make_error(ErrorCode::ProcessFailure,
+                       "could not generate ephemeral credentials for RC"));
     }
     state.username = *username;
     state.password = *password;
@@ -519,9 +514,8 @@ bool definitely_missing_executable(const Error& error) noexcept {
 std::expected<std::filesystem::path, Error>
 resolve_rclone_executable(const detail::RcloneConfiguration& configuration) {
     if (configuration.executable.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::InvalidContext,
-                       "o executável do rclone não pode ser vazio"));
+        return std::unexpected(make_error(ErrorCode::InvalidContext,
+                                          "rclone executable cannot be empty"));
     }
 
     const auto accept =
@@ -557,7 +551,7 @@ resolve_rclone_executable(const detail::RcloneConfiguration& configuration) {
         }
         return std::unexpected(make_error(
             ErrorCode::ProcessFailure,
-            "executável rclone inválido, fora da raiz permitida ou não "
+            "invalid rclone executable, outside allowed root or not "
             "regular: " +
                 platform::path::to_utf8(configured),
             std::make_error_code(std::errc::permission_denied).value()));
@@ -596,7 +590,7 @@ resolve_rclone_executable(const detail::RcloneConfiguration& configuration) {
 
     return std::unexpected(make_error(
         ErrorCode::ProcessFailure,
-        "rclone não encontrado em um diretório absoluto e permitido do PATH",
+        "rclone not found in an absolute and allowed PATH directory",
         std::make_error_code(std::errc::no_such_file_or_directory).value()));
 }
 
@@ -613,7 +607,7 @@ make_child_environment(const State& state) {
         if (!block) {
             return std::unexpected(
                 make_error(ErrorCode::ProcessFailure,
-                           "não foi possível ler o ambiente do processo",
+                           "could not read process environment",
                            static_cast<int>(GetLastError())));
         }
         for (const wchar_t* entry = block.get(); *entry != L'\0';
@@ -655,8 +649,8 @@ make_child_environment(const State& state) {
                       std::make_move_iterator(controlled.end()));
         return result;
     } catch (const std::bad_alloc&) {
-        return std::unexpected(make_error(
-            ErrorCode::Io, "não foi possível copiar o ambiente do rclone"));
+        return std::unexpected(
+            make_error(ErrorCode::Io, "could not copy rclone environment"));
     }
 }
 
@@ -675,10 +669,10 @@ start_state(detail::RcloneConfiguration configuration) {
         state = std::make_unique<State>();
     } catch (const std::bad_alloc&) {
         return std::unexpected(
-            make_error(ErrorCode::Io, "não foi possível alocar a sessão RC"));
+            make_error(ErrorCode::Io, "could not allocate RC session"));
     }
     state->configuration = std::move(configuration);
-    Error last_error = make_error(ErrorCode::Unknown, "startup RC falhou");
+    Error last_error = make_error(ErrorCode::Unknown, "RC startup failed");
     for (int attempt = 0; attempt < 3; ++attempt) {
         const auto result = prepare_attempt(*state);
         if (result) {
@@ -693,14 +687,14 @@ start_state(detail::RcloneConfiguration configuration) {
             if (!cleaned) {
                 last_error =
                     make_error(ErrorCode::ProcessFailure,
-                               "não foi possível encerrar com segurança a "
-                               "tentativa anterior do rclone");
+                               "could not safely terminate previous rclone "
+                               "attempt");
             }
             break;
         }
     }
     last_error.message +=
-        " (executável rclone: " +
+        " (rclone executable: " +
         platform::path::to_utf8(state->configuration.executable) + ")";
     destroy_state(state.release());
     return std::unexpected(std::move(last_error));

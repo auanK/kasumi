@@ -21,22 +21,21 @@ namespace {
 std::expected<std::filesystem::file_status, std::string>
 read_status(const std::filesystem::path& path) {
     if (path.empty()) {
-        return std::unexpected("o caminho do timestamp está vazio");
+        return std::unexpected("timestamp path is empty");
     }
     std::error_code error;
     const auto status = std::filesystem::symlink_status(path, error);
     if (error) {
-        return std::unexpected(
-            "não foi possível inspecionar o caminho do timestamp: " +
-            error.message());
+        return std::unexpected("failed to inspect timestamp path: " +
+                               error.message());
     }
     if (std::filesystem::is_symlink(status)) {
-        return std::unexpected("o caminho do timestamp é um link simbólico");
+        return std::unexpected("timestamp path is a symbolic link");
     }
     if (!std::filesystem::is_regular_file(status) &&
         !std::filesystem::is_directory(status)) {
         return std::unexpected(
-            "o caminho do timestamp não é um arquivo ou diretório");
+            "timestamp path is neither a file nor a directory");
     }
     return status;
 }
@@ -51,8 +50,7 @@ to_windows_ticks(std::filesystem::file_time_type value) {
         std::chrono::duration_cast<file_ticks>(value.time_since_epoch())
             .count();
     if (ticks <= 0) {
-        return std::unexpected(
-            "timestamp fora do intervalo válido de FILETIME do Windows");
+        return std::unexpected("timestamp out of valid Windows FILETIME range");
     }
     return static_cast<std::uint64_t>(ticks);
 #else
@@ -66,8 +64,7 @@ to_windows_ticks(std::filesystem::file_time_type value) {
             .count();
     const auto ticks = sys_ticks + unix_to_windows_epoch_ticks;
     if (ticks <= 0) {
-        return std::unexpected(
-            "timestamp fora do intervalo válido de FILETIME do Windows");
+        return std::unexpected("timestamp out of valid Windows FILETIME range");
     }
     return static_cast<std::uint64_t>(ticks);
 #endif
@@ -99,7 +96,7 @@ set_windows_time(const std::filesystem::path& path,
                     nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         return std::unexpected(
-            "CreateFileW falhou: " +
+            "CreateFileW failed: " +
             std::system_category().message(static_cast<int>(GetLastError())));
     }
     const auto close = [&] {
@@ -107,7 +104,7 @@ set_windows_time(const std::filesystem::path& path,
     };
     if (!SetFileTime(handle, nullptr, nullptr, &file_time)) {
         const auto message =
-            "SetFileTime falhou: " +
+            "SetFileTime failed: " +
             std::system_category().message(static_cast<int>(GetLastError()));
         close();
         return std::unexpected(message);
@@ -128,13 +125,13 @@ read_windows_ticks(const std::filesystem::path& path) {
                     nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         return std::unexpected(
-            "CreateFileW de leitura falhou: " +
+            "CreateFileW read failed: " +
             std::system_category().message(static_cast<int>(GetLastError())));
     }
     FILETIME file_time{};
     if (!GetFileTime(handle, nullptr, nullptr, &file_time)) {
         const auto message =
-            "GetFileTime falhou: " +
+            "GetFileTime failed: " +
             std::system_category().message(static_cast<int>(GetLastError()));
         CloseHandle(handle);
         return std::unexpected(message);
@@ -187,7 +184,7 @@ set_last_write_time(const std::filesystem::path& path,
         std::error_code error;
         std::filesystem::last_write_time(path, value, error);
         if (error) {
-            return std::unexpected("não foi possível definir o timestamp: " +
+            return std::unexpected("failed to set timestamp: " +
                                    error.message());
         }
     }
@@ -196,14 +193,14 @@ set_last_write_time(const std::filesystem::path& path,
 #if defined(_WIN32)
     const auto actual = read_windows_ticks(path);
     if (!actual) {
-        return std::unexpected("não foi possível confirmar o timestamp: " +
+        return std::unexpected("failed to confirm timestamp: " +
                                actual.error());
     }
 #else
     std::error_code error;
     const auto actual = std::filesystem::last_write_time(path, error);
     if (error) {
-        return std::unexpected("não foi possível confirmar o timestamp: " +
+        return std::unexpected("failed to confirm timestamp: " +
                                error.message());
     }
 #endif
@@ -213,12 +210,12 @@ set_last_write_time(const std::filesystem::path& path,
     const auto equivalent = equivalent_file_time(value, actual);
 #endif
     if (!equivalent) {
-        return std::unexpected("não foi possível verificar o timestamp para " +
+        return std::unexpected("failed to verify timestamp for " +
                                platform::path::to_utf8(path) + ": " +
                                equivalent.error());
     }
     if (!*equivalent) {
-        return std::unexpected("falha na verificação do timestamp para " +
+        return std::unexpected("timestamp verification failed for " +
                                platform::path::to_utf8(path));
     }
     return {};

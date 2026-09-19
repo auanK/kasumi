@@ -21,7 +21,7 @@ validate_destination(const std::filesystem::path& root) {
             if (!std::filesystem::is_directory(status)) {
                 return std::unexpected(Error{
                     .code = ErrorCode::InvalidContext,
-                    .message = "o destino local passa por um arquivo",
+                    .message = "local destination traverses a file",
                     .native_code = 0,
                 });
             }
@@ -31,7 +31,7 @@ validate_destination(const std::filesystem::path& root) {
         if (parent.empty() || parent == candidate) {
             return std::unexpected(Error{
                 .code = ErrorCode::StorageNotFound,
-                .message = "a raiz do destino local nao esta disponivel",
+                .message = "local destination root is not available",
                 .native_code = error.value(),
             });
         }
@@ -50,7 +50,7 @@ detail::open_local_backend(detail::LocalConfiguration configuration) {
     if (configuration.root.empty()) {
         return std::unexpected(Error{
             .code = ErrorCode::InvalidContext,
-            .message = "caminho do armazenamento é inválido",
+            .message = "storage path is invalid",
             .native_code = 0,
         });
     }
@@ -63,7 +63,7 @@ detail::open_local_backend(detail::LocalConfiguration configuration) {
     if (state == nullptr) {
         return std::unexpected(Error{
             .code = ErrorCode::Io,
-            .message = "não foi possível alocar o estado local",
+            .message = "could not allocate local state",
             .native_code = 0,
         });
     }
