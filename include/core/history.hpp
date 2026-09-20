@@ -35,7 +35,7 @@ enum class ErrorCode {
     HeightMismatch,
     InvalidHead,
     NoCommonAncestor,
-    // More than one common ancestor base at maximum height.
+    // More than one incomparable best common ancestor exists.
     AmbiguousMergeBase,
     // Merge would produce a structurally invalid snapshot.
     UnsafeMerge,
