@@ -454,6 +454,35 @@ TEST(HistoryTest, ResolveDagValidation) {
         ErrorCode::InvalidHead);
 }
 
+TEST(HistoryTest, CommitIdentityRejectsDifferentCanonicalPayload) {
+    const auto commit_a =
+        make_bootstrap(make_tree({make_file("file.txt", "A")}), 0).value();
+    const auto commit_b =
+        make_bootstrap(make_tree({make_file("file.txt", "B")}), 0).value();
+
+    const auto bytes_a = serialize(commit_a);
+    const auto bytes_b = serialize(commit_b);
+    ASSERT_TRUE(bytes_a.has_value());
+    ASSERT_TRUE(bytes_b.has_value());
+    ASSERT_NE(*bytes_a, *bytes_b);
+
+    const auto id_a = compute_id(commit_a).value();
+    const auto id_b = compute_id(commit_b).value();
+    ASSERT_NE(id_a, id_b);
+
+    const LoadedCommit forged{
+        .id = id_a,
+        .commit = commit_b,
+    };
+
+    const auto result =
+        resolve(std::vector<LoadedCommit>{forged},
+                std::vector<std::string>{id_a});
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::InvalidCommitId);
+}
+
 TEST(HistoryTest, HeadFilteringAndMergeBase) {
     auto b1 = make_empty_bootstrap();
     auto id1 = compute_id(*b1).value();
