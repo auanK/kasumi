@@ -510,6 +510,39 @@ TEST(HistoryTest, AmbiguousMergeBase) {
     EXPECT_EQ(res.error().code, ErrorCode::AmbiguousMergeBase);
 }
 
+TEST(HistoryTest, AmbiguousMergeBaseWithUnequalHeights) {
+    auto r = make_empty_bootstrap().value();
+    auto id_r = compute_id(r).value();
+    LoadedCommit lc_r{id_r, r};
+
+    auto a = make_commit(1, {id_r}, make_custom_snapshot(1)).value();
+    auto id_a = compute_id(a).value();
+    LoadedCommit lc_a{id_a, a};
+
+    auto x = make_commit(1, {id_r}, make_custom_snapshot(2)).value();
+    auto id_x = compute_id(x).value();
+    LoadedCommit lc_x{id_x, x};
+
+    auto b = make_commit(2, {id_x}, make_custom_snapshot(3)).value();
+    auto id_b = compute_id(b).value();
+    LoadedCommit lc_b{id_b, b};
+
+    auto h1 = make_commit(3, {id_a, id_b}, make_custom_snapshot(4)).value();
+    auto id_h1 = compute_id(h1).value();
+    LoadedCommit lc_h1{id_h1, h1};
+
+    auto h2 = make_commit(3, {id_a, id_b}, make_custom_snapshot(5)).value();
+    auto id_h2 = compute_id(h2).value();
+    LoadedCommit lc_h2{id_h2, h2};
+
+    auto res =
+        resolve(std::vector<LoadedCommit>{lc_r, lc_a, lc_x, lc_b, lc_h1, lc_h2},
+                std::vector<std::string>{id_h1, id_h2});
+    ASSERT_FALSE(res.has_value());
+    EXPECT_EQ(res.error().code, ErrorCode::AmbiguousMergeBase);
+}
+
+
 TEST(HistoryTest, MergeConflict_FileFile) {
     auto b1 = make_empty_bootstrap();
     auto id1 = compute_id(*b1).value();
