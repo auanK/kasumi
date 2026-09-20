@@ -483,6 +483,68 @@ TEST(HistoryTest, CommitIdentityRejectsDifferentCanonicalPayload) {
     EXPECT_EQ(result.error().code, ErrorCode::InvalidCommitId);
 }
 
+TEST(HistoryTest, RejectsTimestampRegressionAlongParentEdge) {
+    const auto parent =
+        make_bootstrap(make_valid_snapshot(), 0, /*created_at=*/100).value();
+    const auto parent_id = compute_id(parent).value();
+
+    const auto child =
+        make_commit(1, {parent_id}, make_valid_snapshot(), /*created_at=*/99)
+            .value();
+    const auto child_id = compute_id(child).value();
+
+    ASSERT_EQ(parent.height, 0U);
+    ASSERT_EQ(child.height, 1U);
+    ASSERT_EQ(child.parents, std::vector<std::string>{parent_id});
+    ASSERT_GT(parent.created_at, child.created_at);
+
+    const LoadedCommit loaded_parent{parent_id, parent};
+    const LoadedCommit loaded_child{child_id, child};
+
+    const auto result =
+        resolve(std::vector<LoadedCommit>{
+                    loaded_parent,
+                    loaded_child,
+                },
+                std::vector<std::string>{
+                    child_id,
+                });
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::InvalidCommit);
+}
+
+TEST(HistoryTest, AllowsEqualTimestampAlongParentEdge) {
+    const auto parent =
+        make_bootstrap(make_valid_snapshot(), 0, /*created_at=*/100).value();
+    const auto parent_id = compute_id(parent).value();
+
+    const auto child =
+        make_commit(1, {parent_id}, make_valid_snapshot(), /*created_at=*/100)
+            .value();
+    const auto child_id = compute_id(child).value();
+
+    ASSERT_EQ(parent.height, 0U);
+    ASSERT_EQ(child.height, 1U);
+    ASSERT_EQ(child.parents, std::vector<std::string>{parent_id});
+    ASSERT_EQ(parent.created_at, child.created_at);
+
+    const LoadedCommit loaded_parent{parent_id, parent};
+    const LoadedCommit loaded_child{child_id, child};
+
+    const auto result =
+        resolve(std::vector<LoadedCommit>{
+                    loaded_parent,
+                    loaded_child,
+                },
+                std::vector<std::string>{
+                    child_id,
+                });
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->heads, std::vector<std::string>{child_id});
+}
+
 TEST(HistoryTest, HeadFilteringAndMergeBase) {
     auto b1 = make_empty_bootstrap();
     auto id1 = compute_id(*b1).value();
