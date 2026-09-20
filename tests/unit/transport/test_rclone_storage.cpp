@@ -651,6 +651,70 @@ TEST(RcloneStorageTest, DownloadsExactBatchWithOneSequentialCopy) {
     EXPECT_NE(request.find("/b/two"), std::string::npos);
 }
 
+TEST(RcloneStorageTest, UploadsBatchWithNoTraverseAndNoUpdateModTime) {
+    RcServerState remote;
+    std::vector<nlohmann::json> requests;
+    remote.server.Post(
+        "/rc/sync/copy",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            requests.push_back(nlohmann::json::parse(input.body));
+            response.set_content("{}", "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    auto workspace = kasumi::test::make_temp_workspace("rclone-put-batch");
+    const auto source = kasumi::test::workspace_path(workspace, "staged");
+    std::filesystem::create_directories(source);
+    kasumi::test::write_text(source / "obj1", "ciphertext1");
+    kasumi::test::write_text(source / "obj2", "ciphertext2");
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    const auto uploaded_default = operations.put_batch(
+        &state,
+        {.source_root = source, .identifiers = {"obj1", "obj2"}});
+    ASSERT_TRUE(uploaded_default);
+
+    const auto uploaded_explicit = operations.put_batch(
+        &state,
+        {.source_root = source,
+         .identifiers = {"obj1"},
+         .max_parallel_transfers = 3});
+    ASSERT_TRUE(uploaded_explicit);
+
+    stop_rc_server(remote);
+
+    ASSERT_EQ(requests.size(), 2U);
+
+    {
+        const auto& req = requests[0];
+        EXPECT_EQ(req.at("srcFs"), kasumi::platform::path::to_utf8(source));
+        EXPECT_EQ(req.at("dstFs"), "test:root");
+        EXPECT_EQ(req.at("createEmptySrcDirs"), false);
+
+        const auto& config = req.at("_config");
+        EXPECT_EQ(config.at("NoTraverse"), true);
+        EXPECT_EQ(config.at("NoUpdateModTime"), true);
+        EXPECT_FALSE(config.contains("Transfers"));
+        EXPECT_FALSE(config.contains("CheckSum"));
+        EXPECT_FALSE(config.contains("IgnoreExisting"));
+        EXPECT_FALSE(config.contains("SizeOnly"));
+    }
+
+    {
+        const auto& req = requests[1];
+        const auto& config = req.at("_config");
+        EXPECT_EQ(config.at("NoTraverse"), true);
+        EXPECT_EQ(config.at("NoUpdateModTime"), true);
+        EXPECT_EQ(config.at("Transfers"), 3);
+        EXPECT_FALSE(config.contains("CheckSum"));
+        EXPECT_FALSE(config.contains("IgnoreExisting"));
+        EXPECT_FALSE(config.contains("SizeOnly"));
+    }
+}
+
 kasumi::transport::PhysicalHashBatchRequest batch_request() {
     return {
         .scratch_root = std::filesystem::path{"scratch"},
