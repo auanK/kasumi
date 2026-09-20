@@ -989,6 +989,77 @@ TEST(HistoryTest, ThreeVariantsAndInputPermutationsAreDeterministic) {
     } while (std::next_permutation(order.begin(), order.end()));
 }
 
+TEST(HistoryTest, LogicalHeadsAreDeterministicAcrossIndependentInputPermutations) {
+    const auto r = make_empty_bootstrap().value();
+    const auto id_r = compute_id(r).value();
+    const LoadedCommit lc_r{id_r, r};
+
+    const auto a1 =
+        make_commit(1, {id_r}, make_valid_snapshot(), /*created_at=*/1).value();
+    const auto id_a1 = compute_id(a1).value();
+    const LoadedCommit lc_a1{id_a1, a1};
+
+    const auto a2 =
+        make_commit(2, {id_a1}, make_valid_snapshot(), /*created_at=*/2).value();
+    const auto id_a2 = compute_id(a2).value();
+    const LoadedCommit lc_a2{id_a2, a2};
+
+    const auto b1 =
+        make_commit(1, {id_r}, make_valid_snapshot(), /*created_at=*/3).value();
+    const auto id_b1 = compute_id(b1).value();
+    const LoadedCommit lc_b1{id_b1, b1};
+
+    std::vector<std::string> expected_heads{id_a2, id_b1};
+    std::ranges::sort(expected_heads);
+
+    const std::vector<LoadedCommit> base_loaded{lc_r, lc_a1, lc_a2, lc_b1};
+    const std::vector<std::string> base_marked{id_r, id_a1, id_a2, id_b1};
+
+    std::vector<std::size_t> loaded_order{0, 1, 2, 3};
+    std::size_t cases_tested = 0;
+    std::optional<kasumi::Snapshot> canonical_tree;
+
+    do {
+        std::vector<LoadedCommit> loaded;
+        loaded.reserve(4);
+        for (const auto idx : loaded_order) {
+            loaded.push_back(base_loaded[idx]);
+        }
+
+        std::vector<std::size_t> marked_order{0, 1, 2, 3};
+        do {
+            std::vector<std::string> marked;
+            marked.reserve(4);
+            for (const auto idx : marked_order) {
+                marked.push_back(base_marked[idx]);
+            }
+
+            const auto result = resolve(loaded, marked);
+            ASSERT_TRUE(result.has_value());
+
+            EXPECT_EQ(result->heads, expected_heads);
+            EXPECT_EQ(result->height, 2);
+            EXPECT_FALSE(result->has_conflicts);
+
+            EXPECT_EQ(std::ranges::find(result->heads, id_r),
+                      result->heads.end());
+            EXPECT_EQ(std::ranges::find(result->heads, id_a1),
+                      result->heads.end());
+
+            if (!canonical_tree) {
+                canonical_tree = result->tree;
+            } else {
+                EXPECT_EQ(result->tree, *canonical_tree);
+            }
+
+            ++cases_tested;
+        } while (std::next_permutation(marked_order.begin(), marked_order.end()));
+    } while (std::next_permutation(loaded_order.begin(), loaded_order.end()));
+
+    EXPECT_EQ(cases_tested, 576U);
+}
+
+
 TEST(HistoryTest, MergeIsIdempotentWhenMergeCommitIsMarked) {
     const auto base = make_empty_bootstrap().value();
     const auto base_id = compute_id(base).value();
