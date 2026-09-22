@@ -8592,6 +8592,66 @@ TEST(SyncCoordinatorTest, InvalidJournalIsRejectedBeforeMutation) {
         kasumi::application::sync::coordinator::ErrorCode::JournalFailure);
 }
 
+TEST(SyncCoordinatorTest,
+     MissingWorkspacePreservesAppliedLocalMutationForRecovery) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("transaction-missing-workspace");
+    const auto profile = kasumi::test::workspace_path(workspace, "profile");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    const auto runtime_data = make_runtime(
+        profile, local, kasumi::test::workspace_path(workspace, "storage"));
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    const std::string payload = "only-surviving-user-payload";
+    const auto operation = kasumi::Operation{
+        .action = kasumi::Action::DeleteLocal,
+        .path = "document.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string(payload)),
+        .size = payload.size()};
+    kasumi::test::write_text(local / operation.path, payload);
+
+    auto record = kasumi::application::sync::journal::create_record(
+        0, 0, kasumi::make_sync_plan({operation}, 0), true);
+    ASSERT_TRUE(record.has_value());
+    ASSERT_EQ(record->plan.operations.size(), 1U);
+    ASSERT_TRUE(std::filesystem::create_directories(
+        profile / ".transactions" / record->operation_id));
+    const kasumi::platform::Workspace transaction_workspace{
+        .root = profile / ".transactions" / record->operation_id};
+
+    auto prepared = kasumi::application::sync::mutation::prepare_operation(
+        operation,
+        0,
+        local,
+        transaction_workspace,
+        record->progress[0]);
+    ASSERT_TRUE(prepared.has_value()) << prepared.error().detail;
+    record->progress[0] = *prepared;
+    kasumi::transport::Transport unavailable{};
+    ASSERT_TRUE(kasumi::application::sync::mutation::apply_operation(
+        operation, 0, local, unavailable, key, transaction_workspace));
+    record->progress[0].state = kasumi::transaction::OperationState::Applied;
+    record->phase = kasumi::transaction::Phase::FilesStaged;
+
+    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    ASSERT_TRUE(
+        kasumi::application::sync::journal::save(*paths, *record, key));
+    ASSERT_FALSE(std::filesystem::exists(local / operation.path));
+    ASSERT_TRUE(std::filesystem::remove_all(transaction_workspace.root));
+
+    const auto recovered =
+        kasumi::application::sync::coordinator::recover_if_needed(
+            runtime_data, unavailable, key);
+    ASSERT_FALSE(recovered.has_value());
+    EXPECT_EQ(
+        recovered.error().code,
+        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    EXPECT_TRUE(std::filesystem::exists(paths->final_path));
+    EXPECT_FALSE(std::filesystem::exists(local / operation.path));
+}
+
 TEST(SyncCoordinatorTest, StartedTransactionRollsBackBeforePublication) {
     auto workspace =
         kasumi::test::make_temp_workspace("transaction-before-publication");
