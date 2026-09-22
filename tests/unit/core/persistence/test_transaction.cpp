@@ -206,6 +206,21 @@ TEST(TransactionTypesTest, LocalOnlyRecordsHaveNoPublicationPhases) {
     }
 }
 
+TEST(TransactionTypesTest, PublicationRecordsPersistObservedBaseIdentity) {
+    const auto observed_head = std::string(64, 'e');
+    auto record = kasumi::transaction::make_record(
+        std::string(32, 'f'), 0, 0, kasumi::make_sync_plan({}, 0), true,
+        observed_head);
+    ASSERT_TRUE(record.has_value());
+    EXPECT_TRUE(kasumi::transaction::valid(*record));
+
+    const auto encoded = kasumi::transaction::codec::encode(*record);
+    ASSERT_TRUE(encoded.has_value());
+    const auto decoded = kasumi::transaction::codec::decode(*encoded);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->observed_head_id, observed_head);
+}
+
 TEST(TransactionTypesTest, DetectsEveryKnownStructuralCorruption) {
     const auto canonical = representative_record();
 

@@ -1241,7 +1241,11 @@ execute(const runtime::RuntimeData& runtime_data,
         return std::unexpected(profile.error());
     }
     std::string observed_head_id;
-    if (!reconciliation_result.requires_publication) {
+    if (reconciliation_result.requires_publication) {
+        if (observed_input.base_state_present) {
+            observed_head_id = observed_input.base_commit_id;
+        }
+    } else {
         if (observed_input.storage.logical_heads.size() != 1) {
             return std::unexpected(detail::make_error(
                 ErrorCode::InvalidInput,
