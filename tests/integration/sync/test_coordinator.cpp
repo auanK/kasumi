@@ -5613,6 +5613,81 @@ TEST(ReconciliationTest, LocalNewerModifyModifyPreservesRemoteInSharedTree) {
     }
 }
 
+TEST(ReconciliationTest,
+     LocalWinsConflictReservationPreservesExistingArtifact) {
+    const auto now = std::filesystem::file_time_type::clock::now();
+    const auto t0 = now - std::chrono::hours{1};
+    const auto t1 = now;
+    const auto t2 = now + std::chrono::hours{1};
+
+    const auto base_hash = kasumi::hasher::hash_string("BASE");
+    const auto local_hash = kasumi::hasher::hash_string("LOCAL");
+    const auto remote_hash = kasumi::hasher::hash_string("REMOTE");
+    const auto existing_hash = kasumi::hasher::hash_string("PRE_EXISTING");
+
+    auto base_tree = kasumi::Snapshot{
+        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
+                 kasumi::NodeRow{.path = "file.txt",
+                                 .hash = base_hash,
+                                 .size = 4,
+                                 .mtime = t1,
+                                 .is_directory = false}}};
+    kasumi::finalize_snapshot(base_tree);
+
+    auto storage_tree = kasumi::Snapshot{
+        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
+                 kasumi::NodeRow{.path = "file.txt",
+                                 .hash = remote_hash,
+                                 .size = 6,
+                                 .mtime = t1,
+                                 .is_directory = false}}};
+    kasumi::finalize_snapshot(storage_tree);
+
+    auto local_tree = kasumi::Snapshot{
+        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
+                 kasumi::NodeRow{.path = "file.txt",
+                                 .hash = local_hash,
+                                 .size = 5,
+                                 .mtime = t2,
+                                 .is_directory = false},
+                 kasumi::NodeRow{.path = "file.txt.kasumiconflict_remote",
+                                 .hash = existing_hash,
+                                 .size = 12,
+                                 .mtime = t0,
+                                 .is_directory = false}}};
+    kasumi::finalize_snapshot(local_tree);
+
+    auto input = empty_publication_input();
+    input.local_tree = local_tree;
+    input.base_tree = base_tree;
+    input.storage.tree = storage_tree;
+    input.storage.history_present = true;
+    input.storage.generation = 1;
+    input.storage.logical_heads = {std::string(64, 'a')};
+
+    const auto result = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_TRUE(result->has_conflicts);
+    EXPECT_TRUE(result->requires_publication);
+
+    const auto* local_row =
+        kasumi::find_row(result->candidate_shared_tree, "file.txt");
+    ASSERT_NE(local_row, nullptr);
+    EXPECT_EQ(local_row->hash, local_hash);
+
+    const auto* existing_row = kasumi::find_row(
+        result->candidate_shared_tree, "file.txt.kasumiconflict_remote");
+    ASSERT_NE(existing_row, nullptr);
+    EXPECT_EQ(existing_row->hash, existing_hash);
+
+    const auto* numbered_row = kasumi::find_row(
+        result->candidate_shared_tree, "file.txt.kasumiconflict_remote.1");
+    ASSERT_NE(numbered_row, nullptr);
+    EXPECT_EQ(numbered_row->hash, remote_hash);
+    EXPECT_EQ(numbered_row->size, 6U);
+    EXPECT_EQ(numbered_row->mtime, t1);
+}
+
 TEST(SyncCoordinatorTest, EmptyPlanPublishesAndPersistsConvergenceCommit) {
     auto workspace = kasumi::test::make_temp_workspace("runtime-convergence");
     const auto profile = kasumi::test::workspace_path(workspace, "profile");

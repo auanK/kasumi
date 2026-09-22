@@ -325,7 +325,7 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                                platform::path::from_utf8(make_conflict_path(
                                    path, ".kasumiconflict_remote")),
                                hash_hex(c->hash),
-                               {},
+                               target,
                                c->size,
                                true});
             } else {

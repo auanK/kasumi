@@ -358,6 +358,45 @@ candidate_shared_tree(const Input& input,
                 upsert_row(result.tree, std::move(row));
                 break;
             }
+            case Action::Download: {
+                if (!operation.exclusive_destination) {
+                    break;
+                }
+
+                const auto expected_hash = hash_from_hex(operation.hash);
+                if (!expected_hash) {
+                    return std::unexpected(Error{
+                        .code = ErrorCode::UnsafePlan,
+                        .detail = "conflict download contains invalid hash",
+                        .paths = {operation.path},
+                    });
+                }
+
+                const auto source_path =
+                    platform::path::to_logical_utf8(operation.alt_path);
+                const auto* source =
+                    find_row(input.storage.tree, source_path);
+                if (source == nullptr || source->is_directory ||
+                    source->hash != *expected_hash ||
+                    source->size != operation.size) {
+                    return std::unexpected(Error{
+                        .code = ErrorCode::UnsafePlan,
+                        .detail =
+                            "conflict download does not match observed storage row",
+                        .paths = {operation.path},
+                    });
+                }
+
+                auto row = *source;
+                row.path = platform::path::to_logical_utf8(operation.path);
+                auto parents = synchronize_ancestor_rows(
+                    result.tree, input.local_tree, row.path, false, &input.storage.tree);
+                if (!parents) {
+                    return std::unexpected(std::move(parents.error()));
+                }
+                upsert_row(result.tree, std::move(row));
+                break;
+            }
             case Action::CreateRemoteDirectory: {
                 const auto path =
                     platform::path::to_logical_utf8(operation.path);

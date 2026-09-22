@@ -326,7 +326,7 @@ TEST(DiffThreeWayTest,
                        signature(Action::Download,
                                  "notes.txt.kasumiconflict_remote",
                                  kasumi::hash_hex(cloud.hash),
-                                 {},
+                                 "notes.txt",
                                  cloud.size,
                                  true)});
 
@@ -373,7 +373,7 @@ TEST(DiffThreeWayTest, UnicodeConflictPathsPreserveAllConflictBranches) {
                        signature(Action::Download,
                                  logical_path + ".kasumiconflict_remote",
                                  kasumi::hash_hex(cloud_file.hash),
-                                 {},
+                                 logical_path,
                                  cloud_file.size,
                                  true)});
 

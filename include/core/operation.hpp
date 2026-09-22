@@ -80,7 +80,8 @@ struct Operation {
     std::filesystem::path path;
     // BLAKE3 hash used in file transfers.
     std::string hash;
-    // Destination of RenameLocal.
+    // Alternate path: RenameLocal destination or trusted remote source path
+    // for an exclusive conflict Download.
     std::filesystem::path alt_path;
     // Logical file size in bytes.
     std::uint64_t size = 0;
