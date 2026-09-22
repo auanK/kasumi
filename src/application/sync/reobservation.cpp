@@ -90,7 +90,8 @@ stage_attempt(const runtime::RuntimeData& runtime_data,
                                         index,
                                         runtime_data.local_dir,
                                         *workspace,
-                                        record->progress[index]);
+                                        record->progress[index],
+                                        record->plan.operations);
         if (!prepared) {
             return std::unexpected(
                 detail::make_error(ErrorCode::MutationFailure,

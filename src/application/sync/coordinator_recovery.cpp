@@ -347,7 +347,8 @@ std::expected<void, Error> resume_pending_local_mutations(
                                                         index,
                                                         runtime_data.local_dir,
                                                         workspace,
-                                                        record.progress[index]);
+                                                        record.progress[index],
+                                                        record.plan.operations);
             if (!prepared) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::MutationFailure,

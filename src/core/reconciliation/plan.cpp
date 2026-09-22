@@ -131,12 +131,13 @@ reserve_conflict_path(const std::filesystem::path& preferred,
 }
 
 void reserve_conflict_destinations(const Snapshot& local_tree,
+                                   const Snapshot& storage_tree,
                                    std::vector<Operation>& operations) {
     std::unordered_set<std::string> reserved;
     std::unordered_set<std::string> reserved_case_keys;
 
     const std::size_t estimated_size =
-        local_tree.rows.size() + operations.size();
+        local_tree.rows.size() + storage_tree.rows.size() + operations.size();
     reserved.reserve(estimated_size);
     reserved_case_keys.reserve(estimated_size);
 
@@ -146,6 +147,12 @@ void reserve_conflict_destinations(const Snapshot& local_tree,
     };
 
     for (const auto& row : local_tree.rows) {
+        if (!row.path.empty()) {
+            add_reserved(row.path);
+        }
+    }
+
+    for (const auto& row : storage_tree.rows) {
         if (!row.path.empty()) {
             add_reserved(row.path);
         }
@@ -411,12 +418,21 @@ candidate_shared_tree(const Input& input,
                 }
                 const auto existing = find_row(result.tree, path);
                 if (existing != nullptr && !existing->is_directory) {
-                    return std::unexpected(Error{
-                        .code = ErrorCode::UnsafePlan,
-                        .detail =
-                            "remote directory creation conflicts with file",
-                        .paths = {operation.path},
-                    });
+                    const bool preserved_as_conflict = std::ranges::any_of(
+                        sync_plan_operations(plan), [&](const Operation& op) {
+                            return op.action == Action::Download &&
+                                   op.exclusive_destination &&
+                                   platform::path::to_logical_utf8(
+                                       op.alt_path) == path;
+                        });
+                    if (!preserved_as_conflict) {
+                        return std::unexpected(Error{
+                            .code = ErrorCode::UnsafePlan,
+                            .detail =
+                                "remote directory creation conflicts with file",
+                            .paths = {operation.path},
+                        });
+                    }
                 }
                 auto parents = synchronize_ancestor_rows(
                     result.tree, input.local_tree, path, true);
@@ -660,7 +676,8 @@ ReconcileResult reconcile(const Input& input) {
                                           missing_objects,
                                           &input.ignore_list);
 
-    reserve_conflict_destinations(input.local_tree, operations);
+    reserve_conflict_destinations(
+        input.local_tree, effective_storage_tree, operations);
 
     std::vector<std::string> repair_upload_paths;
     append_recovery_uploads(

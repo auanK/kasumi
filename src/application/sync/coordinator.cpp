@@ -1278,7 +1278,8 @@ execute(const runtime::RuntimeData& runtime_data,
                                         index,
                                         runtime_data.local_dir,
                                         *workspace,
-                                        record->progress[index]);
+                                        record->progress[index],
+                                        record->plan.operations);
         if (!prepared) {
             auto rolled = detail::rollback_transaction(*paths,
                                                        *record,

@@ -705,7 +705,8 @@ prepare_operation_impl(const Operation& operation,
                        std::size_t operation_index,
                        const std::filesystem::path& local_root,
                        const platform::Workspace& workspace,
-                       const transaction::OperationProgress& current_progress) {
+                       const transaction::OperationProgress& current_progress,
+                       std::span<const Operation> plan_operations = {}) {
     if (operation_index == std::numeric_limits<std::size_t>::max() ||
         !is_valid_action(operation.action) || !has_safe_paths(operation)) {
         return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
@@ -756,9 +757,9 @@ prepare_operation_impl(const Operation& operation,
 
     if (operation.action == Action::RenameLocal) {
         auto source =
-            resolve_local_path(local_root, operation.path, operation_index);
+            resolve_local_path(local_root, operation.path, operation_index, plan_operations);
         auto destination =
-            resolve_local_path(local_root, operation.alt_path, operation_index);
+            resolve_local_path(local_root, operation.alt_path, operation_index, plan_operations);
         if (!source)
             return std::unexpected(source.error());
         if (!destination)
@@ -833,7 +834,8 @@ prepare_operation_impl(const Operation& operation,
                        operation_index));
     }
 
-    auto path = resolve_local_path(local_root, operation.path, operation_index);
+    auto path = resolve_local_path(
+        local_root, operation.path, operation_index, plan_operations);
     if (!path)
         return std::unexpected(path.error());
     if (operation.action == Action::CreateLocalDirectory ||
@@ -847,7 +849,18 @@ prepare_operation_impl(const Operation& operation,
                                               *path,
                                               operation_index));
         }
-        if (!missing(*status) && !std::filesystem::is_directory(*status)) {
+        bool source_of_preceding_rename = false;
+        if (operation.action == Action::CreateLocalDirectory) {
+            for (std::size_t i = 0; i < operation_index && i < plan_operations.size(); ++i) {
+                if (plan_operations[i].action == Action::RenameLocal &&
+                    plan_operations[i].path == operation.path) {
+                    source_of_preceding_rename = true;
+                    break;
+                }
+            }
+        }
+        if (!missing(*status) && !std::filesystem::is_directory(*status) &&
+            !source_of_preceding_rename) {
             return std::unexpected(
                 make_error(MutationErrorCode::DestinationConflict,
                            "local object is not a directory",
@@ -855,7 +868,7 @@ prepare_operation_impl(const Operation& operation,
                            operation_index));
         }
         auto result = current_progress;
-        result.had_original = !missing(*status);
+        result.had_original = !missing(*status) && !source_of_preceding_rename;
         result.previous_hash.clear();
         result.state = transaction::OperationState::BackupCreated;
         return result;
@@ -970,9 +983,10 @@ prepare_operation(const Operation& operation,
                   std::size_t operation_index,
                   const std::filesystem::path& local_root,
                   const platform::Workspace& workspace,
-                  const transaction::OperationProgress& current_progress) {
+                  const transaction::OperationProgress& current_progress,
+                  std::span<const Operation> plan_operations) {
     return prepare_operation_impl(
-        operation, operation_index, local_root, workspace, current_progress);
+        operation, operation_index, local_root, workspace, current_progress, plan_operations);
 }
 
 std::expected<void, MutationError>

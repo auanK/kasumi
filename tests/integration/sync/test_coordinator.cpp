@@ -1422,6 +1422,178 @@ TEST(SyncCoordinatorTest, CorruptedRenameBackupFailsClosed) {
     EXPECT_EQ(kasumi::test::read_text(local / rename.alt_path), "original");
 }
 
+TEST(SyncCoordinatorTest, DirectionBInterruptionAfterRenameRollsBackToOriginalFile) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("dirb-interrupt-after-rename");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto transaction =
+        kasumi::test::workspace_path(workspace, "transaction");
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    ASSERT_TRUE(std::filesystem::create_directories(transaction));
+    const kasumi::platform::Workspace tx{.root = transaction};
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    kasumi::transport::Transport unavailable{};
+
+    const std::string payload = "ORIGINAL-FILE-PAYLOAD";
+    kasumi::test::write_text(local / "node", payload);
+
+    const std::vector<kasumi::Operation> plan_ops{
+        kasumi::Operation{
+            .action = kasumi::Action::RenameLocal,
+            .path = "node",
+            .hash = kasumi::hash_hex(kasumi::hasher::hash_string(payload)),
+            .alt_path = "node.kasumiconflict_local",
+            .size = payload.size(),
+            .exclusive_destination = true},
+        kasumi::Operation{
+            .action = kasumi::Action::CreateLocalDirectory,
+            .path = "node"},
+        kasumi::Operation{
+            .action = kasumi::Action::Download,
+            .path = "node/child.txt",
+            .hash = kasumi::hash_hex(kasumi::hasher::hash_string("CHILD")),
+            .size = 5}};
+
+    kasumi::transaction::OperationProgress progress_rename{.backup_slot = 0};
+    auto prepared_rename =
+        kasumi::application::sync::mutation::prepare_operation(
+            plan_ops[0], 0, local, tx, progress_rename, plan_ops);
+    ASSERT_TRUE(prepared_rename.has_value()) << prepared_rename.error().detail;
+
+    kasumi::transaction::OperationProgress progress_mkdir{.backup_slot = 1};
+    auto prepared_mkdir =
+        kasumi::application::sync::mutation::prepare_operation(
+            plan_ops[1], 1, local, tx, progress_mkdir, plan_ops);
+    ASSERT_TRUE(prepared_mkdir.has_value()) << prepared_mkdir.error().detail;
+
+    // Apply only RenameLocal
+    ASSERT_TRUE(kasumi::application::sync::mutation::apply_operation(
+        plan_ops[0], 0, local, unavailable, key, tx));
+    EXPECT_FALSE(std::filesystem::exists(local / "node"));
+    EXPECT_EQ(kasumi::test::read_text(local / "node.kasumiconflict_local"), payload);
+
+    // Simulate interruption/failure before applying CreateLocalDirectory: rollback rename
+    progress_rename = *prepared_rename;
+    progress_rename.state = kasumi::transaction::OperationState::Applied;
+    auto rolled = kasumi::application::sync::mutation::rollback_operation(
+        plan_ops[0], 0, local, tx, progress_rename);
+    ASSERT_TRUE(rolled.has_value()) << rolled.error().detail;
+
+    EXPECT_TRUE(std::filesystem::is_regular_file(local / "node"));
+    EXPECT_EQ(kasumi::test::read_text(local / "node"), payload);
+    EXPECT_FALSE(std::filesystem::exists(local / "node.kasumiconflict_local"));
+}
+
+TEST(SyncCoordinatorTest, DirectionBInterruptionDuringDescendantDownloadRollsBackEntirely) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("dirb-interrupt-during-download");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto transaction =
+        kasumi::test::workspace_path(workspace, "transaction");
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    ASSERT_TRUE(std::filesystem::create_directories(transaction));
+    const kasumi::platform::Workspace tx{.root = transaction};
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    kasumi::transport::Transport unavailable{};
+
+    const std::string payload = "ORIGINAL-FILE-PAYLOAD";
+    kasumi::test::write_text(local / "node", payload);
+
+    const std::vector<kasumi::Operation> plan_ops{
+        kasumi::Operation{
+            .action = kasumi::Action::RenameLocal,
+            .path = "node",
+            .hash = kasumi::hash_hex(kasumi::hasher::hash_string(payload)),
+            .alt_path = "node.kasumiconflict_local",
+            .size = payload.size(),
+            .exclusive_destination = true},
+        kasumi::Operation{
+            .action = kasumi::Action::CreateLocalDirectory,
+            .path = "node"},
+        kasumi::Operation{
+            .action = kasumi::Action::Download,
+            .path = "node/child.txt",
+            .hash = kasumi::hash_hex(kasumi::hasher::hash_string("CHILD")),
+            .size = 5}};
+
+    kasumi::transaction::OperationProgress progress_rename{.backup_slot = 0};
+    auto prepared_rename =
+        kasumi::application::sync::mutation::prepare_operation(
+            plan_ops[0], 0, local, tx, progress_rename, plan_ops);
+    ASSERT_TRUE(prepared_rename.has_value()) << prepared_rename.error().detail;
+
+    kasumi::transaction::OperationProgress progress_mkdir{.backup_slot = 1};
+    auto prepared_mkdir =
+        kasumi::application::sync::mutation::prepare_operation(
+            plan_ops[1], 1, local, tx, progress_mkdir, plan_ops);
+    ASSERT_TRUE(prepared_mkdir.has_value()) << prepared_mkdir.error().detail;
+
+    // Apply RenameLocal then CreateLocalDirectory
+    ASSERT_TRUE(kasumi::application::sync::mutation::apply_operation(
+        plan_ops[0], 0, local, unavailable, key, tx));
+    ASSERT_TRUE(kasumi::application::sync::mutation::apply_operation(
+        plan_ops[1], 1, local, unavailable, key, tx));
+    EXPECT_TRUE(std::filesystem::is_directory(local / "node"));
+    EXPECT_EQ(kasumi::test::read_text(local / "node.kasumiconflict_local"), payload);
+
+    // Rollback in reverse order:
+    // 1. Roll back CreateLocalDirectory (removes empty directory "node")
+    progress_mkdir = *prepared_mkdir;
+    progress_mkdir.state = kasumi::transaction::OperationState::Applied;
+    auto rolled_mkdir = kasumi::application::sync::mutation::rollback_operation(
+        plan_ops[1], 1, local, tx, progress_mkdir);
+    ASSERT_TRUE(rolled_mkdir.has_value()) << rolled_mkdir.error().detail;
+    EXPECT_FALSE(std::filesystem::exists(local / "node"));
+
+    // 2. Roll back RenameLocal (restores original file "node" and removes conflict file)
+    progress_rename = *prepared_rename;
+    progress_rename.state = kasumi::transaction::OperationState::Applied;
+    auto rolled_rename = kasumi::application::sync::mutation::rollback_operation(
+        plan_ops[0], 0, local, tx, progress_rename);
+    ASSERT_TRUE(rolled_rename.has_value()) << rolled_rename.error().detail;
+
+    EXPECT_TRUE(std::filesystem::is_regular_file(local / "node"));
+    EXPECT_EQ(kasumi::test::read_text(local / "node"), payload);
+    EXPECT_FALSE(std::filesystem::exists(local / "node.kasumiconflict_local"));
+}
+
+TEST(SyncCoordinatorTest, DirectionBFailureWhenConflictDestinationAlreadyExists) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("dirb-dest-conflict");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto transaction =
+        kasumi::test::workspace_path(workspace, "transaction");
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    ASSERT_TRUE(std::filesystem::create_directories(transaction));
+    const kasumi::platform::Workspace tx{.root = transaction};
+
+    const std::string original = "ORIGINAL";
+    const std::string pre_existing = "PRE-EXISTING";
+    kasumi::test::write_text(local / "node", original);
+    kasumi::test::write_text(local / "node.kasumiconflict_local", pre_existing);
+
+    const kasumi::Operation rename_op{
+        .action = kasumi::Action::RenameLocal,
+        .path = "node",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string(original)),
+        .alt_path = "node.kasumiconflict_local",
+        .size = original.size(),
+        .exclusive_destination = true};
+
+    kasumi::transaction::OperationProgress progress{.backup_slot = 0};
+    auto prepared = kasumi::application::sync::mutation::prepare_operation(
+        rename_op, 0, local, tx, progress);
+    ASSERT_FALSE(prepared.has_value());
+    EXPECT_EQ(prepared.error().code,
+              kasumi::application::sync::mutation::MutationErrorCode::DestinationConflict);
+
+    // Verify neither file was altered
+    EXPECT_TRUE(std::filesystem::is_regular_file(local / "node"));
+    EXPECT_EQ(kasumi::test::read_text(local / "node"), original);
+    EXPECT_TRUE(std::filesystem::is_regular_file(local / "node.kasumiconflict_local"));
+    EXPECT_EQ(kasumi::test::read_text(local / "node.kasumiconflict_local"), pre_existing);
+}
+
 TEST(SyncCoordinatorTest, PrepareCommitTimestampSurvivesCanonicalRoundTrip) {
     const kasumi::Snapshot tree{
         .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};

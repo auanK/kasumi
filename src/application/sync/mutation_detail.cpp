@@ -60,7 +60,8 @@ bool missing(std::filesystem::file_status status) noexcept {
 std::expected<std::filesystem::path, MutationError>
 resolve_local_path(const std::filesystem::path& local_root,
                    const std::filesystem::path& relative,
-                   std::size_t operation_index) {
+                   std::size_t operation_index,
+                   std::span<const Operation> plan_operations) {
     if (relative.empty() || relative == "." || relative.is_absolute() ||
         relative.has_root_name() || relative.has_root_directory() ||
         std::ranges::find(relative, std::filesystem::path{".."}) !=
@@ -124,11 +125,38 @@ resolve_local_path(const std::filesystem::path& local_root,
         }
         const bool is_last = component_index + 1 == component_count;
         if (!is_last && !std::filesystem::is_directory(*status)) {
-            return std::unexpected(
-                make_error(MutationErrorCode::LocalIo,
-                           "intermediate component is not a directory",
-                           current,
-                           operation_index));
+            bool intermediate_will_become_directory = false;
+            if (!plan_operations.empty()) {
+                const auto intermediate_rel =
+                    current.lexically_relative(normalized_root);
+                bool has_rename = false;
+                bool has_create_dir = false;
+                for (std::size_t i = 0;
+                     i < operation_index && i < plan_operations.size();
+                     ++i) {
+                    if (plan_operations[i].action == Action::RenameLocal &&
+                        plan_operations[i].path.lexically_normal() ==
+                            intermediate_rel.lexically_normal()) {
+                        has_rename = true;
+                    }
+                    if (plan_operations[i].action ==
+                            Action::CreateLocalDirectory &&
+                        plan_operations[i].path.lexically_normal() ==
+                            intermediate_rel.lexically_normal()) {
+                        has_create_dir = true;
+                    }
+                }
+                if (has_rename && has_create_dir) {
+                    intermediate_will_become_directory = true;
+                }
+            }
+            if (!intermediate_will_become_directory) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::LocalIo,
+                               "intermediate component is not a directory",
+                               current,
+                               operation_index));
+            }
         }
         ++component_index;
     }
