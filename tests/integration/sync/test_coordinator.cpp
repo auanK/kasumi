@@ -5412,6 +5412,96 @@ TEST(ReconciliationTest, UnicodeMissingObjectPathsPreserveRecoverySources) {
     EXPECT_EQ(pending->pending_storage_rows.front().path, missing_path);
 }
 
+TEST(ReconciliationTest, LogicalHeadOrderDoesNotChangeReconciliationResult) {
+    kasumi::Snapshot tree{
+        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    kasumi::finalize_snapshot(tree);
+
+    const auto commit_r = kasumi::history::make_commit(0, {}, tree, 1);
+    ASSERT_TRUE(commit_r.has_value()) << commit_r.error().detail;
+    const auto id_r = kasumi::history::compute_id(*commit_r);
+    ASSERT_TRUE(id_r.has_value()) << id_r.error().detail;
+
+    const auto commit_a = kasumi::history::make_commit(1, {*id_r}, tree, 2);
+    ASSERT_TRUE(commit_a.has_value()) << commit_a.error().detail;
+    const auto id_a = kasumi::history::compute_id(*commit_a);
+    ASSERT_TRUE(id_a.has_value()) << id_a.error().detail;
+
+    const auto commit_b = kasumi::history::make_commit(1, {*id_r}, tree, 3);
+    ASSERT_TRUE(commit_b.has_value()) << commit_b.error().detail;
+    const auto id_b = kasumi::history::compute_id(*commit_b);
+    ASSERT_TRUE(id_b.has_value()) << id_b.error().detail;
+
+    ASSERT_NE(*id_a, *id_b);
+
+    const kasumi::history::LoadedCommit loaded_r{.id = *id_r,
+                                                 .commit = *commit_r};
+    const kasumi::history::LoadedCommit loaded_a{.id = *id_a,
+                                                 .commit = *commit_a};
+    const kasumi::history::LoadedCommit loaded_b{.id = *id_b,
+                                                 .commit = *commit_b};
+
+    const std::vector<kasumi::history::LoadedCommit> loaded_commits{
+        loaded_r, loaded_a, loaded_b};
+    const std::vector<std::string> marked_heads{*id_a, *id_b};
+    const auto resolution =
+        kasumi::history::resolve(loaded_commits, marked_heads);
+    ASSERT_TRUE(resolution.has_value()) << resolution.error().detail;
+    ASSERT_EQ(resolution->heads.size(), 2U);
+
+    auto input = empty_publication_input();
+    input.local_tree = tree;
+    input.base_tree = tree;
+    input.storage.tree = tree;
+
+    input.base_state_present = true;
+    input.base_commit_id = *id_a;
+    input.local_generation = 1;
+
+    input.storage.history_present = true;
+    input.storage.generation = 1;
+    input.storage.reachable_commits = {loaded_r, loaded_a, loaded_b};
+    input.storage.reachable_commit_ids = {*id_r, *id_a, *id_b};
+    input.storage.marked_heads = {*id_a, *id_b};
+    input.storage.logical_heads = {*id_a, *id_b};
+
+    auto first = input;
+    auto second = input;
+
+    first.storage.logical_heads = {*id_a, *id_b};
+    second.storage.logical_heads = {*id_b, *id_a};
+
+    const auto first_result = kasumi::reconciliation::reconcile(first);
+    ASSERT_TRUE(first_result.has_value()) << first_result.error().detail;
+
+    const auto second_result = kasumi::reconciliation::reconcile(second);
+    ASSERT_TRUE(second_result.has_value()) << second_result.error().detail;
+
+    EXPECT_TRUE(first_result->plan.operations.empty());
+    EXPECT_TRUE(second_result->plan.operations.empty());
+
+    EXPECT_TRUE(first_result->requires_publication);
+    EXPECT_TRUE(second_result->requires_publication);
+
+    EXPECT_EQ(first_result->candidate_shared_tree,
+              second_result->candidate_shared_tree);
+    EXPECT_EQ(first_result->target_generation,
+              second_result->target_generation);
+
+    EXPECT_EQ(first_result->shared_tree_changed,
+              second_result->shared_tree_changed);
+    EXPECT_EQ(first_result->requires_local_mutation,
+              second_result->requires_local_mutation);
+    EXPECT_EQ(first_result->requires_storage_repair,
+              second_result->requires_storage_repair);
+    EXPECT_EQ(first_result->has_conflicts, second_result->has_conflicts);
+    EXPECT_EQ(first_result->recovering_missing_history,
+              second_result->recovering_missing_history);
+
+    EXPECT_EQ(first_result->requires_state_commit,
+              second_result->requires_state_commit);
+}
+
 TEST(SyncCoordinatorTest, EmptyPlanPublishesAndPersistsConvergenceCommit) {
     auto workspace = kasumi::test::make_temp_workspace("runtime-convergence");
     const auto profile = kasumi::test::workspace_path(workspace, "profile");
