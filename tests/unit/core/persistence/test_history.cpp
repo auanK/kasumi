@@ -1404,4 +1404,305 @@ TEST(HistoryTest, RejectsUnicodeCaseEquivalentSnapshotInCommit) {
     EXPECT_EQ(commit_result.error().code, ErrorCode::InvalidSnapshot);
 }
 
+
+TEST(HistoryTest, StructuralMissingDirectParentRejected) {
+    const auto c0 = make_empty_bootstrap().value();
+    const auto c0_id = compute_id(c0).value();
+    const LoadedCommit lc0{c0_id, c0};
+
+    const std::string missing_id =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    ASSERT_TRUE(valid_commit_id(missing_id));
+
+    const auto c1 = make_commit(1, {missing_id}, make_valid_snapshot()).value();
+    const auto c1_id = compute_id(c1).value();
+    const LoadedCommit lc1{c1_id, c1};
+
+    const auto result = resolve(std::vector<LoadedCommit>{lc0, lc1},
+                                std::vector<std::string>{c1_id});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::MissingParent);
+}
+
+TEST(HistoryTest, StructuralMissingTransitiveParentRejected) {
+    const auto c0 = make_empty_bootstrap().value();
+    const auto c0_id = compute_id(c0).value();
+
+    const auto c1 = make_commit(1, {c0_id}, make_valid_snapshot()).value();
+    const auto c1_id = compute_id(c1).value();
+    const LoadedCommit lc1{c1_id, c1};
+
+    const auto c2 = make_commit(2, {c1_id}, make_valid_snapshot()).value();
+    const auto c2_id = compute_id(c2).value();
+    const LoadedCommit lc2{c2_id, c2};
+
+    // Omit C0 from the supplied loaded graph. Resolve C2.
+    const auto result = resolve(std::vector<LoadedCommit>{lc1, lc2},
+                                std::vector<std::string>{c2_id});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::MissingParent);
+}
+
+TEST(HistoryTest, StructuralParentlessCommitWithNonZeroHeightRejected) {
+    // Construct a parentless commit represented in the loaded graph with:
+    // parents = {}, height = 1
+    const auto c = make_bootstrap(make_valid_snapshot(), 1).value();
+    ASSERT_TRUE(c.parents.empty());
+    ASSERT_EQ(c.height, 1U);
+
+    const auto id = compute_id(c).value();
+    const LoadedCommit lc{id, c};
+
+    const auto result =
+        resolve(std::vector<LoadedCommit>{lc}, std::vector<std::string>{id});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::HeightMismatch);
+}
+
+TEST(HistoryTest, StructuralSingleParentHeightMismatchRejected) {
+    const auto c0 = make_empty_bootstrap().value();
+    const auto c0_id = compute_id(c0).value();
+    const LoadedCommit lc0{c0_id, c0};
+
+    // Control: C1.height = 1 is accepted
+    const auto c1_valid =
+        make_commit(1, {c0_id}, make_valid_snapshot()).value();
+    const auto c1_valid_id = compute_id(c1_valid).value();
+    const LoadedCommit lc1_valid{c1_valid_id, c1_valid};
+    const auto valid_res = resolve(
+        std::vector<LoadedCommit>{lc0, lc1_valid},
+        std::vector<std::string>{c1_valid_id});
+    ASSERT_TRUE(valid_res.has_value());
+
+    // Malformed: C1.height = 2 with parent C0 (height 0)
+    const auto c1_bad = make_commit(2, {c0_id}, make_valid_snapshot()).value();
+    const auto c1_bad_id = compute_id(c1_bad).value();
+    const LoadedCommit lc1_bad{c1_bad_id, c1_bad};
+    const auto bad_res =
+        resolve(std::vector<LoadedCommit>{lc0, lc1_bad},
+                std::vector<std::string>{c1_bad_id});
+    ASSERT_FALSE(bad_res.has_value());
+    EXPECT_EQ(bad_res.error().code, ErrorCode::HeightMismatch);
+}
+
+TEST(HistoryTest, StructuralMultiParentHeightMismatchRejected) {
+    const auto c0 = make_empty_bootstrap().value();
+    const auto c0_id = compute_id(c0).value();
+    const LoadedCommit lc0{c0_id, c0};
+
+    const auto c1 = make_commit(1, {c0_id}, make_custom_snapshot(1)).value();
+    const auto c1_id = compute_id(c1).value();
+    const LoadedCommit lc1{c1_id, c1};
+
+    const auto c2 = make_commit(2, {c1_id}, make_custom_snapshot(2)).value();
+    const auto c2_id = compute_id(c2).value();
+    const LoadedCommit lc2{c2_id, c2};
+
+    const auto b1 = make_commit(1, {c0_id}, make_custom_snapshot(3)).value();
+    const auto b1_id = compute_id(b1).value();
+    const LoadedCommit lb1{b1_id, b1};
+
+    // Merge parents: {C2, B1}. Max parent height is max(2, 1) = 2.
+    // Correct height: max(2, 1) + 1 = 3.
+    const auto m_valid =
+        make_commit(3, {c2_id, b1_id}, make_custom_snapshot(4)).value();
+    const auto m_valid_id = compute_id(m_valid).value();
+    const LoadedCommit lm_valid{m_valid_id, m_valid};
+
+    const auto valid_res =
+        resolve(std::vector<LoadedCommit>{lc0, lc1, lc2, lb1, lm_valid},
+                std::vector<std::string>{m_valid_id});
+    ASSERT_TRUE(valid_res.has_value());
+    EXPECT_EQ(valid_res->height, 3U);
+
+    // Malformed: M.height = 2 (violates max(parent heights) + 1)
+    const auto m_bad =
+        make_commit(2, {c2_id, b1_id}, make_custom_snapshot(4)).value();
+    const auto m_bad_id = compute_id(m_bad).value();
+    const LoadedCommit lm_bad{m_bad_id, m_bad};
+
+    const auto bad_res =
+        resolve(std::vector<LoadedCommit>{lc0, lc1, lc2, lb1, lm_bad},
+                std::vector<std::string>{m_bad_id});
+    ASSERT_FALSE(bad_res.has_value());
+    EXPECT_EQ(bad_res.error().code, ErrorCode::HeightMismatch);
+}
+
+TEST(HistoryTest, StructuralSelfCycleRejected) {
+    const std::string a_id =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const auto commit = Commit{
+        .height = 1,
+        .created_at = 100,
+        .parents = {a_id},
+        .tree = make_valid_snapshot(),
+    };
+    const LoadedCommit la{a_id, commit};
+
+    const auto result = resolve_authenticated(
+        std::vector<LoadedCommit>{la}, std::vector<std::string>{a_id});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_TRUE(result.error().code == ErrorCode::HeightMismatch ||
+                result.error().code == ErrorCode::Cycle);
+}
+
+TEST(HistoryTest, StructuralTwoNodeCycleRejected) {
+    const std::string a_id =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const std::string b_id =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    const auto commit_a = Commit{
+        .height = 1,
+        .created_at = 100,
+        .parents = {b_id},
+        .tree = make_valid_snapshot(),
+    };
+    const auto commit_b = Commit{
+        .height = 2,
+        .created_at = 100,
+        .parents = {a_id},
+        .tree = make_valid_snapshot(),
+    };
+    const LoadedCommit la{a_id, commit_a};
+    const LoadedCommit lb{b_id, commit_b};
+
+    const auto result = resolve_authenticated(
+        std::vector<LoadedCommit>{la, lb}, std::vector<std::string>{b_id});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_TRUE(result.error().code == ErrorCode::HeightMismatch ||
+                result.error().code == ErrorCode::Cycle);
+}
+
+TEST(HistoryTest, StructuralLongerCycleRejected) {
+    const std::string a_id =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const std::string b_id =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const std::string c_id =
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    const auto commit_a = Commit{
+        .height = 1,
+        .created_at = 100,
+        .parents = {c_id},
+        .tree = make_valid_snapshot(),
+    };
+    const auto commit_b = Commit{
+        .height = 2,
+        .created_at = 100,
+        .parents = {a_id},
+        .tree = make_valid_snapshot(),
+    };
+    const auto commit_c = Commit{
+        .height = 3,
+        .created_at = 100,
+        .parents = {b_id},
+        .tree = make_valid_snapshot(),
+    };
+    const LoadedCommit la{a_id, commit_a};
+    const LoadedCommit lb{b_id, commit_b};
+    const LoadedCommit lc{c_id, commit_c};
+
+    const auto result = resolve_authenticated(
+        std::vector<LoadedCommit>{la, lb, lc}, std::vector<std::string>{c_id});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_TRUE(result.error().code == ErrorCode::HeightMismatch ||
+                result.error().code == ErrorCode::Cycle);
+}
+
+TEST(HistoryTest, StructuralInputOrderIndependence) {
+    const auto c0 = make_empty_bootstrap().value();
+    const auto c0_id = compute_id(c0).value();
+    const LoadedCommit lc0{c0_id, c0};
+
+    const auto c1 = make_commit(1, {c0_id}, make_custom_snapshot(1)).value();
+    const auto c1_id = compute_id(c1).value();
+    const LoadedCommit lc1{c1_id, c1};
+
+    const auto c2 = make_commit(2, {c1_id}, make_custom_snapshot(2)).value();
+    const auto c2_id = compute_id(c2).value();
+    const LoadedCommit lc2{c2_id, c2};
+
+    const auto b2 = make_commit(2, {c1_id}, make_custom_snapshot(3)).value();
+    const auto b2_id = compute_id(b2).value();
+    const LoadedCommit lb2{b2_id, b2};
+
+    const std::vector<std::string> marked_heads{c2_id, b2_id};
+
+    // Topological order
+    const std::vector<LoadedCommit> topo{lc0, lc1, lc2, lb2};
+    const auto res_topo = resolve(topo, marked_heads);
+    ASSERT_TRUE(res_topo.has_value());
+
+    // Reverse topological order
+    const std::vector<LoadedCommit> rev_topo{lb2, lc2, lc1, lc0};
+    const auto res_rev = resolve(rev_topo, marked_heads);
+    ASSERT_TRUE(res_rev.has_value());
+
+    // Arbitrary order
+    const std::vector<LoadedCommit> arb{lc2, lc0, lb2, lc1};
+    const auto res_arb = resolve(arb, marked_heads);
+    ASSERT_TRUE(res_arb.has_value());
+
+    EXPECT_EQ(res_topo->heads, res_rev->heads);
+    EXPECT_EQ(res_topo->heads, res_arb->heads);
+    EXPECT_EQ(res_topo->height, res_rev->height);
+    EXPECT_EQ(res_topo->height, res_arb->height);
+    EXPECT_EQ(res_topo->tree, res_rev->tree);
+    EXPECT_EQ(res_topo->tree, res_arb->tree);
+
+    // Verify malformed graph (MissingParent) remains rejected under all orders
+    const std::vector<LoadedCommit> malformed_topo{lc1, lc2};
+    const auto bad_topo =
+        resolve(malformed_topo, std::vector<std::string>{c2_id});
+    ASSERT_FALSE(bad_topo.has_value());
+    EXPECT_EQ(bad_topo.error().code, ErrorCode::MissingParent);
+
+    const std::vector<LoadedCommit> malformed_rev{lc2, lc1};
+    const auto bad_rev =
+        resolve(malformed_rev, std::vector<std::string>{c2_id});
+    ASSERT_FALSE(bad_rev.has_value());
+    EXPECT_EQ(bad_rev.error().code, ErrorCode::MissingParent);
+}
+
+TEST(HistoryTest, StructuralValidDagControl) {
+    // Positive control:
+    // Genesis C0
+    const auto c0 = make_empty_bootstrap().value();
+    const auto c0_id = compute_id(c0).value();
+    const LoadedCommit lc0{c0_id, c0};
+
+    // Linear chain C1 -> C0
+    const auto c1 = make_commit(1, {c0_id}, make_custom_snapshot(1)).value();
+    const auto c1_id = compute_id(c1).value();
+    const LoadedCommit lc1{c1_id, c1};
+
+    // Two concurrent branches: C2 -> C1, B2 -> C1
+    const auto c2 = make_commit(2, {c1_id}, make_custom_snapshot(2)).value();
+    const auto c2_id = compute_id(c2).value();
+    const LoadedCommit lc2{c2_id, c2};
+
+    const auto b2 = make_commit(2, {c1_id}, make_custom_snapshot(3)).value();
+    const auto b2_id = compute_id(b2).value();
+    const LoadedCommit lb2{b2_id, b2};
+
+    // Merge commit M -> {B2, C2} (parents must be lexicographically sorted)
+    std::vector<std::string> merge_parents{b2_id, c2_id};
+    std::ranges::sort(merge_parents);
+    const auto m =
+        make_commit(3, merge_parents, make_custom_snapshot(4)).value();
+    const auto m_id = compute_id(m).value();
+    const LoadedCommit lm{m_id, m};
+
+    const auto result =
+        resolve(std::vector<LoadedCommit>{lc0, lc1, lc2, lb2, lm},
+                std::vector<std::string>{m_id});
+    ASSERT_TRUE(result.has_value());
+    expect_resolution_publishable(*result);
+    EXPECT_EQ(result->heads, std::vector<std::string>{m_id});
+    EXPECT_EQ(result->height, 3U);
+    EXPECT_FALSE(result->has_conflicts);
+}
+
 } // namespace
