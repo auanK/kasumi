@@ -757,7 +757,7 @@ TEST(ApplicationInspectionTest, RemoteTreeUsesExactSnapshotOfSingleHead) {
                   kasumi::test::workspace_path(fixture.workspace, "storage"));
     const auto tree = nested_tree();
     const auto commit =
-        kasumi::history::make_commit(7, {}, tree, 123456).value();
+        kasumi::history::make_commit(0, {}, tree, 123456).value();
     const auto published = publish(fixture, commit);
 
     const auto result = inspect_request(
@@ -771,7 +771,7 @@ TEST(ApplicationInspectionTest, RemoteTreeUsesExactSnapshotOfSingleHead) {
     ASSERT_NE(report, nullptr);
     ASSERT_TRUE(report->history_present);
     EXPECT_EQ(report->commit_id, published.head.commit_id);
-    EXPECT_EQ(report->height, 7U);
+    EXPECT_EQ(report->height, 0U);
     EXPECT_EQ(report->created_at, 123456);
     EXPECT_EQ(report->root_hash,
               kasumi::hash_hex(commit.tree.rows.front().hash));
@@ -996,7 +996,7 @@ TEST(ApplicationInspectionTest, ReportsAuthenticatedHeadMetadataAndStatistics) {
                   kasumi::test::workspace_path(fixture.workspace, "storage"));
 
     const auto commit =
-        kasumi::history::make_commit(7, {}, statistics_tree(), 123456).value();
+        kasumi::history::make_commit(0, {}, statistics_tree(), 123456).value();
     const auto published = publish(fixture, commit);
     ASSERT_FALSE(published.head.commit_id.empty());
 
@@ -1011,14 +1011,14 @@ TEST(ApplicationInspectionTest, ReportsAuthenticatedHeadMetadataAndStatistics) {
     ASSERT_EQ(report.heads.size(), 1U);
     const auto& head = report.heads.front();
     EXPECT_EQ(head.commit_id, published.head.commit_id);
-    EXPECT_EQ(head.height, 7U);
+    EXPECT_EQ(head.height, 0U);
     EXPECT_EQ(head.created_at, 123456);
     EXPECT_TRUE(head.parent_ids.empty());
     EXPECT_EQ(head.root_hash, kasumi::hash_hex(commit.tree.rows.front().hash));
     EXPECT_EQ(head.file_count, 3U);
     EXPECT_EQ(head.directory_count, 2U);
     EXPECT_EQ(head.total_bytes, 6U);
-    EXPECT_EQ(report.observed_height, 7U);
+    EXPECT_EQ(report.observed_height, 0U);
     EXPECT_EQ(report.physical_marker_count, 1U);
 }
 
@@ -1619,7 +1619,7 @@ TEST(ApplicationInspectionTest, RemoteStatReadsExactEffectiveTreeEntries) {
     write_profile(workspace,
                   kasumi::test::workspace_path(fixture.workspace, "storage"));
     const auto commit =
-        kasumi::history::make_commit(7, {}, statistics_tree(), 100).value();
+        kasumi::history::make_commit(0, {}, statistics_tree(), 100).value();
     publish(fixture, commit);
 
     const auto inspect_path = [&](std::string path) {

@@ -417,6 +417,57 @@ collect_ancestors(const Index& index, const std::string& head) {
     return result;
 }
 
+std::expected<std::vector<std::string>, Error>
+find_best_common_ancestors(
+    const Index& index,
+    const std::unordered_set<std::string>& common_ancestors) {
+    if (common_ancestors.empty()) {
+        return std::vector<std::string>{};
+    }
+
+    std::unordered_set<std::string> visited;
+    std::vector<std::pair<std::string, std::size_t>> pending;
+
+    for (const auto& candidate : common_ancestors) {
+        for (const auto& parent : index.at(candidate)->commit.parents) {
+            pending.emplace_back(parent, 1);
+        }
+    }
+
+    while (!pending.empty()) {
+        auto [id, depth] = std::move(pending.back());
+        pending.pop_back();
+
+        if (depth > maximum_graph_depth) {
+            return std::unexpected(
+                Error{ErrorCode::LimitExceeded, "graph depth exceeded"});
+        }
+
+        if (!visited.insert(id).second) {
+            continue;
+        }
+
+        if (visited.size() > maximum_loaded_commit_count) {
+            return std::unexpected(
+                Error{ErrorCode::LimitExceeded, "ancestor count exceeded"});
+        }
+
+        for (const auto& parent : index.at(id)->commit.parents) {
+            pending.emplace_back(parent, depth + 1);
+        }
+    }
+
+    std::vector<std::string> best;
+    for (const auto& candidate : common_ancestors) {
+        if (!visited.contains(candidate)) {
+            best.push_back(candidate);
+        }
+    }
+
+    std::ranges::sort(best);
+    return best;
+}
+
 struct HeadChanges {
     std::string head_id;
     const Snapshot* tree = nullptr;
@@ -1046,8 +1097,15 @@ resolve_impl(std::span<const LoadedCommit> commits,
                 return std::unexpected(Error{ErrorCode::LimitExceeded,
                                              "too many parents in commit"});
             }
-            if (loaded->commit.parents.empty())
+            if (loaded->commit.parents.empty()) {
+                if (!trusted_anchors.contains(id) &&
+                    loaded->commit.height != 0) {
+                    return std::unexpected(
+                        Error{ErrorCode::HeightMismatch,
+                              "untrusted root commit must have height zero"});
+                }
                 continue;
+            }
             std::uint64_t max_parent_height = 0;
             for (const auto& parent : loaded->commit.parents) {
                 const auto it = index.find(parent);
@@ -1127,21 +1185,17 @@ resolve_impl(std::span<const LoadedCommit> commits,
             return std::unexpected(
                 Error{ErrorCode::NoCommonAncestor, "no common ancestor found"});
 
-        std::uint64_t max_height = 0;
-        for (const auto& ancestor : common_ancestors) {
-            max_height =
-                std::max(max_height, index.at(ancestor)->commit.height);
-        }
-        std::vector<std::string> merge_bases;
-        for (const auto& ancestor : common_ancestors) {
-            if (index.at(ancestor)->commit.height == max_height)
-                merge_bases.push_back(ancestor);
-        }
-        if (merge_bases.size() > 1)
+        auto best_bases = find_best_common_ancestors(index, common_ancestors);
+        if (!best_bases)
+            return std::unexpected(best_bases.error());
+        if (best_bases->empty())
+            return std::unexpected(
+                Error{ErrorCode::NoCommonAncestor, "no common ancestor found"});
+        if (best_bases->size() > 1)
             return std::unexpected(Error{ErrorCode::AmbiguousMergeBase,
-                                         "ambiguous merge base (criss-cross)"});
+                                         "ambiguous merge base (multiple best common ancestors)"});
 
-        const auto& base = index.at(merge_bases.front())->commit.tree;
+        const auto& base = index.at(best_bases->front())->commit.tree;
         std::vector<HeadChanges> changes;
         changes.reserve(logical_heads.size());
         for (const auto& head : logical_heads) {

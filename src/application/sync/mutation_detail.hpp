@@ -36,7 +36,8 @@ bool missing(std::filesystem::file_status status) noexcept;
 std::expected<std::filesystem::path, MutationError>
 resolve_local_path(const std::filesystem::path& local_root,
                    const std::filesystem::path& relative,
-                   std::size_t operation_index);
+                   std::size_t operation_index,
+                   std::span<const Operation> plan_operations = {});
 
 // Verifies the integrity of a newly uploaded object via physical hash or
 // get/decrypt.

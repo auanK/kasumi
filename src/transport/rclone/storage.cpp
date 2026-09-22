@@ -373,7 +373,8 @@ Result rclone_put_batch(void* context, const PutBatch& batch) {
     nlohmann::json payload = {{"srcFs", source_path},
                               {"dstFs", objects_remote_fs(*state)},
                               {"createEmptySrcDirs", false}};
-    nlohmann::json config = {{"NoTraverse", true}};
+    nlohmann::json config = {{"NoTraverse", true},
+                             {"NoUpdateModTime", true}};
     if (batch.max_parallel_transfers > 0) {
         config["Transfers"] = batch.max_parallel_transfers;
     }

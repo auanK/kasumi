@@ -79,7 +79,8 @@ bool valid(const Record& record) noexcept {
         record.local_generation > record.storage_generation ||
         record.storage_generation ==
             std::numeric_limits<std::uint64_t>::max() ||
-        (record.publication_required && !record.observed_head_id.empty()) ||
+        (record.publication_required && !record.observed_head_id.empty() &&
+         !kasumi::history::valid_commit_id(record.observed_head_id)) ||
         (!record.publication_required &&
          (!kasumi::history::valid_commit_id(record.observed_head_id) ||
           !valid_local_only_phase(record.phase))) ||
@@ -176,8 +177,12 @@ std::expected<Record, std::string> make_record(std::string transaction_id,
     if (!publication_required && plan.target_generation != storage_generation) {
         return std::unexpected("local generation cannot publish state");
     }
-    if (!publication_required && !history::valid_commit_id(observed_head_id)) {
-        return std::unexpected("invalid observed logical head");
+    if (!observed_head_id.empty() &&
+        !history::valid_commit_id(observed_head_id)) {
+        return std::unexpected("invalid observed head identity");
+    }
+    if (!publication_required && observed_head_id.empty()) {
+        return std::unexpected("missing observed logical head");
     }
 
     Record record{

@@ -65,7 +65,8 @@ prepare_operation(const Operation& operation,
                   std::size_t operation_index,
                   const std::filesystem::path& local_root,
                   const platform::Workspace& workspace,
-                  const transaction::OperationProgress& current_progress);
+                  const transaction::OperationProgress& current_progress,
+                  std::span<const Operation> plan_operations = {});
 
 // Restores previous state of a prepared operation.
 std::expected<void, MutationError>

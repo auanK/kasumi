@@ -46,12 +46,15 @@ Commit publication does not require an exclusive global synchronization lock tha
 
 ## Merge Base & Three-Way Reconciler
 
-When a client observes multiple concurrent heads (`CA` and `CB`), it traverses ancestry to find their common ancestors:
+When a client observes multiple concurrent heads (`CA` and `CB`), it traverses ancestry to determine their merge base:
 
-1. Ancestry traversal identifies all common ancestor commits of the active logical heads;
-2. Kasumi determines the maximum commit height among those common ancestors;
-3. Kasumi selects the unique common ancestor with the greatest commit height as the **merge base**;
-4. If more than one common ancestor exists at that maximum height, resolution stops with an ambiguous merge-base error (`AmbiguousMergeBase`) rather than selecting one arbitrarily.
+1. Compute common ancestors of all active logical heads;
+2. Remove any common ancestor that is an ancestor of another common ancestor (dominated ancestors);
+3. The remaining commits are the best common ancestors (the maximal elements under the ancestry partial order);
+4. If exactly one best common ancestor exists, Kasumi selects it as the **merge base**;
+5. If more than one incomparable best common ancestor exists, resolution stops with an ambiguous merge-base error (`AmbiguousMergeBase`) rather than selecting one arbitrarily.
+
+Commit height is structural metadata and is not sufficient to order incomparable commits causally.
 
 ```text
 C0 → CA: Mutations on branch A

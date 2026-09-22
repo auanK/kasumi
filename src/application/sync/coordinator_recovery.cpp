@@ -103,6 +103,7 @@ bool same_tree(const Snapshot& left, const Snapshot& right) noexcept {
 
 std::expected<void, Error>
 ensure_state(const runtime::RuntimeData& runtime_data,
+             const transaction::Record& record,
              const history::LoadedCommit& commit,
              const std::string& ciphertext_id,
              const std::string& epoch_id,
@@ -129,6 +130,14 @@ ensure_state(const runtime::RuntimeData& runtime_data,
         same_tree((*current)->tree, commit.commit.tree) &&
         (epoch_id.empty() || (*current)->epoch_id == epoch_id)) {
         return {};
+    }
+    if (*current &&
+        (record.observed_head_id.empty() ||
+         (*current)->commit_id != record.observed_head_id ||
+         (*current)->height != record.local_generation)) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::RecoveryConflict,
+            "state.db does not match the pending publication transition"));
     }
     if (!state_storage::save_state(
             runtime_data.database_path,
@@ -347,7 +356,8 @@ std::expected<void, Error> resume_pending_local_mutations(
                                                         index,
                                                         runtime_data.local_dir,
                                                         workspace,
-                                                        record.progress[index]);
+                                                        record.progress[index],
+                                                        record.plan.operations);
             if (!prepared) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::MutationFailure,
@@ -698,6 +708,7 @@ roll_forward(const journal::Paths& paths,
         }
         if (auto state = ensure_state(
                 runtime_data,
+                record,
                 *commit,
                 record.ciphertext_id,
                 accepted_epoch ? accepted_epoch->epoch_id : std::string{},

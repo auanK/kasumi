@@ -134,8 +134,19 @@ bool cache_graph_is_complete(const InspectionHistoryCache& cache) {
         return false;
     }
     const std::array marked_heads{cache.anchor_id};
+    std::vector<std::string> anchors;
+    if (cache.epoch) {
+        for (const auto& commit : cache.commits) {
+            if (commit.commit.parents.empty() && commit.commit.height != 0) {
+                anchors.push_back(commit.id);
+            }
+        }
+    }
     const auto resolved =
-        history::resolve_authenticated(cache.commits, marked_heads);
+        anchors.empty()
+            ? history::resolve_authenticated(cache.commits, marked_heads)
+            : history::resolve_from_frontier_authenticated(
+                  cache.commits, marked_heads, anchors);
     return resolved && resolved->heads == std::vector{cache.anchor_id};
 }
 
@@ -348,8 +359,20 @@ bool merge_history_cache(observation::history::StorageView& observed,
             static_cast<void>(unused);
             commits.push_back(std::move(commit));
         }
+        std::vector<std::string> anchors;
+        if (observed.epoch) {
+            for (const auto& commit : commits) {
+                if (commit.commit.parents.empty() &&
+                    commit.commit.height != 0) {
+                    anchors.push_back(commit.id);
+                }
+            }
+        }
         const auto resolved =
-            history::resolve_authenticated(commits, observed.marked_heads);
+            anchors.empty()
+                ? history::resolve_authenticated(commits, observed.marked_heads)
+                : history::resolve_from_frontier_authenticated(
+                      commits, observed.marked_heads, anchors);
         if (!resolved || resolved->tree != observed.effective_tree ||
             resolved->height != observed.observed_height ||
             resolved->heads != observed.logical_heads ||

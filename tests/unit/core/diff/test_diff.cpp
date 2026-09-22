@@ -326,7 +326,7 @@ TEST(DiffThreeWayTest,
                        signature(Action::Download,
                                  "notes.txt.kasumiconflict_remote",
                                  kasumi::hash_hex(cloud.hash),
-                                 {},
+                                 "notes.txt",
                                  cloud.size,
                                  true)});
 
@@ -373,7 +373,7 @@ TEST(DiffThreeWayTest, UnicodeConflictPathsPreserveAllConflictBranches) {
                        signature(Action::Download,
                                  logical_path + ".kasumiconflict_remote",
                                  kasumi::hash_hex(cloud_file.hash),
-                                 {},
+                                 logical_path,
                                  cloud_file.size,
                                  true)});
 
@@ -429,8 +429,20 @@ TEST(DiffThreeWayTest, FileAndDirectoryStatesDoNotBecomeAccidentalDeletes) {
     cloud_directory.mtime = now + std::chrono::hours{1};
     const auto reverse = kasumi::diff::compare_trees(
         tree({local_file}), tree(), tree({cloud_directory}));
-    expect_operations(reverse,
-                      {signature(Action::CreateLocalDirectory, "reverse")});
+    expect_operations(
+        reverse,
+        {signature(Action::CreateLocalDirectory, "reverse"),
+         signature(Action::RenameLocal,
+                   "reverse",
+                   {},
+                   "reverse.kasumiconflict_local",
+                   0,
+                   true),
+         signature(Action::Upload,
+                   "reverse.kasumiconflict_local",
+                   kasumi::hash_hex(local_file.hash),
+                   {},
+                   local_file.size)});
 }
 
 TEST(DiffThreeWayTest, IgnoredFilesOnRemoteArePurgedAndNotDownloaded) {

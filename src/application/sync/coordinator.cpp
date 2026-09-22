@@ -90,7 +90,8 @@ std::expected<std::filesystem::file_status, Error>
 read_status(const std::filesystem::path& path) {
     std::error_code error;
     const auto status = std::filesystem::symlink_status(path, error);
-    if (error == std::errc::no_such_file_or_directory) {
+    if (error == std::errc::no_such_file_or_directory ||
+        error == std::errc::not_a_directory) {
         return std::filesystem::file_status{
             std::filesystem::file_type::not_found};
     }
@@ -599,12 +600,29 @@ checkpoint_upload_batch(const journal::Paths& paths,
     return {};
 }
 
+bool has_local_rollback_work(const transaction::Record& record) noexcept {
+    for (std::size_t index = 0; index < record.plan.operations.size();
+         ++index) {
+        if (is_local_mutation(record.plan.operations[index].action) &&
+            record.progress[index].state >=
+                transaction::OperationState::BackupCreated) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::expected<void, Error>
 rollback_transaction(const journal::Paths& paths,
                      transaction::Record& record,
                      const std::optional<platform::Workspace>& workspace,
                      const std::filesystem::path& local_root,
                      std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+    if (has_local_rollback_work(record) && !workspace) {
+        return std::unexpected(make_error(
+            ErrorCode::RecoveryConflict,
+            "transaction workspace missing while local rollback is required"));
+    }
     if (workspace) {
         for (std::size_t index = record.plan.operations.size(); index > 0;
              --index) {
@@ -653,6 +671,11 @@ std::expected<void, Error>
 rollback_local_mutations(transaction::Record& record,
                          const std::optional<platform::Workspace>& workspace,
                          const std::filesystem::path& local_root) {
+    if (has_local_rollback_work(record) && !workspace) {
+        return std::unexpected(make_error(
+            ErrorCode::RecoveryConflict,
+            "transaction workspace missing while local rollback is required"));
+    }
     if (!workspace) {
         return {};
     }
@@ -1218,7 +1241,11 @@ execute(const runtime::RuntimeData& runtime_data,
         return std::unexpected(profile.error());
     }
     std::string observed_head_id;
-    if (!reconciliation_result.requires_publication) {
+    if (reconciliation_result.requires_publication) {
+        if (observed_input.base_state_present) {
+            observed_head_id = observed_input.base_commit_id;
+        }
+    } else {
         if (observed_input.storage.logical_heads.size() != 1) {
             return std::unexpected(detail::make_error(
                 ErrorCode::InvalidInput,
@@ -1278,7 +1305,8 @@ execute(const runtime::RuntimeData& runtime_data,
                                         index,
                                         runtime_data.local_dir,
                                         *workspace,
-                                        record->progress[index]);
+                                        record->progress[index],
+                                        record->plan.operations);
         if (!prepared) {
             auto rolled = detail::rollback_transaction(*paths,
                                                        *record,

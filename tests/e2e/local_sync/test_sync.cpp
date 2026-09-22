@@ -275,12 +275,11 @@ void expect_fixed_point(Scenario& scenario, const Client& client) {
 void set_mtime(const Client& client,
                std::string_view path,
                std::filesystem::file_time_type timestamp) {
-    std::error_code error;
-    std::filesystem::last_write_time(
-        client_local_dir(client) / kasumi::platform::path::from_utf8(path),
-        timestamp,
-        error);
-    ASSERT_FALSE(error) << error.message();
+    const auto target =
+        client_local_dir(client) / kasumi::platform::path::from_utf8(path);
+    const auto result =
+        kasumi::platform::metadata::set_last_write_time(target, timestamp);
+    ASSERT_TRUE(result.has_value()) << result.error();
 }
 
 void remove_file(const Client& client, std::string_view path) {
@@ -1063,6 +1062,393 @@ TEST(H3LocalSyncTest, ThreePersistentClientsConvergeBidirectionally) {
     expect_file(c, "from-b.txt", "B");
     expect_converged(scenario, {&a, &b, &c});
     expect_fixed_point(scenario, a);
+}
+
+TEST(H3LocalSyncTest, ConcurrentDirectoryDeletePreservesModifiedDescendant) {
+    auto scenario = make_scenario();
+    const auto a = make_client(scenario, "a");
+    const auto b = make_client(scenario, "b");
+
+    kasumi::test::write_text(client_local_dir(a) / "docs/changed.txt",
+                             "BASE-CHANGED");
+    kasumi::test::write_text(client_local_dir(a) / "docs/obsolete.txt",
+                             "BASE-OBSOLETE");
+    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync(b));
+
+    kasumi::test::write_text(client_local_dir(a) / "docs/changed.txt",
+                             "A-MODIFIED");
+    ASSERT_TRUE(sync(a));
+
+    remove_file(b, "docs/changed.txt");
+    remove_file(b, "docs/obsolete.txt");
+    remove_directory(b, "docs");
+    expect_absent(b, "docs");
+
+    ASSERT_TRUE(sync(b));
+
+    expect_file(b, "docs/changed.txt", "A-MODIFIED");
+    expect_absent(b, "docs/obsolete.txt");
+
+    ASSERT_TRUE(sync(a));
+
+    expect_file(a, "docs/changed.txt", "A-MODIFIED");
+    expect_file(b, "docs/changed.txt", "A-MODIFIED");
+    expect_absent(a, "docs/obsolete.txt");
+    expect_absent(b, "docs/obsolete.txt");
+
+    auto observed_remote = remote(scenario);
+    ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
+    const auto* changed_row =
+        kasumi::find_row(observed_remote->effective_tree, "docs/changed.txt");
+    ASSERT_NE(changed_row, nullptr);
+    EXPECT_EQ(changed_row->hash, kasumi::hasher::hash_string("A-MODIFIED"));
+    expect_remote_absent(*observed_remote, "docs/obsolete.txt");
+
+    expect_converged(scenario, {&a, &b});
+    expect_fixed_point(scenario, a);
+    expect_fixed_point(scenario, b);
+}
+
+std::vector<std::pair<std::string, std::string>>
+read_local_payloads(const Client& client) {
+    std::vector<std::pair<std::string, std::string>> results;
+    for (const auto& entry :
+         std::filesystem::recursive_directory_iterator(client_local_dir(client))) {
+        if (entry.is_regular_file()) {
+            const auto rel = std::filesystem::relative(entry.path(),
+                                                      client_local_dir(client));
+            results.emplace_back(
+                kasumi::platform::path::to_logical_utf8(rel),
+                kasumi::test::read_text(entry.path()));
+        }
+    }
+    std::ranges::sort(results);
+    return results;
+}
+
+std::vector<std::string> payload_contents(
+    const std::vector<std::pair<std::string, std::string>>& files) {
+    std::vector<std::string> contents;
+    for (const auto& [path, content] : files) {
+        contents.push_back(content);
+    }
+    std::ranges::sort(contents);
+    return contents;
+}
+
+TEST(H3LocalSyncTest, ThreeConcurrentModificationsPreserveAllVersions) {
+    auto scenario = make_scenario();
+    const auto a = make_client(scenario, "a");
+    const auto b = make_client(scenario, "b");
+    const auto c = make_client(scenario, "c");
+
+    // 1. Establish baseline
+    kasumi::test::write_text(client_local_dir(a) / "file.txt", "BASE");
+    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync(b));
+    ASSERT_TRUE(sync(c));
+
+    expect_file(a, "file.txt", "BASE");
+    expect_file(b, "file.txt", "BASE");
+    expect_file(c, "file.txt", "BASE");
+
+    // 2. Create three genuinely concurrent modifications
+    kasumi::test::write_text(client_local_dir(a) / "file.txt", "A-V2");
+    kasumi::test::write_text(client_local_dir(b) / "file.txt", "B-V2");
+    kasumi::test::write_text(client_local_dir(c) / "file.txt", "C-V2");
+
+    const auto base_time = std::filesystem::file_time_type::clock::now();
+    set_mtime(a, "file.txt", base_time + std::chrono::hours{1});
+    set_mtime(b, "file.txt", base_time + std::chrono::hours{2});
+    set_mtime(c, "file.txt", base_time + std::chrono::hours{3});
+
+    // 3. First publication: sync A
+    ASSERT_TRUE(sync(a));
+
+    // 4. First conflict reconciliation: sync B
+    ASSERT_TRUE(sync(b));
+
+    const auto b_payloads_step4 = read_local_payloads(b);
+    EXPECT_EQ(b_payloads_step4.size(), 2U);
+    EXPECT_EQ(payload_contents(b_payloads_step4),
+              (std::vector<std::string>{"A-V2", "B-V2"}));
+
+    // 5. Third concurrent writer: sync C
+    ASSERT_TRUE(sync(c));
+
+    const auto c_payloads_step5 = read_local_payloads(c);
+    EXPECT_EQ(c_payloads_step5.size(), 3U);
+    EXPECT_EQ(payload_contents(c_payloads_step5),
+              (std::vector<std::string>{"A-V2", "B-V2", "C-V2"}));
+
+    // 6. Convergence: sync A and B again until all three consume the final state
+    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync(b));
+    ASSERT_TRUE(sync(c));
+    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync(b));
+    ASSERT_TRUE(sync(c));
+
+    auto observed_remote = remote(scenario);
+
+    // Required assertions on all clients
+    const std::vector<std::string> expected_payloads{"A-V2", "B-V2", "C-V2"};
+    for (const auto* client : {&a, &b, &c}) {
+        const auto payloads = read_local_payloads(*client);
+        ASSERT_EQ(payloads.size(), 3U)
+            << "Client " << client_name(*client) << " does not have 3 payloads";
+        EXPECT_EQ(payload_contents(payloads), expected_payloads);
+
+        std::unordered_set<std::string> distinct_paths;
+        for (const auto& [path, content] : payloads) {
+            distinct_paths.insert(path);
+            EXPECT_NE(content, "BASE");
+        }
+        EXPECT_EQ(distinct_paths.size(), 3U);
+    }
+
+    // Inspect effective remote tree
+    ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
+    EXPECT_EQ(observed_remote->logical_heads.size(), 1U);
+
+    std::vector<kasumi::Hash> remote_file_hashes;
+    for (const auto& row : observed_remote->effective_tree.rows) {
+        if (!row.is_directory) {
+            remote_file_hashes.push_back(row.hash);
+        }
+    }
+    std::ranges::sort(remote_file_hashes);
+
+    std::vector<kasumi::Hash> expected_hashes{
+        kasumi::hasher::hash_string("A-V2"),
+        kasumi::hasher::hash_string("B-V2"),
+        kasumi::hasher::hash_string("C-V2")};
+    std::ranges::sort(expected_hashes);
+
+    EXPECT_EQ(remote_file_hashes, expected_hashes);
+
+    expect_converged(scenario, {&a, &b, &c});
+    expect_fixed_point(scenario, a);
+    expect_fixed_point(scenario, b);
+    expect_fixed_point(scenario, c);
+}
+
+void verify_file_and_directory_branches_preserved(
+    Scenario& scenario,
+    const Client& a,
+    const Client& b) {
+    const std::vector<std::string> expected_contents{
+        "CHILD-PAYLOAD", "DEEP-PAYLOAD", "FILE-PAYLOAD"};
+
+    for (const auto* client : {&a, &b}) {
+        const auto payloads = read_local_payloads(*client);
+        ASSERT_EQ(payloads.size(), 3U)
+            << "Client " << client_name(*client)
+            << " does not have exactly 3 payloads";
+        EXPECT_EQ(payload_contents(payloads), expected_contents);
+
+        std::string file_path;
+        std::string child_path;
+        std::string deep_path;
+        for (const auto& [path, content] : payloads) {
+            if (content == "FILE-PAYLOAD") file_path = path;
+            else if (content == "CHILD-PAYLOAD") child_path = path;
+            else if (content == "DEEP-PAYLOAD") deep_path = path;
+        }
+        EXPECT_FALSE(file_path.empty());
+        EXPECT_FALSE(child_path.empty());
+        EXPECT_FALSE(deep_path.empty());
+
+        // File and directory branches occupy non-overlapping logical paths
+        EXPECT_NE(file_path, child_path);
+        EXPECT_NE(file_path, deep_path);
+        EXPECT_FALSE(child_path.starts_with(file_path + "/"));
+        EXPECT_FALSE(deep_path.starts_with(file_path + "/"));
+
+        // Ancestor/descendant consistency: child and deep must share parent directory structure
+        const auto child_parent =
+            std::filesystem::path(child_path).parent_path().lexically_normal();
+        const auto deep_parent = std::filesystem::path(deep_path)
+                                     .parent_path()
+                                     .parent_path()
+                                     .lexically_normal();
+        EXPECT_EQ(child_parent, deep_parent);
+    }
+
+    auto observed_remote = remote(scenario);
+    ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
+    EXPECT_EQ(observed_remote->logical_heads.size(), 1U);
+
+    std::vector<kasumi::Hash> file_hashes;
+    for (const auto& row : observed_remote->effective_tree.rows) {
+        if (!row.is_directory) {
+            file_hashes.push_back(row.hash);
+        }
+    }
+    std::ranges::sort(file_hashes);
+    std::vector<kasumi::Hash> expected_hashes{
+        kasumi::hasher::hash_string("CHILD-PAYLOAD"),
+        kasumi::hasher::hash_string("DEEP-PAYLOAD"),
+        kasumi::hasher::hash_string("FILE-PAYLOAD")};
+    std::ranges::sort(expected_hashes);
+    EXPECT_EQ(file_hashes, expected_hashes);
+
+    EXPECT_TRUE(kasumi::valid_snapshot(observed_remote->effective_tree, false));
+
+    expect_converged(scenario, {&a, &b});
+    expect_fixed_point(scenario, a);
+    expect_fixed_point(scenario, b);
+}
+
+TEST(H3LocalSyncTest, ConcurrentFileDirectoryCreationPreservesBothBranches) {
+    auto scenario = make_scenario();
+    const auto a = make_client(scenario, "a");
+    const auto b = make_client(scenario, "b");
+
+    // 1. Establish an empty shared baseline
+    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync(b));
+    expect_absent(a, "node");
+    expect_absent(b, "node");
+
+    // 2. Diverge without further sync
+    kasumi::test::write_text(client_local_dir(a) / "node", "FILE-PAYLOAD");
+
+    make_directory(client_local_dir(b) / "node" / "nested");
+    kasumi::test::write_text(client_local_dir(b) / "node" / "child.txt",
+                             "CHILD-PAYLOAD");
+    kasumi::test::write_text(
+        client_local_dir(b) / "node" / "nested" / "deep.txt", "DEEP-PAYLOAD");
+
+    // 3. Publish A
+    ASSERT_TRUE(sync(a));
+    auto remote_after_a = remote(scenario);
+    ASSERT_TRUE(remote_after_a.has_value()) << remote_after_a.error();
+    const auto* remote_node =
+        kasumi::find_row(remote_after_a->effective_tree, "node");
+    ASSERT_NE(remote_node, nullptr);
+    EXPECT_FALSE(remote_node->is_directory);
+    EXPECT_EQ(remote_node->hash, kasumi::hasher::hash_string("FILE-PAYLOAD"));
+
+    const auto stored_b_before = state(b);
+    ASSERT_TRUE(stored_b_before.has_value());
+
+    // 4. Reconcile B
+    const auto sync_b_result = sync(b);
+    if (!sync_b_result) {
+        // Verify conservative failure properties:
+        // - A's published FILE-PAYLOAD remains remotely reachable
+        auto observed_remote = remote(scenario);
+        ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
+        const auto* published_node =
+            kasumi::find_row(observed_remote->effective_tree, "node");
+        ASSERT_NE(published_node, nullptr);
+        EXPECT_FALSE(published_node->is_directory);
+        EXPECT_EQ(published_node->hash,
+                  kasumi::hasher::hash_string("FILE-PAYLOAD"));
+
+        // - B's local directory subtree remains intact
+        expect_file(b, "node/child.txt", "CHILD-PAYLOAD");
+        expect_file(b, "node/nested/deep.txt", "DEEP-PAYLOAD");
+
+        // - No new remote commit/head was published from B
+        EXPECT_EQ(observed_remote->logical_heads.size(), 1U);
+        EXPECT_EQ(observed_remote->logical_heads.front(),
+                  remote_after_a->logical_heads.front());
+
+        // - B's accepted StoredState was not advanced
+        const auto stored_b_after = state(b);
+        ASSERT_TRUE(stored_b_after.has_value());
+        if (stored_b_before->has_value()) {
+            ASSERT_TRUE(stored_b_after->has_value());
+            EXPECT_EQ((*stored_b_after)->commit_id,
+                      (*stored_b_before)->commit_id);
+            EXPECT_EQ((*stored_b_after)->height, (*stored_b_before)->height);
+        }
+    }
+
+    ASSERT_TRUE(sync_b_result.has_value())
+        << "sync(b) failed: " << (sync_b_result ? "" : sync_b_result.error());
+
+    // 5. Consume on A and verify convergence
+    ASSERT_TRUE(sync(a));
+    verify_file_and_directory_branches_preserved(scenario, a, b);
+}
+
+TEST(H3LocalSyncTest, ConcurrentDirectoryFileCreationPreservesBothBranches) {
+    auto scenario = make_scenario();
+    const auto a = make_client(scenario, "a");
+    const auto b = make_client(scenario, "b");
+
+    // 1. Establish an empty shared baseline
+    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync(b));
+    expect_absent(a, "node");
+    expect_absent(b, "node");
+
+    // 2. Diverge: A creates directory subtree, B creates regular file
+    make_directory(client_local_dir(a) / "node" / "nested");
+    kasumi::test::write_text(client_local_dir(a) / "node" / "child.txt",
+                             "CHILD-PAYLOAD");
+    kasumi::test::write_text(
+        client_local_dir(a) / "node" / "nested" / "deep.txt", "DEEP-PAYLOAD");
+
+    kasumi::test::write_text(client_local_dir(b) / "node", "FILE-PAYLOAD");
+
+    // 3. Publish A (directory subtree)
+    ASSERT_TRUE(sync(a));
+    auto remote_after_a = remote(scenario);
+    ASSERT_TRUE(remote_after_a.has_value()) << remote_after_a.error();
+    const auto* remote_node =
+        kasumi::find_row(remote_after_a->effective_tree, "node");
+    ASSERT_NE(remote_node, nullptr);
+    EXPECT_TRUE(remote_node->is_directory);
+    expect_remote_present(*remote_after_a, "node/child.txt");
+    expect_remote_present(*remote_after_a, "node/nested/deep.txt");
+
+    const auto stored_b_before = state(b);
+    ASSERT_TRUE(stored_b_before.has_value());
+
+    // 4. Reconcile B (regular file)
+    const auto sync_b_result = sync(b);
+    if (!sync_b_result) {
+        // Verify conservative failure properties:
+        // - A's published directory subtree remains remotely reachable
+        auto observed_remote = remote(scenario);
+        ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
+        const auto* published_node =
+            kasumi::find_row(observed_remote->effective_tree, "node");
+        ASSERT_NE(published_node, nullptr);
+        EXPECT_TRUE(published_node->is_directory);
+        expect_remote_present(*observed_remote, "node/child.txt");
+        expect_remote_present(*observed_remote, "node/nested/deep.txt");
+
+        // - B's local file remains intact
+        expect_file(b, "node", "FILE-PAYLOAD");
+
+        // - No new remote commit/head was published from B
+        EXPECT_EQ(observed_remote->logical_heads.size(), 1U);
+        EXPECT_EQ(observed_remote->logical_heads.front(),
+                  remote_after_a->logical_heads.front());
+
+        // - B's accepted StoredState was not advanced
+        const auto stored_b_after = state(b);
+        ASSERT_TRUE(stored_b_after.has_value());
+        if (stored_b_before->has_value()) {
+            ASSERT_TRUE(stored_b_after->has_value());
+            EXPECT_EQ((*stored_b_after)->commit_id,
+                      (*stored_b_before)->commit_id);
+            EXPECT_EQ((*stored_b_after)->height, (*stored_b_before)->height);
+        }
+    }
+
+    ASSERT_TRUE(sync_b_result.has_value())
+        << "sync(b) failed: " << (sync_b_result ? "" : sync_b_result.error());
+
+    // 5. Consume on A and verify convergence
+    ASSERT_TRUE(sync(a));
+    verify_file_and_directory_branches_preserved(scenario, a, b);
 }
 
 } // namespace
