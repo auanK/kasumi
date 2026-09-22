@@ -12,7 +12,8 @@ namespace kasumi::application::sync::mutation::detail {
 namespace {
 
 bool path_not_found(const std::error_code& error) noexcept {
-    return error == std::errc::no_such_file_or_directory;
+    return error == std::errc::no_such_file_or_directory ||
+           error == std::errc::not_a_directory;
 }
 
 } // namespace

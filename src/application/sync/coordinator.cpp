@@ -90,7 +90,8 @@ std::expected<std::filesystem::file_status, Error>
 read_status(const std::filesystem::path& path) {
     std::error_code error;
     const auto status = std::filesystem::symlink_status(path, error);
-    if (error == std::errc::no_such_file_or_directory) {
+    if (error == std::errc::no_such_file_or_directory ||
+        error == std::errc::not_a_directory) {
         return std::filesystem::file_status{
             std::filesystem::file_type::not_found};
     }

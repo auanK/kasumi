@@ -1594,6 +1594,55 @@ TEST(SyncCoordinatorTest, DirectionBFailureWhenConflictDestinationAlreadyExists)
     EXPECT_EQ(kasumi::test::read_text(local / "node.kasumiconflict_local"), pre_existing);
 }
 
+TEST(SyncCoordinatorTest, DirectionBDescendantPreparationSucceedsWithAncestorFile) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("dirb-descendant-prep");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto transaction =
+        kasumi::test::workspace_path(workspace, "transaction");
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    ASSERT_TRUE(std::filesystem::create_directories(transaction));
+    const kasumi::platform::Workspace tx{.root = transaction};
+
+    const std::string payload = "ANCESTOR-PAYLOAD";
+    kasumi::test::write_text(local / "node", payload);
+
+    const std::vector<kasumi::Operation> plan_ops{
+        kasumi::Operation{
+            .action = kasumi::Action::RenameLocal,
+            .path = "node",
+            .hash = kasumi::hash_hex(kasumi::hasher::hash_string(payload)),
+            .alt_path = "node.kasumiconflict_local",
+            .size = payload.size(),
+            .exclusive_destination = true},
+        kasumi::Operation{
+            .action = kasumi::Action::CreateLocalDirectory,
+            .path = "node"},
+        kasumi::Operation{
+            .action = kasumi::Action::CreateLocalDirectory,
+            .path = "node/nested"},
+        kasumi::Operation{
+            .action = kasumi::Action::Download,
+            .path = "node/child.txt",
+            .hash = kasumi::hash_hex(kasumi::hasher::hash_string("CHILD")),
+            .size = 5},
+        kasumi::Operation{
+            .action = kasumi::Action::Download,
+            .path = "node/nested/deep.txt",
+            .hash = kasumi::hash_hex(kasumi::hasher::hash_string("DEEP")),
+            .size = 4}};
+
+    // While "node" is still a regular file on disk, all operations must prepare successfully
+    for (std::size_t i = 0; i < plan_ops.size(); ++i) {
+        kasumi::transaction::OperationProgress progress{.backup_slot = static_cast<std::uint32_t>(i)};
+        auto prepared = kasumi::application::sync::mutation::prepare_operation(
+            plan_ops[i], i, local, tx, progress, plan_ops);
+        ASSERT_TRUE(prepared.has_value())
+            << "Op " << i << " (" << plan_ops[i].path << ") failed: "
+            << prepared.error().detail;
+    }
+}
+
 TEST(SyncCoordinatorTest, PrepareCommitTimestampSurvivesCanonicalRoundTrip) {
     const kasumi::Snapshot tree{
         .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
