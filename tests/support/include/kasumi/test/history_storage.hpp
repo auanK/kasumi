@@ -194,6 +194,7 @@ struct FakeState {
     bool fail_barrier_presence = false;
     bool fail_commit_put = false;
     bool persist_commit_on_put_failure = false;
+    bool fail_quarantine_metadata_put = false;
     bool fail_commit_get = false;
     bool fail_content_get = false;
     bool fail_marker_put = false;
@@ -243,8 +244,11 @@ kasumi::transport::Result fake_put(void* context,
     auto* state = fake_state(context);
     const bool failed_commit = is_commit(identifier) && state->fail_commit_put;
     const bool failed_marker = is_marker(identifier) && state->fail_marker_put;
+    const bool failed_quarantine_metadata =
+        state->fail_quarantine_metadata_put && identifier.ends_with(".meta");
     if ((failed_commit && !state->persist_commit_on_put_failure) ||
-        (failed_marker && !state->persist_marker_on_put_failure)) {
+        (failed_marker && !state->persist_marker_on_put_failure) ||
+        failed_quarantine_metadata) {
         return std::unexpected(
             kasumi::transport::Error{.code = kasumi::transport::ErrorCode::Io,
                                      .message = "injected put failure"});

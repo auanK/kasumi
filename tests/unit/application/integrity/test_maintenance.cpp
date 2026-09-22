@@ -494,6 +494,79 @@ TEST(IntegrityMaintenanceTest, PurgesOnlyAfterTenDaysAndAnotherCollection) {
         storage.transport, aged->metadata_identifier, Presence::Absent);
 }
 
+TEST(IntegrityMaintenanceTest, QuarantineRetentionBoundaryUsesInclusiveAge) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    publish_remote(storage.transport,
+                   storage.workspace,
+                   kasumi::history::make_empty_bootstrap().value());
+    const auto boundary =
+        put_content(storage.transport, storage.workspace, "boundary", "boundary");
+    const auto beyond =
+        put_content(storage.transport, storage.workspace, "beyond", "beyond");
+    const auto boundary_quarantine =
+        protocol::quarantine_identifier(test_layout(), boundary).value();
+    const auto beyond_quarantine =
+        protocol::quarantine_identifier(test_layout(), beyond).value();
+    ASSERT_TRUE(kasumi::application::integrity::garbage_collect(
+        runtime, storage.transport, test_key()));
+
+    const auto now = kasumi::platform::clock::unix_seconds();
+    ASSERT_TRUE(now.has_value()) << now.error();
+    ASSERT_TRUE(protocol::record_quarantine(
+        storage.transport,
+        boundary_quarantine,
+        *now - protocol::quarantine_retention_seconds,
+        test_key(),
+        kasumi::test::workspace_root(storage.workspace)));
+    ASSERT_TRUE(protocol::record_quarantine(
+        storage.transport,
+        beyond_quarantine,
+        *now - protocol::quarantine_retention_seconds - 1,
+        test_key(),
+        kasumi::test::workspace_root(storage.workspace)));
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, storage.transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->purged_objects, 2U);
+    expect_presence(storage.transport, boundary_quarantine, Presence::Absent);
+    expect_presence(storage.transport, beyond_quarantine, Presence::Absent);
+}
+
+TEST(IntegrityMaintenanceTest,
+     OriginalReappearancePreservesExpiredQuarantineCopy) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    publish_remote(storage.transport,
+                   storage.workspace,
+                   kasumi::history::make_empty_bootstrap().value());
+    const auto orphan =
+        put_content(storage.transport, storage.workspace, "orphan", "orphan");
+    const auto quarantined =
+        protocol::quarantine_identifier(test_layout(), orphan).value();
+    ASSERT_TRUE(kasumi::application::integrity::garbage_collect(
+        runtime, storage.transport, test_key()));
+
+    const auto now = kasumi::platform::clock::unix_seconds();
+    ASSERT_TRUE(now.has_value()) << now.error();
+    ASSERT_TRUE(protocol::record_quarantine(
+        storage.transport,
+        quarantined,
+        *now - protocol::quarantine_retention_seconds - 1,
+        test_key(),
+        kasumi::test::workspace_root(storage.workspace)));
+    put_content(storage.transport, storage.workspace, "orphan", "orphan-again");
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, storage.transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->purged_objects, 0U);
+    expect_presence(storage.transport, orphan, Presence::Absent);
+    expect_presence(storage.transport, quarantined, Presence::Present);
+    expect_presence(storage.transport, quarantined + ".meta", Presence::Present);
+}
+
 TEST(IntegrityMaintenanceTest,
      GarbageCollectFailsClosedWhenReachableContentIsMissing) {
     auto storage = make_local_storage();
@@ -717,6 +790,22 @@ TEST(IntegrityMaintenanceTest, WriterAdmissionBlocksPresentBarrier) {
     EXPECT_EQ(state->presence_count, 1U);
 }
 
+TEST(IntegrityMaintenanceTest, WriterAdmissionResumesAfterBarrierRelease) {
+    auto storage = make_local_storage();
+    const auto root = kasumi::test::workspace_root(storage.workspace);
+    auto barrier = protocol::establish_barrier(storage.transport, root);
+    ASSERT_TRUE(barrier.has_value()) << barrier.error().detail;
+
+    const auto blocked = protocol::register_writer(storage.transport, root);
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error().code, protocol::ErrorCode::Blocked);
+
+    ASSERT_TRUE(protocol::release_registration(*barrier));
+    auto writer = protocol::register_writer(storage.transport, root);
+    ASSERT_TRUE(writer.has_value()) << writer.error().detail;
+    ASSERT_TRUE(protocol::release_registration(*writer));
+}
+
 TEST(IntegrityMaintenanceTest,
      WriterAdmissionBlocksBarrierEstablishedAfterWriterList) {
     auto workspace =
@@ -835,6 +924,51 @@ TEST(IntegrityMaintenanceTest,
     expect_presence(transport, orphan, Presence::Present);
 }
 
+TEST(IntegrityMaintenanceTest, CopyFailurePreservesTheOriginal) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-copy-failure");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+    publish_remote(
+        transport, workspace, kasumi::history::make_empty_bootstrap().value());
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto quarantined =
+        protocol::quarantine_identifier(test_layout(), orphan).value();
+    state->fail_content_get = true;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::TransportFailure);
+    expect_presence(transport, orphan, Presence::Present);
+    expect_presence(transport, quarantined, Presence::Absent);
+    expect_presence(transport, quarantined + ".meta", Presence::Absent);
+}
+
+TEST(IntegrityMaintenanceTest,
+     QuarantineMetadataFailurePreservesTheOriginal) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-metadata-failure");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+    publish_remote(
+        transport, workspace, kasumi::history::make_empty_bootstrap().value());
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto quarantined =
+        protocol::quarantine_identifier(test_layout(), orphan).value();
+    state->fail_quarantine_metadata_put = true;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::TransportFailure);
+    expect_presence(transport, orphan, Presence::Present);
+    expect_presence(transport, quarantined, Presence::Present);
+    expect_presence(transport, quarantined + ".meta", Presence::Absent);
+}
+
 TEST(IntegrityMaintenanceTest, LostBarrierBeforeRemovalPreservesTheOriginal) {
     auto workspace = kasumi::test::make_temp_workspace("gc-lost-barrier");
     FakeState* state = nullptr;
@@ -855,6 +989,52 @@ TEST(IntegrityMaintenanceTest, LostBarrierBeforeRemovalPreservesTheOriginal) {
         transport,
         protocol::quarantine_identifier(test_layout(), orphan).value(),
         Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest,
+     AmbiguousOriginalRemovalPreservesRecoveryEvidence) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-ambiguous-remove");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+    publish_remote(
+        transport, workspace, kasumi::history::make_empty_bootstrap().value());
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto quarantined =
+        protocol::quarantine_identifier(test_layout(), orphan).value();
+    state->remove_then_fail_identifier = orphan;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+    expect_presence(transport, orphan, Presence::Absent);
+    expect_presence(transport, quarantined, Presence::Present);
+    expect_presence(transport, quarantined + ".meta", Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest,
+     BarrierReleaseFailureDoesNotLoseQuarantineEvidence) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-barrier-release");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+    publish_remote(
+        transport, workspace, kasumi::history::make_empty_bootstrap().value());
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto quarantined =
+        protocol::quarantine_identifier(test_layout(), orphan).value();
+    state->fail_remove_identifier = test_layout().barrier_identifier;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::TransportFailure);
+    expect_presence(transport, orphan, Presence::Absent);
+    expect_presence(transport, quarantined, Presence::Present);
+    expect_presence(transport, quarantined + ".meta", Presence::Present);
 }
 
 TEST(IntegrityMaintenanceTest, UnknownControlObjectFailsClosed) {
