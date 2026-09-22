@@ -600,12 +600,29 @@ checkpoint_upload_batch(const journal::Paths& paths,
     return {};
 }
 
+bool has_local_rollback_work(const transaction::Record& record) noexcept {
+    for (std::size_t index = 0; index < record.plan.operations.size();
+         ++index) {
+        if (is_local_mutation(record.plan.operations[index].action) &&
+            record.progress[index].state >=
+                transaction::OperationState::BackupCreated) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::expected<void, Error>
 rollback_transaction(const journal::Paths& paths,
                      transaction::Record& record,
                      const std::optional<platform::Workspace>& workspace,
                      const std::filesystem::path& local_root,
                      std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+    if (has_local_rollback_work(record) && !workspace) {
+        return std::unexpected(make_error(
+            ErrorCode::RecoveryConflict,
+            "transaction workspace missing while local rollback is required"));
+    }
     if (workspace) {
         for (std::size_t index = record.plan.operations.size(); index > 0;
              --index) {
@@ -654,6 +671,11 @@ std::expected<void, Error>
 rollback_local_mutations(transaction::Record& record,
                          const std::optional<platform::Workspace>& workspace,
                          const std::filesystem::path& local_root) {
+    if (has_local_rollback_work(record) && !workspace) {
+        return std::unexpected(make_error(
+            ErrorCode::RecoveryConflict,
+            "transaction workspace missing while local rollback is required"));
+    }
     if (!workspace) {
         return {};
     }

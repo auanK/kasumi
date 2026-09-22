@@ -8633,6 +8633,7 @@ TEST(SyncCoordinatorTest,
         operation, 0, local, unavailable, key, transaction_workspace));
     record->progress[0].state = kasumi::transaction::OperationState::Applied;
     record->phase = kasumi::transaction::Phase::FilesStaged;
+    const auto expected_progress = record->progress[0];
 
     const auto paths = kasumi::application::sync::journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
@@ -8650,6 +8651,152 @@ TEST(SyncCoordinatorTest,
         kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
     EXPECT_FALSE(std::filesystem::exists(local / operation.path));
+    EXPECT_FALSE(std::filesystem::exists(runtime_data.database_path));
+
+    const auto preserved =
+        kasumi::application::sync::journal::load(*paths, key);
+    ASSERT_TRUE(preserved.has_value() && *preserved);
+    EXPECT_EQ((*preserved)->phase, kasumi::transaction::Phase::FilesStaged);
+    ASSERT_EQ((*preserved)->plan.operations.size(), 1U);
+    EXPECT_EQ((*preserved)->plan.operations[0].action,
+              kasumi::Action::DeleteLocal);
+    EXPECT_EQ((*preserved)->plan.operations[0].path, operation.path);
+    ASSERT_EQ((*preserved)->progress.size(), 1U);
+    EXPECT_EQ((*preserved)->progress[0].state,
+              kasumi::transaction::OperationState::Applied);
+    EXPECT_EQ((*preserved)->progress[0].previous_hash,
+              expected_progress.previous_hash);
+    EXPECT_EQ((*preserved)->progress[0].backup_slot,
+              expected_progress.backup_slot);
+    EXPECT_EQ((*preserved)->progress[0].had_original,
+              expected_progress.had_original);
+
+    const auto retried =
+        kasumi::application::sync::coordinator::recover_if_needed(
+            runtime_data, unavailable, key);
+    ASSERT_FALSE(retried.has_value());
+    EXPECT_EQ(
+        retried.error().code,
+        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    EXPECT_TRUE(std::filesystem::exists(paths->final_path));
+    EXPECT_FALSE(std::filesystem::exists(local / operation.path));
+}
+
+TEST(SyncCoordinatorTest,
+     MissingWorkspaceWithoutLocalRollbackWorkCanRollbackSafely) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("transaction-missing-workspace-safe");
+    const auto profile = kasumi::test::workspace_path(workspace, "profile");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    const auto runtime_data = make_runtime(
+        profile, local, kasumi::test::workspace_path(workspace, "storage"));
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    const auto transaction_id = save_recovery_record(
+        profile, kasumi::transaction::Phase::FilesStaged, key);
+    ASSERT_FALSE(transaction_id.empty());
+    const auto transaction_root =
+        profile / ".transactions" / transaction_id;
+    ASSERT_GT(std::filesystem::remove_all(transaction_root), 0U);
+
+    kasumi::transport::Transport unavailable{};
+    const auto recovered =
+        kasumi::application::sync::coordinator::recover_if_needed(
+            runtime_data, unavailable, key);
+    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+    EXPECT_EQ(
+        *recovered,
+        kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
+    EXPECT_FALSE(std::filesystem::exists(transaction_root));
+}
+
+TEST(SyncCoordinatorTest,
+     LocalOnlyRecoveryMissingWorkspacePreservesRollbackEvidence) {
+    auto workspace = kasumi::test::make_temp_workspace(
+        "local-only-missing-workspace");
+    const auto profile = kasumi::test::workspace_path(workspace, "profile");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto storage_path =
+        kasumi::test::workspace_path(workspace, "storage");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    const auto runtime_data = make_runtime(profile, local, storage_path);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    const std::string payload = "local-only-payload";
+    const kasumi::Operation delete_operation{
+        .action = kasumi::Action::DeleteLocal,
+        .path = "document.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string(payload)),
+        .size = payload.size()};
+    const kasumi::Operation upload_operation{
+        .action = kasumi::Action::Upload,
+        .path = "repair.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("repair")),
+        .size = 6};
+    kasumi::test::write_text(local / delete_operation.path, payload);
+
+    auto record = kasumi::application::sync::journal::create_record(
+        0,
+        0,
+        kasumi::make_sync_plan({delete_operation, upload_operation}, 0),
+        false,
+        std::string(64, 'a'));
+    ASSERT_TRUE(record.has_value());
+    ASSERT_EQ(record->plan.operations[0].action, kasumi::Action::Upload);
+    ASSERT_EQ(record->plan.operations[1].action, kasumi::Action::DeleteLocal);
+    ASSERT_TRUE(std::filesystem::create_directories(
+        profile / ".transactions" / record->operation_id));
+    const kasumi::platform::Workspace transaction_workspace{
+        .root = profile / ".transactions" / record->operation_id};
+    auto prepared = kasumi::application::sync::mutation::prepare_operation(
+        record->plan.operations[1],
+        1,
+        local,
+        transaction_workspace,
+        record->progress[1]);
+    ASSERT_TRUE(prepared.has_value()) << prepared.error().detail;
+    record->progress[1] = *prepared;
+    kasumi::transport::Transport unavailable{};
+    ASSERT_TRUE(kasumi::application::sync::mutation::apply_operation(
+        record->plan.operations[1],
+        1,
+        local,
+        unavailable,
+        key,
+        transaction_workspace));
+    record->progress[1].state = kasumi::transaction::OperationState::Applied;
+    record->phase = kasumi::transaction::Phase::FilesStaged;
+    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    ASSERT_TRUE(
+        kasumi::application::sync::journal::save(*paths, *record, key));
+    ASSERT_TRUE(std::filesystem::remove_all(transaction_workspace.root) > 0);
+
+    auto storage = kasumi::transport::open_transport(storage_path.string());
+    ASSERT_TRUE(storage.has_value());
+    ASSERT_TRUE(kasumi::transport::initialize(*storage));
+    const auto recovered =
+        kasumi::application::sync::coordinator::recover_if_needed(
+            runtime_data, *storage, key);
+    ASSERT_FALSE(recovered.has_value());
+    EXPECT_EQ(
+        recovered.error().code,
+        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    EXPECT_NE(recovered.error().detail.find(
+                  "workspace missing while local rollback is required"),
+              std::string::npos)
+        << recovered.error().detail;
+    EXPECT_TRUE(std::filesystem::exists(paths->final_path));
+    EXPECT_FALSE(std::filesystem::exists(local / delete_operation.path));
+    EXPECT_FALSE(std::filesystem::exists(runtime_data.database_path));
+    const auto preserved =
+        kasumi::application::sync::journal::load(*paths, key);
+    ASSERT_TRUE(preserved.has_value() && *preserved);
+    EXPECT_EQ((*preserved)->phase, kasumi::transaction::Phase::FilesStaged);
+    EXPECT_EQ((*preserved)->progress[1].state,
+              kasumi::transaction::OperationState::Applied);
 }
 
 TEST(SyncCoordinatorTest, StartedTransactionRollsBackBeforePublication) {
