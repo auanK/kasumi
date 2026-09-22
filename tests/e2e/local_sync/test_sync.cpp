@@ -1111,4 +1111,128 @@ TEST(H3LocalSyncTest, ConcurrentDirectoryDeletePreservesModifiedDescendant) {
     expect_fixed_point(scenario, b);
 }
 
+std::vector<std::pair<std::string, std::string>>
+read_local_payloads(const Client& client) {
+    std::vector<std::pair<std::string, std::string>> results;
+    for (const auto& entry :
+         std::filesystem::recursive_directory_iterator(client_local_dir(client))) {
+        if (entry.is_regular_file()) {
+            const auto rel = std::filesystem::relative(entry.path(),
+                                                      client_local_dir(client));
+            results.emplace_back(
+                kasumi::platform::path::to_logical_utf8(rel),
+                kasumi::test::read_text(entry.path()));
+        }
+    }
+    std::ranges::sort(results);
+    return results;
+}
+
+std::vector<std::string> payload_contents(
+    const std::vector<std::pair<std::string, std::string>>& files) {
+    std::vector<std::string> contents;
+    for (const auto& [path, content] : files) {
+        contents.push_back(content);
+    }
+    std::ranges::sort(contents);
+    return contents;
+}
+
+TEST(H3LocalSyncTest, ThreeConcurrentModificationsPreserveAllVersions) {
+    auto scenario = make_scenario();
+    const auto a = make_client(scenario, "a");
+    const auto b = make_client(scenario, "b");
+    const auto c = make_client(scenario, "c");
+
+    // 1. Establish baseline
+    kasumi::test::write_text(client_local_dir(a) / "file.txt", "BASE");
+    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync(b));
+    ASSERT_TRUE(sync(c));
+
+    expect_file(a, "file.txt", "BASE");
+    expect_file(b, "file.txt", "BASE");
+    expect_file(c, "file.txt", "BASE");
+
+    // 2. Create three genuinely concurrent modifications
+    kasumi::test::write_text(client_local_dir(a) / "file.txt", "A-V2");
+    kasumi::test::write_text(client_local_dir(b) / "file.txt", "B-V2");
+    kasumi::test::write_text(client_local_dir(c) / "file.txt", "C-V2");
+
+    const auto base_time = std::filesystem::file_time_type::clock::now();
+    set_mtime(a, "file.txt", base_time + std::chrono::hours{1});
+    set_mtime(b, "file.txt", base_time + std::chrono::hours{2});
+    set_mtime(c, "file.txt", base_time + std::chrono::hours{3});
+
+    // 3. First publication: sync A
+    ASSERT_TRUE(sync(a));
+
+    // 4. First conflict reconciliation: sync B
+    ASSERT_TRUE(sync(b));
+
+    const auto b_payloads_step4 = read_local_payloads(b);
+    EXPECT_EQ(b_payloads_step4.size(), 2U);
+    EXPECT_EQ(payload_contents(b_payloads_step4),
+              (std::vector<std::string>{"A-V2", "B-V2"}));
+
+    // 5. Third concurrent writer: sync C
+    ASSERT_TRUE(sync(c));
+
+    const auto c_payloads_step5 = read_local_payloads(c);
+    EXPECT_EQ(c_payloads_step5.size(), 3U);
+    EXPECT_EQ(payload_contents(c_payloads_step5),
+              (std::vector<std::string>{"A-V2", "B-V2", "C-V2"}));
+
+    // 6. Convergence: sync A and B again until all three consume the final state
+    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync(b));
+    ASSERT_TRUE(sync(c));
+    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync(b));
+    ASSERT_TRUE(sync(c));
+
+    auto observed_remote = remote(scenario);
+
+    // Required assertions on all clients
+    const std::vector<std::string> expected_payloads{"A-V2", "B-V2", "C-V2"};
+    for (const auto* client : {&a, &b, &c}) {
+        const auto payloads = read_local_payloads(*client);
+        ASSERT_EQ(payloads.size(), 3U)
+            << "Client " << client_name(*client) << " does not have 3 payloads";
+        EXPECT_EQ(payload_contents(payloads), expected_payloads);
+
+        std::unordered_set<std::string> distinct_paths;
+        for (const auto& [path, content] : payloads) {
+            distinct_paths.insert(path);
+            EXPECT_NE(content, "BASE");
+        }
+        EXPECT_EQ(distinct_paths.size(), 3U);
+    }
+
+    // Inspect effective remote tree
+    ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
+    EXPECT_EQ(observed_remote->logical_heads.size(), 1U);
+
+    std::vector<kasumi::Hash> remote_file_hashes;
+    for (const auto& row : observed_remote->effective_tree.rows) {
+        if (!row.is_directory) {
+            remote_file_hashes.push_back(row.hash);
+        }
+    }
+    std::ranges::sort(remote_file_hashes);
+
+    std::vector<kasumi::Hash> expected_hashes{
+        kasumi::hasher::hash_string("A-V2"),
+        kasumi::hasher::hash_string("B-V2"),
+        kasumi::hasher::hash_string("C-V2")};
+    std::ranges::sort(expected_hashes);
+
+    EXPECT_EQ(remote_file_hashes, expected_hashes);
+
+    expect_converged(scenario, {&a, &b, &c});
+    expect_fixed_point(scenario, a);
+    expect_fixed_point(scenario, b);
+    expect_fixed_point(scenario, c);
+}
+
 } // namespace
