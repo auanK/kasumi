@@ -1065,4 +1065,50 @@ TEST(H3LocalSyncTest, ThreePersistentClientsConvergeBidirectionally) {
     expect_fixed_point(scenario, a);
 }
 
+TEST(H3LocalSyncTest, ConcurrentDirectoryDeletePreservesModifiedDescendant) {
+    auto scenario = make_scenario();
+    const auto a = make_client(scenario, "a");
+    const auto b = make_client(scenario, "b");
+
+    kasumi::test::write_text(client_local_dir(a) / "docs/changed.txt",
+                             "BASE-CHANGED");
+    kasumi::test::write_text(client_local_dir(a) / "docs/obsolete.txt",
+                             "BASE-OBSOLETE");
+    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync(b));
+
+    kasumi::test::write_text(client_local_dir(a) / "docs/changed.txt",
+                             "A-MODIFIED");
+    ASSERT_TRUE(sync(a));
+
+    remove_file(b, "docs/changed.txt");
+    remove_file(b, "docs/obsolete.txt");
+    remove_directory(b, "docs");
+    expect_absent(b, "docs");
+
+    ASSERT_TRUE(sync(b));
+
+    expect_file(b, "docs/changed.txt", "A-MODIFIED");
+    expect_absent(b, "docs/obsolete.txt");
+
+    ASSERT_TRUE(sync(a));
+
+    expect_file(a, "docs/changed.txt", "A-MODIFIED");
+    expect_file(b, "docs/changed.txt", "A-MODIFIED");
+    expect_absent(a, "docs/obsolete.txt");
+    expect_absent(b, "docs/obsolete.txt");
+
+    auto observed_remote = remote(scenario);
+    ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
+    const auto* changed_row =
+        kasumi::find_row(observed_remote->effective_tree, "docs/changed.txt");
+    ASSERT_NE(changed_row, nullptr);
+    EXPECT_EQ(changed_row->hash, kasumi::hasher::hash_string("A-MODIFIED"));
+    expect_remote_absent(*observed_remote, "docs/obsolete.txt");
+
+    expect_converged(scenario, {&a, &b});
+    expect_fixed_point(scenario, a);
+    expect_fixed_point(scenario, b);
+}
+
 } // namespace
