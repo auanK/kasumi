@@ -388,6 +388,10 @@ struct ReobserveTransportState {
     bool require_local_change_overlap = false;
     bool local_change_observed = false;
     bool local_change_overlap_timed_out = false;
+    bool fail_commit_verification = false;
+    bool fail_commit_put_ambiguous_absent = false;
+    bool fail_head_verification = false;
+    std::function<void()> on_commit_verified;
 };
 
 void destroy_reobserve_state(void*) noexcept {
@@ -428,6 +432,11 @@ kasumi::transport::Result reobserve_put(void* context,
                                 : epoch  ? "epoch PUT"
                                          : "content PUT");
         if (commit) {
+            if (state->fail_commit_put_ambiguous_absent) {
+                return std::unexpected(kasumi::transport::Error{
+                    .code = kasumi::transport::ErrorCode::Io,
+                    .message = "injected ambiguous commit put failure (absent)"});
+            }
             state->commit_put_started = true;
             state->condition.notify_all();
         } else if (!marker && state->require_commit_overlap &&
@@ -456,9 +465,19 @@ reobserve_get(void* context,
         if (identifier.find('-') != std::string_view::npos &&
             identifier.substr(identifier.rfind('/') + 1).size() == 129) {
             ++state->marker_get_count;
+            if (state->fail_head_verification) {
+                return std::unexpected(kasumi::transport::Error{
+                    .code = kasumi::transport::ErrorCode::Io,
+                    .message = "injected head verification readback failure"});
+            }
         } else if (identifier.find('/') != std::string_view::npos &&
                    identifier.find('-') == std::string_view::npos) {
             ++state->commit_get_count;
+            if (state->fail_commit_verification) {
+                return std::unexpected(kasumi::transport::Error{
+                    .code = kasumi::transport::ErrorCode::Io,
+                    .message = "injected commit verification readback failure"});
+            }
         }
     }
     return kasumi::transport::get(*state->base, identifier, destination);
@@ -548,6 +567,15 @@ std::expected<std::string, kasumi::transport::Error> reobserve_physical_hash(
                                 : is_head  ? "head verified"
                                 : is_epoch ? "epoch verified"
                                            : "content verified");
+        if (is_commit && state->fail_commit_verification) {
+            return std::string("mismatched_commit_physical_hash");
+        }
+        if (is_head && state->fail_head_verification) {
+            return std::string("mismatched_head_physical_hash");
+        }
+        if (is_commit && state->on_commit_verified) {
+            state->on_commit_verified();
+        }
         if (is_commit) {
             state->commit_verification_started = true;
             state->condition.notify_all();
@@ -2849,6 +2877,301 @@ TEST(SyncCoordinatorTest,
     EXPECT_LT(content_verified, head_put);
     EXPECT_LT(commit_verified, head_put);
     EXPECT_LT(head_put, head_verified);
+}
+
+TEST(SyncCoordinatorTest, CommitVerificationFailurePreventsHeadPublication) {
+    auto workspace = kasumi::test::make_temp_workspace(
+        "commit-verification-failure-no-head");
+    const auto profile = kasumi::test::workspace_path(workspace, "profile");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto storage_path =
+        kasumi::test::workspace_path(workspace, "storage");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    kasumi::test::write_text(local / "file.txt", "contents");
+
+    const auto local_tree =
+        kasumi::application::observation::collect_local_tree(local);
+    ASSERT_TRUE(local_tree.has_value()) << local_tree.error();
+    auto input = empty_publication_input();
+    input.local_tree = *local_tree;
+    const auto result = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    ASSERT_TRUE(result->requires_publication);
+
+    auto base = kasumi::transport::open_transport(storage_path.string());
+    ASSERT_TRUE(base.has_value());
+    ASSERT_TRUE(kasumi::transport::initialize(*base));
+    ReobserveTransportState state{};
+    state.base = &*base;
+    state.storage_root = storage_path;
+    state.fail_commit_verification = true;
+    auto storage = make_reobserve_transport(state);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    const auto executed = kasumi::application::sync::coordinator::execute(
+        make_runtime(profile, local, storage_path),
+        storage,
+        key,
+        input,
+        *result);
+    ASSERT_FALSE(executed.has_value());
+    EXPECT_EQ(
+        executed.error().code,
+        kasumi::application::sync::coordinator::ErrorCode::PublicationFailure);
+
+    // HEAD PUT was never attempted.
+    EXPECT_TRUE(std::ranges::find(state.events, "head PUT") ==
+                state.events.end());
+
+    // Commit object was uploaded, but NO head marker exists remotely.
+    EXPECT_TRUE(std::ranges::find(state.events, "commit PUT") !=
+                state.events.end());
+    const auto listing = kasumi::transport::list(*base);
+    ASSERT_TRUE(listing.has_value());
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key);
+    EXPECT_TRUE(std::ranges::none_of(*listing, [&](const auto& id) {
+        return id.starts_with(layout.heads_prefix) ||
+               id.starts_with("history/heads/");
+    }));
+
+    // Local state database was not created.
+    EXPECT_FALSE(std::filesystem::exists(profile / "state.db"));
+
+    // Journal was rolled back and does not claim CommitVerified or HeadPublished.
+    EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
+}
+
+TEST(SyncCoordinatorTest,
+     JournalSaveFailureBeforeHeadMarkerPreventsPublication) {
+    auto workspace = kasumi::test::make_temp_workspace(
+        "journal-failure-before-head-put");
+    const auto profile = kasumi::test::workspace_path(workspace, "profile");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto storage_path =
+        kasumi::test::workspace_path(workspace, "storage");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    kasumi::test::write_text(local / "file.txt", "contents");
+
+    const auto local_tree =
+        kasumi::application::observation::collect_local_tree(local);
+    ASSERT_TRUE(local_tree.has_value()) << local_tree.error();
+    auto input = empty_publication_input();
+    input.local_tree = *local_tree;
+    const auto result = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    ASSERT_TRUE(result->requires_publication);
+
+    auto base = kasumi::transport::open_transport(storage_path.string());
+    ASSERT_TRUE(base.has_value());
+    ASSERT_TRUE(kasumi::transport::initialize(*base));
+    ReobserveTransportState state{};
+    state.base = &*base;
+    state.storage_root = storage_path;
+    // When commit verification finishes, sabotage temporary journal path so journal save fails.
+    state.on_commit_verified = [&]() {
+        std::filesystem::create_directories(profile / "transaction.bin.enc.new");
+    };
+    auto storage = make_reobserve_transport(state);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    const auto executed = kasumi::application::sync::coordinator::execute(
+        make_runtime(profile, local, storage_path),
+        storage,
+        key,
+        input,
+        *result);
+    ASSERT_FALSE(executed.has_value());
+
+    // HEAD PUT was never attempted.
+    EXPECT_TRUE(std::ranges::find(state.events, "head PUT") ==
+                state.events.end());
+
+    // No head marker exists remotely.
+    const auto listing = kasumi::transport::list(*base);
+    ASSERT_TRUE(listing.has_value());
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key);
+    EXPECT_TRUE(std::ranges::none_of(*listing, [&](const auto& id) {
+        return id.starts_with(layout.heads_prefix) ||
+               id.starts_with("history/heads/");
+    }));
+
+    // Local state database was not created.
+    EXPECT_FALSE(std::filesystem::exists(profile / "state.db"));
+}
+
+TEST(SyncCoordinatorTest,
+     AmbiguousCommitUploadAbsentPreventsHeadPublication) {
+    auto workspace = kasumi::test::make_temp_workspace(
+        "ambiguous-commit-absent-no-head");
+    const auto profile = kasumi::test::workspace_path(workspace, "profile");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto storage_path =
+        kasumi::test::workspace_path(workspace, "storage");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    kasumi::test::write_text(local / "file.txt", "contents");
+
+    const auto local_tree =
+        kasumi::application::observation::collect_local_tree(local);
+    ASSERT_TRUE(local_tree.has_value()) << local_tree.error();
+    auto input = empty_publication_input();
+    input.local_tree = *local_tree;
+    const auto result = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    ASSERT_TRUE(result->requires_publication);
+
+    auto base = kasumi::transport::open_transport(storage_path.string());
+    ASSERT_TRUE(base.has_value());
+    ASSERT_TRUE(kasumi::transport::initialize(*base));
+    ReobserveTransportState state{};
+    state.base = &*base;
+    state.storage_root = storage_path;
+    state.fail_commit_put_ambiguous_absent = true;
+    auto storage = make_reobserve_transport(state);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    const auto executed = kasumi::application::sync::coordinator::execute(
+        make_runtime(profile, local, storage_path),
+        storage,
+        key,
+        input,
+        *result);
+    ASSERT_FALSE(executed.has_value());
+    EXPECT_EQ(
+        executed.error().code,
+        kasumi::application::sync::coordinator::ErrorCode::PublicationFailure);
+
+    // HEAD PUT was never attempted.
+    EXPECT_TRUE(std::ranges::find(state.events, "head PUT") ==
+                state.events.end());
+
+    // Commit and head marker are absent remotely.
+    const auto listing = kasumi::transport::list(*base);
+    ASSERT_TRUE(listing.has_value());
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key);
+    EXPECT_TRUE(std::ranges::none_of(*listing, [&](const auto& id) {
+        return id.starts_with(layout.heads_prefix) ||
+               id.starts_with(layout.commits_prefix) ||
+               id.starts_with("history/heads/") ||
+               id.starts_with("history/commits/");
+    }));
+
+    // Local state database was not created.
+    EXPECT_FALSE(std::filesystem::exists(profile / "state.db"));
+}
+
+TEST(SyncCoordinatorTest, HeadVerificationFailurePreventsDatabaseAdvance) {
+    auto workspace = kasumi::test::make_temp_workspace(
+        "head-verification-failure-no-db");
+    const auto profile = kasumi::test::workspace_path(workspace, "profile");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto storage_path =
+        kasumi::test::workspace_path(workspace, "storage");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    kasumi::test::write_text(local / "file.txt", "contents");
+
+    const auto local_tree =
+        kasumi::application::observation::collect_local_tree(local);
+    ASSERT_TRUE(local_tree.has_value()) << local_tree.error();
+    auto input = empty_publication_input();
+    input.local_tree = *local_tree;
+    const auto result = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    ASSERT_TRUE(result->requires_publication);
+
+    auto base = kasumi::transport::open_transport(storage_path.string());
+    ASSERT_TRUE(base.has_value());
+    ASSERT_TRUE(kasumi::transport::initialize(*base));
+    ReobserveTransportState state{};
+    state.base = &*base;
+    state.storage_root = storage_path;
+    state.fail_head_verification = true;
+    auto storage = make_reobserve_transport(state);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    const auto executed = kasumi::application::sync::coordinator::execute(
+        make_runtime(profile, local, storage_path),
+        storage,
+        key,
+        input,
+        *result);
+    ASSERT_FALSE(executed.has_value());
+    EXPECT_EQ(
+        executed.error().code,
+        kasumi::application::sync::coordinator::ErrorCode::PublicationFailure);
+
+    // HEAD PUT was attempted.
+    EXPECT_TRUE(std::ranges::find(state.events, "head PUT") !=
+                state.events.end());
+
+    // But verification failure prevented database advance!
+    EXPECT_FALSE(std::filesystem::exists(profile / "state.db"));
+}
+
+TEST(SyncCoordinatorTest, MismatchedHeadMarkerRejectedDuringRecovery) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("mismatched-head-marker-recovery");
+    const auto profile = kasumi::test::workspace_path(workspace, "profile");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto storage_path =
+        kasumi::test::workspace_path(workspace, "storage");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    const auto runtime_data = make_runtime(profile, local, storage_path);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    const kasumi::Snapshot tree{
+        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    auto prepared = kasumi::application::sync::publication::prepare_commit(
+        tree, false, 0, {}, 100, key);
+    ASSERT_TRUE(prepared.has_value());
+
+    auto opened = kasumi::transport::open_transport(storage_path.string());
+    ASSERT_TRUE(opened.has_value());
+    ASSERT_TRUE(kasumi::transport::initialize(*opened));
+
+    // Upload commit object so commit exists remotely.
+    auto object = kasumi::application::sync::publication::publish_commit_object(
+        *opened, key, *prepared, local);
+    ASSERT_TRUE(object.has_value());
+
+    // Publish a head marker, but write mismatched / corrupted bytes into the marker file.
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key);
+    auto marker = kasumi::application::sync::publication::publish_head_marker(
+        *opened, layout, object->head, local);
+    ASSERT_TRUE(marker.has_value());
+
+    // Corrupt the marker contents so it fails validation against object->head.
+    const auto marker_file =
+        storage_path / std::filesystem::path{marker->marker_id};
+    kasumi::test::write_text(marker_file, "corrupted-or-wrong-marker-data");
+
+    // Save recovery record claiming HeadPublished.
+    const auto id = save_recovery_record(
+        profile,
+        kasumi::transaction::Phase::HeadPublished,
+        key,
+        prepared->commit_id,
+        object->head.ciphertext_id);
+    ASSERT_FALSE(id.empty());
+
+    const auto recovered =
+        kasumi::application::sync::coordinator::recover_if_needed(
+            runtime_data, *opened, key);
+    ASSERT_FALSE(recovered.has_value());
+    EXPECT_EQ(
+        recovered.error().code,
+        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+
+    // State database must NOT be advanced.
+    EXPECT_FALSE(std::filesystem::exists(runtime_data.database_path));
 }
 
 TEST(SyncCoordinatorTest, RenameReusesContentReferencedByRemoteHistory) {
