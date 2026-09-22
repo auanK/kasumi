@@ -677,7 +677,8 @@ ReconcileResult reconcile(const Input& input) {
 
     const bool requires_state_commit =
         input.storage.history_present &&
-        (!input.base_state_present || input.storage.logical_heads.empty() ||
+        (!input.base_state_present ||
+         input.storage.logical_heads.size() != 1 ||
          input.base_commit_id != input.storage.logical_heads.front());
 
     return Result{
