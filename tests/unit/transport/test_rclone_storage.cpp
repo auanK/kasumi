@@ -617,6 +617,97 @@ TEST(RcloneStorageTest, PreservesUnicodeLocalPathsInCopyRequests) {
     EXPECT_EQ(kasumi::test::read_text(destination), "unicode payload");
 }
 
+TEST(RcloneStorageTest, CopiesBetweenPathsOnTheConfiguredRemote) {
+    RcServerState remote;
+    std::vector<nlohmann::json> requests;
+    remote.server.Post(
+        "/rc/operations/copyfile",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            requests.push_back(nlohmann::json::parse(input.body));
+            response.set_content("{}", "application/json");
+        });
+    start_rc_server(remote);
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    const auto copied = operations.copy(
+        &state,
+        "objects/source",
+        "history/gc/v1/quarantine/nested/destination");
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(copied) << kasumi::transport::describe(copied.error());
+    ASSERT_EQ(requests.size(), 1U);
+    EXPECT_EQ(requests.front().at("srcFs"), "test:");
+    EXPECT_EQ(requests.front().at("srcRemote"), "root/objects/source");
+    EXPECT_EQ(requests.front().at("dstFs"), "test:");
+    EXPECT_EQ(requests.front().at("dstRemote"),
+              "root/history/gc/v1/quarantine/nested/destination");
+}
+
+TEST(RcloneStorageTest, PropagatesRemoteCopyFailure) {
+    RcServerState remote;
+    remote.server.Post(
+        "/rc/operations/copyfile",
+        [](const httplib::Request&, httplib::Response& response) {
+            response.status = 500;
+            response.set_content(R"({"error":"copy failed"})",
+                                 "application/json");
+        });
+    start_rc_server(remote);
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    const auto copied = operations.copy(&state, "objects/source", "copy");
+    stop_rc_server(remote);
+
+    ASSERT_FALSE(copied.has_value());
+    EXPECT_EQ(copied.error().code,
+              kasumi::transport::ErrorCode::ProtocolFailure);
+    EXPECT_EQ(copied.error().native_code, 500);
+}
+
+TEST(RcloneStorageTest, MapsMissingCopySourceAndRejectsInvalidIdentifiers) {
+    RcServerState remote;
+    std::atomic_int calls = 0;
+    remote.server.Post(
+        "/rc/operations/copyfile",
+        [&](const httplib::Request&, httplib::Response& response) {
+            ++calls;
+            response.status = 404;
+            response.set_content(R"({"error":"object not found"})",
+                                 "application/json");
+        });
+    start_rc_server(remote);
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    const auto missing =
+        operations.copy(&state, "objects/missing", "copy");
+    const auto invalid = operations.copy(&state, "../escape", "copy");
+    const auto identical =
+        operations.copy(&state, "same/object", "same/object");
+    stop_rc_server(remote);
+
+    ASSERT_FALSE(missing.has_value());
+    EXPECT_EQ(missing.error().code,
+              kasumi::transport::ErrorCode::ObjectNotFound);
+    EXPECT_EQ(calls, 1);
+    ASSERT_FALSE(invalid.has_value());
+    EXPECT_EQ(invalid.error().code,
+              kasumi::transport::ErrorCode::InvalidIdentifier);
+    ASSERT_FALSE(identical.has_value());
+    EXPECT_EQ(identical.error().code,
+              kasumi::transport::ErrorCode::InvalidIdentifier);
+    EXPECT_EQ(calls, 1);
+}
+
 TEST(RcloneStorageTest, DownloadsExactBatchWithOneSequentialCopy) {
     RcServerState remote;
     std::string request;

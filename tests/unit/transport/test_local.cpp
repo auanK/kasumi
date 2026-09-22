@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -61,6 +62,51 @@ TEST(LocalTransportTest, StoresListsAndRemovesObjects) {
               Removal::Removed);
     EXPECT_EQ(kasumi::transport::remove(transport, "alpha").value(),
               Removal::AlreadyAbsent);
+}
+
+TEST(LocalTransportTest, CopiesNestedObjectsWithoutRemovingTheSource) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("transport-local-copy");
+    auto opened = kasumi::transport::open_transport(
+        kasumi::test::workspace_path(workspace, "storage").string());
+    ASSERT_TRUE(opened.has_value());
+    auto& transport = *opened;
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+
+    const auto source = kasumi::test::workspace_path(workspace, "source.bin");
+    const auto old_destination =
+        kasumi::test::workspace_path(workspace, "old-destination.bin");
+    const auto downloaded =
+        kasumi::test::workspace_path(workspace, "downloaded.bin");
+    const std::string payload{"first\0second", 12};
+    kasumi::test::write_text(source, payload);
+    kasumi::test::write_text(old_destination, "old bytes");
+    ASSERT_TRUE(kasumi::transport::put(transport, source, "objects/source"));
+    ASSERT_TRUE(kasumi::transport::put(
+        transport, old_destination, "quarantine/nested/copy"));
+
+    ASSERT_TRUE(kasumi::transport::copy(
+        transport, "objects/source", "quarantine/nested/copy"));
+    ASSERT_TRUE(kasumi::transport::get(
+        transport, "quarantine/nested/copy", downloaded));
+    EXPECT_EQ(kasumi::test::read_text(downloaded), payload);
+    EXPECT_EQ(kasumi::transport::presence(transport, "objects/source").value(),
+              Presence::Present);
+
+    const auto missing = kasumi::transport::copy(
+        transport, "missing/source", "quarantine/missing/copy");
+    ASSERT_FALSE(missing.has_value());
+    EXPECT_EQ(missing.error().code, ErrorCode::ObjectNotFound);
+
+    for (const auto& [source_identifier, destination_identifier] :
+         {std::pair{"../escape", "safe/destination"},
+          std::pair{"objects/source", "../escape"},
+          std::pair{"objects/source", "objects/source"}}) {
+        const auto invalid = kasumi::transport::copy(
+            transport, source_identifier, destination_identifier);
+        ASSERT_FALSE(invalid.has_value());
+        EXPECT_EQ(invalid.error().code, ErrorCode::InvalidIdentifier);
+    }
 }
 
 TEST(LocalTransportTest, ListsOnlyDirectFilesUnderValidatedPrefix) {

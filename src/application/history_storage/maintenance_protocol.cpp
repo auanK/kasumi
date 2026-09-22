@@ -819,17 +819,43 @@ verify_quarantine(transport::Transport& storage,
     return *physical_sha256 == entry.physical_sha256;
 }
 
-std::expected<std::string, Error>
-copy_verified(transport::Transport& storage,
-              std::string_view source_identifier,
-              std::string_view destination_identifier,
-              const std::filesystem::path& workspace_root) {
-    if (is_epoch_object(source_identifier) ||
-        is_epoch_object(destination_identifier)) {
-        return std::unexpected(
-            error(ErrorCode::Blocked,
-                  "epoch objects cannot be copied by collection"));
+namespace {
+
+std::expected<void, Error>
+verify_destination_via_workspace(
+    transport::Transport& storage,
+    std::string_view destination_identifier,
+    std::string_view expected_sha256,
+    const std::filesystem::path& workspace_root) {
+    auto temporary = detail::make_workspace(workspace_root);
+    if (!temporary) {
+        return std::unexpected(history_error(temporary.error()));
     }
+    const auto destination = (*temporary)->root / "destination.object";
+    if (auto downloaded =
+            detail::download(storage, destination_identifier, destination);
+        !downloaded) {
+        return std::unexpected(history_error(downloaded.error()));
+    }
+    auto destination_hash = crypto::physical::hash_file(destination, "sha256");
+    if (!destination_hash) {
+        return std::unexpected(
+            error(ErrorCode::WorkspaceFailure, destination_hash.error()));
+    }
+    if (*destination_hash != expected_sha256) {
+        return std::unexpected(
+            error(ErrorCode::VerificationFailure,
+                  "downloaded copy does not match source object"));
+    }
+    return {};
+}
+
+std::expected<std::string, Error>
+copy_verified_via_workspace(
+    transport::Transport& storage,
+    std::string_view source_identifier,
+    std::string_view destination_identifier,
+    const std::filesystem::path& workspace_root) {
     auto temporary = detail::make_workspace(workspace_root);
     if (!temporary) {
         return std::unexpected(history_error(temporary.error()));
@@ -880,6 +906,71 @@ copy_verified(transport::Transport& storage,
                   "downloaded copy does not match source object"));
     }
     return std::move(*source_hash);
+}
+
+} // namespace
+
+std::expected<std::string, Error>
+copy_verified(transport::Transport& storage,
+              std::string_view source_identifier,
+              std::string_view destination_identifier,
+              const std::filesystem::path& workspace_root) {
+    if (is_epoch_object(source_identifier) ||
+        is_epoch_object(destination_identifier)) {
+        return std::unexpected(
+            error(ErrorCode::Blocked,
+                  "epoch objects cannot be copied by collection"));
+    }
+    auto source_hash =
+        transport::physical_hash(storage, source_identifier, "sha256");
+    if (source_hash) {
+        if (!valid_sha256(*source_hash)) {
+            return std::unexpected(
+                error(ErrorCode::VerificationFailure,
+                      "invalid source physical SHA-256"));
+        }
+        auto copied = transport::copy(
+            storage, source_identifier, destination_identifier);
+        if (copied) {
+            auto destination_hash =
+                transport::physical_hash(storage,
+                                         destination_identifier,
+                                         "sha256");
+            if (destination_hash) {
+                if (!valid_sha256(*destination_hash)) {
+                    return std::unexpected(
+                        error(ErrorCode::VerificationFailure,
+                              "invalid destination physical SHA-256"));
+                }
+                if (*destination_hash != *source_hash) {
+                    return std::unexpected(
+                        error(ErrorCode::VerificationFailure,
+                              "remote copy does not match source object"));
+                }
+                return std::move(*source_hash);
+            }
+            if (destination_hash.error().code !=
+                transport::ErrorCode::Unsupported) {
+                return std::unexpected(
+                    transport_error(destination_hash.error()));
+            }
+            auto verified = verify_destination_via_workspace(
+                storage, destination_identifier, *source_hash, workspace_root);
+            if (!verified) {
+                return std::unexpected(verified.error());
+            }
+            return std::move(*source_hash);
+        }
+        if (copied.error().code != transport::ErrorCode::Unsupported) {
+            return std::unexpected(transport_error(copied.error()));
+        }
+    } else if (source_hash.error().code !=
+               transport::ErrorCode::Unsupported) {
+        return std::unexpected(transport_error(source_hash.error()));
+    }
+
+    return copy_verified_via_workspace(
+        storage, source_identifier, destination_identifier, workspace_root);
 }
 
 } // namespace kasumi::application::history_storage::maintenance_protocol

@@ -207,6 +207,44 @@ Result local_get(void* context,
     return copy_file_overwrite(*source, destination);
 }
 
+Result local_copy(void* context,
+                  std::string_view source_identifier,
+                  std::string_view destination_identifier) {
+    auto* state = local_state(context);
+
+    if (state == nullptr || state->root.empty()) {
+        return std::unexpected(invalid_context_error());
+    }
+
+    auto source = resolve_object_path(*state, source_identifier);
+    if (!source) {
+        return std::unexpected(source.error());
+    }
+    auto destination = resolve_object_path(*state, destination_identifier);
+    if (!destination) {
+        return std::unexpected(destination.error());
+    }
+
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(*source, error)) {
+        if (error) {
+            return std::unexpected(make_error(error));
+        }
+        return std::unexpected(Error{
+            .code = ErrorCode::ObjectNotFound,
+            .message = "source object does not exist",
+            .native_code = 0,
+        });
+    }
+
+    auto parent_result = ensure_parent_directory(*destination);
+    if (!parent_result) {
+        return parent_result;
+    }
+
+    return copy_file_overwrite(*source, *destination);
+}
+
 PresenceResult local_presence(void* context, std::string_view identifier) {
     auto* state = local_state(context);
 
@@ -378,6 +416,7 @@ StorageOperations make_storage_operations() noexcept {
         .initialize = local_initialize,
         .put = local_put,
         .get = local_get,
+        .copy = local_copy,
         .presence = local_presence,
         .list = local_list,
         .list_prefix = local_list_prefix,

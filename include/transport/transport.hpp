@@ -25,6 +25,11 @@ using GetFunction = Result (*)(void* context,
                                std::string_view identifier,
                                const std::filesystem::path& destination);
 
+// Function signature for copying an object within the opened storage.
+using CopyFunction = Result (*)(void* context,
+                                std::string_view source_identifier,
+                                std::string_view destination_identifier);
+
 // Batch of objects for optimized download. Identifiers are relative to
 // the remote prefix and local destination directory.
 struct GetBatch {
@@ -108,13 +113,14 @@ using ControlReadBatchFunction = ControlReadBatchResponse (*)(
 using RemoveFunction = RemovalResult (*)(void* context,
                                          std::string_view identifier);
 
-// Operations table; prefix listing and physical hash are optional.
+// Operations table; copy, prefix listing and physical hash are optional.
 struct StorageOperations {
     InitializeFunction initialize = nullptr;
     PutFunction put = nullptr;
     PutBatchFunction put_batch = nullptr;
     GetFunction get = nullptr;
     GetBatchFunction get_batch = nullptr;
+    CopyFunction copy = nullptr;
     PresenceFunction presence = nullptr;
     ListFunction list = nullptr;
     ListPrefixFunction list_prefix = nullptr;
@@ -165,6 +171,12 @@ Result put_batch(Transport& transport, const PutBatch& batch);
 Result get(Transport& transport,
            std::string_view identifier,
            const std::filesystem::path& destination);
+
+// Requests a byte copy in the same opened storage; does not verify or remove
+// the source.
+Result copy(Transport& transport,
+            std::string_view source_identifier,
+            std::string_view destination_identifier);
 
 // Downloads a batch of objects. Falls back to individual get() calls if
 // unsupported natively by backend.

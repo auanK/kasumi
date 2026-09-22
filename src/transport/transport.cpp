@@ -190,6 +190,26 @@ bool valid_batch_identifier(std::string_view identifier) noexcept {
     return path.lexically_normal() == path;
 }
 
+bool valid_object_identifier(std::string_view identifier) {
+    if (identifier.empty() || identifier.find('\\') != std::string_view::npos) {
+        return false;
+    }
+    const auto path = platform::path::from_utf8(identifier);
+    if (path.empty() || path.is_absolute() || path.has_root_name() ||
+        path.has_root_directory()) {
+        return false;
+    }
+    for (const auto& component : path) {
+        if (component == "." || component == "..") {
+            return false;
+        }
+    }
+    const auto normalized = path.lexically_normal();
+    return !normalized.empty() && normalized != "." &&
+           !normalized.is_absolute() && !normalized.has_root_name() &&
+           !normalized.has_root_directory();
+}
+
 std::expected<void, Error> validate_batch(const PutBatch& batch) {
     std::error_code error;
     if (!std::filesystem::is_directory(batch.source_root, error)) {
@@ -459,6 +479,29 @@ Result get(Transport& transport,
     }
 
     return transport.storage.get(state, identifier, destination);
+}
+
+Result copy(Transport& transport,
+            std::string_view source_identifier,
+            std::string_view destination_identifier) {
+    auto* state = state_pointer(transport);
+    if (state == nullptr) {
+        return std::unexpected(invalid_transport_error());
+    }
+    if (!valid_object_identifier(source_identifier) ||
+        !valid_object_identifier(destination_identifier) ||
+        source_identifier == destination_identifier) {
+        return std::unexpected(
+            make_error(ErrorCode::InvalidIdentifier,
+                       "invalid or identical copy identifiers"));
+    }
+    if (transport.storage.copy == nullptr) {
+        return std::unexpected(
+            make_error(ErrorCode::Unsupported,
+                       "transport does not support remote object copy"));
+    }
+    return transport.storage.copy(
+        state, source_identifier, destination_identifier);
 }
 
 Result get_batch(Transport& transport, const GetBatch& batch) {

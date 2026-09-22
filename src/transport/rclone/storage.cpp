@@ -451,6 +451,42 @@ Result rclone_get(void* context,
     return {};
 }
 
+Result rclone_copy(void* context,
+                   std::string_view source_identifier,
+                   std::string_view destination_identifier) {
+    auto* state = ready_state(context);
+    if (state == nullptr) {
+        return std::unexpected(invalid_context_error());
+    }
+    if (!valid_identifier(source_identifier) ||
+        !valid_identifier(destination_identifier) ||
+        source_identifier == destination_identifier) {
+        return std::unexpected(invalid_identifier_error());
+    }
+
+    const auto copied =
+        request_json(*state,
+                     "operations/copyfile",
+                     nlohmann::json{
+                         {"srcFs", remote_fs(*state)},
+                         {"srcRemote",
+                          object_remote(*state, source_identifier)},
+                         {"dstFs", remote_fs(*state)},
+                         {"dstRemote",
+                          object_remote(*state, destination_identifier)},
+                     },
+                     maximum_response_size,
+                     transfer_timeout);
+    if (!copied) {
+        if (not_found(copied.error())) {
+            return std::unexpected(make_error(
+                ErrorCode::ObjectNotFound, "remote source does not exist"));
+        }
+        return std::unexpected(copied.error());
+    }
+    return {};
+}
+
 Result rclone_get_batch(void* context, const GetBatch& batch) {
     auto* state = ready_state(context);
     if (state == nullptr) {
@@ -1164,6 +1200,7 @@ StorageOperations make_storage_operations() noexcept {
         .put_batch = rclone_put_batch,
         .get = rclone_get,
         .get_batch = rclone_get_batch,
+        .copy = rclone_copy,
         .presence = rclone_presence,
         .list = rclone_list,
         .list_prefix = rclone_list_prefix,
