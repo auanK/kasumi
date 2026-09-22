@@ -9,6 +9,7 @@
 #include "application/sync/mutation.hpp"
 #include "application/sync/publication.hpp"
 #include "application/sync/reobservation.hpp"
+#include "core/diff.hpp"
 #include "core/hasher.hpp"
 #include "core/history.hpp"
 #include "core/node.hpp"
@@ -5686,6 +5687,326 @@ TEST(ReconciliationTest,
     EXPECT_EQ(numbered_row->hash, remote_hash);
     EXPECT_EQ(numbered_row->size, 6U);
     EXPECT_EQ(numbered_row->mtime, t1);
+}
+void verify_candidate_tree_preserves_file_and_directory(
+    const kasumi::Snapshot& tree,
+    kasumi::Hash file_hash,
+    kasumi::Hash child_hash,
+    kasumi::Hash deep_hash) {
+    EXPECT_TRUE(kasumi::valid_snapshot(tree, false));
+
+    std::string file_path;
+    std::string child_path;
+    std::string deep_path;
+    std::size_t file_count = 0;
+    std::size_t child_count = 0;
+    std::size_t deep_count = 0;
+
+    for (const auto& row : tree.rows) {
+        if (!row.is_directory) {
+            if (row.hash == file_hash) {
+                file_path = row.path;
+                ++file_count;
+            } else if (row.hash == child_hash) {
+                child_path = row.path;
+                ++child_count;
+            } else if (row.hash == deep_hash) {
+                deep_path = row.path;
+                ++deep_count;
+            }
+        }
+    }
+
+    EXPECT_EQ(file_count, 1U) << "FILE-PAYLOAD does not appear exactly once";
+    EXPECT_EQ(child_count, 1U) << "CHILD-PAYLOAD does not appear exactly once";
+    EXPECT_EQ(deep_count, 1U) << "DEEP-PAYLOAD does not appear exactly once";
+
+    EXPECT_FALSE(file_path.empty());
+    EXPECT_FALSE(child_path.empty());
+    EXPECT_FALSE(deep_path.empty());
+
+    // File and directory branches occupy non-overlapping logical paths
+    EXPECT_NE(file_path, child_path);
+    EXPECT_NE(file_path, deep_path);
+    EXPECT_FALSE(child_path.starts_with(file_path + "/"));
+    EXPECT_FALSE(deep_path.starts_with(file_path + "/"));
+
+    // Descendants remain under the same relocated or canonical subtree
+    const auto child_parent =
+        std::filesystem::path(child_path).parent_path().lexically_normal();
+    const auto deep_parent = std::filesystem::path(deep_path)
+                                 .parent_path()
+                                 .parent_path()
+                                 .lexically_normal();
+    EXPECT_EQ(child_parent, deep_parent);
+
+    // No path occupied by both a file and directory
+    std::unordered_set<std::string> files;
+    std::unordered_set<std::string> dirs;
+    for (const auto& row : tree.rows) {
+        if (row.is_directory) {
+            dirs.insert(row.path);
+        } else {
+            files.insert(row.path);
+        }
+    }
+    for (const auto& f : files) {
+        EXPECT_FALSE(dirs.contains(f))
+            << "Path " << f << " is occupied by both a file and a directory";
+    }
+}
+
+TEST(ReconciliationTest,
+     ConcurrentFileDirectoryCreationPreservesBothBranchesDirectionA) {
+    const auto now = std::filesystem::file_time_type::clock::now();
+    const auto t1 = now;
+    const auto t2 = now + std::chrono::hours{1};
+
+    const auto file_hash = kasumi::hasher::hash_string("FILE-PAYLOAD");
+    const auto child_hash = kasumi::hasher::hash_string("CHILD-PAYLOAD");
+    const auto deep_hash = kasumi::hasher::hash_string("DEEP-PAYLOAD");
+
+    const auto make_file_tree = [&](std::filesystem::file_time_type mtime) {
+        kasumi::Snapshot tree{
+            .rows = {kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true},
+                     kasumi::NodeRow{.path = "node",
+                                     .hash = file_hash,
+                                     .size = 12,
+                                     .mtime = mtime,
+                                     .is_directory = false}}};
+        kasumi::finalize_snapshot(tree);
+        return tree;
+    };
+
+    const auto make_dir_tree = [&](std::filesystem::file_time_type mtime) {
+        kasumi::Snapshot tree{
+            .rows = {
+                kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true},
+                kasumi::NodeRow{.path = "node", .mtime = mtime, .is_directory = true},
+                kasumi::NodeRow{.path = "node/child.txt",
+                                .hash = child_hash,
+                                .size = 13,
+                                .mtime = mtime,
+                                .is_directory = false},
+                kasumi::NodeRow{.path = "node/nested",
+                                .mtime = mtime,
+                                .is_directory = true},
+                kasumi::NodeRow{.path = "node/nested/deep.txt",
+                                .hash = deep_hash,
+                                .size = 12,
+                                .mtime = mtime,
+                                .is_directory = false}}};
+        kasumi::finalize_snapshot(tree);
+        return tree;
+    };
+
+    auto base_tree = kasumi::Snapshot{
+        .rows = {kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true}}};
+    kasumi::finalize_snapshot(base_tree);
+
+    // Subcase A1: Local directory mtime <= Remote file mtime (Local T1, Remote T2)
+    {
+        auto input = empty_publication_input();
+        input.local_tree = make_dir_tree(t1);
+        input.base_tree = base_tree;
+        input.storage.tree = make_file_tree(t2);
+        input.storage.history_present = true;
+        input.storage.generation = 1;
+        input.storage.logical_heads = {std::string(64, 'a')};
+
+        const auto result = kasumi::reconciliation::reconcile(input);
+        EXPECT_TRUE(result.has_value())
+            << "Reconciliation failed for Direction A (local dir older): "
+            << (result ? "" : result.error().detail);
+        if (result) {
+            EXPECT_TRUE(result->requires_publication);
+            verify_candidate_tree_preserves_file_and_directory(
+                result->candidate_shared_tree, file_hash, child_hash, deep_hash);
+        }
+    }
+
+    // Subcase A2: Local directory mtime > Remote file mtime (Local T2, Remote T1)
+    {
+        auto input = empty_publication_input();
+        input.local_tree = make_dir_tree(t2);
+        input.base_tree = base_tree;
+        input.storage.tree = make_file_tree(t1);
+        input.storage.history_present = true;
+        input.storage.generation = 1;
+        input.storage.logical_heads = {std::string(64, 'a')};
+
+        const auto result = kasumi::reconciliation::reconcile(input);
+        EXPECT_TRUE(result.has_value())
+            << "Reconciliation failed for Direction A (local dir newer): "
+            << (result ? "" : result.error().detail);
+        if (result) {
+            EXPECT_TRUE(result->requires_publication);
+            verify_candidate_tree_preserves_file_and_directory(
+                result->candidate_shared_tree, file_hash, child_hash, deep_hash);
+        }
+    }
+}
+
+TEST(ReconciliationTest,
+     ConcurrentFileDirectoryCreationPreservesBothBranchesDirectionB) {
+    const auto now = std::filesystem::file_time_type::clock::now();
+    const auto t1 = now;
+    const auto t2 = now + std::chrono::hours{1};
+
+    const auto file_hash = kasumi::hasher::hash_string("FILE-PAYLOAD");
+    const auto child_hash = kasumi::hasher::hash_string("CHILD-PAYLOAD");
+    const auto deep_hash = kasumi::hasher::hash_string("DEEP-PAYLOAD");
+
+    const auto make_file_tree = [&](std::filesystem::file_time_type mtime) {
+        kasumi::Snapshot tree{
+            .rows = {kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true},
+                     kasumi::NodeRow{.path = "node",
+                                     .hash = file_hash,
+                                     .size = 12,
+                                     .mtime = mtime,
+                                     .is_directory = false}}};
+        kasumi::finalize_snapshot(tree);
+        return tree;
+    };
+
+    const auto make_dir_tree = [&](std::filesystem::file_time_type mtime) {
+        kasumi::Snapshot tree{
+            .rows = {
+                kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true},
+                kasumi::NodeRow{.path = "node", .mtime = mtime, .is_directory = true},
+                kasumi::NodeRow{.path = "node/child.txt",
+                                .hash = child_hash,
+                                .size = 13,
+                                .mtime = mtime,
+                                .is_directory = false},
+                kasumi::NodeRow{.path = "node/nested",
+                                .mtime = mtime,
+                                .is_directory = true},
+                kasumi::NodeRow{.path = "node/nested/deep.txt",
+                                .hash = deep_hash,
+                                .size = 12,
+                                .mtime = mtime,
+                                .is_directory = false}}};
+        kasumi::finalize_snapshot(tree);
+        return tree;
+    };
+
+    auto base_tree = kasumi::Snapshot{
+        .rows = {kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true}}};
+    kasumi::finalize_snapshot(base_tree);
+
+    // Subcase B1: Local file mtime <= Remote directory mtime (Local T1, Remote T2)
+    {
+        auto input = empty_publication_input();
+        input.local_tree = make_file_tree(t1);
+        input.base_tree = base_tree;
+        input.storage.tree = make_dir_tree(t2);
+        input.storage.history_present = true;
+        input.storage.generation = 1;
+        input.storage.logical_heads = {std::string(64, 'a')};
+
+        const auto result = kasumi::reconciliation::reconcile(input);
+        EXPECT_TRUE(result.has_value())
+            << "Reconciliation failed for Direction B (local file older): "
+            << (result ? "" : result.error().detail);
+        if (result) {
+            EXPECT_TRUE(result->requires_publication);
+            verify_candidate_tree_preserves_file_and_directory(
+                result->candidate_shared_tree, file_hash, child_hash, deep_hash);
+        }
+    }
+
+    // Subcase B2: Local file mtime > Remote directory mtime (Local T2, Remote T1)
+    {
+        auto input = empty_publication_input();
+        input.local_tree = make_file_tree(t2);
+        input.base_tree = base_tree;
+        input.storage.tree = make_dir_tree(t1);
+        input.storage.history_present = true;
+        input.storage.generation = 1;
+        input.storage.logical_heads = {std::string(64, 'a')};
+
+        const auto result = kasumi::reconciliation::reconcile(input);
+        EXPECT_TRUE(result.has_value())
+            << "Reconciliation failed for Direction B (local file newer): "
+            << (result ? "" : result.error().detail);
+        if (result) {
+            EXPECT_TRUE(result->requires_publication);
+            verify_candidate_tree_preserves_file_and_directory(
+                result->candidate_shared_tree, file_hash, child_hash, deep_hash);
+        }
+    }
+}
+
+TEST(ReconciliationTest,
+     ConcurrentFileDirectoryConflictReservationPreservesExistingArtifact) {
+    const auto now = std::filesystem::file_time_type::clock::now();
+    const auto t1 = now;
+    const auto t2 = now + std::chrono::hours{1};
+
+    const auto file_hash = kasumi::hasher::hash_string("FILE-PAYLOAD");
+    const auto child_hash = kasumi::hasher::hash_string("CHILD-PAYLOAD");
+    const auto deep_hash = kasumi::hasher::hash_string("DEEP-PAYLOAD");
+    const auto existing_hash = kasumi::hasher::hash_string("PRE_EXISTING");
+
+    // Local directory subtree + existing conflict file artifact
+    kasumi::Snapshot local_tree{
+        .rows = {
+            kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true},
+            kasumi::NodeRow{.path = "node", .mtime = t1, .is_directory = true},
+            kasumi::NodeRow{.path = "node/child.txt",
+                            .hash = child_hash,
+                            .size = 13,
+                            .mtime = t1,
+                            .is_directory = false},
+            kasumi::NodeRow{.path = "node/nested",
+                            .mtime = t1,
+                            .is_directory = true},
+            kasumi::NodeRow{.path = "node/nested/deep.txt",
+                            .hash = deep_hash,
+                            .size = 12,
+                            .mtime = t1,
+                            .is_directory = false},
+            kasumi::NodeRow{.path = "node.kasumiconflict_remote",
+                            .hash = existing_hash,
+                            .size = 12,
+                            .mtime = t1,
+                            .is_directory = false}}};
+    kasumi::finalize_snapshot(local_tree);
+
+    kasumi::Snapshot storage_tree{
+        .rows = {kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true},
+                 kasumi::NodeRow{.path = "node",
+                                 .hash = file_hash,
+                                 .size = 12,
+                                 .mtime = t2,
+                                 .is_directory = false}}};
+    kasumi::finalize_snapshot(storage_tree);
+
+    auto base_tree = kasumi::Snapshot{
+        .rows = {kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true}}};
+    kasumi::finalize_snapshot(base_tree);
+
+    auto input = empty_publication_input();
+    input.local_tree = local_tree;
+    input.base_tree = base_tree;
+    input.storage.tree = storage_tree;
+    input.storage.history_present = true;
+    input.storage.generation = 1;
+    input.storage.logical_heads = {std::string(64, 'a')};
+
+    const auto result = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+
+    // The pre-existing artifact must survive with its original content
+    const auto* existing_row = kasumi::find_row(
+        result->candidate_shared_tree, "node.kasumiconflict_remote");
+    ASSERT_NE(existing_row, nullptr)
+        << "Pre-existing conflict artifact was dropped during reconciliation";
+    EXPECT_EQ(existing_row->hash, existing_hash);
+
+    verify_candidate_tree_preserves_file_and_directory(
+        result->candidate_shared_tree, file_hash, child_hash, deep_hash);
 }
 
 TEST(SyncCoordinatorTest, EmptyPlanPublishesAndPersistsConvergenceCommit) {
