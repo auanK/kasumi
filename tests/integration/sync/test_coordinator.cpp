@@ -357,6 +357,8 @@ struct AmbiguousPublicationState {
     bool fail_content_get = false;
     UploadCorruption upload_corruption = UploadCorruption::None;
     bool claim_present_after_upload = false;
+    std::function<void()> on_epoch_verified;
+    bool epoch_verified_callback_fired = false;
 };
 
 struct ReobserveTransportState {
@@ -762,6 +764,7 @@ ambiguous_get(void* context,
               const std::filesystem::path& destination) {
     auto* state = ambiguous_state(context);
     std::vector<std::uint8_t> bytes;
+    std::function<void()> epoch_verified_callback;
     {
         std::lock_guard lock(state->mutex);
         ++state->get_count;
@@ -782,6 +785,11 @@ ambiguous_get(void* context,
                 .message = "object missing"});
         }
         bytes = found->second;
+        if (ambiguous_epoch(identifier) && state->on_epoch_verified &&
+            !state->epoch_verified_callback_fired) {
+            state->epoch_verified_callback_fired = true;
+            epoch_verified_callback = state->on_epoch_verified;
+        }
     }
     std::error_code error;
     std::filesystem::create_directories(destination.parent_path(), error);
@@ -793,6 +801,9 @@ ambiguous_get(void* context,
     }
     output.write(reinterpret_cast<const char*>(bytes.data()),
                  static_cast<std::streamsize>(bytes.size()));
+    if (output && epoch_verified_callback) {
+        epoch_verified_callback();
+    }
     return output ? kasumi::transport::Result{}
                   : kasumi::transport::Result{
                         std::unexpect,
@@ -2372,6 +2383,118 @@ TEST(SyncCoordinatorTest,
         kasumi::state_storage::load_state(fixture.runtime.database_path);
     ASSERT_TRUE(state.has_value() && *state);
     EXPECT_EQ((*state)->epoch_sequence, 3U);
+}
+
+TEST(SyncCoordinatorTest,
+     EpochVerifiedJournalFailureStopsBeforeDatabaseAndCleanup) {
+    auto fixture = make_pruning_fixture();
+    ASSERT_TRUE(fixture.ready);
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(
+            fixture.key);
+    const auto old_marker =
+        kasumi::application::history_storage::marker_identifier(
+            layout, fixture.recovery_head);
+    fixture.input.storage.marked_head_identifiers = {old_marker};
+
+    const auto paths =
+        kasumi::application::sync::journal::make_paths(fixture.profile);
+    ASSERT_TRUE(paths.has_value());
+    fixture.state->on_epoch_verified = [temporary = paths->temporary_path] {
+        std::error_code error;
+        std::filesystem::create_directory(temporary, error);
+        EXPECT_FALSE(error);
+    };
+
+    const auto executed =
+        kasumi::application::sync::coordinator::execute(fixture.runtime,
+                                                        fixture.storage,
+                                                        fixture.key,
+                                                        fixture.input,
+                                                        fixture.result);
+    ASSERT_FALSE(executed.has_value());
+    EXPECT_EQ(executed.error().code,
+              kasumi::application::sync::coordinator::ErrorCode::JournalFailure);
+    EXPECT_FALSE(std::filesystem::exists(fixture.runtime.database_path));
+
+    const auto pending =
+        kasumi::application::sync::journal::load(*paths, fixture.key);
+    ASSERT_TRUE(pending.has_value() && *pending);
+    EXPECT_EQ((*pending)->phase, kasumi::transaction::Phase::EpochUploaded);
+    std::lock_guard lock(fixture.state->mutex);
+    EXPECT_TRUE(fixture.state->objects.contains(old_marker));
+    EXPECT_TRUE(fixture.state->objects.contains((*pending)->marker_id));
+}
+
+TEST(SyncCoordinatorTest,
+     DatabaseFailurePreservesAcceptedPublicationMarkers) {
+    auto fixture = make_pruning_fixture();
+    ASSERT_TRUE(fixture.ready);
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(
+            fixture.key);
+    const auto old_marker =
+        kasumi::application::history_storage::marker_identifier(
+            layout, fixture.recovery_head);
+    fixture.input.storage.marked_head_identifiers = {old_marker};
+
+    ASSERT_TRUE(
+        kasumi::state_storage::initialize(fixture.runtime.database_path));
+    ASSERT_TRUE(kasumi::state_storage::save_state(
+        fixture.runtime.database_path,
+        {.tree = fixture.input.storage.tree,
+         .height = fixture.input.storage.generation,
+         .commit_id = fixture.input.storage.logical_heads.front(),
+         .ciphertext_id = std::string(64, 'c'),
+         .epoch_id = fixture.previous_epoch.reference.epoch_id,
+         .epoch_sequence = fixture.previous_epoch.reference.sequence}));
+
+    sqlite3* database = nullptr;
+    ASSERT_EQ(sqlite3_open(fixture.runtime.database_path.string().c_str(),
+                           &database),
+              SQLITE_OK);
+    char* sqlite_error = nullptr;
+    ASSERT_EQ(
+        sqlite3_exec(
+            database,
+            "CREATE TRIGGER reject_state_write BEFORE INSERT ON metadata "
+            "WHEN NEW.key = 'commit_id' "
+            "BEGIN SELECT RAISE(ABORT, 'injected state failure'); END;",
+            nullptr,
+            nullptr,
+            &sqlite_error),
+        SQLITE_OK)
+        << (sqlite_error == nullptr ? "" : sqlite_error);
+    sqlite3_free(sqlite_error);
+    ASSERT_EQ(sqlite3_close(database), SQLITE_OK);
+
+    const auto executed =
+        kasumi::application::sync::coordinator::execute(fixture.runtime,
+                                                        fixture.storage,
+                                                        fixture.key,
+                                                        fixture.input,
+                                                        fixture.result);
+    ASSERT_FALSE(executed.has_value());
+    EXPECT_EQ(executed.error().code,
+              kasumi::application::sync::coordinator::ErrorCode::DatabaseFailure);
+
+    const auto state =
+        kasumi::state_storage::load_state(fixture.runtime.database_path);
+    ASSERT_TRUE(state.has_value() && *state);
+    EXPECT_EQ((*state)->epoch_id, fixture.previous_epoch.reference.epoch_id);
+    EXPECT_EQ((*state)->epoch_sequence,
+              fixture.previous_epoch.reference.sequence);
+
+    const auto paths =
+        kasumi::application::sync::journal::make_paths(fixture.profile);
+    ASSERT_TRUE(paths.has_value());
+    const auto pending =
+        kasumi::application::sync::journal::load(*paths, fixture.key);
+    ASSERT_TRUE(pending.has_value() && *pending);
+    EXPECT_EQ((*pending)->phase, kasumi::transaction::Phase::EpochVerified);
+    std::lock_guard lock(fixture.state->mutex);
+    EXPECT_TRUE(fixture.state->objects.contains(old_marker));
+    EXPECT_TRUE(fixture.state->objects.contains((*pending)->marker_id));
 }
 
 kasumi::application::history_storage::epoch::SealedEpoch
