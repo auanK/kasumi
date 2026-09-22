@@ -5502,6 +5502,117 @@ TEST(ReconciliationTest, LogicalHeadOrderDoesNotChangeReconciliationResult) {
               second_result->requires_state_commit);
 }
 
+TEST(ReconciliationTest, LocalNewerModifyModifyPreservesRemoteInSharedTree) {
+    const auto now = std::filesystem::file_time_type::clock::now();
+    const auto t1 = now;
+    const auto t2 = now + std::chrono::hours{1};
+
+    const auto base_hash = kasumi::hasher::hash_string("BASE");
+    const auto local_hash = kasumi::hasher::hash_string("LOCAL");
+    const auto remote_hash = kasumi::hasher::hash_string("REMOTE");
+
+    const auto make_tree = [&](std::string_view content,
+                               std::filesystem::file_time_type mtime) {
+        kasumi::Snapshot tree{
+            .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
+                     kasumi::NodeRow{.path = "file.txt",
+                                     .hash = kasumi::hasher::hash_string(content),
+                                     .size = content.size(),
+                                     .mtime = mtime,
+                                     .is_directory = false}}};
+        kasumi::finalize_snapshot(tree);
+        return tree;
+    };
+
+    const auto base_tree = make_tree("BASE", t1);
+    const std::vector<kasumi::Hash> expected_hashes{
+        std::min(local_hash, remote_hash), std::max(local_hash, remote_hash)};
+
+    // Symmetry control: remote wins (local mtime = T1, remote mtime = T2)
+    {
+        auto input_remote_wins = empty_publication_input();
+        input_remote_wins.local_tree = make_tree("LOCAL", t1);
+        input_remote_wins.base_tree = base_tree;
+        input_remote_wins.storage.tree = make_tree("REMOTE", t2);
+        input_remote_wins.storage.history_present = true;
+        input_remote_wins.storage.generation = 1;
+        input_remote_wins.storage.logical_heads = {std::string(64, 'a')};
+
+        const auto result =
+            kasumi::reconciliation::reconcile(input_remote_wins);
+        ASSERT_TRUE(result.has_value()) << result.error().detail;
+        EXPECT_TRUE(result->has_conflicts);
+        EXPECT_TRUE(result->requires_publication);
+
+        std::vector<kasumi::Hash> file_hashes;
+        for (const auto& row : result->candidate_shared_tree.rows) {
+            if (!row.is_directory) {
+                file_hashes.push_back(row.hash);
+                EXPECT_NE(row.hash, base_hash);
+            }
+        }
+        std::ranges::sort(file_hashes);
+        EXPECT_EQ(file_hashes.size(), 2U);
+        EXPECT_EQ(file_hashes, expected_hashes);
+
+        auto pub_tree = kasumi::reconciliation::build_publication_tree(
+            result->candidate_shared_tree,
+            result->pending_storage_rows,
+            result->candidate_shared_tree);
+        ASSERT_TRUE(pub_tree.has_value()) << pub_tree.error().detail;
+        std::vector<kasumi::Hash> pub_hashes;
+        for (const auto& row : pub_tree->rows) {
+            if (!row.is_directory) {
+                pub_hashes.push_back(row.hash);
+            }
+        }
+        std::ranges::sort(pub_hashes);
+        EXPECT_EQ(pub_hashes, expected_hashes);
+    }
+
+    // Target scenario: local wins (local mtime = T2, remote mtime = T1)
+    {
+        auto input_local_wins = empty_publication_input();
+        input_local_wins.local_tree = make_tree("LOCAL", t2);
+        input_local_wins.base_tree = base_tree;
+        input_local_wins.storage.tree = make_tree("REMOTE", t1);
+        input_local_wins.storage.history_present = true;
+        input_local_wins.storage.generation = 1;
+        input_local_wins.storage.logical_heads = {std::string(64, 'a')};
+
+        const auto result = kasumi::reconciliation::reconcile(input_local_wins);
+        ASSERT_TRUE(result.has_value()) << result.error().detail;
+        EXPECT_TRUE(result->has_conflicts);
+        EXPECT_TRUE(result->requires_publication);
+
+        std::vector<kasumi::Hash> file_hashes;
+        for (const auto& row : result->candidate_shared_tree.rows) {
+            if (!row.is_directory) {
+                file_hashes.push_back(row.hash);
+                EXPECT_NE(row.hash, base_hash);
+            }
+        }
+        std::ranges::sort(file_hashes);
+        EXPECT_EQ(file_hashes.size(), 2U)
+            << "candidate_shared_tree failed to preserve both versions when local wins";
+        EXPECT_EQ(file_hashes, expected_hashes);
+
+        auto pub_tree = kasumi::reconciliation::build_publication_tree(
+            result->candidate_shared_tree,
+            result->pending_storage_rows,
+            result->candidate_shared_tree);
+        ASSERT_TRUE(pub_tree.has_value()) << pub_tree.error().detail;
+        std::vector<kasumi::Hash> pub_hashes;
+        for (const auto& row : pub_tree->rows) {
+            if (!row.is_directory) {
+                pub_hashes.push_back(row.hash);
+            }
+        }
+        std::ranges::sort(pub_hashes);
+        EXPECT_EQ(pub_hashes, expected_hashes);
+    }
+}
+
 TEST(SyncCoordinatorTest, EmptyPlanPublishesAndPersistsConvergenceCommit) {
     auto workspace = kasumi::test::make_temp_workspace("runtime-convergence");
     const auto profile = kasumi::test::workspace_path(workspace, "profile");
