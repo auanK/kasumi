@@ -1097,8 +1097,15 @@ resolve_impl(std::span<const LoadedCommit> commits,
                 return std::unexpected(Error{ErrorCode::LimitExceeded,
                                              "too many parents in commit"});
             }
-            if (loaded->commit.parents.empty())
+            if (loaded->commit.parents.empty()) {
+                if (!trusted_anchors.contains(id) &&
+                    loaded->commit.height != 0) {
+                    return std::unexpected(
+                        Error{ErrorCode::HeightMismatch,
+                              "untrusted root commit must have height zero"});
+                }
                 continue;
+            }
             std::uint64_t max_parent_height = 0;
             for (const auto& parent : loaded->commit.parents) {
                 const auto it = index.find(parent);

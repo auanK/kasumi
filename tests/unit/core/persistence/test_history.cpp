@@ -1705,4 +1705,105 @@ TEST(HistoryTest, StructuralValidDagControl) {
     EXPECT_FALSE(result->has_conflicts);
 }
 
+TEST(HistoryTest, StructuralAuthenticatedUnanchoredRejectsNonZeroRoot) {
+    const auto c = make_bootstrap(make_valid_snapshot(), 42).value();
+    const auto id = compute_id(c).value();
+    const LoadedCommit lc{id, c};
+
+    const auto result = resolve_authenticated(
+        std::vector<LoadedCommit>{lc}, std::vector<std::string>{id});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::HeightMismatch);
+}
+
+TEST(HistoryTest, StructuralExplicitTrustedAnchorAcceptsNonZeroHeight) {
+    const auto a = make_bootstrap(make_valid_snapshot(), 42).value();
+    const auto a_id = compute_id(a).value();
+    const LoadedCommit la{a_id, a};
+
+    const auto result = resolve_from_anchor_authenticated(
+        std::vector<LoadedCommit>{la}, std::vector<std::string>{a_id}, a_id);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->height, 42U);
+    EXPECT_EQ(result->heads, std::vector<std::string>{a_id});
+}
+
+TEST(HistoryTest, StructuralChildAboveTrustedAnchorValidatesRelativeHeight) {
+    const auto a = make_bootstrap(make_valid_snapshot(), 42).value();
+    const auto a_id = compute_id(a).value();
+    const LoadedCommit la{a_id, a};
+
+    // Valid child: height = 43, parent = A (height 42)
+    const auto c_valid =
+        make_commit(43, {a_id}, make_valid_snapshot()).value();
+    const auto c_valid_id = compute_id(c_valid).value();
+    const LoadedCommit lc_valid{c_valid_id, c_valid};
+
+    const auto valid_res = resolve_from_anchor_authenticated(
+        std::vector<LoadedCommit>{la, lc_valid},
+        std::vector<std::string>{c_valid_id},
+        a_id);
+    ASSERT_TRUE(valid_res.has_value());
+    EXPECT_EQ(valid_res->height, 43U);
+
+    // Malformed child: height = 44 (violates 42 + 1)
+    const auto c_bad = make_commit(44, {a_id}, make_valid_snapshot()).value();
+    const auto c_bad_id = compute_id(c_bad).value();
+    const LoadedCommit lc_bad{c_bad_id, c_bad};
+
+    const auto bad_res = resolve_from_anchor_authenticated(
+        std::vector<LoadedCommit>{la, lc_bad},
+        std::vector<std::string>{c_bad_id},
+        a_id);
+    ASSERT_FALSE(bad_res.has_value());
+    EXPECT_EQ(bad_res.error().code, ErrorCode::HeightMismatch);
+}
+
+TEST(HistoryTest, StructuralMultipleTrustedFrontierRootsAccepted) {
+    const auto a = make_bootstrap(make_custom_snapshot(1), 40).value();
+    const auto a_id = compute_id(a).value();
+    const LoadedCommit la{a_id, a};
+
+    const auto b = make_bootstrap(make_custom_snapshot(2), 45).value();
+    const auto b_id = compute_id(b).value();
+    const LoadedCommit lb{b_id, b};
+
+    const std::vector<std::string> anchors{a_id, b_id};
+
+    std::vector<std::string> merge_parents{a_id, b_id};
+    std::ranges::sort(merge_parents);
+    const auto m =
+        make_commit(46, merge_parents, make_custom_snapshot(3)).value();
+    const auto m_id = compute_id(m).value();
+    const LoadedCommit lm{m_id, m};
+
+    const auto result = resolve_from_frontier_authenticated(
+        std::vector<LoadedCommit>{la, lb, lm},
+        std::vector<std::string>{m_id},
+        anchors);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->height, 46U);
+}
+
+TEST(HistoryTest, StructuralUntrustedExtraParentlessNonZeroCommitRejected) {
+    const auto c0 = make_empty_bootstrap().value();
+    const auto c0_id = compute_id(c0).value();
+    const LoadedCommit lc0{c0_id, c0};
+
+    const auto c1 = make_commit(1, {c0_id}, make_valid_snapshot()).value();
+    const auto c1_id = compute_id(c1).value();
+    const LoadedCommit lc1{c1_id, c1};
+
+    // Extra untrusted commit X with parents = {} and height = 10 (not a trusted anchor)
+    const auto x = make_bootstrap(make_valid_snapshot(), 10).value();
+    const auto x_id = compute_id(x).value();
+    const LoadedCommit lx{x_id, x};
+
+    const auto result = resolve(
+        std::vector<LoadedCommit>{lc0, lc1, lx},
+        std::vector<std::string>{c1_id});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::HeightMismatch);
+}
+
 } // namespace
