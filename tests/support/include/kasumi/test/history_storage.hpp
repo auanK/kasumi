@@ -181,6 +181,9 @@ struct FakeState {
     std::size_t marker_put_count = 0;
     std::size_t commit_get_count = 0;
     std::size_t marker_get_count = 0;
+    std::size_t orphan_payload_get_count = 0;
+    std::size_t quarantine_payload_put_count = 0;
+    std::size_t quarantine_metadata_put_count = 0;
     std::size_t physical_hash_count = 0;
     std::map<std::string, std::string> physical_hashes;
     bool physical_hash_supported = false;
@@ -208,6 +211,7 @@ struct FakeState {
     bool hide_probe_listing = false;
     bool replace_barrier_after_quarantine_put = false;
     std::string disappear_on_get;
+    std::string observed_payload_identifier;
     std::optional<kasumi::transport::ErrorCode> physical_hash_failure;
     std::vector<std::string> remote_events;
 };
@@ -254,12 +258,20 @@ kasumi::transport::Result fake_put(void* context,
                                      .message = "injected put failure"});
     }
     ++state->put_count;
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
     if (is_commit(identifier)) {
         ++state->commit_put_count;
         state->remote_events.emplace_back("PutCommit");
     } else if (is_marker(identifier)) {
         ++state->marker_put_count;
         state->remote_events.emplace_back("PutHead");
+    }
+    if (identifier.starts_with(layout.quarantine_prefix) &&
+        identifier.ends_with(".meta")) {
+        ++state->quarantine_metadata_put_count;
+    } else if (identifier.starts_with(layout.quarantine_prefix)) {
+        ++state->quarantine_payload_put_count;
     }
     auto physical_hash = kasumi::crypto::physical::hash_file(source, "sha256");
     if (!physical_hash) {
@@ -279,8 +291,6 @@ kasumi::transport::Result fake_put(void* context,
                static_cast<std::streamsize>(bytes.size()));
     state->objects[std::string{identifier}] = std::move(bytes);
     state->physical_hashes[std::string{identifier}] = std::move(*physical_hash);
-    const auto layout =
-        kasumi::application::history_storage::derive_remote_layout(test_key());
     if (state->replace_barrier_after_quarantine_put &&
         (identifier.starts_with("history/gc/v1/quarantine/") ||
          identifier.starts_with(layout.quarantine_prefix))) {
@@ -330,6 +340,9 @@ kasumi::transport::Result fake_get(void* context,
     } else if (is_marker(identifier)) {
         ++state->marker_get_count;
         state->remote_events.emplace_back("GetHead");
+    }
+    if (identifier == state->observed_payload_identifier) {
+        ++state->orphan_payload_get_count;
     }
     if ((is_commit(identifier) && state->fail_commit_get) ||
         (is_marker(identifier) && state->fail_marker_get) ||

@@ -1184,6 +1184,61 @@ TEST(IntegrityMaintenanceTest,
     EXPECT_EQ(state->get_count, 7U);
 }
 
+TEST(IntegrityMaintenanceTest,
+     GarbageCollectQuarantineAvoidsClientPayloadRoundTrip) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-quarantine-remote-copy-red");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    const auto reachable = make_commit(0, {}, "alpha.txt", "alpha").value();
+    publish_remote(transport, workspace, reachable);
+    put_content(transport, workspace, "alpha", "alpha");
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto quarantined =
+        protocol::quarantine_identifier(test_layout(), orphan).value();
+
+    state->observed_payload_identifier = orphan;
+    state->get_count = 0;
+    state->put_count = 0;
+    state->commit_get_count = 0;
+    state->marker_get_count = 0;
+    state->orphan_payload_get_count = 0;
+    state->quarantine_payload_put_count = 0;
+    state->quarantine_metadata_put_count = 0;
+    state->physical_hash_count = 0;
+    state->remove_count = 0;
+
+    ASSERT_TRUE(state->physical_hash_supported);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+    expect_presence(transport, orphan, Presence::Absent);
+    expect_presence(transport, quarantined, Presence::Present);
+    expect_presence(transport, quarantined + ".meta", Presence::Present);
+
+    const auto counters = [&] {
+        return "total GET=" + std::to_string(state->get_count) +
+               ", orphan payload GET=" +
+               std::to_string(state->orphan_payload_get_count) +
+               ", total PUT=" + std::to_string(state->put_count) +
+               ", quarantine payload PUT=" +
+               std::to_string(state->quarantine_payload_put_count) +
+               ", quarantine metadata PUT=" +
+               std::to_string(state->quarantine_metadata_put_count) +
+               ", physical_hash=" +
+               std::to_string(state->physical_hash_count) +
+               ", remove=" + std::to_string(state->remove_count);
+    };
+    EXPECT_EQ(state->orphan_payload_get_count, 0U) << counters();
+    EXPECT_EQ(state->quarantine_payload_put_count, 0U) << counters();
+}
+
 TEST(IntegrityMaintenanceTest, FinalListingDetectsLateConcurrentChange) {
     auto workspace =
         kasumi::test::make_temp_workspace("gc-final-list-concurrent");
