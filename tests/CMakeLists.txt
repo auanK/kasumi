@@ -196,8 +196,11 @@ kasumi_add_test_suite(
     SOURCES
         unit/transport/test_local.cpp
         unit/transport/test_rclone_storage.cpp
+        unit/transport/test_remote_copy_smoke.cpp
+        operational/remote_copy_smoke_support.cpp
     LIBRARIES
         kasumi_transport
+        kasumi_platform
         nlohmann_json::nlohmann_json
         httplib::httplib
         reproc++

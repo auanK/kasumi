@@ -22,6 +22,11 @@ option(
     "Build Kasumi operational benchmark executables"
     OFF
 )
+option(
+    KASUMI_BUILD_REMOTE_COPY_SMOKE
+    "Build the opt-in real-rclone-remote copy smoke test"
+    OFF
+)
 
 add_library(kasumi_warnings INTERFACE)
 if(WIN32)
@@ -557,6 +562,23 @@ target_link_libraries(
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
     target_link_options(kasumi PRIVATE
         $<$<OR:$<CONFIG:Release>,$<CONFIG:MinSizeRel>>:-static>
+    )
+endif()
+
+if(KASUMI_BUILD_REMOTE_COPY_SMOKE)
+    add_executable(
+        kasumi_remote_copy_smoke
+        tests/operational/remote_copy_smoke.cpp
+        tests/operational/remote_copy_smoke_support.cpp
+    )
+    target_link_libraries(
+        kasumi_remote_copy_smoke
+        PRIVATE
+        kasumi_transport
+        kasumi_platform
+        nlohmann_json::nlohmann_json
+        reproc++
+        kasumi_warnings
     )
 endif()
 
