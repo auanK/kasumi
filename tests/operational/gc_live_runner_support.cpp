@@ -812,15 +812,31 @@ RunnerReport run(
     report.metrics.gc_candidate_remove = kasumi::platform::perf_trace::get_count("gc candidate remove");
 
     // Capture benchmark timers
+    report.benchmark.gc_barrier_acquire_us = kasumi::platform::perf_trace::get_time("gc barrier acquire");
+    report.benchmark.gc_writer_consistency_checks_us = kasumi::platform::perf_trace::get_time("gc writer consistency checks");
+    report.benchmark.gc_backend_consistency_probe_us = kasumi::platform::perf_trace::get_time("gc backend consistency probe");
+    report.benchmark.gc_quarantine_inventory_us = kasumi::platform::perf_trace::get_time("gc quarantine inventory");
+    report.benchmark.gc_quarantine_restoration_us = kasumi::platform::perf_trace::get_time("gc quarantine restoration");
+    report.benchmark.gc_prior_metadata_initialization_us = kasumi::platform::perf_trace::get_time("gc prior metadata initialization");
+    report.benchmark.gc_reachability_observation_1_us = kasumi::platform::perf_trace::get_time("gc reachability observation 1");
+    report.benchmark.gc_reachability_observation_2_us = kasumi::platform::perf_trace::get_time("gc reachability observation 2");
+    report.benchmark.gc_stable_state_comparison_us = kasumi::platform::perf_trace::get_time("gc stable-state comparison");
+    report.benchmark.gc_final_namespace_verification_us = kasumi::platform::perf_trace::get_time("gc final namespace verification");
+    report.benchmark.gc_expired_quarantine_purge_us = kasumi::platform::perf_trace::get_time("gc expired quarantine purge");
+
+    report.benchmark.gc_candidate_pre_copy_barrier_verification_us = kasumi::platform::perf_trace::get_time("gc candidate pre-copy barrier verification");
     report.benchmark.gc_candidate_verified_copy_us = kasumi::platform::perf_trace::get_time("gc candidate verified copy");
     report.benchmark.verified_copy_source_physical_hash_us = kasumi::platform::perf_trace::get_time("verified copy source physical hash");
     report.benchmark.verified_copy_native_copy_us = kasumi::platform::perf_trace::get_time("verified copy native copy");
     report.benchmark.verified_copy_destination_physical_hash_us = kasumi::platform::perf_trace::get_time("verified copy destination physical hash");
-    report.benchmark.rclone_download_us = kasumi::platform::perf_trace::get_time("rclone copyfile download");
-    report.benchmark.rclone_upload_us = kasumi::platform::perf_trace::get_time("rclone copyfile upload");
     report.benchmark.gc_candidate_metadata_publish_us = kasumi::platform::perf_trace::get_time("gc candidate metadata publish");
     report.benchmark.gc_candidate_pre_remove_barrier_verification_us = kasumi::platform::perf_trace::get_time("gc candidate pre-remove barrier verification");
     report.benchmark.gc_candidate_remove_us = kasumi::platform::perf_trace::get_time("gc candidate remove");
+
+    report.benchmark.gc_barrier_release_us = kasumi::platform::perf_trace::get_time("gc barrier release");
+
+    report.benchmark.rclone_download_us = kasumi::platform::perf_trace::get_time("rclone copyfile download");
+    report.benchmark.rclone_upload_us = kasumi::platform::perf_trace::get_time("rclone copyfile upload");
 
     if (!gc_result) {
         report.gc.result = "FAILED";
@@ -991,15 +1007,32 @@ nlohmann::json to_json(const RunnerReport& report) {
             {"candidate_physical_bytes", report.benchmark.candidate_physical_bytes},
             {"process_wall_ms", report.benchmark.process_wall_ms},
             {"gc_total_us", report.benchmark.gc_total_us},
+
+            {"gc_barrier_acquire_us", report.benchmark.gc_barrier_acquire_us},
+            {"gc_writer_consistency_checks_us", report.benchmark.gc_writer_consistency_checks_us},
+            {"gc_backend_consistency_probe_us", report.benchmark.gc_backend_consistency_probe_us},
+            {"gc_quarantine_inventory_us", report.benchmark.gc_quarantine_inventory_us},
+            {"gc_quarantine_restoration_us", report.benchmark.gc_quarantine_restoration_us},
+            {"gc_prior_metadata_initialization_us", report.benchmark.gc_prior_metadata_initialization_us},
+            {"gc_reachability_observation_1_us", report.benchmark.gc_reachability_observation_1_us},
+            {"gc_reachability_observation_2_us", report.benchmark.gc_reachability_observation_2_us},
+            {"gc_stable_state_comparison_us", report.benchmark.gc_stable_state_comparison_us},
+            {"gc_final_namespace_verification_us", report.benchmark.gc_final_namespace_verification_us},
+            {"gc_expired_quarantine_purge_us", report.benchmark.gc_expired_quarantine_purge_us},
+
+            {"gc_candidate_pre_copy_barrier_verification_us", report.benchmark.gc_candidate_pre_copy_barrier_verification_us},
             {"gc_candidate_verified_copy_us", report.benchmark.gc_candidate_verified_copy_us},
             {"verified_copy_source_physical_hash_us", report.benchmark.verified_copy_source_physical_hash_us},
             {"verified_copy_native_copy_us", report.benchmark.verified_copy_native_copy_us},
             {"verified_copy_destination_physical_hash_us", report.benchmark.verified_copy_destination_physical_hash_us},
-            {"rclone_download_us", report.benchmark.rclone_download_us},
-            {"rclone_upload_us", report.benchmark.rclone_upload_us},
             {"gc_candidate_metadata_publish_us", report.benchmark.gc_candidate_metadata_publish_us},
             {"gc_candidate_pre_remove_barrier_verification_us", report.benchmark.gc_candidate_pre_remove_barrier_verification_us},
             {"gc_candidate_remove_us", report.benchmark.gc_candidate_remove_us},
+
+            {"gc_barrier_release_us", report.benchmark.gc_barrier_release_us},
+
+            {"rclone_download_us", report.benchmark.rclone_download_us},
+            {"rclone_upload_us", report.benchmark.rclone_upload_us},
         }},
         {"gc", {
             {"called", report.gc.called},

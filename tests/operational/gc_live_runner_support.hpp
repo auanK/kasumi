@@ -185,17 +185,38 @@ struct RunnerReport {
         std::string copy_mode = "native";
         std::size_t candidate_plaintext_bytes = 0;
         std::uint64_t candidate_physical_bytes = 0;
+        std::uint64_t process_wall_ms = 0;
         std::uint64_t gc_total_us = 0;
+
+        // Pre-candidate stage timers
+        std::uint64_t gc_barrier_acquire_us = 0;
+        std::uint64_t gc_writer_consistency_checks_us = 0;
+        std::uint64_t gc_backend_consistency_probe_us = 0;
+        std::uint64_t gc_quarantine_inventory_us = 0;
+        std::uint64_t gc_quarantine_restoration_us = 0;
+        std::uint64_t gc_prior_metadata_initialization_us = 0;
+        std::uint64_t gc_reachability_observation_1_us = 0;
+        std::uint64_t gc_reachability_observation_2_us = 0;
+        std::uint64_t gc_stable_state_comparison_us = 0;
+        std::uint64_t gc_final_namespace_verification_us = 0;
+        std::uint64_t gc_expired_quarantine_purge_us = 0;
+
+        // Candidate stage timers
+        std::uint64_t gc_candidate_pre_copy_barrier_verification_us = 0;
         std::uint64_t gc_candidate_verified_copy_us = 0;
         std::uint64_t verified_copy_source_physical_hash_us = 0;
         std::uint64_t verified_copy_native_copy_us = 0;
         std::uint64_t verified_copy_destination_physical_hash_us = 0;
-        std::uint64_t rclone_download_us = 0;
-        std::uint64_t rclone_upload_us = 0;
         std::uint64_t gc_candidate_metadata_publish_us = 0;
         std::uint64_t gc_candidate_pre_remove_barrier_verification_us = 0;
         std::uint64_t gc_candidate_remove_us = 0;
-        std::uint64_t process_wall_ms = 0;
+
+        // Final stage timer
+        std::uint64_t gc_barrier_release_us = 0;
+
+        // Transport copyfile timers
+        std::uint64_t rclone_download_us = 0;
+        std::uint64_t rclone_upload_us = 0;
     } benchmark;
 
     StorageInventory inventory_before;

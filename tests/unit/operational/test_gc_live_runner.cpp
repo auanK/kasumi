@@ -16,6 +16,8 @@ namespace integrity = kasumi::application::integrity;
 
 struct FakeHarness {
     kasumi::test::TempWorkspace workspace;
+    std::unique_ptr<FakeState> owned_parent_state;
+    std::unique_ptr<FakeState> owned_child_state;
     FakeState* parent_state = nullptr;
     FakeState* child_state = nullptr;
     std::filesystem::path output_path;
@@ -33,6 +35,8 @@ struct FakeHarness {
         auto t = make_fake_transport(parent_state);
         parent_state->physical_hash_supported = true;
         parent_state->copy_supported = true;
+        owned_parent_state.reset(static_cast<FakeState*>(t.state.release()));
+        t.state = transport::TransportStateHandle{parent_state, +[](void*) noexcept {}};
         return t;
     }
 
@@ -40,6 +44,8 @@ struct FakeHarness {
         auto t = make_fake_transport(child_state);
         child_state->physical_hash_supported = true;
         child_state->copy_supported = true;
+        owned_child_state.reset(static_cast<FakeState*>(t.state.release()));
+        t.state = transport::TransportStateHandle{child_state, +[](void*) noexcept {}};
         return t;
     }
 
@@ -1281,6 +1287,118 @@ TEST(GcLiveCliPathTest, PreparesValidPathsAndCreatesScratch) {
     ASSERT_TRUE(res.has_value());
     EXPECT_EQ(res->output_path, std::filesystem::absolute(out));
     EXPECT_TRUE(std::filesystem::is_directory(res->scratch_root));
+}
+
+// Phase 8.1: Full GC stage telemetry export
+TEST(GcLiveRunnerTelemetryTest, ExportsAllPreexistingGcStageTimers) {
+    FakeHarness harness{"stage-telemetry"};
+    auto options = harness.make_options();
+    auto parent = harness.make_parent_transport();
+    auto child = harness.make_child_transport();
+
+    const auto report = runner::run(options, &parent, &child);
+    EXPECT_EQ(report.status, "PASS");
+    EXPECT_EQ(report.gc.result, "SUCCESS");
+
+    auto json = runner::to_json(report);
+    ASSERT_TRUE(json.contains("benchmark"));
+    const auto& bench = json["benchmark"];
+
+    // Pre-candidate stage timers
+    EXPECT_TRUE(bench.contains("gc_barrier_acquire_us"));
+    EXPECT_TRUE(bench.contains("gc_writer_consistency_checks_us"));
+    EXPECT_TRUE(bench.contains("gc_backend_consistency_probe_us"));
+    EXPECT_TRUE(bench.contains("gc_quarantine_inventory_us"));
+    EXPECT_TRUE(bench.contains("gc_quarantine_restoration_us"));
+    EXPECT_TRUE(bench.contains("gc_prior_metadata_initialization_us"));
+    EXPECT_TRUE(bench.contains("gc_reachability_observation_1_us"));
+    EXPECT_TRUE(bench.contains("gc_reachability_observation_2_us"));
+    EXPECT_TRUE(bench.contains("gc_stable_state_comparison_us"));
+    EXPECT_TRUE(bench.contains("gc_final_namespace_verification_us"));
+    EXPECT_TRUE(bench.contains("gc_expired_quarantine_purge_us"));
+
+    // Candidate stage timers
+    EXPECT_TRUE(bench.contains("gc_candidate_pre_copy_barrier_verification_us"));
+    EXPECT_TRUE(bench.contains("gc_candidate_verified_copy_us"));
+    EXPECT_TRUE(bench.contains("gc_candidate_metadata_publish_us"));
+    EXPECT_TRUE(bench.contains("gc_candidate_pre_remove_barrier_verification_us"));
+    EXPECT_TRUE(bench.contains("gc_candidate_remove_us"));
+
+    // Final stage timer
+    EXPECT_TRUE(bench.contains("gc_barrier_release_us"));
+
+    // Existing fields from Phase 6 preserved
+    EXPECT_TRUE(bench.contains("gc_total_us"));
+    EXPECT_TRUE(bench.contains("process_wall_ms"));
+    EXPECT_TRUE(bench.contains("verified_copy_source_physical_hash_us"));
+    EXPECT_TRUE(bench.contains("verified_copy_native_copy_us"));
+    EXPECT_TRUE(bench.contains("verified_copy_destination_physical_hash_us"));
+    EXPECT_TRUE(bench.contains("rclone_download_us"));
+    EXPECT_TRUE(bench.contains("rclone_upload_us"));
+}
+
+TEST(GcLiveRunnerTelemetryTest, PreservesCompletedStageTimersOnGcFailure) {
+    FakeHarness harness{"telemetry-failure"};
+    auto options = harness.make_options();
+    auto parent = harness.make_parent_transport();
+    auto child = harness.make_child_transport();
+
+    const auto report = runner::run(
+        options,
+        &parent,
+        &child,
+        [](const auto&, auto&, auto) -> std::expected<integrity::GarbageCollectResult, integrity::Error> {
+            const auto trace1 = kasumi::platform::perf_trace::begin();
+            kasumi::platform::perf_trace::finish("gc barrier acquire", trace1);
+            const auto trace2 = kasumi::platform::perf_trace::begin();
+            kasumi::platform::perf_trace::finish("gc writer consistency checks", trace2);
+            return std::unexpected(integrity::Error{
+                .code = integrity::ErrorCode::TransportFailure,
+                .detail = "simulated network failure during probe",
+            });
+        });
+
+    EXPECT_EQ(report.status, "FAILED");
+    EXPECT_EQ(report.gc.result, "FAILED");
+    ASSERT_TRUE(report.gc.error_category.has_value());
+    EXPECT_EQ(*report.gc.error_category, integrity::ErrorCode::TransportFailure);
+
+    auto json = runner::to_json(report);
+    ASSERT_TRUE(json.contains("benchmark"));
+    EXPECT_TRUE(json["benchmark"].contains("gc_barrier_acquire_us"));
+    EXPECT_TRUE(json["benchmark"].contains("gc_writer_consistency_checks_us"));
+}
+
+TEST(GcLiveRunnerTelemetryTest, ResetsTimersBetweenSequentialRuns) {
+    FakeHarness harness1{"telemetry-reset-1"};
+    auto options1 = harness1.make_options();
+    auto parent1 = harness1.make_parent_transport();
+    auto child1 = harness1.make_child_transport();
+
+    // Run A: Successful GC with actual execution
+    const auto report1 = runner::run(options1, &parent1, &child1);
+    EXPECT_EQ(report1.status, "PASS");
+    EXPECT_EQ(report1.gc.called, true);
+
+    // Run B: Refused before GC (dry run)
+    FakeHarness harness2{"telemetry-reset-2"};
+    auto options2 = harness2.make_options();
+    options2.execute_live_gc = false;
+    auto parent2 = harness2.make_parent_transport();
+    auto child2 = harness2.make_child_transport();
+
+    const auto report2 = runner::run(options2, &parent2, &child2);
+    EXPECT_EQ(report2.status, "REFUSED");
+    EXPECT_EQ(report2.gc.called, false);
+
+    // Run B must not inherit any timers from Run A
+    auto json2 = runner::to_json(report2);
+    ASSERT_TRUE(json2.contains("benchmark"));
+    EXPECT_EQ(json2["benchmark"]["gc_total_us"].get<std::uint64_t>(), 0U);
+    EXPECT_TRUE(json2["benchmark"].contains("gc_barrier_acquire_us"));
+    if (json2["benchmark"].contains("gc_barrier_acquire_us")) {
+        EXPECT_EQ(json2["benchmark"]["gc_barrier_acquire_us"].get<std::uint64_t>(), 0U);
+    }
 }
 
 } // namespace
