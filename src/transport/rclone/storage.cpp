@@ -727,6 +727,16 @@ std::expected<std::string, Error> rclone_physical_hash(
         maximum_response_size,
         control_read_deadline);
     if (!response) {
+        if (response.error().code == ErrorCode::ProtocolFailure &&
+            response.error().native_code == 404 &&
+            response.error().message.find(
+                "couldn't find method \"operations/hashsumfile\"") !=
+                std::string::npos) {
+            return std::unexpected(make_error(
+                ErrorCode::Unsupported,
+                "rclone does not support operations/hashsumfile",
+                response.error().native_code));
+        }
         if (not_found(response.error())) {
             return std::unexpected(make_error(ErrorCode::ObjectNotFound,
                                               "remote object does not exist"));

@@ -708,6 +708,52 @@ TEST(RcloneStorageTest, MapsMissingCopySourceAndRejectsInvalidIdentifiers) {
     EXPECT_EQ(calls, 1);
 }
 
+TEST(RcloneStorageTest, MissingHashsumfileMethodIsNotMissingObject) {
+    RcServerState remote;
+    remote.server.Post(
+        "/rc/operations/hashsumfile",
+        [](const httplib::Request&, httplib::Response& response) {
+            response.status = 404;
+            response.set_content(
+                R"({"error":"couldn't find method \"operations/hashsumfile\""})",
+                "application/json");
+        });
+    start_rc_server(remote);
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    const auto result = operations.physical_hash(&state, "nested/object", "sha256");
+    stop_rc_server(remote);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, kasumi::transport::ErrorCode::Unsupported);
+}
+
+TEST(RcloneStorageTest, MissingPhysicalHashObjectRemainsObjectNotFound) {
+    RcServerState remote;
+    remote.server.Post(
+        "/rc/operations/hashsumfile",
+        [](const httplib::Request&, httplib::Response& response) {
+            response.status = 404;
+            response.set_content(R"({"error":"object not found"})",
+                                 "application/json");
+        });
+    start_rc_server(remote);
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    const auto result = operations.physical_hash(&state, "nested/object", "sha256");
+    stop_rc_server(remote);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code,
+              kasumi::transport::ErrorCode::ObjectNotFound);
+}
+
 TEST(RcloneStorageTest, DownloadsExactBatchWithOneSequentialCopy) {
     RcServerState remote;
     std::string request;
