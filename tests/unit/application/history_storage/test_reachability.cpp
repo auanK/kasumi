@@ -773,4 +773,124 @@ TEST(ReachabilityTest, InventoryConsumesOneNativeCommitBatchWhenSupported) {
     EXPECT_EQ(state->commit_get_count, 0U);
 }
 
+TEST(ReachabilityTest, SingleCommitVariantBypassesBatchAndUsesDirectDownload) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("reachability-single-direct");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    const auto commit = kasumi::history::make_empty_bootstrap().value();
+    add_fake_commit(transport, workspace, commit, "bootstrap");
+
+    transport.storage.get_batch = fake_reachability_get_batch;
+    state->get_batch_count = 0;
+    state->commit_get_count = 0;
+
+    const auto result =
+        kasumi::application::history_storage::inventory_reachability(
+            transport, test_key(), kasumi::test::workspace_root(workspace));
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->commits.size(), 1U);
+    EXPECT_EQ(result->reachable_commits.size(), 1U);
+    EXPECT_EQ(state->get_batch_count, 0U);
+    EXPECT_EQ(state->commit_get_count, 1U);
+}
+
+TEST(ReachabilityTest, TwoPhysicalVariantsForSameCommitPreserveBatchWhenSupported) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("reachability-two-variants-same-commit");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    const auto commit = kasumi::history::make_empty_bootstrap().value();
+    const auto ref1 = add_fake_commit(transport, workspace, commit, "v1", true);
+    const auto ref2 = add_fake_commit(transport, workspace, commit, "v2", true);
+    ASSERT_NE(ref1.ciphertext_id, ref2.ciphertext_id);
+    ASSERT_EQ(ref1.commit_id, ref2.commit_id);
+
+    transport.storage.get_batch = fake_reachability_get_batch;
+    state->get_batch_count = 0;
+    state->commit_get_count = 0;
+
+    const auto result =
+        kasumi::application::history_storage::inventory_reachability(
+            transport, test_key(), kasumi::test::workspace_root(workspace));
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->commits.size(), 1U);
+    EXPECT_EQ(result->commits.front().variants.size(), 2U);
+    EXPECT_EQ(state->get_batch_count, 1U);
+    EXPECT_EQ(state->commit_get_count, 0U);
+}
+
+TEST(ReachabilityTest, ZeroCommitVariantsPerformZeroDownloads) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("reachability-zero-variants");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+
+    transport.storage.get_batch = fake_reachability_get_batch;
+    state->get_batch_count = 0;
+    state->commit_get_count = 0;
+
+    const auto result =
+        kasumi::application::history_storage::inventory_reachability(
+            transport, test_key(), kasumi::test::workspace_root(workspace));
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_TRUE(result->commits.empty());
+    EXPECT_EQ(state->get_batch_count, 0U);
+    EXPECT_EQ(state->commit_get_count, 0U);
+}
+
+TEST(ReachabilityTest, SingleCommitVariantWithoutGetBatchUsesDirectDownload) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("reachability-single-no-batch");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    const auto commit = kasumi::history::make_empty_bootstrap().value();
+    add_fake_commit(transport, workspace, commit, "bootstrap");
+
+    transport.storage.get_batch = nullptr;
+    state->get_batch_count = 0;
+    state->commit_get_count = 0;
+
+    const auto result =
+        kasumi::application::history_storage::inventory_reachability(
+            transport, test_key(), kasumi::test::workspace_root(workspace));
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->commits.size(), 1U);
+    EXPECT_EQ(result->reachable_commits.size(), 1U);
+    EXPECT_EQ(state->get_batch_count, 0U);
+    EXPECT_EQ(state->commit_get_count, 1U);
+}
+
+TEST(ReachabilityTest, SingleCommitVariantTamperedCiphertextIsClassifiedAsInvalid) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("reachability-single-tampered");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    const auto commit = kasumi::history::make_empty_bootstrap().value();
+    const auto ref = add_fake_commit(transport, workspace, commit, "bootstrap");
+
+    transport.storage.get_batch = fake_reachability_get_batch;
+    state->corrupt_get_identifier = object_path(ref);
+    state->get_batch_count = 0;
+    state->commit_get_count = 0;
+
+    const auto result =
+        kasumi::application::history_storage::inventory_reachability(
+            transport, test_key(), kasumi::test::workspace_root(workspace));
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    ASSERT_EQ(result->commits.size(), 1U);
+    ASSERT_EQ(result->commits.front().variants.size(), 1U);
+    EXPECT_EQ(result->commits.front().variants.front().state,
+              VariantState::InvalidCiphertext);
+    EXPECT_FALSE(result->commits.front().valid);
+    EXPECT_TRUE(result->reachable_commits.empty());
+    EXPECT_EQ(state->get_batch_count, 0U);
+    EXPECT_EQ(state->commit_get_count, 1U);
+}
+
 } // namespace

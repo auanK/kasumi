@@ -928,7 +928,7 @@ TEST(GcLiveRunnerIntegratedTest, FullExecutionWithNativeBatchStorage) {
     EXPECT_EQ(report.gc.candidate_objects, 1U);
     EXPECT_EQ(report.gc.quarantined_objects, 1U);
     EXPECT_EQ(report.cleanup.result, "removed");
-    EXPECT_GT(native_get_batch_count, 0U);
+    EXPECT_EQ(native_get_batch_count, 0U);
 }
 
 // RED 1: Real Fallback Executes When Forced

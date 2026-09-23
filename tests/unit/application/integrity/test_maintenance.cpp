@@ -2173,4 +2173,117 @@ TEST(IntegrityMaintenanceTest, GarbageCollectionBatchBaselineScale) {
     kasumi::platform::perf_trace::force_enable(false);
 }
 
+namespace {
+kasumi::transport::Result
+fake_reachability_get_batch(void* context,
+                            const kasumi::transport::GetBatch& batch) {
+    ++fake_state(context)->get_batch_count;
+    for (const auto& identifier : batch.identifiers) {
+        const auto source = batch.source_prefix.empty()
+                                ? identifier
+                                : batch.source_prefix + "/" + identifier;
+        auto result =
+            fake_get(context, source, batch.destination_root / identifier);
+        if (!result) {
+            return result;
+        }
+        --fake_state(context)->get_count;
+        --fake_state(context)->commit_get_count;
+        fake_state(context)->remote_events.pop_back();
+    }
+    return {};
+}
+} // namespace
+
+TEST(IntegrityMaintenanceTest, TwoGcObservationsIndependentlyDownloadSingleCommitDirectly) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-single-commit-direct");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+    const auto published = publish_remote(
+        transport, workspace, kasumi::history::make_empty_bootstrap().value());
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    transport.storage.get_batch = fake_reachability_get_batch;
+    state->get_batch_count = 0;
+    state->commit_get_count = 0;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(state->get_batch_count, 0U);
+    EXPECT_EQ(state->commit_get_count, 2U);
+}
+
+TEST(IntegrityMaintenanceTest, DirectCommitDownloadFailureDuringGcFailsClosed) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-single-commit-download-failure");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+    publish_remote(
+        transport, workspace, kasumi::history::make_empty_bootstrap().value());
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    transport.storage.get_batch = fake_reachability_get_batch;
+    state->fail_commit_get = true;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::TransportFailure);
+    expect_presence(transport, orphan, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, RemoteCommitMutationBetweenObservationsAbortsGcWithoutLocalReuse) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-commit-mutation-between-observations");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+    const auto published = publish_remote(
+        transport, workspace, kasumi::history::make_empty_bootstrap().value());
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    transport.storage.get_batch = fake_reachability_get_batch;
+
+    static std::size_t commit_gets_seen = 0;
+    commit_gets_seen = 0;
+    static auto original_get = transport.storage.get;
+    original_get = transport.storage.get;
+
+    transport.storage.get = [](void* ctx,
+                               std::string_view identifier,
+                               const std::filesystem::path& destination) -> kasumi::transport::Result {
+        if (is_commit(identifier)) {
+            commit_gets_seen++;
+            if (commit_gets_seen == 2) {
+                auto* s = fake_state(ctx);
+                auto it = s->objects.find(std::string{identifier});
+                if (it != s->objects.end() && !it->second.empty()) {
+                    it->second.front() ^= 0xFF;
+                }
+            }
+        }
+        return original_get(ctx, identifier, destination);
+    };
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    transport.storage.get = original_get;
+
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_GE(commit_gets_seen, 2U);
+    expect_presence(transport, orphan, Presence::Present);
+}
+
 } // namespace
