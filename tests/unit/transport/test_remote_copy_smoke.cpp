@@ -1,5 +1,7 @@
 #include "../../operational/remote_copy_smoke_support.hpp"
+#include "../../operational/gc_live_preflight_support.hpp"
 
+#include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 
 #include <filesystem>
@@ -53,6 +55,10 @@ struct FakeState {
     std::set<std::string> empty_success_prefixes;
     std::vector<std::string> removed;
     std::string scope_root;
+    bool storage_root_exists = true;
+    std::size_t initialize_count = 0;
+    std::size_t put_count = 0;
+    std::size_t get_count = 0;
 };
 
 std::string full_identifier(const FakeState& state, std::string_view identifier) {
@@ -65,7 +71,12 @@ void destroy_state(void* context) noexcept {
     delete static_cast<FakeState*>(context);
 }
 
-transport::Result initialize(void*) { return {}; }
+transport::Result initialize(void* context) {
+    auto* state = static_cast<FakeState*>(context);
+    ++state->initialize_count;
+    state->storage_root_exists = true;
+    return {};
+}
 
 transport::Result put(void* context,
                       const std::filesystem::path& source,
@@ -77,8 +88,9 @@ transport::Result put(void* context,
             .message = "local test file missing"});
     }
     std::string bytes{std::istreambuf_iterator<char>{input}, {}};
-    static_cast<FakeState*>(context)->objects[std::string{identifier}] =
-        std::move(bytes);
+    auto* state = static_cast<FakeState*>(context);
+    ++state->put_count;
+    state->objects[full_identifier(*state, identifier)] = std::move(bytes);
     return {};
 }
 
@@ -86,6 +98,7 @@ transport::Result get(void* context,
                       std::string_view identifier,
                       const std::filesystem::path& destination) {
     auto* state = static_cast<FakeState*>(context);
+    ++state->get_count;
     const auto found = state->objects.find(full_identifier(*state, identifier));
     if (found == state->objects.end()) {
         return std::unexpected(transport::Error{
@@ -109,9 +122,21 @@ transport::PresenceResult presence(void* context, std::string_view identifier) {
 
 transport::ListingResult list(void* context) {
     auto* state = static_cast<FakeState*>(context);
+    if (!state->storage_root_exists) {
+        return std::unexpected(transport::Error{
+            .code = transport::ErrorCode::StorageNotFound,
+            .message = "storage root missing"});
+    }
     std::vector<std::string> identifiers;
     for (const auto& [identifier, _] : state->objects) {
-        identifiers.push_back(identifier);
+        if (state->scope_root.empty()) {
+            identifiers.push_back(identifier);
+        } else {
+            const auto marker = state->scope_root + "/";
+            if (identifier.starts_with(marker)) {
+                identifiers.push_back(identifier.substr(marker.size()));
+            }
+        }
     }
     return identifiers;
 }
@@ -276,6 +301,362 @@ TEST(RemoteCopySmokeSafetyTest, RemovesOnlyOwnedObjectsInsideTheChild) {
         std::string{child} + "/owner.marker"};
     EXPECT_EQ(state->removed, expected_removed);
     EXPECT_TRUE(state->objects.contains("outside/object"));
+}
+
+namespace gc_live = kasumi::operational::gc_live_preflight;
+
+gc_live::PreInitializeObservation proven_absent_observation(
+    const smoke::RemoteParent& parent,
+    std::string_view child) {
+    return gc_live::PreInitializeObservation{
+        .transport = {.result = "FAILED",
+                      .error_category = transport::ErrorCode::StorageNotFound,
+                      .error_message = "remote objects directory does not exist"},
+        .raw_rc = {.endpoint = "operations/list",
+                   .request_fs = parent.remote_name + ":",
+                   .request_remote = parent.directory + "/" +
+                                     std::string{child},
+                   .result = "FAILED",
+                   .native_status = 404,
+                   .error_category = transport::ErrorCode::ProtocolFailure,
+                   .error_message = "endpoint=operations/list: error in ListJSON: directory not found"},
+    };
+}
+
+TEST(GcLivePreflightTest, ChildNamespaceUsesOnlyItsDedicatedPrefix) {
+    const auto first = gc_live::child_namespace(
+        "0123456789abcdef0123456789abcdef");
+    const auto second = gc_live::child_namespace(
+        "fedcba9876543210fedcba9876543210");
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    ASSERT_TRUE(parent);
+    EXPECT_NE(*first, *second);
+    EXPECT_EQ(*first,
+              "kasumi-gc-live-0123456789abcdef0123456789abcdef");
+    EXPECT_TRUE(gc_live::valid_child(*first));
+    EXPECT_FALSE(gc_live::valid_child(
+        "kasumi-copy-smoke-0123456789abcdef0123456789abcdef"));
+    EXPECT_FALSE(gc_live::child_location(
+        *parent, "kasumi-copy-smoke-0123456789abcdef0123456789abcdef"));
+
+    auto mismatched_parent = *parent;
+    mismatched_parent.location = "archive:other-test-parent";
+    EXPECT_FALSE(gc_live::child_location(mismatched_parent, *first));
+    EXPECT_FALSE(gc_live::child_location(
+        smoke::RemoteParent{.location = "archive:",
+                            .remote_name = "archive",
+                            .directory = ""},
+        *first));
+}
+
+TEST(GcLivePreflightTest, StrictMissingDirectoryEvidenceAllowsInitialize) {
+    constexpr std::string_view child =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(parent);
+    const auto observation = proven_absent_observation(*parent, child);
+
+    const auto classification =
+        gc_live::classify_pre_initialize(observation, *parent, child);
+
+    EXPECT_EQ(classification.disposition, gc_live::ChildDisposition::Unused);
+}
+
+TEST(GcLivePreflightTest, ExistingObjectsAndExistingEmptyChildAreRefused) {
+    constexpr std::string_view child =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(parent);
+
+    auto existing = proven_absent_observation(*parent, child);
+    existing.transport = {.result = "SUCCESS", .entry_count = 1};
+    EXPECT_EQ(gc_live::classify_pre_initialize(existing, *parent, child)
+                  .disposition,
+              gc_live::ChildDisposition::Existing);
+
+    auto empty = proven_absent_observation(*parent, child);
+    empty.transport = {.result = "SUCCESS", .entry_count = 0};
+    empty.raw_rc = {.endpoint = "operations/list",
+                    .request_fs = parent->remote_name + ":",
+                    .request_remote = parent->directory + "/" +
+                                      std::string{child},
+                    .result = "SUCCESS",
+                    .entry_count = 0};
+    const auto empty_classification =
+        gc_live::classify_pre_initialize(empty, *parent, child);
+    EXPECT_EQ(empty_classification.disposition,
+              gc_live::ChildDisposition::Refused);
+    EXPECT_NE(empty_classification.reason.find("empty"), std::string::npos);
+}
+
+TEST(GcLivePreflightTest,
+     NormalizedStorageNotFoundWithoutStrictRcEvidenceIsRefused) {
+    constexpr std::string_view child =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(parent);
+
+    auto observation = proven_absent_observation(*parent, child);
+    observation.raw_rc = {};
+    EXPECT_EQ(gc_live::classify_pre_initialize(observation, *parent, child)
+                  .disposition,
+              gc_live::ChildDisposition::Refused);
+    const auto report = gc_live::to_json(
+        observation,
+        gc_live::classify_pre_initialize(observation, *parent, child));
+    EXPECT_EQ(report["raw_rc_native_status"], nullptr);
+    EXPECT_EQ(report["raw_rc_error_category"], nullptr);
+    EXPECT_EQ(report["raw_rc_error_message_sanitized"], nullptr);
+
+    for (const auto* message : {"generic HTTP 404",
+                                "couldn't find method \"operations/list\"",
+                                "object not found",
+                                "permission denied"}) {
+        auto ambiguous = proven_absent_observation(*parent, child);
+        ambiguous.raw_rc.error_message = message;
+        EXPECT_EQ(gc_live::classify_pre_initialize(ambiguous, *parent, child)
+                      .disposition,
+                  gc_live::ChildDisposition::Refused)
+            << message;
+    }
+}
+
+TEST(GcLivePreflightTest, NonAbsenceTransportErrorsAreRefused) {
+    constexpr std::string_view child =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(parent);
+    for (const auto code : {transport::ErrorCode::PermissionDenied,
+                            transport::ErrorCode::Io,
+                            transport::ErrorCode::Timeout,
+                            transport::ErrorCode::ProtocolFailure}) {
+        auto observation = proven_absent_observation(*parent, child);
+        observation.transport.error_category = code;
+        EXPECT_EQ(gc_live::classify_pre_initialize(observation, *parent, child)
+                      .disposition,
+                  gc_live::ChildDisposition::Refused)
+            << transport::error_code_name(code);
+    }
+}
+
+TEST(GcLivePreflightTest,
+     InitializeThenEmptyPostListingAllowsVerifiedOwnershipMarker) {
+    constexpr std::string_view child_name =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(parent);
+    FakeState* state = nullptr;
+    auto storage = make_transport(state);
+    state->scope_root = std::string{child_name};
+    state->storage_root_exists = false;
+    gc_live::ChildStorage child{.parent = *parent,
+                                .child = std::string{child_name},
+                                .storage = std::move(storage)};
+    const auto pre = proven_absent_observation(*parent, child_name);
+
+    ASSERT_TRUE(gc_live::initialize_child(child, pre));
+    const auto post = gc_live::observe_post_initialize(child);
+    EXPECT_EQ(gc_live::classify_post_initialize(post),
+              gc_live::PostInitializeDisposition::Empty);
+    EXPECT_EQ(post.transport.entry_count, 0U);
+
+    auto workspace = kasumi::test::make_temp_workspace("gc-live-owner");
+    const auto marker_source =
+        kasumi::test::workspace_path(workspace, "owner-source");
+    const auto marker_readback =
+        kasumi::test::workspace_path(workspace, "owner-readback");
+    kasumi::test::write_text(marker_source, "run-token");
+    ASSERT_TRUE(gc_live::establish_ownership_marker(
+        child, post, "run-token", marker_source, marker_readback));
+    EXPECT_EQ(state->put_count, 1U);
+    EXPECT_TRUE(state->objects.contains(std::string{child_name} +
+                                        "/owner.marker"));
+}
+
+TEST(GcLivePreflightTest, RefusedGatesNeverInitializeOrWriteOwnerMarker) {
+    constexpr std::string_view child_name =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(parent);
+    FakeState* state = nullptr;
+    auto storage = make_transport(state);
+    gc_live::ChildStorage child{.parent = *parent,
+                                .child = std::string{child_name},
+                                .storage = std::move(storage)};
+    auto unproven = proven_absent_observation(*parent, child_name);
+    unproven.raw_rc = {};
+
+    const auto initialized = gc_live::initialize_child(child, unproven);
+    EXPECT_FALSE(initialized);
+    EXPECT_EQ(state->initialize_count, 0U);
+
+    auto existing = proven_absent_observation(*parent, child_name);
+    existing.transport = {.result = "SUCCESS", .entry_count = 1};
+    EXPECT_FALSE(gc_live::initialize_child(child, existing));
+    EXPECT_EQ(state->initialize_count, 0U);
+
+    auto empty_existing = proven_absent_observation(*parent, child_name);
+    empty_existing.transport = {.result = "SUCCESS", .entry_count = 0};
+    empty_existing.raw_rc.result = "SUCCESS";
+    empty_existing.raw_rc.entry_count = 0;
+    EXPECT_FALSE(gc_live::initialize_child(child, empty_existing));
+    EXPECT_EQ(state->initialize_count, 0U);
+
+    const auto post = gc_live::PostInitializeObservation{
+        .transport = {.result = "FAILED",
+                      .error_category = transport::ErrorCode::StorageNotFound}};
+    auto workspace = kasumi::test::make_temp_workspace("gc-live-no-owner");
+    const auto marker_source =
+        kasumi::test::workspace_path(workspace, "owner-source");
+    const auto marker_readback =
+        kasumi::test::workspace_path(workspace, "owner-readback");
+    kasumi::test::write_text(marker_source, "run-token");
+    EXPECT_FALSE(gc_live::establish_ownership_marker(
+        child, post, "run-token", marker_source, marker_readback));
+    EXPECT_EQ(state->put_count, 0U);
+
+    const auto non_empty = gc_live::PostInitializeObservation{
+        .transport = {.result = "SUCCESS", .entry_count = 1}};
+    EXPECT_FALSE(gc_live::establish_ownership_marker(
+        child, non_empty, "run-token", marker_source, marker_readback));
+    EXPECT_EQ(state->put_count, 0U);
+}
+
+TEST(GcLivePreflightTest, PostInitializeRequiresSuccessfulEmptyListing) {
+    for (const auto& observation : {
+             gc_live::PostInitializeObservation{
+                 .transport = {.result = "FAILED",
+                               .error_category = transport::ErrorCode::StorageNotFound}},
+             gc_live::PostInitializeObservation{
+                 .transport = {.result = "SUCCESS", .entry_count = 1}},
+             gc_live::PostInitializeObservation{
+                 .transport = {.result = "FAILED",
+                               .error_category = transport::ErrorCode::PermissionDenied}},
+             gc_live::PostInitializeObservation{
+                 .transport = {.result = "FAILED",
+                               .error_category = transport::ErrorCode::Timeout}},
+             gc_live::PostInitializeObservation{
+                 .transport = {.result = "FAILED",
+                               .error_category = transport::ErrorCode::Io}},
+             gc_live::PostInitializeObservation{
+                 .transport = {.result = "FAILED",
+                               .error_category = transport::ErrorCode::ProtocolFailure}}}) {
+        EXPECT_EQ(gc_live::classify_post_initialize(observation),
+                  gc_live::PostInitializeDisposition::Refused);
+    }
+}
+
+TEST(GcLivePreflightTest, CleanupRefusesMissingOrMismatchedOwnership) {
+    constexpr std::string_view child_name =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(parent);
+    auto workspace = kasumi::test::make_temp_workspace("gc-live-cleanup-refused");
+    FakeState* state = nullptr;
+    auto storage = make_transport(state);
+    state->scope_root = std::string{child_name};
+    gc_live::ChildStorage child{.parent = *parent,
+                                .child = std::string{child_name},
+                                .storage = std::move(storage)};
+
+    const auto missing = gc_live::cleanup_owned_child(
+        child, "run-token", {"payload.bin"},
+        kasumi::test::workspace_root(workspace));
+    EXPECT_EQ(missing.result, "refused");
+    EXPECT_TRUE(state->removed.empty());
+
+    state->objects[std::string{child_name} + "/owner.marker"] = "other-run";
+    state->objects[std::string{child_name} + "/payload.bin"] = "payload";
+    const auto mismatched = gc_live::cleanup_owned_child(
+        child, "run-token", {"payload.bin"},
+        kasumi::test::workspace_root(workspace));
+    EXPECT_EQ(mismatched.result, "refused");
+    EXPECT_TRUE(state->removed.empty());
+    EXPECT_TRUE(state->objects.contains(std::string{child_name} +
+                                        "/payload.bin"));
+}
+
+TEST(GcLivePreflightTest, CleanupRejectsUnsafeIdentifiersBeforeRemoteRead) {
+    constexpr std::string_view child_name =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(parent);
+    auto workspace = kasumi::test::make_temp_workspace("gc-live-cleanup-path");
+    FakeState* state = nullptr;
+    auto storage = make_transport(state);
+    state->scope_root = std::string{child_name};
+    state->objects[std::string{child_name} + "/owner.marker"] = "run-token";
+    gc_live::ChildStorage child{.parent = *parent,
+                                .child = std::string{child_name},
+                                .storage = std::move(storage)};
+
+    const auto result = gc_live::cleanup_owned_child(
+        child, "run-token", {"../outside.bin"},
+        kasumi::test::workspace_root(workspace));
+
+    EXPECT_EQ(result.result, "refused");
+    EXPECT_EQ(state->get_count, 0U);
+    EXPECT_TRUE(state->removed.empty());
+}
+
+TEST(GcLivePreflightTest, CleanupRefusesExistingLocalOwnershipCheckPath) {
+    constexpr std::string_view child_name =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(parent);
+    auto workspace = kasumi::test::make_temp_workspace("gc-live-cleanup-local-path");
+    const auto check_path = kasumi::test::workspace_path(
+        workspace, "gc-live-owner-check.tmp");
+    kasumi::test::write_text(check_path, "do-not-overwrite");
+    FakeState* state = nullptr;
+    auto storage = make_transport(state);
+    state->scope_root = std::string{child_name};
+    state->objects[std::string{child_name} + "/owner.marker"] = "run-token";
+    gc_live::ChildStorage child{.parent = *parent,
+                                .child = std::string{child_name},
+                                .storage = std::move(storage)};
+
+    const auto result = gc_live::cleanup_owned_child(
+        child, "run-token", {"payload.bin"},
+        kasumi::test::workspace_root(workspace));
+
+    EXPECT_EQ(result.result, "refused");
+    EXPECT_EQ(state->get_count, 0U);
+    EXPECT_TRUE(state->removed.empty());
+    std::ifstream input(check_path, std::ios::binary);
+    const std::string contents{std::istreambuf_iterator<char>{input}, {}};
+    EXPECT_EQ(contents, "do-not-overwrite");
+}
+
+TEST(GcLivePreflightTest, CleanupRemovesOnlyExplicitObjectsAfterOwnerReadback) {
+    constexpr std::string_view child_name =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(parent);
+    auto workspace = kasumi::test::make_temp_workspace("gc-live-cleanup-owned");
+    FakeState* state = nullptr;
+    auto storage = make_transport(state);
+    state->scope_root = std::string{child_name};
+    state->objects[std::string{child_name} + "/owner.marker"] = "run-token";
+    state->objects[std::string{child_name} + "/payload.bin"] = "payload";
+    state->objects["outside/payload.bin"] = "preserve";
+    gc_live::ChildStorage child{.parent = *parent,
+                                .child = std::string{child_name},
+                                .storage = std::move(storage)};
+
+    const auto result = gc_live::cleanup_owned_child(
+        child, "run-token", {"payload.bin"},
+        kasumi::test::workspace_root(workspace));
+
+    EXPECT_EQ(result.result, "removed");
+    EXPECT_EQ(state->removed,
+              (std::vector<std::string>{std::string{child_name} +
+                                            "/payload.bin",
+                                        std::string{child_name} +
+                                            "/owner.marker"}));
+    EXPECT_TRUE(state->objects.contains("outside/payload.bin"));
 }
 
 TEST(RemoteCopySmokeSafetyTest, ReportsUnsupportedHashAndCopyErrorsInJson) {

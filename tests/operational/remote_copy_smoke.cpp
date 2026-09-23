@@ -226,19 +226,6 @@ nlohmann::json readiness_report(
     };
 }
 
-void replace_all(std::string& value,
-                 std::string_view secret,
-                 std::string_view replacement) {
-    if (secret.empty()) {
-        return;
-    }
-    std::size_t position = 0;
-    while ((position = value.find(secret, position)) != std::string::npos) {
-        value.replace(position, secret.size(), replacement);
-        position += replacement.size();
-    }
-}
-
 nlohmann::json diagnostic_hashsumfile(
     rclone_detail::State& state,
     nlohmann::json& operations,
@@ -277,9 +264,8 @@ nlohmann::json diagnostic_hashsumfile(
             result["error_message"] = "RC response was not valid JSON";
         }
     } else {
-        auto message = response.error().message;
-        replace_all(message, state.username, "<redacted>");
-        replace_all(message, state.password, "<redacted>");
+        auto message = smoke::sanitize_rc_message(
+            response.error().message, state.username, state.password);
         result["error_category"] =
             transport::error_code_name(response.error().code);
         result["error_native_code"] = response.error().native_code;

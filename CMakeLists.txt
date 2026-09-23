@@ -27,6 +27,11 @@ option(
     "Build the opt-in real-rclone-remote copy smoke test"
     OFF
 )
+option(
+    KASUMI_BUILD_GC_LIVE_PREFLIGHT
+    "Build the read-only GC live namespace preflight diagnostic"
+    OFF
+)
 
 add_library(kasumi_warnings INTERFACE)
 if(WIN32)
@@ -573,6 +578,24 @@ if(KASUMI_BUILD_REMOTE_COPY_SMOKE)
     )
     target_link_libraries(
         kasumi_remote_copy_smoke
+        PRIVATE
+        kasumi_transport
+        kasumi_platform
+        nlohmann_json::nlohmann_json
+        reproc++
+        kasumi_warnings
+    )
+endif()
+
+if(KASUMI_BUILD_GC_LIVE_PREFLIGHT)
+    add_executable(
+        kasumi_gc_live_preflight
+        tests/operational/gc_live_preflight.cpp
+        tests/operational/gc_live_preflight_support.cpp
+        tests/operational/remote_copy_smoke_support.cpp
+    )
+    target_link_libraries(
+        kasumi_gc_live_preflight
         PRIVATE
         kasumi_transport
         kasumi_platform

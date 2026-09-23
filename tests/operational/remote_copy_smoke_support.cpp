@@ -53,6 +53,19 @@ bool valid_child(std::string_view child) noexcept {
                        });
 }
 
+void replace_all(std::string& value,
+                 std::string_view secret,
+                 std::string_view replacement) {
+    if (secret.empty()) {
+        return;
+    }
+    std::size_t position = 0;
+    while ((position = value.find(secret, position)) != std::string::npos) {
+        value.replace(position, secret.size(), replacement);
+        position += replacement.size();
+    }
+}
+
 CleanupResult refused(std::string detail,
                       std::optional<transport::ErrorCode> code = std::nullopt) {
     return CleanupResult{.result = "refused",
@@ -223,6 +236,14 @@ child_namespace(std::string_view random_hex) {
         return std::unexpected("namespace nonce must be 128-bit lowercase hex");
     }
     return std::string{prefix} + std::string{random_hex};
+}
+
+std::string sanitize_rc_message(std::string message,
+                                std::string_view username,
+                                std::string_view password) {
+    replace_all(message, username, "<redacted>");
+    replace_all(message, password, "<redacted>");
+    return message;
 }
 
 std::expected<std::string, std::string>

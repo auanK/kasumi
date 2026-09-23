@@ -4,6 +4,7 @@
 #include "platform/cancellation.hpp"
 #include "platform/path.hpp"
 #include "transport/rclone/detail.hpp"
+#include "../../operational/gc_live_preflight_support.hpp"
 
 #include <algorithm>
 #include <array>
@@ -245,6 +246,28 @@ void configure_state(kasumi::transport::rclone_detail::State& state, int port) {
     state.base_url = "/rc";
     state.port = static_cast<std::uint16_t>(port);
     state.ready = true;
+}
+
+void destroy_stack_state(void*) noexcept {}
+
+kasumi::transport::Transport make_preflight_transport(
+    kasumi::transport::rclone_detail::State& state) {
+    return kasumi::transport::Transport{
+        .state = kasumi::transport::TransportStateHandle{
+            &state, destroy_stack_state},
+        .storage = kasumi::transport::rclone_detail::make_storage_operations(),
+    };
+}
+
+void configure_preflight_state(
+    kasumi::transport::rclone_detail::State& state,
+    int port,
+    const kasumi::operational::remote_copy_smoke::RemoteParent& parent) {
+    configure_state(state, port);
+    state.configuration.remote_name = parent.remote_name;
+    state.configuration.remote_root = parent.directory;
+    state.username = "rc-user-secret";
+    state.password = "rc-password-secret";
 }
 
 void close_response_early(httplib::Response& response) {
@@ -1052,6 +1075,130 @@ TEST(RcloneStorageTest, ControlBatchRejectsMalformedOrContradictorySubresults) {
         EXPECT_EQ(result.error().code,
                   kasumi::transport::ErrorCode::ProtocolFailure);
     }
+}
+
+TEST(GcLivePreflightRcTest,
+     ReadOnlyDiagnosticDistinguishesStrictMissingDirectoryFromAmbiguity) {
+    namespace gc_live = kasumi::operational::gc_live_preflight;
+    namespace smoke = kasumi::operational::remote_copy_smoke;
+    namespace transport = kasumi::transport;
+    constexpr std::string_view child =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(parent);
+
+    struct Scenario {
+        int status;
+        std::string body;
+        gc_live::ChildDisposition expected;
+    };
+    const std::vector<Scenario> scenarios{
+        {404,
+         R"({"error":"error in ListJSON: directory not found"})",
+         gc_live::ChildDisposition::Unused},
+        {404, R"({"error":"generic HTTP 404 rc-user-secret rc-password-secret"})",
+         gc_live::ChildDisposition::Refused},
+        {404,
+         R"({"error":"couldn't find method \"operations/list\""})",
+         gc_live::ChildDisposition::Refused},
+        {404, R"({"error":"object not found"})",
+         gc_live::ChildDisposition::Refused},
+        {403, R"({"error":"permission denied"})",
+         gc_live::ChildDisposition::Refused},
+        {200, "not-json", gc_live::ChildDisposition::Refused},
+        {200, R"({"list":[]})", gc_live::ChildDisposition::Refused},
+        {200,
+         R"({"list":[{"Path":"entry.bin"}]})",
+         gc_live::ChildDisposition::Existing},
+    };
+
+    RcServerState remote;
+    std::atomic_int calls = 0;
+    std::vector<nlohmann::json> requests;
+    remote.server.Post(
+        "/rc/operations/list",
+        [&](const httplib::Request& request, httplib::Response& response) {
+            const auto request_number = ++calls;
+            requests.push_back(nlohmann::json::parse(request.body));
+            const auto& scenario = scenarios.at(
+                static_cast<std::size_t>((request_number - 1) / 2));
+            response.status = scenario.status;
+            response.set_content(scenario.body, "application/json");
+        });
+    start_rc_server(remote);
+    transport::rclone_detail::State state;
+    configure_preflight_state(state, remote.port, *parent);
+    auto storage = make_preflight_transport(state);
+
+    std::vector<gc_live::PreInitializeObservation> observations;
+    for (const auto& scenario : scenarios) {
+        observations.push_back(gc_live::observe_pre_initialize(
+            storage, *parent, child, std::chrono::seconds{1}));
+    }
+    stop_rc_server(remote);
+
+    ASSERT_EQ(calls, static_cast<int>(scenarios.size() * 2));
+    ASSERT_EQ(requests.size(), scenarios.size() * 2);
+    for (std::size_t index = 0; index < scenarios.size(); ++index) {
+        const auto classification = gc_live::classify_pre_initialize(
+            observations[index], *parent, child);
+        EXPECT_EQ(classification.disposition, scenarios[index].expected)
+            << index << ": " << classification.reason;
+        EXPECT_EQ(observations[index].raw_rc.endpoint, "operations/list");
+        EXPECT_EQ(observations[index].raw_rc.request_fs, "archive:");
+        EXPECT_EQ(observations[index].raw_rc.request_remote,
+                  "dedicated-test-parent/" + std::string{child});
+        EXPECT_EQ(requests[index * 2]["fs"], "archive:");
+        EXPECT_EQ(requests[index * 2]["remote"],
+                  "dedicated-test-parent/" + std::string{child});
+        EXPECT_EQ(requests[index * 2]["opt"]["recurse"], false);
+        EXPECT_EQ(requests[index * 2]["opt"]["filesOnly"], true);
+    }
+    const auto generic_report = gc_live::to_json(
+        observations[1],
+        gc_live::classify_pre_initialize(observations[1], *parent, child));
+    const auto report_text = generic_report.dump();
+    EXPECT_EQ(generic_report["phase"], "PRE_INITIALIZE");
+    EXPECT_EQ(generic_report["raw_rc_native_status"], 404);
+    EXPECT_EQ(generic_report["transport_error_category"], "storage_not_found");
+    EXPECT_EQ(generic_report["raw_rc_error_category"], "protocol_failure");
+    EXPECT_EQ(generic_report["raw_rc_probe_result"], "FAILED");
+    EXPECT_EQ(report_text.find("rc-user-secret"), std::string::npos);
+    EXPECT_EQ(report_text.find("rc-password-secret"), std::string::npos);
+}
+
+TEST(GcLivePreflightRcTest, ReadOnlyDiagnosticTimeoutFailsClosed) {
+    namespace gc_live = kasumi::operational::gc_live_preflight;
+    namespace smoke = kasumi::operational::remote_copy_smoke;
+    namespace transport = kasumi::transport;
+    constexpr std::string_view child =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(parent);
+
+    RcServerState remote;
+    std::atomic_int calls = 0;
+    remote.server.Post(
+        "/rc/operations/list",
+        [&](const httplib::Request&, httplib::Response& response) {
+            ++calls;
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            response.set_content(R"({"list":[]})", "application/json");
+        });
+    start_rc_server(remote);
+    transport::rclone_detail::State state;
+    configure_preflight_state(state, remote.port, *parent);
+    auto storage = make_preflight_transport(state);
+
+    const auto observation = gc_live::observe_pre_initialize(
+        storage, *parent, child, std::chrono::milliseconds{20});
+    stop_rc_server(remote);
+
+    EXPECT_EQ(observation.raw_rc.error_category,
+              transport::ErrorCode::Timeout);
+    EXPECT_EQ(gc_live::classify_pre_initialize(observation, *parent, child)
+                  .disposition,
+              gc_live::ChildDisposition::Refused);
 }
 
 } // namespace

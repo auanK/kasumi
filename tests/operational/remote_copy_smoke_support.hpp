@@ -92,6 +92,10 @@ parse_remote_parent(std::string_view location);
 std::expected<std::string, std::string>
 child_namespace(std::string_view random_hex);
 
+std::string sanitize_rc_message(std::string message,
+                                std::string_view username,
+                                std::string_view password);
+
 std::expected<std::string, std::string>
 child_location(const RemoteParent& parent, std::string_view child);
 
