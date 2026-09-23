@@ -201,6 +201,7 @@ struct FakeState {
     std::optional<kasumi::transport::ErrorCode> copy_failure;
     std::string physical_hash_mismatch_identifier;
     std::string physical_hash_unsupported_identifier;
+    std::string physical_hash_failure_identifier;
     std::size_t control_read_batch_count = 0;
     bool control_read_batch_supported = false;
     std::optional<kasumi::transport::ErrorCode> control_read_batch_failure;
@@ -218,7 +219,11 @@ struct FakeState {
     bool fail_marker_get = false;
     std::size_t fail_remove_at = 0;
     std::string fail_remove_identifier;
+    std::string fail_get_identifier;
+    std::string fail_put_identifier;
     std::string remove_then_fail_identifier;
+    std::optional<kasumi::transport::ErrorCode> copy_failure_after_effect;
+    std::string corrupt_get_identifier;
     bool directory_destination = false;
     bool reverse_listing = false;
     bool hide_probe_listing = false;
@@ -300,13 +305,17 @@ kasumi::transport::Result fake_put(void* context,
                                    const std::filesystem::path& source,
                                    std::string_view identifier) {
     auto* state = fake_state(context);
+    const bool failed_target = identifier == state->fail_put_identifier;
     const bool failed_commit = is_commit(identifier) && state->fail_commit_put;
     const bool failed_marker = is_marker(identifier) && state->fail_marker_put;
     const bool failed_quarantine_metadata =
         state->fail_quarantine_metadata_put && identifier.ends_with(".meta");
     if ((failed_commit && !state->persist_commit_on_put_failure) ||
         (failed_marker && !state->persist_marker_on_put_failure) ||
-        failed_quarantine_metadata) {
+        failed_quarantine_metadata || failed_target) {
+        if (failed_target) {
+            state->fail_put_identifier.clear();
+        }
         return std::unexpected(
             kasumi::transport::Error{.code = kasumi::transport::ErrorCode::Io,
                                      .message = "injected put failure"});
@@ -402,6 +411,13 @@ kasumi::transport::Result fake_copy(
         kasumi::application::history_storage::derive_remote_layout(test_key());
     maybe_replace_barrier_after_quarantine_put(
         state, destination_identifier, layout);
+    if (state->copy_failure_after_effect) {
+        const auto failure = *state->copy_failure_after_effect;
+        state->copy_failure_after_effect.reset();
+        return std::unexpected(kasumi::transport::Error{
+            .code = failure,
+            .message = "injected copy error after destination effect"});
+    }
     return {};
 }
 
@@ -442,10 +458,15 @@ kasumi::transport::Result fake_get(void* context,
     if (identifier == layout.barrier_identifier) {
         ++state->barrier_verification_count;
     }
+    const bool failed_target = identifier == state->fail_get_identifier;
     if ((is_commit(identifier) && state->fail_commit_get) ||
         (is_marker(identifier) && state->fail_marker_get) ||
         (!is_commit(identifier) && !is_marker(identifier) &&
-         state->fail_content_get)) {
+         state->fail_content_get) ||
+        failed_target) {
+        if (failed_target) {
+            state->fail_get_identifier.clear();
+        }
         return std::unexpected(
             kasumi::transport::Error{.code = kasumi::transport::ErrorCode::Io,
                                      .message = "injected get failure"});
@@ -481,8 +502,12 @@ kasumi::transport::Result fake_get(void* context,
             kasumi::transport::Error{.code = kasumi::transport::ErrorCode::Io,
                                      .message = "destination unavailable"});
     }
-    output.write(reinterpret_cast<const char*>(found->second.data()),
-                 static_cast<std::streamsize>(found->second.size()));
+    auto bytes = found->second;
+    if (identifier == state->corrupt_get_identifier && !bytes.empty()) {
+        bytes.front() ^= 1U;
+    }
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
     output.flush();
     if (!output) {
         return std::unexpected(kasumi::transport::Error{
@@ -624,7 +649,9 @@ std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
     } else if (is_marker(identifier)) {
         state->remote_events.emplace_back("HashHead");
     }
-    if (state->physical_hash_failure) {
+    if (state->physical_hash_failure &&
+        (state->physical_hash_failure_identifier.empty() ||
+         identifier == state->physical_hash_failure_identifier)) {
         return std::unexpected(kasumi::transport::Error{
             .code = *state->physical_hash_failure,
             .message = "injected physical hash failure"});

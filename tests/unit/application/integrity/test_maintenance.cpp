@@ -13,6 +13,7 @@
 #include <chrono>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <set>
 #include <span>
 #include <string>
@@ -77,6 +78,366 @@ void expect_presence(kasumi::transport::Transport& transport,
     const auto present = kasumi::transport::presence(transport, identifier);
     ASSERT_TRUE(present.has_value()) << present.error().message;
     EXPECT_EQ(*present, expected);
+}
+
+enum class IntegratedCopyPath {
+    Native,
+    SourceHashUnsupported,
+    NativeCopyUnsupported,
+    DestinationHashUnsupported,
+};
+
+enum class IntegratedFailure {
+    SourceHash,
+    FallbackGet,
+    FallbackPut,
+    CopyEffectThenError,
+    CorruptReadback,
+};
+
+struct IntegratedGcFixture {
+    kasumi::test::TempWorkspace workspace;
+    FakeState* state = nullptr;
+    kasumi::transport::Transport storage;
+    RuntimeData runtime;
+    std::string reachable_content;
+    std::string reachable_commit;
+    std::string reachable_marker;
+    std::vector<std::string> candidates;
+    std::vector<std::string> quarantines;
+    std::map<std::string, std::vector<std::uint8_t>> initial_objects;
+    std::map<std::string, std::vector<std::uint8_t>> expected_payload_objects;
+    std::map<std::string, std::string> expected_hashes;
+
+    IntegratedGcFixture(std::string_view name, std::size_t candidate_count)
+        : workspace(kasumi::test::make_temp_workspace("gc-integrated-" +
+                                                      std::string{name})),
+          storage(make_fake_transport(state)),
+          runtime(runtime_data(workspace)) {
+        EXPECT_TRUE(kasumi::transport::initialize(storage));
+        state->physical_hash_supported = true;
+        state->copy_supported = true;
+
+        const auto commit = make_commit(0, {}, "live.txt", "live").value();
+        const auto published = publish_remote(storage, workspace, commit);
+        reachable_content =
+            put_content(storage, workspace, "live", "live-content");
+        reachable_commit = object_path(published.head);
+        reachable_marker = marker_path(published.head);
+        for (std::size_t index = 0; index < candidate_count; ++index) {
+            const auto suffix = "orphan-" + std::to_string(index);
+            candidates.push_back(
+                put_content(storage, workspace, suffix, suffix));
+        }
+        std::ranges::sort(candidates);
+        for (const auto& candidate : candidates) {
+            const auto quarantine =
+                protocol::quarantine_identifier(test_layout(), candidate);
+            EXPECT_TRUE(quarantine.has_value());
+            if (!quarantine) {
+                continue;
+            }
+            quarantines.push_back(*quarantine);
+            expected_hashes.emplace(candidate,
+                                    state->physical_hashes.at(candidate));
+        }
+
+        initial_objects = state->objects;
+        expected_payload_objects = initial_objects;
+        for (std::size_t index = 0; index < candidates.size(); ++index) {
+            const auto bytes = expected_payload_objects.at(candidates[index]);
+            expected_payload_objects.erase(candidates[index]);
+            expected_payload_objects.emplace(quarantines[index], bytes);
+        }
+    }
+};
+
+void expect_integrated_copy_case(IntegratedCopyPath path,
+                                 std::string_view name,
+                                 std::size_t candidate_count = 1) {
+    struct TraceGuard {
+        ~TraceGuard() {
+            kasumi::platform::perf_trace::force_enable(false);
+        }
+    } trace_guard;
+    kasumi::platform::perf_trace::force_enable(true);
+
+    IntegratedGcFixture fixture{name, candidate_count};
+    const auto& first_candidate = fixture.candidates.front();
+    switch (path) {
+        case IntegratedCopyPath::Native:
+            break;
+        case IntegratedCopyPath::SourceHashUnsupported:
+            fixture.state->physical_hash_unsupported_identifier =
+                first_candidate;
+            break;
+        case IntegratedCopyPath::NativeCopyUnsupported:
+            fixture.state->copy_supported = false;
+            break;
+        case IntegratedCopyPath::DestinationHashUnsupported:
+            fixture.state->physical_hash_unsupported_identifier =
+                fixture.quarantines.front();
+            break;
+    }
+    for (const auto& identifier : fixture.candidates) {
+        fixture.state->observed_payload_identifiers.insert(identifier);
+    }
+    reset_fake_traffic(*fixture.state);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_FALSE(collected->analysis_only);
+    EXPECT_EQ(collected->candidate_objects, candidate_count);
+    EXPECT_EQ(collected->quarantined_objects, candidate_count);
+    EXPECT_EQ(collected->restored_objects, 0U);
+    EXPECT_EQ(collected->purged_objects, 0U);
+
+    EXPECT_TRUE(fixture.initial_objects.contains(fixture.reachable_commit));
+    EXPECT_TRUE(fixture.initial_objects.contains(fixture.reachable_marker));
+    EXPECT_TRUE(fixture.initial_objects.contains(fixture.reachable_content));
+    for (const auto& candidate : fixture.candidates) {
+        EXPECT_TRUE(fixture.initial_objects.contains(candidate));
+        EXPECT_FALSE(fixture.initial_objects.contains(
+            protocol::quarantine_identifier(test_layout(), candidate).value()));
+    }
+    EXPECT_EQ(fixture.state->objects.size(),
+              fixture.expected_payload_objects.size() + candidate_count);
+    auto actual_payload_objects = fixture.state->objects;
+    for (const auto& quarantine : fixture.quarantines) {
+        EXPECT_TRUE(fixture.state->objects.contains(quarantine + ".meta"));
+        actual_payload_objects.erase(quarantine + ".meta");
+    }
+    EXPECT_EQ(actual_payload_objects, fixture.expected_payload_objects);
+
+    const auto inventory = protocol::inventory_quarantine(
+        fixture.storage,
+        test_key(),
+        kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_TRUE(inventory.has_value()) << inventory.error().detail;
+    ASSERT_EQ(inventory->size(), candidate_count);
+    for (const auto& entry : *inventory) {
+        EXPECT_EQ(entry.quarantined_at.has_value(), true);
+        EXPECT_EQ(entry.physical_sha256,
+                  fixture.expected_hashes.at(entry.original_identifier));
+        const auto verified = protocol::verify_quarantine(
+            fixture.storage,
+            entry,
+            kasumi::test::workspace_root(fixture.workspace));
+        ASSERT_TRUE(verified.has_value()) << verified.error().detail;
+        EXPECT_TRUE(*verified);
+    }
+
+    const bool source_hash_supported =
+        path != IntegratedCopyPath::SourceHashUnsupported;
+    const bool native_copy_attempted = source_hash_supported;
+    const bool native_copy_succeeded =
+        path == IntegratedCopyPath::Native ||
+        path == IntegratedCopyPath::DestinationHashUnsupported;
+    const bool native_destination_hash_attempted = native_copy_succeeded;
+    const bool client_fallback =
+        path == IntegratedCopyPath::SourceHashUnsupported ||
+        path == IntegratedCopyPath::NativeCopyUnsupported;
+    std::size_t candidate_bytes = 0;
+    for (const auto& candidate : fixture.candidates) {
+        candidate_bytes += fixture.initial_objects.at(candidate).size();
+    }
+    EXPECT_EQ(fixture.state->copy_count,
+              native_copy_attempted ? candidate_count : 0U);
+    EXPECT_EQ(fixture.state->orphan_payload_get_count,
+              client_fallback ? candidate_count : 0U);
+    EXPECT_EQ(fixture.state->orphan_payload_get_bytes,
+              client_fallback ? candidate_bytes : 0U);
+    EXPECT_EQ(fixture.state->quarantine_payload_put_count,
+              client_fallback ? candidate_count : 0U);
+    EXPECT_EQ(fixture.state->quarantine_payload_put_bytes,
+              client_fallback ? candidate_bytes : 0U);
+    EXPECT_EQ(fixture.state->quarantine_metadata_put_count, candidate_count);
+    EXPECT_EQ(fixture.state->native_copy_bytes,
+              native_copy_succeeded ? candidate_bytes : 0U);
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy source physical hash"),
+              candidate_count);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("verified copy native copy"),
+        native_copy_attempted ? candidate_count : 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy native copy successes"),
+              native_copy_succeeded ? candidate_count : 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy native copy verifications"),
+              native_copy_succeeded ? candidate_count : 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy destination physical hash"),
+              native_destination_hash_attempted ? candidate_count : 0U);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("gc candidate verified copy"),
+        candidate_count);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc candidate metadata publish"),
+              candidate_count);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc candidate pre-remove barrier verification"),
+              candidate_count);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc candidate remove"),
+              candidate_count);
+}
+
+void expect_integrated_failure(IntegratedFailure failure,
+                               std::string_view name,
+                               IntegrityErrorCode expected_error) {
+    struct TraceGuard {
+        ~TraceGuard() {
+            kasumi::platform::perf_trace::force_enable(false);
+        }
+    } trace_guard;
+    kasumi::platform::perf_trace::force_enable(true);
+
+    IntegratedGcFixture fixture{name, 1};
+    const auto& source = fixture.candidates.front();
+    const auto& quarantine = fixture.quarantines.front();
+    fixture.state->observed_payload_identifiers.insert(source);
+    fixture.state->physical_hash_supported = true;
+    switch (failure) {
+        case IntegratedFailure::SourceHash:
+            fixture.state->physical_hash_failure =
+                kasumi::transport::ErrorCode::Io;
+            fixture.state->physical_hash_failure_identifier = source;
+            break;
+        case IntegratedFailure::FallbackGet:
+            fixture.state->copy_supported = false;
+            fixture.state->fail_get_identifier = source;
+            break;
+        case IntegratedFailure::FallbackPut:
+            fixture.state->copy_supported = false;
+            fixture.state->fail_put_identifier = quarantine;
+            break;
+        case IntegratedFailure::CopyEffectThenError:
+            fixture.state->copy_failure_after_effect =
+                kasumi::transport::ErrorCode::Io;
+            break;
+        case IntegratedFailure::CorruptReadback:
+            fixture.state->physical_hash_unsupported_identifier = quarantine;
+            fixture.state->corrupt_get_identifier = quarantine;
+            break;
+    }
+    reset_fake_traffic(*fixture.state);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, expected_error);
+
+    auto expected_objects = fixture.initial_objects;
+    const bool copy_effect =
+        failure == IntegratedFailure::CopyEffectThenError ||
+        failure == IntegratedFailure::CorruptReadback;
+    if (copy_effect) {
+        expected_objects.emplace(quarantine,
+                                 fixture.initial_objects.at(source));
+    }
+    EXPECT_EQ(fixture.state->objects, expected_objects);
+    EXPECT_TRUE(fixture.state->objects.contains(source));
+    EXPECT_EQ(fixture.state->objects.contains(quarantine), copy_effect);
+    EXPECT_FALSE(fixture.state->objects.contains(quarantine + ".meta"));
+
+    const bool source_hash_failed = failure == IntegratedFailure::SourceHash;
+    const bool fallback_read_failed = failure == IntegratedFailure::FallbackGet;
+    const bool fallback_put_failed = failure == IntegratedFailure::FallbackPut;
+    const auto source_bytes = fixture.initial_objects.at(source).size();
+    EXPECT_EQ(fixture.state->copy_count, source_hash_failed ? 0U : 1U);
+    EXPECT_EQ(fixture.state->orphan_payload_get_count,
+              fallback_read_failed || fallback_put_failed ? 1U : 0U);
+    EXPECT_EQ(fixture.state->orphan_payload_get_bytes,
+              fallback_put_failed ? source_bytes : 0U);
+    if (fallback_read_failed) {
+        EXPECT_TRUE(fixture.state->fail_get_identifier.empty());
+    }
+    if (fallback_put_failed) {
+        EXPECT_TRUE(fixture.state->fail_put_identifier.empty());
+    }
+    EXPECT_EQ(fixture.state->quarantine_payload_put_count, 0U);
+    EXPECT_EQ(fixture.state->quarantine_metadata_put_count, 0U);
+    EXPECT_EQ(fixture.state->native_copy_bytes,
+              copy_effect ? source_bytes : 0U);
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy source physical hash"),
+              1U);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("verified copy native copy"),
+        source_hash_failed ? 0U : 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy native copy successes"),
+              failure == IntegratedFailure::CorruptReadback ? 1U : 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy native copy verifications"),
+              0U);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("gc candidate verified copy"),
+        1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc candidate metadata publish"),
+              0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc candidate pre-remove barrier verification"),
+              0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc candidate remove"),
+              0U);
+}
+
+TEST(IntegratedGcFixtureTest,
+     NativeCopyPreservesExactInventoryAndAggregatesMetrics) {
+    expect_integrated_copy_case(IntegratedCopyPath::Native, "native", 2);
+}
+
+TEST(IntegratedGcFixtureTest, UnsupportedSourceHashUsesVerifiedFallback) {
+    expect_integrated_copy_case(IntegratedCopyPath::SourceHashUnsupported,
+                                "source-hash-unsupported");
+}
+
+TEST(IntegratedGcFixtureTest, UnsupportedNativeCopyUsesVerifiedFallback) {
+    expect_integrated_copy_case(IntegratedCopyPath::NativeCopyUnsupported,
+                                "copy-unsupported");
+}
+
+TEST(IntegratedGcFixtureTest, UnsupportedDestinationHashUsesVerifiedReadback) {
+    expect_integrated_copy_case(IntegratedCopyPath::DestinationHashUnsupported,
+                                "destination-hash-unsupported");
+}
+
+TEST(IntegratedGcFixtureTest, SourceHashTransportFailurePreservesInventory) {
+    expect_integrated_failure(IntegratedFailure::SourceHash,
+                              "source-hash-failure",
+                              IntegrityErrorCode::TransportFailure);
+}
+
+TEST(IntegratedGcFixtureTest, FallbackGetFailurePreservesInventory) {
+    expect_integrated_failure(IntegratedFailure::FallbackGet,
+                              "fallback-get-failure",
+                              IntegrityErrorCode::TransportFailure);
+}
+
+TEST(IntegratedGcFixtureTest, FallbackPutFailurePreservesInventory) {
+    expect_integrated_failure(IntegratedFailure::FallbackPut,
+                              "fallback-put-failure",
+                              IntegrityErrorCode::TransportFailure);
+}
+
+TEST(IntegratedGcFixtureTest,
+     CopyEffectThenTransportErrorLeavesUnclaimedResidue) {
+    expect_integrated_failure(IntegratedFailure::CopyEffectThenError,
+                              "copy-effect-then-error",
+                              IntegrityErrorCode::TransportFailure);
+}
+
+TEST(IntegratedGcFixtureTest, CorruptReadbackPreservesOriginalWithoutMetadata) {
+    expect_integrated_failure(IntegratedFailure::CorruptReadback,
+                              "corrupt-readback",
+                              IntegrityErrorCode::IntegrityFailure);
 }
 
 TEST(MaintenanceTest, UnicodeReferenceAndRecoveryPaths) {
