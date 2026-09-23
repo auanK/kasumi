@@ -116,7 +116,7 @@ ReachabilityResult inventory_impl(
                                             reference.ciphertext_id);
             }
         }
-        if (!batch.identifiers.empty()) {
+        if (batch.identifiers.size() > 1) {
             auto prefetched = transport::get_batch(storage, batch);
             if (!prefetched) {
                 return std::unexpected(

@@ -2286,4 +2286,35 @@ TEST(IntegrityMaintenanceTest, RemoteCommitMutationBetweenObservationsAbortsGcWi
     expect_presence(transport, orphan, Presence::Present);
 }
 
+TEST(IntegrityMaintenanceTest, MultipleCommitsPreserveBatchDuringGc) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-multiple-commits-batch");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+    const auto parent = publish_remote(
+        transport, workspace, make_commit(0, {}, "file.txt", "zero").value());
+    publish_remote(
+        transport,
+        workspace,
+        make_commit(1, {parent.head.commit_id}, "file.txt", "one").value());
+    put_content(transport, workspace, "zero", "zero");
+    put_content(transport, workspace, "one", "one");
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    transport.storage.get_batch = fake_reachability_get_batch;
+    state->get_batch_count = 0;
+    state->commit_get_count = 0;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(state->get_batch_count, 2U);
+    EXPECT_EQ(state->commit_get_count, 0U);
+}
+
 } // namespace
