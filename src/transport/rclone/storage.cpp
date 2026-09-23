@@ -464,6 +464,7 @@ Result rclone_copy(void* context,
         return std::unexpected(invalid_identifier_error());
     }
 
+    const auto copy_trace = platform::perf_trace::begin();
     const auto copied =
         request_json(*state,
                      "operations/copyfile",
@@ -477,6 +478,7 @@ Result rclone_copy(void* context,
                      },
                      maximum_response_size,
                      transfer_timeout);
+    platform::perf_trace::finish("rclone copyfile remote copy", copy_trace);
     if (!copied) {
         if (not_found(copied.error())) {
             return std::unexpected(make_error(

@@ -921,21 +921,34 @@ copy_verified(transport::Transport& storage,
             error(ErrorCode::Blocked,
                   "epoch objects cannot be copied by collection"));
     }
+    const auto source_hash_trace = platform::perf_trace::begin();
     auto source_hash =
         transport::physical_hash(storage, source_identifier, "sha256");
+    platform::perf_trace::finish("verified copy source physical hash",
+                                 source_hash_trace);
     if (source_hash) {
         if (!valid_sha256(*source_hash)) {
             return std::unexpected(
                 error(ErrorCode::VerificationFailure,
                       "invalid source physical SHA-256"));
         }
+        const auto native_copy_trace = platform::perf_trace::begin();
         auto copied = transport::copy(
             storage, source_identifier, destination_identifier);
+        platform::perf_trace::finish("verified copy native copy",
+                                     native_copy_trace);
         if (copied) {
+            platform::perf_trace::count(
+                "verified copy native copy successes");
+            const auto destination_hash_trace =
+                platform::perf_trace::begin();
             auto destination_hash =
                 transport::physical_hash(storage,
                                          destination_identifier,
                                          "sha256");
+            platform::perf_trace::finish(
+                "verified copy destination physical hash",
+                destination_hash_trace);
             if (destination_hash) {
                 if (!valid_sha256(*destination_hash)) {
                     return std::unexpected(
@@ -947,6 +960,8 @@ copy_verified(transport::Transport& storage,
                         error(ErrorCode::VerificationFailure,
                               "remote copy does not match source object"));
                 }
+                platform::perf_trace::count(
+                    "verified copy native copy verifications");
                 return std::move(*source_hash);
             }
             if (destination_hash.error().code !=
@@ -959,6 +974,8 @@ copy_verified(transport::Transport& storage,
             if (!verified) {
                 return std::unexpected(verified.error());
             }
+            platform::perf_trace::count(
+                "verified copy native copy verifications");
             return std::move(*source_hash);
         }
         if (copied.error().code != transport::ErrorCode::Unsupported) {

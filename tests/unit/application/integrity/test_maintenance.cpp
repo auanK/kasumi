@@ -6,10 +6,14 @@
 #include "core/maintenance.hpp"
 #include "kasumi/test/history_storage.hpp"
 #include "platform/clock.hpp"
+#include "platform/perf_trace.hpp"
 #include "platform/path.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
+#include <iostream>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -367,6 +371,10 @@ TEST(IntegrityMaintenanceTest,
 
 TEST(IntegrityMaintenanceTest,
      CopyVerifiedReadsBackWhenDestinationPhysicalHashIsUnsupported) {
+    struct TraceGuard {
+        ~TraceGuard() { kasumi::platform::perf_trace::force_enable(false); }
+    } trace_guard;
+    kasumi::platform::perf_trace::force_enable(true);
     auto workspace =
         kasumi::test::make_temp_workspace("copy-destination-hash-unsupported");
     FakeState* state = nullptr;
@@ -380,6 +388,7 @@ TEST(IntegrityMaintenanceTest,
     state->get_count = 0;
     state->put_count = 0;
     state->copy_count = 0;
+    kasumi::platform::perf_trace::reset();
 
     const auto copied = protocol::copy_verified(
         transport,
@@ -392,8 +401,72 @@ TEST(IntegrityMaintenanceTest,
     EXPECT_EQ(state->copy_count, 1U);
     EXPECT_EQ(state->get_count, 1U);
     EXPECT_EQ(state->put_count, 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy native copy"),
+              1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy native copy successes"),
+              1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy native copy verifications"),
+              1U);
     EXPECT_EQ(state->objects.at(source),
               state->objects.at(std::string{destination}));
+}
+
+TEST(IntegrityMaintenanceTest,
+     CopyVerifiedTraceSeparatesNativeAttemptSuccessAndVerification) {
+    struct TraceGuard {
+        ~TraceGuard() { kasumi::platform::perf_trace::force_enable(false); }
+    } trace_guard;
+    kasumi::platform::perf_trace::force_enable(true);
+
+    const auto verify_case = [](std::string_view suffix,
+                                bool copy_supported,
+                                bool destination_mismatch) {
+        auto workspace = kasumi::test::make_temp_workspace(
+            "copy-trace-" + std::string{suffix});
+        FakeState* state = nullptr;
+        auto transport = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(transport));
+        state->physical_hash_supported = true;
+        state->copy_supported = copy_supported;
+        state->copy_destination_mismatch = destination_mismatch;
+        const auto source = put_content(transport, workspace, "payload", suffix);
+        const auto destination = "copy/trace/" + std::string{suffix};
+        reset_fake_traffic(*state);
+        kasumi::platform::perf_trace::reset();
+
+        const auto copied = protocol::copy_verified(
+            transport,
+            source,
+            destination,
+            kasumi::test::workspace_root(workspace));
+
+        if (destination_mismatch) {
+            ASSERT_FALSE(copied.has_value());
+            EXPECT_EQ(copied.error().code,
+                      protocol::ErrorCode::VerificationFailure);
+        } else {
+            ASSERT_TRUE(copied.has_value()) << copied.error().detail;
+        }
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy native copy"),
+                  1U);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy native copy successes"),
+                  copy_supported ? 1U : 0U);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy native copy verifications"),
+                  copy_supported && !destination_mismatch ? 1U : 0U);
+        EXPECT_EQ(state->get_count, copy_supported ? 0U : 1U);
+        EXPECT_EQ(state->put_count, copy_supported ? 0U : 1U);
+        EXPECT_TRUE(state->objects.contains(source));
+    };
+
+    verify_case("native-success", true, false);
+    verify_case("unsupported-fallback", false, false);
+    verify_case("destination-mismatch", true, true);
 }
 
 TEST(IntegrityMaintenanceTest,
@@ -702,10 +775,18 @@ TEST(IntegrityMaintenanceTest, ActiveOrAbandonedWriterBlocksCollection) {
         kasumi::test::workspace_root(storage.workspace));
     ASSERT_TRUE(writer.has_value()) << writer.error().detail;
 
+    struct TraceGuard {
+        ~TraceGuard() { kasumi::platform::perf_trace::force_enable(false); }
+    } trace_guard;
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
     const auto collected = kasumi::application::integrity::garbage_collect(
         runtime, storage.transport, test_key());
     ASSERT_FALSE(collected.has_value());
     EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc writer consistency checks"),
+              1U);
     expect_presence(storage.transport, orphan, Presence::Present);
     expect_presence(
         storage.transport,
@@ -1351,6 +1432,27 @@ TEST(IntegrityMaintenanceTest,
 }
 
 TEST(IntegrityMaintenanceTest,
+     FailedOrphanPayloadGetDoesNotCountDownloadedBytes) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-failed-payload-get-bytes");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    constexpr std::string_view identifier = "content/orphan-payload";
+    state->objects[std::string{identifier}] = {1, 2, 3, 4};
+    state->observed_payload_identifier = identifier;
+    state->fail_content_get = true;
+
+    const auto result = kasumi::transport::get(
+        transport,
+        identifier,
+        kasumi::test::workspace_root(workspace) / "orphan-payload.bin");
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(state->orphan_payload_get_count, 1U);
+    EXPECT_EQ(state->orphan_payload_get_bytes, 0U);
+}
+
+TEST(IntegrityMaintenanceTest,
      GarbageCollectQuarantineFallsBackWhenNativeCopyUnsupported) {
     auto workspace =
         kasumi::test::make_temp_workspace("gc-quarantine-copy-fallback");
@@ -1496,6 +1598,218 @@ TEST(IntegrityMaintenanceTest,
     EXPECT_EQ(state->copy_count, 2U);
     EXPECT_EQ(state->orphan_payload_get_count, 0U);
     EXPECT_EQ(state->quarantine_payload_put_count, 0U);
+}
+
+TEST(IntegrityMaintenanceTest, GarbageCollectionBatchBaselineScale) {
+    struct TraceGuard {
+        ~TraceGuard() { kasumi::platform::perf_trace::force_enable(false); }
+    } trace_guard;
+
+    kasumi::platform::perf_trace::force_enable(true);
+    std::cout << "GC_MEASUREMENT_COLUMNS n,total_us,barrier_acquire_us,"
+                 "writer_checks_us,probe_us,quarantine_inventory_us,"
+                 "restore_us,prior_metadata_us,reachability_1_us,"
+                 "reachability_2_us,stable_compare_us,"
+                 "final_namespace_verify_us,"
+                 "purge_us,candidate_pre_copy_barrier_us,candidate_copy_us,"
+                 "candidate_source_hash_us,native_copy_us,"
+                 "candidate_destination_hash_us,"
+                 "candidate_metadata_us,put_verification_us,"
+                 "candidate_pre_remove_barrier_us,"
+                 "candidate_remove_us,barrier_release_us,get,orphan_get,"
+                 "orphan_get_bytes,put,quarantine_payload_put,"
+                 "quarantine_payload_put_bytes,metadata_put,full_list,"
+                 "full_list_identifiers,prefix_list,presence,physical_hash,"
+                 "physical_hash_batch,"
+                 "put_batch,control_read_batch,copy_attempts,copy_successes,"
+                 "copy_verifications,native_copy_bytes,"
+                 "remove,barrier_verification,writer_hash_verification_calls,"
+                 "candidates,quarantined,"
+                 "restored,purged,analysis_only\n";
+
+    const auto trace_us = [](std::string_view name) {
+        return kasumi::platform::perf_trace::get_time(name);
+    };
+    for (const std::size_t orphan_count : {0U, 1U, 10U, 100U}) {
+        auto workspace =
+            kasumi::test::make_temp_workspace("gc-batch-baseline");
+        FakeState* state = nullptr;
+        auto transport = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(transport));
+        state->physical_hash_supported = true;
+        state->copy_supported = true;
+        auto runtime = runtime_data(workspace);
+
+        const auto retained =
+            make_commit(0, {}, "retained.txt", "retained").value();
+        const auto published = publish_remote(transport, workspace, retained);
+        const auto retained_content =
+            put_content(transport, workspace, "retained", "retained");
+
+        std::vector<std::pair<std::string, std::vector<std::uint8_t>>> orphans;
+        orphans.reserve(orphan_count);
+        std::set<std::string> unique_orphan_identifiers;
+        std::set<std::vector<std::uint8_t>> unique_orphan_ciphertexts;
+        std::size_t orphan_bytes = 0;
+        for (std::size_t index = 0; index < orphan_count; ++index) {
+            const auto suffix = "orphan-" + std::to_string(index);
+            const auto identifier =
+                put_content(transport, workspace, suffix, suffix);
+            state->observed_payload_identifiers.insert(identifier);
+            const auto& ciphertext = state->objects.at(identifier);
+            EXPECT_TRUE(unique_orphan_identifiers.insert(identifier).second);
+            EXPECT_TRUE(unique_orphan_ciphertexts.insert(ciphertext).second);
+            orphans.emplace_back(identifier, ciphertext);
+            orphan_bytes += state->objects.at(identifier).size();
+        }
+        const auto layout = test_layout();
+        EXPECT_TRUE(std::ranges::none_of(state->objects, [&](const auto& item) {
+            return protocol::is_epoch_object(layout, item.first);
+        }));
+
+        reset_fake_traffic(*state);
+        kasumi::platform::perf_trace::reset();
+        const auto started = std::chrono::steady_clock::now();
+        const auto collected = kasumi::application::integrity::garbage_collect(
+            runtime, transport, test_key());
+        const auto total_us = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - started)
+                .count());
+        ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+        EXPECT_FALSE(collected->analysis_only);
+        EXPECT_EQ(collected->candidate_objects, orphan_count);
+        EXPECT_EQ(collected->quarantined_objects, orphan_count);
+        EXPECT_EQ(collected->restored_objects, 0U);
+        EXPECT_EQ(collected->purged_objects, 0U);
+        EXPECT_EQ(state->get_count, 7U + 2U * orphan_count);
+        EXPECT_EQ(state->orphan_payload_get_count, 0U);
+        EXPECT_EQ(state->orphan_payload_get_bytes, 0U);
+        EXPECT_EQ(state->put_count, 2U + orphan_count);
+        EXPECT_EQ(state->quarantine_payload_put_count, 0U);
+        EXPECT_EQ(state->quarantine_payload_put_bytes, 0U);
+        EXPECT_EQ(state->quarantine_metadata_put_count, orphan_count);
+        EXPECT_EQ(state->full_list_count, 4U);
+        EXPECT_EQ(state->full_list_identifier_count,
+                  4U * (orphan_count + 4U));
+        EXPECT_EQ(state->prefix_list_count, 6U);
+        EXPECT_EQ(state->presence_count, 0U);
+        EXPECT_EQ(state->physical_hash_count, 2U + 3U * orphan_count);
+        EXPECT_EQ(state->physical_hash_batch_count, 0U);
+        EXPECT_EQ(state->put_batch_count, 0U);
+        EXPECT_EQ(state->control_read_batch_count, 0U);
+        EXPECT_EQ(state->copy_count, orphan_count);
+        EXPECT_EQ(state->native_copy_bytes, orphan_bytes);
+        EXPECT_EQ(state->remove_count, 2U + orphan_count);
+        EXPECT_EQ(state->barrier_verification_count,
+                  3U + 2U * orphan_count);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "writer physical hash calls"),
+                  2U + orphan_count);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "writer verification"),
+                  2U + orphan_count);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy source physical hash"),
+                  orphan_count);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy native copy"),
+                  orphan_count);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy native copy successes"),
+                  orphan_count);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy native copy verifications"),
+                  orphan_count);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy destination physical hash"),
+                  orphan_count);
+
+        std::cout << "GC_MEASUREMENT " << orphan_count << ',' << total_us << ','
+                  << trace_us("gc barrier acquire") << ','
+                  << trace_us("gc writer consistency checks") << ','
+                  << trace_us("gc backend consistency probe") << ','
+                  << trace_us("gc quarantine inventory") << ','
+                  << trace_us("gc quarantine restoration") << ','
+                  << trace_us("gc prior metadata initialization") << ','
+                  << trace_us("gc reachability observation 1") << ','
+                  << trace_us("gc reachability observation 2") << ','
+                  << trace_us("gc stable-state comparison") << ','
+                  << trace_us("gc final namespace verification") << ','
+                  << trace_us("gc expired quarantine purge") << ','
+                  << trace_us("gc candidate pre-copy barrier verification")
+                  << ',' << trace_us("gc candidate verified copy") << ','
+                  << trace_us("verified copy source physical hash") << ','
+                  << trace_us("verified copy native copy") << ','
+                  << trace_us("verified copy destination physical hash")
+                  << ','
+                  << trace_us("gc candidate metadata publish") << ','
+                  << trace_us("writer verification") << ','
+                  << trace_us("gc candidate pre-remove barrier verification")
+                  << ',' << trace_us("gc candidate remove") << ','
+                  << trace_us("gc barrier release") << ',' << state->get_count
+                  << ',' << state->orphan_payload_get_count << ','
+                  << state->orphan_payload_get_bytes << ',' << state->put_count
+                  << ','
+                  << state->quarantine_payload_put_count << ','
+                  << state->quarantine_payload_put_bytes << ','
+                  << state->quarantine_metadata_put_count << ','
+                  << state->full_list_count << ','
+                  << state->full_list_identifier_count << ','
+                  << state->prefix_list_count
+                  << ',' << state->presence_count << ','
+                  << state->physical_hash_count << ','
+                  << state->physical_hash_batch_count << ','
+                  << state->put_batch_count << ','
+                  << state->control_read_batch_count << ','
+                  << kasumi::platform::perf_trace::get_count(
+                         "verified copy native copy")
+                  << ','
+                  << kasumi::platform::perf_trace::get_count(
+                         "verified copy native copy successes")
+                  << ','
+                  << kasumi::platform::perf_trace::get_count(
+                         "verified copy native copy verifications")
+                  << ',' << state->native_copy_bytes << ','
+                  << state->remove_count << ','
+                  << state->barrier_verification_count << ','
+                  << kasumi::platform::perf_trace::get_count(
+                         "writer physical hash calls")
+                  << ','
+                  << collected->candidate_objects << ','
+                  << collected->quarantined_objects << ','
+                  << collected->restored_objects << ','
+                  << collected->purged_objects << ','
+                  << collected->analysis_only << '\n';
+
+        EXPECT_TRUE(state->objects.contains(retained_content));
+        EXPECT_TRUE(state->objects.contains(object_path(published.head)));
+        EXPECT_TRUE(state->objects.contains(marker_path(published.head)));
+        for (const auto& [identifier, bytes] : orphans) {
+            const auto quarantine =
+                protocol::quarantine_identifier(test_layout(), identifier);
+            ASSERT_TRUE(quarantine.has_value());
+            EXPECT_FALSE(state->objects.contains(identifier));
+            const auto quarantined = state->objects.find(*quarantine);
+            ASSERT_NE(quarantined, state->objects.end());
+            EXPECT_EQ(quarantined->second, bytes);
+        }
+
+        const auto inventory = protocol::inventory_quarantine(
+            transport, test_key(), kasumi::test::workspace_root(workspace));
+        ASSERT_TRUE(inventory.has_value());
+        EXPECT_EQ(inventory->size(), orphan_count);
+        for (const auto& entry : *inventory) {
+            EXPECT_FALSE(protocol::is_epoch_object(
+                test_layout(), entry.original_identifier));
+            const auto verified = protocol::verify_quarantine(
+                transport, entry, kasumi::test::workspace_root(workspace));
+            ASSERT_TRUE(verified.has_value());
+            EXPECT_TRUE(*verified);
+        }
+    }
+    kasumi::platform::perf_trace::force_enable(false);
 }
 
 } // namespace

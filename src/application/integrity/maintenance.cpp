@@ -9,6 +9,7 @@
 #include "crypto/content.hpp"
 #include "platform/clock.hpp"
 #include "platform/path.hpp"
+#include "platform/perf_trace.hpp"
 #include "platform/workspace.hpp"
 
 #include <algorithm>
@@ -939,21 +940,28 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
     try {
         const auto layout = history_storage::derive_remote_layout(key);
         const auto workspace_root = maintenance_workspace_root(runtime_data);
+        const auto barrier_acquire_trace = platform::perf_trace::begin();
         auto barrier = history_storage::maintenance_protocol::establish_barrier(
             storage, layout, workspace_root);
+        platform::perf_trace::finish("gc barrier acquire", barrier_acquire_trace);
         if (!barrier) {
             return std::unexpected(protocol_error(barrier.error()));
         }
         auto outcome = [&]() -> std::expected<GarbageCollectResult, Error> {
             try {
+                const auto writer_check_trace = platform::perf_trace::begin();
                 for (int observation = 0; observation < 2; ++observation) {
                     auto writers =
                         history_storage::maintenance_protocol::active_writers(
                             storage, layout);
                     if (!writers) {
+                        platform::perf_trace::finish(
+                            "gc writer consistency checks", writer_check_trace);
                         return std::unexpected(protocol_error(writers.error()));
                     }
                     if (!writers->empty()) {
+                        platform::perf_trace::finish(
+                            "gc writer consistency checks", writer_check_trace);
                         return std::unexpected(make_error(
                             ErrorCode::ConcurrentChange,
                             list_detail("active or abandoned writers: ",
@@ -962,12 +970,20 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     auto owned = history_storage::maintenance_protocol::
                         verify_registration(*barrier);
                     if (!owned) {
+                        platform::perf_trace::finish(
+                            "gc writer consistency checks", writer_check_trace);
                         return std::unexpected(protocol_error(owned.error()));
                     }
                 }
+                platform::perf_trace::finish("gc writer consistency checks",
+                                             writer_check_trace);
 
+                const auto consistency_probe_trace =
+                    platform::perf_trace::begin();
                 auto online = history_storage::maintenance_protocol::
                     supports_online_collection(storage, layout, workspace_root);
+                platform::perf_trace::finish("gc backend consistency probe",
+                                             consistency_probe_trace);
                 if (!online) {
                     return std::unexpected(protocol_error(online.error()));
                 }
@@ -989,34 +1005,56 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                         make_error(ErrorCode::StateFailure, now.error()));
                 }
 
+                const auto quarantine_inventory_trace =
+                    platform::perf_trace::begin();
                 auto quarantine =
                     history_storage::maintenance_protocol::inventory_quarantine(
                         storage, key, workspace_root);
+                platform::perf_trace::finish("gc quarantine inventory",
+                                             quarantine_inventory_trace);
                 if (!quarantine) {
                     return std::unexpected(protocol_error(quarantine.error()));
                 }
+                const auto restore_trace = platform::perf_trace::begin();
                 auto restored = restore_reachable_quarantine(
                     storage, key, workspace_root, *barrier, *quarantine);
+                platform::perf_trace::finish("gc quarantine restoration",
+                                             restore_trace);
                 if (!restored) {
                     return std::unexpected(restored.error());
                 }
+                const auto metadata_init_trace = platform::perf_trace::begin();
                 auto metadata = initialize_quarantine_metadata(
                     storage, key, workspace_root, *now, *barrier, *quarantine);
+                platform::perf_trace::finish("gc prior metadata initialization",
+                                             metadata_init_trace);
                 if (!metadata) {
                     return std::unexpected(metadata.error());
                 }
 
+                const auto first_observation_trace =
+                    platform::perf_trace::begin();
                 auto first = collect_garbage_collection_snapshot(
                     storage, key, workspace_root);
+                platform::perf_trace::finish("gc reachability observation 1",
+                                             first_observation_trace);
                 if (!first) {
                     return std::unexpected(first.error());
                 }
+                const auto second_observation_trace =
+                    platform::perf_trace::begin();
                 auto confirmed = collect_garbage_collection_snapshot(
                     storage, key, workspace_root);
+                platform::perf_trace::finish("gc reachability observation 2",
+                                             second_observation_trace);
                 if (!confirmed) {
                     return std::unexpected(confirmed.error());
                 }
-                if (!same_reachable_state(*first, *confirmed)) {
+                const auto stable_compare_trace = platform::perf_trace::begin();
+                const bool stable = same_reachable_state(*first, *confirmed);
+                platform::perf_trace::finish("gc stable-state comparison",
+                                             stable_compare_trace);
+                if (!stable) {
                     return std::unexpected(make_error(
                         ErrorCode::ConcurrentChange,
                         "reachability or inventory changed during GC"));
@@ -1026,17 +1064,26 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     .candidate_objects = confirmed->candidates.size(),
                     .restored_objects = *restored,
                 };
+                const auto final_listing_trace = platform::perf_trace::begin();
                 auto final_listing = transport::list(storage);
                 if (!final_listing) {
+                    platform::perf_trace::finish(
+                        "gc final namespace verification",
+                        final_listing_trace);
                     return std::unexpected(
                         transport_error(final_listing.error()));
                 }
                 std::ranges::sort(*final_listing);
-                if (*final_listing != confirmed->physical_namespace) {
+                const bool namespace_matches =
+                    *final_listing == confirmed->physical_namespace;
+                platform::perf_trace::finish(
+                    "gc final namespace verification", final_listing_trace);
+                if (!namespace_matches) {
                     return std::unexpected(make_error(
                         ErrorCode::ConcurrentChange,
                         "remote storage changed prior to destructive phase"));
                 }
+                const auto purge_trace = platform::perf_trace::begin();
                 auto purged = purge_expired_quarantine(storage,
                                                        layout,
                                                        workspace_root,
@@ -1044,6 +1091,8 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                                        *confirmed,
                                                        *barrier,
                                                        *quarantine);
+                platform::perf_trace::finish("gc expired quarantine purge",
+                                             purge_trace);
                 if (!purged) {
                     return std::unexpected(purged.error());
                 }
@@ -1056,8 +1105,13 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                             "epoch candidate blocked from quarantine",
                             identifier));
                     }
+                    const auto before_copy_barrier_trace =
+                        platform::perf_trace::begin();
                     auto owned = history_storage::maintenance_protocol::
                         verify_registration(*barrier);
+                    platform::perf_trace::finish(
+                        "gc candidate pre-copy barrier verification",
+                        before_copy_barrier_trace);
                     if (!owned) {
                         return std::unexpected(protocol_error(owned.error()));
                     }
@@ -1070,15 +1124,19 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                        "candidate cannot be quarantined",
                                        identifier));
                     }
+                    const auto copy_trace = platform::perf_trace::begin();
                     auto copied =
                         history_storage::maintenance_protocol::copy_verified(
                             storage,
                             identifier,
                             *quarantine_identifier,
                             workspace_root);
+                    platform::perf_trace::finish("gc candidate verified copy",
+                                                 copy_trace);
                     if (!copied) {
                         return std::unexpected(protocol_error(copied.error()));
                     }
+                    const auto metadata_trace = platform::perf_trace::begin();
                     auto recorded = history_storage::maintenance_protocol::
                         record_quarantine(storage,
                                           *quarantine_identifier,
@@ -1086,16 +1144,26 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                           key,
                                           workspace_root,
                                           *copied);
+                    platform::perf_trace::finish("gc candidate metadata publish",
+                                                 metadata_trace);
                     if (!recorded) {
                         return std::unexpected(
                             protocol_error(recorded.error()));
                     }
+                    const auto before_remove_barrier_trace =
+                        platform::perf_trace::begin();
                     owned = history_storage::maintenance_protocol::
                         verify_registration(*barrier);
+                    platform::perf_trace::finish(
+                        "gc candidate pre-remove barrier verification",
+                        before_remove_barrier_trace);
                     if (!owned) {
                         return std::unexpected(protocol_error(owned.error()));
                     }
+                    const auto remove_trace = platform::perf_trace::begin();
                     auto removed = transport::remove(storage, identifier);
+                    platform::perf_trace::finish("gc candidate remove",
+                                                 remove_trace);
                     if (!removed) {
                         return std::unexpected(
                             transport_error(removed.error(), identifier));
@@ -1110,9 +1178,12 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     make_error(ErrorCode::StateFailure, exception.what()));
             }
         }();
+        const auto barrier_release_trace = platform::perf_trace::begin();
         auto released =
             history_storage::maintenance_protocol::release_registration(
                 *barrier);
+        platform::perf_trace::finish("gc barrier release",
+                                     barrier_release_trace);
         if (!outcome) {
             return outcome;
         }

@@ -20,6 +20,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -169,6 +170,7 @@ struct FakeState {
     std::map<std::string, std::vector<std::uint8_t>> hidden_objects;
     std::size_t list_count = 0;
     std::size_t full_list_count = 0;
+    std::size_t full_list_identifier_count = 0;
     std::size_t prefix_list_count = 0;
     std::size_t reveal_on_list_count = 0;
     std::size_t get_count = 0;
@@ -183,9 +185,14 @@ struct FakeState {
     std::size_t commit_get_count = 0;
     std::size_t marker_get_count = 0;
     std::size_t orphan_payload_get_count = 0;
+    std::size_t orphan_payload_get_bytes = 0;
     std::size_t quarantine_payload_put_count = 0;
+    std::size_t quarantine_payload_put_bytes = 0;
+    std::size_t native_copy_bytes = 0;
     std::size_t quarantine_metadata_put_count = 0;
     std::size_t physical_hash_count = 0;
+    std::size_t physical_hash_batch_count = 0;
+    std::size_t barrier_verification_count = 0;
     std::map<std::string, std::string> physical_hashes;
     bool physical_hash_supported = false;
     bool physical_hash_mismatch = false;
@@ -218,6 +225,7 @@ struct FakeState {
     bool replace_barrier_after_quarantine_put = false;
     std::string disappear_on_get;
     std::string observed_payload_identifier;
+    std::set<std::string> observed_payload_identifiers;
     std::optional<kasumi::transport::ErrorCode> physical_hash_failure;
     std::vector<std::string> remote_events;
 };
@@ -228,6 +236,25 @@ void destroy_fake(void* context) noexcept {
 
 FakeState* fake_state(void* context) {
     return static_cast<FakeState*>(context);
+}
+
+[[maybe_unused]] void reset_fake_traffic(FakeState& state) {
+    state.list_count = state.full_list_count = state.prefix_list_count = 0;
+    state.full_list_identifier_count = 0;
+    state.get_count = state.get_batch_count = state.copy_count = 0;
+    state.presence_count = state.remove_count = state.put_count = 0;
+    state.put_batch_count = state.commit_put_count = state.marker_put_count = 0;
+    state.commit_get_count = state.marker_get_count = 0;
+    state.orphan_payload_get_count = 0;
+    state.orphan_payload_get_bytes = 0;
+    state.quarantine_payload_put_count = 0;
+    state.quarantine_payload_put_bytes = 0;
+    state.native_copy_bytes = 0;
+    state.quarantine_metadata_put_count = 0;
+    state.physical_hash_count = state.physical_hash_batch_count = 0;
+    state.barrier_verification_count = 0;
+    state.control_read_batch_count = 0;
+    state.remote_events.clear();
 }
 
 bool is_commit(std::string_view identifier) {
@@ -294,10 +321,15 @@ kasumi::transport::Result fake_put(void* context,
         ++state->marker_put_count;
         state->remote_events.emplace_back("PutHead");
     }
-    if (identifier.starts_with(layout.quarantine_prefix) &&
-        identifier.ends_with(".meta")) {
+    const bool quarantine_metadata =
+        identifier.starts_with(layout.quarantine_prefix) &&
+        identifier.ends_with(".meta");
+    const bool quarantine_payload =
+        identifier.starts_with(layout.quarantine_prefix) &&
+        !identifier.ends_with(".meta");
+    if (quarantine_metadata) {
         ++state->quarantine_metadata_put_count;
-    } else if (identifier.starts_with(layout.quarantine_prefix)) {
+    } else if (quarantine_payload) {
         ++state->quarantine_payload_put_count;
     }
     auto physical_hash = kasumi::crypto::physical::hash_file(source, "sha256");
@@ -318,22 +350,11 @@ kasumi::transport::Result fake_put(void* context,
                static_cast<std::streamsize>(bytes.size()));
     state->objects[std::string{identifier}] = std::move(bytes);
     state->physical_hashes[std::string{identifier}] = std::move(*physical_hash);
-    if (state->replace_barrier_after_quarantine_put &&
-        (identifier.starts_with("history/gc/v1/quarantine/") ||
-         identifier.starts_with(layout.quarantine_prefix))) {
-        state->replace_barrier_after_quarantine_put = false;
-        for (auto& [object_identifier, object] : state->objects) {
-            constexpr std::string_view barrier_payload =
-                "kasumi-gc-v1:barrier:";
-            static_cast<void>(object_identifier);
-            if (object.size() >= barrier_payload.size() &&
-                std::ranges::equal(
-                    barrier_payload,
-                    std::span{object}.first(barrier_payload.size()))) {
-                object.assign({'r', 'e', 'p', 'l', 'a', 'c', 'e', 'd'});
-            }
-        }
+    if (quarantine_payload) {
+        state->quarantine_payload_put_bytes +=
+            state->objects[std::string{identifier}].size();
     }
+    maybe_replace_barrier_after_quarantine_put(state, identifier, layout);
     if (failed_commit || failed_marker) {
         return std::unexpected(
             kasumi::transport::Error{.code = kasumi::transport::ErrorCode::Io,
@@ -365,6 +386,7 @@ kasumi::transport::Result fake_copy(
             .message = "source object missing"});
     }
     state->objects[std::string{destination_identifier}] = found->second;
+    state->native_copy_bytes += found->second.size();
     const auto hash = state->physical_hashes.find(std::string{source_identifier});
     if (hash == state->physical_hashes.end()) {
         state->physical_hashes.erase(std::string{destination_identifier});
@@ -409,8 +431,16 @@ kasumi::transport::Result fake_get(void* context,
         ++state->marker_get_count;
         state->remote_events.emplace_back("GetHead");
     }
-    if (identifier == state->observed_payload_identifier) {
+    const bool observed_payload =
+        identifier == state->observed_payload_identifier ||
+        state->observed_payload_identifiers.contains(std::string{identifier});
+    if (observed_payload) {
         ++state->orphan_payload_get_count;
+    }
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    if (identifier == layout.barrier_identifier) {
+        ++state->barrier_verification_count;
     }
     if ((is_commit(identifier) && state->fail_commit_get) ||
         (is_marker(identifier) && state->fail_marker_get) ||
@@ -453,12 +483,16 @@ kasumi::transport::Result fake_get(void* context,
     }
     output.write(reinterpret_cast<const char*>(found->second.data()),
                  static_cast<std::streamsize>(found->second.size()));
-    return output ? kasumi::transport::Result{}
-                  : kasumi::transport::Result{
-                        std::unexpect,
-                        kasumi::transport::Error{
-                            .code = kasumi::transport::ErrorCode::Io,
-                            .message = "write failed"}};
+    output.flush();
+    if (!output) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Io,
+            .message = "write failed"});
+    }
+    if (observed_payload) {
+        state->orphan_payload_get_bytes += found->second.size();
+    }
+    return {};
 }
 
 kasumi::transport::PresenceResult fake_presence(void* context,
@@ -491,6 +525,7 @@ kasumi::transport::ListingResult fake_list(void* context) {
     if (state->reverse_listing) {
         std::ranges::reverse(result);
     }
+    state->full_list_identifier_count += result.size();
     return result;
 }
 
@@ -612,6 +647,15 @@ std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
                : found->second;
 }
 
+kasumi::transport::PhysicalHashBatchResult fake_physical_hash_batch(
+    void* context,
+    const kasumi::transport::PhysicalHashBatchRequest&) {
+    ++fake_state(context)->physical_hash_batch_count;
+    return std::unexpected(kasumi::transport::Error{
+        .code = kasumi::transport::ErrorCode::Unsupported,
+        .message = "physical hash batch unavailable"});
+}
+
 kasumi::transport::ControlReadBatchResponse fake_control_read_batch(
     void* context, const kasumi::transport::ControlReadBatchRequest& request) {
     auto* state = fake_state(context);
@@ -659,6 +703,7 @@ make_fake_transport(FakeState*& state) {
                 .list = fake_list,
                 .list_prefix = fake_list_prefix,
                 .physical_hash = fake_physical_hash,
+                .physical_hash_batch = fake_physical_hash_batch,
                 .control_read_batch = fake_control_read_batch,
                 .remove = fake_remove,
             },
