@@ -38,9 +38,14 @@ void destroy_vault_context(void* context) noexcept {
     delete static_cast<VaultTransportContext*>(context);
 }
 
+transport::Result vault_initialize(void* context) {
+    auto* ctx = static_cast<VaultTransportContext*>(context);
+    return transport::initialize(*ctx->underlying);
+}
+
 transport::ListingResult vault_list(void* context) {
     auto* ctx = static_cast<VaultTransportContext*>(context);
-    auto raw = ctx->underlying->storage.list(ctx->underlying->state.get());
+    auto raw = transport::list(*ctx->underlying);
     if (!raw) {
         return raw;
     }
@@ -56,13 +61,7 @@ transport::ListingResult vault_list(void* context) {
 
 transport::ListingResult vault_list_prefix(void* context, std::string_view prefix) {
     auto* ctx = static_cast<VaultTransportContext*>(context);
-    if (!ctx->underlying->storage.list_prefix) {
-        return std::unexpected(transport::Error{
-            .code = transport::ErrorCode::Unsupported,
-            .message = "prefix listing unsupported",
-        });
-    }
-    auto raw = ctx->underlying->storage.list_prefix(ctx->underlying->state.get(), prefix);
+    auto raw = transport::list(*ctx->underlying, prefix);
     if (!raw) {
         return raw;
     }
@@ -81,7 +80,7 @@ transport::PresenceResult vault_presence(void* context, std::string_view identif
     if (identifier == ctx->hidden_marker) {
         return transport::Presence::Absent;
     }
-    return ctx->underlying->storage.presence(ctx->underlying->state.get(), identifier);
+    return transport::presence(*ctx->underlying, identifier);
 }
 
 transport::RemovalResult vault_remove(void* context, std::string_view identifier) {
@@ -89,36 +88,76 @@ transport::RemovalResult vault_remove(void* context, std::string_view identifier
     if (identifier == ctx->hidden_marker) {
         return transport::Removal::AlreadyAbsent;
     }
-    return ctx->underlying->storage.remove(ctx->underlying->state.get(), identifier);
+    return transport::remove(*ctx->underlying, identifier);
 }
 
 transport::Result vault_put(void* context,
                             const std::filesystem::path& source,
                             std::string_view identifier) {
     auto* ctx = static_cast<VaultTransportContext*>(context);
-    return ctx->underlying->storage.put(ctx->underlying->state.get(), source, identifier);
+    if (identifier == ctx->hidden_marker) {
+        return std::unexpected(transport::Error{
+            .code = transport::ErrorCode::InvalidIdentifier,
+            .message = "cannot overwrite owner marker via vault transport",
+        });
+    }
+    return transport::put(*ctx->underlying, source, identifier);
+}
+
+transport::Result vault_put_batch(void* context, const transport::PutBatch& batch) {
+    auto* ctx = static_cast<VaultTransportContext*>(context);
+    for (const auto& id : batch.identifiers) {
+        if (id == ctx->hidden_marker) {
+            return std::unexpected(transport::Error{
+                .code = transport::ErrorCode::InvalidIdentifier,
+                .message = "cannot overwrite owner marker via vault transport",
+            });
+        }
+    }
+    return transport::put_batch(*ctx->underlying, batch);
 }
 
 transport::Result vault_get(void* context,
                             std::string_view identifier,
                             const std::filesystem::path& destination) {
     auto* ctx = static_cast<VaultTransportContext*>(context);
-    return ctx->underlying->storage.get(ctx->underlying->state.get(), identifier, destination);
+    if (identifier == ctx->hidden_marker) {
+        return std::unexpected(transport::Error{
+            .code = transport::ErrorCode::ObjectNotFound,
+            .message = "object not found",
+        });
+    }
+    return transport::get(*ctx->underlying, identifier, destination);
+}
+
+transport::Result vault_get_batch(void* context, const transport::GetBatch& batch) {
+    auto* ctx = static_cast<VaultTransportContext*>(context);
+    for (const auto& id : batch.identifiers) {
+        const auto full_id = batch.source_prefix.empty() ? id : batch.source_prefix + "/" + id;
+        if (id == ctx->hidden_marker || full_id == ctx->hidden_marker) {
+            return std::unexpected(transport::Error{
+                .code = transport::ErrorCode::ObjectNotFound,
+                .message = "object not found",
+            });
+        }
+    }
+    return transport::get_batch(*ctx->underlying, batch);
 }
 
 transport::Result vault_copy(void* context,
                              std::string_view source_identifier,
                              std::string_view destination_identifier) {
     auto* ctx = static_cast<VaultTransportContext*>(context);
-    if (!ctx->underlying->storage.copy) {
+    if (source_identifier == ctx->hidden_marker ||
+        destination_identifier == ctx->hidden_marker) {
         return std::unexpected(transport::Error{
-            .code = transport::ErrorCode::Unsupported,
-            .message = "native copy unsupported",
+            .code = transport::ErrorCode::InvalidIdentifier,
+            .message = "cannot copy to or from owner marker",
         });
     }
-    return ctx->underlying->storage.copy(ctx->underlying->state.get(),
-                                         source_identifier,
-                                         destination_identifier);
+    return transport::copy(*ctx->underlying,
+                           source_identifier,
+                           destination_identifier);
 }
 
 std::expected<std::string, transport::Error>
@@ -126,15 +165,48 @@ vault_physical_hash(void* context,
                     std::string_view identifier,
                     std::string_view algorithm) {
     auto* ctx = static_cast<VaultTransportContext*>(context);
-    if (!ctx->underlying->storage.physical_hash) {
+    if (identifier == ctx->hidden_marker) {
         return std::unexpected(transport::Error{
-            .code = transport::ErrorCode::Unsupported,
-            .message = "physical hash unsupported",
+            .code = transport::ErrorCode::ObjectNotFound,
+            .message = "object not found",
         });
     }
-    return ctx->underlying->storage.physical_hash(ctx->underlying->state.get(),
-                                                  identifier,
-                                                  algorithm);
+    return transport::physical_hash(*ctx->underlying, identifier, algorithm);
+}
+
+transport::PhysicalHashBatchResult
+vault_physical_hash_batch(void* context,
+                          const transport::PhysicalHashBatchRequest& request) {
+    auto* ctx = static_cast<VaultTransportContext*>(context);
+    for (const auto& obj : request.objects) {
+        if (obj.identifier == ctx->hidden_marker) {
+            return std::unexpected(transport::Error{
+                .code = transport::ErrorCode::ObjectNotFound,
+                .message = "object not found",
+            });
+        }
+    }
+    return transport::physical_hash_batch(*ctx->underlying, request);
+}
+
+transport::ControlReadBatchResponse
+vault_control_read_batch(void* context,
+                         const transport::ControlReadBatchRequest& request) {
+    auto* ctx = static_cast<VaultTransportContext*>(context);
+    auto resp = transport::control_read_batch(*ctx->underlying, request);
+    if (!resp) {
+        return resp;
+    }
+    for (auto& listing : resp->listings) {
+        std::erase(listing, ctx->hidden_marker);
+    }
+    for (std::size_t i = 0; i < request.presence_identifiers.size(); ++i) {
+        if (request.presence_identifiers[i] == ctx->hidden_marker &&
+            i < resp->presences.size()) {
+            resp->presences[i] = transport::Presence::Absent;
+        }
+    }
+    return resp;
 }
 
 } // namespace
@@ -173,21 +245,24 @@ transport::Transport make_vault_transport(transport::Transport& underlying,
         .underlying = &underlying,
         .hidden_marker = std::move(hidden_marker),
     };
-    transport::StorageOperations ops = underlying.storage;
-    ops.list = vault_list;
-    if (ops.list_prefix) {
-        ops.list_prefix = vault_list_prefix;
-    }
-    ops.presence = vault_presence;
-    ops.remove = vault_remove;
-    ops.put = vault_put;
-    ops.get = vault_get;
-    if (ops.copy) {
-        ops.copy = vault_copy;
-    }
-    if (ops.physical_hash) {
-        ops.physical_hash = vault_physical_hash;
-    }
+    transport::StorageOperations ops{
+        .initialize = vault_initialize,
+        .put = vault_put,
+        .put_batch = underlying.storage.put_batch != nullptr ? vault_put_batch : nullptr,
+        .get = vault_get,
+        .get_batch = underlying.storage.get_batch != nullptr ? vault_get_batch : nullptr,
+        .copy = underlying.storage.copy != nullptr ? vault_copy : nullptr,
+        .presence = vault_presence,
+        .list = vault_list,
+        .list_prefix = underlying.storage.list_prefix != nullptr ? vault_list_prefix : nullptr,
+        .physical_hash = underlying.storage.physical_hash != nullptr ? vault_physical_hash : nullptr,
+        .physical_hash_batch = underlying.storage.physical_hash_batch != nullptr ? vault_physical_hash_batch : nullptr,
+        .control_read_batch = underlying.storage.control_read_batch != nullptr ? vault_control_read_batch : nullptr,
+        .remove = vault_remove,
+        .physical_hash_batch_min_objects = underlying.storage.physical_hash_batch != nullptr
+                                               ? underlying.storage.physical_hash_batch_min_objects
+                                               : 0,
+    };
     return transport::Transport{
         .state = transport::TransportStateHandle{ctx, destroy_vault_context},
         .storage = ops,
@@ -642,6 +717,16 @@ RunnerReport run(
     report.gc.called = true;
     report.gc.call_count = 1U;
 
+    struct ScopedPerfTrace {
+        ScopedPerfTrace() {
+            kasumi::platform::perf_trace::force_enable(true);
+            kasumi::platform::perf_trace::reset();
+        }
+        ~ScopedPerfTrace() {
+            kasumi::platform::perf_trace::force_enable(false);
+        }
+    } perf_guard;
+
     std::expected<integrity::GarbageCollectResult, integrity::Error> gc_result;
     if (gc_override) {
         gc_result = gc_override(runtime_data, vault_transport, key);
@@ -662,7 +747,7 @@ RunnerReport run(
 
     if (!gc_result) {
         report.gc.result = "FAILED";
-        report.gc.error_category = transport::ErrorCode::Io;
+        report.gc.error_category = gc_result.error().code;
         report.gc.error_detail_sanitized = gc_result.error().detail;
         report.status = "FAILED";
 
@@ -849,7 +934,7 @@ nlohmann::json to_json(const RunnerReport& report) {
             {"quarantined_objects", report.gc.quarantined_objects},
             {"restored_objects", report.gc.restored_objects},
             {"purged_objects", report.gc.purged_objects},
-            {"error_category", report.gc.error_category ? nlohmann::json(std::string{transport::error_code_name(*report.gc.error_category)}) : nlohmann::json(nullptr)},
+            {"error_category", report.gc.error_category ? nlohmann::json(std::string{integrity_error_code_name(*report.gc.error_category)}) : nlohmann::json(nullptr)},
             {"error_detail_sanitized", report.gc.error_detail_sanitized.empty() ? nlohmann::json(nullptr) : nlohmann::json(report.gc.error_detail_sanitized)},
         }},
         {"metrics", {

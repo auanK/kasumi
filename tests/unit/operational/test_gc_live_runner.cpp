@@ -1,6 +1,8 @@
 #include "../../operational/gc_live_runner_support.hpp"
 #include "kasumi/test/history_storage.hpp"
 #include "kasumi/test/temp_workspace.hpp"
+#include "platform/path.hpp"
+#include "platform/perf_trace.hpp"
 
 #include <gtest/gtest.h>
 
@@ -496,6 +498,431 @@ TEST(GcLiveRunnerCleanupTest, SuccessfulCleanupRemovesOwnerMarkerLast) {
     EXPECT_EQ(removal_order.back(), "owner.marker");
     // Targets removed before marker
     EXPECT_GT(removal_order.size(), 1U);
+}
+
+// RED Test for Passo 3: Native get_batch receives correct context
+struct NativeBatchState {
+    static constexpr std::uint32_t kMagic = 0x54415453; // "STAT"
+    std::uint32_t magic = kMagic;
+    std::size_t get_batch_calls = 0;
+    bool context_matched = false;
+    std::string last_identifier;
+};
+
+TEST(VaultTransportAdapterTest, NativeGetBatchReceivesCorrectContext) {
+    auto* raw_state = new NativeBatchState{};
+    transport::Transport base_transport{
+        .state = transport::TransportStateHandle{raw_state, [](void* p) noexcept {
+            delete static_cast<NativeBatchState*>(p);
+        }},
+        .storage = transport::StorageOperations{
+            .initialize = [](void* ctx) -> transport::Result {
+                auto* s = static_cast<NativeBatchState*>(ctx);
+                if (s->magic != NativeBatchState::kMagic) {
+                    return std::unexpected(transport::Error{.code = transport::ErrorCode::InvalidContext, .message = "init ctx mismatch"});
+                }
+                return {};
+            },
+            .put = [](void*, const std::filesystem::path&, std::string_view) -> transport::Result { return {}; },
+            .get = [](void*, std::string_view, const std::filesystem::path&) -> transport::Result { return {}; },
+            .get_batch = [](void* ctx, const transport::GetBatch& batch) -> transport::Result {
+                auto* s = static_cast<NativeBatchState*>(ctx);
+                if (s->magic != NativeBatchState::kMagic) {
+                    return std::unexpected(transport::Error{
+                        .code = transport::ErrorCode::InvalidContext,
+                        .message = "get_batch ctx mismatch: expected NativeBatchState",
+                    });
+                }
+                s->context_matched = true;
+                s->get_batch_calls++;
+                if (!batch.identifiers.empty()) {
+                    s->last_identifier = batch.identifiers.front();
+                }
+                return {};
+            },
+            .presence = [](void*, std::string_view) -> transport::PresenceResult { return transport::Presence::Present; },
+            .list = [](void*) -> transport::ListingResult { return std::vector<std::string>{}; },
+            .remove = [](void*, std::string_view) -> transport::RemovalResult { return transport::Removal::Removed; },
+        },
+    };
+
+    auto vault_transport = runner::make_vault_transport(base_transport, "owner.marker");
+
+    kasumi::test::TempWorkspace ws(kasumi::test::make_temp_workspace("get-batch-test"));
+    transport::GetBatch batch{
+        .destination_root = kasumi::test::workspace_path(ws, "dest"),
+        .identifiers = {"test_object.bin"},
+    };
+    std::filesystem::create_directories(batch.destination_root);
+
+    auto result = transport::get_batch(vault_transport, batch);
+    EXPECT_TRUE(result.has_value()) << (result ? "" : result.error().message);
+    EXPECT_TRUE(raw_state->context_matched);
+    EXPECT_EQ(raw_state->get_batch_calls, 1U);
+}
+
+// Passo 12: PutBatch delegates and protects owner marker
+TEST(VaultTransportAdapterTest, PutBatchDelegatesAndProtectsMarker) {
+    auto* raw_state = new NativeBatchState{};
+    transport::Transport base_transport{
+        .state = transport::TransportStateHandle{raw_state, [](void* p) noexcept {
+            delete static_cast<NativeBatchState*>(p);
+        }},
+        .storage = transport::StorageOperations{
+            .initialize = [](void*) -> transport::Result { return {}; },
+            .put = [](void*, const std::filesystem::path&, std::string_view) -> transport::Result { return {}; },
+            .put_batch = [](void* ctx, const transport::PutBatch& batch) -> transport::Result {
+                auto* s = static_cast<NativeBatchState*>(ctx);
+                if (s->magic != NativeBatchState::kMagic) {
+                    return std::unexpected(transport::Error{.code = transport::ErrorCode::InvalidContext, .message = "put_batch ctx mismatch"});
+                }
+                s->context_matched = true;
+                s->get_batch_calls++;
+                if (!batch.identifiers.empty()) {
+                    s->last_identifier = batch.identifiers.front();
+                }
+                return {};
+            },
+            .get = [](void*, std::string_view, const std::filesystem::path&) -> transport::Result { return {}; },
+            .presence = [](void*, std::string_view) -> transport::PresenceResult { return transport::Presence::Present; },
+            .list = [](void*) -> transport::ListingResult { return std::vector<std::string>{}; },
+            .remove = [](void*, std::string_view) -> transport::RemovalResult { return transport::Removal::Removed; },
+        },
+    };
+
+    auto vault_transport = runner::make_vault_transport(base_transport, "owner.marker");
+
+    kasumi::test::TempWorkspace ws(kasumi::test::make_temp_workspace("put-batch-test"));
+    auto src_dir = kasumi::test::workspace_path(ws, "src");
+    std::filesystem::create_directories(src_dir);
+    auto file_path = src_dir / "obj1.bin";
+    std::ofstream(file_path, std::ios::binary) << "hello";
+
+    transport::PutBatch valid_batch{
+        .source_root = src_dir,
+        .identifiers = {"obj1.bin"},
+        .max_parallel_transfers = 4,
+    };
+    auto res_valid = transport::put_batch(vault_transport, valid_batch);
+    EXPECT_TRUE(res_valid.has_value());
+    EXPECT_TRUE(raw_state->context_matched);
+    EXPECT_EQ(raw_state->last_identifier, "obj1.bin");
+
+    auto src_marker = kasumi::test::workspace_path(ws, "src_marker");
+    std::filesystem::create_directories(src_marker);
+    std::ofstream(src_marker / "owner.marker", std::ios::binary) << "marker";
+    transport::PutBatch marker_batch{
+        .source_root = src_marker,
+        .identifiers = {"owner.marker"},
+    };
+    auto res_marker = transport::put_batch(vault_transport, marker_batch);
+    EXPECT_FALSE(res_marker.has_value());
+    EXPECT_EQ(res_marker.error().code, transport::ErrorCode::InvalidIdentifier);
+}
+
+// Passo 9: Fallback when base get_batch is null
+TEST(VaultTransportAdapterTest, GetBatchFallbackWhenBaseNull) {
+    auto* raw_state = new NativeBatchState{};
+    transport::Transport base_transport{
+        .state = transport::TransportStateHandle{raw_state, [](void* p) noexcept {
+            delete static_cast<NativeBatchState*>(p);
+        }},
+        .storage = transport::StorageOperations{
+            .initialize = [](void*) -> transport::Result { return {}; },
+            .put = [](void*, const std::filesystem::path&, std::string_view) -> transport::Result { return {}; },
+            .get = [](void* ctx, std::string_view id, const std::filesystem::path& dest) -> transport::Result {
+                auto* s = static_cast<NativeBatchState*>(ctx);
+                if (s->magic != NativeBatchState::kMagic) {
+                    return std::unexpected(transport::Error{.code = transport::ErrorCode::InvalidContext, .message = "get ctx mismatch"});
+                }
+                s->context_matched = true;
+                s->last_identifier = std::string{id};
+                std::filesystem::create_directories(dest.parent_path());
+                std::ofstream(dest, std::ios::binary) << "content";
+                return {};
+            },
+            .get_batch = nullptr,
+            .presence = [](void*, std::string_view) -> transport::PresenceResult { return transport::Presence::Present; },
+            .list = [](void*) -> transport::ListingResult { return std::vector<std::string>{}; },
+            .remove = [](void*, std::string_view) -> transport::RemovalResult { return transport::Removal::Removed; },
+        },
+    };
+
+    auto vault_transport = runner::make_vault_transport(base_transport, "owner.marker");
+    EXPECT_EQ(vault_transport.storage.get_batch, nullptr);
+
+    kasumi::test::TempWorkspace ws(kasumi::test::make_temp_workspace("get-batch-fallback"));
+    transport::GetBatch batch{
+        .destination_root = kasumi::test::workspace_path(ws, "dest"),
+        .identifiers = {"fallback_obj.bin"},
+    };
+    std::filesystem::create_directories(batch.destination_root);
+
+    auto result = transport::get_batch(vault_transport, batch);
+    EXPECT_TRUE(result.has_value());
+    EXPECT_TRUE(raw_state->context_matched);
+    EXPECT_EQ(raw_state->last_identifier, "fallback_obj.bin");
+}
+
+// Passo 11: PhysicalHashBatch delegates and protects owner marker
+TEST(VaultTransportAdapterTest, PhysicalHashBatchDelegatesAndProtectsMarker) {
+    auto* raw_state = new NativeBatchState{};
+    transport::Transport base_transport{
+        .state = transport::TransportStateHandle{raw_state, [](void* p) noexcept {
+            delete static_cast<NativeBatchState*>(p);
+        }},
+        .storage = transport::StorageOperations{
+            .initialize = [](void*) -> transport::Result { return {}; },
+            .put = [](void*, const std::filesystem::path&, std::string_view) -> transport::Result { return {}; },
+            .get = [](void*, std::string_view, const std::filesystem::path&) -> transport::Result { return {}; },
+            .presence = [](void*, std::string_view) -> transport::PresenceResult { return transport::Presence::Present; },
+            .list = [](void*) -> transport::ListingResult { return std::vector<std::string>{}; },
+            .physical_hash_batch = [](void* ctx, const transport::PhysicalHashBatchRequest&) -> transport::PhysicalHashBatchResult {
+                auto* s = static_cast<NativeBatchState*>(ctx);
+                if (s->magic != NativeBatchState::kMagic) {
+                    return std::unexpected(transport::Error{.code = transport::ErrorCode::InvalidContext, .message = "hash_batch ctx mismatch"});
+                }
+                s->context_matched = true;
+                return transport::PhysicalHashBatchReport{};
+            },
+            .remove = [](void*, std::string_view) -> transport::RemovalResult { return transport::Removal::Removed; },
+            .physical_hash_batch_min_objects = 2,
+        },
+    };
+
+    auto vault_transport = runner::make_vault_transport(base_transport, "owner.marker");
+    EXPECT_NE(vault_transport.storage.physical_hash_batch, nullptr);
+    EXPECT_EQ(vault_transport.storage.physical_hash_batch_min_objects, 2U);
+
+    kasumi::test::TempWorkspace ws(kasumi::test::make_temp_workspace("hash-batch-test"));
+    auto scratch = kasumi::test::workspace_path(ws, "scratch");
+    std::filesystem::create_directories(scratch);
+
+    transport::PhysicalHashBatchRequest valid_req{
+        .scratch_root = scratch,
+        .objects = {
+            {.identifier = "valid1", .expected_hash = "abc"},
+            {.identifier = "valid2", .expected_hash = "def"},
+        },
+        .algorithm = "sha256",
+    };
+    auto res_valid = transport::physical_hash_batch(vault_transport, valid_req);
+    EXPECT_TRUE(res_valid.has_value());
+    EXPECT_TRUE(raw_state->context_matched);
+
+    transport::PhysicalHashBatchRequest marker_req{
+        .scratch_root = scratch,
+        .objects = {
+            {.identifier = "owner.marker", .expected_hash = "abc"},
+        },
+        .algorithm = "sha256",
+    };
+    auto res_marker = transport::physical_hash_batch(vault_transport, marker_req);
+    EXPECT_FALSE(res_marker.has_value());
+    EXPECT_EQ(res_marker.error().code, transport::ErrorCode::ObjectNotFound);
+}
+
+// Passo 10: ControlReadBatch filters hidden marker from listings and presences
+TEST(VaultTransportAdapterTest, ControlReadBatchFiltersHiddenMarker) {
+    auto* raw_state = new NativeBatchState{};
+    transport::Transport base_transport{
+        .state = transport::TransportStateHandle{raw_state, [](void* p) noexcept {
+            delete static_cast<NativeBatchState*>(p);
+        }},
+        .storage = transport::StorageOperations{
+            .initialize = [](void*) -> transport::Result { return {}; },
+            .put = [](void*, const std::filesystem::path&, std::string_view) -> transport::Result { return {}; },
+            .get = [](void*, std::string_view, const std::filesystem::path&) -> transport::Result { return {}; },
+            .presence = [](void*, std::string_view) -> transport::PresenceResult { return transport::Presence::Present; },
+            .list = [](void*) -> transport::ListingResult { return std::vector<std::string>{}; },
+            .control_read_batch = [](void* ctx, const transport::ControlReadBatchRequest&) -> transport::ControlReadBatchResponse {
+                auto* s = static_cast<NativeBatchState*>(ctx);
+                if (s->magic != NativeBatchState::kMagic) {
+                    return std::unexpected(transport::Error{.code = transport::ErrorCode::InvalidContext, .message = "control_read ctx mismatch"});
+                }
+                s->context_matched = true;
+                transport::ControlReadBatchResult r;
+                r.listings.push_back({"file1.bin", "owner.marker", "file2.bin"});
+                r.presences = {transport::Presence::Present, transport::Presence::Present};
+                return r;
+            },
+            .remove = [](void*, std::string_view) -> transport::RemovalResult { return transport::Removal::Removed; },
+        },
+    };
+
+    auto vault_transport = runner::make_vault_transport(base_transport, "owner.marker");
+    EXPECT_NE(vault_transport.storage.control_read_batch, nullptr);
+
+    transport::ControlReadBatchRequest req{
+        .list_prefixes = {"prefix"},
+        .presence_identifiers = {"file1.bin", "owner.marker"},
+    };
+
+    auto resp = transport::control_read_batch(vault_transport, req);
+    ASSERT_TRUE(resp.has_value());
+    EXPECT_TRUE(raw_state->context_matched);
+    ASSERT_EQ(resp->listings.size(), 1U);
+    EXPECT_EQ(resp->listings[0], (std::vector<std::string>{"file1.bin", "file2.bin"}));
+    ASSERT_EQ(resp->presences.size(), 2U);
+    EXPECT_EQ(resp->presences[0], transport::Presence::Present);
+    EXPECT_EQ(resp->presences[1], transport::Presence::Absent);
+}
+
+// Passo 14: Regressão contra futuras capabilities copiadas cegamente
+TEST(VaultTransportAdapterTest, NoCallbacksDirectlyCopiedFromBase) {
+    auto dummy_init = [](void*) -> transport::Result { return {}; };
+    auto dummy_put = [](void*, const std::filesystem::path&, std::string_view) -> transport::Result { return {}; };
+    auto dummy_put_batch = [](void*, const transport::PutBatch&) -> transport::Result { return {}; };
+    auto dummy_get = [](void*, std::string_view, const std::filesystem::path&) -> transport::Result { return {}; };
+    auto dummy_get_batch = [](void*, const transport::GetBatch&) -> transport::Result { return {}; };
+    auto dummy_copy = [](void*, std::string_view, std::string_view) -> transport::Result { return {}; };
+    auto dummy_presence = [](void*, std::string_view) -> transport::PresenceResult { return transport::Presence::Present; };
+    auto dummy_list = [](void*) -> transport::ListingResult { return std::vector<std::string>{}; };
+    auto dummy_list_prefix = [](void*, std::string_view) -> transport::ListingResult { return std::vector<std::string>{}; };
+    auto dummy_hash = [](void*, std::string_view, std::string_view) -> std::expected<std::string, transport::Error> { return ""; };
+    auto dummy_hash_batch = [](void*, const transport::PhysicalHashBatchRequest&) -> transport::PhysicalHashBatchResult { return transport::PhysicalHashBatchReport{}; };
+    auto dummy_control_read = [](void*, const transport::ControlReadBatchRequest&) -> transport::ControlReadBatchResponse { return transport::ControlReadBatchResult{}; };
+    auto dummy_remove = [](void*, std::string_view) -> transport::RemovalResult { return transport::Removal::Removed; };
+
+    transport::Transport base_transport{
+        .state = transport::TransportStateHandle{nullptr, [](void*) noexcept {}},
+        .storage = transport::StorageOperations{
+            .initialize = dummy_init,
+            .put = dummy_put,
+            .put_batch = dummy_put_batch,
+            .get = dummy_get,
+            .get_batch = dummy_get_batch,
+            .copy = dummy_copy,
+            .presence = dummy_presence,
+            .list = dummy_list,
+            .list_prefix = dummy_list_prefix,
+            .physical_hash = dummy_hash,
+            .physical_hash_batch = dummy_hash_batch,
+            .control_read_batch = dummy_control_read,
+            .remove = dummy_remove,
+            .physical_hash_batch_min_objects = 5,
+        },
+    };
+
+    auto vault = runner::make_vault_transport(base_transport, "owner.marker");
+
+    // Invariant: NO function pointer may be copied directly from base
+    EXPECT_NE(vault.storage.initialize, base_transport.storage.initialize);
+    EXPECT_NE(vault.storage.put, base_transport.storage.put);
+    EXPECT_NE(vault.storage.put_batch, base_transport.storage.put_batch);
+    EXPECT_NE(vault.storage.get, base_transport.storage.get);
+    EXPECT_NE(vault.storage.get_batch, base_transport.storage.get_batch);
+    EXPECT_NE(vault.storage.copy, base_transport.storage.copy);
+    EXPECT_NE(vault.storage.presence, base_transport.storage.presence);
+    EXPECT_NE(vault.storage.list, base_transport.storage.list);
+    EXPECT_NE(vault.storage.list_prefix, base_transport.storage.list_prefix);
+    EXPECT_NE(vault.storage.physical_hash, base_transport.storage.physical_hash);
+    EXPECT_NE(vault.storage.physical_hash_batch, base_transport.storage.physical_hash_batch);
+    EXPECT_NE(vault.storage.control_read_batch, base_transport.storage.control_read_batch);
+    EXPECT_NE(vault.storage.remove, base_transport.storage.remove);
+}
+
+// Passo 16: Error code real do integrity::garbage_collect preservado
+TEST(GcLiveRunnerDiagnosisTest, PreservesRealIntegrityErrorCode) {
+    FakeHarness harness{"error-code-preservation"};
+    auto options = harness.make_options();
+    auto parent = harness.make_parent_transport();
+    auto child = harness.make_child_transport();
+
+    const auto report = runner::run(
+        options,
+        &parent,
+        &child,
+        [](const auto&, auto&, auto) -> std::expected<integrity::GarbageCollectResult, integrity::Error> {
+            return std::unexpected(integrity::Error{
+                .code = integrity::ErrorCode::TransportFailure,
+                .detail = "simulated remote connection reset",
+            });
+        });
+
+    EXPECT_EQ(report.status, "FAILED");
+    EXPECT_EQ(report.gc.result, "FAILED");
+    ASSERT_TRUE(report.gc.error_category.has_value());
+    EXPECT_EQ(*report.gc.error_category, integrity::ErrorCode::TransportFailure);
+    EXPECT_EQ(runner::integrity_error_code_name(*report.gc.error_category), "transport_failure");
+    EXPECT_EQ(report.gc.error_detail_sanitized, "simulated remote connection reset");
+
+    auto json = runner::to_json(report);
+    EXPECT_EQ(json["gc"]["error_category"], "transport_failure");
+    EXPECT_EQ(json["gc"]["error_detail_sanitized"], "simulated remote connection reset");
+}
+
+// Passo 18: Métricas capturadas mesmo em failure path
+TEST(GcLiveRunnerDiagnosisTest, CapturesMetricsOnFailurePath) {
+    FakeHarness harness{"metrics-failure"};
+    auto options = harness.make_options();
+    auto parent = harness.make_parent_transport();
+    auto child = harness.make_child_transport();
+
+    const auto report = runner::run(
+        options,
+        &parent,
+        &child,
+        [](const auto&, auto&, auto) -> std::expected<integrity::GarbageCollectResult, integrity::Error> {
+            kasumi::platform::perf_trace::count("verified copy native copy");
+            kasumi::platform::perf_trace::count("verified copy native copy successes");
+            return std::unexpected(integrity::Error{
+                .code = integrity::ErrorCode::IntegrityFailure,
+                .detail = "barrier check failed",
+            });
+        });
+
+    EXPECT_EQ(report.status, "FAILED");
+    EXPECT_EQ(report.gc.result, "FAILED");
+    EXPECT_EQ(report.metrics.verified_copy_native_copy, 1U);
+    EXPECT_EQ(report.metrics.verified_copy_native_copy_successes, 1U);
+}
+
+// Passo 20: Teste integrado offline com base native-capable
+TEST(GcLiveRunnerIntegratedTest, FullExecutionWithNativeBatchStorage) {
+    FakeHarness harness{"integrated-native-batch"};
+    auto options = harness.make_options();
+    auto parent = harness.make_parent_transport();
+    auto child = harness.make_child_transport();
+
+    std::size_t native_get_batch_count = 0;
+    static std::size_t* s_batch_count = nullptr;
+    s_batch_count = &native_get_batch_count;
+
+    child.storage.get_batch = [](void* ctx, const transport::GetBatch& batch) -> transport::Result {
+        auto* state = static_cast<FakeState*>(ctx);
+        if (s_batch_count) {
+            (*s_batch_count)++;
+        }
+        for (const auto& id : batch.identifiers) {
+            const auto source = batch.source_prefix.empty() ? id : batch.source_prefix + "/" + id;
+            auto it = state->objects.find(source);
+            if (it == state->objects.end()) {
+                return std::unexpected(transport::Error{
+                    .code = transport::ErrorCode::ObjectNotFound,
+                    .message = "object not found in native get_batch",
+                });
+            }
+            auto dest = batch.destination_root / kasumi::platform::path::from_utf8(id);
+            std::filesystem::create_directories(dest.parent_path());
+            std::ofstream stream(dest, std::ios::binary);
+            stream.write(reinterpret_cast<const char*>(it->second.data()), static_cast<std::streamsize>(it->second.size()));
+        }
+        return {};
+    };
+
+    const auto report = runner::run(options, &parent, &child);
+    s_batch_count = nullptr;
+
+    EXPECT_EQ(report.status, "PASS");
+    EXPECT_EQ(report.stage_reached, runner::LiveGcStage::CleanupCompleted);
+    EXPECT_EQ(report.gc.called, true);
+    EXPECT_EQ(report.gc.call_count, 1U);
+    EXPECT_EQ(report.gc.result, "SUCCESS");
+    EXPECT_EQ(report.gc.candidate_objects, 1U);
+    EXPECT_EQ(report.gc.quarantined_objects, 1U);
+    EXPECT_EQ(report.cleanup.result, "removed");
+    EXPECT_GT(native_get_batch_count, 0U);
 }
 
 } // namespace

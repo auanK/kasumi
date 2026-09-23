@@ -76,6 +76,28 @@ struct ScenarioObjects {
     std::vector<std::string> expected_post_vault_objects;
 };
 
+constexpr std::string_view integrity_error_code_name(kasumi::application::integrity::ErrorCode code) noexcept {
+    switch (code) {
+        case kasumi::application::integrity::ErrorCode::InvalidInput:
+            return "invalid_input";
+        case kasumi::application::integrity::ErrorCode::StateFailure:
+            return "state_failure";
+        case kasumi::application::integrity::ErrorCode::WorkspaceFailure:
+            return "workspace_failure";
+        case kasumi::application::integrity::ErrorCode::TransportFailure:
+            return "transport_failure";
+        case kasumi::application::integrity::ErrorCode::CryptoFailure:
+            return "crypto_failure";
+        case kasumi::application::integrity::ErrorCode::IntegrityFailure:
+            return "integrity_failure";
+        case kasumi::application::integrity::ErrorCode::Unrecoverable:
+            return "unrecoverable";
+        case kasumi::application::integrity::ErrorCode::ConcurrentChange:
+            return "concurrent_change";
+    }
+    return "unknown";
+}
+
 struct GcExecutionResult {
     bool called = false;
     std::size_t call_count = 0;
@@ -84,7 +106,7 @@ struct GcExecutionResult {
     std::size_t quarantined_objects = 0;
     std::size_t restored_objects = 0;
     std::size_t purged_objects = 0;
-    std::optional<transport::ErrorCode> error_category;
+    std::optional<kasumi::application::integrity::ErrorCode> error_category;
     std::string error_detail_sanitized;
 };
 
