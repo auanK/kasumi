@@ -232,6 +232,12 @@ struct FakeState {
     std::string observed_payload_identifier;
     std::set<std::string> observed_payload_identifiers;
     std::optional<kasumi::transport::ErrorCode> physical_hash_failure;
+    bool physical_hash_batch_supported = false;
+    std::size_t physical_hash_batch_min_objects = 2;
+    std::optional<kasumi::transport::ErrorCode> physical_hash_batch_failure;
+    std::set<std::string> physical_hash_batch_mismatches;
+    std::set<std::string> physical_hash_batch_missing;
+    std::set<std::string> physical_hash_batch_errors;
     std::vector<std::string> remote_events;
 };
 
@@ -676,11 +682,41 @@ std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
 
 kasumi::transport::PhysicalHashBatchResult fake_physical_hash_batch(
     void* context,
-    const kasumi::transport::PhysicalHashBatchRequest&) {
-    ++fake_state(context)->physical_hash_batch_count;
-    return std::unexpected(kasumi::transport::Error{
-        .code = kasumi::transport::ErrorCode::Unsupported,
-        .message = "physical hash batch unavailable"});
+    const kasumi::transport::PhysicalHashBatchRequest& request) {
+    auto* state = fake_state(context);
+    ++state->physical_hash_batch_count;
+    if (state->physical_hash_batch_failure) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = *state->physical_hash_batch_failure,
+            .message = "injected physical hash batch failure"});
+    }
+    if (!state->physical_hash_batch_supported) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Unsupported,
+            .message = "physical hash batch unavailable"});
+    }
+    kasumi::transport::PhysicalHashBatchReport report;
+    for (const auto& object : request.objects) {
+        if (state->physical_hash_batch_errors.contains(object.identifier)) {
+            report.errors.push_back(object.identifier);
+            continue;
+        }
+        if (state->physical_hash_batch_missing.contains(object.identifier)) {
+            report.missing.push_back(object.identifier);
+            continue;
+        }
+        if (state->physical_hash_batch_mismatches.contains(object.identifier)) {
+            report.mismatched.push_back(object.identifier);
+            continue;
+        }
+        const auto found = state->physical_hashes.find(object.identifier);
+        if (found == state->physical_hashes.end()) {
+            report.missing.push_back(object.identifier);
+        } else if (found->second != object.expected_hash) {
+            report.mismatched.push_back(object.identifier);
+        }
+    }
+    return report;
 }
 
 kasumi::transport::ControlReadBatchResponse fake_control_read_batch(
@@ -713,6 +749,15 @@ kasumi::transport::ControlReadBatchResponse fake_control_read_batch(
         result.presences.push_back(*presence);
     }
     return result;
+}
+
+[[maybe_unused]] inline void enable_fake_physical_hash_batch(
+    kasumi::transport::Transport& transport,
+    FakeState& state,
+    std::size_t min_objects = 2) {
+    state.physical_hash_batch_supported = true;
+    state.physical_hash_batch_min_objects = min_objects;
+    transport.storage.physical_hash_batch_min_objects = min_objects;
 }
 
 [[maybe_unused]] kasumi::transport::Transport
