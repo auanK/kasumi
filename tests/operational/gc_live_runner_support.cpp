@@ -29,6 +29,28 @@ bool write_file_string(const std::filesystem::path& path, std::string_view text)
     return static_cast<bool>(stream);
 }
 
+bool write_synthetic_payload(const std::filesystem::path& path, std::size_t total_bytes) {
+    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    if (!stream) {
+        return false;
+    }
+    constexpr std::size_t chunk_size = 64 * 1024;
+    std::vector<std::uint8_t> chunk(chunk_size);
+    for (std::size_t i = 0; i < chunk_size; ++i) {
+        chunk[i] = static_cast<std::uint8_t>((i * 137U + 42U) & 0xFFU);
+    }
+    std::size_t remaining = total_bytes;
+    while (remaining > 0) {
+        const std::size_t to_write = std::min(remaining, chunk_size);
+        stream.write(reinterpret_cast<const char*>(chunk.data()), static_cast<std::streamsize>(to_write));
+        if (!stream) {
+            return false;
+        }
+        remaining -= to_write;
+    }
+    return true;
+}
+
 struct VaultTransportContext {
     transport::Transport* underlying = nullptr;
     std::string hidden_marker = "owner.marker";
@@ -240,7 +262,8 @@ bool is_authorized_live_parent(std::string_view remote_parent) noexcept {
 }
 
 transport::Transport make_vault_transport(transport::Transport& underlying,
-                                          std::string hidden_marker) {
+                                          std::string hidden_marker,
+                                          CopyMode copy_mode) {
     auto* ctx = new VaultTransportContext{
         .underlying = &underlying,
         .hidden_marker = std::move(hidden_marker),
@@ -251,7 +274,9 @@ transport::Transport make_vault_transport(transport::Transport& underlying,
         .put_batch = underlying.storage.put_batch != nullptr ? vault_put_batch : nullptr,
         .get = vault_get,
         .get_batch = underlying.storage.get_batch != nullptr ? vault_get_batch : nullptr,
-        .copy = underlying.storage.copy != nullptr ? vault_copy : nullptr,
+        .copy = (copy_mode == CopyMode::ForceFallback || underlying.storage.copy == nullptr)
+                    ? nullptr
+                    : vault_copy,
         .presence = vault_presence,
         .list = vault_list,
         .list_prefix = underlying.storage.list_prefix != nullptr ? vault_list_prefix : nullptr,
@@ -272,7 +297,9 @@ transport::Transport make_vault_transport(transport::Transport& underlying,
 std::expected<ScenarioObjects, transport::Error>
 setup_scenario(transport::Transport& vault_storage,
                const std::filesystem::path& scratch_root,
-               std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key) {
+               std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key,
+               std::size_t candidate_payload_bytes) {
+    (void)candidate_payload_bytes;
     ScenarioObjects result;
     std::copy(key.begin(), key.end(), result.key.begin());
 
@@ -324,18 +351,39 @@ setup_scenario(transport::Transport& vault_storage,
     result.reachable_marker_id = kasumi::application::history_storage::marker_object(layout, published->head);
 
     // 3. Orphan candidate
-    constexpr std::string_view orphan_text = "kasumi live gc orphan candidate v1";
     const auto orphan_plain = scenario_dir / "orphan.plain";
     const auto orphan_enc = scenario_dir / "orphan.enc";
-    if (!write_file_string(orphan_plain, orphan_text)) {
-        return std::unexpected(transport::Error{.code = transport::ErrorCode::Io, .message = "failed to write orphan plain"});
+    std::size_t plaintext_bytes = 0;
+    if (candidate_payload_bytes == 0) {
+        constexpr std::string_view orphan_text = "kasumi live gc orphan candidate v1";
+        plaintext_bytes = orphan_text.size();
+        if (!write_file_string(orphan_plain, orphan_text)) {
+            return std::unexpected(transport::Error{.code = transport::ErrorCode::Io, .message = "failed to write orphan plain"});
+        }
+    } else {
+        if (candidate_payload_bytes > 64 * 1024 * 1024) {
+            return std::unexpected(transport::Error{
+                .code = transport::ErrorCode::InvalidIdentifier,
+                .message = "candidate_payload_bytes exceeds maximum allowed limit of 64 MiB",
+            });
+        }
+        plaintext_bytes = candidate_payload_bytes;
+        if (!write_synthetic_payload(orphan_plain, candidate_payload_bytes)) {
+            return std::unexpected(transport::Error{.code = transport::ErrorCode::Io, .message = "failed to write synthetic candidate plain"});
+        }
+    }
+
+    auto plain_hash = kasumi::crypto::content::hash_file(orphan_plain);
+    if (!plain_hash) {
+        return std::unexpected(transport::Error{.code = transport::ErrorCode::Io, .message = "failed to hash orphan plain: " + plain_hash.error()});
     }
     auto enc_res = kasumi::crypto::encrypt_file_with_hashes(orphan_plain, orphan_enc, key, kasumi::crypto::FilePurpose::Content);
     if (!enc_res) {
         return std::unexpected(transport::Error{.code = transport::ErrorCode::Io, .message = "failed to encrypt orphan candidate"});
     }
-    result.candidate_id = kasumi::crypto::content_identifier(key, kasumi::hasher::hash_string(orphan_text));
+    result.candidate_id = kasumi::crypto::content_identifier(key, *plain_hash);
     result.candidate_sha256 = enc_res->ciphertext_sha256;
+    result.candidate_plaintext_bytes = plaintext_bytes;
 
     auto put_orphan = transport::put(vault_storage, orphan_enc, result.candidate_id);
     if (!put_orphan) {
@@ -435,6 +483,13 @@ RunnerReport run(
     if (!parent_transport_override && !is_authorized_live_parent(options.remote_parent)) {
         report.status = "REFUSED";
         report.error_message = "remote parent not authorized for live GC";
+        return report;
+    }
+
+    // Gate 3: Check candidate payload limit
+    if (options.candidate_payload_bytes > 64 * 1024 * 1024) {
+        report.status = "REFUSED";
+        report.error_message = "candidate_payload_bytes exceeds maximum allowed limit (64 MiB)";
         return report;
     }
 
@@ -635,7 +690,9 @@ RunnerReport run(
     report.stage_reached = LiveGcStage::OwnershipEstablished;
 
     // Create vault transport view (filters out owner.marker)
-    auto vault_transport = make_vault_transport(child_storage.storage, std::string{default_owner_identifier});
+    auto vault_transport = make_vault_transport(child_storage.storage,
+                                                std::string{default_owner_identifier},
+                                                options.copy_mode);
 
     // Synthetic key
     std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
@@ -648,7 +705,10 @@ RunnerReport run(
     }
 
     // Publish scenario
-    auto scenario = setup_scenario(vault_transport, options.local_scratch, key);
+    auto scenario = setup_scenario(vault_transport,
+                                   options.local_scratch,
+                                   key,
+                                   options.candidate_payload_bytes);
     if (!scenario) {
         report.status = "FAILED";
         report.error_message = "failed to publish scenario: " + scenario.error().message;
@@ -662,6 +722,8 @@ RunnerReport run(
     report.scenario.candidate_identifier = scenario->candidate_id;
     report.scenario.candidate_sha256 = scenario->candidate_sha256;
     report.scenario.quarantine_identifier = scenario->expected_quarantine_id;
+    report.benchmark.copy_mode = (options.copy_mode == CopyMode::Native) ? "native" : "fallback";
+    report.benchmark.candidate_plaintext_bytes = scenario->candidate_plaintext_bytes;
     report.stage_reached = LiveGcStage::ScenarioPublished;
 
     // Capture pre-GC inventory
@@ -699,6 +761,12 @@ RunnerReport run(
         return report;
     }
     report.stage_reached = LiveGcStage::PreInventoryVerified;
+    for (const auto& item : report.inventory_before.vault_objects) {
+        if (item.identifier == scenario->candidate_id) {
+            report.benchmark.candidate_physical_bytes = item.size;
+            break;
+        }
+    }
 
     // Build runtime data
     const auto local_dir = options.local_scratch / "local";
@@ -727,12 +795,16 @@ RunnerReport run(
         }
     } perf_guard;
 
+    const auto gc_start = std::chrono::steady_clock::now();
     std::expected<integrity::GarbageCollectResult, integrity::Error> gc_result;
     if (gc_override) {
         gc_result = gc_override(runtime_data, vault_transport, key);
     } else {
         gc_result = kasumi::application::integrity::garbage_collect(runtime_data, vault_transport, key);
     }
+    const auto gc_end = std::chrono::steady_clock::now();
+    report.benchmark.gc_total_us = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(gc_end - gc_start).count());
 
     // Capture metrics
     report.metrics.verified_copy_source_physical_hash = kasumi::platform::perf_trace::get_count("verified copy source physical hash");
@@ -744,6 +816,17 @@ RunnerReport run(
     report.metrics.gc_candidate_metadata_publish = kasumi::platform::perf_trace::get_count("gc candidate metadata publish");
     report.metrics.gc_candidate_pre_remove_barrier_verification = kasumi::platform::perf_trace::get_count("gc candidate pre-remove barrier verification");
     report.metrics.gc_candidate_remove = kasumi::platform::perf_trace::get_count("gc candidate remove");
+
+    // Capture benchmark timers
+    report.benchmark.gc_candidate_verified_copy_us = kasumi::platform::perf_trace::get_time("gc candidate verified copy");
+    report.benchmark.verified_copy_source_physical_hash_us = kasumi::platform::perf_trace::get_time("verified copy source physical hash");
+    report.benchmark.verified_copy_native_copy_us = kasumi::platform::perf_trace::get_time("verified copy native copy");
+    report.benchmark.verified_copy_destination_physical_hash_us = kasumi::platform::perf_trace::get_time("verified copy destination physical hash");
+    report.benchmark.rclone_download_us = kasumi::platform::perf_trace::get_time("rclone copyfile download");
+    report.benchmark.rclone_upload_us = kasumi::platform::perf_trace::get_time("rclone copyfile upload");
+    report.benchmark.gc_candidate_metadata_publish_us = kasumi::platform::perf_trace::get_time("gc candidate metadata publish");
+    report.benchmark.gc_candidate_pre_remove_barrier_verification_us = kasumi::platform::perf_trace::get_time("gc candidate pre-remove barrier verification");
+    report.benchmark.gc_candidate_remove_us = kasumi::platform::perf_trace::get_time("gc candidate remove");
 
     if (!gc_result) {
         report.gc.result = "FAILED";
@@ -926,6 +1009,22 @@ nlohmann::json to_json(const RunnerReport& report) {
             {"candidate_sha256", report.scenario.candidate_sha256},
             {"quarantine_identifier", report.scenario.quarantine_identifier},
         }},
+        {"benchmark", {
+            {"copy_mode", report.benchmark.copy_mode},
+            {"candidate_plaintext_bytes", report.benchmark.candidate_plaintext_bytes},
+            {"candidate_physical_bytes", report.benchmark.candidate_physical_bytes},
+            {"process_wall_ms", report.benchmark.process_wall_ms},
+            {"gc_total_us", report.benchmark.gc_total_us},
+            {"gc_candidate_verified_copy_us", report.benchmark.gc_candidate_verified_copy_us},
+            {"verified_copy_source_physical_hash_us", report.benchmark.verified_copy_source_physical_hash_us},
+            {"verified_copy_native_copy_us", report.benchmark.verified_copy_native_copy_us},
+            {"verified_copy_destination_physical_hash_us", report.benchmark.verified_copy_destination_physical_hash_us},
+            {"rclone_download_us", report.benchmark.rclone_download_us},
+            {"rclone_upload_us", report.benchmark.rclone_upload_us},
+            {"gc_candidate_metadata_publish_us", report.benchmark.gc_candidate_metadata_publish_us},
+            {"gc_candidate_pre_remove_barrier_verification_us", report.benchmark.gc_candidate_pre_remove_barrier_verification_us},
+            {"gc_candidate_remove_us", report.benchmark.gc_candidate_remove_us},
+        }},
         {"gc", {
             {"called", report.gc.called},
             {"call_count", report.gc.call_count},
@@ -990,6 +1089,65 @@ nlohmann::json to_json(const RunnerReport& report) {
     root["inventory_after"] = inv_to_json(report.inventory_after);
 
     return root;
+}
+
+std::expected<BenchmarkArguments, std::string>
+parse_benchmark_arguments(std::span<const std::string_view> args) {
+    BenchmarkArguments result;
+    const std::size_t count = args.size();
+    for (std::size_t index = 1; index < count; ++index) {
+        const auto option = args[index];
+        if (option == "--help" || option == "-h") {
+            return std::unexpected("help");
+        }
+        if (option == "--execute-live-benchmark") {
+            result.execute_live_benchmark = true;
+            continue;
+        }
+        if (option == "--preserve-evidence-on-failure") {
+            result.preserve_evidence_on_failure = true;
+            continue;
+        }
+        if (index + 1 >= count) {
+            return std::unexpected("missing value for " + std::string{option});
+        }
+        const auto value = args[++index];
+        if (option == "--remote" && result.remote.empty()) {
+            result.remote = std::string{value};
+        } else if (option == "--rclone-config" && !result.rclone_config) {
+            result.rclone_config = std::filesystem::path{value};
+        } else if (option == "--output" && result.output.empty()) {
+            result.output = std::filesystem::path{value};
+        } else if (option == "--mode") {
+            if (value == "native") {
+                result.mode = CopyMode::Native;
+            } else if (value == "fallback") {
+                result.mode = CopyMode::ForceFallback;
+            } else {
+                return std::unexpected("unknown mode '" + std::string{value} + "': must be 'native' or 'fallback'");
+            }
+        } else if (option == "--payload-bytes") {
+            try {
+                const auto parsed = std::stoull(std::string{value});
+                if (parsed == 0 || parsed > 64ULL * 1024ULL * 1024ULL) {
+                    return std::unexpected("--payload-bytes must be between 1 and 67108864 (64 MiB)");
+                }
+                result.payload_bytes = static_cast<std::size_t>(parsed);
+            } catch (...) {
+                return std::unexpected("invalid integer for --payload-bytes: " + std::string{value});
+            }
+        } else {
+            return std::unexpected("unknown or duplicate option: " + std::string{option});
+        }
+    }
+
+    if (result.remote.empty() || result.output.empty()) {
+        return std::unexpected("--remote and --output are required");
+    }
+    if (!result.execute_live_benchmark) {
+        return std::unexpected("--execute-live-benchmark is required to execute live benchmark");
+    }
+    return result;
 }
 
 } // namespace kasumi::operational::gc_live_runner

@@ -37,6 +37,11 @@ option(
     "Build the guarded live GC collection runner"
     OFF
 )
+option(
+    KASUMI_BUILD_GC_LIVE_BENCHMARK
+    "Build the controlled live GC remote copy benchmark runner"
+    OFF
+)
 
 add_library(kasumi_warnings INTERFACE)
 if(WIN32)
@@ -631,6 +636,33 @@ if(KASUMI_BUILD_GC_LIVE_SMOKE)
     )
     target_include_directories(
         kasumi_gc_live_smoke
+        PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/include
+    )
+endif()
+
+if(KASUMI_BUILD_GC_LIVE_BENCHMARK)
+    add_executable(
+        kasumi_gc_live_benchmark
+        tests/operational/gc_live_benchmark.cpp
+        tests/operational/gc_live_runner_support.cpp
+        tests/operational/gc_live_preflight_support.cpp
+        tests/operational/remote_copy_smoke_support.cpp
+    )
+    target_link_libraries(
+        kasumi_gc_live_benchmark
+        PRIVATE
+        kasumi_application
+        kasumi_transport
+        kasumi_platform
+        kasumi_crypto
+        nlohmann_json::nlohmann_json
+        reproc++
+        kasumi_warnings
+    )
+    target_include_directories(
+        kasumi_gc_live_benchmark
         PRIVATE
         ${PROJECT_SOURCE_DIR}/src
         ${PROJECT_SOURCE_DIR}/include

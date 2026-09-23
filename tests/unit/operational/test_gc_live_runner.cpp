@@ -925,4 +925,298 @@ TEST(GcLiveRunnerIntegratedTest, FullExecutionWithNativeBatchStorage) {
     EXPECT_GT(native_get_batch_count, 0U);
 }
 
+// RED 1: Real Fallback Executes When Forced
+TEST(GcLiveRunnerFallbackTest, RealFallbackExecutesWhenForced) {
+    FakeHarness harness{"real-fallback"};
+    auto options = harness.make_options();
+    options.copy_mode = runner::CopyMode::ForceFallback;
+    auto parent = harness.make_parent_transport();
+    auto child = harness.make_child_transport();
+
+    struct FallbackObserver {
+        std::size_t copy_count = 0;
+        std::size_t get_count = 0;
+        std::size_t put_count = 0;
+        std::vector<std::string> op_log;
+        transport::CopyFunction orig_copy = nullptr;
+        transport::GetFunction orig_get = nullptr;
+        transport::PutFunction orig_put = nullptr;
+        transport::RemoveFunction orig_remove = nullptr;
+    };
+    static FallbackObserver* s_observer = nullptr;
+    FallbackObserver observer;
+    s_observer = &observer;
+
+    observer.orig_copy = child.storage.copy;
+    observer.orig_get = child.storage.get;
+    observer.orig_put = child.storage.put;
+    observer.orig_remove = child.storage.remove;
+
+    child.storage.copy = [](void* ctx, std::string_view src, std::string_view dst) -> transport::Result {
+        if (s_observer) {
+            s_observer->copy_count++;
+            s_observer->op_log.push_back("COPY:" + std::string{src} + "->" + std::string{dst});
+            return s_observer->orig_copy(ctx, src, dst);
+        }
+        return {};
+    };
+    child.storage.get = [](void* ctx, std::string_view id, const std::filesystem::path& dest) -> transport::Result {
+        if (s_observer) {
+            s_observer->get_count++;
+            s_observer->op_log.push_back("GET:" + std::string{id});
+            return s_observer->orig_get(ctx, id, dest);
+        }
+        return {};
+    };
+    child.storage.put = [](void* ctx, const std::filesystem::path& src, std::string_view id) -> transport::Result {
+        if (s_observer) {
+            s_observer->put_count++;
+            s_observer->op_log.push_back("PUT:" + std::string{id});
+            return s_observer->orig_put(ctx, src, id);
+        }
+        return {};
+    };
+    child.storage.remove = [](void* ctx, std::string_view id) -> transport::RemovalResult {
+        if (s_observer) {
+            s_observer->op_log.push_back("REMOVE:" + std::string{id});
+            return s_observer->orig_remove(ctx, id);
+        }
+        return transport::Removal::Removed;
+    };
+
+    const auto report = runner::run(options, &parent, &child);
+    s_observer = nullptr;
+
+    EXPECT_EQ(report.status, "PASS");
+    EXPECT_EQ(report.stage_reached, runner::LiveGcStage::CleanupCompleted);
+    EXPECT_EQ(report.gc.called, true);
+    EXPECT_EQ(report.gc.call_count, 1U);
+    EXPECT_EQ(report.gc.result, "SUCCESS");
+
+    // Proves native copy was NOT used:
+    EXPECT_EQ(report.metrics.verified_copy_native_copy_successes, 0U);
+    EXPECT_EQ(report.metrics.verified_copy_native_copy_verifications, 0U);
+    EXPECT_EQ(observer.copy_count, 0U);
+
+    // Proves candidate verified copy happened via fallback:
+    EXPECT_EQ(report.metrics.gc_candidate_verified_copy, 1U);
+
+    // Proves source GET occurred:
+    EXPECT_GT(observer.get_count, 0U);
+    const auto candidate_id = report.scenario.candidate_identifier;
+    const auto quarantine_id = report.scenario.quarantine_identifier;
+
+    // Proves destination PUT occurred:
+    EXPECT_GT(observer.put_count, 0U);
+
+    // Proves operation sequence: source GET -> destination PUT -> source REMOVE
+    auto find_op = [&](std::string_view prefix) -> std::optional<std::size_t> {
+        for (std::size_t i = 0; i < observer.op_log.size(); ++i) {
+            if (observer.op_log[i] == prefix) {
+                return i;
+            }
+        }
+        return std::nullopt;
+    };
+
+    auto get_candidate_pos = find_op("GET:" + candidate_id);
+    auto put_quarantine_pos = find_op("PUT:" + quarantine_id);
+    auto remove_candidate_pos = find_op("REMOVE:" + candidate_id);
+
+    ASSERT_TRUE(get_candidate_pos.has_value()) << "GET candidate should have occurred";
+    ASSERT_TRUE(put_quarantine_pos.has_value()) << "PUT quarantine destination should have occurred";
+    ASSERT_TRUE(remove_candidate_pos.has_value()) << "REMOVE candidate should have occurred";
+
+    EXPECT_LT(*get_candidate_pos, *put_quarantine_pos);
+    EXPECT_LT(*put_quarantine_pos, *remove_candidate_pos);
+
+    // Proves quarantine metadata valid & authenticated:
+    EXPECT_TRUE(report.validation.metadata_authenticated);
+    EXPECT_TRUE(report.validation.quarantine_verified);
+    EXPECT_TRUE(report.validation.source_removed);
+    EXPECT_EQ(report.cleanup.result, "removed");
+}
+
+// RED 2: Native Copy Remains Functional
+TEST(GcLiveRunnerNativeTest, NativeCopyRemainsFunctional) {
+    FakeHarness harness{"native-remains-native"};
+    auto options = harness.make_options();
+    options.copy_mode = runner::CopyMode::Native;
+    auto parent = harness.make_parent_transport();
+    auto child = harness.make_child_transport();
+
+    std::size_t copy_call_count = 0;
+    static std::size_t* s_copy_calls = nullptr;
+    s_copy_calls = &copy_call_count;
+    child.storage.copy = [](void* ctx, std::string_view src, std::string_view dst) -> transport::Result {
+        if (s_copy_calls) {
+            (*s_copy_calls)++;
+        }
+        auto* state = fake_state(ctx);
+        if (!state->copy_supported) {
+            return std::unexpected(transport::Error{.code = transport::ErrorCode::Unsupported, .message = "unsupported"});
+        }
+        return fake_copy(ctx, src, dst);
+    };
+
+    const auto report = runner::run(options, &parent, &child);
+    s_copy_calls = nullptr;
+
+    EXPECT_EQ(report.status, "PASS");
+    EXPECT_EQ(report.stage_reached, runner::LiveGcStage::CleanupCompleted);
+    EXPECT_EQ(report.gc.called, true);
+    EXPECT_EQ(report.gc.call_count, 1U);
+    EXPECT_EQ(report.gc.result, "SUCCESS");
+
+    // Proves native copy was attempted, succeeded, and verified:
+    EXPECT_EQ(report.metrics.verified_copy_native_copy, 1U);
+    EXPECT_EQ(report.metrics.verified_copy_native_copy_successes, 1U);
+    EXPECT_EQ(report.metrics.verified_copy_native_copy_verifications, 1U);
+    EXPECT_EQ(copy_call_count, 1U);
+    EXPECT_EQ(report.cleanup.result, "removed");
+}
+
+// RED 3: Mesma Key e Payload produzem mesmo candidate identifier entre modos
+TEST(GcLiveRunnerScenarioTest, IdenticalScenarioBetweenCopyModes) {
+    const auto key = test_key();
+    constexpr std::size_t payload_bytes = 4096;
+
+    FakeHarness harness_native{"identical-scenario-native"};
+    auto opt_native = harness_native.make_options();
+    opt_native.explicit_key = key;
+    opt_native.candidate_payload_bytes = payload_bytes;
+    opt_native.copy_mode = runner::CopyMode::Native;
+    auto parent_native = harness_native.make_parent_transport();
+    auto child_native = harness_native.make_child_transport();
+    const auto report_native = runner::run(opt_native, &parent_native, &child_native);
+
+    FakeHarness harness_fallback{"identical-scenario-fallback"};
+    auto opt_fallback = harness_fallback.make_options();
+    opt_fallback.explicit_key = key;
+    opt_fallback.candidate_payload_bytes = payload_bytes;
+    opt_fallback.copy_mode = runner::CopyMode::ForceFallback;
+    auto parent_fallback = harness_fallback.make_parent_transport();
+    auto child_fallback = harness_fallback.make_child_transport();
+    const auto report_fallback = runner::run(opt_fallback, &parent_fallback, &child_fallback);
+
+    EXPECT_EQ(report_native.status, "PASS");
+    EXPECT_EQ(report_fallback.status, "PASS");
+    EXPECT_FALSE(report_native.scenario.candidate_identifier.empty());
+    EXPECT_EQ(report_native.scenario.candidate_identifier, report_fallback.scenario.candidate_identifier);
+    EXPECT_EQ(report_native.benchmark.candidate_plaintext_bytes, payload_bytes);
+    EXPECT_EQ(report_fallback.benchmark.candidate_plaintext_bytes, payload_bytes);
+    EXPECT_EQ(report_native.benchmark.copy_mode, "native");
+    EXPECT_EQ(report_fallback.benchmark.copy_mode, "fallback");
+}
+
+// Payload 8 MiB em ambiente fake offline
+TEST(GcLiveRunnerPayloadTest, Configured8MiBPayloadExecutesOffline) {
+    FakeHarness harness{"8mib-payload"};
+    auto options = harness.make_options();
+    options.candidate_payload_bytes = 8 * 1024 * 1024;
+    auto parent = harness.make_parent_transport();
+    auto child = harness.make_child_transport();
+
+    const auto report = runner::run(options, &parent, &child);
+
+    EXPECT_EQ(report.status, "PASS");
+    EXPECT_EQ(report.stage_reached, runner::LiveGcStage::CleanupCompleted);
+    EXPECT_EQ(report.gc.called, true);
+    EXPECT_EQ(report.gc.call_count, 1U);
+    EXPECT_EQ(report.gc.result, "SUCCESS");
+    EXPECT_EQ(report.benchmark.candidate_plaintext_bytes, 8 * 1024 * 1024);
+    EXPECT_GE(report.benchmark.candidate_physical_bytes, 8 * 1024 * 1024);
+    EXPECT_GT(report.benchmark.gc_total_us, 0U);
+
+    auto json = runner::to_json(report);
+    EXPECT_EQ(json["benchmark"]["candidate_plaintext_bytes"], 8 * 1024 * 1024);
+    EXPECT_EQ(json["benchmark"]["copy_mode"], "native");
+}
+
+// Payload acima de 64 MiB recusado
+TEST(GcLiveRunnerPayloadTest, RejectsPayloadExceeding64MiB) {
+    FakeHarness harness{"payload-too-large"};
+    auto options = harness.make_options();
+    options.candidate_payload_bytes = 65 * 1024 * 1024;
+    auto parent = harness.make_parent_transport();
+    auto child = harness.make_child_transport();
+
+    const auto report = runner::run(options, &parent, &child);
+
+    EXPECT_EQ(report.status, "REFUSED");
+    EXPECT_EQ(report.gc.called, false);
+    EXPECT_EQ(report.gc.call_count, 0U);
+    EXPECT_NE(report.error_message.find("64 MiB"), std::string::npos);
+}
+
+// CLI Tests
+TEST(GcLiveBenchmarkCliTest, ParsesValidArguments) {
+    const std::vector<std::string_view> args = {
+        "kasumi_gc_live_benchmark",
+        "--remote", "kasumi:integration-tests",
+        "--output", "test_report.json",
+        "--mode", "fallback",
+        "--payload-bytes", "8388608",
+        "--execute-live-benchmark",
+    };
+    auto parsed = runner::parse_benchmark_arguments(args);
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->remote, "kasumi:integration-tests");
+    EXPECT_EQ(parsed->output, std::filesystem::path{"test_report.json"});
+    EXPECT_EQ(parsed->mode, runner::CopyMode::ForceFallback);
+    EXPECT_EQ(parsed->payload_bytes, 8388608U);
+    EXPECT_TRUE(parsed->execute_live_benchmark);
+}
+
+TEST(GcLiveBenchmarkCliTest, RejectsMissingExecuteGate) {
+    const std::vector<std::string_view> args = {
+        "kasumi_gc_live_benchmark",
+        "--remote", "kasumi:integration-tests",
+        "--output", "test_report.json",
+        "--mode", "native",
+        "--payload-bytes", "8388608",
+    };
+    auto parsed = runner::parse_benchmark_arguments(args);
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_NE(parsed.error().find("--execute-live-benchmark is required"), std::string::npos);
+}
+
+TEST(GcLiveBenchmarkCliTest, RejectsZeroPayloadBytes) {
+    const std::vector<std::string_view> args = {
+        "kasumi_gc_live_benchmark",
+        "--remote", "kasumi:integration-tests",
+        "--output", "test_report.json",
+        "--payload-bytes", "0",
+        "--execute-live-benchmark",
+    };
+    auto parsed = runner::parse_benchmark_arguments(args);
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_NE(parsed.error().find("payload-bytes must be between 1 and 67108864"), std::string::npos);
+}
+
+TEST(GcLiveBenchmarkCliTest, RejectsPayloadExceeding64MiB) {
+    const std::vector<std::string_view> args = {
+        "kasumi_gc_live_benchmark",
+        "--remote", "kasumi:integration-tests",
+        "--output", "test_report.json",
+        "--payload-bytes", "67108865",
+        "--execute-live-benchmark",
+    };
+    auto parsed = runner::parse_benchmark_arguments(args);
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_NE(parsed.error().find("payload-bytes must be between 1 and 67108864"), std::string::npos);
+}
+
+TEST(GcLiveBenchmarkCliTest, RejectsUnauthorizedRemoteParent) {
+    const std::vector<std::string_view> args = {
+        "kasumi_gc_live_benchmark",
+        "--remote", "kasumi:unauthorized-folder",
+        "--output", "test_report.json",
+        "--execute-live-benchmark",
+    };
+    auto parsed = runner::parse_benchmark_arguments(args);
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_FALSE(runner::is_authorized_live_parent(parsed->remote));
+}
+
 } // namespace

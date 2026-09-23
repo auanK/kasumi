@@ -70,6 +70,7 @@ struct ScenarioObjects {
     std::string reachable_marker_id;
     std::string candidate_id;
     std::string candidate_sha256;
+    std::size_t candidate_plaintext_bytes = 0;
     std::string expected_quarantine_id;
     std::string expected_quarantine_meta_id;
     std::vector<std::string> expected_pre_vault_objects;
@@ -97,6 +98,11 @@ constexpr std::string_view integrity_error_code_name(kasumi::application::integr
     }
     return "unknown";
 }
+
+enum class CopyMode {
+    Native,
+    ForceFallback
+};
 
 struct GcExecutionResult {
     bool called = false;
@@ -139,6 +145,8 @@ struct RunnerOptions {
     std::filesystem::path local_scratch;
     bool execute_live_gc = false;
     bool preserve_evidence_on_failure = true;
+    CopyMode copy_mode = CopyMode::Native;
+    std::size_t candidate_payload_bytes = 0;
     std::chrono::milliseconds preflight_timeout = std::chrono::minutes{2};
     std::optional<std::array<std::uint8_t, kasumi::crypto::KEY_SIZE>> explicit_key = std::nullopt;
     std::optional<std::string> explicit_child = std::nullopt;
@@ -173,6 +181,23 @@ struct RunnerReport {
         std::string quarantine_identifier;
     } scenario;
 
+    struct BenchmarkReport {
+        std::string copy_mode = "native";
+        std::size_t candidate_plaintext_bytes = 0;
+        std::uint64_t candidate_physical_bytes = 0;
+        std::uint64_t gc_total_us = 0;
+        std::uint64_t gc_candidate_verified_copy_us = 0;
+        std::uint64_t verified_copy_source_physical_hash_us = 0;
+        std::uint64_t verified_copy_native_copy_us = 0;
+        std::uint64_t verified_copy_destination_physical_hash_us = 0;
+        std::uint64_t rclone_download_us = 0;
+        std::uint64_t rclone_upload_us = 0;
+        std::uint64_t gc_candidate_metadata_publish_us = 0;
+        std::uint64_t gc_candidate_pre_remove_barrier_verification_us = 0;
+        std::uint64_t gc_candidate_remove_us = 0;
+        std::uint64_t process_wall_ms = 0;
+    } benchmark;
+
     StorageInventory inventory_before;
     GcExecutionResult gc;
     GcMetrics metrics;
@@ -184,12 +209,14 @@ struct RunnerReport {
 bool is_authorized_live_parent(std::string_view remote_parent) noexcept;
 
 transport::Transport make_vault_transport(transport::Transport& underlying,
-                                          std::string hidden_marker = "owner.marker");
+                                          std::string hidden_marker = "owner.marker",
+                                          CopyMode copy_mode = CopyMode::Native);
 
 std::expected<ScenarioObjects, transport::Error>
 setup_scenario(transport::Transport& vault_storage,
                const std::filesystem::path& scratch_root,
-               std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key);
+               std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key,
+               std::size_t candidate_payload_bytes = 0);
 
 std::expected<StorageInventory, transport::Error>
 capture_inventory(transport::Transport& child_storage,
@@ -208,6 +235,19 @@ RunnerReport run(
     GcInvocation gc_override = nullptr);
 
 nlohmann::json to_json(const RunnerReport& report);
+
+struct BenchmarkArguments {
+    std::string remote;
+    std::optional<std::filesystem::path> rclone_config;
+    std::filesystem::path output;
+    CopyMode mode = CopyMode::Native;
+    std::size_t payload_bytes = 8 * 1024 * 1024; // 8 MiB default
+    bool execute_live_benchmark = false;
+    bool preserve_evidence_on_failure = true;
+};
+
+std::expected<BenchmarkArguments, std::string>
+parse_benchmark_arguments(std::span<const std::string_view> args);
 
 } // namespace kasumi::operational::gc_live_runner
 
