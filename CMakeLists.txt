@@ -32,6 +32,11 @@ option(
     "Build the read-only GC live namespace preflight diagnostic"
     OFF
 )
+option(
+    KASUMI_BUILD_GC_LIVE_SMOKE
+    "Build the guarded live GC collection runner"
+    OFF
+)
 
 add_library(kasumi_warnings INTERFACE)
 if(WIN32)
@@ -602,6 +607,33 @@ if(KASUMI_BUILD_GC_LIVE_PREFLIGHT)
         nlohmann_json::nlohmann_json
         reproc++
         kasumi_warnings
+    )
+endif()
+
+if(KASUMI_BUILD_GC_LIVE_SMOKE)
+    add_executable(
+        kasumi_gc_live_smoke
+        tests/operational/gc_live_smoke.cpp
+        tests/operational/gc_live_runner_support.cpp
+        tests/operational/gc_live_preflight_support.cpp
+        tests/operational/remote_copy_smoke_support.cpp
+    )
+    target_link_libraries(
+        kasumi_gc_live_smoke
+        PRIVATE
+        kasumi_application
+        kasumi_transport
+        kasumi_platform
+        kasumi_crypto
+        nlohmann_json::nlohmann_json
+        reproc++
+        kasumi_warnings
+    )
+    target_include_directories(
+        kasumi_gc_live_smoke
+        PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/include
     )
 endif()
 
