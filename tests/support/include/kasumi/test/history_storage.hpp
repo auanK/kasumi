@@ -705,7 +705,9 @@ kasumi::transport::PhysicalHashBatchResult fake_physical_hash_batch(
             report.missing.push_back(object.identifier);
             continue;
         }
-        if (state->physical_hash_batch_mismatches.contains(object.identifier)) {
+        if (state->physical_hash_mismatch ||
+            object.identifier == state->physical_hash_mismatch_identifier ||
+            state->physical_hash_batch_mismatches.contains(object.identifier)) {
             report.mismatched.push_back(object.identifier);
             continue;
         }

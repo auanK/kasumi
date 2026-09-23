@@ -2198,6 +2198,54 @@ fake_reachability_get_batch(void* context,
 // Phase 10: Batch Garbage Collection Tests (Scenarios A through K)
 // ============================================================================
 
+TEST(IntegrityMaintenanceTest, GarbageCollectionBatchMeasurementScale) {
+    constexpr std::size_t batch_capacity = 8;
+    for (const std::size_t count : {0U, 1U, 10U, 100U}) {
+        auto workspace =
+            kasumi::test::make_temp_workspace("gc-batch-measure-" + std::to_string(count));
+        FakeState* state = nullptr;
+        auto transport = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(transport));
+        state->physical_hash_supported = true;
+        state->copy_supported = true;
+        enable_fake_physical_hash_batch(transport, *state, 2);
+        auto runtime = runtime_data(workspace);
+
+        const auto retained =
+            make_commit(0, {}, "retained.txt", "retained").value();
+        publish_remote(transport, workspace, retained);
+        put_content(transport, workspace, "retained", "retained");
+
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto suffix = "orphan-" + std::to_string(i);
+            put_content(transport, workspace, suffix, suffix);
+        }
+
+        reset_fake_traffic(*state);
+        const auto collected = kasumi::application::integrity::garbage_collect(
+            runtime, transport, test_key());
+        ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+        EXPECT_EQ(collected->candidate_objects, count);
+        EXPECT_EQ(collected->quarantined_objects, count);
+
+        const std::size_t batches =
+            count == 0 ? 0 : (count + batch_capacity - 1) / batch_capacity;
+        const std::size_t expected_batch_calls =
+            count < 2 ? 0 : batches;
+        EXPECT_EQ(state->physical_hash_batch_count, expected_batch_calls);
+
+        std::cout << "PHASE10_BATCH_SCALE N=" << count
+                  << " batches=" << batches
+                  << " physical_hash_batch=" << state->physical_hash_batch_count
+                  << " physical_hash_indiv=" << state->physical_hash_count
+                  << " copy=" << state->copy_count
+                  << " remove=" << state->remove_count
+                  << " put=" << state->put_count
+                  << " quarantined=" << collected->quarantined_objects
+                  << std::endl;
+    }
+}
+
 TEST(IntegrityMaintenanceTest, BatchGcScenarioAZeroCandidates) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-a-zero");
     FakeState* state = nullptr;
@@ -2432,15 +2480,20 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioHIntermediateCandidateFailure) {
         const auto suffix = "orphan-" + std::to_string(i);
         orphans.push_back(put_content(transport, workspace, suffix, suffix));
     }
+    std::ranges::sort(orphans);
 
-    state->copy_destination_mismatch = true;
     state->physical_hash_mismatch_identifier =
         *protocol::quarantine_identifier(test_layout(), orphans[1]);
 
     const auto collected = kasumi::application::integrity::garbage_collect(
         runtime, transport, test_key());
     ASSERT_FALSE(collected.has_value());
+    // Candidate 0 was completed before failure
+    expect_presence(transport, orphans[0], Presence::Absent);
+    // Candidate 1 failed verification: must NOT be removed
     expect_presence(transport, orphans[1], Presence::Present);
+    // Candidate 2 was not processed: must remain intact
+    expect_presence(transport, orphans[2], Presence::Present);
 }
 
 TEST(IntegrityMaintenanceTest, BatchGcScenarioIBarrierLossBeforeRemoval) {
