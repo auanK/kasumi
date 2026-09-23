@@ -1219,4 +1219,68 @@ TEST(GcLiveBenchmarkCliTest, RejectsUnauthorizedRemoteParent) {
     EXPECT_FALSE(runner::is_authorized_live_parent(parsed->remote));
 }
 
+// Smoke CLI Tests
+TEST(GcLiveSmokeCliTest, ParsesValidArguments) {
+    const std::vector<std::string_view> args = {
+        "kasumi_gc_live_smoke",
+        "--remote", "kasumi:integration-tests",
+        "--output", "test_report.json",
+        "--execute-live-gc",
+    };
+    auto parsed = runner::parse_smoke_arguments(args);
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->remote, "kasumi:integration-tests");
+    EXPECT_EQ(parsed->output, std::filesystem::path{"test_report.json"});
+    EXPECT_TRUE(parsed->execute_live_gc);
+    EXPECT_TRUE(parsed->preserve_evidence_on_failure);
+}
+
+TEST(GcLiveSmokeCliTest, RejectsMissingExecuteGate) {
+    const std::vector<std::string_view> args = {
+        "kasumi_gc_live_smoke",
+        "--remote", "kasumi:integration-tests",
+        "--output", "test_report.json",
+    };
+    auto parsed = runner::parse_smoke_arguments(args);
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_NE(parsed.error().find("--execute-live-gc is required"), std::string::npos);
+}
+
+TEST(GcLiveSmokeCliTest, RejectsMissingRemoteOrOutput) {
+    const std::vector<std::string_view> args = {
+        "kasumi_gc_live_smoke",
+        "--output", "test_report.json",
+        "--execute-live-gc",
+    };
+    auto parsed = runner::parse_smoke_arguments(args);
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_NE(parsed.error().find("--remote and --output are required"), std::string::npos);
+}
+
+TEST(GcLiveCliPathTest, RejectsUnauthorizedRemote) {
+    auto res = runner::prepare_cli_paths("kasumi:unauthorized", "out.json", std::nullopt, "scratch");
+    ASSERT_FALSE(res.has_value());
+    EXPECT_NE(res.error().find("Remote parent must be exactly"), std::string::npos);
+}
+
+TEST(GcLiveCliPathTest, RejectsExistingOutputFile) {
+    kasumi::test::TempWorkspace ws(kasumi::test::make_temp_workspace("cli-path-test"));
+    auto out = kasumi::test::workspace_path(ws, "existing.json");
+    std::ofstream(out) << "data";
+
+    auto res = runner::prepare_cli_paths("kasumi:integration-tests", out, std::nullopt, "scratch");
+    ASSERT_FALSE(res.has_value());
+    EXPECT_NE(res.error().find("Output must be a new local file"), std::string::npos);
+}
+
+TEST(GcLiveCliPathTest, PreparesValidPathsAndCreatesScratch) {
+    kasumi::test::TempWorkspace ws(kasumi::test::make_temp_workspace("cli-path-valid"));
+    auto out = kasumi::test::workspace_path(ws, "new_report.json");
+
+    auto res = runner::prepare_cli_paths("kasumi:integration-tests", out, std::nullopt, "test-scratch");
+    ASSERT_TRUE(res.has_value());
+    EXPECT_EQ(res->output_path, std::filesystem::absolute(out));
+    EXPECT_TRUE(std::filesystem::is_directory(res->scratch_root));
+}
+
 } // namespace

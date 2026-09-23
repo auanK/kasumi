@@ -1,42 +1,15 @@
 #include "gc_live_runner_support.hpp"
 
 #include <chrono>
-#include <cstdlib>
-#include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <optional>
 #include <span>
-#include <string>
 #include <string_view>
-#include <system_error>
 #include <vector>
 
 namespace {
 
 namespace runner = kasumi::operational::gc_live_runner;
-
-struct RcloneConfigEnvironment {
-    std::optional<std::string> previous;
-
-    RcloneConfigEnvironment() {
-        if (const char* value = std::getenv("RCLONE_CONFIG"); value != nullptr) {
-            previous = value;
-        }
-    }
-
-    ~RcloneConfigEnvironment() {
-#ifdef _WIN32
-        _putenv_s("RCLONE_CONFIG", previous ? previous->c_str() : "");
-#else
-        if (previous) {
-            setenv("RCLONE_CONFIG", previous->c_str(), 1);
-        } else {
-            unsetenv("RCLONE_CONFIG");
-        }
-#endif
-    }
-};
 
 void print_usage(std::ostream& output) {
     output << "Usage: kasumi_gc_live_benchmark --remote <kasumi:integration-tests> \\\n"
@@ -55,65 +28,20 @@ void print_usage(std::ostream& output) {
 }
 
 int execute(const runner::BenchmarkArguments& arguments) {
-    if (!runner::is_authorized_live_parent(arguments.remote)) {
-        std::cerr << "Remote parent must be exactly 'kasumi:integration-tests'; no remote request made.\n";
-        return 2;
-    }
+    runner::RcloneConfigEnvironment restore_environment;
 
-    std::error_code fs_error;
-    auto output = std::filesystem::absolute(arguments.output, fs_error);
-    if (fs_error) {
-        std::cerr << "Invalid local report path.\n";
-        return 2;
-    }
-    if (std::filesystem::exists(output, fs_error) || fs_error) {
-        std::cerr << "Output must be a new local file.\n";
-        return 2;
-    }
-    const auto output_parent = output.parent_path();
-    if (!std::filesystem::is_directory(output_parent, fs_error) || fs_error) {
-        std::cerr << "Output parent directory must already exist.\n";
-        return 2;
-    }
-
-    if (arguments.rclone_config) {
-        fs_error.clear();
-        const auto status = std::filesystem::symlink_status(*arguments.rclone_config, fs_error);
-        if (fs_error || std::filesystem::is_symlink(status) || !std::filesystem::is_regular_file(status)) {
-            std::cerr << "rclone config must be a regular local file.\n";
-            return 2;
-        }
-    }
-
-    RcloneConfigEnvironment restore_environment;
-    if (arguments.rclone_config) {
-        const auto config = std::filesystem::absolute(*arguments.rclone_config, fs_error);
-        if (fs_error) {
-            std::cerr << "could not resolve rclone config path.\n";
-            return 2;
-        }
-#ifdef _WIN32
-        if (_putenv_s("RCLONE_CONFIG", config.string().c_str()) != 0) {
-#else
-        if (setenv("RCLONE_CONFIG", config.string().c_str(), 1) != 0) {
-#endif
-            std::cerr << "could not set RCLONE_CONFIG environment variable.\n";
-            return 2;
-        }
-    }
-
-    const auto scratch_root = output_parent / "kasumi-gc-benchmark-scratch";
-    std::filesystem::create_directories(scratch_root, fs_error);
-    if (fs_error) {
-        std::cerr << "could not create scratch directory.\n";
+    auto prepared = runner::prepare_cli_paths(
+        arguments.remote, arguments.output, arguments.rclone_config, "kasumi-gc-benchmark-scratch");
+    if (!prepared) {
+        std::cerr << prepared.error() << '\n';
         return 2;
     }
 
     runner::RunnerOptions options{
         .remote_parent = arguments.remote,
         .rclone_config = arguments.rclone_config,
-        .output_path = output,
-        .local_scratch = scratch_root,
+        .output_path = prepared->output_path,
+        .local_scratch = prepared->scratch_root,
         .execute_live_gc = arguments.execute_live_benchmark,
         .preserve_evidence_on_failure = arguments.preserve_evidence_on_failure,
         .copy_mode = arguments.mode,
@@ -144,7 +72,7 @@ int execute(const runner::BenchmarkArguments& arguments) {
     std::cout.flush();
 
     auto report_json = runner::to_json(report);
-    std::ofstream stream(output, std::ios::binary | std::ios::trunc);
+    std::ofstream stream(prepared->output_path, std::ios::binary | std::ios::trunc);
     if (stream) {
         stream << report_json.dump(2) << '\n';
     }

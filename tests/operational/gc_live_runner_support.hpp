@@ -236,6 +236,35 @@ RunnerReport run(
 
 nlohmann::json to_json(const RunnerReport& report);
 
+struct RcloneConfigEnvironment {
+    std::optional<std::string> previous;
+
+    RcloneConfigEnvironment();
+    ~RcloneConfigEnvironment();
+};
+
+struct PreparedCliPaths {
+    std::filesystem::path output_path;
+    std::filesystem::path scratch_root;
+};
+
+std::expected<PreparedCliPaths, std::string>
+prepare_cli_paths(std::string_view remote,
+                  const std::filesystem::path& raw_output,
+                  const std::optional<std::filesystem::path>& rclone_config,
+                  std::string_view scratch_dirname);
+
+struct SmokeArguments {
+    std::string remote;
+    std::optional<std::filesystem::path> rclone_config;
+    std::filesystem::path output;
+    bool execute_live_gc = false;
+    bool preserve_evidence_on_failure = true;
+};
+
+std::expected<SmokeArguments, std::string>
+parse_smoke_arguments(std::span<const std::string_view> args);
+
 struct BenchmarkArguments {
     std::string remote;
     std::optional<std::filesystem::path> rclone_config;

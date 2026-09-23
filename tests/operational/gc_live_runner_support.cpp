@@ -13,11 +13,6 @@ namespace {
 
 constexpr std::string_view default_owner_identifier = "owner.marker";
 
-[[maybe_unused]] std::string read_file_string(const std::filesystem::path& path) {
-    std::ifstream stream(path, std::ios::binary);
-    return std::string{std::istreambuf_iterator<char>{stream}, {}};
-}
-
 std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary);
     return std::vector<std::uint8_t>{std::istreambuf_iterator<char>{stream}, {}};
@@ -299,7 +294,6 @@ setup_scenario(transport::Transport& vault_storage,
                const std::filesystem::path& scratch_root,
                std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key,
                std::size_t candidate_payload_bytes) {
-    (void)candidate_payload_bytes;
     ScenarioObjects result;
     std::copy(key.begin(), key.end(), result.key.begin());
 
@@ -846,13 +840,8 @@ RunnerReport run(
         }
 
         // Attempt safe cleanup of owned objects if ownership still verifiable
-        std::vector<std::string> cleanup_targets = {
-            scenario->reachable_content_id,
-            scenario->reachable_commit_id,
-            scenario->reachable_marker_id,
-            scenario->candidate_id,
-        };
-        report.cleanup = preflight::cleanup_owned_child(child_storage, owner_token, cleanup_targets, options.local_scratch);
+        report.cleanup = preflight::cleanup_owned_child(
+            child_storage, owner_token, scenario->expected_pre_vault_objects, options.local_scratch);
         return report;
     }
 
@@ -938,16 +927,9 @@ RunnerReport run(
     // Pre-cleanup Audit (Passo 7 & 8):
     // Invariant: While any un-enumerated object or residue exists in child storage,
     // owner.marker MUST NOT be removed!
-    std::set<std::string> allowed_cleanup_ids{
-        scenario->reachable_content_id,
-        scenario->reachable_commit_id,
-        scenario->reachable_marker_id,
-        scenario->expected_quarantine_id,
-        scenario->expected_quarantine_meta_id,
-    };
     bool unallowed_residue_detected = false;
     for (const auto& item : report.inventory_after.vault_objects) {
-        if (!allowed_cleanup_ids.contains(item.identifier)) {
+        if (!std::ranges::binary_search(scenario->expected_post_vault_objects, item.identifier)) {
             unallowed_residue_detected = true;
             break;
         }
@@ -960,14 +942,8 @@ RunnerReport run(
         return report;
     }
 
-    std::vector<std::string> cleanup_targets = {
-        scenario->reachable_content_id,
-        scenario->reachable_commit_id,
-        scenario->reachable_marker_id,
-        scenario->expected_quarantine_id,
-        scenario->expected_quarantine_meta_id,
-    };
-    report.cleanup = preflight::cleanup_owned_child(child_storage, owner_token, cleanup_targets, options.local_scratch);
+    report.cleanup = preflight::cleanup_owned_child(
+        child_storage, owner_token, scenario->expected_post_vault_objects, options.local_scratch);
     if (report.cleanup.result == "removed") {
         report.stage_reached = LiveGcStage::CleanupCompleted;
         report.status = "PASS";
@@ -1146,6 +1122,118 @@ parse_benchmark_arguments(std::span<const std::string_view> args) {
     }
     if (!result.execute_live_benchmark) {
         return std::unexpected("--execute-live-benchmark is required to execute live benchmark");
+    }
+    return result;
+}
+
+RcloneConfigEnvironment::RcloneConfigEnvironment() {
+    if (const char* value = std::getenv("RCLONE_CONFIG"); value != nullptr) {
+        previous = value;
+    }
+}
+
+RcloneConfigEnvironment::~RcloneConfigEnvironment() {
+#ifdef _WIN32
+    _putenv_s("RCLONE_CONFIG", previous ? previous->c_str() : "");
+#else
+    if (previous) {
+        setenv("RCLONE_CONFIG", previous->c_str(), 1);
+    } else {
+        unsetenv("RCLONE_CONFIG");
+    }
+#endif
+}
+
+std::expected<PreparedCliPaths, std::string>
+prepare_cli_paths(std::string_view remote,
+                  const std::filesystem::path& raw_output,
+                  const std::optional<std::filesystem::path>& rclone_config,
+                  std::string_view scratch_dirname) {
+    if (!is_authorized_live_parent(remote)) {
+        return std::unexpected("Remote parent must be exactly 'kasumi:integration-tests'; no remote request made.");
+    }
+
+    std::error_code fs_error;
+    auto output = std::filesystem::absolute(raw_output, fs_error);
+    if (fs_error) {
+        return std::unexpected("Invalid local report path.");
+    }
+    if (std::filesystem::exists(output, fs_error) || fs_error) {
+        return std::unexpected("Output must be a new local file.");
+    }
+    const auto output_parent = output.parent_path();
+    if (!std::filesystem::is_directory(output_parent, fs_error) || fs_error) {
+        return std::unexpected("Output parent directory must already exist.");
+    }
+
+    if (rclone_config) {
+        fs_error.clear();
+        const auto status = std::filesystem::symlink_status(*rclone_config, fs_error);
+        if (fs_error || std::filesystem::is_symlink(status) || !std::filesystem::is_regular_file(status)) {
+            return std::unexpected("rclone config must be a regular local file.");
+        }
+        const auto config = std::filesystem::absolute(*rclone_config, fs_error);
+        if (fs_error) {
+            return std::unexpected("could not resolve rclone config path.");
+        }
+#ifdef _WIN32
+        if (_putenv_s("RCLONE_CONFIG", config.string().c_str()) != 0) {
+#else
+        if (setenv("RCLONE_CONFIG", config.string().c_str(), 1) != 0) {
+#endif
+            return std::unexpected("could not set RCLONE_CONFIG environment variable.");
+        }
+    }
+
+    const auto scratch_root = output_parent / scratch_dirname;
+    std::filesystem::create_directories(scratch_root, fs_error);
+    if (fs_error) {
+        return std::unexpected("could not create scratch directory.");
+    }
+
+    return PreparedCliPaths{
+        .output_path = std::move(output),
+        .scratch_root = std::move(scratch_root),
+    };
+}
+
+std::expected<SmokeArguments, std::string>
+parse_smoke_arguments(std::span<const std::string_view> args) {
+    SmokeArguments result;
+    const std::size_t count = args.size();
+    for (std::size_t index = 1; index < count; ++index) {
+        const auto option = args[index];
+        if (option == "--help" || option == "-h") {
+            return std::unexpected("help");
+        }
+        if (option == "--execute-live-gc") {
+            result.execute_live_gc = true;
+            continue;
+        }
+        if (option == "--preserve-evidence-on-failure") {
+            result.preserve_evidence_on_failure = true;
+            continue;
+        }
+        if (index + 1 >= count) {
+            return std::unexpected("missing value for " + std::string{option});
+        }
+        const auto value = args[++index];
+        if (option == "--remote" && result.remote.empty()) {
+            result.remote = std::string{value};
+        } else if (option == "--rclone-config" && !result.rclone_config) {
+            result.rclone_config = std::filesystem::path{value};
+        } else if (option == "--output" && result.output.empty()) {
+            result.output = std::filesystem::path{value};
+        } else {
+            return std::unexpected("unknown or duplicate option: " + std::string{option});
+        }
+    }
+
+    if (result.remote.empty() || result.output.empty()) {
+        return std::unexpected("--remote and --output are required");
+    }
+    if (!result.execute_live_gc) {
+        return std::unexpected("--execute-live-gc is required to execute live GC collection");
     }
     return result;
 }
