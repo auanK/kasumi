@@ -107,6 +107,7 @@ inventory_impl(transport::Transport& storage,
         }
 
         std::vector<RawReference> raw_references;
+        const bool measure_capacity_growth = platform::perf_trace::enabled();
         std::size_t reference_count = 0;
         for (const auto& commit : history_inventory.commits) {
             if (!commit.valid || !commit.reachable) {
@@ -120,11 +121,14 @@ inventory_impl(transport::Transport& storage,
             }
             const auto required_capacity =
                 raw_references.size() + commit.tree->tree.rows.size();
-            if (required_capacity > raw_references.capacity()) {
+            const auto capacity_before_reserve =
+                measure_capacity_growth ? raw_references.capacity() : 0;
+            raw_references.reserve(required_capacity);
+            if (measure_capacity_growth &&
+                raw_references.capacity() != capacity_before_reserve) {
                 platform::perf_trace::count(
                     "rc/content_reference_capacity_growth_events");
             }
-            raw_references.reserve(required_capacity);
             for (const auto& row : commit.tree->tree.rows) {
                 if (row.is_directory) {
                     continue;
@@ -137,6 +141,8 @@ inventory_impl(transport::Transport& storage,
                         detail::error(ErrorCode::LimitExceeded,
                                       "too many content references"));
                 }
+                const auto capacity_before_push =
+                    measure_capacity_growth ? raw_references.capacity() : 0;
                 raw_references.push_back(RawReference{
                     .remote_id = remote_id,
                     .plaintext_hash = plaintext_hash,
@@ -146,6 +152,11 @@ inventory_impl(transport::Transport& storage,
                         .size = row.size,
                     },
                 });
+                if (measure_capacity_growth &&
+                    raw_references.capacity() != capacity_before_push) {
+                    platform::perf_trace::count(
+                        "rc/content_reference_capacity_growth_events");
+                }
             }
         }
 

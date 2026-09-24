@@ -107,6 +107,7 @@ struct TrialMetrics {
     // History reconstruction
     std::size_t commit_object_get_calls = 0;
     std::size_t marker_object_get_calls = 0;
+    std::size_t content_reference_capacity_growth_events = 0;
 
     // Timings (us)
     std::uint64_t barrier_acquire_us = 0;
@@ -251,6 +252,9 @@ void collect_metrics_post_gc(TrialMetrics& m, FakeState* state, const kasumi::ap
     m.total_identifiers_listed = state->full_list_identifier_count;
     m.commit_object_get_calls = state->commit_get_count;
     m.marker_object_get_calls = state->marker_get_count;
+    m.content_reference_capacity_growth_events =
+        kasumi::platform::perf_trace::get_count(
+            "rc/content_reference_capacity_growth_events");
 
     m.candidates_detected = collected.candidate_objects;
     m.candidates_quarantined = collected.quarantined_objects;
@@ -482,12 +486,16 @@ struct SummaryStats {
     double min_v = 0;
     double median_v = 0;
     double max_v = 0;
+    double mean_v = 0;
 
     static SummaryStats compute(std::vector<double> vals) {
         if (vals.empty()) return {};
         std::ranges::sort(vals);
         double min_v = vals.front();
         double max_v = vals.back();
+        const double mean_v =
+            std::accumulate(vals.begin(), vals.end(), 0.0) /
+            static_cast<double>(vals.size());
         double median_v = 0;
         const auto sz = vals.size();
         if (sz % 2 == 1) {
@@ -495,7 +503,7 @@ struct SummaryStats {
         } else {
             median_v = (vals[sz / 2 - 1] + vals[sz / 2]) / 2.0;
         }
-        return SummaryStats{min_v, median_v, max_v};
+        return SummaryStats{min_v, median_v, max_v, mean_v};
     }
 };
 
@@ -555,26 +563,26 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
             first, &SnapshotTimings::inspect_markers_epochs_us);
         const auto dag = extract_snapshot(
             first, &SnapshotTimings::dag_traversal_us);
-        const auto history_residual = history.median_v -
-                                      inventory.median_v - load.median_v -
-                                      inspect.median_v - dag.median_v;
-        const auto snapshot_residual = total.median_v - physical.median_v -
-                                       history.median_v - validation.median_v -
-                                       content.median_v - candidates.median_v;
+        const auto history_residual = history.mean_v - inventory.mean_v -
+                                      load.mean_v - inspect.mean_v - dag.mean_v;
+        const auto snapshot_residual = total.mean_v - physical.mean_v -
+                                       history.mean_v - validation.mean_v -
+                                       content.mean_v - candidates.mean_v;
         return nlohmann::json{
             {"calls_per_successful_observation", 1},
-            {"exclusive_partition_median_us",
-             {{"physical_listing", physical.median_v},
-              {"history_reconstruction", history.median_v},
-              {"history_validation", validation.median_v},
-              {"content_reachability", content.median_v},
-              {"candidate_selection", candidates.median_v},
+            {"statistic", "arithmetic_mean_over_repetitions"},
+            {"exclusive_partition_mean_us",
+             {{"physical_listing", physical.mean_v},
+              {"history_reconstruction", history.mean_v},
+              {"history_validation", validation.mean_v},
+              {"content_reachability", content.mean_v},
+              {"candidate_selection", candidates.mean_v},
               {"residual_unattributed", snapshot_residual}}},
-            {"history_reconstruction_detail_median_us",
-             {{"build_history_inventory", inventory.median_v},
-              {"load_and_auth_commits", load.median_v},
-              {"inspect_markers_epochs", inspect.median_v},
-              {"dag_traversal", dag.median_v},
+            {"history_reconstruction_detail_mean_us",
+             {{"build_history_inventory", inventory.mean_v},
+              {"load_and_auth_commits", load.mean_v},
+              {"inspect_markers_epochs", inspect.mean_v},
+              {"dag_traversal", dag.mean_v},
               {"history_residual_unattributed", history_residual}}}};
     };
 
@@ -604,7 +612,9 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
         {"commit_object_get_calls", rep1.commit_object_get_calls},
         {"marker_object_get_calls", rep1.marker_object_get_calls},
         {"other_object_get_calls", rep1.transport_get_count - rep1.commit_object_get_calls - rep1.marker_object_get_calls},
-        {"commit_object_get_calls_per_observation", rep1.commit_object_get_calls / 2}
+        {"commit_object_get_calls_per_observation", rep1.commit_object_get_calls / 2},
+        {"content_reference_capacity_growth_events_both_observations", rep1.content_reference_capacity_growth_events},
+        {"content_reference_capacity_growth_events_per_observation", rep1.content_reference_capacity_growth_events / 2}
     };
     entry["snapshot_attribution"] = {
         {"observation_1", snapshot_attribution(true)},
