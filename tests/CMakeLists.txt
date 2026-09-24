@@ -212,6 +212,8 @@ kasumi_add_test_suite(
     "operational.gc_live_runner"
     SOURCES
         unit/operational/test_gc_live_runner.cpp
+        unit/operational/test_gc_live_phase11.cpp
+        operational/gc_live_phase11_support.cpp
         operational/gc_live_runner_support.cpp
         operational/gc_live_preflight_support.cpp
         operational/remote_copy_smoke_support.cpp

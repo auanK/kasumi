@@ -196,8 +196,17 @@ child_namespace(std::string_view random_hex) {
 
 bool valid_child(std::string_view child) noexcept {
     constexpr std::string_view prefix = "kasumi-gc-live-";
-    return child.starts_with(prefix) && child.size() == prefix.size() + 32 &&
-           std::all_of(child.begin() + static_cast<std::ptrdiff_t>(prefix.size()),
+    constexpr std::string_view benchmark_prefix = "kasumi-gc-benchmark-";
+    std::string_view active_prefix;
+    if (child.starts_with(prefix)) {
+        active_prefix = prefix;
+    } else if (child.starts_with(benchmark_prefix)) {
+        active_prefix = benchmark_prefix;
+    } else {
+        return false;
+    }
+    return child.size() == active_prefix.size() + 32 &&
+           std::all_of(child.begin() + static_cast<std::ptrdiff_t>(active_prefix.size()),
                        child.end(),
                        [](char value) {
                            return (value >= '0' && value <= '9') ||

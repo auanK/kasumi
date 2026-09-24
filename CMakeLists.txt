@@ -667,6 +667,32 @@ if(KASUMI_BUILD_GC_LIVE_BENCHMARK)
         ${PROJECT_SOURCE_DIR}/src
         ${PROJECT_SOURCE_DIR}/include
     )
+
+    add_executable(
+        kasumi_gc_live_phase11
+        tests/operational/gc_live_phase11.cpp
+        tests/operational/gc_live_phase11_support.cpp
+        tests/operational/gc_live_runner_support.cpp
+        tests/operational/gc_live_preflight_support.cpp
+        tests/operational/remote_copy_smoke_support.cpp
+    )
+    target_link_libraries(
+        kasumi_gc_live_phase11
+        PRIVATE
+        kasumi_application
+        kasumi_transport
+        kasumi_platform
+        kasumi_crypto
+        nlohmann_json::nlohmann_json
+        reproc++
+        kasumi_warnings
+    )
+    target_include_directories(
+        kasumi_gc_live_phase11
+        PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/include
+    )
 endif()
 
 set(KASUMI_FIRST_PARTY_TARGETS
