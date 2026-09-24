@@ -1077,6 +1077,46 @@ TEST(ContentReachabilityTest, EquivalenceLargeListingMaintainsOrderAndUniqueness
     EXPECT_EQ(result->contents.size(), 150U);
 }
 
+TEST(ContentReachabilityTest, SharedCommitTreesAvoidPerCommitCapacityGrowth) {
+    struct TraceGuard {
+        ~TraceGuard() { kasumi::platform::perf_trace::force_enable(false); }
+    } trace_guard;
+    constexpr std::size_t commit_count = 64;
+    auto storage = make_local_storage();
+    ReachabilityInventory history;
+    history.commits.reserve(commit_count);
+    for (std::size_t index = 0; index < commit_count; ++index) {
+        const auto commit = make_tree_commit(
+            index, {}, {NodeRow{.path = "", .is_directory = true},
+                        file_row("shared.txt", "same payload")});
+        history.commits.push_back(
+            kasumi::application::history_storage::ReachabilityCommit{
+                .commit_id = commit_id(commit),
+                .valid = true,
+                .reachable = true,
+                .tree = commit});
+    }
+
+    const std::vector<std::string> identifiers{content_id("same payload")};
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+    const auto result =
+        kasumi::application::history_storage::inventory_content_reachability(
+            storage.transport,
+            test_key(),
+            identifiers,
+            history,
+            kasumi::test::workspace_root(storage.workspace),
+            false);
+
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    ASSERT_EQ(result->contents.size(), 1U);
+    EXPECT_EQ(result->contents.front().references.size(), commit_count);
+    EXPECT_LT(kasumi::platform::perf_trace::get_count(
+                  "rc/content_reference_capacity_growth_events"),
+              commit_count);
+}
+
 TEST(ContentReachabilityTest, AllocationBudgetAvoidsNodeBasedContainers) {
     auto storage = make_local_storage();
     std::vector<NodeRow> rows;

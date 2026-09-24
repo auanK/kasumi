@@ -118,8 +118,13 @@ inventory_impl(transport::Transport& storage,
                     detail::error(ErrorCode::InvalidCommit,
                                   "reachable commit has no valid tree"));
             }
-            raw_references.reserve(raw_references.size() +
-                                   commit.tree->tree.rows.size());
+            const auto required_capacity =
+                raw_references.size() + commit.tree->tree.rows.size();
+            if (required_capacity > raw_references.capacity()) {
+                platform::perf_trace::count(
+                    "rc/content_reference_capacity_growth_events");
+            }
+            raw_references.reserve(required_capacity);
             for (const auto& row : commit.tree->tree.rows) {
                 if (row.is_directory) {
                     continue;
