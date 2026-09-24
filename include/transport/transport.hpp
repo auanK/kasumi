@@ -82,6 +82,7 @@ struct PhysicalHashBatchRequest {
 
 // Batch physical hash verification result.
 struct PhysicalHashBatchReport {
+    std::vector<std::string> matched;
     std::vector<std::string> mismatched;
     std::vector<std::string> missing;
     std::vector<std::string> errors;

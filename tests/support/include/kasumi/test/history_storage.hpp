@@ -238,6 +238,8 @@ struct FakeState {
     std::set<std::string> physical_hash_batch_mismatches;
     std::set<std::string> physical_hash_batch_missing;
     std::set<std::string> physical_hash_batch_errors;
+    std::optional<kasumi::transport::PhysicalHashBatchReport> physical_hash_batch_override_report;
+    std::set<std::string> physical_hash_batch_omitted;
     std::vector<std::string> remote_events;
 };
 
@@ -695,8 +697,14 @@ kasumi::transport::PhysicalHashBatchResult fake_physical_hash_batch(
             .code = kasumi::transport::ErrorCode::Unsupported,
             .message = "physical hash batch unavailable"});
     }
+    if (state->physical_hash_batch_override_report) {
+        return *state->physical_hash_batch_override_report;
+    }
     kasumi::transport::PhysicalHashBatchReport report;
     for (const auto& object : request.objects) {
+        if (state->physical_hash_batch_omitted.contains(object.identifier)) {
+            continue;
+        }
         if (state->physical_hash_batch_errors.contains(object.identifier)) {
             report.errors.push_back(object.identifier);
             continue;
@@ -716,6 +724,8 @@ kasumi::transport::PhysicalHashBatchResult fake_physical_hash_batch(
             report.missing.push_back(object.identifier);
         } else if (found->second != object.expected_hash) {
             report.mismatched.push_back(object.identifier);
+        } else {
+            report.matched.push_back(object.identifier);
         }
     }
     return report;

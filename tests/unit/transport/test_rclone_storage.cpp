@@ -901,6 +901,7 @@ TEST(RcloneStorageTest, BulkCheckAcceptsCompleteAllMatchResponse) {
             R"({"differ":[],"error":[],"hashType":"sha256","match":["a","b","c"],"missingOnDst":[],"success":true})",
             batch_request());
     ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->matched, (std::vector<std::string>{"a", "b", "c"}));
     EXPECT_TRUE(result->mismatched.empty());
     EXPECT_TRUE(result->missing.empty());
     EXPECT_TRUE(result->errors.empty());
