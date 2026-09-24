@@ -2,6 +2,7 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
+#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <array>
@@ -867,6 +868,258 @@ TEST(ContentReachabilityTest,
     EXPECT_TRUE(result->corrupt_content_ids.empty());
     EXPECT_FALSE(kasumi::test::has_temporary_history_workspace(
         kasumi::test::workspace_root(workspace)));
+}
+
+TEST(ContentReachabilityTest, EquivalenceMultiplePhysicalObjectsArbitraryOrder) {
+    auto storage = make_local_storage();
+    const auto commit = make_tree_commit(
+        0,
+        {},
+        {NodeRow{.path = "", .is_directory = true},
+         file_row("a.txt", "content_a"),
+         file_row("b.txt", "content_b"),
+         file_row("c.txt", "content_c")});
+    publish(storage, commit);
+
+    const auto id_a = content_id("content_a");
+    const auto id_b = content_id("content_b");
+    const auto id_c = content_id("content_c");
+    const auto id_o1 = content_id("orphan_1");
+    const auto id_o2 = content_id("orphan_2");
+
+    std::vector<std::string> identifiers = {id_o2, id_c, id_o1, id_a, id_b};
+    const auto history = history_inventory(
+        storage.transport, kasumi::test::workspace_root(storage.workspace));
+    const auto result =
+        kasumi::application::history_storage::inventory_content_reachability(
+            storage.transport,
+            test_key(),
+            identifiers,
+            history,
+            kasumi::test::workspace_root(storage.workspace),
+            false);
+    ASSERT_TRUE(result.has_value());
+
+    EXPECT_TRUE(std::ranges::is_sorted(result->reachable_content_ids));
+    EXPECT_TRUE(std::ranges::is_sorted(result->orphan_content_ids));
+    EXPECT_TRUE(std::ranges::is_sorted(
+        result->contents, {}, &ContentEntry::content_id));
+    EXPECT_EQ(result->reachable_content_ids.size(), 3U);
+    EXPECT_EQ(result->orphan_content_ids.size(), 2U);
+    EXPECT_EQ(result->contents.size(), 5U);
+}
+
+TEST(ContentReachabilityTest, EquivalenceDuplicateIdentifiersInPhysicalListing) {
+    auto storage = make_local_storage();
+    const auto commit = make_tree_commit(
+        0,
+        {},
+        {NodeRow{.path = "", .is_directory = true},
+         file_row("a.txt", "content_a")});
+    publish(storage, commit);
+
+    const auto id_a = content_id("content_a");
+    const auto id_o = content_id("orphan_x");
+
+    std::vector<std::string> identifiers = {id_a, id_o, id_a, id_o, id_a};
+    const auto history = history_inventory(
+        storage.transport, kasumi::test::workspace_root(storage.workspace));
+    const auto result =
+        kasumi::application::history_storage::inventory_content_reachability(
+            storage.transport,
+            test_key(),
+            identifiers,
+            history,
+            kasumi::test::workspace_root(storage.workspace),
+            false);
+    ASSERT_TRUE(result.has_value());
+
+    EXPECT_EQ(result->reachable_content_ids, std::vector<std::string>{id_a});
+    EXPECT_EQ(result->orphan_content_ids, std::vector<std::string>{id_o});
+    ASSERT_EQ(result->contents.size(), 2U);
+    EXPECT_EQ(result->contents[0].content_id, std::min(id_a, id_o));
+    EXPECT_EQ(result->contents[1].content_id, std::max(id_a, id_o));
+}
+
+TEST(ContentReachabilityTest, EquivalenceSharedContentAcrossBranches) {
+    auto storage = make_local_storage();
+    const auto commit_a = make_tree_commit(
+        0,
+        {},
+        {NodeRow{.path = "", .is_directory = true},
+         file_row("shared.txt", "common_payload")});
+    const auto commit_b = make_tree_commit(
+        0,
+        {},
+        {NodeRow{.path = "", .is_directory = true},
+         file_row("shared_alias.txt", "common_payload")});
+    publish(storage, commit_a);
+    publish(storage, commit_b);
+
+    const auto id_shared = content_id("common_payload");
+    std::vector<std::string> identifiers = {id_shared};
+    const auto history = history_inventory(
+        storage.transport, kasumi::test::workspace_root(storage.workspace));
+    const auto result =
+        kasumi::application::history_storage::inventory_content_reachability(
+            storage.transport,
+            test_key(),
+            identifiers,
+            history,
+            kasumi::test::workspace_root(storage.workspace),
+            false);
+    ASSERT_TRUE(result.has_value());
+
+    EXPECT_EQ(result->reachable_content_ids, std::vector<std::string>{id_shared});
+    ASSERT_EQ(result->contents.size(), 1U);
+    EXPECT_EQ(result->contents.front().references.size(), 2U);
+}
+
+TEST(ContentReachabilityTest, EquivalenceTransportListingFailureReported) {
+    auto workspace = kasumi::test::make_temp_workspace("listing-fail");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+
+    const auto history = history_inventory(
+        transport, kasumi::test::workspace_root(workspace));
+
+    transport.storage.list = [](void*) -> kasumi::transport::ListingResult {
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Io,
+            .message = "injected list error"});
+    };
+
+    const auto result =
+        kasumi::application::history_storage::inventory_content_reachability(
+            transport,
+            test_key(),
+            history,
+            kasumi::test::workspace_root(workspace),
+            false);
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST(ContentReachabilityTest, EquivalenceInvalidReachableCommitTreeFails) {
+    auto storage = make_local_storage();
+    ReachabilityInventory history;
+    kasumi::application::history_storage::ReachabilityCommit bad_commit{
+        .commit_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        .valid = true,
+        .reachable = true,
+        .parents = {},
+        .tree = kasumi::history::Commit{
+            .height = 0,
+            .created_at = 0,
+            .parents = {},
+            .tree = Snapshot{.rows = {NodeRow{.path = "orphan_dir/file.txt", .is_directory = false}}}
+        }
+    };
+    history.commits.push_back(std::move(bad_commit));
+
+    const auto result =
+        kasumi::application::history_storage::inventory_content_reachability(
+            storage.transport,
+            test_key(),
+            std::span<const std::string>{},
+            history,
+            kasumi::test::workspace_root(storage.workspace),
+            false);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, kasumi::application::history_storage::ErrorCode::InvalidCommit);
+}
+
+TEST(ContentReachabilityTest, EquivalenceLargeListingMaintainsOrderAndUniqueness) {
+    auto storage = make_local_storage();
+    std::vector<NodeRow> rows;
+    rows.push_back(NodeRow{.path = "", .is_directory = true});
+    for (std::size_t i = 0; i < 100; ++i) {
+        rows.push_back(file_row("f" + std::to_string(i), "c" + std::to_string(i)));
+    }
+    const auto commit = make_tree_commit(0, {}, std::move(rows));
+    publish(storage, commit);
+
+    std::vector<std::string> identifiers;
+    identifiers.reserve(300);
+    for (std::size_t i = 0; i < 100; ++i) {
+        identifiers.push_back(content_id("c" + std::to_string(i)));
+    }
+    for (std::size_t i = 0; i < 50; ++i) {
+        identifiers.push_back(content_id("orph_" + std::to_string(i)));
+    }
+    for (std::size_t i = 0; i < 10; ++i) {
+        identifiers.push_back("unknown_obj_" + std::to_string(i));
+    }
+    identifiers.insert(identifiers.end(), identifiers.begin(), identifiers.begin() + 30);
+    std::ranges::reverse(identifiers);
+
+    const auto history = history_inventory(
+        storage.transport, kasumi::test::workspace_root(storage.workspace));
+    const auto result =
+        kasumi::application::history_storage::inventory_content_reachability(
+            storage.transport,
+            test_key(),
+            identifiers,
+            history,
+            kasumi::test::workspace_root(storage.workspace),
+            false);
+    ASSERT_TRUE(result.has_value());
+
+    EXPECT_TRUE(std::ranges::is_sorted(result->reachable_content_ids));
+    EXPECT_TRUE(std::ranges::is_sorted(result->orphan_content_ids));
+    EXPECT_TRUE(std::ranges::is_sorted(result->unknown_storage_objects));
+    EXPECT_TRUE(std::ranges::is_sorted(
+        result->contents, {}, &ContentEntry::content_id));
+
+    EXPECT_EQ(result->reachable_content_ids.size(), 100U);
+    EXPECT_EQ(result->orphan_content_ids.size(), 50U);
+    EXPECT_EQ(result->unknown_storage_objects.size(), 10U);
+    EXPECT_EQ(result->contents.size(), 150U);
+}
+
+TEST(ContentReachabilityTest, AllocationBudgetAvoidsNodeBasedContainers) {
+    auto storage = make_local_storage();
+    std::vector<NodeRow> rows;
+    rows.push_back(NodeRow{.path = "", .is_directory = true});
+    for (std::size_t i = 0; i < 50; ++i) {
+        rows.push_back(file_row("f" + std::to_string(i), "p" + std::to_string(i)));
+    }
+    const auto commit = make_tree_commit(0, {}, std::move(rows));
+    publish(storage, commit);
+
+    std::vector<std::string> identifiers;
+    identifiers.reserve(100);
+    for (std::size_t i = 0; i < 50; ++i) {
+        identifiers.push_back(content_id("p" + std::to_string(i)));
+    }
+    for (std::size_t i = 0; i < 50; ++i) {
+        identifiers.push_back(content_id("o" + std::to_string(i)));
+    }
+
+    const auto history = history_inventory(
+        storage.transport, kasumi::test::workspace_root(storage.workspace));
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    const auto result =
+        kasumi::application::history_storage::inventory_content_reachability(
+            storage.transport,
+            test_key(),
+            identifiers,
+            history,
+            kasumi::test::workspace_root(storage.workspace),
+            false);
+    ASSERT_TRUE(result.has_value());
+
+    // Budget: Zero intermediate node-based tree containers (std::set, std::map)
+    // and zero node allocations
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "content_reachability.intermediate_tree_containers"),
+              0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "content_reachability.node_allocations"),
+              0U);
 }
 
 } // namespace

@@ -3,6 +3,7 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
+#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <map>
@@ -101,6 +102,8 @@ inventory_impl(transport::Transport& storage,
         }
 
         ReferenceMap references;
+        platform::perf_trace::count(
+            "content_reachability.intermediate_tree_containers", 1);
         std::size_t reference_count = 0;
         for (const auto& commit : history_inventory.commits) {
             if (!commit.valid || !commit.reachable) {
@@ -119,7 +122,12 @@ inventory_impl(transport::Transport& storage,
                 const auto plaintext_hash = hash_hex(row.hash);
                 const auto remote_id =
                     crypto::content_identifier(key, row.hash);
+                const bool is_new = !references.contains(remote_id);
                 auto& content = references[remote_id];
+                if (is_new) {
+                    platform::perf_trace::count(
+                        "content_reachability.node_allocations", 1);
+                }
                 if (!content.references.empty() &&
                     content.references.front().size != row.size) {
                     return std::unexpected(
@@ -159,6 +167,8 @@ inventory_impl(transport::Transport& storage,
         }
 
         std::set<std::string> physical;
+        platform::perf_trace::count(
+            "content_reachability.intermediate_tree_containers", 1);
         std::vector<std::string> unknown;
         if (!listing_span.empty()) {
             const auto layout = derive_remote_layout(key);
@@ -173,7 +183,10 @@ inventory_impl(transport::Transport& storage,
                                       "too many content storage objects"));
                 }
                 if (valid_content_id(identifier)) {
-                    physical.insert(identifier);
+                    if (physical.insert(identifier).second) {
+                        platform::perf_trace::count(
+                            "content_reachability.node_allocations", 1);
+                    }
                 } else {
                     unknown.push_back(identifier);
                 }
@@ -183,6 +196,8 @@ inventory_impl(transport::Transport& storage,
         ContentReachabilityInventory result;
         std::size_t sequence = 0;
         std::map<std::string, ContentEntry> entries;
+        platform::perf_trace::count(
+            "content_reachability.intermediate_tree_containers", 1);
         for (auto& [content_id, content] : references) {
             std::ranges::sort(content.references);
             const auto found = physical.find(content_id);
@@ -216,6 +231,8 @@ inventory_impl(transport::Transport& storage,
                              .state = state,
                              .reachable = true,
                              .references = std::move(content.references)});
+            platform::perf_trace::count(
+                "content_reachability.node_allocations", 1);
         }
 
         for (const auto& content_id : physical) {
@@ -245,6 +262,8 @@ inventory_impl(transport::Transport& storage,
                                          .state = state,
                                          .reachable = false,
                                          .references = {}});
+            platform::perf_trace::count(
+                "content_reachability.node_allocations", 1);
         }
 
         std::ranges::sort(unknown);
