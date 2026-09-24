@@ -233,6 +233,9 @@ void collect_metrics_post_gc(TrialMetrics& m, FakeState* state, const kasumi::ap
                                   m.snapshot2.inspect_markers_epochs_us;
     m.dag_traversal_us =
         m.snapshot1.dag_traversal_us + m.snapshot2.dag_traversal_us;
+    m.content_reference_capacity_growth_events =
+        kasumi::platform::perf_trace::get_count(
+            "rc/content_reference_capacity_growth_events");
 
     kasumi::platform::perf_trace::force_enable(false);
 
@@ -252,9 +255,6 @@ void collect_metrics_post_gc(TrialMetrics& m, FakeState* state, const kasumi::ap
     m.total_identifiers_listed = state->full_list_identifier_count;
     m.commit_object_get_calls = state->commit_get_count;
     m.marker_object_get_calls = state->marker_get_count;
-    m.content_reference_capacity_growth_events =
-        kasumi::platform::perf_trace::get_count(
-            "rc/content_reference_capacity_growth_events");
 
     m.candidates_detected = collected.candidate_objects;
     m.candidates_quarantined = collected.quarantined_objects;
