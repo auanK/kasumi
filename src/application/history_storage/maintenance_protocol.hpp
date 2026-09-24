@@ -138,6 +138,22 @@ verify_quarantine(transport::Transport& storage,
                   const QuarantineEntry& entry,
                   const std::filesystem::path& workspace_root);
 
+// Verifies destination object bytes match expected physical hash via local workspace readback.
+std::expected<void, Error>
+verify_destination_via_workspace(
+    transport::Transport& storage,
+    std::string_view destination_identifier,
+    std::string_view expected_sha256,
+    const std::filesystem::path& workspace_root);
+
+// Copies bytes via local workspace download and upload, validating hash.
+std::expected<std::string, Error>
+copy_verified_via_workspace(
+    transport::Transport& storage,
+    std::string_view source_identifier,
+    std::string_view destination_identifier,
+    const std::filesystem::path& workspace_root);
+
 // Copies bytes, validates destination SHA-256, and returns the hash.
 std::expected<std::string, Error>
 copy_verified(transport::Transport& storage,

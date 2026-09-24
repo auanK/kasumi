@@ -819,8 +819,6 @@ verify_quarantine(transport::Transport& storage,
     return *physical_sha256 == entry.physical_sha256;
 }
 
-namespace {
-
 std::expected<void, Error>
 verify_destination_via_workspace(
     transport::Transport& storage,
@@ -856,6 +854,12 @@ copy_verified_via_workspace(
     std::string_view source_identifier,
     std::string_view destination_identifier,
     const std::filesystem::path& workspace_root) {
+    if (is_epoch_object(source_identifier) ||
+        is_epoch_object(destination_identifier)) {
+        return std::unexpected(
+            error(ErrorCode::Blocked,
+                  "epoch objects cannot be copied by collection"));
+    }
     auto temporary = detail::make_workspace(workspace_root);
     if (!temporary) {
         return std::unexpected(history_error(temporary.error()));
@@ -907,8 +911,6 @@ copy_verified_via_workspace(
     }
     return std::move(*source_hash);
 }
-
-} // namespace
 
 std::expected<std::string, Error>
 copy_verified(transport::Transport& storage,

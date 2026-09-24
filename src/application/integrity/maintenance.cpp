@@ -965,6 +965,13 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
     }
 
     try {
+        const auto gc_total_trace = platform::perf_trace::begin();
+        struct GcTotalTraceGuard {
+            platform::perf_trace::Token token;
+            ~GcTotalTraceGuard() {
+                platform::perf_trace::finish("gc.total_duration_us", token);
+            }
+        } total_guard{.token = gc_total_trace};
         const auto layout = history_storage::derive_remote_layout(key);
         const auto workspace_root = maintenance_workspace_root(runtime_data);
         const auto barrier_acquire_trace = platform::perf_trace::begin();
@@ -1124,6 +1131,14 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     return std::unexpected(purged.error());
                 }
                 result.purged_objects = *purged;
+                platform::perf_trace::count("gc.candidates_selected", confirmed->candidates.size());
+                struct BatchPhaseTraceGuard {
+                    std::string_view name;
+                    platform::perf_trace::Token token;
+                    ~BatchPhaseTraceGuard() {
+                        platform::perf_trace::finish(name, token);
+                    }
+                };
                 for (std::size_t batch_start = 0;
                      batch_start < confirmed->candidates.size();
                      batch_start += max_candidates_per_batch) {
@@ -1133,6 +1148,8 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     std::span<const std::string> candidate_slice{
                         confirmed->candidates.data() + batch_start, batch_count
                     };
+                    platform::perf_trace::count("gc.candidate_batches", 1);
+                    platform::perf_trace::count("gc.batch_sizes", candidate_slice.size());
 
                     std::vector<CandidateItem> batch_items;
                     batch_items.reserve(candidate_slice.size());
@@ -1163,22 +1180,24 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     }
 
                     // Phase 1: Preparation & Native Copy
-                    for (auto& item : batch_items) {
-                        const auto before_copy_barrier_trace =
-                            platform::perf_trace::begin();
-                        auto owned = history_storage::maintenance_protocol::
-                            verify_registration(*barrier);
-                        platform::perf_trace::finish(
-                            "gc candidate pre-copy barrier verification",
-                            before_copy_barrier_trace);
-                        if (!owned) {
-                            return std::unexpected(protocol_error(owned.error()));
-                        }
+                    {
+                        BatchPhaseTraceGuard phase1_guard{
+                            "gc.batch_prepare_duration_us",
+                            platform::perf_trace::begin()};
+                        for (auto& item : batch_items) {
+                            const auto before_copy_barrier_trace =
+                                platform::perf_trace::begin();
+                            auto owned = history_storage::maintenance_protocol::
+                                verify_registration(*barrier);
+                            platform::perf_trace::finish(
+                                "gc candidate pre-copy barrier verification",
+                                before_copy_barrier_trace);
+                            if (!owned) {
+                                return std::unexpected(protocol_error(owned.error()));
+                            }
 
-                        const auto copy_trace = platform::perf_trace::begin();
-                        bool attempted_native = false;
-                        if (transport::prefers_physical_hash_batch(
-                                storage, batch_items.size())) {
+                            const auto copy_trace = platform::perf_trace::begin();
+                            bool attempted_native = false;
                             const auto source_hash_trace =
                                 platform::perf_trace::begin();
                             auto source_hash = transport::physical_hash(
@@ -1195,6 +1214,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                         "invalid source physical SHA-256",
                                         item.source_identifier));
                                 }
+                                platform::perf_trace::count("gc.native_copy_attempts", 1);
                                 const auto native_copy_trace =
                                     platform::perf_trace::begin();
                                 auto copied = transport::copy(
@@ -1207,6 +1227,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                 if (copied) {
                                     platform::perf_trace::count(
                                         "verified copy native copy successes");
+                                    platform::perf_trace::count("gc.native_copy_successes", 1);
                                     item.expected_physical_hash =
                                         std::move(*source_hash);
                                     item.native_copied = true;
@@ -1218,6 +1239,8 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                         "gc candidate verified copy", copy_trace);
                                     return std::unexpected(transport_error(
                                         copied.error(), item.source_identifier));
+                                } else {
+                                    platform::perf_trace::count("gc.native_copy_unsupported", 1);
                                 }
                             } else if (source_hash.error().code !=
                                        transport::ErrorCode::Unsupported) {
@@ -1225,78 +1248,141 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                     "gc candidate verified copy", copy_trace);
                                 return std::unexpected(transport_error(
                                     source_hash.error(), item.source_identifier));
+                            } else {
+                                platform::perf_trace::count("gc.native_copy_unsupported", 1);
                             }
-                        }
 
-                        if (!attempted_native) {
-                            auto copied = history_storage::maintenance_protocol::
-                                copy_verified(storage,
-                                              item.source_identifier,
-                                              item.quarantine_identifier,
-                                              workspace_root);
-                            platform::perf_trace::finish(
-                                "gc candidate verified copy", copy_trace);
-                            if (!copied) {
-                                return std::unexpected(
-                                    protocol_error(copied.error()));
+                            if (!attempted_native) {
+                                platform::perf_trace::count("gc.fallback_copy_attempts", 1);
+                                auto copied = history_storage::maintenance_protocol::
+                                    copy_verified_via_workspace(storage,
+                                                                item.source_identifier,
+                                                                item.quarantine_identifier,
+                                                                workspace_root);
+                                platform::perf_trace::finish(
+                                    "gc candidate verified copy", copy_trace);
+                                if (!copied) {
+                                    return std::unexpected(
+                                        protocol_error(copied.error()));
+                                }
+                                item.expected_physical_hash = std::move(*copied);
+                                item.state = CandidateProcessingState::Verified;
+                                platform::perf_trace::count("gc.candidates_verified", 1);
+                            } else {
+                                platform::perf_trace::finish(
+                                    "gc candidate verified copy", copy_trace);
                             }
-                            item.expected_physical_hash = std::move(*copied);
-                            item.state = CandidateProcessingState::Verified;
-                        } else {
-                            platform::perf_trace::finish(
-                                "gc candidate verified copy", copy_trace);
                         }
                     }
 
                     // Phase 2: Batch Verification of Native Copies
-                    std::vector<CandidateItem*> to_batch_verify;
-                    for (auto& item : batch_items) {
-                        if (item.state == CandidateProcessingState::Copied) {
-                            to_batch_verify.push_back(&item);
-                        }
-                    }
-
-                    if (!to_batch_verify.empty()) {
-                        if (transport::prefers_physical_hash_batch(
-                                storage, to_batch_verify.size())) {
-                            transport::PhysicalHashBatchRequest request{
-                                .scratch_root = workspace_root,
-                                .objects = {},
-                                .algorithm = "sha256",
-                            };
-                            request.objects.reserve(to_batch_verify.size());
-                            for (const auto* item : to_batch_verify) {
-                                request.objects.push_back(
-                                    transport::PhysicalHashExpectation{
-                                        .identifier = item->quarantine_identifier,
-                                        .expected_hash = item->expected_physical_hash,
-                                    });
+                    {
+                        BatchPhaseTraceGuard phase2_guard{
+                            "gc.batch_verify_duration_us",
+                            platform::perf_trace::begin()};
+                        std::vector<CandidateItem*> to_batch_verify;
+                        for (auto& item : batch_items) {
+                            if (item.state == CandidateProcessingState::Copied) {
+                                to_batch_verify.push_back(&item);
                             }
-                            const auto batch_verify_trace =
-                                platform::perf_trace::begin();
-                            auto batch_result = transport::physical_hash_batch(
-                                storage, request);
-                            platform::perf_trace::finish(
-                                "gc candidate batch physical hash verification",
-                                batch_verify_trace);
-                            if (batch_result) {
-                                const auto has = [](const std::vector<std::string>& list,
-                                                    const std::string& val) {
-                                    return std::ranges::find(list, val) != list.end();
+                        }
+
+                        if (!to_batch_verify.empty()) {
+                            if (transport::prefers_physical_hash_batch(
+                                    storage, to_batch_verify.size())) {
+                                transport::PhysicalHashBatchRequest request{
+                                    .scratch_root = workspace_root,
+                                    .objects = {},
+                                    .algorithm = "sha256",
                                 };
-                                for (auto* item : to_batch_verify) {
-                                    if (has(batch_result->matched,
-                                            item->quarantine_identifier)) {
-                                        item->state = CandidateProcessingState::Verified;
-                                        platform::perf_trace::count(
-                                            "verified copy native copy verifications");
-                                    } else {
-                                        item->state = CandidateProcessingState::Failed;
-                                    }
+                                request.objects.reserve(to_batch_verify.size());
+                                for (const auto* item : to_batch_verify) {
+                                    request.objects.push_back(
+                                        transport::PhysicalHashExpectation{
+                                            .identifier = item->quarantine_identifier,
+                                            .expected_hash = item->expected_physical_hash,
+                                        });
                                 }
-                            } else if (batch_result.error().code ==
-                                       transport::ErrorCode::Unsupported) {
+                                platform::perf_trace::count("gc.batch_verify_attempts", 1);
+                                const auto batch_verify_trace =
+                                    platform::perf_trace::begin();
+                                auto batch_result = transport::physical_hash_batch(
+                                    storage, request);
+                                platform::perf_trace::finish(
+                                    "gc candidate batch physical hash verification",
+                                    batch_verify_trace);
+                                if (batch_result) {
+                                    platform::perf_trace::count("gc.batch_verify_supported", 1);
+                                    const auto has = [](const std::vector<std::string>& list,
+                                                        const std::string& val) {
+                                        return std::ranges::find(list, val) != list.end();
+                                    };
+                                    for (auto* item : to_batch_verify) {
+                                        if (has(batch_result->matched,
+                                                item->quarantine_identifier)) {
+                                            item->state = CandidateProcessingState::Verified;
+                                            platform::perf_trace::count(
+                                                "verified copy native copy verifications");
+                                            platform::perf_trace::count("gc.candidates_verified", 1);
+                                        } else {
+                                            item->state = CandidateProcessingState::Failed;
+                                            platform::perf_trace::count("gc.batch_verify_failures", 1);
+                                        }
+                                    }
+                                } else if (batch_result.error().code ==
+                                           transport::ErrorCode::Unsupported) {
+                                    platform::perf_trace::count("gc.batch_verify_unsupported", 1);
+                                    for (auto* item : to_batch_verify) {
+                                        platform::perf_trace::count("gc.individual_destination_hash_attempts", 1);
+                                        const auto dest_hash_trace =
+                                            platform::perf_trace::begin();
+                                        auto dest_hash = transport::physical_hash(
+                                            storage, item->quarantine_identifier, "sha256");
+                                        platform::perf_trace::finish(
+                                            "verified copy destination physical hash",
+                                            dest_hash_trace);
+                                        if (dest_hash) {
+                                            if (!is_hex_sha256(*dest_hash) ||
+                                                *dest_hash != item->expected_physical_hash) {
+                                                item->state = CandidateProcessingState::Failed;
+                                                platform::perf_trace::count("gc.batch_verify_failures", 1);
+                                            } else {
+                                                item->state = CandidateProcessingState::Verified;
+                                                platform::perf_trace::count(
+                                                    "verified copy native copy verifications");
+                                                platform::perf_trace::count("gc.candidates_verified", 1);
+                                            }
+                                        } else if (dest_hash.error().code ==
+                                                   transport::ErrorCode::Unsupported) {
+                                            auto verified = history_storage::
+                                                maintenance_protocol::verify_destination_via_workspace(
+                                                    storage,
+                                                    item->quarantine_identifier,
+                                                    item->expected_physical_hash,
+                                                    workspace_root);
+                                            if (verified) {
+                                                item->state = CandidateProcessingState::Verified;
+                                                platform::perf_trace::count(
+                                                    "verified copy native copy verifications");
+                                                platform::perf_trace::count("gc.candidates_verified", 1);
+                                            } else {
+                                                item->state = CandidateProcessingState::Failed;
+                                                platform::perf_trace::count("gc.batch_verify_failures", 1);
+                                            }
+                                        } else {
+                                            platform::perf_trace::count("gc.batch_verify_failures", 1);
+                                            return std::unexpected(transport_error(
+                                                dest_hash.error(), item->quarantine_identifier));
+                                        }
+                                    }
+                                } else {
+                                    platform::perf_trace::count("gc.batch_verify_failures", 1);
+                                    return std::unexpected(
+                                        transport_error(batch_result.error()));
+                                }
+                            } else {
                                 for (auto* item : to_batch_verify) {
+                                    platform::perf_trace::count("gc.individual_destination_hash_attempts", 1);
                                     const auto dest_hash_trace =
                                         platform::perf_trace::begin();
                                     auto dest_hash = transport::physical_hash(
@@ -1308,119 +1394,94 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                         if (!is_hex_sha256(*dest_hash) ||
                                             *dest_hash != item->expected_physical_hash) {
                                             item->state = CandidateProcessingState::Failed;
+                                            platform::perf_trace::count("gc.batch_verify_failures", 1);
                                         } else {
                                             item->state = CandidateProcessingState::Verified;
                                             platform::perf_trace::count(
                                                 "verified copy native copy verifications");
+                                            platform::perf_trace::count("gc.candidates_verified", 1);
                                         }
                                     } else if (dest_hash.error().code ==
                                                transport::ErrorCode::Unsupported) {
                                         auto verified = history_storage::
-                                            maintenance_protocol::copy_verified(
+                                            maintenance_protocol::verify_destination_via_workspace(
                                                 storage,
-                                                item->source_identifier,
                                                 item->quarantine_identifier,
+                                                item->expected_physical_hash,
                                                 workspace_root);
                                         if (verified) {
                                             item->state = CandidateProcessingState::Verified;
+                                            platform::perf_trace::count(
+                                                "verified copy native copy verifications");
+                                            platform::perf_trace::count("gc.candidates_verified", 1);
                                         } else {
                                             item->state = CandidateProcessingState::Failed;
+                                            platform::perf_trace::count("gc.batch_verify_failures", 1);
                                         }
                                     } else {
-                                        return std::unexpected(transport_error(
-                                            dest_hash.error(), item->quarantine_identifier));
-                                    }
-                                }
-                            } else {
-                                return std::unexpected(
-                                    transport_error(batch_result.error()));
-                            }
-                        } else {
-                            for (auto* item : to_batch_verify) {
-                                const auto dest_hash_trace =
-                                    platform::perf_trace::begin();
-                                auto dest_hash = transport::physical_hash(
-                                    storage, item->quarantine_identifier, "sha256");
-                                platform::perf_trace::finish(
-                                    "verified copy destination physical hash",
-                                    dest_hash_trace);
-                                if (dest_hash) {
-                                    if (!is_hex_sha256(*dest_hash) ||
-                                        *dest_hash != item->expected_physical_hash) {
-                                        item->state = CandidateProcessingState::Failed;
-                                    } else {
-                                        item->state = CandidateProcessingState::Verified;
-                                        platform::perf_trace::count(
-                                            "verified copy native copy verifications");
-                                    }
-                                } else if (dest_hash.error().code ==
-                                           transport::ErrorCode::Unsupported) {
-                                    auto verified = history_storage::
-                                        maintenance_protocol::copy_verified(
-                                            storage,
-                                            item->source_identifier,
-                                            item->quarantine_identifier,
-                                            workspace_root);
-                                    if (verified) {
-                                        item->state = CandidateProcessingState::Verified;
-                                    } else {
-                                        item->state = CandidateProcessingState::Failed;
-                                    }
-                                } else {
+                                    platform::perf_trace::count("gc.batch_verify_failures", 1);
                                     return std::unexpected(transport_error(
                                         dest_hash.error(), item->quarantine_identifier));
                                 }
                             }
                         }
                     }
+                    }
 
                     // Phase 3: Metadata Publication and Removal
-                    for (auto& item : batch_items) {
-                        if (item.state != CandidateProcessingState::Verified) {
-                            return std::unexpected(make_error(
-                                ErrorCode::IntegrityFailure,
-                                "candidate verification failed",
-                                item.source_identifier));
-                        }
+                    {
+                        BatchPhaseTraceGuard phase3_guard{
+                            "gc.batch_publish_remove_duration_us",
+                            platform::perf_trace::begin()};
+                        for (auto& item : batch_items) {
+                            if (item.state != CandidateProcessingState::Verified) {
+                                return std::unexpected(make_error(
+                                    ErrorCode::IntegrityFailure,
+                                    "candidate verification failed",
+                                    item.source_identifier));
+                            }
 
-                        const auto metadata_trace = platform::perf_trace::begin();
-                        auto recorded = history_storage::maintenance_protocol::
-                            record_quarantine(storage,
-                                              item.quarantine_identifier,
-                                              *now,
-                                              key,
-                                              workspace_root,
-                                              item.expected_physical_hash);
-                        platform::perf_trace::finish(
-                            "gc candidate metadata publish", metadata_trace);
-                        if (!recorded) {
-                            return std::unexpected(
-                                protocol_error(recorded.error()));
-                        }
-                        item.state = CandidateProcessingState::MetadataPublished;
+                            const auto metadata_trace = platform::perf_trace::begin();
+                            auto recorded = history_storage::maintenance_protocol::
+                                record_quarantine(storage,
+                                                  item.quarantine_identifier,
+                                                  *now,
+                                                  key,
+                                                  workspace_root,
+                                                  item.expected_physical_hash);
+                            platform::perf_trace::finish(
+                                "gc candidate metadata publish", metadata_trace);
+                            if (!recorded) {
+                                return std::unexpected(
+                                    protocol_error(recorded.error()));
+                            }
+                            item.state = CandidateProcessingState::MetadataPublished;
 
-                        const auto before_remove_barrier_trace =
-                            platform::perf_trace::begin();
-                        auto owned = history_storage::maintenance_protocol::
-                            verify_registration(*barrier);
-                        platform::perf_trace::finish(
-                            "gc candidate pre-remove barrier verification",
-                            before_remove_barrier_trace);
-                        if (!owned) {
-                            return std::unexpected(protocol_error(owned.error()));
-                        }
+                            const auto before_remove_barrier_trace =
+                                platform::perf_trace::begin();
+                            auto owned = history_storage::maintenance_protocol::
+                                verify_registration(*barrier);
+                            platform::perf_trace::finish(
+                                "gc candidate pre-remove barrier verification",
+                                before_remove_barrier_trace);
+                            if (!owned) {
+                                return std::unexpected(protocol_error(owned.error()));
+                            }
 
-                        const auto remove_trace = platform::perf_trace::begin();
-                        auto removed = transport::remove(storage, item.source_identifier);
-                        platform::perf_trace::finish(
-                            "gc candidate remove", remove_trace);
-                        if (!removed) {
-                            return std::unexpected(transport_error(
-                                removed.error(), item.source_identifier));
-                        }
-                        if (*removed == transport::Removal::Removed) {
-                            item.state = CandidateProcessingState::Removed;
-                            ++result.quarantined_objects;
+                            platform::perf_trace::count("gc.source_removals", 1);
+                            const auto remove_trace = platform::perf_trace::begin();
+                            auto removed = transport::remove(storage, item.source_identifier);
+                            platform::perf_trace::finish(
+                                "gc candidate remove", remove_trace);
+                            if (!removed) {
+                                return std::unexpected(transport_error(
+                                    removed.error(), item.source_identifier));
+                            }
+                            if (*removed == transport::Removal::Removed) {
+                                item.state = CandidateProcessingState::Removed;
+                                ++result.quarantined_objects;
+                                platform::perf_trace::count("gc.candidates_quarantined", 1);
+                            }
                         }
                     }
                 }
