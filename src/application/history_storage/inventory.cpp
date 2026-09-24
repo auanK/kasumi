@@ -1,5 +1,6 @@
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
+#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -84,11 +85,16 @@ build_history_inventory(transport::Transport& storage) {
 std::expected<HistoryInventory, Error>
 build_history_inventory(std::span<const std::string> identifiers,
                         const RemoteLayout& layout) {
+    platform::perf_trace::count(
+        "history_inventory.intermediate_tree_containers", 1);
     HistoryInventory inventory;
     for (const auto& identifier : identifiers) {
         if (is_history_object(layout, identifier) &&
             !is_control_object(layout, identifier)) {
-            inventory.identifiers.insert(identifier);
+            if (inventory.identifiers.insert(identifier).second) {
+                platform::perf_trace::count(
+                    "history_inventory.node_allocations", 1);
+            }
         }
     }
     if (inventory.identifiers.size() > maximum_history_object_count) {

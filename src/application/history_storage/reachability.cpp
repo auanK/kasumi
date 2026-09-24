@@ -93,9 +93,12 @@ ReachabilityResult inventory_impl(
     const auto layout = derive_remote_layout(key);
     // The listing freezes the observation; new markers are deferred to the next
     // run.
+    const auto inventory_trace = platform::perf_trace::begin();
     auto listed = identifiers
                       ? detail::build_history_inventory(*identifiers, layout)
                       : detail::build_history_inventory(storage, layout);
+    platform::perf_trace::finish(
+        "rc/build_history_inventory", inventory_trace);
     if (!listed) {
         return std::unexpected(listed.error());
     }
@@ -126,9 +129,15 @@ ReachabilityResult inventory_impl(
     }
 
     CommitMap commits;
+    platform::perf_trace::count(
+        "reachability.intermediate_tree_containers", 1);
     std::size_t sequence = 0;
     for (const auto& [commit_id, references] : listed->commit_variants) {
+        const bool is_new = !commits.contains(commit_id);
         auto& commit = commits[commit_id];
+        if (is_new) {
+            platform::perf_trace::count("reachability.node_allocations", 1);
+        }
         commit.commit_id = commit_id;
         for (const auto& reference : references) {
             auto loaded = detail::try_load_variant(
@@ -305,8 +314,11 @@ ReachabilityResult inventory_impl(
         }
     }
 
+    const auto dag_trace = platform::perf_trace::begin();
     std::set<std::string> visited;
     std::set<std::string> reachable;
+    platform::perf_trace::count(
+        "reachability.intermediate_tree_containers", 2);
     std::vector<std::pair<std::string, std::size_t>> pending;
     for (const auto& root : result.logical_heads) {
         pending.emplace_back(root, 0);
@@ -321,11 +333,14 @@ ReachabilityResult inventory_impl(
         if (!visited.insert(commit_id).second) {
             continue;
         }
+        platform::perf_trace::count("reachability.node_allocations", 1);
         const auto found = commits.find(commit_id);
         if (found == commits.end() || !found->second.valid) {
             continue;
         }
-        reachable.insert(commit_id);
+        if (reachable.insert(commit_id).second) {
+            platform::perf_trace::count("reachability.node_allocations", 1);
+        }
         if (epoch_anchors.contains(commit_id)) {
             continue;
         }
@@ -333,6 +348,7 @@ ReachabilityResult inventory_impl(
             pending.emplace_back(parent, depth + 1);
         }
     }
+    platform::perf_trace::finish("rc/dag_traversal", dag_trace);
 
     sort_unique(result.logical_heads);
     result.reachable_commits.assign(reachable.begin(), reachable.end());
