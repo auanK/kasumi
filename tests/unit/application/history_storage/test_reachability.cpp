@@ -1,3 +1,4 @@
+#include "application/history_storage/epoch.hpp"
 #include "application/history_storage/reachability.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
@@ -665,6 +666,53 @@ TEST(ReachabilityTest, InvalidCommitIsReported) {
     EXPECT_EQ(entry->variants.front().state, VariantState::InvalidCommit);
     EXPECT_EQ(result.markers.front().state,
               ReachabilityMarkerState::InvalidCommit);
+}
+
+TEST(ReachabilityTest, EpochAnchorMustBePresentAndMatchItsHeight) {
+    const auto check_anchor = [](std::string_view suffix,
+                                 const Commit& commit,
+                                 const std::string& anchor_id,
+                                 std::uint64_t anchor_height) {
+        auto workspace =
+            kasumi::test::make_temp_workspace(std::string{suffix});
+        FakeState* state = nullptr;
+        auto transport = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(transport));
+        add_fake_commit(transport, workspace, commit, "head");
+
+        const kasumi::application::history_storage::epoch::Epoch value{
+            .vault_id = std::string(64, 'a'),
+            .sequence = 0,
+            .issued_at = 1,
+            .policy = {},
+            .anchors = {{.commit_id = anchor_id, .height = anchor_height}},
+        };
+        const auto sealed =
+            kasumi::application::history_storage::epoch::seal(value, test_key());
+        ASSERT_TRUE(sealed.has_value()) << sealed.error().detail;
+        ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
+            transport, test_key(), *sealed,
+            kasumi::test::workspace_root(workspace)));
+
+        const auto result =
+            kasumi::application::history_storage::inventory_reachability(
+                transport, test_key(),
+                kasumi::test::workspace_root(workspace));
+        EXPECT_FALSE(result.has_value());
+    };
+
+    const auto absent_anchor = std::string(64, 'f');
+    check_anchor("reachability-missing-epoch-anchor",
+                 make_commit(1, {absent_anchor}, "head.txt", "head").value(),
+                 absent_anchor,
+                 0);
+
+    const auto mismatched =
+        make_commit(2, {}, "mismatched.txt", "mismatched").value();
+    check_anchor("reachability-wrong-epoch-anchor-height",
+                 mismatched,
+                 commit_id(mismatched),
+                 1);
 }
 
 TEST(ReachabilityTest, InventoryIsReadOnly) {
