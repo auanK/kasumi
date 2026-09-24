@@ -89,13 +89,49 @@ void sort_unique(std::vector<std::string>& values) {
     values.erase(std::ranges::unique(values).begin(), values.end());
 }
 
+struct TraceGuard {
+    std::string_view name;
+    platform::perf_trace::Token token;
+    bool active = true;
+    void stop() noexcept {
+        if (active) {
+            platform::perf_trace::finish(name, token);
+            active = false;
+        }
+    }
+    ~TraceGuard() noexcept { stop(); }
+};
+
 ReachabilityResult inventory_impl(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const std::filesystem::path& workspace_root,
     std::optional<std::span<const std::string>> identifiers = std::nullopt,
     std::optional<std::span<const epoch::VerifiedEpoch>> verified_epochs =
-        std::nullopt) {
+        std::nullopt,
+    std::string_view trace_scope = {}) {
+    std::string scoped_build_inventory_name;
+    std::string scoped_load_commits_name;
+    std::string scoped_inspect_history_name;
+    std::string scoped_dag_traversal_name;
+    const auto metric_name = [trace_scope](std::string_view name,
+                                           std::string& scoped_name) {
+        if (trace_scope.empty()) {
+            return name;
+        }
+        scoped_name.assign(trace_scope);
+        scoped_name.append("/");
+        scoped_name.append(name);
+        return std::string_view{scoped_name};
+    };
+    const auto build_inventory_name =
+        metric_name("rc/build_history_inventory", scoped_build_inventory_name);
+    const auto load_commits_name =
+        metric_name("rc/load_and_auth_commits", scoped_load_commits_name);
+    const auto inspect_history_name =
+        metric_name("rc/inspect_markers_epochs", scoped_inspect_history_name);
+    const auto dag_traversal_name =
+        metric_name("rc/dag_traversal", scoped_dag_traversal_name);
     if (!transport::valid(storage)) {
         return std::unexpected(
             detail::error(ErrorCode::InvalidInput, "invalid transport"));
@@ -111,8 +147,7 @@ ReachabilityResult inventory_impl(
     auto listed = identifiers
                       ? detail::build_history_inventory(*identifiers, layout)
                       : detail::build_history_inventory(storage, layout);
-    platform::perf_trace::finish(
-        "rc/build_history_inventory", inventory_trace);
+    platform::perf_trace::finish(build_inventory_name, inventory_trace);
     if (!listed) {
         return std::unexpected(listed.error());
     }
@@ -142,6 +177,8 @@ ReachabilityResult inventory_impl(
         }
     }
 
+    TraceGuard load_commits_guard{load_commits_name,
+                                  platform::perf_trace::begin()};
     CommitList commits;
     commits.reserve(listed->commit_variants.size() + listed->marker_variants.size());
     std::size_t sequence = 0;
@@ -167,7 +204,10 @@ ReachabilityResult inventory_impl(
             }
         }
     }
+    load_commits_guard.stop();
 
+    TraceGuard inspect_guard{inspect_history_name,
+                             platform::perf_trace::begin()};
     ReachabilityInventory result;
     std::vector<std::pair<std::string, epoch::VerifiedEpoch>> loaded_epochs;
     if (verified_epochs) {
@@ -322,8 +362,9 @@ ReachabilityResult inventory_impl(
             }
         }
     }
+    inspect_guard.stop();
 
-    const auto dag_trace = platform::perf_trace::begin();
+    TraceGuard dag_guard{dag_traversal_name, platform::perf_trace::begin()};
     std::vector<std::pair<std::string, std::size_t>> pending;
     for (const auto& root : result.logical_heads) {
         pending.emplace_back(root, 0);
@@ -347,7 +388,7 @@ ReachabilityResult inventory_impl(
             pending.emplace_back(parent, depth + 1);
         }
     }
-    platform::perf_trace::finish("rc/dag_traversal", dag_trace);
+    dag_guard.stop();
 
     sort_unique(result.logical_heads);
     sort_unique(result.missing_parent_ids);
@@ -383,10 +424,12 @@ ReachabilityResult
 inventory_reachability(transport::Transport& storage,
                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                        std::span<const std::string> identifiers,
-                       const std::filesystem::path& workspace_root) {
+                       const std::filesystem::path& workspace_root,
+                       std::string_view trace_scope) {
     try {
         return inventory_impl(
-            storage, key, workspace_root, identifiers, std::nullopt);
+            storage, key, workspace_root, identifiers, std::nullopt,
+            trace_scope);
     } catch (const std::bad_alloc&) {
         return std::unexpected(
             detail::error(ErrorCode::LimitExceeded, "allocation failed"));

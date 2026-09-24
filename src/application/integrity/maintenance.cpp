@@ -57,6 +57,50 @@ bool is_hex_sha256(std::string_view value) noexcept {
 
 using KeySpan = std::span<const std::uint8_t, crypto::KEY_SIZE>;
 
+struct TraceGuard {
+    std::string_view name;
+    platform::perf_trace::Token token;
+    bool active = true;
+    void stop() noexcept {
+        if (active) {
+            platform::perf_trace::finish(name, token);
+            active = false;
+        }
+    }
+    ~TraceGuard() noexcept { stop(); }
+};
+
+struct SnapshotTraceNames {
+    std::string_view physical_listing;
+    std::string_view history_reconstruction;
+    std::string_view history_validation;
+    std::string_view content_reachability;
+    std::string_view candidate_selection;
+    std::string_view history_scope;
+};
+
+constexpr SnapshotTraceNames analysis_snapshot_traces{
+    "gc.snapshot.analysis.physical_listing_us",
+    "gc.snapshot.analysis.history_reconstruction_us",
+    "gc.snapshot.analysis.validate_history_us",
+    "gc.snapshot.analysis.content_reachability_us",
+    "gc.snapshot.analysis.candidate_selection_us",
+    "gc.snapshot.analysis"};
+constexpr SnapshotTraceNames first_snapshot_traces{
+    "gc.snapshot.first.physical_listing_us",
+    "gc.snapshot.first.history_reconstruction_us",
+    "gc.snapshot.first.validate_history_us",
+    "gc.snapshot.first.content_reachability_us",
+    "gc.snapshot.first.candidate_selection_us",
+    "gc.snapshot.first"};
+constexpr SnapshotTraceNames second_snapshot_traces{
+    "gc.snapshot.second.physical_listing_us",
+    "gc.snapshot.second.history_reconstruction_us",
+    "gc.snapshot.second.validate_history_us",
+    "gc.snapshot.second.content_reachability_us",
+    "gc.snapshot.second.candidate_selection_us",
+    "gc.snapshot.second"};
+
 enum class AuditState {
     Healthy,
     Missing,
@@ -282,27 +326,45 @@ std::expected<GarbageCollectionSnapshot, Error>
 collect_garbage_collection_snapshot(
     transport::Transport& storage,
     KeySpan key,
-    const std::filesystem::path& workspace_root) {
+    const std::filesystem::path& workspace_root,
+    const SnapshotTraceNames& traces) {
+    TraceGuard list_guard{traces.physical_listing,
+                          platform::perf_trace::begin()};
     auto listing = transport::list(storage);
     if (!listing) {
         return std::unexpected(transport_error(listing.error()));
     }
     std::ranges::sort(*listing);
+    list_guard.stop();
 
+    TraceGuard history_guard{traces.history_reconstruction,
+                             platform::perf_trace::begin()};
     auto history = history_storage::inventory_reachability(
-        storage, key, *listing, workspace_root);
+        storage, key, *listing, workspace_root,
+        platform::perf_trace::enabled() ? traces.history_scope
+                                        : std::string_view{});
     if (!history) {
         return std::unexpected(history_storage_error(history.error()));
     }
+    history_guard.stop();
+    TraceGuard val_hist_guard{traces.history_validation,
+                              platform::perf_trace::begin()};
     if (auto valid = validate_history_inventory(*history); !valid) {
         return std::unexpected(valid.error());
     }
+    val_hist_guard.stop();
 
+    TraceGuard content_guard{traces.content_reachability,
+                             platform::perf_trace::begin()};
     auto content = history_storage::inventory_content_reachability(
         storage, key, *listing, *history, workspace_root, false);
     if (!content) {
         return std::unexpected(history_storage_error(content.error()));
     }
+    content_guard.stop();
+
+    TraceGuard cand_guard{traces.candidate_selection,
+                          platform::perf_trace::begin()};
     if (auto valid = validate_content_inventory(*content); !valid) {
         return std::unexpected(valid.error());
     }
@@ -1023,7 +1085,8 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                 }
                 if (!*online) {
                     auto analyzed = collect_garbage_collection_snapshot(
-                        storage, key, workspace_root);
+                        storage, key, workspace_root,
+                        analysis_snapshot_traces);
                     if (!analyzed) {
                         return std::unexpected(analyzed.error());
                     }
@@ -1069,7 +1132,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                 const auto first_observation_trace =
                     platform::perf_trace::begin();
                 auto first = collect_garbage_collection_snapshot(
-                    storage, key, workspace_root);
+                    storage, key, workspace_root, first_snapshot_traces);
                 platform::perf_trace::finish("gc reachability observation 1",
                                              first_observation_trace);
                 if (!first) {
@@ -1078,7 +1141,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                 const auto second_observation_trace =
                     platform::perf_trace::begin();
                 auto confirmed = collect_garbage_collection_snapshot(
-                    storage, key, workspace_root);
+                    storage, key, workspace_root, second_snapshot_traces);
                 platform::perf_trace::finish("gc reachability observation 2",
                                              second_observation_trace);
                 if (!confirmed) {

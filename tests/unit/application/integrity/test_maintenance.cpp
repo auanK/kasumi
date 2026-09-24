@@ -3042,6 +3042,56 @@ TEST(IntegrityMaintenanceTest, BatchGcTailOfOneHundredCandidatesWithThresholdSix
     EXPECT_EQ(state->quarantine_payload_put_count, 0U);
 }
 
+TEST(IntegrityMaintenanceTest, SnapshotTraceScopesResetAndKeepPartialFailures) {
+    struct TraceGuard {
+        ~TraceGuard() { kasumi::platform::perf_trace::force_enable(false); }
+    } trace_guard;
+    kasumi::platform::perf_trace::force_enable(true);
+
+    IntegratedGcFixture fixture{"snapshot-traces", 0};
+    reset_fake_traffic(*fixture.state);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(fixture.state->commit_get_count, 2U);
+    EXPECT_EQ(fixture.state->marker_get_count, 2U);
+    EXPECT_EQ(fixture.state->get_count, 27U);
+    EXPECT_EQ(fixture.state->list_count, 10U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc.snapshot.first/rc/load_and_auth_commits"),
+              1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc.snapshot.second/rc/load_and_auth_commits"),
+              1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/get_commit"), 2U);
+
+    kasumi::platform::perf_trace::reset();
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc.snapshot.first.physical_listing_us"),
+              0U);
+    reset_fake_traffic(*fixture.state);
+    fixture.state->fail_commit_get = true;
+
+    const auto failed = kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key());
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(fixture.state->commit_get_count, 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc.snapshot.first.physical_listing_us"),
+              1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc.snapshot.first.history_reconstruction_us"),
+              1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc.snapshot.first/rc/load_and_auth_commits"),
+              1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc.snapshot.second.physical_listing_us"),
+              0U);
+}
+
 } // namespace
 
 TEST(IntegrityMaintenanceTest, TwoGcObservationsIndependentlyDownloadSingleCommitDirectly) {

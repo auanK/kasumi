@@ -73,6 +73,18 @@ void put_commit_fast(
     }
 }
 
+struct SnapshotTimings {
+    std::uint64_t physical_listing_us = 0;
+    std::uint64_t history_reconstruction_us = 0;
+    std::uint64_t build_history_inventory_us = 0;
+    std::uint64_t load_and_auth_commits_us = 0;
+    std::uint64_t inspect_markers_epochs_us = 0;
+    std::uint64_t dag_traversal_us = 0;
+    std::uint64_t validate_history_us = 0;
+    std::uint64_t content_reachability_us = 0;
+    std::uint64_t candidate_selection_us = 0;
+};
+
 struct TrialMetrics {
     std::string series;
     std::size_t N = 0;
@@ -93,8 +105,8 @@ struct TrialMetrics {
     std::size_t orphan_candidates = 0;
 
     // History reconstruction
-    std::size_t commits_visited = 0;
-    std::size_t authenticated_history_reads = 0;
+    std::size_t commit_object_get_calls = 0;
+    std::size_t marker_object_get_calls = 0;
 
     // Timings (us)
     std::uint64_t barrier_acquire_us = 0;
@@ -122,10 +134,13 @@ struct TrialMetrics {
 
     std::uint64_t total_gc_us = 0;
     std::uint64_t wall_clock_us = 0;
-
-    std::uint64_t build_history_inventory_us = 0;
-    std::uint64_t dag_traversal_us = 0;
     std::uint64_t get_commit_us = 0;
+    std::uint64_t build_history_inventory_us = 0;
+    std::uint64_t load_and_auth_commits_us = 0;
+    std::uint64_t inspect_markers_epochs_us = 0;
+    std::uint64_t dag_traversal_us = 0;
+    SnapshotTimings snapshot1;
+    SnapshotTimings snapshot2;
 
     // Transport calls
     std::size_t transport_list_count = 0;
@@ -180,9 +195,43 @@ void collect_metrics_post_gc(TrialMetrics& m, FakeState* state, const kasumi::ap
 
     m.total_gc_us = kasumi::platform::perf_trace::get_time("gc.total_duration_us");
 
-    m.build_history_inventory_us = kasumi::platform::perf_trace::get_time("rc/build_history_inventory");
-    m.dag_traversal_us = kasumi::platform::perf_trace::get_time("rc/dag_traversal");
     m.get_commit_us = kasumi::platform::perf_trace::get_time("rc/get_commit");
+    const auto trace_time = [](std::string_view scope,
+                               std::string_view name) {
+        std::string metric{scope};
+        metric.append(name);
+        return kasumi::platform::perf_trace::get_time(metric);
+    };
+    const auto collect_snapshot = [&](SnapshotTimings& timings,
+                                      std::string_view scope) {
+        timings.physical_listing_us =
+            trace_time(scope, ".physical_listing_us");
+        timings.history_reconstruction_us =
+            trace_time(scope, ".history_reconstruction_us");
+        timings.build_history_inventory_us =
+            trace_time(scope, "/rc/build_history_inventory");
+        timings.load_and_auth_commits_us =
+            trace_time(scope, "/rc/load_and_auth_commits");
+        timings.inspect_markers_epochs_us =
+            trace_time(scope, "/rc/inspect_markers_epochs");
+        timings.dag_traversal_us = trace_time(scope, "/rc/dag_traversal");
+        timings.validate_history_us = trace_time(scope, ".validate_history_us");
+        timings.content_reachability_us =
+            trace_time(scope, ".content_reachability_us");
+        timings.candidate_selection_us =
+            trace_time(scope, ".candidate_selection_us");
+    };
+    collect_snapshot(m.snapshot1, "gc.snapshot.first");
+    collect_snapshot(m.snapshot2, "gc.snapshot.second");
+    m.build_history_inventory_us =
+        m.snapshot1.build_history_inventory_us +
+        m.snapshot2.build_history_inventory_us;
+    m.load_and_auth_commits_us = m.snapshot1.load_and_auth_commits_us +
+                                 m.snapshot2.load_and_auth_commits_us;
+    m.inspect_markers_epochs_us = m.snapshot1.inspect_markers_epochs_us +
+                                  m.snapshot2.inspect_markers_epochs_us;
+    m.dag_traversal_us =
+        m.snapshot1.dag_traversal_us + m.snapshot2.dag_traversal_us;
 
     kasumi::platform::perf_trace::force_enable(false);
 
@@ -200,7 +249,8 @@ void collect_metrics_post_gc(TrialMetrics& m, FakeState* state, const kasumi::ap
     m.transport_barrier_verify_count = state->barrier_verification_count;
 
     m.total_identifiers_listed = state->full_list_identifier_count;
-    m.authenticated_history_reads = state->commit_get_count;
+    m.commit_object_get_calls = state->commit_get_count;
+    m.marker_object_get_calls = state->marker_get_count;
 
     m.candidates_detected = collected.candidate_objects;
     m.candidates_quarantined = collected.quarantined_objects;
@@ -293,7 +343,6 @@ TrialMetrics run_trial_serie_a(std::size_t N, std::size_t rep) {
     m.content_references_examined = live_count;
     m.unique_reachable_content_ids = live_count;
     m.orphan_candidates = orphan_count;
-    m.commits_visited = 1;
 
     reset_fake_traffic(*state);
     kasumi::platform::perf_trace::force_enable(true);
@@ -405,7 +454,6 @@ TrialMetrics run_trial_serie_b(std::size_t H, std::size_t rep) {
     m.content_references_examined = H * live_count;
     m.unique_reachable_content_ids = live_count;
     m.orphan_candidates = orphan_count;
-    m.commits_visited = H;
 
     reset_fake_traffic(*state);
     kasumi::platform::perf_trace::force_enable(true);
@@ -460,6 +508,15 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
         }
         return SummaryStats::compute(vals);
     };
+    auto extract_snapshot = [&](bool first, auto member_ptr) {
+        std::vector<double> vals;
+        vals.reserve(trials.size());
+        for (const auto& trial : trials) {
+            const auto& snapshot = first ? trial.snapshot1 : trial.snapshot2;
+            vals.push_back(static_cast<double>(snapshot.*member_ptr));
+        }
+        return SummaryStats::compute(vals);
+    };
 
     auto s_barrier = extract(&TrialMetrics::stage_barrier_writers_us);
     auto s_quarantine = extract(&TrialMetrics::stage_quarantine_inventory_recovery_us);
@@ -478,6 +535,48 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
     auto s_build_hist = extract(&TrialMetrics::build_history_inventory_us);
     auto s_dag = extract(&TrialMetrics::dag_traversal_us);
     auto s_get_commit = extract(&TrialMetrics::get_commit_us);
+    auto snapshot_attribution = [&](bool first) {
+        const auto total = first ? s_obs1 : s_obs2;
+        const auto physical = extract_snapshot(
+            first, &SnapshotTimings::physical_listing_us);
+        const auto history = extract_snapshot(
+            first, &SnapshotTimings::history_reconstruction_us);
+        const auto validation = extract_snapshot(
+            first, &SnapshotTimings::validate_history_us);
+        const auto content = extract_snapshot(
+            first, &SnapshotTimings::content_reachability_us);
+        const auto candidates = extract_snapshot(
+            first, &SnapshotTimings::candidate_selection_us);
+        const auto inventory = extract_snapshot(
+            first, &SnapshotTimings::build_history_inventory_us);
+        const auto load = extract_snapshot(
+            first, &SnapshotTimings::load_and_auth_commits_us);
+        const auto inspect = extract_snapshot(
+            first, &SnapshotTimings::inspect_markers_epochs_us);
+        const auto dag = extract_snapshot(
+            first, &SnapshotTimings::dag_traversal_us);
+        const auto history_residual = history.median_v -
+                                      inventory.median_v - load.median_v -
+                                      inspect.median_v - dag.median_v;
+        const auto snapshot_residual = total.median_v - physical.median_v -
+                                       history.median_v - validation.median_v -
+                                       content.median_v - candidates.median_v;
+        return nlohmann::json{
+            {"calls_per_successful_observation", 1},
+            {"exclusive_partition_median_us",
+             {{"physical_listing", physical.median_v},
+              {"history_reconstruction", history.median_v},
+              {"history_validation", validation.median_v},
+              {"content_reachability", content.median_v},
+              {"candidate_selection", candidates.median_v},
+              {"residual_unattributed", snapshot_residual}}},
+            {"history_reconstruction_detail_median_us",
+             {{"build_history_inventory", inventory.median_v},
+              {"load_and_auth_commits", load.median_v},
+              {"inspect_markers_epochs", inspect.median_v},
+              {"dag_traversal", dag.median_v},
+              {"history_residual_unattributed", history_residual}}}};
+    };
 
     const auto& rep1 = trials.front();
     nlohmann::json entry;
@@ -501,8 +600,17 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
     };
 
     entry["history_reconstruction"] = {
-        {"commits_visited", rep1.commits_visited},
-        {"authenticated_history_reads", rep1.authenticated_history_reads}
+        {"retained_commits_fixture", rep1.retained_commits},
+        {"commit_object_get_calls", rep1.commit_object_get_calls},
+        {"marker_object_get_calls", rep1.marker_object_get_calls},
+        {"other_object_get_calls", rep1.transport_get_count - rep1.commit_object_get_calls - rep1.marker_object_get_calls},
+        {"commit_object_get_calls_per_observation", rep1.commit_object_get_calls / 2}
+    };
+    entry["snapshot_attribution"] = {
+        {"observation_1", snapshot_attribution(true)},
+        {"observation_2", snapshot_attribution(false)},
+        {"get_commit_transport_time_both_observations_inclusive_us",
+         s_get_commit.median_v}
     };
 
     entry["timings_us"] = {
