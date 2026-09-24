@@ -1,3 +1,4 @@
+#include "platform/perf_trace.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
@@ -1200,6 +1201,161 @@ TEST(GcLivePreflightRcTest, ReadOnlyDiagnosticTimeoutFailsClosed) {
     EXPECT_EQ(gc_live::classify_pre_initialize(observation, *parent, child)
                   .disposition,
               gc_live::ChildDisposition::Refused);
+}
+
+
+
+
+// ============================================================================
+// Phase 10B RC Telemetry Tests
+// ============================================================================
+
+TEST(RcloneRcTelemetryTest, ScenarioIRcRetryCountsEachAttempt) {
+    RcServerState remote;
+    std::atomic_int attempt_count = 0;
+    remote.server.Post(
+        "/rc/operations/hashsumfile",
+        [&](const httplib::Request&, httplib::Response& response) {
+            const int current = ++attempt_count;
+            if (current == 1) {
+                close_response_early(response);
+                return;
+            }
+            response.status = 200;
+            response.set_content(
+                R"({"hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","hashType":"SHA-256"})",
+                "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    auto transport = make_preflight_transport(state);
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    const auto hash_result = kasumi::transport::physical_hash(
+        transport, "objects/test-obj", "sha256");
+
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(hash_result.has_value()) << hash_result.error().message;
+    EXPECT_EQ(attempt_count.load(), 2);
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_attempted"), 2U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_failed"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_completed"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_by_endpoint.operations/hashsumfile"), 2U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(RcloneRcTelemetryTest, ScenarioJFailureBeforeRcSend) {
+    kasumi::transport::rclone_detail::State state;
+    state.port = 12345;
+    state.base_url = "/rc";
+    state.ready = true;
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    // Invalid endpoint with path traversal must fail BEFORE HTTP send
+    const auto result = kasumi::transport::rclone_detail::post_rc(
+        state, "../forbidden", "{}", 1024, std::chrono::seconds(1));
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, kasumi::transport::ErrorCode::ProtocolFailure);
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_attempted"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_failed"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_completed"), 0U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(RcloneRcTelemetryTest, ScenarioKRcTelemetryDisabled) {
+    RcServerState remote;
+    remote.server.Post(
+        "/rc/operations/hashsumfile",
+        [&](const httplib::Request&, httplib::Response& response) {
+            response.status = 200;
+            response.set_content(
+                R"({"hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","hashType":"SHA-256"})",
+                "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    auto transport = make_preflight_transport(state);
+
+    kasumi::platform::perf_trace::force_enable(false);
+    kasumi::platform::perf_trace::reset();
+
+    const auto hash_result = kasumi::transport::physical_hash(
+        transport, "objects/test-obj", "sha256");
+
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(hash_result.has_value());
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_attempted"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_completed"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_failed"), 0U);
+}
+
+TEST(RcloneRcTelemetryTest, ScenarioRcEndpointsAndControlBytes) {
+    RcServerState remote;
+    remote.server.Post(
+        "/rc/operations/stat",
+        [&](const httplib::Request&, httplib::Response& response) {
+            response.status = 200;
+            response.set_content(R"({"item":{"Path":"test","Size":123}})", "application/json");
+        });
+    remote.server.Post(
+        "/rc/operations/deletefile",
+        [&](const httplib::Request&, httplib::Response& response) {
+            response.status = 200;
+            response.set_content(R"({})", "application/json");
+        });
+    remote.server.Post(
+        "/rc/operations/copyfile",
+        [&](const httplib::Request&, httplib::Response& response) {
+            response.status = 200;
+            response.set_content(R"({})", "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    auto transport = make_preflight_transport(state);
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    const auto stat_res = kasumi::transport::presence(transport, "objects/obj1");
+    const auto copy_res = kasumi::transport::copy(transport, "objects/obj1", "quarantine/obj1");
+    const auto del_res = kasumi::transport::remove(transport, "objects/obj1");
+
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(stat_res.has_value());
+    ASSERT_TRUE(copy_res.has_value());
+    ASSERT_TRUE(del_res.has_value());
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_attempted"), 3U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_completed"), 3U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_failed"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_by_endpoint.operations/stat"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_by_endpoint.operations/copyfile"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc.http_requests_by_endpoint.operations/deletefile"), 1U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_count("rc.bytes_sent_control_json"), 0U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_count("rc.bytes_received_control_json"), 0U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
 }
 
 } // namespace
