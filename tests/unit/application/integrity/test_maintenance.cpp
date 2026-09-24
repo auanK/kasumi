@@ -3594,4 +3594,331 @@ TEST(IntegrityMaintenanceTelemetryTest, ScenarioMInterruption) {
     kasumi::platform::perf_trace::force_enable(false);
 }
 
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario1HistoricalContentRetained) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen1");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    // Commit 0: creates "x.txt" with "content_X"
+    const auto commit0 = make_commit(0, {}, "x.txt", "content_X").value();
+    const auto pub0 = publish_remote(transport, workspace, commit0);
+    const auto id_x = put_content(transport, workspace, "content_X", "x-content");
+
+    // Commit 1: updates to "y.txt" with "content_Y", parent is commit0
+    const auto commit1 = make_commit(1, {pub0.head.commit_id}, "y.txt", "content_Y").value();
+    const auto pub1 = publish_remote(transport, workspace, commit1);
+    const auto id_y = put_content(transport, workspace, "content_Y", "y-content");
+
+    // Orphan candidate
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    // X is NOT in head commit1, but is in historical commit0 reachable from head -> protected!
+    expect_presence(transport, id_x, Presence::Present);
+    expect_presence(transport, id_y, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Absent);
+}
+
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario2SharedBranch) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen2");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    // Root commit with "shared.txt" = "content_X"
+    const auto root = make_commit(0, {}, "shared.txt", "content_X").value();
+    const auto pub_root = publish_remote(transport, workspace, root);
+    const auto id_x = put_content(transport, workspace, "content_X", "x-content");
+
+    // Branch A: drops shared.txt, adds branch_a.txt = "content_A"
+    const auto commit_a = make_commit(1, {pub_root.head.commit_id}, "branch_a.txt", "content_A").value();
+    publish_remote(transport, workspace, commit_a);
+    const auto id_a = put_content(transport, workspace, "content_A", "a-content");
+
+    // Branch B: keeps shared.txt, adds branch_b.txt = "content_B"
+    Snapshot snap_b{
+        .rows = {
+            kasumi::NodeRow{.path = "", .hash = {}, .size = 0, .mtime = {}, .is_directory = true},
+            kasumi::NodeRow{.path = "branch_b.txt", .hash = kasumi::hasher::hash_string("content_B"), .size = 9, .mtime = {}, .is_directory = false},
+            kasumi::NodeRow{.path = "shared.txt", .hash = kasumi::hasher::hash_string("content_X"), .size = 9, .mtime = {}, .is_directory = false},
+        },
+    };
+    kasumi::finalize_snapshot(snap_b);
+    const auto commit_b = kasumi::history::make_commit(1, {pub_root.head.commit_id}, std::move(snap_b)).value();
+    publish_remote(transport, workspace, commit_b);
+    const auto id_b = put_content(transport, workspace, "content_B", "b-content");
+
+    // Orphan candidate
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    // Branch A drops X, but Branch B (and root) still reference X -> X remains protected!
+    expect_presence(transport, id_x, Presence::Present);
+    expect_presence(transport, id_a, Presence::Present);
+    expect_presence(transport, id_b, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Absent);
+}
+
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario3ContentReturn) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen3");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    // Commit 0: has X
+    const auto c0 = make_commit(0, {}, "data.txt", "content_X").value();
+    const auto pub0 = publish_remote(transport, workspace, c0);
+    const auto id_x = put_content(transport, workspace, "content_X", "x-content");
+
+    // Commit 1: replaces X with Y
+    const auto c1 = make_commit(1, {pub0.head.commit_id}, "data.txt", "content_Y").value();
+    const auto pub1 = publish_remote(transport, workspace, c1);
+    const auto id_y = put_content(transport, workspace, "content_Y", "y-content");
+
+    // Commit 2: returns to X
+    const auto c2 = make_commit(2, {pub1.head.commit_id}, "data.txt", "content_X").value();
+    publish_remote(transport, workspace, c2);
+
+    // Orphan candidate
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    // X was removed in commit 1, but re-introduced in commit 2 (and existed in commit 0).
+    // The prior removal must not authorize collection of X!
+    expect_presence(transport, id_x, Presence::Present);
+    expect_presence(transport, id_y, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Absent);
+}
+
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario4Merge) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen4");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    // Base commit
+    const auto c0 = make_commit(0, {}, "base.txt", "content_C0").value();
+    const auto pub0 = publish_remote(transport, workspace, c0);
+    const auto id_c0 = put_content(transport, workspace, "content_C0", "c0-content");
+
+    // Branch 1
+    const auto c1a = make_commit(1, {pub0.head.commit_id}, "branch_1.txt", "content_1A").value();
+    const auto pub1a = publish_remote(transport, workspace, c1a);
+    const auto id_1a = put_content(transport, workspace, "content_1A", "1a-content");
+
+    // Branch 2
+    const auto c1b = make_commit(1, {pub0.head.commit_id}, "branch_2.txt", "content_1B").value();
+    const auto pub1b = publish_remote(transport, workspace, c1b);
+    const auto id_1b = put_content(transport, workspace, "content_1B", "1b-content");
+
+    // Merge commit with 2 parents: pub1a and pub1b
+    Snapshot snap_merge{
+        .rows = {
+            kasumi::NodeRow{.path = "", .hash = {}, .size = 0, .mtime = {}, .is_directory = true},
+            kasumi::NodeRow{.path = "base.txt", .hash = kasumi::hasher::hash_string("content_C0"), .size = 10, .mtime = {}, .is_directory = false},
+            kasumi::NodeRow{.path = "branch_1.txt", .hash = kasumi::hasher::hash_string("content_1A"), .size = 10, .mtime = {}, .is_directory = false},
+            kasumi::NodeRow{.path = "branch_2.txt", .hash = kasumi::hasher::hash_string("content_1B"), .size = 10, .mtime = {}, .is_directory = false},
+        },
+    };
+    kasumi::finalize_snapshot(snap_merge);
+    const auto c_merge = kasumi::history::make_commit(2, {pub1a.head.commit_id, pub1b.head.commit_id}, std::move(snap_merge)).value();
+    publish_remote(transport, workspace, c_merge);
+
+    // Orphan candidate
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    // All merged branches and base remain protected
+    expect_presence(transport, id_c0, Presence::Present);
+    expect_presence(transport, id_1a, Presence::Present);
+    expect_presence(transport, id_1b, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Absent);
+}
+
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario5EpochRetention) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen5");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    // Commit 0
+    const auto c0 = make_commit(0, {}, "c0.txt", "content_0").value();
+    const auto pub0 = publish_remote(transport, workspace, c0);
+    const auto id_0 = put_content(transport, workspace, "content_0", "c0-content");
+
+    // Commit 1
+    const auto c1 = make_commit(1, {pub0.head.commit_id}, "c1.txt", "content_1").value();
+    const auto pub1 = publish_remote(transport, workspace, c1);
+    const auto id_1 = put_content(transport, workspace, "content_1", "c1-content");
+
+    // Commit 2
+    const auto c2 = make_commit(2, {pub1.head.commit_id}, "c2.txt", "content_2").value();
+    publish_remote(transport, workspace, c2);
+    const auto id_2 = put_content(transport, workspace, "content_2", "c2-content");
+
+    // Publish an Epoch anchored at commit 0
+    const std::string vault_id(64, 'e');
+    kasumi::application::history_storage::epoch::Epoch epoch_val{
+        .vault_id = vault_id,
+        .sequence = 0,
+        .issued_at = 100,
+        .policy = {},
+        .anchors = {{pub0.head.commit_id, 0}},
+        .previous_epoch_id = {},
+    };
+    const auto sealed = kasumi::application::history_storage::epoch::seal(epoch_val, test_key());
+    ASSERT_TRUE(sealed.has_value());
+    ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
+        transport, test_key(), *sealed, kasumi::test::workspace_root(workspace)));
+
+    // Orphan candidate
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    // Everything protected by epoch boundary and history is preserved
+    expect_presence(transport, id_0, Presence::Present);
+    expect_presence(transport, id_1, Presence::Present);
+    expect_presence(transport, id_2, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Absent);
+}
+
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario6AlterationBetweenObservations) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen6");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    const auto c0 = make_commit(0, {}, "data.txt", "content_0").value();
+    publish_remote(transport, workspace, c0);
+    const auto id_0 = put_content(transport, workspace, "content_0", "c0-content");
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    reset_fake_traffic(*state);
+
+    // Observation 1 is list call 8. Observation 2 is list call 9.
+    // Reveal a new valid content object on list call 9 so snapshot 2 diverges from snapshot 1.
+    state->reveal_on_list_count = 9;
+    const auto concurrent_id = kasumi::crypto::content_identifier(
+        test_key(), kasumi::hasher::hash_string("concurrent_valid_content"));
+    state->hidden_objects[concurrent_id] = {1, 2, 3, 4};
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange)
+        << collected.error().detail;
+
+    // Fail-closed invariant: no destructive operations occurred!
+    expect_presence(transport, id_0, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Present);
+}
+
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario7AlterationBeforeFinalListing) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen7");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    const auto c0 = make_commit(0, {}, "data.txt", "content_0").value();
+    publish_remote(transport, workspace, c0);
+    const auto id_0 = put_content(transport, workspace, "content_0", "c0-content");
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    reset_fake_traffic(*state);
+
+    // Snapshot 1 (call 8) and Snapshot 2 (call 9) match!
+    // Final listing (call 10) sees a newly added object.
+    state->reveal_on_list_count = 10;
+    state->hidden_objects["late_arriving_object"] = {5, 6, 7, 8};
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange);
+
+    // Fail-closed invariant: no removals!
+    expect_presence(transport, id_0, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Present);
+}
+
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario8IoErrorAndIncompleteListing) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen8");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    const auto c0 = make_commit(0, {}, "data.txt", "content_0").value();
+    publish_remote(transport, workspace, c0);
+    const auto id_0 = put_content(transport, workspace, "content_0", "c0-content");
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    // Part A: Explicit I/O failure during snapshot listing (call 8)
+    reset_fake_traffic(*state);
+    state->fail_list_at = 8;
+    state->fail_list = kasumi::transport::ErrorCode::Io;
+
+    auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::TransportFailure);
+    expect_presence(transport, id_0, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Present);
+
+    // Part B: Explicit I/O failure during final listing (call 10)
+    reset_fake_traffic(*state);
+    state->fail_list_at = 10;
+    state->fail_list = kasumi::transport::ErrorCode::Io;
+
+    collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::TransportFailure);
+    expect_presence(transport, id_0, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Present);
+}
+
 } // namespace

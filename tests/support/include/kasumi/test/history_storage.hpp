@@ -208,6 +208,8 @@ struct FakeState {
     bool hide_writer_listing = false;
     bool publish_barrier_after_writer_list = false;
     bool fail_writer_list = false;
+    std::size_t fail_list_at = 0;
+    std::optional<kasumi::transport::ErrorCode> fail_list;
     bool fail_barrier_presence = false;
     bool fail_commit_put = false;
     bool persist_commit_on_put_failure = false;
@@ -267,6 +269,8 @@ FakeState* fake_state(void* context) {
     state.physical_hash_count = state.physical_hash_batch_count = 0;
     state.barrier_verification_count = 0;
     state.control_read_batch_count = 0;
+    state.fail_list.reset();
+    state.fail_list_at = 0;
     state.remote_events.clear();
 }
 
@@ -546,6 +550,11 @@ kasumi::transport::ListingResult fake_list(void* context) {
     auto* state = fake_state(context);
     ++state->list_count;
     ++state->full_list_count;
+    if (state->fail_list && (state->fail_list_at == 0 || state->fail_list_at == state->list_count)) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = *state->fail_list,
+            .message = "injected full list failure"});
+    }
     if (state->reveal_on_list_count == state->list_count) {
         state->objects.merge(state->hidden_objects);
         state->reveal_on_list_count = 0;
@@ -567,6 +576,11 @@ kasumi::transport::ListingResult fake_list_prefix(void* context,
     auto* state = fake_state(context);
     ++state->list_count;
     ++state->prefix_list_count;
+    if (state->fail_list && (state->fail_list_at == 0 || state->fail_list_at == state->list_count)) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = *state->fail_list,
+            .message = "injected prefix list failure"});
+    }
     if (state->reveal_on_list_count == state->list_count) {
         state->objects.merge(state->hidden_objects);
         state->reveal_on_list_count = 0;
