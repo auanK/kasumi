@@ -275,7 +275,7 @@ ReachabilityResult inventory_impl(
         }
     }
 
-    std::unordered_set<std::string> epoch_anchors;
+    std::map<std::string, std::uint64_t> epoch_anchors;
     if (!loaded_epochs.empty()) {
         std::vector<epoch::VerifiedEpoch> epoch_values;
         for (const auto& [_, ep] : loaded_epochs) {
@@ -287,7 +287,7 @@ ReachabilityResult inventory_impl(
                                                  latest_epoch.error().detail));
         }
         for (const auto& anchor : latest_epoch->value.anchors) {
-            epoch_anchors.insert(anchor.commit_id);
+            epoch_anchors.emplace(anchor.commit_id, anchor.height);
         }
         for (const auto& [id, ep] : loaded_epochs) {
             if (ep.reference == latest_epoch->reference) {
@@ -389,6 +389,16 @@ ReachabilityResult inventory_impl(
         }
     }
     dag_guard.stop();
+
+    for (const auto& [anchor_id, height] : epoch_anchors) {
+        const auto* anchor = find_commit(commits, anchor_id);
+        if (anchor == nullptr || !anchor->valid || !anchor->reachable ||
+            !anchor->tree || anchor->tree->height != height) {
+            return std::unexpected(detail::error(
+                ErrorCode::InvalidCommit,
+                "Epoch anchor is missing, invalid, unreachable, or has a mismatched height"));
+        }
+    }
 
     sort_unique(result.logical_heads);
     sort_unique(result.missing_parent_ids);

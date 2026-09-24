@@ -1,4 +1,5 @@
 #include "application/history_storage/epoch.hpp"
+#include "application/history_storage/epoch.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
 #include "application/history_storage/remote_layout.hpp"
@@ -3040,6 +3041,55 @@ TEST(IntegrityMaintenanceTest, BatchGcTailOfOneHundredCandidatesWithThresholdSix
     // Zero payload fallback
     EXPECT_EQ(state->orphan_payload_get_count, 0U);
     EXPECT_EQ(state->quarantine_payload_put_count, 0U);
+}
+
+TEST(IntegrityMaintenanceTest,
+     CorruptPhysicalOrphanCommitStillBlocksGcWithValidEpoch) {
+    auto workspace = kasumi::test::make_temp_workspace(
+        "gc-corrupt-old-commit-with-epoch");
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto runtime = runtime_data(workspace);
+
+    const auto head = make_commit(0, {}, "live.txt", "live").value();
+    const auto published_head =
+        publish_remote(storage, workspace, head);
+    put_content(storage, workspace, "live", "live");
+
+    const auto orphan = make_commit(0, {}, "old.txt", "old").value();
+    const auto published_orphan = publish_remote(storage, workspace, orphan);
+    ASSERT_EQ(kasumi::transport::remove(
+                  storage, marker_path(published_orphan.head)).value(),
+              kasumi::transport::Removal::Removed);
+    const auto orphan_object = object_path(published_orphan.head);
+    ASSERT_FALSE(state->objects.at(orphan_object).empty());
+    state->objects.at(orphan_object).front() ^= 0xff;
+
+    const std::string vault_id(64, 'a');
+    const kasumi::application::history_storage::epoch::Epoch genesis{
+        .vault_id = vault_id,
+        .sequence = 0,
+        .issued_at = 1,
+        .policy = {},
+        .anchors = {{.commit_id = published_head.head.commit_id,
+                     .height = 0}},
+    };
+    const auto sealed =
+        kasumi::application::history_storage::epoch::seal(genesis, test_key());
+    ASSERT_TRUE(sealed.has_value()) << sealed.error().detail;
+    ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
+        storage, test_key(), *sealed,
+        kasumi::test::workspace_root(workspace)));
+
+    const auto collected =
+        kasumi::application::integrity::garbage_collect(
+            runtime, storage, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_TRUE(state->objects.contains(orphan_object));
+    EXPECT_FALSE(state->objects.contains(
+        protocol::quarantine_identifier(test_layout(), orphan_object).value()));
 }
 
 TEST(IntegrityMaintenanceTest, SnapshotTraceScopesResetAndKeepPartialFailures) {
