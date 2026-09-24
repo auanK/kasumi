@@ -683,13 +683,17 @@ TEST(VaultTransportAdapterTest, PhysicalHashBatchDelegatesAndProtectsMarker) {
             .get = [](void*, std::string_view, const std::filesystem::path&) -> transport::Result { return {}; },
             .presence = [](void*, std::string_view) -> transport::PresenceResult { return transport::Presence::Present; },
             .list = [](void*) -> transport::ListingResult { return std::vector<std::string>{}; },
-            .physical_hash_batch = [](void* ctx, const transport::PhysicalHashBatchRequest&) -> transport::PhysicalHashBatchResult {
+            .physical_hash_batch = [](void* ctx, const transport::PhysicalHashBatchRequest& req) -> transport::PhysicalHashBatchResult {
                 auto* s = static_cast<NativeBatchState*>(ctx);
                 if (s->magic != NativeBatchState::kMagic) {
                     return std::unexpected(transport::Error{.code = transport::ErrorCode::InvalidContext, .message = "hash_batch ctx mismatch"});
                 }
                 s->context_matched = true;
-                return transport::PhysicalHashBatchReport{};
+                transport::PhysicalHashBatchReport report;
+                for (const auto& obj : req.objects) {
+                    report.matched.push_back(obj.identifier);
+                }
+                return report;
             },
             .remove = [](void*, std::string_view) -> transport::RemovalResult { return transport::Removal::Removed; },
             .physical_hash_batch_min_objects = 2,

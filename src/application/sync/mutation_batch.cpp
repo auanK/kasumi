@@ -397,6 +397,10 @@ bulk_verification_error(const StagedUploadBatch& batch,
             choose(object,
                    MutationErrorCode::TransportFailure,
                    "rclone failed to physically verify remote object");
+        } else if (!has(report.matched)) {
+            choose(object,
+                   MutationErrorCode::IntegrityMismatch,
+                   "remote object unconfirmed in batch verification");
         }
     }
     return selected;

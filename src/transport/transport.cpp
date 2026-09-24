@@ -343,6 +343,56 @@ validate_physical_hash_batch_request(const PhysicalHashBatchRequest& request) {
 }
 
 std::expected<void, Error>
+validate_physical_hash_batch_report(const PhysicalHashBatchReport& report,
+                                    const PhysicalHashBatchRequest& request) {
+    std::unordered_set<std::string> requested;
+    requested.reserve(request.objects.size());
+    for (const auto& object : request.objects) {
+        requested.insert(object.identifier);
+    }
+
+    std::unordered_set<std::string> seen;
+    seen.reserve(request.objects.size());
+
+    const std::vector<const std::vector<std::string>*> categories = {
+        &report.matched, &report.mismatched, &report.missing, &report.errors
+    };
+
+    for (const auto* list : categories) {
+        for (const auto& identifier : *list) {
+            if (identifier.empty() ||
+                identifier.find_first_of("\r\n") != std::string_view::npos) {
+                return std::unexpected(make_error(
+                    ErrorCode::ProtocolFailure,
+                    "invalid identifier in physical hash batch report"));
+            }
+            if (!requested.contains(identifier)) {
+                return std::unexpected(make_error(
+                    ErrorCode::ProtocolFailure,
+                    "unexpected identifier in physical hash batch report: " +
+                        identifier));
+            }
+            if (!seen.insert(identifier).second) {
+                return std::unexpected(make_error(
+                    ErrorCode::ProtocolFailure,
+                    "duplicate identifier in physical hash batch report: " +
+                        identifier));
+            }
+        }
+    }
+
+    if (seen.size() != requested.size()) {
+        return std::unexpected(make_error(
+            ErrorCode::ProtocolFailure,
+            "incomplete physical hash batch report: expected " +
+                std::to_string(requested.size()) + " objects, but classified " +
+                std::to_string(seen.size())));
+    }
+
+    return {};
+}
+
+std::expected<void, Error>
 validate_control_read_batch_request(const ControlReadBatchRequest& request) {
     if (request.list_prefixes.empty() && request.presence_identifiers.empty()) {
         return std::unexpected(
@@ -595,8 +645,17 @@ physical_hash_batch(Transport& transport,
             ErrorCode::Unsupported,
             "transport does not support batch remote physical hash"));
     }
-    return transport.storage.physical_hash_batch(transport.state.get(),
-                                                 request);
+    auto result = transport.storage.physical_hash_batch(transport.state.get(),
+                                                        request);
+    if (!result) {
+        return result;
+    }
+    auto report_validation =
+        validate_physical_hash_batch_report(*result, request);
+    if (!report_validation) {
+        return std::unexpected(report_validation.error());
+    }
+    return result;
 }
 
 bool prefers_physical_hash_batch(const Transport& transport,

@@ -1186,6 +1186,7 @@ parse_physical_hash_batch_response(std::string_view response_body,
         }
 
         return PhysicalHashBatchReport{
+            .matched = std::move(*matched),
             .mismatched = std::move(*mismatched),
             .missing = std::move(*missing),
             .errors = std::move(*errors),

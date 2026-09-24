@@ -1285,17 +1285,13 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                     return std::ranges::find(list, val) != list.end();
                                 };
                                 for (auto* item : to_batch_verify) {
-                                    if (has(batch_result->mismatched,
-                                            item->quarantine_identifier) ||
-                                        has(batch_result->missing,
-                                            item->quarantine_identifier) ||
-                                        has(batch_result->errors,
+                                    if (has(batch_result->matched,
                                             item->quarantine_identifier)) {
-                                        item->state = CandidateProcessingState::Failed;
-                                    } else {
                                         item->state = CandidateProcessingState::Verified;
                                         platform::perf_trace::count(
                                             "verified copy native copy verifications");
+                                    } else {
+                                        item->state = CandidateProcessingState::Failed;
                                     }
                                 }
                             } else if (batch_result.error().code ==

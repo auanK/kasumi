@@ -376,6 +376,7 @@ kasumi::transport::PhysicalHashBatchResult recording_physical_hash_batch(
     }
 
     kasumi::transport::PhysicalHashBatchReport report{
+        .matched = {},
         .mismatched = probe == nullptr ? std::vector<std::string>{}
                                        : probe->bulk_mismatched,
         .missing =
@@ -389,6 +390,13 @@ kasumi::transport::PhysicalHashBatchResult recording_physical_hash_batch(
                 std::string::npos) {
                 report.mismatched.push_back(object.identifier);
             }
+        }
+    }
+    for (const auto& object : request.objects) {
+        if (std::ranges::find(report.mismatched, object.identifier) == report.mismatched.end() &&
+            std::ranges::find(report.missing, object.identifier) == report.missing.end() &&
+            std::ranges::find(report.errors, object.identifier) == report.errors.end()) {
+            report.matched.push_back(object.identifier);
         }
     }
     return report;
