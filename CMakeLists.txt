@@ -694,6 +694,39 @@ if(KASUMI_BUILD_GC_LIVE_BENCHMARK)
         ${PROJECT_SOURCE_DIR}/include
     )
 
+    execute_process(
+        COMMAND git rev-parse --short HEAD
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        OUTPUT_VARIABLE KASUMI_PHASE18_BUILD_COMMIT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    add_executable(
+        kasumi_gc_live_phase18
+        tests/operational/gc_live_phase18.cpp
+    )
+    target_link_libraries(
+        kasumi_gc_live_phase18
+        PRIVATE
+        kasumi_application
+        kasumi_transport
+        kasumi_platform
+        kasumi_crypto
+        nlohmann_json::nlohmann_json
+        reproc++
+        kasumi_warnings
+    )
+    target_compile_definitions(
+        kasumi_gc_live_phase18
+        PRIVATE
+        KASUMI_PHASE18_BUILD_COMMIT="${KASUMI_PHASE18_BUILD_COMMIT}"
+    )
+    target_include_directories(
+        kasumi_gc_live_phase18
+        PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/include
+    )
+
     add_executable(
         kasumi_profile_gc_scale
         tests/operational/profile_gc_scale.cpp
