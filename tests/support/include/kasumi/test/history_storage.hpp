@@ -184,6 +184,7 @@ struct FakeState {
     std::size_t marker_put_count = 0;
     std::size_t commit_get_count = 0;
     std::size_t marker_get_count = 0;
+    std::size_t epoch_get_count = 0;
     std::size_t orphan_payload_get_count = 0;
     std::size_t orphan_payload_get_bytes = 0;
     std::size_t quarantine_payload_put_count = 0;
@@ -259,7 +260,7 @@ FakeState* fake_state(void* context) {
     state.get_count = state.get_batch_count = state.copy_count = 0;
     state.presence_count = state.remove_count = state.put_count = 0;
     state.put_batch_count = state.commit_put_count = state.marker_put_count = 0;
-    state.commit_get_count = state.marker_get_count = 0;
+    state.commit_get_count = state.marker_get_count = state.epoch_get_count = 0;
     state.orphan_payload_get_count = 0;
     state.orphan_payload_get_bytes = 0;
     state.quarantine_payload_put_count = 0;
@@ -286,6 +287,13 @@ bool is_marker(std::string_view identifier) {
         kasumi::application::history_storage::derive_remote_layout(test_key());
     return identifier.starts_with("history/heads/") ||
            identifier.starts_with(layout.heads_prefix);
+}
+
+bool is_epoch(std::string_view identifier) {
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    return identifier.starts_with("history/epochs/") ||
+           identifier.starts_with(layout.epochs_prefix);
 }
 
 void maybe_replace_barrier_after_quarantine_put(
@@ -458,6 +466,9 @@ kasumi::transport::Result fake_get(void* context,
     } else if (is_marker(identifier)) {
         ++state->marker_get_count;
         state->remote_events.emplace_back("GetHead");
+    } else if (is_epoch(identifier)) {
+        ++state->epoch_get_count;
+        state->remote_events.emplace_back("GetEpoch");
     }
     const bool observed_payload =
         identifier == state->observed_payload_identifier ||

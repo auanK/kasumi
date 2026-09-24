@@ -54,22 +54,29 @@ void put_content_fast(
 
 void put_commit_fast(
     kasumi::transport::Transport& transport,
-    const std::filesystem::path& plain_path,
-    const std::filesystem::path& enc_path,
+    const std::filesystem::path& workspace_root,
     const kasumi::history::Commit& commit,
     std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key,
     bool publish_head = false) {
-    const auto canonical = kasumi::history::serialize(commit).value();
-    kasumi::test::write_binary(plain_path, std::as_bytes(std::span{canonical}));
-    kasumi::crypto::encrypt_file(plain_path, enc_path, key, kasumi::crypto::FilePurpose::History);
-    const auto hash = kasumi::crypto::content::hash_file(enc_path).value();
-    HeadReference ref{.commit_id = commit_id(commit), .ciphertext_id = kasumi::hash_hex(hash)};
-    kasumi::transport::put(transport, enc_path, object_path(ref));
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key);
+    auto published = kasumi::application::history_storage::
+        publish_commit_object_scoped(
+            transport, layout, key, commit, workspace_root);
+    if (!published) {
+        std::cerr << "publish_commit_object_scoped failed: "
+                  << published.error().detail << '\n';
+        std::abort();
+    }
     if (publish_head) {
-        const auto marker = kasumi::application::history_storage::encode_marker(ref).value();
-        const auto marker_path_temp = plain_path.parent_path() / "temp.marker";
-        kasumi::test::write_binary(marker_path_temp, std::as_bytes(std::span{marker}));
-        kasumi::transport::put(transport, marker_path_temp, marker_path(ref));
+        auto marker = kasumi::application::history_storage::
+            publish_head_marker_scoped(
+                transport, layout, published->head, workspace_root);
+        if (!marker) {
+            std::cerr << "publish_head_marker_scoped failed: "
+                      << marker.error().detail << '\n';
+            std::abort();
+        }
     }
 }
 
@@ -100,6 +107,10 @@ struct TrialMetrics {
     std::size_t retained_heads = 0;
     std::size_t retained_epochs = 0;
     std::size_t retained_commits = 0;
+    std::size_t epoch_anchors = 0;
+    std::size_t epoch_anchor_total = 0;
+    std::size_t restored_objects = 0;
+    std::size_t purged_objects = 0;
     std::size_t content_references_examined = 0;
     std::size_t unique_reachable_content_ids = 0;
     std::size_t orphan_candidates = 0;
@@ -107,6 +118,7 @@ struct TrialMetrics {
     // History reconstruction
     std::size_t commit_object_get_calls = 0;
     std::size_t marker_object_get_calls = 0;
+    std::size_t epoch_object_get_calls = 0;
     std::size_t content_reference_capacity_growth_events = 0;
 
     // Timings (us)
@@ -255,9 +267,12 @@ void collect_metrics_post_gc(TrialMetrics& m, FakeState* state, const kasumi::ap
     m.total_identifiers_listed = state->full_list_identifier_count;
     m.commit_object_get_calls = state->commit_get_count;
     m.marker_object_get_calls = state->marker_get_count;
+    m.epoch_object_get_calls = state->epoch_get_count;
 
     m.candidates_detected = collected.candidate_objects;
     m.candidates_quarantined = collected.quarantined_objects;
+    m.restored_objects = collected.restored_objects;
+    m.purged_objects = collected.purged_objects;
 }
 
 // Serie A: Vary physical inventory N in {100, 1000, 10000}, C=10, H=1
@@ -427,9 +442,6 @@ TrialMetrics run_trial_serie_b(std::size_t H, std::size_t rep) {
     kasumi::finalize_snapshot(tree);
 
     // Build chain of H commits
-    const auto commit_plain = kasumi::test::workspace_path(workspace, "commit.plain");
-    const auto commit_enc = kasumi::test::workspace_path(workspace, "commit.enc");
-
     std::string previous_commit_id;
     for (std::size_t h = 0; h < H; ++h) {
         std::vector<std::string> parents;
@@ -443,7 +455,11 @@ TrialMetrics run_trial_serie_b(std::size_t H, std::size_t rep) {
         }
         previous_commit_id = commit_id(*commit_res);
         const bool is_tip = (h + 1 == H);
-        put_commit_fast(transport, commit_plain, commit_enc, *commit_res, key, is_tip);
+        put_commit_fast(transport,
+                        kasumi::test::workspace_root(workspace),
+                        *commit_res,
+                        key,
+                        is_tip);
     }
 
     m.N = state->objects.size();
@@ -478,6 +494,197 @@ TrialMetrics run_trial_serie_b(std::size_t H, std::size_t rep) {
         std::abort();
     }
 
+    collect_metrics_post_gc(m, state, *collected);
+    return m;
+}
+
+// Phase 17: valid production Epochs with a fixed recent window and physical
+// history that grows independently of that window.
+TrialMetrics run_trial_retention(std::size_t P,
+                                 std::size_t recent_per_head,
+                                 std::size_t branch_count,
+                                 std::size_t rep) {
+    constexpr std::int64_t retention_now = 1'800'000'000;
+    using namespace kasumi::application::history_storage;
+    namespace epoch = kasumi::application::history_storage::epoch;
+
+    if (branch_count == 0 || P <= branch_count ||
+        (P - 1) / branch_count < recent_per_head + 5) {
+        std::cerr << "invalid Phase 17 retention fixture dimensions\n";
+        std::abort();
+    }
+
+    TrialMetrics m;
+    m.series = "R";
+    m.H = P;
+    m.rep = rep;
+
+    auto workspace = kasumi::test::make_temp_workspace(
+        "gc-phase17-P" + std::to_string(P) + "-recent" +
+        std::to_string(recent_per_head) + "-branches" +
+        std::to_string(branch_count) + "-r" + std::to_string(rep));
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    if (!kasumi::transport::initialize(transport)) {
+        std::cerr << "Transport initialize failed\n";
+        std::abort();
+    }
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+
+    const auto runtime = make_runtime(workspace);
+    const auto key = test_key();
+    const auto layout = derive_remote_layout(key);
+    const auto workspace_root = kasumi::test::workspace_root(workspace);
+    const auto plain_file = kasumi::test::workspace_path(workspace, "temp.plain");
+    const auto enc_file = kasumi::test::workspace_path(workspace, "temp.enc");
+    constexpr std::string_view content = "phase17-shared-retained-content";
+    put_content_fast(transport, plain_file, enc_file, content, key);
+
+    Snapshot tree{.rows = {
+        NodeRow{.path = "", .hash = {}, .size = 0, .mtime = {},
+                .is_directory = true},
+        NodeRow{.path = "shared.bin",
+                .hash = kasumi::hasher::hash_string(content),
+                .size = content.size(), .mtime = {}, .is_directory = false},
+    }};
+    kasumi::finalize_snapshot(tree);
+
+    const auto publish_object = [&](const kasumi::history::Commit& commit) {
+        auto published = publish_commit_object_scoped(
+            transport, layout, key, commit, workspace_root);
+        if (!published) {
+            std::cerr << "publish_commit_object_scoped failed: "
+                      << published.error().detail << '\n';
+            std::abort();
+        }
+        return published->head;
+    };
+
+    const auto root_time = retention_now - 48 * 3600;
+    auto root = kasumi::history::make_commit(0, {}, tree, root_time);
+    if (!root) {
+        std::cerr << "root commit creation failed\n";
+        std::abort();
+    }
+    auto root_reference = publish_object(*root);
+    std::vector<kasumi::history::LoadedCommit> planning_commits;
+    planning_commits.push_back(kasumi::history::LoadedCommit{
+        .id = root_reference.commit_id, .commit = *root});
+
+    const auto branch_total = P - 1;
+    const auto base_branch_size = branch_total / branch_count;
+    const auto branch_remainder = branch_total % branch_count;
+    std::vector<HeadReference> heads;
+    heads.reserve(branch_count);
+    for (std::size_t branch = 0; branch < branch_count; ++branch) {
+        const auto branch_size =
+            base_branch_size + static_cast<std::size_t>(branch < branch_remainder);
+        const auto tail = branch_size - recent_per_head + 1;
+        auto parent = root_reference.commit_id;
+        HeadReference head = root_reference;
+        for (std::size_t height = 1; height <= branch_size; ++height) {
+            const auto timestamp = height < tail
+                ? root_time + static_cast<std::int64_t>(branch * branch_size + height)
+                : retention_now - 3600 +
+                      static_cast<std::int64_t>(height - tail) *
+                          3600 / static_cast<std::int64_t>(recent_per_head);
+            auto commit = kasumi::history::make_commit(
+                height, {parent}, tree, timestamp);
+            if (!commit) {
+                std::cerr << "branch commit creation failed at height "
+                          << height << '\n';
+                std::abort();
+            }
+            head = publish_object(*commit);
+            planning_commits.push_back(kasumi::history::LoadedCommit{
+                .id = head.commit_id, .commit = *commit});
+            parent = head.commit_id;
+        }
+        auto marker = publish_head_marker_scoped(
+            transport, layout, head, workspace_root);
+        if (!marker) {
+            std::cerr << "publish_head_marker_scoped failed: "
+                      << marker.error().detail << '\n';
+            std::abort();
+        }
+        heads.push_back(std::move(head));
+    }
+
+    const epoch::RetentionPolicy policy{};
+    const auto plan = epoch::plan_pruning(planning_commits, policy);
+    if (!plan) {
+        std::cerr << "production retention planner did not produce anchors: "
+                  << plan.error().reason << '\n';
+        std::abort();
+    }
+    const std::string vault_id(64, 'a');
+    const auto genesis = epoch::seal(
+        epoch::Epoch{.vault_id = vault_id,
+                     .sequence = 0,
+                     .issued_at = root_time,
+                     .policy = policy,
+                     .anchors = {{.commit_id = root_reference.commit_id,
+                                  .height = 0}}}, key);
+    if (!genesis || !epoch::publish(transport, key, *genesis, workspace_root)) {
+        std::cerr << "production genesis Epoch publication failed\n";
+        std::abort();
+    }
+    const auto latest = epoch::seal(
+        epoch::Epoch{.vault_id = vault_id,
+                     .sequence = 1,
+                     .issued_at = retention_now,
+                     .policy = policy,
+                     .anchors = plan->anchors,
+                     .previous_epoch_id = genesis->reference.epoch_id}, key);
+    if (!latest || !epoch::publish(transport, key, *latest, workspace_root)) {
+        std::cerr << "production pruning Epoch publication failed\n";
+        std::abort();
+    }
+
+    const auto protected_count =
+        planning_commits.size() - plan->prunable_commits.size() +
+        plan->anchors.size();
+    m.N = state->objects.size();
+    m.physical_commit_objects = planning_commits.size();
+    m.physical_content_objects = 1;
+    m.physical_control_objects = heads.size() + 2;
+    m.total_physical_objects = m.N;
+    m.retained_heads = heads.size();
+    m.retained_epochs = 2;
+    m.retained_commits = protected_count;
+    m.epoch_anchors = plan->anchors.size();
+    m.epoch_anchor_total = plan->anchors.size() + 1;
+    m.content_references_examined = protected_count;
+    m.unique_reachable_content_ids = 1;
+
+    reset_fake_traffic(*state);
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+    const auto start = Clock::now();
+    auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, key);
+    const auto end = Clock::now();
+    m.wall_clock_us = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+    if (!collected) {
+        std::cerr << "Phase 17 full GC failed: "
+                  << kasumi::application::integrity::describe(collected.error())
+                  << '\n';
+        std::abort();
+    }
+    const auto expected_candidates = planning_commits.size() - protected_count;
+    if (collected->candidate_objects != expected_candidates ||
+        collected->quarantined_objects != expected_candidates ||
+        collected->restored_objects != 0 || collected->purged_objects != 0) {
+        std::cerr << "Phase 17 candidate mismatch: expected "
+                  << expected_candidates << ", got "
+                  << collected->candidate_objects << "/"
+                  << collected->quarantined_objects << '\n';
+        std::abort();
+    }
+    m.orphan_candidates = collected->candidate_objects;
     collect_metrics_post_gc(m, state, *collected);
     return m;
 }
@@ -594,6 +801,13 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
     entry["repetitions"] = trials.size();
 
     entry["fixture_state"] = {
+        {"P", rep1.physical_commit_objects},
+        {"R", rep1.retained_commits},
+        {"N", rep1.N},
+        {"C", rep1.orphan_candidates},
+        {"E", rep1.retained_epochs},
+        {"anchors_latest_epoch", rep1.epoch_anchors},
+        {"anchors_all_epochs", rep1.epoch_anchor_total},
         {"physical_content_objects", rep1.physical_content_objects},
         {"physical_commit_objects", rep1.physical_commit_objects},
         {"physical_control_objects", rep1.physical_control_objects},
@@ -602,6 +816,12 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
         {"retained_heads", rep1.retained_heads},
         {"retained_epochs", rep1.retained_epochs},
         {"retained_commits", rep1.retained_commits},
+        {"epoch_anchors", rep1.epoch_anchors},
+        {"epoch_anchor_total", rep1.epoch_anchor_total},
+        {"candidates_detected", rep1.candidates_detected},
+        {"candidates_quarantined", rep1.candidates_quarantined},
+        {"restored_objects", rep1.restored_objects},
+        {"purged_objects", rep1.purged_objects},
         {"content_references_examined", rep1.content_references_examined},
         {"unique_reachable_content_ids", rep1.unique_reachable_content_ids},
         {"orphan_candidates", rep1.orphan_candidates}
@@ -611,8 +831,13 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
         {"retained_commits_fixture", rep1.retained_commits},
         {"commit_object_get_calls", rep1.commit_object_get_calls},
         {"marker_object_get_calls", rep1.marker_object_get_calls},
-        {"other_object_get_calls", rep1.transport_get_count - rep1.commit_object_get_calls - rep1.marker_object_get_calls},
+        {"other_object_get_calls", rep1.transport_get_count - rep1.commit_object_get_calls - rep1.marker_object_get_calls - rep1.epoch_object_get_calls},
         {"commit_object_get_calls_per_observation", rep1.commit_object_get_calls / 2},
+        {"commit_object_get_calls_by_observation", {rep1.commit_object_get_calls / 2, rep1.commit_object_get_calls / 2}},
+        {"marker_object_get_calls_per_observation", rep1.marker_object_get_calls / 2},
+        {"epoch_object_get_calls_by_observation", {rep1.epoch_object_get_calls / 2, rep1.epoch_object_get_calls / 2}},
+        {"epoch_object_get_calls", rep1.epoch_object_get_calls},
+        {"epoch_object_get_calls_per_observation", rep1.epoch_object_get_calls / 2},
         {"content_reference_capacity_growth_events_both_observations", rep1.content_reference_capacity_growth_events},
         {"content_reference_capacity_growth_events_per_observation", rep1.content_reference_capacity_growth_events / 2}
     };
@@ -667,7 +892,7 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
 
-    std::filesystem::path output_file = "build-msys2-ucrt64/phase11_scratch/phase14_gc_scale_profile.json";
+    std::filesystem::path output_file = "build-msys2-ucrt64/phase17/gc_scale_profile.json";
     std::string run_series = "all";
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
@@ -679,11 +904,19 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "========================================================================\n"
-              << "KASUMI PHASE 14: REAL FULL GC SCALE & HISTORY DAG PROFILING (OFFLINE)\n"
+              << "KASUMI: REAL FULL GC SCALE & HISTORY DAG PROFILING (OFFLINE)\n"
               << "========================================================================\n\n";
 
     constexpr std::size_t repetitions = 5;
     nlohmann::json root_json;
+    const auto checkpoint_report = [&] {
+        std::filesystem::create_directories(output_file.parent_path());
+        std::ofstream checkpoint(output_file,
+                                 std::ios::binary | std::ios::trunc);
+        if (checkpoint) {
+            checkpoint << root_json.dump(2) << '\n';
+        }
+    };
 
     if (run_series == "all" || run_series == "A" || run_series == "a") {
         std::cout << "=== SÉRIE A: INVENTÁRIO FÍSICO CRESCENTE (N in {100, 1000, 10000}, C=10, H=1) ===\n";
@@ -720,6 +953,62 @@ int main(int argc, char** argv) {
             }
             root_json["series_b"]["H_" + std::to_string(H)] = summarize_trials(trials);
             std::cout << '\n';
+        }
+    }
+
+    if (run_series == "R" || run_series == "r" || run_series == "R100") {
+        const struct Profile {
+            std::string_view name;
+            std::size_t physical_commits;
+            std::size_t recent_per_head;
+            std::size_t heads;
+            std::size_t repetitions;
+        } profiles[] = {
+            {"R2_P100", 100, 6, 1, 5},
+            {"R2_P1000", 1000, 6, 1, 5},
+            {"R3_P10000", 10000, 6, 1, 1},
+            {"R3_max_supported_P4096", 4096, 6, 1, 1},
+            {"R4_P1000_two_heads", 1000, 6, 2, 5},
+            {"R5_P1000_recent100", 1000, 100, 1, 5},
+        };
+        std::cout << "=== PHASE 17: EPOCH RETENTION (REAL FULL GC + FAKE TRANSPORT) ===\n";
+        for (const auto& profile : profiles) {
+            if (run_series == "R100" && profile.physical_commits != 100) {
+                continue;
+            }
+            if (profile.physical_commits >
+                kasumi::history::maximum_loaded_commit_count) {
+                root_json["series_r"][profile.name] = {
+                    {"status", "SKIP"},
+                    {"reason", "P exceeds history::maximum_loaded_commit_count"},
+                    {"configured_limit",
+                     kasumi::history::maximum_loaded_commit_count},
+                };
+                std::cout << ">>> " << profile.name << " SKIP: P exceeds "
+                          << kasumi::history::maximum_loaded_commit_count << '\n';
+                checkpoint_report();
+                continue;
+            }
+            std::cout << ">>> " << profile.name << " ("
+                      << profile.repetitions << " repetitions)\n";
+            std::vector<TrialMetrics> trials;
+            trials.reserve(profile.repetitions);
+            for (std::size_t rep = 1; rep <= profile.repetitions; ++rep) {
+                auto metrics = run_trial_retention(profile.physical_commits,
+                                                   profile.recent_per_head,
+                                                   profile.heads,
+                                                   rep);
+                std::cout << "  [Rep " << rep << "] P="
+                          << metrics.physical_commit_objects << " R="
+                          << metrics.retained_commits << " C="
+                          << metrics.candidates_quarantined << " commit GETs/obs="
+                          << metrics.commit_object_get_calls / 2 << " GC="
+                          << (static_cast<double>(metrics.total_gc_us) / 1000.0)
+                          << " ms\n";
+                trials.push_back(std::move(metrics));
+            }
+            root_json["series_r"][profile.name] = summarize_trials(trials);
+            checkpoint_report();
         }
     }
 
