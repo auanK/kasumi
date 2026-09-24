@@ -85,18 +85,18 @@ build_history_inventory(transport::Transport& storage) {
 std::expected<HistoryInventory, Error>
 build_history_inventory(std::span<const std::string> identifiers,
                         const RemoteLayout& layout) {
-    platform::perf_trace::count(
-        "history_inventory.intermediate_tree_containers", 1);
     HistoryInventory inventory;
+    inventory.identifiers.reserve(identifiers.size());
     for (const auto& identifier : identifiers) {
         if (is_history_object(layout, identifier) &&
             !is_control_object(layout, identifier)) {
-            if (inventory.identifiers.insert(identifier).second) {
-                platform::perf_trace::count(
-                    "history_inventory.node_allocations", 1);
-            }
+            inventory.identifiers.push_back(identifier);
         }
     }
+    std::ranges::sort(inventory.identifiers);
+    auto [first, last] = std::ranges::unique(inventory.identifiers);
+    inventory.identifiers.erase(first, last);
+
     if (inventory.identifiers.size() > maximum_history_object_count) {
         return std::unexpected(
             error(ErrorCode::LimitExceeded, "too many storage objects"));
@@ -139,9 +139,9 @@ PublicationDelta publication_delta(const HistoryInventory& inventory,
                                    const HeadReference& reference,
                                    const RemoteLayout& layout) {
     const bool adds_commit_object =
-        !inventory.identifiers.contains(commit_object(layout, reference));
+        !inventory.contains(commit_object(layout, reference));
     const bool adds_marker_object =
-        !inventory.identifiers.contains(marker_object(layout, reference));
+        !inventory.contains(marker_object(layout, reference));
     return PublicationDelta{
         .adds_commit_object = adds_commit_object,
         .adds_marker_object = adds_marker_object,
