@@ -13,7 +13,7 @@
 namespace kasumi::application::history_storage {
 namespace {
 
-using CommitMap = std::map<std::string, ReachabilityCommit>;
+using CommitList = std::vector<ReachabilityCommit>;
 
 enum class ParentAvailability {
     Valid,
@@ -28,11 +28,25 @@ ReachabilityVariant* find_variant(ReachabilityCommit& commit,
     return found == commit.variants.end() ? nullptr : &*found;
 }
 
-void add_missing_variant(CommitMap& commits, const HeadReference& reference) {
-    auto& commit = commits[reference.commit_id];
-    commit.commit_id = reference.commit_id;
-    if (find_variant(commit, reference) == nullptr) {
-        commit.variants.push_back(
+ReachabilityCommit* find_commit(CommitList& commits, std::string_view commit_id) {
+    const auto it = std::ranges::lower_bound(
+        commits, commit_id, {}, &ReachabilityCommit::commit_id);
+    if (it != commits.end() && it->commit_id == commit_id) {
+        return &*it;
+    }
+    return nullptr;
+}
+
+void add_missing_variant(CommitList& commits, const HeadReference& reference) {
+    auto* commit = find_commit(commits, reference.commit_id);
+    if (commit == nullptr) {
+        const auto it = std::ranges::lower_bound(
+            commits, reference.commit_id, {}, &ReachabilityCommit::commit_id);
+        commit = &*commits.insert(
+            it, ReachabilityCommit{.commit_id = reference.commit_id});
+    }
+    if (find_variant(*commit, reference) == nullptr) {
+        commit->variants.push_back(
             ReachabilityVariant{.reference = reference, .identifier = {}});
     }
 }
@@ -128,17 +142,13 @@ ReachabilityResult inventory_impl(
         }
     }
 
-    CommitMap commits;
-    platform::perf_trace::count(
-        "reachability.intermediate_tree_containers", 1);
+    CommitList commits;
+    commits.reserve(listed->commit_variants.size() + listed->marker_variants.size());
     std::size_t sequence = 0;
     for (const auto& [commit_id, references] : listed->commit_variants) {
-        const bool is_new = !commits.contains(commit_id);
-        auto& commit = commits[commit_id];
-        if (is_new) {
-            platform::perf_trace::count("reachability.node_allocations", 1);
-        }
-        commit.commit_id = commit_id;
+        commits.push_back(ReachabilityCommit{.commit_id = commit_id});
+        auto& commit = commits.back();
+        commit.variants.reserve(references.size());
         for (const auto& reference : references) {
             auto loaded = detail::try_load_variant(
                 storage, key, reference, (*temporary)->root, sequence++);
@@ -276,8 +286,9 @@ ReachabilityResult inventory_impl(
             marker.state = ReachabilityMarkerState::InvalidMarker;
             continue;
         }
-        auto& commit = commits.at(marker.reference->commit_id);
-        const auto* variant = find_variant(commit, *marker.reference);
+        auto* commit = find_commit(commits, marker.reference->commit_id);
+        const auto* variant =
+            commit == nullptr ? nullptr : find_variant(*commit, *marker.reference);
         marker.state = variant == nullptr
                            ? ReachabilityMarkerState::MissingCommit
                            : marker_state(variant->state);
@@ -286,8 +297,7 @@ ReachabilityResult inventory_impl(
         }
     }
 
-    for (auto& [unused, commit] : commits) {
-        static_cast<void>(unused);
+    for (auto& commit : commits) {
         std::ranges::sort(commit.variants, {}, &ReachabilityVariant::reference);
         if (commit.valid) {
             for (const auto& parent : commit.parents) {
@@ -298,9 +308,8 @@ ReachabilityResult inventory_impl(
                 if (epoch_anchors.contains(parent)) {
                     continue;
                 }
-                const auto found = commits.find(parent);
-                switch (classify_parent(
-                    found == commits.end() ? nullptr : &found->second)) {
+                const auto* found = find_commit(commits, parent);
+                switch (classify_parent(found)) {
                     case ParentAvailability::Valid:
                         break;
                     case ParentAvailability::Missing:
@@ -315,10 +324,6 @@ ReachabilityResult inventory_impl(
     }
 
     const auto dag_trace = platform::perf_trace::begin();
-    std::set<std::string> visited;
-    std::set<std::string> reachable;
-    platform::perf_trace::count(
-        "reachability.intermediate_tree_containers", 2);
     std::vector<std::pair<std::string, std::size_t>> pending;
     for (const auto& root : result.logical_heads) {
         pending.emplace_back(root, 0);
@@ -330,38 +335,32 @@ ReachabilityResult inventory_impl(
             return std::unexpected(detail::error(ErrorCode::LimitExceeded,
                                                  "history graph is too deep"));
         }
-        if (!visited.insert(commit_id).second) {
+        auto* found = find_commit(commits, commit_id);
+        if (found == nullptr || !found->valid || found->reachable) {
             continue;
         }
-        platform::perf_trace::count("reachability.node_allocations", 1);
-        const auto found = commits.find(commit_id);
-        if (found == commits.end() || !found->second.valid) {
-            continue;
-        }
-        if (reachable.insert(commit_id).second) {
-            platform::perf_trace::count("reachability.node_allocations", 1);
-        }
+        found->reachable = true;
         if (epoch_anchors.contains(commit_id)) {
             continue;
         }
-        for (const auto& parent : found->second.parents) {
+        for (const auto& parent : found->parents) {
             pending.emplace_back(parent, depth + 1);
         }
     }
     platform::perf_trace::finish("rc/dag_traversal", dag_trace);
 
     sort_unique(result.logical_heads);
-    result.reachable_commits.assign(reachable.begin(), reachable.end());
     sort_unique(result.missing_parent_ids);
     sort_unique(result.invalid_parent_ids);
     sort_unique(result.unknown_history_objects);
-    for (auto& [commit_id, commit] : commits) {
-        commit.reachable = reachable.contains(commit_id);
-        if (commit.valid && !commit.reachable) {
-            result.orphan_commits.push_back(commit_id);
+    for (auto& commit : commits) {
+        if (commit.reachable) {
+            result.reachable_commits.push_back(commit.commit_id);
+        } else if (commit.valid) {
+            result.orphan_commits.push_back(commit.commit_id);
         }
-        result.commits.push_back(std::move(commit));
     }
+    result.commits = std::move(commits);
     return result;
 }
 
