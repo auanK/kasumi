@@ -693,6 +693,30 @@ if(KASUMI_BUILD_GC_LIVE_BENCHMARK)
         ${PROJECT_SOURCE_DIR}/src
         ${PROJECT_SOURCE_DIR}/include
     )
+
+    add_executable(
+        kasumi_profile_gc_scale
+        tests/operational/profile_gc_scale.cpp
+    )
+    target_link_libraries(
+        kasumi_profile_gc_scale
+        PRIVATE
+        GTest::gtest
+        kasumi_test_support
+        kasumi_application
+        kasumi_transport
+        kasumi_platform
+        kasumi_crypto
+        nlohmann_json::nlohmann_json
+        kasumi_warnings
+    )
+    target_include_directories(
+        kasumi_profile_gc_scale
+        PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/tests/support/include
+    )
 endif()
 
 set(KASUMI_FIRST_PARTY_TARGETS

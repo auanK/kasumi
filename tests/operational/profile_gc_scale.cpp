@@ -1,0 +1,383 @@
+#include "application/integrity/maintenance.hpp"
+#include "kasumi/test/history_storage.hpp"
+#include "kasumi/test/temp_workspace.hpp"
+#include "platform/perf_trace.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <map>
+#include <numeric>
+#include <nlohmann/json.hpp>
+#include <string>
+#include <vector>
+
+namespace {
+
+using kasumi::Snapshot;
+using kasumi::NodeRow;
+using kasumi::test::TempWorkspace;
+using Clock = std::chrono::steady_clock;
+
+kasumi::runtime::RuntimeData make_runtime(TempWorkspace& workspace) {
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto db = kasumi::test::workspace_path(workspace, "db.sqlite3");
+    const auto profile = kasumi::test::workspace_path(workspace, "profile");
+    return kasumi::runtime::RuntimeData{
+        .local_dir = local,
+        .database_path = db,
+        .key_path = profile / "key.bin",
+        .storage_location = "unused",
+    };
+}
+
+void put_content_fast(
+    kasumi::transport::Transport& transport,
+    const std::filesystem::path& plain_path,
+    const std::filesystem::path& enc_path,
+    std::string_view content,
+    std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key) {
+    const auto identifier = kasumi::crypto::content_identifier(
+        key, kasumi::hasher::hash_string(content));
+    kasumi::test::write_text(plain_path, content);
+    kasumi::crypto::encrypt_file(plain_path, enc_path, key);
+    kasumi::transport::put(transport, enc_path, identifier);
+}
+
+struct TrialMetrics {
+    std::size_t N = 0;
+    std::size_t rep = 0;
+
+    // Timings (us)
+    std::uint64_t barrier_acquire_us = 0;
+    std::uint64_t writer_check_us = 0;
+    std::uint64_t consistency_probe_us = 0;
+    std::uint64_t stage_barrier_writers_us = 0;
+
+    std::uint64_t quarantine_inventory_us = 0;
+    std::uint64_t quarantine_restore_us = 0;
+    std::uint64_t quarantine_metadata_init_us = 0;
+    std::uint64_t stage_quarantine_inventory_recovery_us = 0;
+
+    std::uint64_t stage_reachability_obs1_us = 0;
+    std::uint64_t stage_reachability_obs2_us = 0;
+    std::uint64_t stage_snapshot_comparison_us = 0;
+    std::uint64_t stage_final_listing_us = 0;
+    std::uint64_t stage_purge_expired_us = 0;
+
+    std::uint64_t stage_time_to_first_candidate_us = 0;
+
+    std::uint64_t batch_prepare_us = 0;
+    std::uint64_t batch_verify_us = 0;
+    std::uint64_t batch_publish_remove_us = 0;
+    std::uint64_t stage_candidates_processing_us = 0;
+
+    std::uint64_t total_gc_us = 0;
+    std::uint64_t wall_clock_us = 0;
+
+    // Transport calls
+    std::size_t transport_list_count = 0;
+    std::size_t transport_get_count = 0;
+    std::size_t transport_put_count = 0;
+    std::size_t transport_copy_count = 0;
+    std::size_t transport_remove_count = 0;
+    std::size_t transport_presence_count = 0;
+    std::size_t transport_physical_hash_count = 0;
+    std::size_t transport_physical_hash_batch_count = 0;
+    std::size_t transport_barrier_verify_count = 0;
+
+    // Identifiers & structural items
+    std::size_t total_identifiers_listed = 0;
+    std::size_t history_objects_visited = 0;
+    std::size_t candidates_detected = 0;
+    std::size_t candidates_quarantined = 0;
+};
+
+TrialMetrics run_trial(std::size_t N, std::size_t rep) {
+    TrialMetrics m;
+    m.N = N;
+    m.rep = rep;
+
+    auto workspace = kasumi::test::make_temp_workspace(
+        "gc-scale-N" + std::to_string(N) + "-r" + std::to_string(rep));
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    if (!kasumi::transport::initialize(transport)) {
+        std::cerr << "Transport initialize failed\n";
+        std::abort();
+    }
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+
+    auto runtime = make_runtime(workspace);
+    const auto key = test_key();
+
+    // Exactly 10 orphan candidates
+    constexpr std::size_t orphan_count = 10;
+    // 1 commit object + 1 head object = 2 history objects
+    constexpr std::size_t history_count = 2;
+    if (N < orphan_count + history_count) {
+        std::cerr << "N must be at least " << (orphan_count + history_count) << '\n';
+        std::abort();
+    }
+    const std::size_t live_count = N - orphan_count - history_count;
+
+    // Build commit tree with L live objects
+    Snapshot tree;
+    tree.rows.reserve(live_count + 1);
+    tree.rows.push_back(NodeRow{.path = "", .hash = {}, .size = 0, .mtime = {}, .is_directory = true});
+    for (std::size_t i = 0; i < live_count; ++i) {
+        std::string path = "file_" + std::to_string(i) + ".bin";
+        std::string content = "live_content_" + std::to_string(i);
+        tree.rows.push_back(NodeRow{
+            .path = path,
+            .hash = kasumi::hasher::hash_string(content),
+            .size = content.size(),
+            .mtime = {},
+            .is_directory = false
+        });
+    }
+    kasumi::finalize_snapshot(tree);
+    auto commit_res = kasumi::history::make_commit(0, {}, std::move(tree));
+    if (!commit_res) {
+        std::cerr << "make_commit failed: " << commit_res.error().detail << '\n';
+        std::abort();
+    }
+    auto published = kasumi::application::history_storage::publish_commit(
+        transport, key, *commit_res, kasumi::test::workspace_root(workspace));
+    if (!published) {
+        std::cerr << "publish_commit failed\n";
+        std::abort();
+    }
+
+    const auto plain_file = kasumi::test::workspace_path(workspace, "temp.plain");
+    const auto enc_file = kasumi::test::workspace_path(workspace, "temp.enc");
+
+    // Put live content objects
+    for (std::size_t i = 0; i < live_count; ++i) {
+        std::string content = "live_content_" + std::to_string(i);
+        put_content_fast(transport, plain_file, enc_file, content, key);
+    }
+
+    // Put 10 orphan content objects
+    for (std::size_t i = 0; i < orphan_count; ++i) {
+        std::string content = "orphan_content_" + std::to_string(i);
+        put_content_fast(transport, plain_file, enc_file, content, key);
+    }
+
+    if (state->objects.size() != N) {
+        std::cerr << "Expected " << N << " objects in storage, found " << state->objects.size() << '\n';
+        std::abort();
+    }
+
+    // Setup complete: reset traffic counters and enable perf trace
+    reset_fake_traffic(*state);
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    const auto start_gc = Clock::now();
+    auto collected = kasumi::application::integrity::garbage_collect(runtime, transport, key);
+    const auto end_gc = Clock::now();
+    m.wall_clock_us = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(end_gc - start_gc).count());
+
+    if (!collected) {
+        std::cerr << "garbage_collect failed: " << kasumi::application::integrity::describe(collected.error()) << '\n';
+        std::abort();
+    }
+    if (collected->candidate_objects != orphan_count || collected->quarantined_objects != orphan_count) {
+        std::cerr << "Unexpected candidate/quarantine count: " << collected->candidate_objects << " / " << collected->quarantined_objects << '\n';
+        std::abort();
+    }
+
+    m.candidates_detected = collected->candidate_objects;
+    m.candidates_quarantined = collected->quarantined_objects;
+
+    // Collect perf trace timers (in microseconds)
+    m.barrier_acquire_us = kasumi::platform::perf_trace::get_time("gc barrier acquire");
+    m.writer_check_us = kasumi::platform::perf_trace::get_time("gc writer consistency checks");
+    m.consistency_probe_us = kasumi::platform::perf_trace::get_time("gc backend consistency probe");
+    m.stage_barrier_writers_us = m.barrier_acquire_us + m.writer_check_us + m.consistency_probe_us;
+
+    m.quarantine_inventory_us = kasumi::platform::perf_trace::get_time("gc quarantine inventory");
+    m.quarantine_restore_us = kasumi::platform::perf_trace::get_time("gc quarantine restoration");
+    m.quarantine_metadata_init_us = kasumi::platform::perf_trace::get_time("gc prior metadata initialization");
+    m.stage_quarantine_inventory_recovery_us = m.quarantine_inventory_us + m.quarantine_restore_us + m.quarantine_metadata_init_us;
+
+    m.stage_reachability_obs1_us = kasumi::platform::perf_trace::get_time("gc reachability observation 1");
+    m.stage_reachability_obs2_us = kasumi::platform::perf_trace::get_time("gc reachability observation 2");
+    m.stage_snapshot_comparison_us = kasumi::platform::perf_trace::get_time("gc stable-state comparison");
+    m.stage_final_listing_us = kasumi::platform::perf_trace::get_time("gc final namespace verification");
+    m.stage_purge_expired_us = kasumi::platform::perf_trace::get_time("gc expired quarantine purge");
+
+    m.stage_time_to_first_candidate_us =
+        m.stage_barrier_writers_us +
+        m.stage_quarantine_inventory_recovery_us +
+        m.stage_reachability_obs1_us +
+        m.stage_reachability_obs2_us +
+        m.stage_snapshot_comparison_us +
+        m.stage_final_listing_us +
+        m.stage_purge_expired_us;
+
+    m.batch_prepare_us = kasumi::platform::perf_trace::get_time("gc.batch_prepare_duration_us");
+    m.batch_verify_us = kasumi::platform::perf_trace::get_time("gc.batch_verify_duration_us");
+    m.batch_publish_remove_us = kasumi::platform::perf_trace::get_time("gc.batch_publish_remove_duration_us");
+    m.stage_candidates_processing_us = m.batch_prepare_us + m.batch_verify_us + m.batch_publish_remove_us;
+
+    m.total_gc_us = kasumi::platform::perf_trace::get_time("gc.total_duration_us");
+
+    kasumi::platform::perf_trace::force_enable(false);
+
+    // Collect Transport stats
+    m.transport_list_count = state->list_count;
+    m.transport_get_count = state->get_count;
+    m.transport_put_count = state->put_count;
+    m.transport_copy_count = state->copy_count;
+    m.transport_remove_count = state->remove_count;
+    m.transport_presence_count = state->presence_count;
+    m.transport_physical_hash_count = state->physical_hash_count;
+    m.transport_physical_hash_batch_count = state->physical_hash_batch_count;
+    m.transport_barrier_verify_count = state->barrier_verification_count;
+
+    m.total_identifiers_listed = state->full_list_identifier_count;
+    m.history_objects_visited = history_count;
+
+    return m;
+}
+
+struct SummaryStats {
+    double min_v = 0;
+    double median_v = 0;
+    double max_v = 0;
+
+    static SummaryStats compute(std::vector<double> vals) {
+        if (vals.empty()) return {};
+        std::ranges::sort(vals);
+        double min_v = vals.front();
+        double max_v = vals.back();
+        double median_v = 0;
+        const auto sz = vals.size();
+        if (sz % 2 == 1) {
+            median_v = vals[sz / 2];
+        } else {
+            median_v = (vals[sz / 2 - 1] + vals[sz / 2]) / 2.0;
+        }
+        return SummaryStats{min_v, median_v, max_v};
+    }
+};
+
+} // namespace
+
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+
+    std::filesystem::path output_file = "build-msys2-ucrt64/phase11_scratch/phase12_gc_scale_profile.json";
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg = argv[i];
+        if (arg == "--output" && i + 1 < argc) {
+            output_file = argv[++i];
+        }
+    }
+
+    std::cout << "========================================================================\n"
+              << "KASUMI PHASE 12: REAL FULL GC SCALE PROFILING (OFFLINE)\n"
+              << "Varying total physical objects N in {100, 1000, 10000} with 10 orphans\n"
+              << "========================================================================\n\n";
+
+    const std::vector<std::size_t> N_values = {100, 1000, 10000};
+    constexpr std::size_t repetitions = 5;
+
+    nlohmann::json root_json;
+
+    for (const auto N : N_values) {
+        std::cout << ">>> Running profile for N = " << N << " (" << repetitions << " independent repetitions)...\n";
+        std::vector<TrialMetrics> trials;
+        trials.reserve(repetitions);
+
+        for (std::size_t r = 1; r <= repetitions; ++r) {
+            auto m = run_trial(N, r);
+            std::cout << "  [Rep " << r << "] Total GC: " << (static_cast<double>(m.total_gc_us) / 1000.0) << " ms | Time to first candidate: "
+                      << (static_cast<double>(m.stage_time_to_first_candidate_us) / 1000.0) << " ms | Candidates processing: "
+                      << (static_cast<double>(m.stage_candidates_processing_us) / 1000.0) << " ms\n";
+            trials.push_back(m);
+        }
+
+        auto extract = [&](auto member_ptr) {
+            std::vector<double> vals;
+            vals.reserve(trials.size());
+            for (const auto& t : trials) {
+                vals.push_back(static_cast<double>(t.*member_ptr));
+            }
+            return SummaryStats::compute(vals);
+        };
+
+        auto s_barrier = extract(&TrialMetrics::stage_barrier_writers_us);
+        auto s_quarantine = extract(&TrialMetrics::stage_quarantine_inventory_recovery_us);
+        auto s_obs1 = extract(&TrialMetrics::stage_reachability_obs1_us);
+        auto s_obs2 = extract(&TrialMetrics::stage_reachability_obs2_us);
+        auto s_compare = extract(&TrialMetrics::stage_snapshot_comparison_us);
+        auto s_final_list = extract(&TrialMetrics::stage_final_listing_us);
+        auto s_purge = extract(&TrialMetrics::stage_purge_expired_us);
+        auto s_first_cand = extract(&TrialMetrics::stage_time_to_first_candidate_us);
+        auto s_cand_proc = extract(&TrialMetrics::stage_candidates_processing_us);
+        auto s_batch_prep = extract(&TrialMetrics::batch_prepare_us);
+        auto s_batch_verify = extract(&TrialMetrics::batch_verify_us);
+        auto s_batch_publish = extract(&TrialMetrics::batch_publish_remove_us);
+        auto s_total = extract(&TrialMetrics::total_gc_us);
+        auto s_wall = extract(&TrialMetrics::wall_clock_us);
+
+        nlohmann::json n_entry;
+        n_entry["N"] = N;
+        n_entry["repetitions"] = repetitions;
+        n_entry["orphan_candidates"] = 10;
+        n_entry["timings_us"] = {
+            {"barrier_and_writers", {{"min", s_barrier.min_v}, {"median", s_barrier.median_v}, {"max", s_barrier.max_v}}},
+            {"quarantine_inventory_recovery", {{"min", s_quarantine.min_v}, {"median", s_quarantine.median_v}, {"max", s_quarantine.max_v}}},
+            {"reachability_obs1", {{"min", s_obs1.min_v}, {"median", s_obs1.median_v}, {"max", s_obs1.max_v}}},
+            {"reachability_obs2", {{"min", s_obs2.min_v}, {"median", s_obs2.median_v}, {"max", s_obs2.max_v}}},
+            {"snapshot_comparison", {{"min", s_compare.min_v}, {"median", s_compare.median_v}, {"max", s_compare.max_v}}},
+            {"final_physical_listing", {{"min", s_final_list.min_v}, {"median", s_final_list.median_v}, {"max", s_final_list.max_v}}},
+            {"purge_expired_quarantine", {{"min", s_purge.min_v}, {"median", s_purge.median_v}, {"max", s_purge.max_v}}},
+            {"time_to_first_candidate", {{"min", s_first_cand.min_v}, {"median", s_first_cand.median_v}, {"max", s_first_cand.max_v}}},
+            {"candidates_processing", {{"min", s_cand_proc.min_v}, {"median", s_cand_proc.median_v}, {"max", s_cand_proc.max_v}}},
+            {"batch_prepare_us", {{"min", s_batch_prep.min_v}, {"median", s_batch_prep.median_v}, {"max", s_batch_prep.max_v}}},
+            {"batch_verify_us", {{"min", s_batch_verify.min_v}, {"median", s_batch_verify.median_v}, {"max", s_batch_verify.max_v}}},
+            {"batch_publish_remove_us", {{"min", s_batch_publish.min_v}, {"median", s_batch_publish.median_v}, {"max", s_batch_publish.max_v}}},
+            {"total_gc_us", {{"min", s_total.min_v}, {"median", s_total.median_v}, {"max", s_total.max_v}}},
+            {"wall_clock_us", {{"min", s_wall.min_v}, {"median", s_wall.median_v}, {"max", s_wall.max_v}}}
+        };
+
+        const auto& rep1 = trials.front();
+        n_entry["transport_calls"] = {
+            {"list", rep1.transport_list_count},
+            {"get", rep1.transport_get_count},
+            {"put", rep1.transport_put_count},
+            {"copy", rep1.transport_copy_count},
+            {"remove", rep1.transport_remove_count},
+            {"presence", rep1.transport_presence_count},
+            {"physical_hash_individual", rep1.transport_physical_hash_count},
+            {"physical_hash_batch", rep1.transport_physical_hash_batch_count},
+            {"barrier_verify", rep1.transport_barrier_verify_count}
+        };
+
+        n_entry["identifiers_examined"] = rep1.total_identifiers_listed;
+        n_entry["history_objects_visited"] = rep1.history_objects_visited;
+
+        root_json["profiles"]["N_" + std::to_string(N)] = n_entry;
+        std::cout << '\n';
+    }
+
+    std::filesystem::create_directories(output_file.parent_path());
+    std::ofstream out_stream(output_file, std::ios::binary | std::ios::trunc);
+    if (out_stream) {
+        out_stream << root_json.dump(2) << '\n';
+        std::cout << "Saved full JSON profile report to: " << output_file << "\n\n";
+    }
+
+    return 0;
+}
