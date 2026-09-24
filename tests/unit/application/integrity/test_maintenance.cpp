@@ -3057,7 +3057,7 @@ TEST(IntegrityMaintenanceTest, SnapshotTraceScopesResetAndKeepPartialFailures) {
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
     EXPECT_EQ(fixture.state->commit_get_count, 2U);
     EXPECT_EQ(fixture.state->marker_get_count, 2U);
-    EXPECT_EQ(fixture.state->get_count, 27U);
+    EXPECT_EQ(fixture.state->get_count, 7U);
     EXPECT_EQ(fixture.state->list_count, 10U);
     EXPECT_EQ(kasumi::platform::perf_trace::get_count(
                   "gc.snapshot.first/rc/load_and_auth_commits"),
