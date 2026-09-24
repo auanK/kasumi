@@ -1071,6 +1071,9 @@ bool run(const std::filesystem::path& output_path) {
         item["gc_phase_times"] = phase_times_json();
         item["gc_transport"] = traffic_json(traffic);
         item["gc_runs_used"] = gc_runs;
+        item["status"] = "GC_COMPLETE";
+        report["scenarios"][spec.name] = item;
+        if (!write_json(output, report)) return false;
         if (!collected) {
             item["status"] = "GC_FAILED_PRESERVED";
             item["gc_error"] = kasumi::application::integrity::describe(collected.error());
