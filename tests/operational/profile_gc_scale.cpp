@@ -123,6 +123,10 @@ struct TrialMetrics {
     std::uint64_t total_gc_us = 0;
     std::uint64_t wall_clock_us = 0;
 
+    std::uint64_t build_history_inventory_us = 0;
+    std::uint64_t dag_traversal_us = 0;
+    std::uint64_t get_commit_us = 0;
+
     // Transport calls
     std::size_t transport_list_count = 0;
     std::size_t transport_full_list_count = 0;
@@ -175,6 +179,10 @@ void collect_metrics_post_gc(TrialMetrics& m, FakeState* state, const kasumi::ap
     m.stage_candidates_processing_us = m.batch_prepare_us + m.batch_verify_us + m.batch_publish_remove_us;
 
     m.total_gc_us = kasumi::platform::perf_trace::get_time("gc.total_duration_us");
+
+    m.build_history_inventory_us = kasumi::platform::perf_trace::get_time("rc/build_history_inventory");
+    m.dag_traversal_us = kasumi::platform::perf_trace::get_time("rc/dag_traversal");
+    m.get_commit_us = kasumi::platform::perf_trace::get_time("rc/get_commit");
 
     kasumi::platform::perf_trace::force_enable(false);
 
@@ -467,6 +475,9 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
     auto s_batch_publish = extract(&TrialMetrics::batch_publish_remove_us);
     auto s_total = extract(&TrialMetrics::total_gc_us);
     auto s_wall = extract(&TrialMetrics::wall_clock_us);
+    auto s_build_hist = extract(&TrialMetrics::build_history_inventory_us);
+    auto s_dag = extract(&TrialMetrics::dag_traversal_us);
+    auto s_get_commit = extract(&TrialMetrics::get_commit_us);
 
     const auto& rep1 = trials.front();
     nlohmann::json entry;
@@ -507,6 +518,9 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
         {"batch_prepare_us", {{"min", s_batch_prep.min_v}, {"median", s_batch_prep.median_v}, {"max", s_batch_prep.max_v}}},
         {"batch_verify_us", {{"min", s_batch_verify.min_v}, {"median", s_batch_verify.median_v}, {"max", s_batch_verify.max_v}}},
         {"batch_publish_remove_us", {{"min", s_batch_publish.min_v}, {"median", s_batch_publish.median_v}, {"max", s_batch_publish.max_v}}},
+        {"build_history_inventory_us", {{"min", s_build_hist.min_v}, {"median", s_build_hist.median_v}, {"max", s_build_hist.max_v}}},
+        {"dag_traversal_us", {{"min", s_dag.min_v}, {"median", s_dag.median_v}, {"max", s_dag.max_v}}},
+        {"get_commit_us", {{"min", s_get_commit.min_v}, {"median", s_get_commit.median_v}, {"max", s_get_commit.max_v}}},
         {"total_gc_us", {{"min", s_total.min_v}, {"median", s_total.median_v}, {"max", s_total.max_v}}},
         {"wall_clock_us", {{"min", s_wall.min_v}, {"median", s_wall.median_v}, {"max", s_wall.max_v}}}
     };
