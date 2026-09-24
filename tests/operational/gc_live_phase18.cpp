@@ -1064,11 +1064,12 @@ bool run(const std::filesystem::path& output_path) {
         ++gc_runs;
         auto collected = kasumi::application::integrity::garbage_collect(runtime, counted, key);
         const auto gc_end = Clock::now();
+        const auto gc_phase_times = phase_times_json();
         kasumi::platform::perf_trace::force_enable(false);
         const auto gc_us = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(gc_end - gc_start).count());
         item["gc_wall_us"] = gc_us;
-        item["gc_phase_times"] = phase_times_json();
+        item["gc_phase_times"] = gc_phase_times;
         item["gc_transport"] = traffic_json(traffic);
         item["gc_runs_used"] = gc_runs;
         item["status"] = "GC_COMPLETE";
