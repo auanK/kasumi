@@ -77,8 +77,12 @@ bool valid_sha256(std::string_view value) noexcept {
 }
 
 bool valid_batch_identifier(std::string_view identifier) noexcept {
-    return valid_identifier(identifier) &&
-           identifier.find_first_of("/\\\r\n") == std::string_view::npos;
+    if (!valid_identifier(identifier) ||
+        identifier.find_first_of("\r\n") != std::string_view::npos) {
+        return false;
+    }
+    const auto path = platform::path::from_utf8(identifier);
+    return path.lexically_normal() == path;
 }
 
 State* ready_state(void* context) noexcept {
