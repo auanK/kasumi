@@ -1620,6 +1620,56 @@ TEST(RcloneStorageTest, CopyBatchUsesOneJobBatchWithExplicitCopyfileInputs) {
     }
 }
 
+TEST(RcloneStorageTest, PutFilesBatchUsesOneJobBatchWithExplicitLocalSources) {
+    RcServerState remote;
+    nlohmann::json request;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            request = nlohmann::json::parse(input.body);
+            response.set_content(R"({"results":[{},{},{},{},{},{},{},{}]})",
+                                 "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    auto workspace = kasumi::test::make_temp_workspace("rclone-put-files-batch");
+    std::vector<kasumi::transport::PutFilesBatchItem> items;
+    for (std::size_t index = 0; index < 8; ++index) {
+        const auto source = kasumi::test::workspace_path(
+            workspace, "metadata/" + std::to_string(index) + ".meta");
+        kasumi::test::write_text(source, "ciphertext-" + std::to_string(index));
+        items.push_back({
+            source,
+            "history/gc/v1/quarantine/content/" + std::to_string(index) +
+                ".meta",
+        });
+    }
+    auto storage = make_preflight_transport(state);
+
+    const auto uploaded = kasumi::transport::put_files_batch(
+        storage, {.items = items, .concurrency = 8});
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(uploaded.has_value())
+        << kasumi::transport::describe(uploaded.error());
+    ASSERT_EQ(request.at("concurrency"), 8);
+    ASSERT_EQ(request.at("inputs").size(), 8U);
+    for (std::size_t index = 0; index < items.size(); ++index) {
+        const auto& input = request.at("inputs").at(index);
+        EXPECT_EQ(input.at("_path"), "operations/copyfile");
+        EXPECT_EQ(input.at("srcFs"),
+                  kasumi::platform::path::to_utf8(items[index].source.parent_path()));
+        EXPECT_EQ(input.at("srcRemote"),
+                  kasumi::platform::path::to_utf8(items[index].source.filename()));
+        EXPECT_EQ(input.at("dstFs"), "test:");
+        EXPECT_EQ(input.at("dstRemote"),
+                  "root/" + items[index].destination_identifier);
+        EXPECT_EQ(input.size(), 5U);
+    }
+}
+
 TEST(RcloneStorageTest, CopyBatchRejectsInvalidInputsBeforeSending) {
     RcServerState remote;
     std::atomic_int calls = 0;
