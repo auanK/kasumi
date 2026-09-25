@@ -1909,7 +1909,7 @@ TEST(IntegrityMaintenanceTest,
     EXPECT_EQ(state->disappear_on_get, alpha_content);
     EXPECT_EQ(state->commit_get_count, 2U);
     EXPECT_EQ(state->marker_get_count, 2U);
-    EXPECT_EQ(state->get_count, 7U);
+    EXPECT_EQ(state->get_count, 4U);
 }
 
 TEST(IntegrityMaintenanceTest,
@@ -2226,8 +2226,7 @@ TEST(IntegrityMaintenanceTest, GarbageCollectionBatchBaselineScale) {
         EXPECT_EQ(collected->purged_objects, 0U);
         const auto candidate_batches =
             (orphan_count + 7U) / 8U;
-        EXPECT_EQ(state->get_count,
-                  7U + 3U * orphan_count + 2U * candidate_batches);
+        EXPECT_EQ(state->get_count, 4U);
         EXPECT_EQ(state->orphan_payload_get_count, 0U);
         EXPECT_EQ(state->orphan_payload_get_bytes, 0U);
         EXPECT_EQ(state->put_count, 2U + orphan_count);
@@ -2239,7 +2238,9 @@ TEST(IntegrityMaintenanceTest, GarbageCollectionBatchBaselineScale) {
                   4U * (orphan_count + 4U));
         EXPECT_EQ(state->prefix_list_count, 6U);
         EXPECT_EQ(state->presence_count, 0U);
-        EXPECT_EQ(state->physical_hash_count, 2U + 3U * orphan_count);
+        EXPECT_EQ(state->physical_hash_count,
+                  2U + 3U * orphan_count +
+                      (3U + 3U * orphan_count + 2U * candidate_batches));
         EXPECT_EQ(state->physical_hash_batch_count, 0U);
         EXPECT_EQ(state->put_batch_count, 0U);
         EXPECT_EQ(state->control_read_batch_count, 0U);
@@ -2247,7 +2248,7 @@ TEST(IntegrityMaintenanceTest, GarbageCollectionBatchBaselineScale) {
         EXPECT_EQ(state->native_copy_bytes, orphan_bytes);
         EXPECT_EQ(state->remove_count, 2U + orphan_count);
         EXPECT_EQ(state->barrier_verification_count,
-                  3U + 3U * orphan_count + 2U * candidate_batches);
+                  1U + 3U + 3U * orphan_count + 2U * candidate_batches);
         EXPECT_EQ(kasumi::platform::perf_trace::get_count(
                       "writer physical hash calls"),
                   2U + orphan_count);
@@ -2626,7 +2627,7 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioEBatchSupportedReducesCalls) {
         runtime, transport, test_key());
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
     EXPECT_EQ(state->physical_hash_batch_count, 2U);
-    EXPECT_EQ(state->physical_hash_count, 22U);
+    EXPECT_EQ(state->physical_hash_count, 59U);
 }
 
 TEST(IntegrityMaintenanceTest, BatchGcScenarioFBatchUnsupportedFallback) {
@@ -3317,7 +3318,7 @@ TEST(IntegrityMaintenanceTest, SnapshotTraceScopesResetAndKeepPartialFailures) {
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
     EXPECT_EQ(fixture.state->commit_get_count, 2U);
     EXPECT_EQ(fixture.state->marker_get_count, 2U);
-    EXPECT_EQ(fixture.state->get_count, 7U);
+    EXPECT_EQ(fixture.state->get_count, 4U);
     EXPECT_EQ(fixture.state->list_count, 10U);
     EXPECT_EQ(kasumi::platform::perf_trace::get_count(
                   "gc.snapshot.first/rc/load_and_auth_commits"),

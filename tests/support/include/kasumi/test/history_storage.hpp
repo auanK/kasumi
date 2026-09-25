@@ -844,6 +844,10 @@ std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
         identifier == state->physical_hash_mismatch_identifier;
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(test_key());
+    if (identifier == layout.barrier_identifier) {
+        ++state->barrier_verification_count;
+        state->gc_events.emplace_back("barrier:" + std::string{identifier});
+    }
     if (identifier.starts_with(layout.quarantine_prefix)) {
         state->gc_events.emplace_back("verify:" + std::string{identifier});
     }
@@ -915,12 +919,12 @@ kasumi::transport::PhysicalHashBatchResult fake_physical_hash_batch(
     if (metadata_batch && state->replace_barrier_after_metadata_verification) {
         state->replace_barrier_after_metadata_verification = false;
         for (auto& [identifier, bytes] : state->objects) {
-            static_cast<void>(identifier);
             constexpr std::string_view barrier_payload = "kasumi-gc-v1:barrier:";
             if (bytes.size() >= barrier_payload.size() &&
                 std::ranges::equal(barrier_payload,
                                    std::span{bytes}.first(barrier_payload.size()))) {
-                bytes.assign({'r', 'e', 'p', 'l', 'a', 'c', 'e', 'd'});
+                replace_barrier_contents(state, identifier);
+                break;
             }
         }
     }

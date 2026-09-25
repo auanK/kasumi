@@ -996,24 +996,21 @@ std::expected<std::string, Error> rclone_physical_hash(
     if (!response->is_object() || !response->contains("hash") ||
         !response->at("hash").is_string() || !response->contains("hashType") ||
         !response->at("hashType").is_string()) {
-        state->sha256_unsupported.store(true, std::memory_order_relaxed);
         return std::unexpected(
-            make_error(ErrorCode::Unsupported,
-                       "rclone returned an ambiguous physical hash response"));
+            make_error(ErrorCode::ProtocolFailure,
+                       "rclone returned a malformed physical hash response"));
     }
     const auto returned_algorithm = response->at("hashType").get<std::string>();
     if (returned_algorithm != "sha256" && returned_algorithm != "SHA-256") {
-        state->sha256_unsupported.store(true, std::memory_order_relaxed);
         return std::unexpected(
-            make_error(ErrorCode::Unsupported,
+            make_error(ErrorCode::ProtocolFailure,
                        "rclone returned a different physical hash algorithm"));
     }
     auto digest = response->at("hash").get<std::string>();
     if (!valid_sha256(digest)) {
-        state->sha256_unsupported.store(true, std::memory_order_relaxed);
         return std::unexpected(
-            make_error(ErrorCode::Unsupported,
-                       "rclone returned an ambiguous physical hash"));
+            make_error(ErrorCode::ProtocolFailure,
+                       "rclone returned a malformed SHA-256 digest"));
     }
     std::ranges::transform(digest, digest.begin(), [](unsigned char character) {
         return static_cast<char>(std::tolower(character));

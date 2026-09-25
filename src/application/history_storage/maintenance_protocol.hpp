@@ -41,6 +41,7 @@ struct RegistrationState {
     std::filesystem::path workspace_root;
     std::string identifier;
     std::vector<std::uint8_t> payload;
+    std::string expected_physical_sha256;
     bool verify_owner = false;
 };
 

@@ -92,7 +92,7 @@ list_children(transport::Transport& storage, std::string_view prefix) {
     return result;
 }
 
-std::expected<void, Error>
+std::expected<std::string, Error>
 put_verified(transport::Transport& storage,
              std::string_view identifier,
              std::span<const std::uint8_t> bytes,
@@ -127,7 +127,7 @@ put_verified(transport::Transport& storage,
                 error(ErrorCode::VerificationFailure,
                       "remote physical hash does not match published marker"));
         }
-        return {};
+        return *local_hash;
     }
     if (remote_hash.error().code != transport::ErrorCode::Unsupported) {
         platform::perf_trace::finish("writer verification", verification_trace);
@@ -151,7 +151,7 @@ put_verified(transport::Transport& storage,
                   "remote marker does not match published marker"));
     }
     platform::perf_trace::finish("writer verification", verification_trace);
-    return {};
+    return *local_hash;
 }
 
 std::expected<bool, Error>
@@ -192,6 +192,66 @@ original_from_quarantine(const RemoteLayout& layout,
 bool valid_sha256(std::string_view value) {
     const auto parsed = hash_from_hex(value);
     return parsed && hash_hex(*parsed) == value;
+}
+
+std::expected<bool, Error>
+registration_matches(transport::Transport& storage,
+                     const RegistrationState& registration) {
+    const auto ownership_trace = platform::perf_trace::begin();
+    const auto result = [&]() -> std::expected<bool, Error> {
+        platform::perf_trace::count("gc.barrier_ownership_verifications");
+        platform::perf_trace::count("gc.barrier_physical_hash_attempts");
+        const auto hash_trace = platform::perf_trace::begin();
+        auto remote_hash = transport::physical_hash(
+            storage, registration.identifier, "sha256");
+        platform::perf_trace::finish("gc barrier physical hash verification",
+                                     hash_trace);
+        if (remote_hash) {
+            if (!valid_sha256(*remote_hash)) {
+                platform::perf_trace::count(
+                    "gc.barrier_physical_hash_malformed");
+                return std::unexpected(error(
+                    ErrorCode::VerificationFailure,
+                    "invalid remote barrier SHA-256"));
+            }
+            platform::perf_trace::count(
+                "gc.barrier_physical_hash_successes");
+            if (!valid_sha256(registration.expected_physical_sha256)) {
+                return std::unexpected(error(
+                    ErrorCode::VerificationFailure,
+                    "invalid expected barrier SHA-256"));
+            }
+            if (*remote_hash != registration.expected_physical_sha256) {
+                platform::perf_trace::count(
+                    "gc.barrier_physical_hash_mismatches");
+                return false;
+            }
+            return true;
+        }
+        if (remote_hash.error().code == transport::ErrorCode::ObjectNotFound) {
+            platform::perf_trace::count(
+                "gc.barrier_physical_hash_not_found");
+            return false;
+        }
+        if (remote_hash.error().code != transport::ErrorCode::Unsupported) {
+            platform::perf_trace::count("gc.barrier_physical_hash_errors");
+            return std::unexpected(transport_error(remote_hash.error()));
+        }
+
+        platform::perf_trace::count(
+            "gc.barrier_physical_hash_unsupported");
+        platform::perf_trace::count("gc.barrier_get_fallbacks");
+        const auto fallback_trace = platform::perf_trace::begin();
+        auto matches = marker_matches(storage, registration.identifier,
+                                      registration.payload,
+                                      registration.workspace_root);
+        platform::perf_trace::finish("gc barrier GET fallback verification",
+                                     fallback_trace);
+        return matches;
+    }();
+    platform::perf_trace::finish("gc barrier ownership verification",
+                                 ownership_trace);
+    return result;
 }
 
 std::string metadata_for(std::string_view quarantine_identifier) {
@@ -366,7 +426,12 @@ publish_metadata(transport::Transport& storage,
     if (!ciphertext) {
         return std::unexpected(history_error(ciphertext.error()));
     }
-    return put_verified(storage, identifier, *ciphertext, workspace_root);
+    auto published = put_verified(storage, identifier, *ciphertext,
+                                  workspace_root);
+    if (!published) {
+        return std::unexpected(published.error());
+    }
+    return {};
 }
 
 } // namespace
@@ -421,10 +486,7 @@ verify_registration(const RegistrationState& registration) {
         return std::unexpected(
             error(ErrorCode::InvalidInput, "registro remoto inativo"));
     }
-    auto matches = marker_matches(*registration.storage,
-                                  registration.identifier,
-                                  registration.payload,
-                                  registration.workspace_root);
+    auto matches = registration_matches(*registration.storage, registration);
     if (!matches) {
         return std::unexpected(matches.error());
     }
@@ -443,10 +505,7 @@ release_registration(RegistrationState& registration) {
     }
     auto* storage = std::exchange(registration.storage, nullptr);
     if (registration.verify_owner) {
-        auto matches = marker_matches(*storage,
-                                      registration.identifier,
-                                      registration.payload,
-                                      registration.workspace_root);
+        auto matches = registration_matches(*storage, registration);
         if (!matches) {
             return std::unexpected(matches.error());
         }
@@ -477,15 +536,16 @@ register_writer(transport::Transport& storage,
     const auto name = *token;
     const auto identifier = layout.writers_prefix + name;
     auto bytes = payload("writer", *token);
-    if (auto published =
-            put_verified(storage, identifier, bytes, workspace_root);
-        !published) {
+    auto published = put_verified(storage, identifier, bytes, workspace_root);
+    if (!published) {
         return std::unexpected(published.error());
     }
     RegistrationState registration{.storage = &storage,
                                    .workspace_root = workspace_root,
                                    .identifier = identifier,
                                    .payload = std::move(bytes),
+                                   .expected_physical_sha256 =
+                                       std::move(*published),
                                    .verify_owner = false};
     std::vector<std::string> listed;
     transport::Presence barrier = transport::Presence::Absent;
@@ -570,15 +630,16 @@ establish_barrier(transport::Transport& storage,
             error(ErrorCode::WorkspaceFailure, token.error()));
     }
     auto bytes = payload("barrier", *token);
-    if (auto published = put_verified(
+    auto published = put_verified(
             storage, layout.barrier_identifier, bytes, workspace_root);
-        !published) {
+    if (!published) {
         return std::unexpected(published.error());
     }
     return RegistrationState{.storage = &storage,
                              .workspace_root = workspace_root,
                              .identifier = layout.barrier_identifier,
                              .payload = std::move(bytes),
+                             .expected_physical_sha256 = std::move(*published),
                              .verify_owner = true};
 }
 
