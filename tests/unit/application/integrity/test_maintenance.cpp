@@ -2045,7 +2045,10 @@ TEST(IntegrityMaintenanceTest, GarbageCollectionBatchBaselineScale) {
         EXPECT_EQ(collected->quarantined_objects, orphan_count);
         EXPECT_EQ(collected->restored_objects, 0U);
         EXPECT_EQ(collected->purged_objects, 0U);
-        EXPECT_EQ(state->get_count, 7U + 2U * orphan_count);
+        const auto candidate_batches =
+            (orphan_count + 7U) / 8U;
+        EXPECT_EQ(state->get_count,
+                  7U + 3U * orphan_count + 2U * candidate_batches);
         EXPECT_EQ(state->orphan_payload_get_count, 0U);
         EXPECT_EQ(state->orphan_payload_get_bytes, 0U);
         EXPECT_EQ(state->put_count, 2U + orphan_count);
@@ -2065,7 +2068,7 @@ TEST(IntegrityMaintenanceTest, GarbageCollectionBatchBaselineScale) {
         EXPECT_EQ(state->native_copy_bytes, orphan_bytes);
         EXPECT_EQ(state->remove_count, 2U + orphan_count);
         EXPECT_EQ(state->barrier_verification_count,
-                  3U + 2U * orphan_count);
+                  3U + 3U * orphan_count + 2U * candidate_batches);
         EXPECT_EQ(kasumi::platform::perf_trace::get_count(
                       "writer physical hash calls"),
                   2U + orphan_count);
@@ -4090,30 +4093,31 @@ TEST(IntegrityMaintenanceTest, CopyBatchEightPreservesVerificationAndRemovalOrde
     EXPECT_EQ(state->copy_batch_concurrency, 8U);
     EXPECT_EQ(state->physical_hash_batch_count, 1U);
     EXPECT_EQ(state->quarantine_metadata_put_count, 8U);
-    EXPECT_EQ(state->remove_count, 8U);
 
     const auto copy_batch = std::ranges::find(state->gc_events, "copy_batch:8");
-    const auto destination_verify = std::ranges::find_if(
-        state->gc_events,
-        [](const auto& event) { return event.starts_with("batch|"); });
-    const auto first_metadata = std::ranges::find_if(
-        state->gc_events,
-        [](const auto& event) { return event.starts_with("metadata:"); });
-    const auto first_remove = std::ranges::find_if(
-        state->gc_events,
-        [](const auto& event) { return event.starts_with("remove:"); });
     ASSERT_NE(copy_batch, state->gc_events.end());
-    ASSERT_NE(destination_verify, state->gc_events.end());
-    ASSERT_NE(first_metadata, state->gc_events.end());
-    ASSERT_NE(first_remove, state->gc_events.end());
-    EXPECT_LT(copy_batch, destination_verify);
-    EXPECT_LT(destination_verify, first_metadata);
-    EXPECT_LT(first_metadata, first_remove);
     for (const auto& candidate : candidates) {
         const auto source_hash = std::ranges::find(
             state->gc_events, "physical_hash:" + candidate);
+        const auto q_id = protocol::quarantine_identifier(test_layout(), candidate);
+        ASSERT_TRUE(q_id.has_value());
+        const auto destination_verify = std::ranges::find_if(
+            state->gc_events, [&](const auto& event) {
+                return event.starts_with("batch|") &&
+                       event.find(*q_id) != std::string::npos;
+            });
+        const auto metadata = std::ranges::find(
+            state->gc_events, "metadata:" + *q_id + ".meta");
+        const auto remove = std::ranges::find(
+            state->gc_events, "remove:" + candidate);
         ASSERT_NE(source_hash, state->gc_events.end());
+        ASSERT_NE(destination_verify, state->gc_events.end());
+        ASSERT_NE(metadata, state->gc_events.end());
+        ASSERT_NE(remove, state->gc_events.end());
         EXPECT_LT(source_hash, copy_batch);
+        EXPECT_LT(copy_batch, destination_verify);
+        EXPECT_LT(destination_verify, metadata);
+        EXPECT_LT(metadata, remove);
         expect_presence(transport, candidate, Presence::Absent);
     }
 }
@@ -4140,8 +4144,9 @@ TEST(IntegrityMaintenanceTest, CopyBatchPartialAmbiguousFailureKeepsEverySource)
     EXPECT_EQ(state->copy_batch_count, 1U);
     EXPECT_EQ(state->copy_count, 1U);
     EXPECT_EQ(state->quarantine_metadata_put_count, 0U);
-    EXPECT_EQ(state->remove_count, 0U);
     for (const auto& candidate : candidates) {
+        EXPECT_EQ(std::ranges::find(state->gc_events, "remove:" + candidate),
+                  state->gc_events.end());
         expect_presence(transport, candidate, Presence::Present);
     }
 }
@@ -4166,8 +4171,9 @@ TEST(IntegrityMaintenanceTest, CopyBatchBarrierLossPreventsMetadataAndRemoval) {
     ASSERT_FALSE(collected.has_value());
     EXPECT_EQ(state->copy_batch_count, 1U);
     EXPECT_EQ(state->quarantine_metadata_put_count, 0U);
-    EXPECT_EQ(state->remove_count, 0U);
     for (const auto& candidate : candidates) {
+        EXPECT_EQ(std::ranges::find(state->gc_events, "remove:" + candidate),
+                  state->gc_events.end());
         expect_presence(transport, candidate, Presence::Present);
     }
 }
@@ -4194,6 +4200,66 @@ TEST(IntegrityMaintenanceTest, UnsupportedCopyBatchFallsBackToSequentialCopies) 
     EXPECT_EQ(state->copy_count, 8U);
     for (const auto& candidate : candidates) {
         expect_presence(transport, candidate, Presence::Absent);
+    }
+}
+
+TEST(IntegrityMaintenanceTest, MissingCopyBatchCapabilityKeepsSequentialGcPath) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-copy-batch-absent");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    transport.storage.copy_batch = nullptr;
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 1);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8);
+
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(state->copy_batch_count, 0U);
+    EXPECT_EQ(state->copy_count, 1U);
+    expect_presence(transport, candidates.front(), Presence::Absent);
+}
+
+TEST(IntegrityMaintenanceTest, CopyBatchDestinationMismatchOrAbsenceKeepsSource) {
+    for (const bool missing : {false, true}) {
+        auto workspace = kasumi::test::make_temp_workspace(
+            missing ? "gc-copy-batch-destination-missing"
+                    : "gc-copy-batch-destination-mismatch");
+        FakeState* state = nullptr;
+        auto transport = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(transport));
+        state->physical_hash_supported = true;
+        state->copy_supported = true;
+        state->copy_batch_supported = true;
+        enable_fake_physical_hash_batch(transport, *state, 6);
+        auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+        std::ranges::sort(candidates);
+        const auto& candidate = candidates.back();
+        const auto quarantine =
+            protocol::quarantine_identifier(test_layout(), candidate);
+        ASSERT_TRUE(quarantine.has_value());
+        if (missing) {
+            state->physical_hash_batch_missing.insert(*quarantine);
+        } else {
+            state->physical_hash_batch_mismatches.insert(*quarantine);
+        }
+        auto runtime = runtime_data(workspace);
+        reset_fake_traffic(*state);
+
+        const auto collected = kasumi::application::integrity::garbage_collect(
+            runtime, transport, test_key(), 8);
+
+        ASSERT_FALSE(collected.has_value());
+        EXPECT_EQ(state->copy_batch_count, 1U);
+        EXPECT_EQ(std::ranges::find(state->gc_events, "remove:" + candidate),
+                  state->gc_events.end());
+        expect_presence(transport, candidate, Presence::Present);
+        expect_presence(transport, *quarantine + ".meta", Presence::Absent);
     }
 }
 

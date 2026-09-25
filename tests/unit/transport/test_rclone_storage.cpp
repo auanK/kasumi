@@ -1591,7 +1591,7 @@ TEST(RcloneStorageTest, CopyBatchUsesOneJobBatchWithExplicitCopyfileInputs) {
     const auto copied = kasumi::transport::copy_batch(
         storage,
         kasumi::transport::CopyBatch{
-            .items = {{"source-A", "quarantine/A"},
+            .items = {{"source-A/nested", "quarantine/A/nested"},
                       {"source-B", "quarantine/B"},
                       {"source-C", "quarantine/C"}},
             .concurrency = 2,
@@ -1604,7 +1604,7 @@ TEST(RcloneStorageTest, CopyBatchUsesOneJobBatchWithExplicitCopyfileInputs) {
     EXPECT_EQ(requests[0].at("concurrency"), 2);
     ASSERT_EQ(requests[0].at("inputs").size(), 3U);
     const std::array<std::pair<std::string_view, std::string_view>, 3> pairs{{
-        {"source-A", "quarantine/A"},
+        {"source-A/nested", "quarantine/A/nested"},
         {"source-B", "quarantine/B"},
         {"source-C", "quarantine/C"},
     }};
@@ -1636,9 +1636,11 @@ TEST(RcloneStorageTest, CopyBatchRejectsInvalidInputsBeforeSending) {
 
     EXPECT_TRUE(kasumi::transport::copy_batch(
         storage, kasumi::transport::CopyBatch{}));
-    const std::array invalid_batches{
+    const std::array<kasumi::transport::CopyBatch, 9> invalid_batches{
         kasumi::transport::CopyBatch{
             .items = {{"../source", "quarantine/A"}}, .concurrency = 1},
+        kasumi::transport::CopyBatch{
+            .items = {{"/source", "quarantine/A"}}, .concurrency = 1},
         kasumi::transport::CopyBatch{
             .items = {{"source", "../quarantine/A"}}, .concurrency = 1},
         kasumi::transport::CopyBatch{
@@ -1654,7 +1656,11 @@ TEST(RcloneStorageTest, CopyBatchRejectsInvalidInputsBeforeSending) {
             .items = {{"source\nname", "quarantine/A"}},
             .concurrency = 1},
         kasumi::transport::CopyBatch{
-            .items = {{"source", "quarantine/A"}}, .concurrency = 0},
+            .items = {{"source\rname", "quarantine/A"}},
+            .concurrency = 1},
+        kasumi::transport::CopyBatch{
+            .items = {{"source/./name", "quarantine/A"}},
+            .concurrency = 1},
     };
     for (const auto& batch : invalid_batches) {
         const auto result = kasumi::transport::copy_batch(storage, batch);
@@ -1662,6 +1668,13 @@ TEST(RcloneStorageTest, CopyBatchRejectsInvalidInputsBeforeSending) {
         EXPECT_EQ(result.error().code,
                   kasumi::transport::ErrorCode::InvalidIdentifier);
     }
+    const auto invalid_concurrency = kasumi::transport::copy_batch(
+        storage,
+        kasumi::transport::CopyBatch{
+            .items = {{"source", "quarantine/A"}}, .concurrency = 0});
+    ASSERT_FALSE(invalid_concurrency.has_value());
+    EXPECT_EQ(invalid_concurrency.error().code,
+              kasumi::transport::ErrorCode::InvalidContext);
     stop_rc_server(remote);
     EXPECT_EQ(calls, 0);
 }
@@ -1754,6 +1767,24 @@ TEST(RcloneStorageTest, CopyBatchDoesNotRetryAnAmbiguousSubmittedRequest) {
                 result.error().code ==
                     kasumi::transport::ErrorCode::ProtocolFailure);
     EXPECT_EQ(calls, 1);
+}
+
+TEST(RcloneStorageTest, CopyBatchConnectionFailureBeforeResponseFailsClosed) {
+    RcServerState remote;
+    start_rc_server(remote);
+    const auto port = remote.port;
+    stop_rc_server(remote);
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, port);
+    auto storage = make_preflight_transport(state);
+
+    const auto result = kasumi::transport::copy_batch(
+        storage,
+        kasumi::transport::CopyBatch{
+            .items = {{"source", "quarantine/source"}}, .concurrency = 1});
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, kasumi::transport::ErrorCode::Io);
 }
 
 } // namespace

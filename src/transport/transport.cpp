@@ -210,6 +210,35 @@ bool valid_object_identifier(std::string_view identifier) {
            !normalized.has_root_directory();
 }
 
+std::expected<void, Error> validate_copy_batch(const CopyBatch& batch) {
+    if (batch.concurrency == 0) {
+        return std::unexpected(make_error(
+            ErrorCode::InvalidContext, "copy batch concurrency must be positive"));
+    }
+
+    std::unordered_set<std::string> destinations;
+    for (const auto& item : batch.items) {
+        const auto safe = [](std::string_view identifier) {
+            if (!valid_object_identifier(identifier) ||
+                std::any_of(identifier.begin(), identifier.end(),
+                            forbidden_character)) {
+                return false;
+            }
+            const auto path = platform::path::from_utf8(identifier);
+            return path.lexically_normal() == path;
+        };
+        if (!safe(item.source_identifier) ||
+            !safe(item.destination_identifier) ||
+            item.source_identifier == item.destination_identifier ||
+            !destinations.insert(item.destination_identifier).second) {
+            return std::unexpected(make_error(
+                ErrorCode::InvalidIdentifier,
+                "invalid, identical, or duplicate copy batch identifier"));
+        }
+    }
+    return {};
+}
+
 std::expected<void, Error> validate_batch(const PutBatch& batch) {
     std::error_code error;
     if (!std::filesystem::is_directory(batch.source_root, error)) {
@@ -552,6 +581,26 @@ Result copy(Transport& transport,
     }
     return transport.storage.copy(
         state, source_identifier, destination_identifier);
+}
+
+Result copy_batch(Transport& transport, const CopyBatch& batch) {
+    if (batch.items.empty()) {
+        return {};
+    }
+    const auto validation = validate_copy_batch(batch);
+    if (!validation) {
+        return std::unexpected(validation.error());
+    }
+    auto* state = state_pointer(transport);
+    if (state == nullptr) {
+        return std::unexpected(invalid_transport_error());
+    }
+    if (transport.storage.copy_batch == nullptr) {
+        return std::unexpected(make_error(
+            ErrorCode::Unsupported,
+            "transport does not support remote copy batch"));
+    }
+    return transport.storage.copy_batch(state, batch);
 }
 
 Result get_batch(Transport& transport, const GetBatch& batch) {

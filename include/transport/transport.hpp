@@ -3,6 +3,7 @@
 
 #include "transport/types.hpp"
 
+#include <cstddef>
 #include <expected>
 #include <filesystem>
 #include <memory>
@@ -29,6 +30,19 @@ using GetFunction = Result (*)(void* context,
 using CopyFunction = Result (*)(void* context,
                                 std::string_view source_identifier,
                                 std::string_view destination_identifier);
+
+// Explicit same-storage copies executed with bounded backend concurrency.
+struct CopyBatchItem {
+    std::string source_identifier;
+    std::string destination_identifier;
+};
+
+struct CopyBatch {
+    std::vector<CopyBatchItem> items;
+    std::size_t concurrency = 1;
+};
+
+using CopyBatchFunction = Result (*)(void* context, const CopyBatch& batch);
 
 // Batch of objects for optimized download. Identifiers are relative to
 // the remote prefix and local destination directory.
@@ -122,6 +136,7 @@ struct StorageOperations {
     GetFunction get = nullptr;
     GetBatchFunction get_batch = nullptr;
     CopyFunction copy = nullptr;
+    CopyBatchFunction copy_batch = nullptr;
     PresenceFunction presence = nullptr;
     ListFunction list = nullptr;
     ListPrefixFunction list_prefix = nullptr;
@@ -178,6 +193,10 @@ Result get(Transport& transport,
 Result copy(Transport& transport,
             std::string_view source_identifier,
             std::string_view destination_identifier);
+
+// Executes explicit remote copies in one optional backend batch. Unsupported
+// is returned when the transport has no native batch implementation.
+Result copy_batch(Transport& transport, const CopyBatch& batch);
 
 // Downloads a batch of objects. Falls back to individual get() calls if
 // unsupported natively by backend.

@@ -1019,9 +1019,11 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
 std::expected<GarbageCollectResult, Error>
 garbage_collect(const runtime::RuntimeData& runtime_data,
                 transport::Transport& storage,
-                KeySpan key) {
+                KeySpan key,
+                std::size_t copy_batch_concurrency) {
     if (runtime_data.local_dir.empty() || runtime_data.database_path.empty() ||
-        !transport::valid(storage)) {
+        !transport::valid(storage) || copy_batch_concurrency == 0 ||
+        copy_batch_concurrency > max_candidates_per_batch) {
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid GC context"));
     }
@@ -1242,12 +1244,19 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                         });
                     }
 
-                    // Phase 1: Preparation & Native Copy
+                    // Phase 1: prepare source hashes serially.
                     {
                         BatchPhaseTraceGuard phase1_guard{
                             "gc.batch_prepare_duration_us",
                             platform::perf_trace::begin()};
+                        std::vector<CandidateItem*> to_batch_copy;
+                        std::vector<CandidateItem*> to_workspace_copy;
+                        to_batch_copy.reserve(batch_items.size());
+                        to_workspace_copy.reserve(batch_items.size());
                         for (auto& item : batch_items) {
+                            TraceGuard candidate_copy_trace{
+                                "gc candidate verified copy",
+                                platform::perf_trace::begin()};
                             const auto before_copy_barrier_trace =
                                 platform::perf_trace::begin();
                             auto owned = history_storage::maintenance_protocol::
@@ -1259,10 +1268,10 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                 return std::unexpected(protocol_error(owned.error()));
                             }
 
-                            const auto copy_trace = platform::perf_trace::begin();
-                            bool attempted_native = false;
                             const auto source_hash_trace =
                                 platform::perf_trace::begin();
+                            platform::perf_trace::count(
+                                "gc.source_physical_hash_calls", 1);
                             auto source_hash = transport::physical_hash(
                                 storage, item.source_identifier, "sha256");
                             platform::perf_trace::finish(
@@ -1270,71 +1279,156 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                 source_hash_trace);
                             if (source_hash) {
                                 if (!is_hex_sha256(*source_hash)) {
-                                    platform::perf_trace::finish(
-                                        "gc candidate verified copy", copy_trace);
                                     return std::unexpected(make_error(
                                         ErrorCode::IntegrityFailure,
                                         "invalid source physical SHA-256",
                                         item.source_identifier));
                                 }
-                                platform::perf_trace::count("gc.native_copy_attempts", 1);
-                                const auto native_copy_trace =
-                                    platform::perf_trace::begin();
-                                auto copied = transport::copy(
-                                    storage,
-                                    item.source_identifier,
-                                    item.quarantine_identifier);
-                                platform::perf_trace::finish(
-                                    "verified copy native copy",
-                                    native_copy_trace);
-                                if (copied) {
-                                    platform::perf_trace::count(
-                                        "verified copy native copy successes");
-                                    platform::perf_trace::count("gc.native_copy_successes", 1);
-                                    item.expected_physical_hash =
-                                        std::move(*source_hash);
-                                    item.native_copied = true;
-                                    item.state = CandidateProcessingState::Copied;
-                                    attempted_native = true;
-                                } else if (copied.error().code !=
-                                           transport::ErrorCode::Unsupported) {
-                                    platform::perf_trace::finish(
-                                        "gc candidate verified copy", copy_trace);
-                                    return std::unexpected(transport_error(
-                                        copied.error(), item.source_identifier));
-                                } else {
-                                    platform::perf_trace::count("gc.native_copy_unsupported", 1);
-                                }
+                                item.expected_physical_hash = std::move(*source_hash);
+                                to_batch_copy.push_back(&item);
                             } else if (source_hash.error().code !=
                                        transport::ErrorCode::Unsupported) {
-                                platform::perf_trace::finish(
-                                    "gc candidate verified copy", copy_trace);
                                 return std::unexpected(transport_error(
                                     source_hash.error(), item.source_identifier));
                             } else {
                                 platform::perf_trace::count("gc.native_copy_unsupported", 1);
+                                to_workspace_copy.push_back(&item);
+                            }
+                        }
+
+                        if (!to_batch_copy.empty()) {
+                            const auto batch_barrier_trace =
+                                platform::perf_trace::begin();
+                            auto owned = history_storage::maintenance_protocol::
+                                verify_registration(*barrier);
+                            platform::perf_trace::finish(
+                                "gc candidate pre-batch copy barrier verification",
+                                batch_barrier_trace);
+                            if (!owned) {
+                                return std::unexpected(protocol_error(owned.error()));
                             }
 
-                            if (!attempted_native) {
-                                platform::perf_trace::count("gc.fallback_copy_attempts", 1);
-                                auto copied = history_storage::maintenance_protocol::
-                                    copy_verified_via_workspace(storage,
-                                                                item.source_identifier,
-                                                                item.quarantine_identifier,
-                                                                workspace_root);
-                                platform::perf_trace::finish(
-                                    "gc candidate verified copy", copy_trace);
-                                if (!copied) {
-                                    return std::unexpected(
-                                        protocol_error(copied.error()));
-                                }
-                                item.expected_physical_hash = std::move(*copied);
-                                item.state = CandidateProcessingState::Verified;
-                                platform::perf_trace::count("gc.candidates_verified", 1);
-                            } else {
-                                platform::perf_trace::finish(
-                                    "gc candidate verified copy", copy_trace);
+                            transport::CopyBatch request{
+                                .items = {},
+                                .concurrency = copy_batch_concurrency,
+                            };
+                            request.items.reserve(to_batch_copy.size());
+                            for (const auto* item : to_batch_copy) {
+                                request.items.push_back(transport::CopyBatchItem{
+                                    .source_identifier = item->source_identifier,
+                                    .destination_identifier = item->quarantine_identifier,
+                                });
                             }
+                            platform::perf_trace::count("gc.copy_batch_calls", 1);
+                            platform::perf_trace::count(
+                                "gc.copy_batch_inputs", request.items.size());
+                            platform::perf_trace::count(
+                                "gc.copy_batch_concurrency", copy_batch_concurrency);
+                            const auto copy_batch_trace = platform::perf_trace::begin();
+                            auto copied = transport::copy_batch(storage, request);
+                            platform::perf_trace::finish(
+                                "gc candidate copy batch", copy_batch_trace);
+                            if (copied) {
+                                platform::perf_trace::count(
+                                    "gc.native_copy_attempts", request.items.size());
+                                platform::perf_trace::count(
+                                    "verified copy native copy successes",
+                                    request.items.size());
+                                platform::perf_trace::count(
+                                    "gc.native_copy_successes", request.items.size());
+                                for (auto* item : to_batch_copy) {
+                                    item->native_copied = true;
+                                    item->state = CandidateProcessingState::Copied;
+                                }
+                            } else if (copied.error().code ==
+                                       transport::ErrorCode::Unsupported) {
+                                platform::perf_trace::count(
+                                    "gc.copy_batch_unsupported", 1);
+                                for (auto* item : to_batch_copy) {
+                                    auto item_owned = history_storage::
+                                        maintenance_protocol::verify_registration(*barrier);
+                                    if (!item_owned) {
+                                        return std::unexpected(
+                                            protocol_error(item_owned.error()));
+                                    }
+                                    platform::perf_trace::count(
+                                        "gc.native_copy_attempts", 1);
+                                    const auto individual_native_copy_trace =
+                                        platform::perf_trace::begin();
+                                    auto individual = transport::copy(
+                                        storage, item->source_identifier,
+                                        item->quarantine_identifier);
+                                    platform::perf_trace::finish(
+                                        "verified copy native copy",
+                                        individual_native_copy_trace);
+                                    if (individual) {
+                                        platform::perf_trace::count(
+                                            "verified copy native copy successes");
+                                        platform::perf_trace::count(
+                                            "gc.native_copy_successes", 1);
+                                        item->native_copied = true;
+                                        item->state = CandidateProcessingState::Copied;
+                                        continue;
+                                    }
+                                    if (individual.error().code !=
+                                        transport::ErrorCode::Unsupported) {
+                                        return std::unexpected(transport_error(
+                                            individual.error(), item->source_identifier));
+                                    }
+                                    platform::perf_trace::count(
+                                        "gc.native_copy_unsupported", 1);
+                                    platform::perf_trace::count(
+                                        "gc.fallback_copy_attempts", 1);
+                                    auto fallback = history_storage::
+                                        maintenance_protocol::copy_verified_via_workspace(
+                                            storage, item->source_identifier,
+                                            item->quarantine_identifier, workspace_root);
+                                    if (!fallback) {
+                                        return std::unexpected(
+                                            protocol_error(fallback.error()));
+                                    }
+                                    item->expected_physical_hash = std::move(*fallback);
+                                    item->state = CandidateProcessingState::Verified;
+                                    platform::perf_trace::count(
+                                        "gc.candidates_verified", 1);
+                                }
+                            } else {
+                                platform::perf_trace::count("gc.copy_batch_errors", 1);
+                                platform::perf_trace::count("gc.copy_batch_ambiguous", 1);
+                                platform::perf_trace::count(
+                                    "gc.native_copy_attempts", request.items.size());
+                                return std::unexpected(transport_error(
+                                    copied.error(),
+                                    to_batch_copy.front()->source_identifier));
+                            }
+                        }
+
+                        for (auto* item : to_workspace_copy) {
+                            const auto fallback_barrier_trace =
+                                platform::perf_trace::begin();
+                            auto fallback_owned = history_storage::
+                                maintenance_protocol::verify_registration(*barrier);
+                            platform::perf_trace::finish(
+                                "gc candidate pre-fallback copy barrier verification",
+                                fallback_barrier_trace);
+                            if (!fallback_owned) {
+                                return std::unexpected(
+                                    protocol_error(fallback_owned.error()));
+                            }
+                            platform::perf_trace::count(
+                                "gc.fallback_copy_attempts", 1);
+                            auto fallback = history_storage::maintenance_protocol::
+                                copy_verified_via_workspace(
+                                    storage, item->source_identifier,
+                                    item->quarantine_identifier, workspace_root);
+                            if (!fallback) {
+                                return std::unexpected(
+                                    protocol_error(fallback.error()));
+                            }
+                            item->expected_physical_hash = std::move(*fallback);
+                            item->state = CandidateProcessingState::Verified;
+                            platform::perf_trace::count(
+                                "gc.candidates_verified", 1);
                         }
                     }
 
@@ -1488,6 +1582,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                 }
                             }
                         }
+
                     }
                     }
 
@@ -1496,6 +1591,17 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                         BatchPhaseTraceGuard phase3_guard{
                             "gc.batch_publish_remove_duration_us",
                             platform::perf_trace::begin()};
+                        const auto post_copy_barrier_trace =
+                            platform::perf_trace::begin();
+                        auto post_copy_owned = history_storage::maintenance_protocol::
+                            verify_registration(*barrier);
+                        platform::perf_trace::finish(
+                            "gc candidate post-copy barrier verification",
+                            post_copy_barrier_trace);
+                        if (!post_copy_owned) {
+                            return std::unexpected(
+                                protocol_error(post_copy_owned.error()));
+                        }
                         for (auto& item : batch_items) {
                             if (item.state != CandidateProcessingState::Verified) {
                                 return std::unexpected(make_error(
@@ -1518,8 +1624,12 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                 return std::unexpected(
                                     protocol_error(recorded.error()));
                             }
+                            platform::perf_trace::count(
+                                "gc.metadata_publications", 1);
                             item.state = CandidateProcessingState::MetadataPublished;
 
+                            platform::perf_trace::count(
+                                "gc.pre_remove_barrier_verifications", 1);
                             const auto before_remove_barrier_trace =
                                 platform::perf_trace::begin();
                             auto owned = history_storage::maintenance_protocol::

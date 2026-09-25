@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -216,6 +217,102 @@ bool unsupported_job_batch_endpoint(const Error& error) noexcept {
            error.native_code == 404 &&
            (error.message.find("job/batch") != std::string::npos ||
             error.message.find("method not found") != std::string::npos);
+}
+
+Result parse_copy_batch_response(const nlohmann::json& response,
+                                 const nlohmann::json& inputs) {
+    if (!response.is_object() || response.contains("error") ||
+        !response.contains("results") ||
+        !response.at("results").is_array() ||
+        response.at("results").size() != inputs.size()) {
+        return std::unexpected(make_error(
+            ErrorCode::ProtocolFailure,
+            "invalid or incomplete copy job/batch response"));
+    }
+
+    std::size_t successes = 0;
+    bool failed = false;
+    for (std::size_t index = 0; index < inputs.size(); ++index) {
+        const auto& result = response.at("results").at(index);
+        const auto& input = inputs.at(index);
+        if (!result.is_object()) {
+            return std::unexpected(make_error(
+                ErrorCode::ProtocolFailure,
+                "invalid copy job/batch subresult"));
+        }
+        if (result.contains("path") &&
+            (!result.at("path").is_string() ||
+             result.at("path") != input.at("_path"))) {
+            return std::unexpected(make_error(
+                ErrorCode::ProtocolFailure,
+                "copy job/batch result path does not match input"));
+        }
+        if (result.contains("input")) {
+            auto parameters = input;
+            parameters.erase("_path");
+            const auto& echo = result.at("input");
+            if ((!echo.is_object() || echo != parameters) && echo != input) {
+                return std::unexpected(make_error(
+                    ErrorCode::ProtocolFailure,
+                    "copy job/batch result input does not match request"));
+            }
+        }
+
+        bool item_failed = false;
+        if (result.contains("status")) {
+            if (!result.at("status").is_number_integer()) {
+                return std::unexpected(make_error(
+                    ErrorCode::ProtocolFailure,
+                    "invalid copy job/batch result status"));
+            }
+            int status = 0;
+            if (result.at("status").is_number_unsigned()) {
+                const auto value = result.at("status").get<std::uint64_t>();
+                if (value < 100 || value > 599) {
+                    return std::unexpected(make_error(
+                        ErrorCode::ProtocolFailure,
+                        "out-of-range copy job/batch result status"));
+                }
+                status = static_cast<int>(value);
+            } else {
+                const auto value = result.at("status").get<std::int64_t>();
+                if (value < 100 || value > 599) {
+                    return std::unexpected(make_error(
+                        ErrorCode::ProtocolFailure,
+                        "out-of-range copy job/batch result status"));
+                }
+                status = static_cast<int>(value);
+            }
+            item_failed = status < 200 || status >= 300;
+        }
+        if (result.contains("error")) {
+            if (!result.at("error").is_string() ||
+                result.at("error").get_ref<const std::string&>().empty() ||
+                !result.contains("status")) {
+                return std::unexpected(make_error(
+                    ErrorCode::ProtocolFailure,
+                    "invalid copy job/batch error result"));
+            }
+            item_failed = true;
+        }
+        if (item_failed) {
+            failed = true;
+        } else {
+            ++successes;
+        }
+    }
+
+    if (failed) {
+        platform::perf_trace::count(
+            "rclone.copy_batch_reported_successes", successes);
+        platform::perf_trace::count("rclone.copy_batch_partial_responses", 1);
+        return std::unexpected(make_error(
+            ErrorCode::ProtocolFailure,
+            "one or more copy job/batch subcommands failed"));
+    }
+    platform::perf_trace::count("rclone.copy_batch_reported_successes",
+                                successes);
+    return {};
 }
 
 std::expected<std::filesystem::path, Error>
@@ -489,6 +586,63 @@ Result rclone_copy(void* context,
                 ErrorCode::ObjectNotFound, "remote source does not exist"));
         }
         return std::unexpected(copied.error());
+    }
+    return {};
+}
+
+Result rclone_copy_batch(void* context, const CopyBatch& batch) {
+    auto* state = ready_state(context);
+    if (state == nullptr) {
+        return std::unexpected(invalid_context_error());
+    }
+    if (batch.items.empty()) {
+        return {};
+    }
+    if (batch.concurrency == 0) {
+        return std::unexpected(make_error(
+            ErrorCode::InvalidContext,
+            "copy batch concurrency must be positive"));
+    }
+
+    nlohmann::json inputs = nlohmann::json::array();
+    for (const auto& item : batch.items) {
+        if (!valid_identifier(item.source_identifier) ||
+            !valid_identifier(item.destination_identifier) ||
+            item.source_identifier == item.destination_identifier) {
+            return std::unexpected(invalid_identifier_error());
+        }
+        inputs.push_back(nlohmann::json{
+            {"_path", "operations/copyfile"},
+            {"srcFs", remote_fs(*state)},
+            {"srcRemote", object_remote(*state, item.source_identifier)},
+            {"dstFs", remote_fs(*state)},
+            {"dstRemote", object_remote(*state, item.destination_identifier)},
+        });
+    }
+
+    platform::perf_trace::count("rclone.copy_batch_inputs_submitted",
+                                batch.items.size());
+    platform::perf_trace::count("rclone.copy_batch_concurrency_submitted",
+                                batch.concurrency);
+    const auto response = request_json(
+        *state,
+        "job/batch",
+        nlohmann::json{{"inputs", inputs}, {"concurrency", batch.concurrency}},
+        maximum_response_size,
+        transfer_timeout);
+    if (!response) {
+        if (unsupported_job_batch_endpoint(response.error())) {
+            return std::unexpected(make_error(
+                ErrorCode::Unsupported,
+                "rclone does not support job/batch",
+                response.error().native_code));
+        }
+        return std::unexpected(response.error());
+    }
+
+    const auto validated = parse_copy_batch_response(*response, inputs);
+    if (!validated) {
+        return validated;
     }
     return {};
 }
@@ -1218,6 +1372,7 @@ StorageOperations make_storage_operations() noexcept {
         .get = rclone_get,
         .get_batch = rclone_get_batch,
         .copy = rclone_copy,
+        .copy_batch = rclone_copy_batch,
         .presence = rclone_presence,
         .list = rclone_list,
         .list_prefix = rclone_list_prefix,
