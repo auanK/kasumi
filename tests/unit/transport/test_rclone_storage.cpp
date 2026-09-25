@@ -778,6 +778,38 @@ TEST(RcloneStorageTest, MissingPhysicalHashObjectRemainsObjectNotFound) {
               kasumi::transport::ErrorCode::ObjectNotFound);
 }
 
+TEST(RcloneStorageTest, MalformedPhysicalHashResponseIsProtocolFailure) {
+    const auto valid_hash = std::string(64, 'a');
+    const std::vector<std::string> responses{
+        R"({"hashType":"SHA-256"})",
+        "{\"hash\":\"" + valid_hash + "\",\"hashType\":\"MD5\"}",
+        R"({"hash":"not-a-sha256","hashType":"SHA-256"})",
+    };
+    for (const auto& body : responses) {
+        SCOPED_TRACE(body);
+        RcServerState remote;
+        remote.server.Post(
+            "/rc/operations/hashsumfile",
+            [&](const httplib::Request&, httplib::Response& response) {
+                response.set_content(body, "application/json");
+            });
+        start_rc_server(remote);
+        kasumi::transport::rclone_detail::State state;
+        configure_state(state, remote.port);
+        const auto operations =
+            kasumi::transport::rclone_detail::make_storage_operations();
+
+        const auto result = operations.physical_hash(
+            &state, "nested/object", "sha256");
+        stop_rc_server(remote);
+
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code,
+                  kasumi::transport::ErrorCode::ProtocolFailure);
+        EXPECT_FALSE(state.sha256_unsupported.load());
+    }
+}
+
 TEST(RcloneStorageTest, DownloadsExactBatchWithOneSequentialCopy) {
     RcServerState remote;
     std::string request;
