@@ -176,6 +176,9 @@ struct FakeState {
     std::size_t get_count = 0;
     std::size_t get_batch_count = 0;
     std::size_t copy_count = 0;
+    std::size_t copy_batch_count = 0;
+    std::size_t copy_batch_item_count = 0;
+    std::size_t copy_batch_concurrency = 0;
     std::size_t presence_count = 0;
     std::size_t remove_count = 0;
     std::size_t put_count = 0;
@@ -198,6 +201,9 @@ struct FakeState {
     bool physical_hash_supported = false;
     bool physical_hash_mismatch = false;
     bool copy_supported = false;
+    bool copy_batch_supported = false;
+    std::optional<kasumi::transport::ErrorCode> copy_batch_failure;
+    std::size_t copy_batch_fail_after_items = 0;
     bool copy_destination_mismatch = false;
     std::optional<kasumi::transport::ErrorCode> copy_failure;
     std::string physical_hash_mismatch_identifier;
@@ -259,6 +265,8 @@ FakeState* fake_state(void* context) {
     state.list_count = state.full_list_count = state.prefix_list_count = 0;
     state.full_list_identifier_count = 0;
     state.get_count = state.get_batch_count = state.copy_count = 0;
+    state.copy_batch_count = state.copy_batch_item_count = 0;
+    state.copy_batch_concurrency = 0;
     state.presence_count = state.remove_count = state.put_count = 0;
     state.put_batch_count = state.commit_put_count = state.marker_put_count = 0;
     state.commit_get_count = state.marker_get_count = state.epoch_get_count = 0;
@@ -444,6 +452,42 @@ kasumi::transport::Result fake_copy(
         return std::unexpected(kasumi::transport::Error{
             .code = failure,
             .message = "injected copy error after destination effect"});
+    }
+    return {};
+}
+
+kasumi::transport::Result fake_copy_batch(
+    void* context, const kasumi::transport::CopyBatch& batch) {
+    auto* state = fake_state(context);
+    ++state->copy_batch_count;
+    state->copy_batch_item_count += batch.items.size();
+    state->copy_batch_concurrency = batch.concurrency;
+    state->gc_events.emplace_back("copy_batch:" +
+                                  std::to_string(batch.items.size()));
+    if (!state->copy_batch_supported) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Unsupported,
+            .message = "copy batch unavailable"});
+    }
+    for (std::size_t index = 0; index < batch.items.size(); ++index) {
+        const auto& item = batch.items[index];
+        auto copied = fake_copy(context, item.source_identifier,
+                                item.destination_identifier);
+        if (!copied) {
+            return copied;
+        }
+        if (state->copy_batch_failure &&
+            state->copy_batch_fail_after_items != 0 &&
+            index + 1 == state->copy_batch_fail_after_items) {
+            return std::unexpected(kasumi::transport::Error{
+                .code = *state->copy_batch_failure,
+                .message = "injected copy batch failure after remote effect"});
+        }
+    }
+    if (state->copy_batch_failure) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = *state->copy_batch_failure,
+            .message = "injected copy batch failure"});
     }
     return {};
 }
@@ -687,6 +731,7 @@ std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
     void* context, std::string_view identifier, std::string_view algorithm) {
     auto* state = fake_state(context);
     ++state->physical_hash_count;
+    state->gc_events.emplace_back("physical_hash:" + std::string{identifier});
     if (is_commit(identifier)) {
         state->remote_events.emplace_back("HashCommit");
     } else if (is_marker(identifier)) {
@@ -829,6 +874,7 @@ make_fake_transport(FakeState*& state) {
                 .put = fake_put,
                 .get = fake_get,
                 .copy = fake_copy,
+                .copy_batch = fake_copy_batch,
                 .presence = fake_presence,
                 .list = fake_list,
                 .list_prefix = fake_list_prefix,
