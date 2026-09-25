@@ -1157,6 +1157,159 @@ TEST(IntegrityMaintenanceTest, ActiveOrAbandonedWriterBlocksCollection) {
     ASSERT_TRUE(protocol::release_registration(*writer));
 }
 
+class BarrierOwnershipTest : public ::testing::Test {
+protected:
+    TempWorkspace workspace =
+        kasumi::test::make_temp_workspace("barrier-ownership");
+    FakeState* state = nullptr;
+    kasumi::transport::Transport storage = make_fake_transport(state);
+    protocol::RegistrationState barrier;
+
+    void SetUp() override {
+        ASSERT_TRUE(kasumi::transport::initialize(storage));
+        state->physical_hash_supported = true;
+        auto established = protocol::establish_barrier(
+            storage, test_layout(), kasumi::test::workspace_root(workspace));
+        ASSERT_TRUE(established.has_value()) << established.error().detail;
+        barrier = std::move(*established);
+        state->physical_hash_count = 0;
+        state->get_count = 0;
+        state->remove_count = 0;
+    }
+
+    void replace_barrier_bytes() {
+        state->objects[test_layout().barrier_identifier] = {'f', 'o', 'r', 'e', 'i', 'g', 'n'};
+    }
+};
+
+TEST_F(BarrierOwnershipTest, PhysicalHashMatchAndMismatchAvoidGet) {
+    EXPECT_TRUE(protocol::verify_registration(barrier));
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 0U);
+
+    state->physical_hash_mismatch_identifier = test_layout().barrier_identifier;
+    const auto mismatch = protocol::verify_registration(barrier);
+    ASSERT_FALSE(mismatch.has_value());
+    EXPECT_EQ(mismatch.error().code, protocol::ErrorCode::Blocked);
+    EXPECT_EQ(state->physical_hash_count, 2U);
+    EXPECT_EQ(state->get_count, 0U);
+}
+
+TEST_F(BarrierOwnershipTest, MissingBarrierFailsClosedWithoutGet) {
+    state->objects.erase(test_layout().barrier_identifier);
+    state->physical_hashes.erase(test_layout().barrier_identifier);
+
+    const auto result = protocol::verify_registration(barrier);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, protocol::ErrorCode::Blocked);
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 0U);
+}
+
+TEST_F(BarrierOwnershipTest, UnsupportedHashUsesReadbackForMatchMismatchAndMissing) {
+    state->physical_hash_unsupported_identifier = test_layout().barrier_identifier;
+    EXPECT_TRUE(protocol::verify_registration(barrier));
+
+    replace_barrier_bytes();
+    const auto mismatch = protocol::verify_registration(barrier);
+    ASSERT_FALSE(mismatch.has_value());
+    EXPECT_EQ(mismatch.error().code, protocol::ErrorCode::Blocked);
+
+    state->objects.erase(test_layout().barrier_identifier);
+    const auto missing = protocol::verify_registration(barrier);
+    ASSERT_FALSE(missing.has_value());
+    EXPECT_EQ(missing.error().code, protocol::ErrorCode::Blocked);
+    EXPECT_EQ(state->physical_hash_count, 3U);
+    EXPECT_EQ(state->get_count, 3U);
+}
+
+TEST_F(BarrierOwnershipTest, TransportErrorsFailClosedWithoutGet) {
+    using kasumi::transport::ErrorCode;
+    for (const auto code : {ErrorCode::Timeout, ErrorCode::BackendUnavailable,
+                            ErrorCode::PermissionDenied, ErrorCode::ProtocolFailure}) {
+        state->physical_hash_failure = code;
+        const auto result = protocol::verify_registration(barrier);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, protocol::ErrorCode::TransportFailure);
+        EXPECT_EQ(state->get_count, 0U);
+        state->physical_hash_failure.reset();
+    }
+    EXPECT_EQ(state->physical_hash_count, 4U);
+}
+
+TEST_F(BarrierOwnershipTest, MalformedHashFailsClosedWithoutGet) {
+    for (const auto& value : {std::string{}, std::string(64, 'A'),
+                              std::string(64, 'g'), std::string{"abc"}}) {
+        state->physical_hash_override = value;
+        const auto result = protocol::verify_registration(barrier);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, protocol::ErrorCode::VerificationFailure);
+        EXPECT_EQ(state->get_count, 0U);
+        state->physical_hash_override.reset();
+    }
+    EXPECT_EQ(state->physical_hash_count, 4U);
+}
+
+TEST_F(BarrierOwnershipTest, ReleaseVerifiesHashBeforeRemovingOwnedBarrier) {
+    ASSERT_TRUE(protocol::release_registration(barrier));
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 0U);
+    EXPECT_EQ(state->remove_count, 1U);
+    EXPECT_FALSE(state->objects.contains(test_layout().barrier_identifier));
+}
+
+TEST_F(BarrierOwnershipTest, ReleaseDoesNotRemoveForeignBarrier) {
+    state->physical_hash_mismatch_identifier = test_layout().barrier_identifier;
+
+    ASSERT_TRUE(protocol::release_registration(barrier));
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 0U);
+    EXPECT_EQ(state->remove_count, 0U);
+    EXPECT_TRUE(state->objects.contains(test_layout().barrier_identifier));
+}
+
+TEST_F(BarrierOwnershipTest, ReleaseMissingBarrierSucceedsWithoutRemove) {
+    state->objects.erase(test_layout().barrier_identifier);
+    state->physical_hashes.erase(test_layout().barrier_identifier);
+
+    ASSERT_TRUE(protocol::release_registration(barrier));
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 0U);
+    EXPECT_EQ(state->remove_count, 0U);
+}
+
+TEST_F(BarrierOwnershipTest, ReleaseTransportErrorDoesNotRemoveBarrier) {
+    state->physical_hash_failure = kasumi::transport::ErrorCode::Timeout;
+
+    const auto released = protocol::release_registration(barrier);
+    ASSERT_FALSE(released.has_value());
+    EXPECT_EQ(released.error().code, protocol::ErrorCode::TransportFailure);
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 0U);
+    EXPECT_EQ(state->remove_count, 0U);
+    EXPECT_TRUE(state->objects.contains(test_layout().barrier_identifier));
+}
+
+TEST_F(BarrierOwnershipTest, ReleaseUnsupportedHashFallsBackToReadback) {
+    state->physical_hash_unsupported_identifier = test_layout().barrier_identifier;
+    ASSERT_TRUE(protocol::release_registration(barrier));
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 1U);
+    EXPECT_EQ(state->remove_count, 1U);
+    EXPECT_FALSE(state->objects.contains(test_layout().barrier_identifier));
+}
+
+TEST_F(BarrierOwnershipTest, ReleaseUnsupportedHashPreservesForeignBarrier) {
+    state->physical_hash_unsupported_identifier = test_layout().barrier_identifier;
+    replace_barrier_bytes();
+
+    ASSERT_TRUE(protocol::release_registration(barrier));
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 1U);
+    EXPECT_EQ(state->remove_count, 0U);
+    EXPECT_TRUE(state->objects.contains(test_layout().barrier_identifier));
+}
+
 TEST(IntegrityMaintenanceTest, WriterPhysicalHashSuccessAvoidsReadback) {
     auto workspace = kasumi::test::make_temp_workspace("writer-hash-success");
     FakeState* state = nullptr;
@@ -1511,6 +1664,32 @@ TEST(IntegrityMaintenanceTest,
     EXPECT_EQ(state->copy_count, 1U);
     EXPECT_EQ(state->orphan_payload_get_count, 0U);
     EXPECT_EQ(state->quarantine_payload_put_count, 0U);
+}
+
+TEST(IntegrityMaintenanceTest, BarrierLostBeforeFirstCopyPreventsCopy) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-barrier-before-copy");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+    publish_remote(
+        transport, workspace, kasumi::history::make_empty_bootstrap().value());
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    state->replace_barrier_after_writer_list = true;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange);
+    EXPECT_EQ(state->copy_count, 0U);
+    EXPECT_EQ(state->copy_batch_count, 0U);
+    expect_presence(transport, orphan, Presence::Present);
+    expect_presence(
+        transport,
+        protocol::quarantine_identifier(test_layout(), orphan).value(),
+        Presence::Absent);
 }
 
 TEST(IntegrityMaintenanceTest, LostBarrierBeforeRemovalPreservesTheOriginal) {
@@ -4174,6 +4353,43 @@ TEST(IntegrityMaintenanceTest, CopyBatchBarrierLossPreventsMetadataAndRemoval) {
                   state->gc_events.end());
         expect_presence(transport, candidate, Presence::Present);
     }
+}
+
+TEST(IntegrityMaintenanceTest,
+     BarrierLostAfterAuthorizedRemovalPreservesRemainingSources) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-barrier-after-remove");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 2);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+    state->replace_barrier_after_source_remove_count = 1;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8);
+
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange);
+    EXPECT_EQ(state->source_remove_count, 1U);
+    std::size_t removed_sources = 0;
+    for (const auto& candidate : candidates) {
+        const auto removed = std::ranges::find(
+            state->gc_events, "remove:" + candidate) != state->gc_events.end();
+        removed_sources += removed ? 1U : 0U;
+        expect_presence(transport, candidate,
+                       removed ? Presence::Absent : Presence::Present);
+        const auto quarantine =
+            protocol::quarantine_identifier(test_layout(), candidate).value();
+        expect_presence(transport, quarantine, Presence::Present);
+        expect_presence(transport, quarantine + ".meta", Presence::Present);
+    }
+    EXPECT_EQ(removed_sources, 1U);
 }
 
 TEST(IntegrityMaintenanceTest, UnsupportedCopyBatchFallsBackToSequentialCopies) {

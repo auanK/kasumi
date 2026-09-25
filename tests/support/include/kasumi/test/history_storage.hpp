@@ -212,6 +212,7 @@ struct FakeState {
     std::string physical_hash_mismatch_identifier;
     std::string physical_hash_unsupported_identifier;
     std::string physical_hash_failure_identifier;
+    std::optional<std::string> physical_hash_override;
     std::size_t control_read_batch_count = 0;
     bool control_read_batch_supported = false;
     std::optional<kasumi::transport::ErrorCode> control_read_batch_failure;
@@ -233,6 +234,8 @@ struct FakeState {
     bool persist_marker_on_put_failure = false;
     bool fail_marker_get = false;
     std::size_t fail_remove_at = 0;
+    std::size_t source_remove_count = 0;
+    std::size_t replace_barrier_after_source_remove_count = 0;
     std::string fail_remove_identifier;
     std::string fail_get_identifier;
     std::string fail_put_identifier;
@@ -243,6 +246,7 @@ struct FakeState {
     bool reverse_listing = false;
     bool hide_probe_listing = false;
     bool replace_barrier_after_quarantine_put = false;
+    bool replace_barrier_after_writer_list = false;
     std::string disappear_on_get;
     std::string observed_payload_identifier;
     std::set<std::string> observed_payload_identifiers;
@@ -276,6 +280,7 @@ FakeState* fake_state(void* context) {
     state.copy_batch_count = state.copy_batch_item_count = 0;
     state.copy_batch_concurrency = 0;
     state.presence_count = state.remove_count = state.put_count = 0;
+    state.source_remove_count = 0;
     state.put_batch_count = state.commit_put_count = state.marker_put_count = 0;
     state.put_files_batch_count = 0;
     state.put_files_batch_item_count = 0;
@@ -317,6 +322,17 @@ bool is_epoch(std::string_view identifier) {
            identifier.starts_with(layout.epochs_prefix);
 }
 
+void replace_barrier_contents(
+    FakeState* state,
+    std::string_view identifier) {
+    std::vector<std::uint8_t> replacement{'r', 'e', 'p', 'l', 'a', 'c', 'e', 'd'};
+    auto hash = kasumi::crypto::physical::sha256_init();
+    kasumi::crypto::physical::sha256_update(hash, replacement);
+    state->objects[std::string{identifier}] = replacement;
+    state->physical_hashes[std::string{identifier}] =
+        kasumi::crypto::physical::sha256_finish(hash);
+}
+
 void maybe_replace_barrier_after_quarantine_put(
     FakeState* state,
     std::string_view identifier,
@@ -333,7 +349,8 @@ void maybe_replace_barrier_after_quarantine_put(
         if (object.size() >= barrier_payload.size() &&
             std::ranges::equal(
                 barrier_payload, std::span{object}.first(barrier_payload.size()))) {
-            object.assign({'r', 'e', 'p', 'l', 'a', 'c', 'e', 'd'});
+            replace_barrier_contents(state, object_identifier);
+            return;
         }
     }
 }
@@ -738,6 +755,10 @@ kasumi::transport::ListingResult fake_list_prefix(void* context,
         state->objects[test_layout.barrier_identifier] = {};
         state->objects["history/gc/v1/barrier"] = {};
     }
+    if (state->replace_barrier_after_writer_list && is_writers) {
+        state->replace_barrier_after_writer_list = false;
+        replace_barrier_contents(state, test_layout.barrier_identifier);
+    }
     return result;
 }
 
@@ -769,6 +790,19 @@ kasumi::transport::RemovalResult fake_remove(void* context,
     const bool removed = state->objects.erase(std::string{identifier}) != 0;
     if (removed) {
         state->gc_events.emplace_back("remove:" + std::string{identifier});
+        const bool content_identifier = identifier.size() == 64 &&
+            std::ranges::all_of(identifier, [](unsigned char c) {
+                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            });
+        if (content_identifier &&
+            ++state->source_remove_count ==
+                state->replace_barrier_after_source_remove_count) {
+            state->replace_barrier_after_source_remove_count = 0;
+            replace_barrier_contents(
+                state,
+                kasumi::application::history_storage::derive_remote_layout(
+                    test_key()).barrier_identifier);
+        }
     }
     return removed ? kasumi::transport::Removal::Removed
                    : kasumi::transport::Removal::AlreadyAbsent;
@@ -796,6 +830,9 @@ std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
         return std::unexpected(kasumi::transport::Error{
             .code = kasumi::transport::ErrorCode::Unsupported,
             .message = "physical hash unavailable"});
+    }
+    if (state->physical_hash_override) {
+        return *state->physical_hash_override;
     }
     const auto found = state->physical_hashes.find(std::string{identifier});
     if (found == state->physical_hashes.end()) {
