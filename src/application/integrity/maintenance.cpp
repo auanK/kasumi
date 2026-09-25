@@ -1020,10 +1020,13 @@ std::expected<GarbageCollectResult, Error>
 garbage_collect(const runtime::RuntimeData& runtime_data,
                 transport::Transport& storage,
                 KeySpan key,
-                std::size_t copy_batch_concurrency) {
+                std::size_t copy_batch_concurrency,
+                std::size_t metadata_batch_concurrency) {
     if (runtime_data.local_dir.empty() || runtime_data.database_path.empty() ||
         !transport::valid(storage) || copy_batch_concurrency == 0 ||
-        copy_batch_concurrency > max_candidates_per_batch) {
+        copy_batch_concurrency > max_candidates_per_batch ||
+        metadata_batch_concurrency == 0 ||
+        metadata_batch_concurrency > max_candidates_per_batch) {
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid GC context"));
     }
@@ -1259,6 +1262,8 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                 platform::perf_trace::begin()};
                             const auto before_copy_barrier_trace =
                                 platform::perf_trace::begin();
+                            platform::perf_trace::count(
+                                "gc.pre_copy_barrier_verifications", 1);
                             auto owned = history_storage::maintenance_protocol::
                                 verify_registration(*barrier);
                             platform::perf_trace::finish(
@@ -1299,6 +1304,8 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                         if (!to_batch_copy.empty()) {
                             const auto batch_barrier_trace =
                                 platform::perf_trace::begin();
+                            platform::perf_trace::count(
+                                "gc.pre_batch_copy_barrier_verifications", 1);
                             auto owned = history_storage::maintenance_protocol::
                                 verify_registration(*barrier);
                             platform::perf_trace::finish(
@@ -1406,6 +1413,8 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                         for (auto* item : to_workspace_copy) {
                             const auto fallback_barrier_trace =
                                 platform::perf_trace::begin();
+                            platform::perf_trace::count(
+                                "gc.pre_fallback_copy_barrier_verifications", 1);
                             auto fallback_owned = history_storage::
                                 maintenance_protocol::verify_registration(*barrier);
                             platform::perf_trace::finish(
@@ -1593,6 +1602,8 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                             platform::perf_trace::begin()};
                         const auto post_copy_barrier_trace =
                             platform::perf_trace::begin();
+                        platform::perf_trace::count(
+                            "gc.post_copy_barrier_verifications", 1);
                         auto post_copy_owned = history_storage::maintenance_protocol::
                             verify_registration(*barrier);
                         platform::perf_trace::finish(
@@ -1602,31 +1613,226 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                             return std::unexpected(
                                 protocol_error(post_copy_owned.error()));
                         }
-                        for (auto& item : batch_items) {
+                        for (const auto& item : batch_items) {
                             if (item.state != CandidateProcessingState::Verified) {
                                 return std::unexpected(make_error(
                                     ErrorCode::IntegrityFailure,
                                     "candidate verification failed",
                                     item.source_identifier));
                             }
+                        }
 
-                            const auto metadata_trace = platform::perf_trace::begin();
-                            auto recorded = history_storage::maintenance_protocol::
-                                record_quarantine(storage,
-                                                  item.quarantine_identifier,
-                                                  *now,
-                                                  key,
-                                                  workspace_root,
-                                                  item.expected_physical_hash);
-                            platform::perf_trace::finish(
-                                "gc candidate metadata publish", metadata_trace);
-                            if (!recorded) {
+                        auto metadata_workspace =
+                            history_storage::detail::make_workspace(workspace_root);
+                        if (!metadata_workspace) {
+                            return std::unexpected(make_error(
+                                ErrorCode::WorkspaceFailure,
+                                metadata_workspace.error().detail));
+                        }
+                        std::vector<history_storage::maintenance_protocol::
+                                        PreparedQuarantineMetadata> prepared;
+                        prepared.reserve(batch_items.size());
+                        const auto prepare_trace = platform::perf_trace::begin();
+                        for (std::size_t index = 0; index < batch_items.size();
+                             ++index) {
+                            const auto& item = batch_items[index];
+                            const auto path = (*metadata_workspace)->root /
+                                ("metadata-" + std::to_string(index) + ".enc");
+                            auto prepared_item = history_storage::maintenance_protocol::
+                                prepare_quarantine_metadata(
+                                    item.quarantine_identifier, *now, key, path,
+                                    item.expected_physical_hash);
+                            if (!prepared_item) {
                                 return std::unexpected(
-                                    protocol_error(recorded.error()));
+                                    protocol_error(prepared_item.error()));
                             }
+                            prepared.push_back(std::move(*prepared_item));
+                            platform::perf_trace::count("gc.metadata_prepared", 1);
+                        }
+                        platform::perf_trace::finish(
+                            "gc.metadata_prepare_duration_us", prepare_trace);
+
+                        transport::PutFilesBatch publish_request{
+                            .items = {},
+                            .concurrency = metadata_batch_concurrency,
+                        };
+                        publish_request.items.reserve(prepared.size());
+                        for (const auto& prepared_item : prepared) {
+                            publish_request.items.push_back(
+                                transport::PutFilesBatchItem{
+                                    .source = prepared_item.ciphertext_path,
+                                    .destination_identifier =
+                                        prepared_item.entry.metadata_identifier,
+                                });
+                        }
+
+                        platform::perf_trace::count("gc.metadata_batch_calls", 1);
+                        platform::perf_trace::count(
+                            "gc.metadata_objects_submitted", prepared.size());
+                        platform::perf_trace::count(
+                            "gc.metadata_concurrency", metadata_batch_concurrency);
+                        const auto publish_trace = platform::perf_trace::begin();
+                        auto published = transport::put_files_batch(
+                            storage, publish_request);
+                        platform::perf_trace::finish(
+                            "gc.metadata_publish_batch_duration_us", publish_trace);
+                        bool metadata_batch_published = false;
+                        if (published) {
+                            metadata_batch_published = true;
                             platform::perf_trace::count(
-                                "gc.metadata_publications", 1);
-                            item.state = CandidateProcessingState::MetadataPublished;
+                                "gc.metadata_batch_publish_successes", 1);
+                        } else if (published.error().code ==
+                                   transport::ErrorCode::Unsupported) {
+                            platform::perf_trace::count(
+                                "gc.metadata_batch_unsupported", 1);
+                            for (std::size_t index = 0; index < batch_items.size();
+                                 ++index) {
+                                auto recorded = history_storage::maintenance_protocol::
+                                    record_quarantine(
+                                        storage, batch_items[index].quarantine_identifier,
+                                        *now, key, workspace_root,
+                                        batch_items[index].expected_physical_hash);
+                                if (!recorded) {
+                                    return std::unexpected(
+                                        protocol_error(recorded.error()));
+                                }
+                                batch_items[index].state =
+                                    CandidateProcessingState::MetadataPublished;
+                                platform::perf_trace::count(
+                                    "gc.metadata_publications", 1);
+                                platform::perf_trace::count(
+                                    "gc candidate metadata publish", 1);
+                                platform::perf_trace::count(
+                                    "gc.metadata_verified", 1);
+                            }
+                        } else {
+                            platform::perf_trace::count(
+                                "gc.metadata_publication_failures", 1);
+                            return std::unexpected(transport_error(
+                                published.error()));
+                        }
+
+                        if (metadata_batch_published) {
+                            const auto verify_one = [&](
+                                const history_storage::maintenance_protocol::
+                                    PreparedQuarantineMetadata& prepared_item)
+                                -> std::expected<void, Error> {
+                                platform::perf_trace::count(
+                                    "gc.metadata_physical_hash_calls", 1);
+                                auto observed = transport::physical_hash(
+                                    storage,
+                                    prepared_item.entry.metadata_identifier,
+                                    "sha256");
+                                if (observed) {
+                                    if (!is_hex_sha256(*observed) ||
+                                        *observed !=
+                                            prepared_item.expected_physical_sha256) {
+                                        return std::unexpected(make_error(
+                                            ErrorCode::IntegrityFailure,
+                                            "published quarantine metadata hash mismatch",
+                                            prepared_item.entry.metadata_identifier));
+                                    }
+                                    return {};
+                                }
+                                if (observed.error().code !=
+                                    transport::ErrorCode::Unsupported) {
+                                    return std::unexpected(transport_error(
+                                        observed.error(),
+                                        prepared_item.entry.metadata_identifier));
+                                }
+                                auto downloaded = history_storage::
+                                    maintenance_protocol::
+                                        verify_destination_via_workspace(
+                                            storage,
+                                            prepared_item.entry.metadata_identifier,
+                                            prepared_item.expected_physical_sha256,
+                                            workspace_root);
+                                if (!downloaded) {
+                                    return std::unexpected(
+                                        protocol_error(downloaded.error()));
+                                }
+                                return {};
+                            };
+
+                            const auto verify_trace =
+                                platform::perf_trace::begin();
+                            bool used_batch_verification = false;
+                            if (transport::prefers_physical_hash_batch(
+                                    storage, prepared.size())) {
+                                transport::PhysicalHashBatchRequest request{
+                                    .scratch_root = workspace_root,
+                                    .objects = {},
+                                    .algorithm = "sha256",
+                                };
+                                request.objects.reserve(prepared.size());
+                                for (const auto& prepared_item : prepared) {
+                                    request.objects.push_back(
+                                        transport::PhysicalHashExpectation{
+                                            .identifier = prepared_item.entry
+                                                              .metadata_identifier,
+                                            .expected_hash = prepared_item
+                                                               .expected_physical_sha256,
+                                        });
+                                }
+                                platform::perf_trace::count(
+                                    "gc.metadata_physical_hash_batch_calls", 1);
+                                auto verified = transport::physical_hash_batch(
+                                    storage, request);
+                                if (verified) {
+                                    used_batch_verification = true;
+                                    for (const auto& prepared_item : prepared) {
+                                        if (std::ranges::find(
+                                                verified->matched,
+                                                prepared_item.entry.metadata_identifier) ==
+                                            verified->matched.end()) {
+                                            return std::unexpected(make_error(
+                                                ErrorCode::IntegrityFailure,
+                                                "published quarantine metadata failed batch verification",
+                                                prepared_item.entry.metadata_identifier));
+                                        }
+                                    }
+                                } else if (verified.error().code !=
+                                           transport::ErrorCode::Unsupported) {
+                                    return std::unexpected(transport_error(
+                                        verified.error()));
+                                } else {
+                                    platform::perf_trace::count(
+                                        "gc.metadata_physical_hash_batch_unsupported",
+                                        1);
+                                }
+                            }
+                            if (!used_batch_verification) {
+                                for (const auto& prepared_item : prepared) {
+                                    auto verified = verify_one(prepared_item);
+                                    if (!verified) {
+                                        return std::unexpected(verified.error());
+                                    }
+                                }
+                            }
+                            platform::perf_trace::finish(
+                                "gc.metadata_verify_batch_duration_us",
+                                verify_trace);
+
+                            for (auto& item : batch_items) {
+                                item.state =
+                                    CandidateProcessingState::MetadataPublished;
+                                platform::perf_trace::count(
+                                    "gc.metadata_publications", 1);
+                                platform::perf_trace::count(
+                                    "gc candidate metadata publish", 1);
+                                platform::perf_trace::count(
+                                    "gc.metadata_verified", 1);
+                            }
+                        }
+
+                        for (auto& item : batch_items) {
+                            if (item.state !=
+                                CandidateProcessingState::MetadataPublished) {
+                                return std::unexpected(make_error(
+                                    ErrorCode::IntegrityFailure,
+                                    "candidate metadata was not verified",
+                                    item.source_identifier));
+                            }
 
                             platform::perf_trace::count(
                                 "gc.pre_remove_barrier_verifications", 1);
@@ -1665,6 +1871,10 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
             }
         }();
         const auto barrier_release_trace = platform::perf_trace::begin();
+        if (barrier->verify_owner) {
+            platform::perf_trace::count(
+                "gc.barrier_release_owner_verifications", 1);
+        }
         auto released =
             history_storage::maintenance_protocol::release_registration(
                 *barrier);

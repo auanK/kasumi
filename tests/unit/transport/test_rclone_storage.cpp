@@ -1654,6 +1654,7 @@ TEST(RcloneStorageTest, PutFilesBatchUsesOneJobBatchWithExplicitLocalSources) {
 
     ASSERT_TRUE(uploaded.has_value())
         << kasumi::transport::describe(uploaded.error());
+    ASSERT_EQ(request.size(), 2U);
     ASSERT_EQ(request.at("concurrency"), 8);
     ASSERT_EQ(request.at("inputs").size(), 8U);
     for (std::size_t index = 0; index < items.size(); ++index) {
@@ -1668,6 +1669,158 @@ TEST(RcloneStorageTest, PutFilesBatchUsesOneJobBatchWithExplicitLocalSources) {
                   "root/" + items[index].destination_identifier);
         EXPECT_EQ(input.size(), 5U);
     }
+}
+
+TEST(RcloneStorageTest, PutFilesBatchRejectsInvalidRequestsBeforeSubmission) {
+    RcServerState remote;
+    std::atomic_int calls = 0;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request&, httplib::Response& response) {
+            ++calls;
+            response.set_content(R"({"results":[{}]})", "application/json");
+        });
+    start_rc_server(remote);
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    auto workspace = kasumi::test::make_temp_workspace("rclone-put-files-invalid");
+    const auto source = kasumi::test::workspace_path(workspace, "metadata.enc");
+    kasumi::test::write_text(source, "ciphertext");
+    auto storage = make_preflight_transport(state);
+
+    EXPECT_TRUE(kasumi::transport::put_files_batch(
+        storage, {.items = {}, .concurrency = 0}));
+    const std::array<kasumi::transport::PutFilesBatch, 5> invalid{
+        kasumi::transport::PutFilesBatch{
+            .items = {{source, "../escape.meta"}}, .concurrency = 1},
+        kasumi::transport::PutFilesBatch{
+            .items = {{source, "quarantine/a.meta"},
+                      {source, "quarantine/a.meta"}},
+            .concurrency = 2},
+        kasumi::transport::PutFilesBatch{
+            .items = {{kasumi::test::workspace_path(workspace, "missing.enc"),
+                      "quarantine/missing.meta"}},
+            .concurrency = 1},
+        kasumi::transport::PutFilesBatch{
+            .items = {{workspace->root, "quarantine/directory.meta"}},
+            .concurrency = 1},
+        kasumi::transport::PutFilesBatch{
+            .items = {{source, "quarantine/concurrency.meta"}},
+            .concurrency = 0},
+    };
+    for (const auto& batch : invalid) {
+        const auto result = kasumi::transport::put_files_batch(storage, batch);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_TRUE(result.error().code ==
+                        kasumi::transport::ErrorCode::InvalidIdentifier ||
+                    result.error().code ==
+                        kasumi::transport::ErrorCode::ObjectNotFound ||
+                    result.error().code == kasumi::transport::ErrorCode::Io ||
+                    result.error().code ==
+                        kasumi::transport::ErrorCode::InvalidContext);
+    }
+    stop_rc_server(remote);
+    EXPECT_EQ(calls, 0);
+}
+
+TEST(RcloneStorageTest,
+     PutFilesBatchRejectsPartialMalformedAndFailedJobResults) {
+    RcServerState remote;
+    const std::vector<std::string> responses{
+        "not-json",
+        R"({"results":[]})",
+        R"({"results":[{},{},{}]})",
+        R"({"results":[null,{}]})",
+        R"({"results":[{}, {"status":500,"error":"remote detail"}]})",
+        R"({"results":[{}, {"status":"200"}]})",
+        R"({"results":[{}, {"status":503}]})",
+        R"({"results":[{}, {"path":"operations/deletefile"}]})",
+        R"({"results":[{}, {"input":{"_path":"operations/copyfile","srcFs":"wrong","srcRemote":"file-1.enc","dstFs":"test:","dstRemote":"root/quarantine/1.meta"}}]})",
+    };
+    std::size_t next_response = 0;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request&, httplib::Response& response) {
+            response.set_content(responses.at(next_response++),
+                                 "application/json");
+        });
+    start_rc_server(remote);
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    auto workspace = kasumi::test::make_temp_workspace("rclone-put-files-results");
+    const auto first = kasumi::test::workspace_path(workspace, "file-0.enc");
+    const auto second = kasumi::test::workspace_path(workspace, "file-1.enc");
+    kasumi::test::write_text(first, "ciphertext-0");
+    kasumi::test::write_text(second, "ciphertext-1");
+    auto storage = make_preflight_transport(state);
+    const kasumi::transport::PutFilesBatch batch{
+        .items = {{first, "quarantine/0.meta"},
+                  {second, "quarantine/1.meta"}},
+        .concurrency = 2,
+    };
+
+    for (std::size_t index = 0; index < responses.size(); ++index) {
+        const auto result = kasumi::transport::put_files_batch(storage, batch);
+        ASSERT_FALSE(result.has_value()) << index;
+        EXPECT_EQ(result.error().code,
+                  kasumi::transport::ErrorCode::ProtocolFailure)
+            << index;
+    }
+    stop_rc_server(remote);
+    EXPECT_EQ(next_response, responses.size());
+}
+
+TEST(RcloneStorageTest, PutFilesBatchMapsMissingJobEndpointToUnsupported) {
+    RcServerState remote;
+    remote.server.Post(
+        "/rc/job/batch",
+        [](const httplib::Request&, httplib::Response& response) {
+            response.status = 404;
+            response.set_content(R"({"error":"method not found"})",
+                                 "application/json");
+        });
+    start_rc_server(remote);
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    auto workspace = kasumi::test::make_temp_workspace("rclone-put-files-unsupported");
+    const auto source = kasumi::test::workspace_path(workspace, "metadata.enc");
+    kasumi::test::write_text(source, "ciphertext");
+    auto storage = make_preflight_transport(state);
+    const auto result = kasumi::transport::put_files_batch(
+        storage,
+        {.items = {{source, "quarantine/metadata.meta"}}, .concurrency = 1});
+    stop_rc_server(remote);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, kasumi::transport::ErrorCode::Unsupported);
+}
+
+TEST(RcloneStorageTest, PutFilesBatchDoesNotRetryAmbiguousSubmittedRequest) {
+    RcServerState remote;
+    std::atomic_int calls = 0;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request&, httplib::Response& response) {
+            ++calls;
+            close_response_early(response);
+        });
+    start_rc_server(remote);
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    auto workspace = kasumi::test::make_temp_workspace("rclone-put-files-ambiguous");
+    const auto source = kasumi::test::workspace_path(workspace, "metadata.enc");
+    kasumi::test::write_text(source, "ciphertext");
+    auto storage = make_preflight_transport(state);
+    const auto result = kasumi::transport::put_files_batch(
+        storage,
+        {.items = {{source, "quarantine/metadata.meta"}}, .concurrency = 1});
+    stop_rc_server(remote);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_TRUE(result.error().code == kasumi::transport::ErrorCode::Io ||
+                result.error().code ==
+                    kasumi::transport::ErrorCode::ProtocolFailure);
+    EXPECT_EQ(calls, 1);
 }
 
 TEST(RcloneStorageTest, CopyBatchRejectsInvalidInputsBeforeSending) {

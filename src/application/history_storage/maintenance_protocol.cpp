@@ -321,6 +321,31 @@ load_metadata(transport::Transport& storage,
 }
 
 std::expected<void, Error>
+prepare_metadata_ciphertext(std::int64_t quarantined_at,
+                            std::string_view physical_sha256,
+                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                            const std::filesystem::path& ciphertext) {
+    auto plaintext = ciphertext;
+    plaintext += ".plain";
+    const auto encode_trace = platform::perf_trace::begin();
+    const auto bytes = encode_metadata(quarantined_at, physical_sha256);
+    platform::perf_trace::finish("gc.metadata_encode", encode_trace);
+    if (auto written = detail::write_file(plaintext, bytes); !written) {
+        return std::unexpected(history_error(written.error()));
+    }
+    const auto encryption_trace = platform::perf_trace::begin();
+    const bool encrypted = crypto::encrypt_file(
+        plaintext, ciphertext, key, crypto::FilePurpose::History);
+    platform::perf_trace::finish("gc.metadata_encryption", encryption_trace);
+    detail::remove_file(plaintext);
+    if (!encrypted) {
+        return std::unexpected(
+            error(ErrorCode::WorkspaceFailure, "failed to encrypt metadata"));
+    }
+    return {};
+}
+
+std::expected<void, Error>
 publish_metadata(transport::Transport& storage,
                  std::string_view identifier,
                  std::int64_t quarantined_at,
@@ -331,16 +356,11 @@ publish_metadata(transport::Transport& storage,
     if (!temporary) {
         return std::unexpected(history_error(temporary.error()));
     }
-    const auto plaintext = (*temporary)->root / "metadata.plain";
     const auto encrypted = (*temporary)->root / "metadata.enc";
-    const auto bytes = encode_metadata(quarantined_at, physical_sha256);
-    if (auto written = detail::write_file(plaintext, bytes); !written) {
-        return std::unexpected(history_error(written.error()));
-    }
-    if (!crypto::encrypt_file(
-            plaintext, encrypted, key, crypto::FilePurpose::History)) {
-        return std::unexpected(
-            error(ErrorCode::WorkspaceFailure, "failed to encrypt metadata"));
+    if (auto prepared = prepare_metadata_ciphertext(
+            quarantined_at, physical_sha256, key, encrypted);
+        !prepared) {
+        return std::unexpected(prepared.error());
     }
     auto ciphertext = detail::read_file(encrypted, maximum_marker_size);
     if (!ciphertext) {
@@ -350,6 +370,46 @@ publish_metadata(transport::Transport& storage,
 }
 
 } // namespace
+
+std::expected<PreparedQuarantineMetadata, Error>
+prepare_quarantine_metadata(
+    std::string_view quarantine_identifier,
+    std::int64_t quarantined_at,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const std::filesystem::path& ciphertext_path,
+    std::string_view verified_sha256) {
+    const auto layout = derive_remote_layout(key);
+    auto original = restore_destination(layout, quarantine_identifier);
+    if (!original || quarantined_at < 0 || ciphertext_path.empty() ||
+        !valid_sha256(verified_sha256)) {
+        return std::unexpected(
+            error(ErrorCode::InvalidInput, "invalid quarantine record"));
+    }
+    if (auto prepared = prepare_metadata_ciphertext(
+            quarantined_at, verified_sha256, key, ciphertext_path);
+        !prepared) {
+        return std::unexpected(prepared.error());
+    }
+    const auto hash_trace = platform::perf_trace::begin();
+    auto metadata_hash = crypto::physical::hash_file(ciphertext_path, "sha256");
+    platform::perf_trace::finish("gc.metadata_local_hash", hash_trace);
+    if (!metadata_hash) {
+        return std::unexpected(
+            error(ErrorCode::WorkspaceFailure, metadata_hash.error()));
+    }
+    QuarantineEntry entry{
+        .original_identifier = std::move(*original),
+        .quarantine_identifier = std::string{quarantine_identifier},
+        .metadata_identifier = metadata_for(quarantine_identifier),
+        .quarantined_at = quarantined_at,
+        .physical_sha256 = std::string{verified_sha256},
+    };
+    return PreparedQuarantineMetadata{
+        .entry = std::move(entry),
+        .ciphertext_path = ciphertext_path,
+        .expected_physical_sha256 = std::move(*metadata_hash),
+    };
+}
 
 bool registration_active(const RegistrationState& registration) noexcept {
     return registration.storage != nullptr && !registration.identifier.empty();

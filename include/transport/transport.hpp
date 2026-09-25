@@ -66,6 +66,20 @@ struct PutBatch {
 // Function signature for uploading a batch of objects.
 using PutBatchFunction = Result (*)(void* context, const PutBatch& batch);
 
+// Explicit local-file to remote-object uploads in one optional backend batch.
+struct PutFilesBatchItem {
+    std::filesystem::path source;
+    std::string destination_identifier;
+};
+
+struct PutFilesBatch {
+    std::vector<PutFilesBatchItem> items;
+    std::size_t concurrency = 1;
+};
+
+using PutFilesBatchFunction = Result (*)(void* context,
+                                         const PutFilesBatch& batch);
+
 // Function signature for querying object existence.
 using PresenceFunction = PresenceResult (*)(void* context,
                                             std::string_view identifier);
@@ -133,6 +147,7 @@ struct StorageOperations {
     InitializeFunction initialize = nullptr;
     PutFunction put = nullptr;
     PutBatchFunction put_batch = nullptr;
+    PutFilesBatchFunction put_files_batch = nullptr;
     GetFunction get = nullptr;
     GetBatchFunction get_batch = nullptr;
     CopyFunction copy = nullptr;
@@ -182,6 +197,10 @@ Result put(Transport& transport,
 // Uploads a batch of local files. Falls back to individual put() calls if
 // unsupported natively by backend.
 Result put_batch(Transport& transport, const PutBatch& batch);
+
+// Uploads only the explicitly listed local files to their corresponding
+// remote identifiers. Unsupported is returned without submitting any item.
+Result put_files_batch(Transport& transport, const PutFilesBatch& batch);
 
 // Downloads the object to the destination path.
 Result get(Transport& transport,

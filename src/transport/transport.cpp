@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <fstream>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -311,6 +312,49 @@ std::expected<void, Error> validate_batch(const PutBatch& batch) {
     return {};
 }
 
+std::expected<void, Error>
+validate_put_files_batch(const PutFilesBatch& batch) {
+    if (batch.items.empty()) {
+        return {};
+    }
+    if (batch.concurrency == 0) {
+        return std::unexpected(make_error(
+            ErrorCode::InvalidContext,
+            "put files batch concurrency must be positive"));
+    }
+
+    std::unordered_set<std::string> destinations;
+    for (const auto& item : batch.items) {
+        if (!valid_batch_identifier(item.destination_identifier) ||
+            !destinations.insert(item.destination_identifier).second) {
+            return std::unexpected(make_error(
+                ErrorCode::InvalidIdentifier,
+                "invalid or duplicate put files batch destination"));
+        }
+
+        std::error_code error;
+        const auto absolute = std::filesystem::absolute(item.source, error);
+        if (error) {
+            return std::unexpected(make_error(ErrorCode::Io,
+                                              "failed to resolve batch source"));
+        }
+        const auto status = std::filesystem::symlink_status(absolute, error);
+        if (error || std::filesystem::is_symlink(status) ||
+            !std::filesystem::is_regular_file(status)) {
+            return std::unexpected(make_error(
+                error ? ErrorCode::Io : ErrorCode::ObjectNotFound,
+                "put files batch source must be a regular non-symlink file"));
+        }
+        std::ifstream readable(absolute, std::ios::binary);
+        if (!readable) {
+            return std::unexpected(make_error(
+                ErrorCode::PermissionDenied,
+                "put files batch source is not readable"));
+        }
+    }
+    return {};
+}
+
 std::expected<void, Error> validate_batch(const GetBatch& batch) {
     std::error_code error;
     if (!batch.source_prefix.empty() &&
@@ -547,6 +591,27 @@ Result put_batch(Transport& transport, const PutBatch& batch) {
     }
 
     return {};
+}
+
+Result put_files_batch(Transport& transport, const PutFilesBatch& batch) {
+    auto validation = validate_put_files_batch(batch);
+    if (!validation) {
+        return std::unexpected(validation.error());
+    }
+    if (batch.items.empty()) {
+        return {};
+    }
+
+    auto* state = state_pointer(transport);
+    if (state == nullptr) {
+        return std::unexpected(invalid_transport_error());
+    }
+    if (transport.storage.put_files_batch == nullptr) {
+        return std::unexpected(make_error(
+            ErrorCode::Unsupported,
+            "transport does not support explicit put files batch"));
+    }
+    return transport.storage.put_files_batch(state, batch);
 }
 
 Result get(Transport& transport,

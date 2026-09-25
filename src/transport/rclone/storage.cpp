@@ -490,6 +490,87 @@ Result rclone_put_batch(void* context, const PutBatch& batch) {
     return {};
 }
 
+Result rclone_put_files_batch(void* context, const PutFilesBatch& batch) {
+    auto* state = ready_state(context);
+    if (state == nullptr) {
+        return std::unexpected(invalid_context_error());
+    }
+    if (batch.items.empty()) {
+        return {};
+    }
+    if (batch.concurrency == 0) {
+        return std::unexpected(make_error(
+            ErrorCode::InvalidContext,
+            "put files batch concurrency must be positive"));
+    }
+
+    nlohmann::json inputs = nlohmann::json::array();
+    std::unordered_set<std::string> destinations;
+    for (const auto& item : batch.items) {
+        if (!valid_identifier(item.destination_identifier) ||
+            !destinations.insert(item.destination_identifier).second) {
+            return std::unexpected(invalid_identifier_error());
+        }
+        const auto source = absolute_path(item.source);
+        if (!source) {
+            return std::unexpected(source.error());
+        }
+        if (auto valid = require_regular_source(*source); !valid) {
+            return valid;
+        }
+        const auto source_name =
+            platform::path::to_utf8(source->filename());
+        const auto source_parent =
+            platform::path::to_utf8(source->parent_path());
+        if (source_name.empty() || source_parent.empty()) {
+            return std::unexpected(make_error(
+                ErrorCode::InvalidContext, "invalid source file"));
+        }
+        inputs.push_back(nlohmann::json{
+            {"_path", "operations/copyfile"},
+            {"srcFs", source_parent},
+            {"srcRemote", source_name},
+            {"dstFs", remote_fs(*state)},
+            {"dstRemote", object_remote(*state, item.destination_identifier)},
+        });
+    }
+
+    platform::perf_trace::count("rclone.put_files_batch_inputs_submitted",
+                                batch.items.size());
+    platform::perf_trace::count("rclone.put_files_batch_concurrency_submitted",
+                                batch.concurrency);
+    const auto trace = platform::perf_trace::begin();
+    const auto response = request_json(
+        *state,
+        "job/batch",
+        nlohmann::json{{"inputs", inputs}, {"concurrency", batch.concurrency}},
+        maximum_response_size,
+        transfer_timeout);
+    platform::perf_trace::finish("rclone metadata put batch", trace);
+    if (!response) {
+        if (unsupported_job_batch_endpoint(response.error())) {
+            platform::perf_trace::count(
+                "rclone.put_files_batch_unsupported_before_submission", 1);
+            return std::unexpected(make_error(
+                ErrorCode::Unsupported,
+                "rclone does not support job/batch",
+                response.error().native_code));
+        }
+        platform::perf_trace::count(
+            "rclone.put_files_batch_transport_errors", 1);
+        return std::unexpected(response.error());
+    }
+
+    const auto validated = parse_copy_batch_response(*response, inputs);
+    if (!validated) {
+        platform::perf_trace::count("rclone.put_files_batch_failures", 1);
+        return validated;
+    }
+    platform::perf_trace::count("rclone.put_files_batch_reported_successes",
+                                batch.items.size());
+    return {};
+}
+
 Result rclone_get(void* context,
                   std::string_view identifier,
                   const std::filesystem::path& destination) {
@@ -1369,6 +1450,7 @@ StorageOperations make_storage_operations() noexcept {
         .initialize = rclone_initialize,
         .put = rclone_put,
         .put_batch = rclone_put_batch,
+        .put_files_batch = rclone_put_files_batch,
         .get = rclone_get,
         .get_batch = rclone_get_batch,
         .copy = rclone_copy,

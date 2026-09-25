@@ -183,6 +183,9 @@ struct FakeState {
     std::size_t remove_count = 0;
     std::size_t put_count = 0;
     std::size_t put_batch_count = 0;
+    std::size_t put_files_batch_count = 0;
+    std::size_t put_files_batch_item_count = 0;
+    std::size_t put_files_batch_concurrency = 0;
     std::size_t commit_put_count = 0;
     std::size_t marker_put_count = 0;
     std::size_t commit_get_count = 0;
@@ -221,6 +224,9 @@ struct FakeState {
     bool fail_commit_put = false;
     bool persist_commit_on_put_failure = false;
     bool fail_quarantine_metadata_put = false;
+    bool put_files_batch_supported = false;
+    std::optional<kasumi::transport::ErrorCode> put_files_batch_failure;
+    std::size_t put_files_batch_fail_after_items = 0;
     bool fail_commit_get = false;
     bool fail_content_get = false;
     bool fail_marker_put = false;
@@ -249,6 +255,8 @@ struct FakeState {
     std::set<std::string> physical_hash_batch_errors;
     std::optional<kasumi::transport::PhysicalHashBatchReport> physical_hash_batch_override_report;
     std::set<std::string> physical_hash_batch_omitted;
+    bool metadata_physical_hash_batch_unsupported = false;
+    bool replace_barrier_after_metadata_verification = false;
     std::vector<std::string> remote_events;
     std::vector<std::string> gc_events;
 };
@@ -269,6 +277,9 @@ FakeState* fake_state(void* context) {
     state.copy_batch_concurrency = 0;
     state.presence_count = state.remove_count = state.put_count = 0;
     state.put_batch_count = state.commit_put_count = state.marker_put_count = 0;
+    state.put_files_batch_count = 0;
+    state.put_files_batch_item_count = 0;
+    state.put_files_batch_concurrency = 0;
     state.commit_get_count = state.marker_get_count = state.epoch_get_count = 0;
     state.orphan_payload_get_count = 0;
     state.orphan_payload_get_bytes = 0;
@@ -506,6 +517,41 @@ fake_put_batch(void* context, const kasumi::transport::PutBatch& batch) {
     return {};
 }
 
+inline kasumi::transport::Result fake_put_files_batch(
+    void* context, const kasumi::transport::PutFilesBatch& batch) {
+    auto* state = fake_state(context);
+    ++state->put_files_batch_count;
+    state->put_files_batch_item_count += batch.items.size();
+    state->put_files_batch_concurrency = batch.concurrency;
+    state->gc_events.emplace_back("put_files_batch:" +
+                                  std::to_string(batch.items.size()));
+    if (!state->put_files_batch_supported) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Unsupported,
+            .message = "explicit put files batch unavailable"});
+    }
+    for (std::size_t index = 0; index < batch.items.size(); ++index) {
+        auto result = fake_put(context, batch.items[index].source,
+                               batch.items[index].destination_identifier);
+        if (!result) {
+            return result;
+        }
+        if (state->put_files_batch_failure &&
+            state->put_files_batch_fail_after_items != 0 &&
+            index + 1 == state->put_files_batch_fail_after_items) {
+            return std::unexpected(kasumi::transport::Error{
+                .code = *state->put_files_batch_failure,
+                .message = "injected put files batch failure after remote effect"});
+        }
+    }
+    if (state->put_files_batch_failure) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = *state->put_files_batch_failure,
+            .message = "injected put files batch failure"});
+    }
+    return {};
+}
+
 kasumi::transport::Result fake_get(void* context,
                                    std::string_view identifier,
                                    const std::filesystem::path& destination) {
@@ -531,6 +577,7 @@ kasumi::transport::Result fake_get(void* context,
         kasumi::application::history_storage::derive_remote_layout(test_key());
     if (identifier == layout.barrier_identifier) {
         ++state->barrier_verification_count;
+        state->gc_events.emplace_back("barrier:" + std::string{identifier});
     }
     const bool failed_target = identifier == state->fail_get_identifier;
     if ((is_commit(identifier) && state->fail_commit_get) ||
@@ -783,6 +830,15 @@ kasumi::transport::PhysicalHashBatchResult fake_physical_hash_batch(
             .code = kasumi::transport::ErrorCode::Unsupported,
             .message = "physical hash batch unavailable"});
     }
+    const bool metadata_batch = !request.objects.empty() &&
+        std::ranges::all_of(request.objects, [](const auto& object) {
+            return object.identifier.ends_with(".meta");
+        });
+    if (metadata_batch && state->metadata_physical_hash_batch_unsupported) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Unsupported,
+            .message = "metadata physical hash batch unavailable"});
+    }
     if (state->physical_hash_batch_override_report) {
         return *state->physical_hash_batch_override_report;
     }
@@ -819,6 +875,18 @@ kasumi::transport::PhysicalHashBatchResult fake_physical_hash_batch(
         event += "|" + object.identifier;
     }
     state->gc_events.push_back(std::move(event));
+    if (metadata_batch && state->replace_barrier_after_metadata_verification) {
+        state->replace_barrier_after_metadata_verification = false;
+        for (auto& [identifier, bytes] : state->objects) {
+            static_cast<void>(identifier);
+            constexpr std::string_view barrier_payload = "kasumi-gc-v1:barrier:";
+            if (bytes.size() >= barrier_payload.size() &&
+                std::ranges::equal(barrier_payload,
+                                   std::span{bytes}.first(barrier_payload.size()))) {
+                bytes.assign({'r', 'e', 'p', 'l', 'a', 'c', 'e', 'd'});
+            }
+        }
+    }
     return report;
 }
 
@@ -872,6 +940,7 @@ make_fake_transport(FakeState*& state) {
             kasumi::transport::StorageOperations{
                 .initialize = fake_initialize,
                 .put = fake_put,
+                .put_files_batch = fake_put_files_batch,
                 .get = fake_get,
                 .copy = fake_copy,
                 .copy_batch = fake_copy_batch,

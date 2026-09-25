@@ -92,6 +92,12 @@ struct QuarantineEntry {
     std::string physical_sha256;
 };
 
+struct PreparedQuarantineMetadata {
+    QuarantineEntry entry;
+    std::filesystem::path ciphertext_path;
+    std::string expected_physical_sha256;
+};
+
 inline constexpr std::string_view epoch_namespace_prefix = "history/epochs/v1/";
 
 bool is_epoch_object(const RemoteLayout& layout,
@@ -131,6 +137,16 @@ record_quarantine(transport::Transport& storage,
                   std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                   const std::filesystem::path& workspace_root,
                   std::string_view verified_sha256 = {});
+
+// Builds the existing authenticated metadata format in a caller-owned local
+// workspace without publishing it remotely.
+std::expected<PreparedQuarantineMetadata, Error>
+prepare_quarantine_metadata(
+    std::string_view quarantine_identifier,
+    std::int64_t quarantined_at,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const std::filesystem::path& ciphertext_path,
+    std::string_view verified_sha256);
 
 // Confirms that the copy still matches the authenticated metadata.
 std::expected<bool, Error>
