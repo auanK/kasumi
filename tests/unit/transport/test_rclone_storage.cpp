@@ -908,6 +908,221 @@ TEST(RcloneStorageTest, BulkCheckAcceptsCompleteAllMatchResponse) {
     EXPECT_TRUE(result->errors.empty());
 }
 
+TEST(RcloneStorageTest, PhysicalHashBatchAcceptsNestedQuarantineIdentifier) {
+    auto workspace = kasumi::test::make_temp_workspace("rclone-batch-nested-id");
+    const std::string source_id(64, 'a');
+    const auto quarantine_id =
+        "history/gc/v1/quarantine/content/" + source_id;
+
+    RcServerState remote;
+    std::atomic_int check_calls = 0;
+    nlohmann::json check_request;
+    std::string manifest_contents;
+    remote.server.Post(
+        "/rc/operations/check",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            ++check_calls;
+            check_request = nlohmann::json::parse(input.body);
+            const auto manifest =
+                kasumi::platform::path::from_utf8(
+                    check_request.at("checkFileFs").get<std::string>()) /
+                kasumi::platform::path::from_utf8(
+                    check_request.at("checkFileRemote").get<std::string>());
+            manifest_contents = kasumi::test::read_text(manifest);
+            response.set_content(
+                nlohmann::json{{"differ", nlohmann::json::array()},
+                               {"error", nlohmann::json::array()},
+                               {"hashType", "sha256"},
+                               {"match", {quarantine_id}},
+                               {"missingOnDst", nlohmann::json::array()},
+                               {"success", true}}
+                    .dump(),
+                "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    auto transport = make_preflight_transport(state);
+    const auto request = kasumi::transport::PhysicalHashBatchRequest{
+        .scratch_root = kasumi::test::workspace_root(workspace),
+        .objects = {{quarantine_id, std::string(64, 'b')}},
+        .algorithm = "sha256",
+    };
+    const auto result =
+        kasumi::transport::physical_hash_batch(transport, request);
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(result.has_value())
+        << kasumi::transport::describe(result.error());
+    EXPECT_EQ(result->matched, (std::vector<std::string>{quarantine_id}));
+    EXPECT_EQ(check_calls.load(), 1);
+    EXPECT_EQ(check_request.at("dstFs"), "test:root");
+    EXPECT_EQ(manifest_contents,
+              std::string(64, 'b') + "  " + quarantine_id + "\n");
+}
+
+TEST(RcloneStorageTest, PhysicalHashBatchMatchesGenericPathNormalizationEdges) {
+    auto workspace = kasumi::test::make_temp_workspace("rclone-batch-path-edges");
+    RcServerState remote;
+    std::atomic_int check_calls = 0;
+    remote.server.Post(
+        "/rc/operations/check",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            ++check_calls;
+            const auto request = nlohmann::json::parse(input.body);
+            const auto manifest =
+                kasumi::platform::path::from_utf8(
+                    request.at("checkFileFs").get<std::string>()) /
+                kasumi::platform::path::from_utf8(
+                    request.at("checkFileRemote").get<std::string>());
+            auto contents = kasumi::test::read_text(manifest);
+            const auto separator = contents.find("  ");
+            std::string identifier = contents.substr(separator + 2);
+            if (!identifier.empty() && identifier.back() == '\n') {
+                identifier.pop_back();
+            }
+            response.set_content(
+                nlohmann::json{{"differ", nlohmann::json::array()},
+                               {"error", nlohmann::json::array()},
+                               {"hashType", "sha256"},
+                               {"match", {identifier}},
+                               {"missingOnDst", nlohmann::json::array()},
+                               {"success", true}}
+                    .dump(),
+                "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    auto transport = make_preflight_transport(state);
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+    const auto generic_accepts = [](std::string_view identifier) {
+        const auto path = kasumi::platform::path::from_utf8(identifier);
+        if (path.empty() || path.is_absolute() || path.has_root_name() ||
+            path.has_root_directory()) {
+            return false;
+        }
+        for (const auto& component : path) {
+            if (component == "." || component == "..") {
+                return false;
+            }
+        }
+        return path.lexically_normal() == path;
+    };
+
+    std::size_t accepted = 0;
+    for (const std::string identifier : {"a//b", "a/", "/a"}) {
+        const bool expected = generic_accepts(identifier);
+        const kasumi::transport::PhysicalHashBatchRequest request{
+            .scratch_root = kasumi::test::workspace_root(workspace),
+            .objects = {{identifier, std::string(64, 'a')}},
+            .algorithm = "sha256",
+        };
+        const auto through_transport =
+            kasumi::transport::physical_hash_batch(transport, request);
+        const auto through_backend =
+            operations.physical_hash_batch(&state, request);
+        EXPECT_EQ(through_transport.has_value(), expected) << identifier;
+        EXPECT_EQ(through_backend.has_value(), expected) << identifier;
+        if (expected) {
+            ++accepted;
+            if (through_transport) {
+                EXPECT_EQ(through_transport->matched,
+                          (std::vector<std::string>{identifier}));
+            }
+            if (through_backend) {
+                EXPECT_EQ(through_backend->matched,
+                          (std::vector<std::string>{identifier}));
+            }
+        } else {
+            if (!through_transport) {
+                EXPECT_EQ(through_transport.error().code,
+                          kasumi::transport::ErrorCode::InvalidIdentifier);
+            }
+            if (!through_backend) {
+                EXPECT_EQ(through_backend.error().code,
+                          kasumi::transport::ErrorCode::InvalidIdentifier);
+            }
+        }
+    }
+
+    stop_rc_server(remote);
+    EXPECT_EQ(check_calls.load(), static_cast<int>(accepted * 2));
+}
+
+TEST(RcloneStorageTest, PhysicalHashBatchRejectsUnsafeIdentifiersBeforeRc) {
+    auto workspace = kasumi::test::make_temp_workspace("rclone-batch-unsafe-id");
+    RcServerState remote;
+    std::atomic_int check_calls = 0;
+    remote.server.Post(
+        "/rc/operations/check",
+        [&](const httplib::Request&, httplib::Response& response) {
+            ++check_calls;
+            response.set_content(
+                R"({"differ":[],"error":[],"hashType":"sha256","match":[],"missingOnDst":[],"success":true})",
+                "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    auto transport = make_preflight_transport(state);
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+    const std::vector<std::string> unsafe{
+        "", "/absolute", R"(\absolute)", "../escape", "a/../escape",
+        "./a", "a/./b", R"(a\b)", R"(C:\escape)", "a\rb", "a\nb"};
+    for (const auto& identifier : unsafe) {
+        const kasumi::transport::PhysicalHashBatchRequest request{
+            .scratch_root = kasumi::test::workspace_root(workspace),
+            .objects = {{identifier, std::string(64, 'a')}},
+            .algorithm = "sha256",
+        };
+        const auto through_transport =
+            kasumi::transport::physical_hash_batch(transport, request);
+        EXPECT_FALSE(through_transport.has_value()) << identifier;
+        if (!through_transport) {
+            EXPECT_EQ(through_transport.error().code,
+                      kasumi::transport::ErrorCode::InvalidIdentifier);
+        }
+
+        const auto through_backend =
+            operations.physical_hash_batch(&state, request);
+        EXPECT_FALSE(through_backend.has_value()) << identifier;
+        if (!through_backend) {
+            EXPECT_EQ(through_backend.error().code,
+                      kasumi::transport::ErrorCode::InvalidIdentifier);
+        }
+    }
+
+    const kasumi::transport::PhysicalHashBatchRequest duplicate{
+        .scratch_root = kasumi::test::workspace_root(workspace),
+        .objects = {{"quarantine/a", std::string(64, 'a')},
+                    {"quarantine/a", std::string(64, 'a')}},
+        .algorithm = "sha256",
+    };
+    const auto through_transport =
+        kasumi::transport::physical_hash_batch(transport, duplicate);
+    EXPECT_FALSE(through_transport.has_value());
+    if (!through_transport) {
+        EXPECT_EQ(through_transport.error().code,
+                  kasumi::transport::ErrorCode::InvalidIdentifier);
+    }
+    const auto through_backend =
+        operations.physical_hash_batch(&state, duplicate);
+    EXPECT_FALSE(through_backend.has_value());
+    if (!through_backend) {
+        EXPECT_EQ(through_backend.error().code,
+                  kasumi::transport::ErrorCode::InvalidIdentifier);
+    }
+
+    stop_rc_server(remote);
+    EXPECT_EQ(check_calls.load(), 0);
+}
+
 TEST(RcloneStorageTest, BulkCheckAcceptsThousandsOfFilesResponse) {
     kasumi::transport::PhysicalHashBatchRequest request;
     request.scratch_root = std::filesystem::path{"scratch"};

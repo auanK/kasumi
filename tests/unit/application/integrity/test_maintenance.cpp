@@ -2329,11 +2329,11 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioCTenCandidatesBoundedBatches) {
     ASSERT_TRUE(kasumi::transport::initialize(transport));
     state->physical_hash_supported = true;
     state->copy_supported = true;
-    enable_fake_physical_hash_batch(transport, *state, 2);
+    enable_fake_physical_hash_batch(transport, *state, 6);
     auto runtime = runtime_data(workspace);
 
     const auto retained = make_commit(0, {}, "live.txt", "live").value();
-    publish_remote(transport, workspace, retained);
+    const auto published = publish_remote(transport, workspace, retained);
     const auto live_content = put_content(transport, workspace, "live", "live-content");
 
     std::vector<std::string> orphans;
@@ -2348,14 +2348,44 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioCTenCandidatesBoundedBatches) {
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
     EXPECT_EQ(collected->candidate_objects, 10U);
     EXPECT_EQ(collected->quarantined_objects, 10U);
-    EXPECT_EQ(state->physical_hash_batch_count, 2U);
+    EXPECT_EQ(state->physical_hash_batch_count, 1U);
     expect_presence(transport, live_content, Presence::Present);
+    expect_presence(transport, object_path(published.head), Presence::Present);
+    expect_presence(transport, marker_path(published.head), Presence::Present);
     for (const auto& orphan : orphans) {
         expect_presence(transport, orphan, Presence::Absent);
         const auto q_id = protocol::quarantine_identifier(test_layout(), orphan);
         ASSERT_TRUE(q_id.has_value());
         expect_presence(transport, *q_id, Presence::Present);
+        expect_presence(transport, *q_id + ".meta", Presence::Present);
+
+        const auto copy_event = std::ranges::find(
+            state->gc_events, "copy:" + orphan + "|" + *q_id);
+        auto verify_event = std::ranges::find_if(
+            state->gc_events, [&](const auto& event) {
+                return event.starts_with("batch|") &&
+                       event.find(*q_id) != std::string::npos;
+            });
+        if (verify_event == state->gc_events.end()) {
+            verify_event = std::ranges::find(
+                state->gc_events, "verify:" + *q_id);
+        }
+        const auto metadata_event = std::ranges::find(
+            state->gc_events, "metadata:" + *q_id + ".meta");
+        const auto remove_event = std::ranges::find(
+            state->gc_events, "remove:" + orphan);
+        ASSERT_NE(copy_event, state->gc_events.end());
+        ASSERT_NE(verify_event, state->gc_events.end());
+        ASSERT_NE(metadata_event, state->gc_events.end());
+        ASSERT_NE(remove_event, state->gc_events.end());
+        EXPECT_LT(std::distance(state->gc_events.begin(), copy_event),
+                  std::distance(state->gc_events.begin(), verify_event));
+        EXPECT_LT(std::distance(state->gc_events.begin(), verify_event),
+                  std::distance(state->gc_events.begin(), metadata_event));
+        EXPECT_LT(std::distance(state->gc_events.begin(), metadata_event),
+                  std::distance(state->gc_events.begin(), remove_event));
     }
+    EXPECT_EQ(state->quarantine_metadata_put_count, 10U);
 }
 
 TEST(IntegrityMaintenanceTest, BatchGcScenarioDOneHundredCandidatesScale) {

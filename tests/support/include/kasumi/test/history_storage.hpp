@@ -244,6 +244,7 @@ struct FakeState {
     std::optional<kasumi::transport::PhysicalHashBatchReport> physical_hash_batch_override_report;
     std::set<std::string> physical_hash_batch_omitted;
     std::vector<std::string> remote_events;
+    std::vector<std::string> gc_events;
 };
 
 void destroy_fake(void* context) noexcept {
@@ -273,6 +274,7 @@ FakeState* fake_state(void* context) {
     state.fail_list.reset();
     state.fail_list_at = 0;
     state.remote_events.clear();
+    state.gc_events.clear();
 }
 
 bool is_commit(std::string_view identifier) {
@@ -379,6 +381,9 @@ kasumi::transport::Result fake_put(void* context,
                static_cast<std::streamsize>(bytes.size()));
     state->objects[std::string{identifier}] = std::move(bytes);
     state->physical_hashes[std::string{identifier}] = std::move(*physical_hash);
+    if (quarantine_metadata) {
+        state->gc_events.emplace_back("metadata:" + std::string{identifier});
+    }
     if (quarantine_payload) {
         state->quarantine_payload_put_bytes +=
             state->objects[std::string{identifier}].size();
@@ -431,6 +436,8 @@ kasumi::transport::Result fake_copy(
         kasumi::application::history_storage::derive_remote_layout(test_key());
     maybe_replace_barrier_after_quarantine_put(
         state, destination_identifier, layout);
+    state->gc_events.emplace_back("copy:" + std::string{source_identifier} +
+                                  "|" + std::string{destination_identifier});
     if (state->copy_failure_after_effect) {
         const auto failure = *state->copy_failure_after_effect;
         state->copy_failure_after_effect.reset();
@@ -668,9 +675,12 @@ kasumi::transport::RemovalResult fake_remove(void* context,
                                      .message = "injected remove failure"});
     }
     state->physical_hashes.erase(std::string{identifier});
-    return state->objects.erase(std::string{identifier})
-               ? kasumi::transport::Removal::Removed
-               : kasumi::transport::Removal::AlreadyAbsent;
+    const bool removed = state->objects.erase(std::string{identifier}) != 0;
+    if (removed) {
+        state->gc_events.emplace_back("remove:" + std::string{identifier});
+    }
+    return removed ? kasumi::transport::Removal::Removed
+                   : kasumi::transport::Removal::AlreadyAbsent;
 }
 
 std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
@@ -701,8 +711,14 @@ std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
             .code = kasumi::transport::ErrorCode::ObjectNotFound,
             .message = "object missing"});
     }
-    return state->physical_hash_mismatch ||
-                   identifier == state->physical_hash_mismatch_identifier
+    const bool mismatched = state->physical_hash_mismatch ||
+        identifier == state->physical_hash_mismatch_identifier;
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    if (identifier.starts_with(layout.quarantine_prefix)) {
+        state->gc_events.emplace_back("verify:" + std::string{identifier});
+    }
+    return mismatched
                ? std::string(64, '0')
                : found->second;
 }
@@ -753,6 +769,11 @@ kasumi::transport::PhysicalHashBatchResult fake_physical_hash_batch(
             report.matched.push_back(object.identifier);
         }
     }
+    std::string event = "batch";
+    for (const auto& object : request.objects) {
+        event += "|" + object.identifier;
+    }
+    state->gc_events.push_back(std::move(event));
     return report;
 }
 
