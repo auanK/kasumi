@@ -15,6 +15,10 @@ import uuid
 MASTER_KEY = "0123456789abcdef" * 4  # 32-byte hex key
 
 
+def log(msg: str):
+    print(f"[{time.strftime('%X')}] {msg}", flush=True)
+
+
 def run_cmd(cmd, env=None, cwd=None, check=True):
     started = time.perf_counter()
     res = subprocess.run(
@@ -113,6 +117,40 @@ def parse_perf_trace(stderr_text: str):
     return metrics, outcome
 
 
+def classify_objects(file_paths_and_sizes):
+    total_bytes = sum(size for _, size in file_paths_and_sizes)
+    content_objects = 0
+    commit_count = 0
+    head_count = 0
+    epoch_count = 0
+    other_history = 0
+
+    hex_chars = set("0123456789abcdefABCDEF")
+    for path, size in file_paths_and_sizes:
+        path = path.replace("\\", "/")
+        if "/" not in path and len(path) == 64 and all(c in hex_chars for c in path):
+            content_objects += 1
+        else:
+            name = path.split("/")[-1]
+            if len(name) == 85 and name[20] == "-":
+                epoch_count += 1
+            elif len(name) == 129 and name[64] == "-":
+                head_count += 1
+            elif len(name) == 64 and all(c in hex_chars for c in name):
+                commit_count += 1
+            else:
+                other_history += 1
+    return {
+        "remote_object_count": len(file_paths_and_sizes),
+        "remote_bytes": total_bytes,
+        "content_object_count": content_objects,
+        "commit_count": commit_count,
+        "head_count": head_count,
+        "epoch_count": epoch_count,
+        "other_history_count": other_history,
+    }
+
+
 def inspect_remote(remote: str, is_local: bool, env: dict):
     if is_local:
         root = Path(remote)
@@ -124,59 +162,24 @@ def inspect_remote(remote: str, is_local: bool, env: dict):
                 "commit_count": 0,
                 "head_count": 0,
                 "epoch_count": 0,
+                "other_history_count": 0,
             }
-        all_files = [p for p in root.rglob("*") if p.is_file()]
-        total_bytes = sum(p.stat().st_size for p in all_files)
-        content_objects = 0
-        commit_count = 0
-        head_count = 0
-        epoch_count = 0
-        for p in all_files:
-            rel = p.relative_to(root).as_posix()
-            if rel.startswith("history/commits/") and rel.endswith(".commit"):
-                commit_count += 1
-            elif rel.startswith("history/heads/") and rel.endswith(".head"):
-                head_count += 1
-            elif rel.startswith("history/epochs/"):
-                epoch_count += 1
-            elif "/" not in rel and len(rel) == 64:
-                content_objects += 1
-        return {
-            "remote_object_count": len(all_files),
-            "remote_bytes": total_bytes,
-            "content_object_count": content_objects,
-            "commit_count": commit_count,
-            "head_count": head_count,
-            "epoch_count": epoch_count,
-        }
+        file_items = [
+            (p.relative_to(root).as_posix(), p.stat().st_size)
+            for p in root.rglob("*")
+            if p.is_file()
+        ]
+        return classify_objects(file_items)
     else:
         # Run rclone lsjson -R
         _, _, stdout, _ = run_cmd(["rclone", "lsjson", "-R", remote], env=env, check=True)
         items = json.loads(stdout) if stdout.strip() else []
-        files = [it for it in items if not it.get("IsDir", False)]
-        total_bytes = sum(it.get("Size", 0) for it in files)
-        content_objects = 0
-        commit_count = 0
-        head_count = 0
-        epoch_count = 0
-        for it in files:
-            path = it.get("Path", "")
-            if path.startswith("history/commits/") and path.endswith(".commit"):
-                commit_count += 1
-            elif path.startswith("history/heads/") and path.endswith(".head"):
-                head_count += 1
-            elif path.startswith("history/epochs/"):
-                epoch_count += 1
-            elif "/" not in path and len(path) == 64:
-                content_objects += 1
-        return {
-            "remote_object_count": len(files),
-            "remote_bytes": total_bytes,
-            "content_object_count": content_objects,
-            "commit_count": commit_count,
-            "head_count": head_count,
-            "epoch_count": epoch_count,
-        }
+        files = [
+            (it.get("Path", ""), it.get("Size", 0))
+            for it in items
+            if not it.get("IsDir", False)
+        ]
+        return classify_objects(files)
 
 
 def cleanup_remote(remote: str, is_local: bool, env: dict):
