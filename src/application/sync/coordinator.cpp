@@ -1,5 +1,6 @@
 #include "application/sync/coordinator.hpp"
 
+#include "application/concurrency.hpp"
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/scanner.hpp"
@@ -707,24 +708,8 @@ rollback_local_mutations(transaction::Record& record,
     return {};
 }
 
-constexpr std::size_t default_content_concurrency = 8;
-constexpr std::size_t maximum_experimental_content_concurrency = 16;
-
 std::size_t content_concurrency() noexcept {
-    const char* setting = std::getenv("KASUMI_CONTENT_CONCURRENCY");
-    if (setting == nullptr) {
-        return default_content_concurrency;
-    }
-    const std::string_view text{setting};
-    unsigned value = 0;
-    const auto parsed =
-        std::from_chars(text.data(), text.data() + text.size(), value);
-    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() ||
-        value == 0) {
-        return default_content_concurrency;
-    }
-    return std::min<std::size_t>(value,
-                                 maximum_experimental_content_concurrency);
+    return application::content_concurrency();
 }
 
 } // namespace detail

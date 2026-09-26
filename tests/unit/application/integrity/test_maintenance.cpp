@@ -1,20 +1,22 @@
 #include "application/history_storage/epoch.hpp"
-#include "application/history_storage/epoch.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/maintenance.hpp"
 #include "core/maintenance.hpp"
 #include "kasumi/test/history_storage.hpp"
+#include "platform/cancellation.hpp"
 #include "platform/clock.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/path.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <set>
 #include <span>
 #include <string>
@@ -5164,5 +5166,369 @@ TEST(IntegrityMaintenanceTest,
     kasumi::platform::perf_trace::force_enable(false);
 }
 
+struct AuditProbeState {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::size_t active = 0;
+    std::size_t peak_active = 0;
+    std::size_t get_count = 0;
+    std::size_t barrier_target = 0;
+    std::optional<std::size_t> fail_ordinal;
+    kasumi::transport::ErrorCode fail_code = kasumi::transport::ErrorCode::Io;
+    bool cancel_on_barrier = false;
+};
+
+struct AuditProbeTransportState {
+    kasumi::transport::Transport* base = nullptr;
+    AuditProbeState* probe = nullptr;
+};
+
+kasumi::transport::Result audit_probe_get(void* context,
+                                          std::string_view identifier,
+                                          const std::filesystem::path& destination) {
+    auto* state = static_cast<AuditProbeTransportState*>(context);
+    auto* probe = state->probe;
+    if (probe == nullptr || identifier.find('/') != std::string_view::npos) {
+        return kasumi::transport::get(*state->base, identifier, destination);
+    }
+
+    std::size_t ordinal = 0;
+    {
+        std::unique_lock lock(probe->mutex);
+        ordinal = probe->get_count++;
+        ++probe->active;
+        probe->peak_active = std::max(probe->peak_active, probe->active);
+        probe->changed.notify_all();
+        if (probe->barrier_target > 0 && ordinal < probe->barrier_target) {
+            probe->changed.wait_until(
+                lock,
+                std::chrono::steady_clock::now() + std::chrono::milliseconds{300},
+                [&] { return probe->get_count >= probe->barrier_target; });
+            if (probe->cancel_on_barrier && probe->get_count >= probe->barrier_target) {
+                kasumi::platform::cancellation::request();
+            }
+        }
+    }
+
+    auto result = (probe->fail_ordinal && *probe->fail_ordinal == ordinal)
+        ? kasumi::transport::Result{std::unexpect,
+              kasumi::transport::Error{.code = probe->fail_code,
+                                       .message = "injected get failure"}}
+        : kasumi::transport::get(*state->base, identifier, destination);
+
+    {
+        std::lock_guard lock(probe->mutex);
+        --probe->active;
+    }
+    probe->changed.notify_all();
+    return result;
+}
+
+kasumi::transport::Transport make_audit_probe_transport(
+    AuditProbeTransportState& state, kasumi::transport::Transport& base, AuditProbeState& probe) {
+    state.base = &base;
+    state.probe = &probe;
+    kasumi::transport::Transport result;
+    result.state = {&state, [](void*) noexcept {}};
+    result.storage.initialize = [](void* ctx) {
+        return kasumi::transport::initialize(*static_cast<AuditProbeTransportState*>(ctx)->base);
+    };
+    result.storage.put = [](void* ctx, const std::filesystem::path& src, std::string_view id) {
+        return kasumi::transport::put(*static_cast<AuditProbeTransportState*>(ctx)->base, src, id);
+    };
+    result.storage.get = audit_probe_get;
+    result.storage.presence = [](void* ctx, std::string_view id) {
+        return kasumi::transport::presence(*static_cast<AuditProbeTransportState*>(ctx)->base, id);
+    };
+    result.storage.list = [](void* ctx) {
+        return kasumi::transport::list(*static_cast<AuditProbeTransportState*>(ctx)->base);
+    };
+    result.storage.list_prefix = [](void* ctx, std::string_view pfx) {
+        return kasumi::transport::list(*static_cast<AuditProbeTransportState*>(ctx)->base, pfx);
+    };
+    result.storage.remove = [](void* ctx, std::string_view id) {
+        return kasumi::transport::remove(*static_cast<AuditProbeTransportState*>(ctx)->base, id);
+    };
+    return result;
+}
+
+std::vector<std::string> setup_multi_file_dataset(
+    LocalStorage& storage,
+    const std::vector<std::pair<std::string, std::string>>& files) {
+    kasumi::Snapshot tree;
+    tree.rows.push_back(kasumi::NodeRow{
+        .path = "",
+        .hash = {},
+        .size = 0,
+        .mtime = {},
+        .is_directory = true
+    });
+    for (const auto& [path, content] : files) {
+        tree.rows.push_back(kasumi::NodeRow{
+            .path = path,
+            .hash = kasumi::hasher::hash_string(content),
+            .size = content.size(),
+            .mtime = {},
+            .is_directory = false
+        });
+    }
+    kasumi::finalize_snapshot(tree);
+    auto commit = kasumi::history::make_commit(0, {}, tree).value();
+    publish_remote(storage.transport, storage.workspace, commit);
+
+    std::vector<std::string> identifiers;
+    identifiers.reserve(files.size());
+    for (const auto& [path, content] : files) {
+        identifiers.push_back(put_content(storage.transport, storage.workspace, content, path));
+    }
+    return identifiers;
+}
+
+TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckAuditsWithPeakInFlight) {
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    setup_multi_file_dataset(storage, {
+        {"f0.txt", "payload_0"},
+        {"f1.txt", "payload_1"},
+        {"f2.txt", "payload_2"},
+        {"f3.txt", "payload_3"},
+    });
+
+    AuditProbeState probe;
+    probe.barrier_target = 4;
+    AuditProbeTransportState probe_state;
+    auto wrapped_transport = make_audit_probe_transport(probe_state, storage.transport, probe);
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, wrapped_transport, test_key(), 4);
+    ASSERT_TRUE(checked.has_value()) << (checked ? "" : checked.error().detail);
+    EXPECT_EQ(checked->checked_objects, 4U);
+    EXPECT_EQ(probe.peak_active, 4U);
+    EXPECT_LE(probe.peak_active, 4U);
+    EXPECT_EQ(probe.get_count, 4U);
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_peak_in_flight"), 4U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckLimitsInFlightWhenConcurrencyLessThanF) {
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    setup_multi_file_dataset(storage, {
+        {"f0.txt", "payload_0"},
+        {"f1.txt", "payload_1"},
+        {"f2.txt", "payload_2"},
+        {"f3.txt", "payload_3"},
+        {"f4.txt", "payload_4"},
+        {"f5.txt", "payload_5"},
+    });
+
+    AuditProbeState probe;
+    probe.barrier_target = 2;
+    AuditProbeTransportState probe_state;
+    auto wrapped_transport = make_audit_probe_transport(probe_state, storage.transport, probe);
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, wrapped_transport, test_key(), 2);
+    ASSERT_TRUE(checked.has_value()) << (checked ? "" : checked.error().detail);
+    EXPECT_EQ(checked->checked_objects, 6U);
+    EXPECT_EQ(probe.peak_active, 2U);
+    EXPECT_LE(probe.peak_active, 2U);
+    EXPECT_EQ(probe.get_count, 6U);
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_objects"), 6U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_get_calls"), 6U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_decrypt_calls"), 6U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_verify_calls"), 6U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_completion_count"), 6U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckLimitsWorkersWhenFLessThanConcurrency) {
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    setup_multi_file_dataset(storage, {
+        {"f0.txt", "payload_0"},
+        {"f1.txt", "payload_1"},
+        {"f2.txt", "payload_2"},
+    });
+
+    AuditProbeState probe;
+    probe.barrier_target = 3;
+    AuditProbeTransportState probe_state;
+    auto wrapped_transport = make_audit_probe_transport(probe_state, storage.transport, probe);
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, wrapped_transport, test_key(), 8);
+    ASSERT_TRUE(checked.has_value()) << (checked ? "" : checked.error().detail);
+    EXPECT_EQ(checked->checked_objects, 3U);
+    EXPECT_EQ(probe.peak_active, 3U);
+    EXPECT_LE(probe.peak_active, 3U);
+    EXPECT_EQ(probe.get_count, 3U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_completion_count"), 3U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckConcurrencyOneMatchesSerial) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    setup_multi_file_dataset(storage, {
+        {"f0.txt", "payload_0"},
+        {"f1.txt", "payload_1"},
+        {"f2.txt", "payload_2"},
+        {"f3.txt", "payload_3"},
+    });
+
+    AuditProbeState probe;
+    probe.barrier_target = 0;
+    AuditProbeTransportState probe_state;
+    auto wrapped_transport = make_audit_probe_transport(probe_state, storage.transport, probe);
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, wrapped_transport, test_key(), 1);
+    ASSERT_TRUE(checked.has_value()) << (checked ? "" : checked.error().detail);
+    EXPECT_EQ(checked->checked_objects, 4U);
+    EXPECT_EQ(probe.peak_active, 1U);
+    EXPECT_EQ(probe.get_count, 4U);
+}
+
+TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckCollectsAllMissingObjectsDeterministically) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    const auto ids = setup_multi_file_dataset(storage, {
+        {"f0.txt", "payload_0"},
+        {"f1.txt", "payload_1"},
+        {"f2.txt", "payload_2"},
+        {"f3.txt", "payload_3"},
+    });
+
+    const auto content_file_1 =
+        kasumi::test::workspace_path(storage.workspace, "storage") / ids[1];
+    const auto content_file_3 =
+        kasumi::test::workspace_path(storage.workspace, "storage") / ids[3];
+    std::filesystem::remove(content_file_1);
+    std::filesystem::remove(content_file_3);
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key(), 4);
+    ASSERT_FALSE(checked.has_value());
+    EXPECT_EQ(checked.error().code, IntegrityErrorCode::Unrecoverable);
+    EXPECT_NE(checked.error().detail.find("f1.txt"), std::string::npos);
+    EXPECT_NE(checked.error().detail.find("f3.txt"), std::string::npos);
+}
+
+TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckRejectsCorruptCiphertext) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    const auto ids = setup_multi_file_dataset(storage, {
+        {"f0.txt", "payload_0"},
+        {"f1.txt", "payload_1"},
+        {"f2.txt", "payload_2"},
+        {"f3.txt", "payload_3"},
+    });
+
+    const auto content_file_2 =
+        kasumi::test::workspace_path(storage.workspace, "storage") / ids[2];
+    std::filesystem::resize_file(content_file_2, 0);
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key(), 4);
+    ASSERT_FALSE(checked.has_value());
+    EXPECT_EQ(checked.error().code, IntegrityErrorCode::Unrecoverable);
+    EXPECT_NE(checked.error().detail.find("f2.txt"), std::string::npos);
+}
+
+TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckRejectsValidAeadWrongLogicalIdentity) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    const auto ids = setup_multi_file_dataset(storage, {
+        {"f0.txt", "payload_0"},
+        {"f1.txt", "payload_1"},
+    });
+
+    const auto bogus_plain =
+        kasumi::test::workspace_path(storage.workspace, "bogus.plain");
+    const auto content_file_1 =
+        kasumi::test::workspace_path(storage.workspace, "storage") / ids[1];
+    kasumi::test::write_text(bogus_plain, "bogus_payload_1");
+    ASSERT_TRUE(kasumi::crypto::encrypt_file(bogus_plain, content_file_1, test_key()));
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key(), 2);
+    ASSERT_FALSE(checked.has_value());
+    EXPECT_EQ(checked.error().code, IntegrityErrorCode::Unrecoverable);
+    EXPECT_NE(checked.error().detail.find("f1.txt"), std::string::npos);
+}
+
+TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckHardTransportFailureDrainsAndReportsLowestIndex) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    setup_multi_file_dataset(storage, {
+        {"f0.txt", "payload_0"},
+        {"f1.txt", "payload_1"},
+        {"f2.txt", "payload_2"},
+        {"f3.txt", "payload_3"},
+    });
+
+    AuditProbeState probe;
+    probe.fail_ordinal = 1;
+    probe.fail_code = kasumi::transport::ErrorCode::PermissionDenied;
+    AuditProbeTransportState probe_state;
+    auto wrapped_transport = make_audit_probe_transport(probe_state, storage.transport, probe);
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, wrapped_transport, test_key(), 4);
+    ASSERT_FALSE(checked.has_value());
+    EXPECT_EQ(checked.error().code, IntegrityErrorCode::TransportFailure);
+}
+
+TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckCancellationStopsWorkAndCleansWorkspace) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    setup_multi_file_dataset(storage, {
+        {"f0.txt", "payload_0"},
+        {"f1.txt", "payload_1"},
+        {"f2.txt", "payload_2"},
+        {"f3.txt", "payload_3"},
+    });
+
+    AuditProbeState probe;
+    probe.barrier_target = 2;
+    probe.cancel_on_barrier = true;
+    AuditProbeTransportState probe_state;
+    auto wrapped_transport = make_audit_probe_transport(probe_state, storage.transport, probe);
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, wrapped_transport, test_key(), 4);
+    ASSERT_FALSE(checked.has_value());
+    EXPECT_TRUE(kasumi::platform::cancellation::requested());
+    kasumi::platform::cancellation::reset();
+}
+
 } // namespace
+
 

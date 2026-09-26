@@ -57,7 +57,8 @@ struct GarbageCollectResult {
 std::expected<FsckResult, Error>
 fsck(const runtime::RuntimeData& runtime_data,
      transport::Transport& storage,
-     std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+     std::size_t audit_concurrency = 1);
 
 // Callback type for receiving garbage collection progress updates.
 using GarbageCollectProgressCallback =

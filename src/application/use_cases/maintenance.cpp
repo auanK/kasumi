@@ -1,3 +1,4 @@
+#include "application/concurrency.hpp"
 #include "application/integrity/maintenance.hpp"
 
 #include "application/sync/coordinator.hpp"
@@ -18,7 +19,7 @@ std::expected<Response, Error> run_maintenance(OperationContext& context,
 
     if (fsck) {
         auto checked =
-            integrity::fsck(context.runtime, context.storage, context.key);
+            integrity::fsck(context.runtime, context.storage, context.key, content_concurrency());
         if (!checked) {
             return std::unexpected(maintenance_error(
                 context.operation, checked.error(), context.summary));
