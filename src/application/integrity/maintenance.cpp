@@ -7,20 +7,25 @@
 #include "application/observation/state.hpp"
 #include "core/maintenance.hpp"
 #include "crypto/content.hpp"
+#include "platform/cancellation.hpp"
 #include "platform/clock.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/workspace.hpp"
 
 #include <algorithm>
+#include <condition_variable>
 #include <exception>
 #include <filesystem>
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <mutex>
+#include <optional>
 #include <ranges>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -903,6 +908,75 @@ audit_object(transport::Transport& storage,
     return result;
 }
 
+struct AuditWorkResult {
+    std::size_t index = 0;
+    AuditState state = AuditState::Healthy;
+    std::optional<Error> error;
+};
+
+struct AuditWindowState {
+    std::mutex mutex;
+    std::condition_variable_any changed;
+    std::vector<std::optional<std::size_t>> tasks;
+    std::vector<std::optional<AuditWorkResult>> completions;
+    std::size_t in_flight = 0;
+    std::size_t peak_in_flight = 0;
+    bool stop_requested = false;
+};
+
+void run_audit_worker(std::stop_token stop,
+                      std::size_t slot,
+                      AuditWindowState& state,
+                      transport::Transport& storage,
+                      KeySpan key,
+                      const std::vector<kasumi::maintenance::ObjectReference>& references,
+                      const platform::Workspace& workspace) {
+    while (!stop.stop_requested()) {
+        std::size_t index = 0;
+        {
+            std::unique_lock lock(state.mutex);
+            if (!state.changed.wait(lock, stop, [&] {
+                    return state.tasks[slot].has_value() || state.stop_requested;
+                })) {
+                return;
+            }
+            if (state.stop_requested && !state.tasks[slot].has_value()) {
+                return;
+            }
+            index = *state.tasks[slot];
+            state.tasks[slot].reset();
+            ++state.in_flight;
+            state.peak_in_flight =
+                std::max(state.peak_in_flight, state.in_flight);
+        }
+
+        AuditWorkResult result{.index = index, .state = AuditState::Healthy, .error = std::nullopt};
+        try {
+            if (platform::cancellation::requested() || stop.stop_requested()) {
+                result.error = make_error(ErrorCode::StateFailure, "operation cancelled");
+            } else {
+                auto audited = audit_object(storage, key, references[index], workspace, index);
+                if (!audited) {
+                    result.error = audited.error();
+                } else {
+                    result.state = *audited;
+                }
+            }
+        } catch (const std::exception& exception) {
+            result.error = make_error(ErrorCode::StateFailure, exception.what());
+        } catch (...) {
+            result.error = make_error(ErrorCode::StateFailure, "audit worker failed");
+        }
+
+        {
+            std::lock_guard lock(state.mutex);
+            --state.in_flight;
+            state.completions[slot] = std::move(result);
+        }
+        state.changed.notify_all();
+    }
+}
+
 } // namespace
 
 std::string describe(const Error& error) {
@@ -948,7 +1022,6 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                                       transport::Transport& storage,
                                       KeySpan key,
                                       std::size_t audit_concurrency) {
-    static_cast<void>(audit_concurrency);
     TraceGuard total_guard{"fsck.total_duration_us", platform::perf_trace::begin()};
     if (runtime_data.local_dir.empty() || !transport::valid(storage)) {
         return std::unexpected(
@@ -1022,24 +1095,151 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
     auto result = [&]() -> std::expected<FsckResult, Error> {
         TraceGuard referenced_guard{"fsck.referenced_audit_duration_us", platform::perf_trace::begin()};
         try {
+            const auto total_objects = inventory->referenced_objects.size();
             FsckResult fsck_result{
-                .checked_objects = inventory->referenced_objects.size(),
+                .checked_objects = total_objects,
             };
-            std::vector<std::filesystem::path> unrecoverable;
-            for (std::size_t index = 0;
-                 index < inventory->referenced_objects.size();
-                 ++index) {
-                const auto& reference = inventory->referenced_objects[index];
-                auto audited =
-                    audit_object(storage, key, reference, *workspace, index);
-                if (!audited)
-                    return std::unexpected(audited.error());
-                if (*audited == AuditState::Healthy)
-                    continue;
-                unrecoverable.insert(unrecoverable.end(),
-                                     reference.referenced_paths.begin(),
-                                     reference.referenced_paths.end());
+
+            const auto effective_concurrency = std::max<std::size_t>(1, audit_concurrency);
+            const auto worker_count =
+                std::min<std::size_t>(effective_concurrency, total_objects);
+
+            platform::perf_trace::count("fsck.audit_configured_concurrency", effective_concurrency);
+            platform::perf_trace::count("fsck.audit_worker_count", worker_count);
+
+            if (total_objects == 0) {
+                platform::perf_trace::count("fsck.audit_peak_in_flight", 0);
+                return fsck_result;
             }
+
+            AuditWindowState state;
+            state.tasks.resize(worker_count);
+            state.completions.resize(worker_count);
+
+            std::vector<std::jthread> workers;
+            workers.reserve(worker_count);
+            for (std::size_t slot = 0; slot < worker_count; ++slot) {
+                workers.emplace_back(run_audit_worker,
+                                     slot,
+                                     std::ref(state),
+                                     std::ref(storage),
+                                     key,
+                                     std::cref(inventory->referenced_objects),
+                                     std::cref(*workspace));
+            }
+
+            std::size_t next = 0;
+            std::size_t outstanding = 0;
+            const auto admit = [&](std::size_t slot) {
+                {
+                    std::lock_guard lock(state.mutex);
+                    state.tasks[slot] = next++;
+                    ++outstanding;
+                }
+                state.changed.notify_all();
+            };
+
+            for (std::size_t slot = 0; slot < worker_count; ++slot) {
+                admit(slot);
+            }
+
+            std::optional<std::pair<std::size_t, Error>> lowest_hard_failure;
+            std::vector<std::filesystem::path> unrecoverable;
+            bool cancelled = false;
+
+            while (outstanding != 0) {
+                std::size_t slot = 0;
+                AuditWorkResult work_result;
+                {
+                    std::unique_lock lock(state.mutex);
+                    state.changed.wait(lock, [&] {
+                        return std::ranges::any_of(state.completions,
+                                                   [](const auto& item) {
+                                                       return item.has_value();
+                                                   });
+                    });
+                    auto it = std::ranges::find_if(state.completions,
+                                                   [](const auto& item) {
+                                                       return item.has_value();
+                                                   });
+                    slot = static_cast<std::size_t>(it - state.completions.begin());
+                    work_result = std::move(**it);
+                    it->reset();
+                }
+                --outstanding;
+                platform::perf_trace::count("fsck.audit_completion_count");
+
+                if (platform::cancellation::requested()) {
+                    cancelled = true;
+                    {
+                        std::lock_guard lock(state.mutex);
+                        state.stop_requested = true;
+                    }
+                    state.changed.notify_all();
+                    for (auto& w : workers) {
+                        w.request_stop();
+                    }
+                }
+
+                if (work_result.error) {
+                    if (!lowest_hard_failure || work_result.index < lowest_hard_failure->first) {
+                        lowest_hard_failure = std::pair{work_result.index, std::move(*work_result.error)};
+                    }
+                    {
+                        std::lock_guard lock(state.mutex);
+                        state.stop_requested = true;
+                    }
+                    state.changed.notify_all();
+                    for (auto& w : workers) {
+                        w.request_stop();
+                    }
+                } else {
+                    if (work_result.state != AuditState::Healthy) {
+                        const auto& reference = inventory->referenced_objects[work_result.index];
+                        unrecoverable.insert(unrecoverable.end(),
+                                             reference.referenced_paths.begin(),
+                                             reference.referenced_paths.end());
+                    }
+                }
+
+                if (!state.stop_requested && !cancelled && !lowest_hard_failure &&
+                    next < total_objects) {
+                    if (platform::cancellation::requested()) {
+                        cancelled = true;
+                        {
+                            std::lock_guard lock(state.mutex);
+                            state.stop_requested = true;
+                        }
+                        state.changed.notify_all();
+                        for (auto& w : workers) {
+                            w.request_stop();
+                        }
+                    } else {
+                        admit(slot);
+                    }
+                }
+            }
+
+            {
+                std::lock_guard lock(state.mutex);
+                state.stop_requested = true;
+            }
+            state.changed.notify_all();
+            for (auto& w : workers) {
+                w.request_stop();
+            }
+            workers.clear();
+
+            platform::perf_trace::count("fsck.audit_peak_in_flight", state.peak_in_flight);
+
+            if (lowest_hard_failure) {
+                return std::unexpected(std::move(lowest_hard_failure->second));
+            }
+            if (cancelled || platform::cancellation::requested()) {
+                return std::unexpected(
+                    make_error(ErrorCode::StateFailure, "operation cancelled"));
+            }
+
             std::ranges::sort(unrecoverable, {}, [](const auto& path) {
                 return platform::path::to_logical_utf8(path);
             });
