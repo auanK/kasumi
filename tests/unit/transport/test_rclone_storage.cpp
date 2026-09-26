@@ -11,9 +11,11 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <httplib.h>
 #include <mutex>
@@ -2334,6 +2336,110 @@ TEST(RcloneStorageTest, RemoveBatchReportsPartialFailureAccurately) {
     EXPECT_EQ(result->items[1].identifier, "failed-obj");
     ASSERT_FALSE(result->items[1].result.has_value());
     EXPECT_EQ(result->items[1].result.error().native_code, 500);
+}
+
+TEST(RcloneStorageTest, ConcurrentlyExecutesBatchAndIndividualCopyfileReads) {
+    RcServerState remote;
+    std::atomic_size_t entered{0};
+    std::atomic_size_t active{0};
+    std::atomic_size_t peak{0};
+    std::atomic_bool release{false};
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+
+    auto track_and_wait = [&](auto on_release) {
+        const auto current = ++active;
+        auto prev_peak = peak.load();
+        while (current > prev_peak &&
+               !peak.compare_exchange_weak(prev_peak, current)) {
+        }
+        if (++entered == 3) {
+            std::lock_guard lock(gate_mutex);
+            release = true;
+            gate_cv.notify_all();
+        } else {
+            std::unique_lock lock(gate_mutex);
+            gate_cv.wait_for(lock, std::chrono::seconds(10),
+                             [&] { return release.load(); });
+        }
+        on_release();
+        --active;
+    };
+
+    remote.server.Post(
+        "/rc/sync/copy",
+        [&](const httplib::Request&, httplib::Response& response) {
+            track_and_wait([&] {
+                response.set_content("{}", "application/json");
+            });
+        });
+
+    remote.server.Post(
+        "/rc/operations/copyfile",
+        [&](const httplib::Request& req, httplib::Response& response) {
+            track_and_wait([&] {
+                auto body = nlohmann::json::parse(req.body);
+                std::string dst_fs = body.at("dstFs");
+                std::string dst_remote = body.at("dstRemote");
+                std::filesystem::path dst =
+                    kasumi::platform::path::from_utf8(dst_fs) /
+                    kasumi::platform::path::from_utf8(dst_remote);
+                std::filesystem::create_directories(dst.parent_path());
+                std::ofstream out(dst, std::ios::binary);
+                out << "test-data";
+                out.close();
+                response.set_content("{}", "application/json");
+            });
+        });
+
+    start_rc_server(remote);
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    auto storage = make_preflight_transport(state);
+
+    std::error_code ec;
+    auto temp_dir = std::filesystem::temp_directory_path() /
+                    "test-rclone-concurrent-reads";
+    std::filesystem::remove_all(temp_dir, ec);
+    std::filesystem::create_directories(temp_dir / "batch");
+
+    const kasumi::transport::GetBatch batch{
+        .source_prefix = "commits",
+        .destination_root = temp_dir / "batch",
+        .identifiers = {"commit-1/cipher-1"},
+    };
+    const auto epoch_dest = temp_dir / "epoch.dat";
+    const auto marker_dest = temp_dir / "marker.dat";
+
+    kasumi::transport::Result batch_res;
+    kasumi::transport::Result epoch_res;
+    kasumi::transport::Result marker_res;
+
+    {
+        std::jthread t1([&] {
+            batch_res = kasumi::transport::get_batch(storage, batch);
+        });
+        std::jthread t2([&] {
+            epoch_res = kasumi::transport::get(
+                storage, "history/epochs/v1/0000.epoch", epoch_dest);
+        });
+        std::jthread t3([&] {
+            marker_res = kasumi::transport::get(
+                storage, "history/heads/head-1.head", marker_dest);
+        });
+    }
+
+    stop_rc_server(remote);
+    std::filesystem::remove_all(temp_dir, ec);
+
+    EXPECT_EQ(entered, 3U);
+    EXPECT_EQ(peak, 3U);
+    ASSERT_TRUE(batch_res.has_value())
+        << kasumi::transport::describe(batch_res.error());
+    ASSERT_TRUE(epoch_res.has_value())
+        << kasumi::transport::describe(epoch_res.error());
+    ASSERT_TRUE(marker_res.has_value())
+        << kasumi::transport::describe(marker_res.error());
 }
 
 } // namespace
