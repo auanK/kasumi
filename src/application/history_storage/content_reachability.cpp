@@ -56,7 +56,11 @@ audit_object(transport::Transport& storage,
     };
     cleanup();
 
+    platform::perf_trace::count("reachability.audit_objects");
+    platform::perf_trace::count("reachability.audit_get_calls");
+    const auto get_token = platform::perf_trace::begin();
     const auto downloaded = transport::get(storage, content_id, encrypted);
+    platform::perf_trace::finish("reachability.audit_get_duration_us", get_token);
     if (!downloaded) {
         cleanup();
         if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
@@ -65,8 +69,25 @@ audit_object(transport::Transport& storage,
         return std::unexpected(detail::transport_error(downloaded.error()));
     }
 
+    std::error_code enc_size_error;
+    const auto enc_size = std::filesystem::file_size(encrypted, enc_size_error);
+    if (!enc_size_error) {
+        platform::perf_trace::count("reachability.encrypted_bytes_downloaded", enc_size);
+    }
+
     ContentObjectState state = ContentObjectState::Corrupt;
-    if (crypto::decrypt_file(encrypted, plaintext, key)) {
+    platform::perf_trace::count("reachability.audit_decrypt_calls");
+    const auto decrypt_token = platform::perf_trace::begin();
+    const bool decrypted = crypto::decrypt_file(encrypted, plaintext, key);
+    platform::perf_trace::finish("reachability.audit_decrypt_duration_us", decrypt_token);
+    if (decrypted) {
+        std::error_code plain_size_error;
+        const auto plain_size = std::filesystem::file_size(plaintext, plain_size_error);
+        if (!plain_size_error) {
+            platform::perf_trace::count("reachability.plaintext_bytes_verified", plain_size);
+        }
+        platform::perf_trace::count("reachability.audit_verify_calls");
+        const auto verify_token = platform::perf_trace::begin();
         const auto actual_hash = crypto::content::hash_file(plaintext);
         std::error_code size_error;
         const auto actual_size =
@@ -78,6 +99,7 @@ audit_object(transport::Transport& storage,
             crypto::content_identifier(key, *actual_hash) == content_id) {
             state = ContentObjectState::Present;
         }
+        platform::perf_trace::finish("reachability.audit_verify_duration_us", verify_token);
     }
     cleanup();
     return state;

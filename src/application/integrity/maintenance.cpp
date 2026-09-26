@@ -819,6 +819,7 @@ audit_object(transport::Transport& storage,
              const kasumi::maintenance::ObjectReference& reference,
              const platform::Workspace& workspace,
              std::size_t index) {
+    platform::perf_trace::count("fsck.audit_objects");
     const auto plaintext_hash = hash_from_hex(reference.identifier);
     if (!plaintext_hash) {
         return std::unexpected(make_error(ErrorCode::IntegrityFailure,
@@ -837,7 +838,10 @@ audit_object(transport::Transport& storage,
     if (!prepared)
         return std::unexpected(prepared.error());
 
+    platform::perf_trace::count("fsck.audit_get_calls");
+    const auto get_token = platform::perf_trace::begin();
     auto downloaded = transport::get(storage, remote_identifier, encrypted);
+    platform::perf_trace::finish("fsck.audit_get_duration_us", get_token);
     if (!downloaded) {
         auto removed = remove_temporary_file(encrypted);
         if (!removed)
@@ -852,19 +856,37 @@ audit_object(transport::Transport& storage,
             transport_error(downloaded.error(), reference.identifier));
     }
 
+    std::error_code enc_size_error;
+    const auto enc_size = std::filesystem::file_size(encrypted, enc_size_error);
+    if (!enc_size_error) {
+        platform::perf_trace::count("fsck.encrypted_bytes_downloaded", enc_size);
+    }
+
     auto regular = require_regular_file(
         encrypted, ErrorCode::WorkspaceFailure, "invalid temporary download");
     if (!regular)
         return std::unexpected(regular.error());
 
     AuditState result = AuditState::Healthy;
-    if (!crypto::decrypt_file(encrypted, plaintext, key)) {
+    platform::perf_trace::count("fsck.audit_decrypt_calls");
+    const auto decrypt_token = platform::perf_trace::begin();
+    const bool decrypted = crypto::decrypt_file(encrypted, plaintext, key);
+    platform::perf_trace::finish("fsck.audit_decrypt_duration_us", decrypt_token);
+    if (!decrypted) {
         result = AuditState::Corrupt;
     } else {
+        std::error_code plain_size_error;
+        const auto plain_size = std::filesystem::file_size(plaintext, plain_size_error);
+        if (!plain_size_error) {
+            platform::perf_trace::count("fsck.plaintext_bytes_verified", plain_size);
+        }
+        platform::perf_trace::count("fsck.audit_verify_calls");
+        const auto verify_token = platform::perf_trace::begin();
         auto verified = verify_content(plaintext,
                                        reference.identifier,
                                        reference.size,
                                        ErrorCode::WorkspaceFailure);
+        platform::perf_trace::finish("fsck.audit_verify_duration_us", verify_token);
         if (!verified) {
             if (verified.error().code != ErrorCode::IntegrityFailure) {
                 return std::unexpected(verified.error());
@@ -925,13 +947,17 @@ std::string describe(const Error& error) {
 std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                                       transport::Transport& storage,
                                       KeySpan key) {
+    TraceGuard total_guard{"fsck.total_duration_us", platform::perf_trace::begin()};
     if (runtime_data.local_dir.empty() || !transport::valid(storage)) {
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid fsck context"));
     }
     const auto history_workspace = maintenance_workspace_root(runtime_data);
-    auto storage_state = observation::collect_storage_state(
-        storage, key, history_workspace, true);
+    auto storage_state = [&]() {
+        TraceGuard guard{"fsck.collect_storage_state_duration_us", platform::perf_trace::begin()};
+        return observation::collect_storage_state(
+            storage, key, history_workspace, true);
+    }();
     if (!storage_state) {
         return std::unexpected(
             make_error(ErrorCode::StateFailure, storage_state.error()));
@@ -940,7 +966,10 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
         return std::unexpected(
             make_error(ErrorCode::IntegrityFailure, "remote history absent"));
     }
-    auto listing = transport::list(storage);
+    auto listing = [&]() {
+        TraceGuard guard{"fsck.physical_listing_duration_us", platform::perf_trace::begin()};
+        return transport::list(storage);
+    }();
     if (!listing) {
         return std::unexpected(transport_error(listing.error()));
     }
@@ -960,13 +989,18 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                        list_detail("unknown physical identifiers: ",
                                    unknown_storage_identifiers)));
     }
-    auto local_tree = observation::collect_local_tree(runtime_data.local_dir);
+    auto local_tree = [&]() {
+        TraceGuard guard{"fsck.local_tree_duration_us", platform::perf_trace::begin()};
+        return observation::collect_local_tree(runtime_data.local_dir);
+    }();
     if (!local_tree) {
         return std::unexpected(
             make_error(ErrorCode::StateFailure, local_tree.error()));
     }
-    auto inventory =
-        analyze_inventory(storage_state->tree, *local_tree, *storage_state);
+    auto inventory = [&]() {
+        TraceGuard guard{"fsck.inventory_analysis_duration_us", platform::perf_trace::begin()};
+        return analyze_inventory(storage_state->tree, *local_tree, *storage_state);
+    }();
     if (!inventory)
         return std::unexpected(inventory.error());
     if (!inventory->unknown_identifiers.empty()) {
@@ -976,12 +1010,15 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                                    inventory->unknown_identifiers)));
     }
 
+    const auto ws_token = platform::perf_trace::begin();
     auto workspace = platform::create_workspace("fsck");
+    platform::perf_trace::finish("fsck.workspace_duration_us", ws_token);
     if (!workspace) {
         return std::unexpected(
             make_error(ErrorCode::WorkspaceFailure, workspace.error()));
     }
     auto result = [&]() -> std::expected<FsckResult, Error> {
+        TraceGuard referenced_guard{"fsck.referenced_audit_duration_us", platform::perf_trace::begin()};
         try {
             FsckResult fsck_result{
                 .checked_objects = inventory->referenced_objects.size(),
@@ -1016,7 +1053,9 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                 make_error(ErrorCode::StateFailure, exception.what()));
         }
     }();
+    const auto ws_cleanup_token = platform::perf_trace::begin();
     platform::cleanup_workspace(*workspace);
+    platform::perf_trace::finish("fsck.workspace_duration_us", ws_cleanup_token);
     return result;
 }
 
