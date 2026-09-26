@@ -1,4 +1,5 @@
 #include "application/history_storage/epoch.hpp"
+#include "application/history_storage/epoch.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
 #include "application/history_storage/remote_layout.hpp"
@@ -6,10 +7,15 @@
 #include "core/maintenance.hpp"
 #include "kasumi/test/history_storage.hpp"
 #include "platform/clock.hpp"
+#include "platform/perf_trace.hpp"
 #include "platform/path.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
+#include <iostream>
+#include <map>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -73,6 +79,366 @@ void expect_presence(kasumi::transport::Transport& transport,
     const auto present = kasumi::transport::presence(transport, identifier);
     ASSERT_TRUE(present.has_value()) << present.error().message;
     EXPECT_EQ(*present, expected);
+}
+
+enum class IntegratedCopyPath {
+    Native,
+    SourceHashUnsupported,
+    NativeCopyUnsupported,
+    DestinationHashUnsupported,
+};
+
+enum class IntegratedFailure {
+    SourceHash,
+    FallbackGet,
+    FallbackPut,
+    CopyEffectThenError,
+    CorruptReadback,
+};
+
+struct IntegratedGcFixture {
+    kasumi::test::TempWorkspace workspace;
+    FakeState* state = nullptr;
+    kasumi::transport::Transport storage;
+    RuntimeData runtime;
+    std::string reachable_content;
+    std::string reachable_commit;
+    std::string reachable_marker;
+    std::vector<std::string> candidates;
+    std::vector<std::string> quarantines;
+    std::map<std::string, std::vector<std::uint8_t>> initial_objects;
+    std::map<std::string, std::vector<std::uint8_t>> expected_payload_objects;
+    std::map<std::string, std::string> expected_hashes;
+
+    IntegratedGcFixture(std::string_view name, std::size_t candidate_count)
+        : workspace(kasumi::test::make_temp_workspace("gc-integrated-" +
+                                                      std::string{name})),
+          storage(make_fake_transport(state)),
+          runtime(runtime_data(workspace)) {
+        EXPECT_TRUE(kasumi::transport::initialize(storage));
+        state->physical_hash_supported = true;
+        state->copy_supported = true;
+
+        const auto commit = make_commit(0, {}, "live.txt", "live").value();
+        const auto published = publish_remote(storage, workspace, commit);
+        reachable_content =
+            put_content(storage, workspace, "live", "live-content");
+        reachable_commit = object_path(published.head);
+        reachable_marker = marker_path(published.head);
+        for (std::size_t index = 0; index < candidate_count; ++index) {
+            const auto suffix = "orphan-" + std::to_string(index);
+            candidates.push_back(
+                put_content(storage, workspace, suffix, suffix));
+        }
+        std::ranges::sort(candidates);
+        for (const auto& candidate : candidates) {
+            const auto quarantine =
+                protocol::quarantine_identifier(test_layout(), candidate);
+            EXPECT_TRUE(quarantine.has_value());
+            if (!quarantine) {
+                continue;
+            }
+            quarantines.push_back(*quarantine);
+            expected_hashes.emplace(candidate,
+                                    state->physical_hashes.at(candidate));
+        }
+
+        initial_objects = state->objects;
+        expected_payload_objects = initial_objects;
+        for (std::size_t index = 0; index < candidates.size(); ++index) {
+            const auto bytes = expected_payload_objects.at(candidates[index]);
+            expected_payload_objects.erase(candidates[index]);
+            expected_payload_objects.emplace(quarantines[index], bytes);
+        }
+    }
+};
+
+void expect_integrated_copy_case(IntegratedCopyPath path,
+                                 std::string_view name,
+                                 std::size_t candidate_count = 1) {
+    struct TraceGuard {
+        ~TraceGuard() {
+            kasumi::platform::perf_trace::force_enable(false);
+        }
+    } trace_guard;
+    kasumi::platform::perf_trace::force_enable(true);
+
+    IntegratedGcFixture fixture{name, candidate_count};
+    const auto& first_candidate = fixture.candidates.front();
+    switch (path) {
+        case IntegratedCopyPath::Native:
+            break;
+        case IntegratedCopyPath::SourceHashUnsupported:
+            fixture.state->physical_hash_unsupported_identifier =
+                first_candidate;
+            break;
+        case IntegratedCopyPath::NativeCopyUnsupported:
+            fixture.state->copy_supported = false;
+            break;
+        case IntegratedCopyPath::DestinationHashUnsupported:
+            fixture.state->physical_hash_unsupported_identifier =
+                fixture.quarantines.front();
+            break;
+    }
+    for (const auto& identifier : fixture.candidates) {
+        fixture.state->observed_payload_identifiers.insert(identifier);
+    }
+    reset_fake_traffic(*fixture.state);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_FALSE(collected->analysis_only);
+    EXPECT_EQ(collected->candidate_objects, candidate_count);
+    EXPECT_EQ(collected->quarantined_objects, candidate_count);
+    EXPECT_EQ(collected->restored_objects, 0U);
+    EXPECT_EQ(collected->purged_objects, 0U);
+
+    EXPECT_TRUE(fixture.initial_objects.contains(fixture.reachable_commit));
+    EXPECT_TRUE(fixture.initial_objects.contains(fixture.reachable_marker));
+    EXPECT_TRUE(fixture.initial_objects.contains(fixture.reachable_content));
+    for (const auto& candidate : fixture.candidates) {
+        EXPECT_TRUE(fixture.initial_objects.contains(candidate));
+        EXPECT_FALSE(fixture.initial_objects.contains(
+            protocol::quarantine_identifier(test_layout(), candidate).value()));
+    }
+    EXPECT_EQ(fixture.state->objects.size(),
+              fixture.expected_payload_objects.size() + candidate_count);
+    auto actual_payload_objects = fixture.state->objects;
+    for (const auto& quarantine : fixture.quarantines) {
+        EXPECT_TRUE(fixture.state->objects.contains(quarantine + ".meta"));
+        actual_payload_objects.erase(quarantine + ".meta");
+    }
+    EXPECT_EQ(actual_payload_objects, fixture.expected_payload_objects);
+
+    const auto inventory = protocol::inventory_quarantine(
+        fixture.storage,
+        test_key(),
+        kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_TRUE(inventory.has_value()) << inventory.error().detail;
+    ASSERT_EQ(inventory->size(), candidate_count);
+    for (const auto& entry : *inventory) {
+        EXPECT_EQ(entry.quarantined_at.has_value(), true);
+        EXPECT_EQ(entry.physical_sha256,
+                  fixture.expected_hashes.at(entry.original_identifier));
+        const auto verified = protocol::verify_quarantine(
+            fixture.storage,
+            entry,
+            kasumi::test::workspace_root(fixture.workspace));
+        ASSERT_TRUE(verified.has_value()) << verified.error().detail;
+        EXPECT_TRUE(*verified);
+    }
+
+    const bool source_hash_supported =
+        path != IntegratedCopyPath::SourceHashUnsupported;
+    const bool native_copy_attempted = source_hash_supported;
+    const bool native_copy_succeeded =
+        path == IntegratedCopyPath::Native ||
+        path == IntegratedCopyPath::DestinationHashUnsupported;
+    const bool native_destination_hash_attempted = native_copy_succeeded;
+    const bool client_fallback =
+        path == IntegratedCopyPath::SourceHashUnsupported ||
+        path == IntegratedCopyPath::NativeCopyUnsupported;
+    std::size_t candidate_bytes = 0;
+    for (const auto& candidate : fixture.candidates) {
+        candidate_bytes += fixture.initial_objects.at(candidate).size();
+    }
+    EXPECT_EQ(fixture.state->copy_count,
+              native_copy_attempted ? candidate_count : 0U);
+    EXPECT_EQ(fixture.state->orphan_payload_get_count,
+              client_fallback ? candidate_count : 0U);
+    EXPECT_EQ(fixture.state->orphan_payload_get_bytes,
+              client_fallback ? candidate_bytes : 0U);
+    EXPECT_EQ(fixture.state->quarantine_payload_put_count,
+              client_fallback ? candidate_count : 0U);
+    EXPECT_EQ(fixture.state->quarantine_payload_put_bytes,
+              client_fallback ? candidate_bytes : 0U);
+    EXPECT_EQ(fixture.state->quarantine_metadata_put_count, candidate_count);
+    EXPECT_EQ(fixture.state->native_copy_bytes,
+              native_copy_succeeded ? candidate_bytes : 0U);
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy source physical hash"),
+              candidate_count);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("verified copy native copy"),
+        native_copy_attempted ? candidate_count : 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy native copy successes"),
+              native_copy_succeeded ? candidate_count : 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy native copy verifications"),
+              native_copy_succeeded ? candidate_count : 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy destination physical hash"),
+              native_destination_hash_attempted ? candidate_count : 0U);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("gc candidate verified copy"),
+        candidate_count);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc candidate metadata publish"),
+              candidate_count);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc candidate pre-remove barrier verification"),
+              candidate_count);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc candidate remove"),
+              candidate_count);
+}
+
+void expect_integrated_failure(IntegratedFailure failure,
+                               std::string_view name,
+                               IntegrityErrorCode expected_error) {
+    struct TraceGuard {
+        ~TraceGuard() {
+            kasumi::platform::perf_trace::force_enable(false);
+        }
+    } trace_guard;
+    kasumi::platform::perf_trace::force_enable(true);
+
+    IntegratedGcFixture fixture{name, 1};
+    const auto& source = fixture.candidates.front();
+    const auto& quarantine = fixture.quarantines.front();
+    fixture.state->observed_payload_identifiers.insert(source);
+    fixture.state->physical_hash_supported = true;
+    switch (failure) {
+        case IntegratedFailure::SourceHash:
+            fixture.state->physical_hash_failure =
+                kasumi::transport::ErrorCode::Io;
+            fixture.state->physical_hash_failure_identifier = source;
+            break;
+        case IntegratedFailure::FallbackGet:
+            fixture.state->copy_supported = false;
+            fixture.state->fail_get_identifier = source;
+            break;
+        case IntegratedFailure::FallbackPut:
+            fixture.state->copy_supported = false;
+            fixture.state->fail_put_identifier = quarantine;
+            break;
+        case IntegratedFailure::CopyEffectThenError:
+            fixture.state->copy_failure_after_effect =
+                kasumi::transport::ErrorCode::Io;
+            break;
+        case IntegratedFailure::CorruptReadback:
+            fixture.state->physical_hash_unsupported_identifier = quarantine;
+            fixture.state->corrupt_get_identifier = quarantine;
+            break;
+    }
+    reset_fake_traffic(*fixture.state);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, expected_error);
+
+    auto expected_objects = fixture.initial_objects;
+    const bool copy_effect =
+        failure == IntegratedFailure::CopyEffectThenError ||
+        failure == IntegratedFailure::CorruptReadback;
+    if (copy_effect) {
+        expected_objects.emplace(quarantine,
+                                 fixture.initial_objects.at(source));
+    }
+    EXPECT_EQ(fixture.state->objects, expected_objects);
+    EXPECT_TRUE(fixture.state->objects.contains(source));
+    EXPECT_EQ(fixture.state->objects.contains(quarantine), copy_effect);
+    EXPECT_FALSE(fixture.state->objects.contains(quarantine + ".meta"));
+
+    const bool source_hash_failed = failure == IntegratedFailure::SourceHash;
+    const bool fallback_read_failed = failure == IntegratedFailure::FallbackGet;
+    const bool fallback_put_failed = failure == IntegratedFailure::FallbackPut;
+    const auto source_bytes = fixture.initial_objects.at(source).size();
+    EXPECT_EQ(fixture.state->copy_count, source_hash_failed ? 0U : 1U);
+    EXPECT_EQ(fixture.state->orphan_payload_get_count,
+              fallback_read_failed || fallback_put_failed ? 1U : 0U);
+    EXPECT_EQ(fixture.state->orphan_payload_get_bytes,
+              fallback_put_failed ? source_bytes : 0U);
+    if (fallback_read_failed) {
+        EXPECT_TRUE(fixture.state->fail_get_identifier.empty());
+    }
+    if (fallback_put_failed) {
+        EXPECT_TRUE(fixture.state->fail_put_identifier.empty());
+    }
+    EXPECT_EQ(fixture.state->quarantine_payload_put_count, 0U);
+    EXPECT_EQ(fixture.state->quarantine_metadata_put_count, 0U);
+    EXPECT_EQ(fixture.state->native_copy_bytes,
+              copy_effect ? source_bytes : 0U);
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy source physical hash"),
+              1U);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("verified copy native copy"),
+        source_hash_failed ? 0U : 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy native copy successes"),
+              failure == IntegratedFailure::CorruptReadback ? 1U : 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy native copy verifications"),
+              0U);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("gc candidate verified copy"),
+        1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc candidate metadata publish"),
+              0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc candidate pre-remove barrier verification"),
+              0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc candidate remove"),
+              0U);
+}
+
+TEST(IntegratedGcFixtureTest,
+     NativeCopyPreservesExactInventoryAndAggregatesMetrics) {
+    expect_integrated_copy_case(IntegratedCopyPath::Native, "native", 2);
+}
+
+TEST(IntegratedGcFixtureTest, UnsupportedSourceHashUsesVerifiedFallback) {
+    expect_integrated_copy_case(IntegratedCopyPath::SourceHashUnsupported,
+                                "source-hash-unsupported");
+}
+
+TEST(IntegratedGcFixtureTest, UnsupportedNativeCopyUsesVerifiedFallback) {
+    expect_integrated_copy_case(IntegratedCopyPath::NativeCopyUnsupported,
+                                "copy-unsupported");
+}
+
+TEST(IntegratedGcFixtureTest, UnsupportedDestinationHashUsesVerifiedReadback) {
+    expect_integrated_copy_case(IntegratedCopyPath::DestinationHashUnsupported,
+                                "destination-hash-unsupported");
+}
+
+TEST(IntegratedGcFixtureTest, SourceHashTransportFailurePreservesInventory) {
+    expect_integrated_failure(IntegratedFailure::SourceHash,
+                              "source-hash-failure",
+                              IntegrityErrorCode::TransportFailure);
+}
+
+TEST(IntegratedGcFixtureTest, FallbackGetFailurePreservesInventory) {
+    expect_integrated_failure(IntegratedFailure::FallbackGet,
+                              "fallback-get-failure",
+                              IntegrityErrorCode::TransportFailure);
+}
+
+TEST(IntegratedGcFixtureTest, FallbackPutFailurePreservesInventory) {
+    expect_integrated_failure(IntegratedFailure::FallbackPut,
+                              "fallback-put-failure",
+                              IntegrityErrorCode::TransportFailure);
+}
+
+TEST(IntegratedGcFixtureTest,
+     CopyEffectThenTransportErrorLeavesUnclaimedResidue) {
+    expect_integrated_failure(IntegratedFailure::CopyEffectThenError,
+                              "copy-effect-then-error",
+                              IntegrityErrorCode::TransportFailure);
+}
+
+TEST(IntegratedGcFixtureTest, CorruptReadbackPreservesOriginalWithoutMetadata) {
+    expect_integrated_failure(IntegratedFailure::CorruptReadback,
+                              "corrupt-readback",
+                              IntegrityErrorCode::IntegrityFailure);
 }
 
 TEST(MaintenanceTest, UnicodeReferenceAndRecoveryPaths) {
@@ -334,6 +700,135 @@ TEST(IntegrityMaintenanceTest, EpochNamespaceIsBlockedAtTheCopyBoundary) {
         kasumi::test::workspace_root(storage.workspace));
     ASSERT_FALSE(from_quarantine.has_value());
     EXPECT_EQ(from_quarantine.error().code, protocol::ErrorCode::Blocked);
+}
+
+TEST(IntegrityMaintenanceTest,
+     CopyVerifiedStagesWhenSourcePhysicalHashIsUnsupported) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("copy-source-hash-unsupported");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    const auto source = put_content(transport, workspace, "payload", "source");
+    constexpr std::string_view destination = "copy/source-hash-fallback";
+    state->copy_supported = true;
+    state->get_count = 0;
+    state->put_count = 0;
+    state->copy_count = 0;
+
+    const auto copied = protocol::copy_verified(
+        transport,
+        source,
+        destination,
+        kasumi::test::workspace_root(workspace));
+
+    ASSERT_TRUE(copied.has_value()) << copied.error().detail;
+    EXPECT_EQ(*copied, state->physical_hashes.at(source));
+    EXPECT_EQ(state->copy_count, 0U);
+    EXPECT_EQ(state->get_count, 2U);
+    EXPECT_EQ(state->put_count, 1U);
+    EXPECT_EQ(state->objects.at(source),
+              state->objects.at(std::string{destination}));
+}
+
+TEST(IntegrityMaintenanceTest,
+     CopyVerifiedReadsBackWhenDestinationPhysicalHashIsUnsupported) {
+    struct TraceGuard {
+        ~TraceGuard() { kasumi::platform::perf_trace::force_enable(false); }
+    } trace_guard;
+    kasumi::platform::perf_trace::force_enable(true);
+    auto workspace =
+        kasumi::test::make_temp_workspace("copy-destination-hash-unsupported");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    const auto source = put_content(transport, workspace, "payload", "source");
+    constexpr std::string_view destination = "copy/destination-hash-fallback";
+    state->physical_hash_supported = true;
+    state->physical_hash_unsupported_identifier = std::string{destination};
+    state->copy_supported = true;
+    state->get_count = 0;
+    state->put_count = 0;
+    state->copy_count = 0;
+    kasumi::platform::perf_trace::reset();
+
+    const auto copied = protocol::copy_verified(
+        transport,
+        source,
+        destination,
+        kasumi::test::workspace_root(workspace));
+
+    ASSERT_TRUE(copied.has_value()) << copied.error().detail;
+    EXPECT_EQ(*copied, state->physical_hashes.at(source));
+    EXPECT_EQ(state->copy_count, 1U);
+    EXPECT_EQ(state->get_count, 1U);
+    EXPECT_EQ(state->put_count, 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy native copy"),
+              1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy native copy successes"),
+              1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "verified copy native copy verifications"),
+              1U);
+    EXPECT_EQ(state->objects.at(source),
+              state->objects.at(std::string{destination}));
+}
+
+TEST(IntegrityMaintenanceTest,
+     CopyVerifiedTraceSeparatesNativeAttemptSuccessAndVerification) {
+    struct TraceGuard {
+        ~TraceGuard() { kasumi::platform::perf_trace::force_enable(false); }
+    } trace_guard;
+    kasumi::platform::perf_trace::force_enable(true);
+
+    const auto verify_case = [](std::string_view suffix,
+                                bool copy_supported,
+                                bool destination_mismatch) {
+        auto workspace = kasumi::test::make_temp_workspace(
+            "copy-trace-" + std::string{suffix});
+        FakeState* state = nullptr;
+        auto transport = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(transport));
+        state->physical_hash_supported = true;
+        state->copy_supported = copy_supported;
+        state->copy_destination_mismatch = destination_mismatch;
+        const auto source = put_content(transport, workspace, "payload", suffix);
+        const auto destination = "copy/trace/" + std::string{suffix};
+        reset_fake_traffic(*state);
+        kasumi::platform::perf_trace::reset();
+
+        const auto copied = protocol::copy_verified(
+            transport,
+            source,
+            destination,
+            kasumi::test::workspace_root(workspace));
+
+        if (destination_mismatch) {
+            ASSERT_FALSE(copied.has_value());
+            EXPECT_EQ(copied.error().code,
+                      protocol::ErrorCode::VerificationFailure);
+        } else {
+            ASSERT_TRUE(copied.has_value()) << copied.error().detail;
+        }
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy native copy"),
+                  1U);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy native copy successes"),
+                  copy_supported ? 1U : 0U);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy native copy verifications"),
+                  copy_supported && !destination_mismatch ? 1U : 0U);
+        EXPECT_EQ(state->get_count, copy_supported ? 0U : 1U);
+        EXPECT_EQ(state->put_count, copy_supported ? 0U : 1U);
+        EXPECT_TRUE(state->objects.contains(source));
+    };
+
+    verify_case("native-success", true, false);
+    verify_case("unsupported-fallback", false, false);
+    verify_case("destination-mismatch", true, true);
 }
 
 TEST(IntegrityMaintenanceTest,
@@ -642,16 +1137,177 @@ TEST(IntegrityMaintenanceTest, ActiveOrAbandonedWriterBlocksCollection) {
         kasumi::test::workspace_root(storage.workspace));
     ASSERT_TRUE(writer.has_value()) << writer.error().detail;
 
+    struct TraceGuard {
+        ~TraceGuard() { kasumi::platform::perf_trace::force_enable(false); }
+    } trace_guard;
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
     const auto collected = kasumi::application::integrity::garbage_collect(
         runtime, storage.transport, test_key());
     ASSERT_FALSE(collected.has_value());
     EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc writer consistency checks"),
+              1U);
     expect_presence(storage.transport, orphan, Presence::Present);
     expect_presence(
         storage.transport,
         protocol::quarantine_identifier(test_layout(), orphan).value(),
         Presence::Absent);
     ASSERT_TRUE(protocol::release_registration(*writer));
+}
+
+class BarrierOwnershipTest : public ::testing::Test {
+protected:
+    TempWorkspace workspace =
+        kasumi::test::make_temp_workspace("barrier-ownership");
+    FakeState* state = nullptr;
+    kasumi::transport::Transport storage = make_fake_transport(state);
+    protocol::RegistrationState barrier;
+
+    void SetUp() override {
+        ASSERT_TRUE(kasumi::transport::initialize(storage));
+        state->physical_hash_supported = true;
+        auto established = protocol::establish_barrier(
+            storage, test_layout(), kasumi::test::workspace_root(workspace));
+        ASSERT_TRUE(established.has_value()) << established.error().detail;
+        barrier = std::move(*established);
+        state->physical_hash_count = 0;
+        state->get_count = 0;
+        state->remove_count = 0;
+    }
+
+    void replace_barrier_bytes() {
+        state->objects[test_layout().barrier_identifier] = {'f', 'o', 'r', 'e', 'i', 'g', 'n'};
+    }
+};
+
+TEST_F(BarrierOwnershipTest, PhysicalHashMatchAndMismatchAvoidGet) {
+    EXPECT_TRUE(protocol::verify_registration(barrier));
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 0U);
+
+    state->physical_hash_mismatch_identifier = test_layout().barrier_identifier;
+    const auto mismatch = protocol::verify_registration(barrier);
+    ASSERT_FALSE(mismatch.has_value());
+    EXPECT_EQ(mismatch.error().code, protocol::ErrorCode::Blocked);
+    EXPECT_EQ(state->physical_hash_count, 2U);
+    EXPECT_EQ(state->get_count, 0U);
+}
+
+TEST_F(BarrierOwnershipTest, MissingBarrierFailsClosedWithoutGet) {
+    state->objects.erase(test_layout().barrier_identifier);
+    state->physical_hashes.erase(test_layout().barrier_identifier);
+
+    const auto result = protocol::verify_registration(barrier);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, protocol::ErrorCode::Blocked);
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 0U);
+}
+
+TEST_F(BarrierOwnershipTest, UnsupportedHashUsesReadbackForMatchMismatchAndMissing) {
+    state->physical_hash_unsupported_identifier = test_layout().barrier_identifier;
+    EXPECT_TRUE(protocol::verify_registration(barrier));
+
+    replace_barrier_bytes();
+    const auto mismatch = protocol::verify_registration(barrier);
+    ASSERT_FALSE(mismatch.has_value());
+    EXPECT_EQ(mismatch.error().code, protocol::ErrorCode::Blocked);
+
+    state->objects.erase(test_layout().barrier_identifier);
+    const auto missing = protocol::verify_registration(barrier);
+    ASSERT_FALSE(missing.has_value());
+    EXPECT_EQ(missing.error().code, protocol::ErrorCode::Blocked);
+    EXPECT_EQ(state->physical_hash_count, 3U);
+    EXPECT_EQ(state->get_count, 3U);
+}
+
+TEST_F(BarrierOwnershipTest, TransportErrorsFailClosedWithoutGet) {
+    using kasumi::transport::ErrorCode;
+    for (const auto code : {ErrorCode::Timeout, ErrorCode::BackendUnavailable,
+                            ErrorCode::PermissionDenied, ErrorCode::ProtocolFailure}) {
+        state->physical_hash_failure = code;
+        const auto result = protocol::verify_registration(barrier);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, protocol::ErrorCode::TransportFailure);
+        EXPECT_EQ(state->get_count, 0U);
+        state->physical_hash_failure.reset();
+    }
+    EXPECT_EQ(state->physical_hash_count, 4U);
+}
+
+TEST_F(BarrierOwnershipTest, MalformedHashFailsClosedWithoutGet) {
+    for (const auto& value : {std::string{}, std::string(64, 'A'),
+                              std::string(64, 'g'), std::string{"abc"}}) {
+        state->physical_hash_override = value;
+        const auto result = protocol::verify_registration(barrier);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, protocol::ErrorCode::VerificationFailure);
+        EXPECT_EQ(state->get_count, 0U);
+        state->physical_hash_override.reset();
+    }
+    EXPECT_EQ(state->physical_hash_count, 4U);
+}
+
+TEST_F(BarrierOwnershipTest, ReleaseVerifiesHashBeforeRemovingOwnedBarrier) {
+    ASSERT_TRUE(protocol::release_registration(barrier));
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 0U);
+    EXPECT_EQ(state->remove_count, 1U);
+    EXPECT_FALSE(state->objects.contains(test_layout().barrier_identifier));
+}
+
+TEST_F(BarrierOwnershipTest, ReleaseDoesNotRemoveForeignBarrier) {
+    state->physical_hash_mismatch_identifier = test_layout().barrier_identifier;
+
+    ASSERT_TRUE(protocol::release_registration(barrier));
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 0U);
+    EXPECT_EQ(state->remove_count, 0U);
+    EXPECT_TRUE(state->objects.contains(test_layout().barrier_identifier));
+}
+
+TEST_F(BarrierOwnershipTest, ReleaseMissingBarrierSucceedsWithoutRemove) {
+    state->objects.erase(test_layout().barrier_identifier);
+    state->physical_hashes.erase(test_layout().barrier_identifier);
+
+    ASSERT_TRUE(protocol::release_registration(barrier));
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 0U);
+    EXPECT_EQ(state->remove_count, 0U);
+}
+
+TEST_F(BarrierOwnershipTest, ReleaseTransportErrorDoesNotRemoveBarrier) {
+    state->physical_hash_failure = kasumi::transport::ErrorCode::Timeout;
+
+    const auto released = protocol::release_registration(barrier);
+    ASSERT_FALSE(released.has_value());
+    EXPECT_EQ(released.error().code, protocol::ErrorCode::TransportFailure);
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 0U);
+    EXPECT_EQ(state->remove_count, 0U);
+    EXPECT_TRUE(state->objects.contains(test_layout().barrier_identifier));
+}
+
+TEST_F(BarrierOwnershipTest, ReleaseUnsupportedHashFallsBackToReadback) {
+    state->physical_hash_unsupported_identifier = test_layout().barrier_identifier;
+    ASSERT_TRUE(protocol::release_registration(barrier));
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 1U);
+    EXPECT_EQ(state->remove_count, 1U);
+    EXPECT_FALSE(state->objects.contains(test_layout().barrier_identifier));
+}
+
+TEST_F(BarrierOwnershipTest, ReleaseUnsupportedHashPreservesForeignBarrier) {
+    state->physical_hash_unsupported_identifier = test_layout().barrier_identifier;
+    replace_barrier_bytes();
+
+    ASSERT_TRUE(protocol::release_registration(barrier));
+    EXPECT_EQ(state->physical_hash_count, 1U);
+    EXPECT_EQ(state->get_count, 1U);
+    EXPECT_EQ(state->remove_count, 0U);
+    EXPECT_TRUE(state->objects.contains(test_layout().barrier_identifier));
 }
 
 TEST(IntegrityMaintenanceTest, WriterPhysicalHashSuccessAvoidsReadback) {
@@ -935,7 +1591,13 @@ TEST(IntegrityMaintenanceTest, CopyFailurePreservesTheOriginal) {
     const auto orphan = put_content(transport, workspace, "orphan", "orphan");
     const auto quarantined =
         protocol::quarantine_identifier(test_layout(), orphan).value();
-    state->fail_content_get = true;
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_failure = kasumi::transport::ErrorCode::Io;
+    state->observed_payload_identifier = orphan;
+    state->orphan_payload_get_count = 0;
+    state->quarantine_payload_put_count = 0;
+    state->copy_count = 0;
 
     const auto collected = kasumi::application::integrity::garbage_collect(
         runtime, transport, test_key());
@@ -944,6 +1606,36 @@ TEST(IntegrityMaintenanceTest, CopyFailurePreservesTheOriginal) {
     expect_presence(transport, orphan, Presence::Present);
     expect_presence(transport, quarantined, Presence::Absent);
     expect_presence(transport, quarantined + ".meta", Presence::Absent);
+    EXPECT_EQ(state->orphan_payload_get_count, 0U);
+    EXPECT_EQ(state->quarantine_payload_put_count, 0U);
+    EXPECT_EQ(state->copy_count, 1U);
+}
+
+TEST(IntegrityMaintenanceTest,
+     DestinationCopyVerificationFailurePreservesTheOriginal) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-copy-verification-failure");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+    publish_remote(
+        transport, workspace, kasumi::history::make_empty_bootstrap().value());
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto quarantined =
+        protocol::quarantine_identifier(test_layout(), orphan).value();
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_destination_mismatch = true;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::IntegrityFailure);
+    expect_presence(transport, orphan, Presence::Present);
+    expect_presence(transport, quarantined, Presence::Present);
+    expect_presence(transport, quarantined + ".meta", Presence::Absent);
+    EXPECT_EQ(state->copy_count, 1U);
 }
 
 TEST(IntegrityMaintenanceTest,
@@ -958,6 +1650,8 @@ TEST(IntegrityMaintenanceTest,
     const auto orphan = put_content(transport, workspace, "orphan", "orphan");
     const auto quarantined =
         protocol::quarantine_identifier(test_layout(), orphan).value();
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
     state->fail_quarantine_metadata_put = true;
 
     const auto collected = kasumi::application::integrity::garbage_collect(
@@ -967,6 +1661,35 @@ TEST(IntegrityMaintenanceTest,
     expect_presence(transport, orphan, Presence::Present);
     expect_presence(transport, quarantined, Presence::Present);
     expect_presence(transport, quarantined + ".meta", Presence::Absent);
+    EXPECT_EQ(state->copy_count, 1U);
+    EXPECT_EQ(state->orphan_payload_get_count, 0U);
+    EXPECT_EQ(state->quarantine_payload_put_count, 0U);
+}
+
+TEST(IntegrityMaintenanceTest, BarrierLostBeforeFirstCopyPreventsCopy) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-barrier-before-copy");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+    publish_remote(
+        transport, workspace, kasumi::history::make_empty_bootstrap().value());
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    state->replace_barrier_after_writer_list = true;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange);
+    EXPECT_EQ(state->copy_count, 0U);
+    EXPECT_EQ(state->copy_batch_count, 0U);
+    expect_presence(transport, orphan, Presence::Present);
+    expect_presence(
+        transport,
+        protocol::quarantine_identifier(test_layout(), orphan).value(),
+        Presence::Absent);
 }
 
 TEST(IntegrityMaintenanceTest, LostBarrierBeforeRemovalPreservesTheOriginal) {
@@ -978,6 +1701,8 @@ TEST(IntegrityMaintenanceTest, LostBarrierBeforeRemovalPreservesTheOriginal) {
     publish_remote(
         transport, workspace, kasumi::history::make_empty_bootstrap().value());
     const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
     state->replace_barrier_after_quarantine_put = true;
 
     const auto collected = kasumi::application::integrity::garbage_collect(
@@ -989,6 +1714,9 @@ TEST(IntegrityMaintenanceTest, LostBarrierBeforeRemovalPreservesTheOriginal) {
         transport,
         protocol::quarantine_identifier(test_layout(), orphan).value(),
         Presence::Present);
+    EXPECT_EQ(state->copy_count, 1U);
+    EXPECT_EQ(state->orphan_payload_get_count, 0U);
+    EXPECT_EQ(state->quarantine_payload_put_count, 0U);
 }
 
 TEST(IntegrityMaintenanceTest,
@@ -1181,7 +1909,124 @@ TEST(IntegrityMaintenanceTest,
     EXPECT_EQ(state->disappear_on_get, alpha_content);
     EXPECT_EQ(state->commit_get_count, 2U);
     EXPECT_EQ(state->marker_get_count, 2U);
-    EXPECT_EQ(state->get_count, 7U);
+    EXPECT_EQ(state->get_count, 4U);
+}
+
+TEST(IntegrityMaintenanceTest,
+     GarbageCollectQuarantineAvoidsClientPayloadRoundTrip) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-quarantine-remote-copy-red");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    const auto reachable = make_commit(0, {}, "alpha.txt", "alpha").value();
+    publish_remote(transport, workspace, reachable);
+    put_content(transport, workspace, "alpha", "alpha");
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto quarantined =
+        protocol::quarantine_identifier(test_layout(), orphan).value();
+
+    state->observed_payload_identifier = orphan;
+    state->get_count = 0;
+    state->put_count = 0;
+    state->commit_get_count = 0;
+    state->marker_get_count = 0;
+    state->orphan_payload_get_count = 0;
+    state->quarantine_payload_put_count = 0;
+    state->quarantine_metadata_put_count = 0;
+    state->physical_hash_count = 0;
+    state->remove_count = 0;
+    state->copy_count = 0;
+
+    ASSERT_TRUE(state->physical_hash_supported);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+    expect_presence(transport, orphan, Presence::Absent);
+    expect_presence(transport, quarantined, Presence::Present);
+    expect_presence(transport, quarantined + ".meta", Presence::Present);
+
+    const auto counters = [&] {
+        return "total GET=" + std::to_string(state->get_count) +
+               ", orphan payload GET=" +
+               std::to_string(state->orphan_payload_get_count) +
+               ", total PUT=" + std::to_string(state->put_count) +
+               ", quarantine payload PUT=" +
+               std::to_string(state->quarantine_payload_put_count) +
+               ", quarantine metadata PUT=" +
+               std::to_string(state->quarantine_metadata_put_count) +
+               ", physical_hash=" +
+               std::to_string(state->physical_hash_count) +
+               ", remove=" + std::to_string(state->remove_count) +
+               ", copy=" + std::to_string(state->copy_count);
+    };
+    EXPECT_EQ(state->quarantine_metadata_put_count, 1U);
+    EXPECT_EQ(state->copy_count, 1U);
+    EXPECT_EQ(state->orphan_payload_get_count, 0U) << counters();
+    EXPECT_EQ(state->quarantine_payload_put_count, 0U) << counters();
+}
+
+TEST(IntegrityMaintenanceTest,
+     FailedOrphanPayloadGetDoesNotCountDownloadedBytes) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-failed-payload-get-bytes");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    constexpr std::string_view identifier = "content/orphan-payload";
+    state->objects[std::string{identifier}] = {1, 2, 3, 4};
+    state->observed_payload_identifier = identifier;
+    state->fail_content_get = true;
+
+    const auto result = kasumi::transport::get(
+        transport,
+        identifier,
+        kasumi::test::workspace_root(workspace) / "orphan-payload.bin");
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(state->orphan_payload_get_count, 1U);
+    EXPECT_EQ(state->orphan_payload_get_bytes, 0U);
+}
+
+TEST(IntegrityMaintenanceTest,
+     GarbageCollectQuarantineFallsBackWhenNativeCopyUnsupported) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-quarantine-copy-fallback");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    const auto reachable = make_commit(0, {}, "alpha.txt", "alpha").value();
+    publish_remote(transport, workspace, reachable);
+    put_content(transport, workspace, "alpha", "alpha");
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto quarantined =
+        protocol::quarantine_identifier(test_layout(), orphan).value();
+
+    state->observed_payload_identifier = orphan;
+    state->get_count = 0;
+    state->put_count = 0;
+    state->orphan_payload_get_count = 0;
+    state->quarantine_payload_put_count = 0;
+    state->copy_count = 0;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+    expect_presence(transport, orphan, Presence::Absent);
+    expect_presence(transport, quarantined, Presence::Present);
+    EXPECT_EQ(state->orphan_payload_get_count, 1U);
+    EXPECT_EQ(state->quarantine_payload_put_count, 1U);
+    EXPECT_EQ(state->copy_count, 1U);
 }
 
 TEST(IntegrityMaintenanceTest, FinalListingDetectsLateConcurrentChange) {
@@ -1229,6 +2074,7 @@ TEST(IntegrityMaintenanceTest,
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
     state->physical_hash_supported = true;
+    state->copy_supported = true;
     auto runtime = runtime_data(workspace);
 
     const auto alpha = make_commit(0, {}, "alpha.txt", "alpha").value();
@@ -1277,6 +2123,10 @@ TEST(IntegrityMaintenanceTest,
         transport, marker_file, marker_path(orphan_published.head)));
 
     state->disappear_on_get = orphan_content;
+    state->observed_payload_identifier = orphan_content_quarantine;
+    state->orphan_payload_get_count = 0;
+    state->quarantine_payload_put_count = 0;
+    state->copy_count = 0;
 
     const auto restored = kasumi::application::integrity::garbage_collect(
         runtime, transport, test_key());
@@ -1286,6 +2136,2977 @@ TEST(IntegrityMaintenanceTest,
     expect_presence(transport, orphan_content, Presence::Present);
     expect_presence(
         transport, object_path(orphan_published.head), Presence::Present);
+    EXPECT_EQ(state->copy_count, 2U);
+    EXPECT_EQ(state->orphan_payload_get_count, 0U);
+    EXPECT_EQ(state->quarantine_payload_put_count, 0U);
+}
+
+TEST(IntegrityMaintenanceTest, GarbageCollectionBatchBaselineScale) {
+    struct TraceGuard {
+        ~TraceGuard() { kasumi::platform::perf_trace::force_enable(false); }
+    } trace_guard;
+
+    kasumi::platform::perf_trace::force_enable(true);
+    std::cout << "GC_MEASUREMENT_COLUMNS n,total_us,barrier_acquire_us,"
+                 "writer_checks_us,probe_us,quarantine_inventory_us,"
+                 "restore_us,prior_metadata_us,reachability_1_us,"
+                 "reachability_2_us,stable_compare_us,"
+                 "final_namespace_verify_us,"
+                 "purge_us,candidate_pre_copy_barrier_us,candidate_copy_us,"
+                 "candidate_source_hash_us,native_copy_us,"
+                 "candidate_destination_hash_us,"
+                 "candidate_metadata_us,put_verification_us,"
+                 "candidate_pre_remove_barrier_us,"
+                 "candidate_remove_us,barrier_release_us,get,orphan_get,"
+                 "orphan_get_bytes,put,quarantine_payload_put,"
+                 "quarantine_payload_put_bytes,metadata_put,full_list,"
+                 "full_list_identifiers,prefix_list,presence,physical_hash,"
+                 "physical_hash_batch,"
+                 "put_batch,control_read_batch,copy_attempts,copy_successes,"
+                 "copy_verifications,native_copy_bytes,"
+                 "remove,barrier_verification,writer_hash_verification_calls,"
+                 "candidates,quarantined,"
+                 "restored,purged,analysis_only\n";
+
+    const auto trace_us = [](std::string_view name) {
+        return kasumi::platform::perf_trace::get_time(name);
+    };
+    for (const std::size_t orphan_count : {0U, 1U, 10U, 100U}) {
+        auto workspace =
+            kasumi::test::make_temp_workspace("gc-batch-baseline");
+        FakeState* state = nullptr;
+        auto transport = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(transport));
+        state->physical_hash_supported = true;
+        state->copy_supported = true;
+        auto runtime = runtime_data(workspace);
+
+        const auto retained =
+            make_commit(0, {}, "retained.txt", "retained").value();
+        const auto published = publish_remote(transport, workspace, retained);
+        const auto retained_content =
+            put_content(transport, workspace, "retained", "retained");
+
+        std::vector<std::pair<std::string, std::vector<std::uint8_t>>> orphans;
+        orphans.reserve(orphan_count);
+        std::set<std::string> unique_orphan_identifiers;
+        std::set<std::vector<std::uint8_t>> unique_orphan_ciphertexts;
+        std::size_t orphan_bytes = 0;
+        for (std::size_t index = 0; index < orphan_count; ++index) {
+            const auto suffix = "orphan-" + std::to_string(index);
+            const auto identifier =
+                put_content(transport, workspace, suffix, suffix);
+            state->observed_payload_identifiers.insert(identifier);
+            const auto& ciphertext = state->objects.at(identifier);
+            EXPECT_TRUE(unique_orphan_identifiers.insert(identifier).second);
+            EXPECT_TRUE(unique_orphan_ciphertexts.insert(ciphertext).second);
+            orphans.emplace_back(identifier, ciphertext);
+            orphan_bytes += state->objects.at(identifier).size();
+        }
+        const auto layout = test_layout();
+        EXPECT_TRUE(std::ranges::none_of(state->objects, [&](const auto& item) {
+            return protocol::is_epoch_object(layout, item.first);
+        }));
+
+        reset_fake_traffic(*state);
+        kasumi::platform::perf_trace::reset();
+        const auto started = std::chrono::steady_clock::now();
+        const auto collected = kasumi::application::integrity::garbage_collect(
+            runtime, transport, test_key());
+        const auto total_us = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - started)
+                .count());
+        ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+        EXPECT_FALSE(collected->analysis_only);
+        EXPECT_EQ(collected->candidate_objects, orphan_count);
+        EXPECT_EQ(collected->quarantined_objects, orphan_count);
+        EXPECT_EQ(collected->restored_objects, 0U);
+        EXPECT_EQ(collected->purged_objects, 0U);
+        const auto candidate_batches =
+            (orphan_count + 7U) / 8U;
+        EXPECT_EQ(state->get_count, 4U);
+        EXPECT_EQ(state->orphan_payload_get_count, 0U);
+        EXPECT_EQ(state->orphan_payload_get_bytes, 0U);
+        EXPECT_EQ(state->put_count, 2U + orphan_count);
+        EXPECT_EQ(state->quarantine_payload_put_count, 0U);
+        EXPECT_EQ(state->quarantine_payload_put_bytes, 0U);
+        EXPECT_EQ(state->quarantine_metadata_put_count, orphan_count);
+        EXPECT_EQ(state->full_list_count, 4U);
+        EXPECT_EQ(state->full_list_identifier_count,
+                  4U * (orphan_count + 4U));
+        EXPECT_EQ(state->prefix_list_count, 6U);
+        EXPECT_EQ(state->presence_count, 0U);
+        EXPECT_EQ(state->physical_hash_count,
+                  2U + 3U * orphan_count +
+                      (3U + 3U * orphan_count + 2U * candidate_batches));
+        EXPECT_EQ(state->physical_hash_batch_count, 0U);
+        EXPECT_EQ(state->put_batch_count, 0U);
+        EXPECT_EQ(state->control_read_batch_count, 0U);
+        EXPECT_EQ(state->copy_count, orphan_count);
+        EXPECT_EQ(state->native_copy_bytes, orphan_bytes);
+        EXPECT_EQ(state->remove_count, 2U + orphan_count);
+        EXPECT_EQ(state->barrier_verification_count,
+                  1U + 3U + 3U * orphan_count + 2U * candidate_batches);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "writer physical hash calls"),
+                  2U + orphan_count);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "writer verification"),
+                  2U + orphan_count);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy source physical hash"),
+                  orphan_count);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy native copy"),
+                  orphan_count);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy native copy successes"),
+                  orphan_count);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy native copy verifications"),
+                  orphan_count);
+        EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                      "verified copy destination physical hash"),
+                  orphan_count);
+
+        std::cout << "GC_MEASUREMENT " << orphan_count << ',' << total_us << ','
+                  << trace_us("gc barrier acquire") << ','
+                  << trace_us("gc writer consistency checks") << ','
+                  << trace_us("gc backend consistency probe") << ','
+                  << trace_us("gc quarantine inventory") << ','
+                  << trace_us("gc quarantine restoration") << ','
+                  << trace_us("gc prior metadata initialization") << ','
+                  << trace_us("gc reachability observation 1") << ','
+                  << trace_us("gc reachability observation 2") << ','
+                  << trace_us("gc stable-state comparison") << ','
+                  << trace_us("gc final namespace verification") << ','
+                  << trace_us("gc expired quarantine purge") << ','
+                  << trace_us("gc candidate pre-copy barrier verification")
+                  << ',' << trace_us("gc candidate verified copy") << ','
+                  << trace_us("verified copy source physical hash") << ','
+                  << trace_us("verified copy native copy") << ','
+                  << trace_us("verified copy destination physical hash")
+                  << ','
+                  << trace_us("gc candidate metadata publish") << ','
+                  << trace_us("writer verification") << ','
+                  << trace_us("gc candidate pre-remove barrier verification")
+                  << ',' << trace_us("gc candidate remove") << ','
+                  << trace_us("gc barrier release") << ',' << state->get_count
+                  << ',' << state->orphan_payload_get_count << ','
+                  << state->orphan_payload_get_bytes << ',' << state->put_count
+                  << ','
+                  << state->quarantine_payload_put_count << ','
+                  << state->quarantine_payload_put_bytes << ','
+                  << state->quarantine_metadata_put_count << ','
+                  << state->full_list_count << ','
+                  << state->full_list_identifier_count << ','
+                  << state->prefix_list_count
+                  << ',' << state->presence_count << ','
+                  << state->physical_hash_count << ','
+                  << state->physical_hash_batch_count << ','
+                  << state->put_batch_count << ','
+                  << state->control_read_batch_count << ','
+                  << kasumi::platform::perf_trace::get_count(
+                         "verified copy native copy")
+                  << ','
+                  << kasumi::platform::perf_trace::get_count(
+                         "verified copy native copy successes")
+                  << ','
+                  << kasumi::platform::perf_trace::get_count(
+                         "verified copy native copy verifications")
+                  << ',' << state->native_copy_bytes << ','
+                  << state->remove_count << ','
+                  << state->barrier_verification_count << ','
+                  << kasumi::platform::perf_trace::get_count(
+                         "writer physical hash calls")
+                  << ','
+                  << collected->candidate_objects << ','
+                  << collected->quarantined_objects << ','
+                  << collected->restored_objects << ','
+                  << collected->purged_objects << ','
+                  << collected->analysis_only << '\n';
+
+        EXPECT_TRUE(state->objects.contains(retained_content));
+        EXPECT_TRUE(state->objects.contains(object_path(published.head)));
+        EXPECT_TRUE(state->objects.contains(marker_path(published.head)));
+        for (const auto& [identifier, bytes] : orphans) {
+            const auto quarantine =
+                protocol::quarantine_identifier(test_layout(), identifier);
+            ASSERT_TRUE(quarantine.has_value());
+            EXPECT_FALSE(state->objects.contains(identifier));
+            const auto quarantined = state->objects.find(*quarantine);
+            ASSERT_NE(quarantined, state->objects.end());
+            EXPECT_EQ(quarantined->second, bytes);
+        }
+
+        const auto inventory = protocol::inventory_quarantine(
+            transport, test_key(), kasumi::test::workspace_root(workspace));
+        ASSERT_TRUE(inventory.has_value());
+        EXPECT_EQ(inventory->size(), orphan_count);
+        for (const auto& entry : *inventory) {
+            EXPECT_FALSE(protocol::is_epoch_object(
+                test_layout(), entry.original_identifier));
+            const auto verified = protocol::verify_quarantine(
+                transport, entry, kasumi::test::workspace_root(workspace));
+            ASSERT_TRUE(verified.has_value());
+            EXPECT_TRUE(*verified);
+        }
+    }
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+namespace {
+kasumi::transport::Result
+fake_reachability_get_batch(void* context,
+                            const kasumi::transport::GetBatch& batch) {
+    ++fake_state(context)->get_batch_count;
+    for (const auto& identifier : batch.identifiers) {
+        const auto source = batch.source_prefix.empty()
+                                ? identifier
+                                : batch.source_prefix + "/" + identifier;
+        auto result =
+            fake_get(context, source, batch.destination_root / identifier);
+        if (!result) {
+            return result;
+        }
+        --fake_state(context)->get_count;
+        --fake_state(context)->commit_get_count;
+        fake_state(context)->remote_events.pop_back();
+    }
+    return {};
+}
+
+// ============================================================================
+// Phase 10: Batch Garbage Collection Tests (Scenarios A through K)
+// ============================================================================
+
+TEST(IntegrityMaintenanceTest, GarbageCollectionBatchMeasurementScale) {
+    constexpr std::size_t batch_capacity = 8;
+    constexpr std::size_t min_batch_threshold = 6;
+    for (const std::size_t count : {0U, 1U, 10U, 100U}) {
+        auto workspace =
+            kasumi::test::make_temp_workspace("gc-batch-measure-" + std::to_string(count));
+        FakeState* state = nullptr;
+        auto transport = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(transport));
+        state->physical_hash_supported = true;
+        state->copy_supported = true;
+        enable_fake_physical_hash_batch(transport, *state, min_batch_threshold);
+        auto runtime = runtime_data(workspace);
+
+        const auto retained =
+            make_commit(0, {}, "retained.txt", "retained").value();
+        publish_remote(transport, workspace, retained);
+        put_content(transport, workspace, "retained", "retained");
+
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto suffix = "orphan-" + std::to_string(i);
+            put_content(transport, workspace, suffix, suffix);
+        }
+
+        reset_fake_traffic(*state);
+        kasumi::platform::perf_trace::force_enable(true);
+        kasumi::platform::perf_trace::reset();
+        const auto collected = kasumi::application::integrity::garbage_collect(
+            runtime, transport, test_key());
+        const auto source_hash_indiv =
+            kasumi::platform::perf_trace::get_count("verified copy source physical hash");
+        const auto dest_hash_indiv =
+            kasumi::platform::perf_trace::get_count("verified copy destination physical hash");
+        const auto candidates_verified =
+            kasumi::platform::perf_trace::get_count("gc.candidates_verified");
+        kasumi::platform::perf_trace::force_enable(false);
+        ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+        EXPECT_EQ(collected->candidate_objects, count);
+        EXPECT_EQ(collected->quarantined_objects, count);
+        const std::size_t batches =
+            count == 0 ? 0 : (count + batch_capacity - 1) / batch_capacity;
+        const std::size_t expected_batch_calls =
+            count == 0 ? 0 :
+            count == 1 ? 0 :
+            count == 10 ? 1 : 12;
+        EXPECT_EQ(state->physical_hash_batch_count, expected_batch_calls);
+        EXPECT_EQ(state->copy_count, count);
+        EXPECT_EQ(state->orphan_payload_get_count, 0U);
+        EXPECT_EQ(state->quarantine_payload_put_count, 0U);
+
+        std::cout << "PHASE10_BATCH_SCALE N=" << count
+                  << " batches=" << batches
+                  << " copy_count=" << state->copy_count
+                  << " physical_hash_batch_count=" << state->physical_hash_batch_count
+                  << " source_hash_indiv=" << source_hash_indiv
+                  << " dest_hash_indiv=" << dest_hash_indiv
+                  << " get_payload=" << state->orphan_payload_get_count
+                  << " put_payload=" << state->quarantine_payload_put_count
+                  << " put_metadata=" << state->quarantine_metadata_put_count
+                  << " remove=" << state->remove_count
+                  << " verified=" << candidates_verified
+                  << " quarantined=" << collected->quarantined_objects
+                  << std::endl;
+    }
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioAZeroCandidates) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-a-zero");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 0U);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
+    EXPECT_EQ(collected->restored_objects, 0U);
+    EXPECT_EQ(collected->purged_objects, 0U);
+    EXPECT_EQ(state->physical_hash_batch_count, 0U);
+    EXPECT_EQ(state->copy_count, 0U);
+    EXPECT_EQ(state->quarantine_metadata_put_count, 0U);
+    EXPECT_EQ(state->remove_count, 2U);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioBOneCandidate) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-b-one");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(state->physical_hash_batch_count, 0U);
+    EXPECT_EQ(state->copy_count, 1U);
+    expect_presence(transport, orphan, Presence::Absent);
+    const auto q_id = protocol::quarantine_identifier(test_layout(), orphan);
+    ASSERT_TRUE(q_id.has_value());
+    expect_presence(transport, *q_id, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioCTenCandidatesBoundedBatches) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-c-ten");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    const auto published = publish_remote(transport, workspace, retained);
+    const auto live_content = put_content(transport, workspace, "live", "live-content");
+
+    std::vector<std::string> orphans;
+    for (std::size_t i = 0; i < 10; ++i) {
+        const auto suffix = "orphan-" + std::to_string(i);
+        orphans.push_back(put_content(transport, workspace, suffix, suffix));
+    }
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 10U);
+    EXPECT_EQ(collected->quarantined_objects, 10U);
+    EXPECT_EQ(state->physical_hash_batch_count, 1U);
+    expect_presence(transport, live_content, Presence::Present);
+    expect_presence(transport, object_path(published.head), Presence::Present);
+    expect_presence(transport, marker_path(published.head), Presence::Present);
+    for (const auto& orphan : orphans) {
+        expect_presence(transport, orphan, Presence::Absent);
+        const auto q_id = protocol::quarantine_identifier(test_layout(), orphan);
+        ASSERT_TRUE(q_id.has_value());
+        expect_presence(transport, *q_id, Presence::Present);
+        expect_presence(transport, *q_id + ".meta", Presence::Present);
+
+        const auto copy_event = std::ranges::find(
+            state->gc_events, "copy:" + orphan + "|" + *q_id);
+        auto verify_event = std::ranges::find_if(
+            state->gc_events, [&](const auto& event) {
+                return event.starts_with("batch|") &&
+                       event.find(*q_id) != std::string::npos;
+            });
+        if (verify_event == state->gc_events.end()) {
+            verify_event = std::ranges::find(
+                state->gc_events, "verify:" + *q_id);
+        }
+        const auto metadata_event = std::ranges::find(
+            state->gc_events, "metadata:" + *q_id + ".meta");
+        const auto remove_event = std::ranges::find(
+            state->gc_events, "remove:" + orphan);
+        ASSERT_NE(copy_event, state->gc_events.end());
+        ASSERT_NE(verify_event, state->gc_events.end());
+        ASSERT_NE(metadata_event, state->gc_events.end());
+        ASSERT_NE(remove_event, state->gc_events.end());
+        EXPECT_LT(std::distance(state->gc_events.begin(), copy_event),
+                  std::distance(state->gc_events.begin(), verify_event));
+        EXPECT_LT(std::distance(state->gc_events.begin(), verify_event),
+                  std::distance(state->gc_events.begin(), metadata_event));
+        EXPECT_LT(std::distance(state->gc_events.begin(), metadata_event),
+                  std::distance(state->gc_events.begin(), remove_event));
+    }
+    EXPECT_EQ(state->quarantine_metadata_put_count, 10U);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioDOneHundredCandidatesScale) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-d-hundred");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    std::vector<std::string> orphans;
+    for (std::size_t i = 0; i < 100; ++i) {
+        const auto suffix = "orphan-" + std::to_string(i);
+        orphans.push_back(put_content(transport, workspace, suffix, suffix));
+    }
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 100U);
+    EXPECT_EQ(collected->quarantined_objects, 100U);
+    EXPECT_EQ(state->physical_hash_batch_count, 13U);
+    for (const auto& orphan : orphans) {
+        expect_presence(transport, orphan, Presence::Absent);
+    }
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioEBatchSupportedReducesCalls) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-e-reduction");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    for (std::size_t i = 0; i < 10; ++i) {
+        const auto suffix = "orphan-" + std::to_string(i);
+        put_content(transport, workspace, suffix, suffix);
+    }
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(state->physical_hash_batch_count, 2U);
+    EXPECT_EQ(state->physical_hash_count, 59U);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioFBatchUnsupportedFallback) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-f-fallback");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->physical_hash_batch_supported = false;
+    transport.storage.physical_hash_batch_min_objects = 2;
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    std::vector<std::string> orphans;
+    for (std::size_t i = 0; i < 10; ++i) {
+        const auto suffix = "orphan-" + std::to_string(i);
+        orphans.push_back(put_content(transport, workspace, suffix, suffix));
+    }
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 10U);
+    EXPECT_EQ(collected->quarantined_objects, 10U);
+    for (const auto& orphan : orphans) {
+        expect_presence(transport, orphan, Presence::Absent);
+    }
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioGBatchPartialCorruptedResult) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-g-corrupted");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    std::vector<std::string> orphans;
+    for (std::size_t i = 0; i < 3; ++i) {
+        const auto suffix = "orphan-" + std::to_string(i);
+        orphans.push_back(put_content(transport, workspace, suffix, suffix));
+    }
+
+    const auto q1 = protocol::quarantine_identifier(test_layout(), orphans[1]);
+    ASSERT_TRUE(q1.has_value());
+    state->physical_hash_batch_mismatches.insert(*q1);
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+
+    expect_presence(transport, orphans[1], Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioHIntermediateCandidateFailure) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-h-interm");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    std::vector<std::string> orphans;
+    for (std::size_t i = 0; i < 3; ++i) {
+        const auto suffix = "orphan-" + std::to_string(i);
+        orphans.push_back(put_content(transport, workspace, suffix, suffix));
+    }
+    std::ranges::sort(orphans);
+
+    state->physical_hash_mismatch_identifier =
+        *protocol::quarantine_identifier(test_layout(), orphans[1]);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    // Batch verification failure preserves every source in the candidate batch.
+    expect_presence(transport, orphans[0], Presence::Present);
+    expect_presence(transport, orphans[1], Presence::Present);
+    expect_presence(transport, orphans[2], Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioIBarrierLossBeforeRemoval) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-i-barrier");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+
+    state->replace_barrier_after_quarantine_put = true;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    expect_presence(transport, orphan, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioJInterruptionRecovery) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-j-interrupt");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+
+    state->fail_quarantine_metadata_put = true;
+    const auto run1 = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(run1.has_value());
+    expect_presence(transport, orphan, Presence::Present);
+
+    state->fail_quarantine_metadata_put = false;
+    const auto run2 = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(run2.has_value()) << run2.error().detail;
+    expect_presence(transport, orphan, Presence::Absent);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioKConcurrentChangeBetweenObservations) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-k-concurrent");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    const auto published = publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+
+    const auto concurrent =
+        make_commit(1, {published.head.commit_id}, "extra.txt", "extra").value();
+    const auto concurrent_published =
+        publish_remote(transport, workspace, concurrent);
+    const auto concurrent_content =
+        put_content(transport, workspace, "extra", "extra");
+
+    const auto hide = [&](const std::string& identifier) {
+        auto node = state->objects.extract(identifier);
+        ASSERT_FALSE(node.empty());
+        state->hidden_objects.insert(std::move(node));
+    };
+    hide(object_path(concurrent_published.head));
+    hide(marker_path(concurrent_published.head));
+    hide(concurrent_content);
+    state->reveal_on_list_count = state->list_count + 9;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange);
+    expect_presence(transport, orphan, Presence::Present);
+    EXPECT_EQ(state->copy_count, 0U);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioLRejectsEmptyBatchReport) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-l-empty");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    const auto orphan0 = put_content(transport, workspace, "orphan0", "orphan0");
+    const auto orphan1 = put_content(transport, workspace, "orphan1", "orphan1");
+
+    state->physical_hash_batch_override_report =
+        kasumi::transport::PhysicalHashBatchReport{};
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::TransportFailure);
+    expect_presence(transport, orphan0, Presence::Present);
+    expect_presence(transport, orphan1, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioMRejectsOmittedCandidateFromBatchReport) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-m-omitted");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    const auto orphan0 = put_content(transport, workspace, "orphan0", "orphan0");
+    const auto orphan1 = put_content(transport, workspace, "orphan1", "orphan1");
+
+    const auto q1 = protocol::quarantine_identifier(test_layout(), orphan1);
+    ASSERT_TRUE(q1.has_value());
+    state->physical_hash_batch_omitted.insert(*q1);
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::TransportFailure);
+    expect_presence(transport, orphan1, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioNRejectsUnexpectedIdentifierInBatchReport) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-n-unexpected");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    const auto orphan0 = put_content(transport, workspace, "orphan0", "orphan0");
+    const auto orphan1 = put_content(transport, workspace, "orphan1", "orphan1");
+
+    const auto q0 = *protocol::quarantine_identifier(test_layout(), orphan0);
+    const auto q1 = *protocol::quarantine_identifier(test_layout(), orphan1);
+
+    state->physical_hash_batch_override_report =
+        kasumi::transport::PhysicalHashBatchReport{
+            .matched = {q0, q1, "foreign_unrequested_object"},
+            .mismatched = {},
+            .missing = {},
+            .errors = {},
+        };
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::TransportFailure);
+    expect_presence(transport, orphan0, Presence::Present);
+    expect_presence(transport, orphan1, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioORejectsCrossCategoryDuplicateInBatchReport) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-o-crossdup");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    const auto orphan0 = put_content(transport, workspace, "orphan0", "orphan0");
+    const auto orphan1 = put_content(transport, workspace, "orphan1", "orphan1");
+
+    const auto q0 = *protocol::quarantine_identifier(test_layout(), orphan0);
+    const auto q1 = *protocol::quarantine_identifier(test_layout(), orphan1);
+
+    state->physical_hash_batch_override_report =
+        kasumi::transport::PhysicalHashBatchReport{
+            .matched = {q0, q1},
+            .mismatched = {},
+            .missing = {q0},
+            .errors = {},
+        };
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::TransportFailure);
+    expect_presence(transport, orphan0, Presence::Present);
+    expect_presence(transport, orphan1, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioPRejectsContradictoryMatchedAndMismatched) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-p-contra");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    const auto orphan0 = put_content(transport, workspace, "orphan0", "orphan0");
+    const auto orphan1 = put_content(transport, workspace, "orphan1", "orphan1");
+
+    const auto q0 = *protocol::quarantine_identifier(test_layout(), orphan0);
+    const auto q1 = *protocol::quarantine_identifier(test_layout(), orphan1);
+
+    state->physical_hash_batch_override_report =
+        kasumi::transport::PhysicalHashBatchReport{
+            .matched = {q0, q1},
+            .mismatched = {q0},
+            .missing = {},
+            .errors = {},
+        };
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::TransportFailure);
+    expect_presence(transport, orphan0, Presence::Present);
+    expect_presence(transport, orphan1, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioQDestinationMissingFailsSafely) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-q-missing");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    const auto orphan0 = put_content(transport, workspace, "orphan0", "orphan0");
+    const auto orphan1 = put_content(transport, workspace, "orphan1", "orphan1");
+
+    const auto q1 = *protocol::quarantine_identifier(test_layout(), orphan1);
+    state->physical_hash_batch_missing.insert(q1);
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    expect_presence(transport, orphan1, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioRIndividualErrorFailsSafely) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-r-error");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    const auto orphan0 = put_content(transport, workspace, "orphan0", "orphan0");
+    const auto orphan1 = put_content(transport, workspace, "orphan1", "orphan1");
+
+    const auto q1 = *protocol::quarantine_identifier(test_layout(), orphan1);
+    state->physical_hash_batch_errors.insert(q1);
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    expect_presence(transport, orphan1, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioSGlobalBatchFailureAbortsFailClosed) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-s-failure");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    const auto orphan0 = put_content(transport, workspace, "orphan0", "orphan0");
+    const auto orphan1 = put_content(transport, workspace, "orphan1", "orphan1");
+
+    state->physical_hash_batch_failure = kasumi::transport::ErrorCode::BackendUnavailable;
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    expect_presence(transport, orphan0, Presence::Present);
+    expect_presence(transport, orphan1, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcScenarioTPositiveVerificationConfirmsAllAndQuarantines) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-t-positive");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    const auto orphan0 = put_content(transport, workspace, "orphan0", "orphan0");
+    const auto orphan1 = put_content(transport, workspace, "orphan1", "orphan1");
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 2U);
+    EXPECT_EQ(collected->quarantined_objects, 2U);
+    EXPECT_EQ(state->physical_hash_batch_count, 1U);
+    expect_presence(transport, orphan0, Presence::Absent);
+    expect_presence(transport, orphan1, Presence::Absent);
+
+    const auto q0 = *protocol::quarantine_identifier(test_layout(), orphan0);
+    const auto q1 = *protocol::quarantine_identifier(test_layout(), orphan1);
+    expect_presence(transport, q0, Presence::Present);
+    expect_presence(transport, q1, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcSmallTailStillUsesNativeCopyWithoutBatchVerification) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-small-tail-native-copy");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    std::vector<std::string> orphans;
+    for (int i = 0; i < 3; ++i) {
+        const auto name = "orphan-" + std::to_string(i);
+        orphans.push_back(put_content(transport, workspace, name, name + "-content"));
+    }
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 3U);
+    EXPECT_EQ(collected->quarantined_objects, 3U);
+
+    // Native copy MUST be used for all 3 candidates directly by the GC pipeline
+    EXPECT_EQ(state->copy_count, 3U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.native_copy_attempts"), 3U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.fallback_copy_attempts"), 0U);
+
+    // Batch verification was not preferred because 3 < 6
+    EXPECT_EQ(state->physical_hash_batch_count, 0U);
+    // Individual physical hash should be called for each destination candidate in Phase 2
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.individual_destination_hash_attempts"), 3U);
+
+    // No payload GET or PUT should be performed as copy fallback
+    EXPECT_EQ(state->orphan_payload_get_count, 0U);
+    EXPECT_EQ(state->quarantine_payload_put_count, 0U);
+    // Only metadata PUTs (3 for quarantine metadata)
+    EXPECT_EQ(state->quarantine_metadata_put_count, 3U);
+
+    // All 3 orphan sources should be removed
+    for (const auto& orphan : orphans) {
+        expect_presence(transport, orphan, Presence::Absent);
+    }
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcThresholdBoundaryFiveAndSixCandidates) {
+    // A. N = 5 (strictly below min_objects 6): native copy, individual destination verification
+    {
+        auto workspace = kasumi::test::make_temp_workspace("gc-batch-boundary-5");
+        FakeState* state = nullptr;
+        auto transport = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(transport));
+        state->physical_hash_supported = true;
+        state->copy_supported = true;
+        enable_fake_physical_hash_batch(transport, *state, 6);
+        auto runtime = runtime_data(workspace);
+
+        const auto retained = make_commit(0, {}, "live.txt", "live").value();
+        publish_remote(transport, workspace, retained);
+        put_content(transport, workspace, "live", "live-content");
+
+        for (int i = 0; i < 5; ++i) {
+            const auto name = "orphan-5-" + std::to_string(i);
+            put_content(transport, workspace, name, name + "-content");
+        }
+
+        reset_fake_traffic(*state);
+        const auto collected = kasumi::application::integrity::garbage_collect(
+            runtime, transport, test_key());
+        ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+        EXPECT_EQ(collected->candidate_objects, 5U);
+        EXPECT_EQ(collected->quarantined_objects, 5U);
+        EXPECT_EQ(state->copy_count, 5U);
+        EXPECT_EQ(state->physical_hash_batch_count, 0U);
+        EXPECT_EQ(state->orphan_payload_get_count, 0U);
+        EXPECT_EQ(state->quarantine_payload_put_count, 0U);
+    }
+
+    // B. N = 6 (at min_objects 6): native copy + batch verification
+    {
+        auto workspace = kasumi::test::make_temp_workspace("gc-batch-boundary-6");
+        FakeState* state = nullptr;
+        auto transport = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(transport));
+        state->physical_hash_supported = true;
+        state->copy_supported = true;
+        enable_fake_physical_hash_batch(transport, *state, 6);
+        auto runtime = runtime_data(workspace);
+
+        const auto retained = make_commit(0, {}, "live.txt", "live").value();
+        publish_remote(transport, workspace, retained);
+        put_content(transport, workspace, "live", "live-content");
+
+        for (int i = 0; i < 6; ++i) {
+            const auto name = "orphan-6-" + std::to_string(i);
+            put_content(transport, workspace, name, name + "-content");
+        }
+
+        reset_fake_traffic(*state);
+        const auto collected = kasumi::application::integrity::garbage_collect(
+            runtime, transport, test_key());
+        ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+        EXPECT_EQ(collected->candidate_objects, 6U);
+        EXPECT_EQ(collected->quarantined_objects, 6U);
+        EXPECT_EQ(state->copy_count, 6U);
+        EXPECT_EQ(state->physical_hash_batch_count, 1U);
+        EXPECT_EQ(state->orphan_payload_get_count, 0U);
+        EXPECT_EQ(state->quarantine_payload_put_count, 0U);
+    }
+}
+
+TEST(IntegrityMaintenanceTest, BatchGcTailOfOneHundredCandidatesWithThresholdSix) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-tail-100");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    // Real rclone threshold: 6 objects minimum for batch
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    for (int i = 0; i < 100; ++i) {
+        const auto name = "orphan-100-" + std::to_string(i);
+        put_content(transport, workspace, name, name + "-content");
+    }
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 100U);
+    EXPECT_EQ(collected->quarantined_objects, 100U);
+
+    // All 100 candidates must be copied natively
+    EXPECT_EQ(state->copy_count, 100U);
+    // 12 batches of 8 (8 >= 6) use batch verify; 1 tail of 4 (4 < 6) uses individual verify
+    EXPECT_EQ(state->physical_hash_batch_count, 12U);
+    // Zero payload fallback
+    EXPECT_EQ(state->orphan_payload_get_count, 0U);
+    EXPECT_EQ(state->quarantine_payload_put_count, 0U);
+}
+
+TEST(IntegrityMaintenanceTest,
+     CorruptPhysicalOrphanCommitStillBlocksGcWithValidEpoch) {
+    auto workspace = kasumi::test::make_temp_workspace(
+        "gc-corrupt-old-commit-with-epoch");
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto runtime = runtime_data(workspace);
+
+    const auto head = make_commit(0, {}, "live.txt", "live").value();
+    const auto published_head =
+        publish_remote(storage, workspace, head);
+    put_content(storage, workspace, "live", "live");
+
+    const auto orphan = make_commit(0, {}, "old.txt", "old").value();
+    const auto published_orphan = publish_remote(storage, workspace, orphan);
+    ASSERT_EQ(kasumi::transport::remove(
+                  storage, marker_path(published_orphan.head)).value(),
+              kasumi::transport::Removal::Removed);
+    const auto orphan_object = object_path(published_orphan.head);
+    ASSERT_FALSE(state->objects.at(orphan_object).empty());
+    state->objects.at(orphan_object).front() ^= 0xff;
+
+    const std::string vault_id(64, 'a');
+    const kasumi::application::history_storage::epoch::Epoch genesis{
+        .vault_id = vault_id,
+        .sequence = 0,
+        .issued_at = 1,
+        .policy = {},
+        .anchors = {{.commit_id = published_head.head.commit_id,
+                     .height = 0}},
+    };
+    const auto sealed =
+        kasumi::application::history_storage::epoch::seal(genesis, test_key());
+    ASSERT_TRUE(sealed.has_value()) << sealed.error().detail;
+    ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
+        storage, test_key(), *sealed,
+        kasumi::test::workspace_root(workspace)));
+
+    const auto collected =
+        kasumi::application::integrity::garbage_collect(
+            runtime, storage, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_TRUE(state->objects.contains(orphan_object));
+    EXPECT_FALSE(state->objects.contains(
+        protocol::quarantine_identifier(test_layout(), orphan_object).value()));
+}
+
+TEST(IntegrityMaintenanceTest, SnapshotTraceScopesResetAndKeepPartialFailures) {
+    struct TraceGuard {
+        ~TraceGuard() { kasumi::platform::perf_trace::force_enable(false); }
+    } trace_guard;
+    kasumi::platform::perf_trace::force_enable(true);
+
+    IntegratedGcFixture fixture{"snapshot-traces", 0};
+    reset_fake_traffic(*fixture.state);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(fixture.state->commit_get_count, 2U);
+    EXPECT_EQ(fixture.state->marker_get_count, 2U);
+    EXPECT_EQ(fixture.state->get_count, 4U);
+    EXPECT_EQ(fixture.state->list_count, 10U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc.snapshot.first/rc/load_and_auth_commits"),
+              1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc.snapshot.second/rc/load_and_auth_commits"),
+              1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/get_commit"), 2U);
+
+    kasumi::platform::perf_trace::reset();
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc.snapshot.first.physical_listing_us"),
+              0U);
+    reset_fake_traffic(*fixture.state);
+    fixture.state->fail_commit_get = true;
+
+    const auto failed = kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key());
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(fixture.state->commit_get_count, 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc.snapshot.first.physical_listing_us"),
+              1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc.snapshot.first.history_reconstruction_us"),
+              1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc.snapshot.first/rc/load_and_auth_commits"),
+              1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "gc.snapshot.second.physical_listing_us"),
+              0U);
+}
+
+} // namespace
+
+TEST(IntegrityMaintenanceTest, TwoGcObservationsIndependentlyDownloadSingleCommitDirectly) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-single-commit-direct");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+    const auto published = publish_remote(
+        transport, workspace, kasumi::history::make_empty_bootstrap().value());
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    transport.storage.get_batch = fake_reachability_get_batch;
+    state->get_batch_count = 0;
+    state->commit_get_count = 0;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(state->get_batch_count, 0U);
+    EXPECT_EQ(state->commit_get_count, 2U);
+}
+
+TEST(IntegrityMaintenanceTest, DirectCommitDownloadFailureDuringGcFailsClosed) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-single-commit-download-failure");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+    publish_remote(
+        transport, workspace, kasumi::history::make_empty_bootstrap().value());
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    transport.storage.get_batch = fake_reachability_get_batch;
+    state->fail_commit_get = true;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::TransportFailure);
+    expect_presence(transport, orphan, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, RemoteCommitMutationBetweenObservationsAbortsGcWithoutLocalReuse) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-commit-mutation-between-observations");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+    const auto published = publish_remote(
+        transport, workspace, kasumi::history::make_empty_bootstrap().value());
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    transport.storage.get_batch = fake_reachability_get_batch;
+
+    static std::size_t commit_gets_seen = 0;
+    commit_gets_seen = 0;
+    static auto original_get = transport.storage.get;
+    original_get = transport.storage.get;
+
+    transport.storage.get = [](void* ctx,
+                               std::string_view identifier,
+                               const std::filesystem::path& destination) -> kasumi::transport::Result {
+        if (is_commit(identifier)) {
+            commit_gets_seen++;
+            if (commit_gets_seen == 2) {
+                auto* s = fake_state(ctx);
+                auto it = s->objects.find(std::string{identifier});
+                if (it != s->objects.end() && !it->second.empty()) {
+                    it->second.front() ^= 0xFF;
+                }
+            }
+        }
+        return original_get(ctx, identifier, destination);
+    };
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    transport.storage.get = original_get;
+
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_GE(commit_gets_seen, 2U);
+    expect_presence(transport, orphan, Presence::Present);
+}
+
+TEST(IntegrityMaintenanceTest, MultipleCommitsPreserveBatchDuringGc) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-multiple-commits-batch");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+    const auto parent = publish_remote(
+        transport, workspace, make_commit(0, {}, "file.txt", "zero").value());
+    publish_remote(
+        transport,
+        workspace,
+        make_commit(1, {parent.head.commit_id}, "file.txt", "one").value());
+    put_content(transport, workspace, "zero", "zero");
+    put_content(transport, workspace, "one", "one");
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    transport.storage.get_batch = fake_reachability_get_batch;
+    state->get_batch_count = 0;
+    state->commit_get_count = 0;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(state->get_batch_count, 2U);
+    EXPECT_EQ(state->commit_get_count, 0U);
+}
+
+
+// ============================================================================
+// Phase 10B Telemetry Tests
+// ============================================================================
+
+TEST(IntegrityMaintenanceTelemetryTest, ScenarioANZeroCandidates) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-telem-a-zero");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_selected"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_verified"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_quarantined"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidate_batches"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_sizes"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_attempts"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_supported"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_unsupported"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_failures"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.individual_destination_hash_attempts"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.native_copy_attempts"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.native_copy_successes"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.native_copy_unsupported"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.fallback_copy_attempts"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.source_removals"), 0U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_time("gc.total_duration_us"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_time("gc.batch_prepare_duration_us"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_time("gc.batch_verify_duration_us"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_time("gc.batch_publish_remove_duration_us"), 0U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(IntegrityMaintenanceTelemetryTest, ScenarioBOneCandidate) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-telem-b-one");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+    put_content(transport, workspace, "orphan-0", "orphan-content");
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_selected"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_verified"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_quarantined"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidate_batches"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_sizes"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_attempts"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.native_copy_attempts"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.native_copy_successes"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.fallback_copy_attempts"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.individual_destination_hash_attempts"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.source_removals"), 1U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_time("gc.total_duration_us"), 0U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(IntegrityMaintenanceTelemetryTest, ScenarioCSixCandidatesThreshold) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-telem-c-six");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+    for (std::size_t i = 0; i < 6; ++i) {
+        const auto name = "orphan-" + std::to_string(i);
+        put_content(transport, workspace, name, name);
+    }
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_selected"), 6U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidate_batches"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_sizes"), 6U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.native_copy_attempts"), 6U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.native_copy_successes"), 6U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_attempts"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_supported"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.individual_destination_hash_attempts"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.fallback_copy_attempts"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_verified"), 6U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_quarantined"), 6U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.source_removals"), 6U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_time("gc.batch_prepare_duration_us"), 0U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_time("gc.batch_verify_duration_us"), 0U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_time("gc.batch_publish_remove_duration_us"), 0U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(IntegrityMaintenanceTelemetryTest, ScenarioDEightCandidatesFullBatch) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-telem-d-eight");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+    for (std::size_t i = 0; i < 8; ++i) {
+        const auto name = "orphan-" + std::to_string(i);
+        put_content(transport, workspace, name, name);
+    }
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_selected"), 8U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidate_batches"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_sizes"), 8U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.native_copy_attempts"), 8U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.native_copy_successes"), 8U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_attempts"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_supported"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_verified"), 8U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_quarantined"), 8U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.source_removals"), 8U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(IntegrityMaintenanceTelemetryTest, ScenarioETenCandidatesDecompositionAndTail) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-telem-e-ten");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+    for (std::size_t i = 0; i < 10; ++i) {
+        const auto name = "orphan-" + std::to_string(i);
+        put_content(transport, workspace, name, name);
+    }
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_selected"), 10U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidate_batches"), 2U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_sizes"), 10U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.native_copy_attempts"), 10U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.native_copy_successes"), 10U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_attempts"), 2U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_supported"), 2U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_verified"), 10U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_quarantined"), 10U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.source_removals"), 10U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(IntegrityMaintenanceTelemetryTest, ScenarioFOneHundredCandidatesScale) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-telem-f-hundred");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+    for (std::size_t i = 0; i < 100; ++i) {
+        const auto name = "orphan-" + std::to_string(i);
+        put_content(transport, workspace, name, name);
+    }
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_selected"), 100U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidate_batches"), 13U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_sizes"), 100U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_quarantined"), 100U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.source_removals"), 100U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(IntegrityMaintenanceTelemetryTest, ScenarioGBatchUnsupportedFallback) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-telem-g-unsupported");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->physical_hash_batch_supported = false;
+    transport.storage.physical_hash_batch_min_objects = 2;
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+    for (std::size_t i = 0; i < 6; ++i) {
+        const auto name = "orphan-" + std::to_string(i);
+        put_content(transport, workspace, name, name);
+    }
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_selected"), 6U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidate_batches"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_attempts"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_unsupported"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_supported"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.individual_destination_hash_attempts"), 6U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_verified"), 6U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_quarantined"), 6U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.source_removals"), 6U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(IntegrityMaintenanceTelemetryTest, ScenarioHFailureAbortsBeforeRemoval) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-telem-h-failure");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+
+    std::vector<std::string> orphans;
+    orphans.push_back(put_content(transport, workspace, "orphan-0", "orphan-0"));
+    orphans.push_back(put_content(transport, workspace, "orphan-1", "orphan-1"));
+    std::ranges::sort(orphans);
+
+    const auto q0 = protocol::quarantine_identifier(test_layout(), orphans[0]);
+    ASSERT_TRUE(q0.has_value());
+    // Simulate first candidate failure in batch report (mismatched)
+    state->physical_hash_batch_mismatches.insert(*q0);
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_selected"), 2U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_attempts"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_verify_failures"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_quarantined"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.source_removals"), 0U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(IntegrityMaintenanceTelemetryTest, ScenarioKTelemetryDisabled) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-telem-k-disabled");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+    put_content(transport, workspace, "orphan-0", "orphan-0");
+
+    kasumi::platform::perf_trace::force_enable(false);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_selected"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_quarantined"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_time("gc.total_duration_us"), 0U);
+}
+
+TEST(IntegrityMaintenanceTelemetryTest, ScenarioLConcurrency) {
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    constexpr int threads_count = 8;
+    constexpr int iterations_per_thread = 500;
+    std::vector<std::thread> workers;
+    workers.reserve(threads_count);
+
+    for (int t = 0; t < threads_count; ++t) {
+        workers.emplace_back([] {
+            for (int i = 0; i < iterations_per_thread; ++i) {
+                kasumi::platform::perf_trace::count("gc.candidates_selected", 1);
+                kasumi::platform::perf_trace::count("gc.source_removals", 2);
+                const auto tok = kasumi::platform::perf_trace::begin();
+                kasumi::platform::perf_trace::finish("gc.batch_prepare_duration_us", tok);
+            }
+        });
+    }
+
+    for (auto& w : workers) {
+        w.join();
+    }
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_selected"),
+              static_cast<std::uint64_t>(threads_count * iterations_per_thread));
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.source_removals"),
+              static_cast<std::uint64_t>(threads_count * iterations_per_thread * 2));
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.batch_prepare_duration_us"),
+              static_cast<std::uint64_t>(threads_count * iterations_per_thread));
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(IntegrityMaintenanceTelemetryTest, ScenarioMInterruption) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-telem-m-interruption");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 2);
+    auto runtime = runtime_data(workspace);
+
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+    const auto orphan = put_content(transport, workspace, "orphan-0", "orphan-0");
+
+    // Fail remove of candidate to simulate interruption during phase 3
+    state->fail_remove_identifier = orphan;
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+
+    // Verified was reached, but quarantined was not!
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_selected"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_verified"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.source_removals"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_quarantined"), 0U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario1HistoricalContentRetained) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen1");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    // Commit 0: creates "x.txt" with "content_X"
+    const auto commit0 = make_commit(0, {}, "x.txt", "content_X").value();
+    const auto pub0 = publish_remote(transport, workspace, commit0);
+    const auto id_x = put_content(transport, workspace, "content_X", "x-content");
+
+    // Commit 1: updates to "y.txt" with "content_Y", parent is commit0
+    const auto commit1 = make_commit(1, {pub0.head.commit_id}, "y.txt", "content_Y").value();
+    const auto pub1 = publish_remote(transport, workspace, commit1);
+    const auto id_y = put_content(transport, workspace, "content_Y", "y-content");
+
+    // Orphan candidate
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    // X is NOT in head commit1, but is in historical commit0 reachable from head -> protected!
+    expect_presence(transport, id_x, Presence::Present);
+    expect_presence(transport, id_y, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Absent);
+}
+
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario2SharedBranch) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen2");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    // Root commit with "shared.txt" = "content_X"
+    const auto root = make_commit(0, {}, "shared.txt", "content_X").value();
+    const auto pub_root = publish_remote(transport, workspace, root);
+    const auto id_x = put_content(transport, workspace, "content_X", "x-content");
+
+    // Branch A: drops shared.txt, adds branch_a.txt = "content_A"
+    const auto commit_a = make_commit(1, {pub_root.head.commit_id}, "branch_a.txt", "content_A").value();
+    publish_remote(transport, workspace, commit_a);
+    const auto id_a = put_content(transport, workspace, "content_A", "a-content");
+
+    // Branch B: keeps shared.txt, adds branch_b.txt = "content_B"
+    Snapshot snap_b{
+        .rows = {
+            kasumi::NodeRow{.path = "", .hash = {}, .size = 0, .mtime = {}, .is_directory = true},
+            kasumi::NodeRow{.path = "branch_b.txt", .hash = kasumi::hasher::hash_string("content_B"), .size = 9, .mtime = {}, .is_directory = false},
+            kasumi::NodeRow{.path = "shared.txt", .hash = kasumi::hasher::hash_string("content_X"), .size = 9, .mtime = {}, .is_directory = false},
+        },
+    };
+    kasumi::finalize_snapshot(snap_b);
+    const auto commit_b = kasumi::history::make_commit(1, {pub_root.head.commit_id}, std::move(snap_b)).value();
+    publish_remote(transport, workspace, commit_b);
+    const auto id_b = put_content(transport, workspace, "content_B", "b-content");
+
+    // Orphan candidate
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    // Branch A drops X, but Branch B (and root) still reference X -> X remains protected!
+    expect_presence(transport, id_x, Presence::Present);
+    expect_presence(transport, id_a, Presence::Present);
+    expect_presence(transport, id_b, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Absent);
+}
+
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario3ContentReturn) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen3");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    // Commit 0: has X
+    const auto c0 = make_commit(0, {}, "data.txt", "content_X").value();
+    const auto pub0 = publish_remote(transport, workspace, c0);
+    const auto id_x = put_content(transport, workspace, "content_X", "x-content");
+
+    // Commit 1: replaces X with Y
+    const auto c1 = make_commit(1, {pub0.head.commit_id}, "data.txt", "content_Y").value();
+    const auto pub1 = publish_remote(transport, workspace, c1);
+    const auto id_y = put_content(transport, workspace, "content_Y", "y-content");
+
+    // Commit 2: returns to X
+    const auto c2 = make_commit(2, {pub1.head.commit_id}, "data.txt", "content_X").value();
+    publish_remote(transport, workspace, c2);
+
+    // Orphan candidate
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    // X was removed in commit 1, but re-introduced in commit 2 (and existed in commit 0).
+    // The prior removal must not authorize collection of X!
+    expect_presence(transport, id_x, Presence::Present);
+    expect_presence(transport, id_y, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Absent);
+}
+
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario4Merge) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen4");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    // Base commit
+    const auto c0 = make_commit(0, {}, "base.txt", "content_C0").value();
+    const auto pub0 = publish_remote(transport, workspace, c0);
+    const auto id_c0 = put_content(transport, workspace, "content_C0", "c0-content");
+
+    // Branch 1
+    const auto c1a = make_commit(1, {pub0.head.commit_id}, "branch_1.txt", "content_1A").value();
+    const auto pub1a = publish_remote(transport, workspace, c1a);
+    const auto id_1a = put_content(transport, workspace, "content_1A", "1a-content");
+
+    // Branch 2
+    const auto c1b = make_commit(1, {pub0.head.commit_id}, "branch_2.txt", "content_1B").value();
+    const auto pub1b = publish_remote(transport, workspace, c1b);
+    const auto id_1b = put_content(transport, workspace, "content_1B", "1b-content");
+
+    // Merge commit with 2 parents: pub1a and pub1b
+    Snapshot snap_merge{
+        .rows = {
+            kasumi::NodeRow{.path = "", .hash = {}, .size = 0, .mtime = {}, .is_directory = true},
+            kasumi::NodeRow{.path = "base.txt", .hash = kasumi::hasher::hash_string("content_C0"), .size = 10, .mtime = {}, .is_directory = false},
+            kasumi::NodeRow{.path = "branch_1.txt", .hash = kasumi::hasher::hash_string("content_1A"), .size = 10, .mtime = {}, .is_directory = false},
+            kasumi::NodeRow{.path = "branch_2.txt", .hash = kasumi::hasher::hash_string("content_1B"), .size = 10, .mtime = {}, .is_directory = false},
+        },
+    };
+    kasumi::finalize_snapshot(snap_merge);
+    const auto c_merge = kasumi::history::make_commit(2, {pub1a.head.commit_id, pub1b.head.commit_id}, std::move(snap_merge)).value();
+    publish_remote(transport, workspace, c_merge);
+
+    // Orphan candidate
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    // All merged branches and base remain protected
+    expect_presence(transport, id_c0, Presence::Present);
+    expect_presence(transport, id_1a, Presence::Present);
+    expect_presence(transport, id_1b, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Absent);
+}
+
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario5EpochRetention) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen5");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    // Commit 0
+    const auto c0 = make_commit(0, {}, "c0.txt", "content_0").value();
+    const auto pub0 = publish_remote(transport, workspace, c0);
+    const auto id_0 = put_content(transport, workspace, "content_0", "c0-content");
+
+    // Commit 1
+    const auto c1 = make_commit(1, {pub0.head.commit_id}, "c1.txt", "content_1").value();
+    const auto pub1 = publish_remote(transport, workspace, c1);
+    const auto id_1 = put_content(transport, workspace, "content_1", "c1-content");
+
+    // Commit 2
+    const auto c2 = make_commit(2, {pub1.head.commit_id}, "c2.txt", "content_2").value();
+    publish_remote(transport, workspace, c2);
+    const auto id_2 = put_content(transport, workspace, "content_2", "c2-content");
+
+    // Publish an Epoch anchored at commit 0
+    const std::string vault_id(64, 'e');
+    kasumi::application::history_storage::epoch::Epoch epoch_val{
+        .vault_id = vault_id,
+        .sequence = 0,
+        .issued_at = 100,
+        .policy = {},
+        .anchors = {{pub0.head.commit_id, 0}},
+        .previous_epoch_id = {},
+    };
+    const auto sealed = kasumi::application::history_storage::epoch::seal(epoch_val, test_key());
+    ASSERT_TRUE(sealed.has_value());
+    ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
+        transport, test_key(), *sealed, kasumi::test::workspace_root(workspace)));
+
+    // Orphan candidate
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    // Everything protected by epoch boundary and history is preserved
+    expect_presence(transport, id_0, Presence::Present);
+    expect_presence(transport, id_1, Presence::Present);
+    expect_presence(transport, id_2, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Absent);
+}
+
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario6AlterationBetweenObservations) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen6");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    const auto c0 = make_commit(0, {}, "data.txt", "content_0").value();
+    publish_remote(transport, workspace, c0);
+    const auto id_0 = put_content(transport, workspace, "content_0", "c0-content");
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    reset_fake_traffic(*state);
+
+    // Observation 1 is list call 8. Observation 2 is list call 9.
+    // Reveal a new valid content object on list call 9 so snapshot 2 diverges from snapshot 1.
+    state->reveal_on_list_count = 9;
+    const auto concurrent_id = kasumi::crypto::content_identifier(
+        test_key(), kasumi::hasher::hash_string("concurrent_valid_content"));
+    state->hidden_objects[concurrent_id] = {1, 2, 3, 4};
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange)
+        << collected.error().detail;
+
+    // Fail-closed invariant: no destructive operations occurred!
+    expect_presence(transport, id_0, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Present);
+}
+
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario7AlterationBeforeFinalListing) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen7");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    const auto c0 = make_commit(0, {}, "data.txt", "content_0").value();
+    publish_remote(transport, workspace, c0);
+    const auto id_0 = put_content(transport, workspace, "content_0", "c0-content");
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    reset_fake_traffic(*state);
+
+    // Snapshot 1 (call 8) and Snapshot 2 (call 9) match!
+    // Final listing (call 10) sees a newly added object.
+    state->reveal_on_list_count = 10;
+    state->hidden_objects["late_arriving_object"] = {5, 6, 7, 8};
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange);
+
+    // Fail-closed invariant: no removals!
+    expect_presence(transport, id_0, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Present);
+}
+
+TEST(IntegrityMaintenancePhase14Scenarios, Scenario8IoErrorAndIncompleteListing) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen8");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    const auto c0 = make_commit(0, {}, "data.txt", "content_0").value();
+    publish_remote(transport, workspace, c0);
+    const auto id_0 = put_content(transport, workspace, "content_0", "c0-content");
+    const auto id_orphan = put_content(transport, workspace, "orphan_data", "orphan-content");
+
+    // Part A: Explicit I/O failure during snapshot listing (call 8)
+    reset_fake_traffic(*state);
+    state->fail_list_at = 8;
+    state->fail_list = kasumi::transport::ErrorCode::Io;
+
+    auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::TransportFailure);
+    expect_presence(transport, id_0, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Present);
+
+    // Part B: Explicit I/O failure during final listing (call 10)
+    reset_fake_traffic(*state);
+    state->fail_list_at = 10;
+    state->fail_list = kasumi::transport::ErrorCode::Io;
+
+    collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::TransportFailure);
+    expect_presence(transport, id_0, Presence::Present);
+    expect_presence(transport, id_orphan, Presence::Present);
+}
+
+std::vector<std::string> seed_copy_batch_gc(
+    kasumi::transport::Transport& transport,
+    TempWorkspace& workspace,
+    std::size_t count) {
+    const auto retained = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, retained);
+    put_content(transport, workspace, "live", "live-content");
+    std::vector<std::string> candidates;
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto value = "batch-orphan-" + std::to_string(index);
+        candidates.push_back(put_content(transport, workspace, value, value));
+    }
+    return candidates;
+}
+
+TEST(IntegrityMaintenanceTest, CopyBatchEightPreservesVerificationAndRemovalOrder) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-copy-batch-eight");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8);
+
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 8U);
+    EXPECT_EQ(collected->quarantined_objects, 8U);
+    EXPECT_EQ(state->copy_batch_count, 1U);
+    EXPECT_EQ(state->copy_batch_item_count, 8U);
+    EXPECT_EQ(state->copy_batch_concurrency, 8U);
+    EXPECT_EQ(state->physical_hash_batch_count, 1U);
+    EXPECT_EQ(state->quarantine_metadata_put_count, 8U);
+
+    const auto copy_batch = std::ranges::find(state->gc_events, "copy_batch:8");
+    ASSERT_NE(copy_batch, state->gc_events.end());
+    for (const auto& candidate : candidates) {
+        const auto source_hash = std::ranges::find(
+            state->gc_events, "physical_hash:" + candidate);
+        const auto q_id = protocol::quarantine_identifier(test_layout(), candidate);
+        ASSERT_TRUE(q_id.has_value());
+        const auto destination_verify = std::ranges::find_if(
+            state->gc_events, [&](const auto& event) {
+                return event.starts_with("batch|") &&
+                       event.find(*q_id) != std::string::npos;
+            });
+        const auto metadata = std::ranges::find(
+            state->gc_events, "metadata:" + *q_id + ".meta");
+        const auto remove = std::ranges::find(
+            state->gc_events, "remove:" + candidate);
+        ASSERT_NE(source_hash, state->gc_events.end());
+        ASSERT_NE(destination_verify, state->gc_events.end());
+        ASSERT_NE(metadata, state->gc_events.end());
+        ASSERT_NE(remove, state->gc_events.end());
+        EXPECT_LT(source_hash, copy_batch);
+        EXPECT_LT(copy_batch, destination_verify);
+        EXPECT_LT(destination_verify, metadata);
+        EXPECT_LT(metadata, remove);
+        expect_presence(transport, candidate, Presence::Absent);
+    }
+}
+
+TEST(IntegrityMaintenanceTest, CopyBatchPartialAmbiguousFailureKeepsEverySource) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-copy-batch-partial");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->copy_batch_failure = kasumi::transport::ErrorCode::Io;
+    state->copy_batch_fail_after_items = 1;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8);
+
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(state->copy_batch_count, 1U);
+    EXPECT_EQ(state->copy_count, 1U);
+    EXPECT_EQ(state->quarantine_metadata_put_count, 0U);
+    for (const auto& candidate : candidates) {
+        EXPECT_EQ(std::ranges::find(state->gc_events, "remove:" + candidate),
+                  state->gc_events.end());
+        expect_presence(transport, candidate, Presence::Present);
+    }
+}
+
+TEST(IntegrityMaintenanceTest, CopyBatchBarrierLossPreventsMetadataAndRemoval) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-copy-batch-barrier");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->replace_barrier_after_quarantine_put = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8);
+
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(state->copy_batch_count, 1U);
+    EXPECT_EQ(state->quarantine_metadata_put_count, 0U);
+    for (const auto& candidate : candidates) {
+        EXPECT_EQ(std::ranges::find(state->gc_events, "remove:" + candidate),
+                  state->gc_events.end());
+        expect_presence(transport, candidate, Presence::Present);
+    }
+}
+
+TEST(IntegrityMaintenanceTest,
+     BarrierLostAfterAuthorizedRemovalPreservesRemainingSources) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-barrier-after-remove");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 2);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+    state->replace_barrier_after_source_remove_count = 1;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8);
+
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange);
+    EXPECT_EQ(state->source_remove_count, 1U);
+    std::size_t removed_sources = 0;
+    for (const auto& candidate : candidates) {
+        const auto removed = std::ranges::find(
+            state->gc_events, "remove:" + candidate) != state->gc_events.end();
+        removed_sources += removed ? 1U : 0U;
+        expect_presence(transport, candidate,
+                       removed ? Presence::Absent : Presence::Present);
+        const auto quarantine =
+            protocol::quarantine_identifier(test_layout(), candidate).value();
+        expect_presence(transport, quarantine, Presence::Present);
+        expect_presence(transport, quarantine + ".meta", Presence::Present);
+    }
+    EXPECT_EQ(removed_sources, 1U);
+}
+
+TEST(IntegrityMaintenanceTest, UnsupportedCopyBatchFallsBackToSequentialCopies) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-copy-batch-unsupported");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = false;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8);
+
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->quarantined_objects, 8U);
+    EXPECT_EQ(state->copy_batch_count, 1U);
+    EXPECT_EQ(state->copy_count, 8U);
+    for (const auto& candidate : candidates) {
+        expect_presence(transport, candidate, Presence::Absent);
+    }
+}
+
+TEST(IntegrityMaintenanceTest, MissingCopyBatchCapabilityKeepsSequentialGcPath) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-copy-batch-absent");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    transport.storage.copy_batch = nullptr;
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 1);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8);
+
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(state->copy_batch_count, 0U);
+    EXPECT_EQ(state->copy_count, 1U);
+    expect_presence(transport, candidates.front(), Presence::Absent);
+}
+
+TEST(IntegrityMaintenanceTest, CopyBatchDestinationMismatchOrAbsenceKeepsSource) {
+    for (const bool missing : {false, true}) {
+        auto workspace = kasumi::test::make_temp_workspace(
+            missing ? "gc-copy-batch-destination-missing"
+                    : "gc-copy-batch-destination-mismatch");
+        FakeState* state = nullptr;
+        auto transport = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(transport));
+        state->physical_hash_supported = true;
+        state->copy_supported = true;
+        state->copy_batch_supported = true;
+        enable_fake_physical_hash_batch(transport, *state, 6);
+        auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+        std::ranges::sort(candidates);
+        const auto& candidate = candidates.back();
+        const auto quarantine =
+            protocol::quarantine_identifier(test_layout(), candidate);
+        ASSERT_TRUE(quarantine.has_value());
+        if (missing) {
+            state->physical_hash_batch_missing.insert(*quarantine);
+        } else {
+            state->physical_hash_batch_mismatches.insert(*quarantine);
+        }
+        auto runtime = runtime_data(workspace);
+        reset_fake_traffic(*state);
+
+        const auto collected = kasumi::application::integrity::garbage_collect(
+            runtime, transport, test_key(), 8);
+
+        ASSERT_FALSE(collected.has_value());
+        EXPECT_EQ(state->copy_batch_count, 1U);
+        EXPECT_EQ(std::ranges::find(state->gc_events, "remove:" + candidate),
+                  state->gc_events.end());
+        expect_presence(transport, candidate, Presence::Present);
+        expect_presence(transport, *quarantine + ".meta", Presence::Absent);
+    }
+}
+
+TEST(IntegrityMaintenanceTest,
+     MetadataBatchPreparesPublishesVerifiesBeforeSerialRemoval) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-metadata-batch-eight");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 4);
+
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 8U);
+    EXPECT_EQ(collected->quarantined_objects, 8U);
+    EXPECT_EQ(state->copy_batch_count, 1U);
+    EXPECT_EQ(state->put_files_batch_count, 1U);
+    EXPECT_EQ(state->put_files_batch_item_count, 8U);
+    EXPECT_EQ(state->put_files_batch_concurrency, 4U);
+    EXPECT_EQ(state->physical_hash_batch_count, 2U);
+    EXPECT_EQ(state->quarantine_metadata_put_count, 8U);
+
+    const auto payload_verify = std::ranges::find_if(
+        state->gc_events, [](const auto& event) {
+            return event.starts_with("batch|") &&
+                   event.find(".meta") == std::string::npos;
+        });
+    const auto metadata_publish = std::ranges::find(
+        state->gc_events, "put_files_batch:8");
+    const auto metadata_verify = std::ranges::find_if(
+        state->gc_events, [](const auto& event) {
+            return event.starts_with("batch|") &&
+                   event.find(".meta") != std::string::npos;
+        });
+    ASSERT_NE(payload_verify, state->gc_events.end());
+    ASSERT_NE(metadata_publish, state->gc_events.end());
+    ASSERT_NE(metadata_verify, state->gc_events.end());
+    EXPECT_LT(payload_verify, metadata_publish);
+    EXPECT_LT(metadata_publish, metadata_verify);
+    EXPECT_EQ(std::ranges::count_if(
+                  std::next(metadata_verify), state->gc_events.end(),
+                  [](const auto& event) { return event.starts_with("barrier:"); }),
+              candidates.size() + 1U);
+    for (const auto& candidate : candidates) {
+        const auto removed = std::ranges::find(
+            state->gc_events, "remove:" + candidate);
+        ASSERT_NE(removed, state->gc_events.end());
+        EXPECT_LT(metadata_verify, removed);
+        ASSERT_NE(removed, state->gc_events.begin());
+        EXPECT_TRUE(std::prev(removed)->starts_with("barrier:"));
+        expect_presence(transport, candidate, Presence::Absent);
+    }
+
+    const auto entries = protocol::inventory_quarantine(
+        transport, test_key(), kasumi::test::workspace_root(workspace));
+    ASSERT_TRUE(entries.has_value());
+    ASSERT_EQ(entries->size(), candidates.size());
+    std::optional<std::int64_t> common_timestamp;
+    for (const auto& entry : *entries) {
+        ASSERT_TRUE(entry.quarantined_at.has_value());
+        if (common_timestamp) {
+            EXPECT_EQ(*entry.quarantined_at, *common_timestamp);
+        }
+        common_timestamp = entry.quarantined_at;
+        EXPECT_EQ(entry.physical_sha256,
+                  state->physical_hashes.at(entry.quarantine_identifier));
+        auto verified = protocol::verify_quarantine(
+            transport, entry, kasumi::test::workspace_root(workspace));
+        ASSERT_TRUE(verified.has_value());
+        EXPECT_TRUE(*verified);
+    }
+}
+
+TEST(IntegrityMaintenanceTest,
+     PreparedQuarantineMetadataRoundTripsExistingAuthenticatedFormat) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-metadata-prepare-roundtrip");
+    const auto quarantine_id = protocol::quarantine_identifier(
+        test_layout(), std::string(64, 'a'));
+    ASSERT_TRUE(quarantine_id.has_value());
+    const auto ciphertext = kasumi::test::workspace_path(
+        workspace, "prepared/metadata.enc");
+    ASSERT_TRUE(std::filesystem::create_directories(ciphertext.parent_path()));
+    const auto payload_hash = std::string(64, 'b');
+
+    auto prepared = protocol::prepare_quarantine_metadata(
+        *quarantine_id, 123456, test_key(), ciphertext, payload_hash);
+
+    ASSERT_TRUE(prepared.has_value()) << prepared.error().detail;
+    EXPECT_EQ(prepared->entry.quarantine_identifier, *quarantine_id);
+    EXPECT_EQ(prepared->entry.metadata_identifier, *quarantine_id + ".meta");
+    EXPECT_EQ(prepared->entry.quarantined_at, 123456);
+    EXPECT_EQ(prepared->entry.physical_sha256, payload_hash);
+    const auto metadata_hash =
+        kasumi::crypto::physical::hash_file(ciphertext, "sha256");
+    ASSERT_TRUE(metadata_hash.has_value());
+    EXPECT_EQ(prepared->expected_physical_sha256, *metadata_hash);
+    const auto plaintext = kasumi::test::workspace_path(
+        workspace, "prepared/roundtrip.plain");
+    ASSERT_TRUE(kasumi::crypto::decrypt_file(
+        ciphertext, plaintext, test_key(), kasumi::crypto::FilePurpose::History));
+    EXPECT_EQ(kasumi::test::read_text(plaintext),
+              "KGQ1\n123456\n" + payload_hash + "\n");
+}
+
+TEST(IntegrityMaintenanceTest,
+     PartialMetadataPublicationKeepsOriginsAndNextGcRecovers) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-metadata-partial-recovery");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    state->put_files_batch_failure = kasumi::transport::ErrorCode::Io;
+    state->put_files_batch_fail_after_items = 4;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto failed = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8);
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(state->put_files_batch_count, 1U);
+    EXPECT_EQ(state->quarantine_metadata_put_count, 4U);
+    for (const auto& candidate : candidates) {
+        EXPECT_EQ(std::ranges::find(state->gc_events, "remove:" + candidate),
+                  state->gc_events.end());
+        expect_presence(transport, candidate, Presence::Present);
+    }
+
+    const auto partial_entries = protocol::inventory_quarantine(
+        transport, test_key(), kasumi::test::workspace_root(workspace));
+    ASSERT_TRUE(partial_entries.has_value());
+    ASSERT_EQ(partial_entries->size(), candidates.size());
+    EXPECT_EQ(std::ranges::count_if(*partial_entries, [](const auto& entry) {
+                  return entry.quarantined_at.has_value();
+              }),
+              4);
+    for (const auto& entry : *partial_entries) {
+        if (!entry.quarantined_at) continue;
+        auto verified = protocol::verify_quarantine(
+            transport, entry, kasumi::test::workspace_root(workspace));
+        ASSERT_TRUE(verified.has_value());
+        EXPECT_TRUE(*verified);
+    }
+
+    state->put_files_batch_failure.reset();
+    state->put_files_batch_fail_after_items = 0;
+    reset_fake_traffic(*state);
+    const auto recovered = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8);
+    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+    EXPECT_EQ(recovered->quarantined_objects, candidates.size());
+    EXPECT_EQ(state->put_files_batch_count, 1U);
+    for (const auto& candidate : candidates) {
+        expect_presence(transport, candidate, Presence::Absent);
+    }
+    const auto entries = protocol::inventory_quarantine(
+        transport, test_key(), kasumi::test::workspace_root(workspace));
+    ASSERT_TRUE(entries.has_value());
+    EXPECT_EQ(entries->size(), candidates.size());
+    for (const auto& entry : *entries) {
+        auto verified = protocol::verify_quarantine(
+            transport, entry, kasumi::test::workspace_root(workspace));
+        ASSERT_TRUE(verified.has_value());
+        EXPECT_TRUE(*verified);
+    }
+}
+
+TEST(IntegrityMaintenanceTest,
+     DefinitePartialMetadataPublishKeepsEverySource) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-metadata-definite-partial");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    state->put_files_batch_failure =
+        kasumi::transport::ErrorCode::PermissionDenied;
+    state->put_files_batch_fail_after_items = 7;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8);
+
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(state->put_files_batch_count, 1U);
+    EXPECT_EQ(state->quarantine_metadata_put_count, 7U);
+    for (const auto& candidate : candidates) {
+        EXPECT_EQ(std::ranges::find(state->gc_events, "remove:" + candidate),
+                  state->gc_events.end());
+        expect_presence(transport, candidate, Presence::Present);
+    }
+}
+
+TEST(IntegrityMaintenanceTest,
+     MetadataBatchHashMismatchOrMissingKeepsEverySource) {
+    for (const bool missing : {false, true}) {
+        auto workspace = kasumi::test::make_temp_workspace(
+            missing ? "gc-metadata-batch-missing" : "gc-metadata-batch-mismatch");
+        FakeState* state = nullptr;
+        auto transport = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(transport));
+        state->physical_hash_supported = true;
+        state->copy_supported = true;
+        state->copy_batch_supported = true;
+        state->put_files_batch_supported = true;
+        enable_fake_physical_hash_batch(transport, *state, 6);
+        const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+        const auto q_id = protocol::quarantine_identifier(
+            test_layout(), candidates.front());
+        ASSERT_TRUE(q_id.has_value());
+        const auto metadata_id = *q_id + ".meta";
+        if (missing) {
+            state->physical_hash_batch_missing.insert(metadata_id);
+        } else {
+            state->physical_hash_batch_mismatches.insert(metadata_id);
+        }
+        auto runtime = runtime_data(workspace);
+        reset_fake_traffic(*state);
+
+        const auto collected = kasumi::application::integrity::garbage_collect(
+            runtime, transport, test_key(), 8, 8);
+
+        ASSERT_FALSE(collected.has_value());
+        EXPECT_EQ(state->put_files_batch_count, 1U);
+        for (const auto& candidate : candidates) {
+            EXPECT_EQ(std::ranges::find(state->gc_events, "remove:" + candidate),
+                      state->gc_events.end());
+            expect_presence(transport, candidate, Presence::Present);
+        }
+    }
+}
+
+TEST(IntegrityMaintenanceTest,
+     UnsupportedMetadataHashBatchUsesSequentialVerification) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-metadata-hash-batch-unsupported");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    state->metadata_physical_hash_batch_unsupported = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8);
+
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(state->physical_hash_batch_count, 2U);
+    EXPECT_EQ(std::ranges::count_if(
+                  state->gc_events, [](const auto& event) {
+                      return event.starts_with("physical_hash:") &&
+                             event.ends_with(".meta");
+                  }),
+              8);
+    EXPECT_EQ(state->quarantine_metadata_put_count, 8U);
+    for (const auto& candidate : candidates) {
+        expect_presence(transport, candidate, Presence::Absent);
+    }
+}
+
+TEST(IntegrityMaintenanceTest,
+     UnsupportedMetadataPublishFallsBackToVerifiedSerialProtocol) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-metadata-publish-unsupported");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8);
+
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->quarantined_objects, candidates.size());
+    EXPECT_EQ(state->put_files_batch_count, 1U);
+    EXPECT_EQ(state->quarantine_metadata_put_count, candidates.size());
+    EXPECT_EQ(state->physical_hash_batch_count, 1U);
+    for (const auto& candidate : candidates) {
+        expect_presence(transport, candidate, Presence::Absent);
+        const auto metadata = std::ranges::find(
+            state->gc_events,
+            "metadata:" + *protocol::quarantine_identifier(
+                              test_layout(), candidate) + ".meta");
+        const auto removed = std::ranges::find(
+            state->gc_events, "remove:" + candidate);
+        ASSERT_NE(metadata, state->gc_events.end());
+        ASSERT_NE(removed, state->gc_events.end());
+        EXPECT_LT(metadata, removed);
+    }
+}
+
+TEST(IntegrityMaintenanceTest,
+     LostBarrierAfterMetadataVerificationPreventsEveryRemoval) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-metadata-barrier-loss");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    state->replace_barrier_after_metadata_verification = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8);
+
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(state->put_files_batch_count, 1U);
+    EXPECT_EQ(state->quarantine_metadata_put_count, 8U);
+    for (const auto& candidate : candidates) {
+        EXPECT_EQ(std::ranges::find(state->gc_events, "remove:" + candidate),
+                  state->gc_events.end());
+        expect_presence(transport, candidate, Presence::Present);
+    }
+}
+
+TEST(IntegrityMaintenanceTest, RemoveBatchHappyPathQuarantinesAllCandidates) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-remove-batch-happy");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    enable_fake_remove_batch(transport, *state);
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8, 8);
+
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->quarantined_objects, 8U);
+    EXPECT_EQ(state->remove_batch_count, 1U);
+    EXPECT_EQ(state->remove_batch_item_count, 8U);
+    EXPECT_EQ(state->remove_batch_concurrency, 8U);
+    for (const auto& candidate : candidates) {
+        expect_presence(transport, candidate, Presence::Absent);
+    }
+    const auto entries = protocol::inventory_quarantine(
+        transport, test_key(), kasumi::test::workspace_root(workspace));
+    ASSERT_TRUE(entries.has_value());
+    EXPECT_EQ(entries->size(), 8U);
+    for (const auto& entry : *entries) {
+        auto verified = protocol::verify_quarantine(
+            transport, entry, kasumi::test::workspace_root(workspace));
+        ASSERT_TRUE(verified.has_value());
+        EXPECT_TRUE(*verified);
+    }
+}
+
+TEST(IntegrityMaintenanceTest,
+     LostBarrierBeforeRemoveBatchAbortsWithoutDeleting) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-remove-batch-lost-barrier");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    enable_fake_remove_batch(transport, *state);
+    state->replace_barrier_after_metadata_verification = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8, 8);
+
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(state->remove_batch_count, 0U);
+    for (const auto& candidate : candidates) {
+        expect_presence(transport, candidate, Presence::Present);
+    }
+}
+
+TEST(IntegrityMaintenanceTest,
+     PartialRemoveBatchFailsClosedPreservingRemovedQuarantine) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-remove-batch-partial");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    enable_fake_remove_batch(transport, *state);
+    state->remove_batch_failure = kasumi::transport::ErrorCode::Io;
+    state->remove_batch_fail_after_items = 4; // 3 succeed, 4th fails
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    std::ranges::sort(candidates);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto failed = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8, 8);
+
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(state->remove_batch_count, 1U);
+    for (std::size_t i = 0; i < 3; ++i) {
+        expect_presence(transport, candidates[i], Presence::Absent);
+    }
+    for (std::size_t i = 3; i < 8; ++i) {
+        expect_presence(transport, candidates[i], Presence::Present);
+    }
+
+    // Subsequent GC run recovers and completes removal
+    state->remove_batch_failure.reset();
+    state->remove_batch_fail_after_items = 0;
+    reset_fake_traffic(*state);
+    const auto recovered = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8, 8);
+    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+    for (const auto& candidate : candidates) {
+        expect_presence(transport, candidate, Presence::Absent);
+    }
+}
+
+TEST(IntegrityMaintenanceTest,
+     RemoveBatchAlreadyAbsentDoesNotCountAsQuarantined) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-remove-batch-absent");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    enable_fake_remove_batch(transport, *state);
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    // Erase candidate 7 before remove batch executes, so it returns AlreadyAbsent
+    state->objects.erase(candidates[7]);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8, 8);
+
+    // If candidate 7 was deleted between listing and remove, GC completes
+    // but quarantined_objects is 7 (not 8)
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->quarantined_objects, 7U);
+}
+
+TEST(IntegrityMaintenanceTest,
+     UnsupportedRemoveBatchFallsBackToSequential) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-remove-batch-unsupported");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    enable_fake_remove_batch(transport, *state);
+    state->remove_batch_supported = false; // unsupported
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8, 8);
+
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->quarantined_objects, 8U);
+    EXPECT_EQ(state->remove_batch_count, 1U); // 1 attempted batch call returned Unsupported
+    EXPECT_EQ(state->source_remove_count, 8U); // Fallback to 8 sequential candidate removes
+    for (const auto& candidate : candidates) {
+        expect_presence(transport, candidate, Presence::Absent);
+    }
+}
+
+TEST(IntegrityMaintenanceTest,
+     AnalysisOnlyEmitsFinalizingExactlyOnceAndNoCheckingQuarantine) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-analysis-only-progress");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+    publish_remote(
+        transport, workspace, kasumi::history::make_empty_bootstrap().value());
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    state->hide_probe_listing = true;
+
+    std::vector<kasumi::application::GarbageCollectProgress> events;
+    auto on_progress = [&](const kasumi::application::GarbageCollectProgress& p) {
+        events.push_back(p);
+    };
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8, 8, on_progress);
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_TRUE(collected->analysis_only);
+
+    std::size_t finalizing_count = 0;
+    std::size_t checking_quarantine_count = 0;
+    std::size_t applying_count = 0;
+    for (const auto& ev : events) {
+        if (ev.stage == kasumi::application::GarbageCollectStage::Finalizing) {
+            ++finalizing_count;
+        } else if (ev.stage == kasumi::application::GarbageCollectStage::CheckingQuarantine) {
+            ++checking_quarantine_count;
+        } else if (ev.stage == kasumi::application::GarbageCollectStage::Applying) {
+            ++applying_count;
+        }
+    }
+
+    EXPECT_EQ(checking_quarantine_count, 0U);
+    EXPECT_EQ(finalizing_count, 1U);
+    EXPECT_EQ(applying_count, 0U);
+}
+
+TEST(IntegrityMaintenanceTest,
+     PurgeOnlyEmitsApplyingBeforeFirstPurgeMutation) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    const auto commit = kasumi::history::make_empty_bootstrap().value();
+    const auto first = add_variant(storage, commit);
+    const auto second = add_variant(storage, commit);
+    ASSERT_NE(first, second);
+    const auto redundant = std::min(first, second);
+    const auto head = std::max(first, second);
+    ASSERT_EQ(
+        kasumi::transport::remove(storage.transport, marker_path(redundant))
+            .value(),
+        kasumi::transport::Removal::Removed);
+    const auto quarantined =
+        protocol::quarantine_identifier(test_layout(), object_path(redundant))
+            .value();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, storage.transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    const auto now = kasumi::platform::clock::unix_seconds();
+    ASSERT_TRUE(now.has_value()) << now.error();
+    const auto aged = protocol::record_quarantine(
+        storage.transport,
+        quarantined,
+        *now - protocol::quarantine_retention_seconds - 1,
+        test_key(),
+        kasumi::test::workspace_root(storage.workspace));
+    ASSERT_TRUE(aged.has_value()) << aged.error().detail;
+
+    bool applying_emitted = false;
+    bool metadata_present_when_applying = false;
+    std::size_t applying_count = 0;
+
+    auto on_progress = [&](const kasumi::application::GarbageCollectProgress& p) {
+        if (p.stage == kasumi::application::GarbageCollectStage::Applying) {
+            ++applying_count;
+            applying_emitted = true;
+            auto pres = kasumi::transport::presence(storage.transport, aged->metadata_identifier);
+            if (pres && *pres == Presence::Present) {
+                metadata_present_when_applying = true;
+            }
+        }
+    };
+
+    const auto purged = kasumi::application::integrity::garbage_collect(
+        runtime, storage.transport, test_key(), 8, 8, 8, on_progress);
+    ASSERT_TRUE(purged.has_value()) << purged.error().detail;
+    EXPECT_EQ(purged->candidate_objects, 0U);
+    EXPECT_EQ(purged->purged_objects, 1U);
+
+    EXPECT_TRUE(applying_emitted);
+    EXPECT_EQ(applying_count, 1U);
+    EXPECT_TRUE(metadata_present_when_applying);
+}
+
+TEST(IntegrityMaintenanceTest,
+     CZeroWithoutPurgeDoesNotEmitApplying) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    const auto commit = kasumi::history::make_empty_bootstrap().value();
+    const auto head = add_variant(storage, commit);
+
+    std::size_t applying_count = 0;
+    auto on_progress = [&](const kasumi::application::GarbageCollectProgress& p) {
+        if (p.stage == kasumi::application::GarbageCollectStage::Applying) {
+            ++applying_count;
+        }
+    };
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, storage.transport, test_key(), 8, 8, 8, on_progress);
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 0U);
+    EXPECT_EQ(collected->purged_objects, 0U);
+    EXPECT_EQ(applying_count, 0U);
 }
 
 } // namespace

@@ -4,6 +4,7 @@
 #include "application/history_storage/history_storage.hpp"
 #include "application/history_storage/remote_layout.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -40,10 +41,14 @@ using ObjectMap = std::map<std::string, std::vector<HeadReference>>;
 
 // History objects classified by commit.
 struct HistoryInventory {
-    // Identifiers found under history/.
-    std::set<std::string> identifiers;
+    // Identifiers found under history/ (sorted and unique).
+    std::vector<std::string> identifiers;
     ObjectMap commit_variants;
     ObjectMap marker_variants;
+
+    bool contains(std::string_view identifier) const noexcept {
+        return std::ranges::binary_search(identifiers, identifier);
+    }
 };
 
 // Objects added by a publication.

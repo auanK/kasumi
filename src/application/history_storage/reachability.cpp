@@ -13,7 +13,7 @@
 namespace kasumi::application::history_storage {
 namespace {
 
-using CommitMap = std::map<std::string, ReachabilityCommit>;
+using CommitList = std::vector<ReachabilityCommit>;
 
 enum class ParentAvailability {
     Valid,
@@ -28,11 +28,25 @@ ReachabilityVariant* find_variant(ReachabilityCommit& commit,
     return found == commit.variants.end() ? nullptr : &*found;
 }
 
-void add_missing_variant(CommitMap& commits, const HeadReference& reference) {
-    auto& commit = commits[reference.commit_id];
-    commit.commit_id = reference.commit_id;
-    if (find_variant(commit, reference) == nullptr) {
-        commit.variants.push_back(
+ReachabilityCommit* find_commit(CommitList& commits, std::string_view commit_id) {
+    const auto it = std::ranges::lower_bound(
+        commits, commit_id, {}, &ReachabilityCommit::commit_id);
+    if (it != commits.end() && it->commit_id == commit_id) {
+        return &*it;
+    }
+    return nullptr;
+}
+
+void add_missing_variant(CommitList& commits, const HeadReference& reference) {
+    auto* commit = find_commit(commits, reference.commit_id);
+    if (commit == nullptr) {
+        const auto it = std::ranges::lower_bound(
+            commits, reference.commit_id, {}, &ReachabilityCommit::commit_id);
+        commit = &*commits.insert(
+            it, ReachabilityCommit{.commit_id = reference.commit_id});
+    }
+    if (find_variant(*commit, reference) == nullptr) {
+        commit->variants.push_back(
             ReachabilityVariant{.reference = reference, .identifier = {}});
     }
 }
@@ -75,13 +89,49 @@ void sort_unique(std::vector<std::string>& values) {
     values.erase(std::ranges::unique(values).begin(), values.end());
 }
 
+struct TraceGuard {
+    std::string_view name;
+    platform::perf_trace::Token token;
+    bool active = true;
+    void stop() noexcept {
+        if (active) {
+            platform::perf_trace::finish(name, token);
+            active = false;
+        }
+    }
+    ~TraceGuard() noexcept { stop(); }
+};
+
 ReachabilityResult inventory_impl(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const std::filesystem::path& workspace_root,
     std::optional<std::span<const std::string>> identifiers = std::nullopt,
     std::optional<std::span<const epoch::VerifiedEpoch>> verified_epochs =
-        std::nullopt) {
+        std::nullopt,
+    std::string_view trace_scope = {}) {
+    std::string scoped_build_inventory_name;
+    std::string scoped_load_commits_name;
+    std::string scoped_inspect_history_name;
+    std::string scoped_dag_traversal_name;
+    const auto metric_name = [trace_scope](std::string_view name,
+                                           std::string& scoped_name) {
+        if (trace_scope.empty()) {
+            return name;
+        }
+        scoped_name.assign(trace_scope);
+        scoped_name.append("/");
+        scoped_name.append(name);
+        return std::string_view{scoped_name};
+    };
+    const auto build_inventory_name =
+        metric_name("rc/build_history_inventory", scoped_build_inventory_name);
+    const auto load_commits_name =
+        metric_name("rc/load_and_auth_commits", scoped_load_commits_name);
+    const auto inspect_history_name =
+        metric_name("rc/inspect_markers_epochs", scoped_inspect_history_name);
+    const auto dag_traversal_name =
+        metric_name("rc/dag_traversal", scoped_dag_traversal_name);
     if (!transport::valid(storage)) {
         return std::unexpected(
             detail::error(ErrorCode::InvalidInput, "invalid transport"));
@@ -93,9 +143,11 @@ ReachabilityResult inventory_impl(
     const auto layout = derive_remote_layout(key);
     // The listing freezes the observation; new markers are deferred to the next
     // run.
+    const auto inventory_trace = platform::perf_trace::begin();
     auto listed = identifiers
                       ? detail::build_history_inventory(*identifiers, layout)
                       : detail::build_history_inventory(storage, layout);
+    platform::perf_trace::finish(build_inventory_name, inventory_trace);
     if (!listed) {
         return std::unexpected(listed.error());
     }
@@ -116,7 +168,7 @@ ReachabilityResult inventory_impl(
                                             reference.ciphertext_id);
             }
         }
-        if (!batch.identifiers.empty()) {
+        if (batch.identifiers.size() > 1) {
             auto prefetched = transport::get_batch(storage, batch);
             if (!prefetched) {
                 return std::unexpected(
@@ -125,11 +177,15 @@ ReachabilityResult inventory_impl(
         }
     }
 
-    CommitMap commits;
+    TraceGuard load_commits_guard{load_commits_name,
+                                  platform::perf_trace::begin()};
+    CommitList commits;
+    commits.reserve(listed->commit_variants.size() + listed->marker_variants.size());
     std::size_t sequence = 0;
     for (const auto& [commit_id, references] : listed->commit_variants) {
-        auto& commit = commits[commit_id];
-        commit.commit_id = commit_id;
+        commits.push_back(ReachabilityCommit{.commit_id = commit_id});
+        auto& commit = commits.back();
+        commit.variants.reserve(references.size());
         for (const auto& reference : references) {
             auto loaded = detail::try_load_variant(
                 storage, key, reference, (*temporary)->root, sequence++);
@@ -148,7 +204,10 @@ ReachabilityResult inventory_impl(
             }
         }
     }
+    load_commits_guard.stop();
 
+    TraceGuard inspect_guard{inspect_history_name,
+                             platform::perf_trace::begin()};
     ReachabilityInventory result;
     std::vector<std::pair<std::string, epoch::VerifiedEpoch>> loaded_epochs;
     if (verified_epochs) {
@@ -216,7 +275,7 @@ ReachabilityResult inventory_impl(
         }
     }
 
-    std::unordered_set<std::string> epoch_anchors;
+    std::map<std::string, std::uint64_t> epoch_anchors;
     if (!loaded_epochs.empty()) {
         std::vector<epoch::VerifiedEpoch> epoch_values;
         for (const auto& [_, ep] : loaded_epochs) {
@@ -228,7 +287,7 @@ ReachabilityResult inventory_impl(
                                                  latest_epoch.error().detail));
         }
         for (const auto& anchor : latest_epoch->value.anchors) {
-            epoch_anchors.insert(anchor.commit_id);
+            epoch_anchors.emplace(anchor.commit_id, anchor.height);
         }
         for (const auto& [id, ep] : loaded_epochs) {
             if (ep.reference == latest_epoch->reference) {
@@ -267,8 +326,9 @@ ReachabilityResult inventory_impl(
             marker.state = ReachabilityMarkerState::InvalidMarker;
             continue;
         }
-        auto& commit = commits.at(marker.reference->commit_id);
-        const auto* variant = find_variant(commit, *marker.reference);
+        auto* commit = find_commit(commits, marker.reference->commit_id);
+        const auto* variant =
+            commit == nullptr ? nullptr : find_variant(*commit, *marker.reference);
         marker.state = variant == nullptr
                            ? ReachabilityMarkerState::MissingCommit
                            : marker_state(variant->state);
@@ -277,8 +337,7 @@ ReachabilityResult inventory_impl(
         }
     }
 
-    for (auto& [unused, commit] : commits) {
-        static_cast<void>(unused);
+    for (auto& commit : commits) {
         std::ranges::sort(commit.variants, {}, &ReachabilityVariant::reference);
         if (commit.valid) {
             for (const auto& parent : commit.parents) {
@@ -289,9 +348,8 @@ ReachabilityResult inventory_impl(
                 if (epoch_anchors.contains(parent)) {
                     continue;
                 }
-                const auto found = commits.find(parent);
-                switch (classify_parent(
-                    found == commits.end() ? nullptr : &found->second)) {
+                const auto* found = find_commit(commits, parent);
+                switch (classify_parent(found)) {
                     case ParentAvailability::Valid:
                         break;
                     case ParentAvailability::Missing:
@@ -304,9 +362,9 @@ ReachabilityResult inventory_impl(
             }
         }
     }
+    inspect_guard.stop();
 
-    std::set<std::string> visited;
-    std::set<std::string> reachable;
+    TraceGuard dag_guard{dag_traversal_name, platform::perf_trace::begin()};
     std::vector<std::pair<std::string, std::size_t>> pending;
     for (const auto& root : result.logical_heads) {
         pending.emplace_back(root, 0);
@@ -318,34 +376,42 @@ ReachabilityResult inventory_impl(
             return std::unexpected(detail::error(ErrorCode::LimitExceeded,
                                                  "history graph is too deep"));
         }
-        if (!visited.insert(commit_id).second) {
+        auto* found = find_commit(commits, commit_id);
+        if (found == nullptr || !found->valid || found->reachable) {
             continue;
         }
-        const auto found = commits.find(commit_id);
-        if (found == commits.end() || !found->second.valid) {
-            continue;
-        }
-        reachable.insert(commit_id);
+        found->reachable = true;
         if (epoch_anchors.contains(commit_id)) {
             continue;
         }
-        for (const auto& parent : found->second.parents) {
+        for (const auto& parent : found->parents) {
             pending.emplace_back(parent, depth + 1);
+        }
+    }
+    dag_guard.stop();
+
+    for (const auto& [anchor_id, height] : epoch_anchors) {
+        const auto* anchor = find_commit(commits, anchor_id);
+        if (anchor == nullptr || !anchor->valid || !anchor->reachable ||
+            !anchor->tree || anchor->tree->height != height) {
+            return std::unexpected(detail::error(
+                ErrorCode::InvalidCommit,
+                "Epoch anchor is missing, invalid, unreachable, or has a mismatched height"));
         }
     }
 
     sort_unique(result.logical_heads);
-    result.reachable_commits.assign(reachable.begin(), reachable.end());
     sort_unique(result.missing_parent_ids);
     sort_unique(result.invalid_parent_ids);
     sort_unique(result.unknown_history_objects);
-    for (auto& [commit_id, commit] : commits) {
-        commit.reachable = reachable.contains(commit_id);
-        if (commit.valid && !commit.reachable) {
-            result.orphan_commits.push_back(commit_id);
+    for (auto& commit : commits) {
+        if (commit.reachable) {
+            result.reachable_commits.push_back(commit.commit_id);
+        } else if (commit.valid) {
+            result.orphan_commits.push_back(commit.commit_id);
         }
-        result.commits.push_back(std::move(commit));
     }
+    result.commits = std::move(commits);
     return result;
 }
 
@@ -368,10 +434,12 @@ ReachabilityResult
 inventory_reachability(transport::Transport& storage,
                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                        std::span<const std::string> identifiers,
-                       const std::filesystem::path& workspace_root) {
+                       const std::filesystem::path& workspace_root,
+                       std::string_view trace_scope) {
     try {
         return inventory_impl(
-            storage, key, workspace_root, identifiers, std::nullopt);
+            storage, key, workspace_root, identifiers, std::nullopt,
+            trace_scope);
     } catch (const std::bad_alloc&) {
         return std::unexpected(
             detail::error(ErrorCode::LimitExceeded, "allocation failed"));

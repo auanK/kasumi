@@ -3,6 +3,7 @@
 
 #include "transport/types.hpp"
 
+#include <cstddef>
 #include <expected>
 #include <filesystem>
 #include <memory>
@@ -25,6 +26,24 @@ using GetFunction = Result (*)(void* context,
                                std::string_view identifier,
                                const std::filesystem::path& destination);
 
+// Function signature for copying an object within the opened storage.
+using CopyFunction = Result (*)(void* context,
+                                std::string_view source_identifier,
+                                std::string_view destination_identifier);
+
+// Explicit same-storage copies executed with bounded backend concurrency.
+struct CopyBatchItem {
+    std::string source_identifier;
+    std::string destination_identifier;
+};
+
+struct CopyBatch {
+    std::vector<CopyBatchItem> items;
+    std::size_t concurrency = 1;
+};
+
+using CopyBatchFunction = Result (*)(void* context, const CopyBatch& batch);
+
 // Batch of objects for optimized download. Identifiers are relative to
 // the remote prefix and local destination directory.
 struct GetBatch {
@@ -46,6 +65,20 @@ struct PutBatch {
 
 // Function signature for uploading a batch of objects.
 using PutBatchFunction = Result (*)(void* context, const PutBatch& batch);
+
+// Explicit local-file to remote-object uploads in one optional backend batch.
+struct PutFilesBatchItem {
+    std::filesystem::path source;
+    std::string destination_identifier;
+};
+
+struct PutFilesBatch {
+    std::vector<PutFilesBatchItem> items;
+    std::size_t concurrency = 1;
+};
+
+using PutFilesBatchFunction = Result (*)(void* context,
+                                         const PutFilesBatch& batch);
 
 // Function signature for querying object existence.
 using PresenceFunction = PresenceResult (*)(void* context,
@@ -77,6 +110,7 @@ struct PhysicalHashBatchRequest {
 
 // Batch physical hash verification result.
 struct PhysicalHashBatchReport {
+    std::vector<std::string> matched;
     std::vector<std::string> mismatched;
     std::vector<std::string> missing;
     std::vector<std::string> errors;
@@ -108,13 +142,40 @@ using ControlReadBatchFunction = ControlReadBatchResponse (*)(
 using RemoveFunction = RemovalResult (*)(void* context,
                                          std::string_view identifier);
 
-// Operations table; prefix listing and physical hash are optional.
+// Explicit object deletions executed in one optional backend batch.
+struct RemoveBatchItem {
+    std::string identifier;
+};
+
+struct RemoveBatch {
+    std::vector<RemoveBatchItem> items;
+    std::size_t concurrency = 1;
+};
+
+struct RemoveBatchItemResult {
+    std::string identifier;
+    RemovalResult result;
+};
+
+struct RemoveBatchReport {
+    std::vector<RemoveBatchItemResult> items;
+};
+
+using RemoveBatchResult = std::expected<RemoveBatchReport, Error>;
+
+using RemoveBatchFunction = RemoveBatchResult (*)(void* context,
+                                                  const RemoveBatch& batch);
+
+// Operations table; copy, prefix listing and physical hash are optional.
 struct StorageOperations {
     InitializeFunction initialize = nullptr;
     PutFunction put = nullptr;
     PutBatchFunction put_batch = nullptr;
+    PutFilesBatchFunction put_files_batch = nullptr;
     GetFunction get = nullptr;
     GetBatchFunction get_batch = nullptr;
+    CopyFunction copy = nullptr;
+    CopyBatchFunction copy_batch = nullptr;
     PresenceFunction presence = nullptr;
     ListFunction list = nullptr;
     ListPrefixFunction list_prefix = nullptr;
@@ -122,6 +183,7 @@ struct StorageOperations {
     PhysicalHashBatchFunction physical_hash_batch = nullptr;
     ControlReadBatchFunction control_read_batch = nullptr;
     RemoveFunction remove = nullptr;
+    RemoveBatchFunction remove_batch = nullptr;
     std::size_t physical_hash_batch_min_objects = 0;
 };
 
@@ -161,10 +223,24 @@ Result put(Transport& transport,
 // unsupported natively by backend.
 Result put_batch(Transport& transport, const PutBatch& batch);
 
+// Uploads only the explicitly listed local files to their corresponding
+// remote identifiers. Unsupported is returned without submitting any item.
+Result put_files_batch(Transport& transport, const PutFilesBatch& batch);
+
 // Downloads the object to the destination path.
 Result get(Transport& transport,
            std::string_view identifier,
            const std::filesystem::path& destination);
+
+// Requests a byte copy in the same opened storage; does not verify or remove
+// the source.
+Result copy(Transport& transport,
+            std::string_view source_identifier,
+            std::string_view destination_identifier);
+
+// Executes explicit remote copies in one optional backend batch. Unsupported
+// is returned when the transport has no native batch implementation.
+Result copy_batch(Transport& transport, const CopyBatch& batch);
 
 // Downloads a batch of objects. Falls back to individual get() calls if
 // unsupported natively by backend.
@@ -201,6 +277,10 @@ control_read_batch(Transport& transport,
 
 // Removes the object idempotently.
 RemovalResult remove(Transport& transport, std::string_view identifier);
+
+// Removes objects in one optional backend batch. Unsupported is returned
+// when the transport has no native batch removal implementation.
+RemoveBatchResult remove_batch(Transport& transport, const RemoveBatch& batch);
 
 } // namespace kasumi::transport
 

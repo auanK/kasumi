@@ -25,6 +25,9 @@ int present_cancellation(
 void present(const application::SyncProgress& progress,
              application::Operation operation = application::Operation::Sync);
 
+// Displays a garbage collection progress event.
+void present(const application::GarbageCollectProgress& progress);
+
 // Displays success and returns 0.
 int present(const application::Response& response, bool full = false);
 

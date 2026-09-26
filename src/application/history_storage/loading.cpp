@@ -496,10 +496,13 @@ build_scoped_history_inventory(transport::Transport& storage,
         if (!reference) {
             continue;
         }
-        inventory.identifiers.insert(identifier);
+        inventory.identifiers.push_back(identifier);
         inventory.marker_variants[reference->commit_id].push_back(
             std::move(*reference));
     }
+    std::ranges::sort(inventory.identifiers);
+    auto [first_marker, last_marker] = std::ranges::unique(inventory.identifiers);
+    inventory.identifiers.erase(first_marker, last_marker);
     if (inventory.identifiers.size() > maximum_history_object_count) {
         return std::unexpected(
             error(ErrorCode::LimitExceeded, "too many storage objects"));
@@ -544,9 +547,12 @@ discover_scoped_commit_variants(transport::Transport& storage,
         if (!reference || reference->commit_id != commit_id) {
             continue;
         }
-        inventory.identifiers.insert(identifier);
+        inventory.identifiers.push_back(identifier);
         variants.push_back(std::move(*reference));
     }
+    std::ranges::sort(inventory.identifiers);
+    auto [first_commit, last_commit] = std::ranges::unique(inventory.identifiers);
+    inventory.identifiers.erase(first_commit, last_commit);
     sort_unique(variants);
     if (inventory.identifiers.size() > maximum_history_object_count ||
         variants.size() > maximum_ciphertext_variants_per_commit) {

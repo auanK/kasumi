@@ -196,11 +196,41 @@ kasumi_add_test_suite(
     SOURCES
         unit/transport/test_local.cpp
         unit/transport/test_rclone_storage.cpp
+        unit/transport/test_remote_copy_smoke.cpp
+        operational/gc_live_preflight_support.cpp
+        operational/remote_copy_smoke_support.cpp
     LIBRARIES
         kasumi_transport
+        kasumi_platform
         nlohmann_json::nlohmann_json
         httplib::httplib
         reproc++
+)
+
+kasumi_add_test_suite(
+    kasumi_test_operational_gc_live_runner
+    "operational.gc_live_runner"
+    SOURCES
+        unit/operational/test_gc_live_runner.cpp
+        unit/operational/test_gc_live_phase11.cpp
+        operational/gc_live_phase11_support.cpp
+        operational/gc_live_runner_support.cpp
+        operational/gc_live_preflight_support.cpp
+        operational/remote_copy_smoke_support.cpp
+    LIBRARIES
+        kasumi_application
+        kasumi_transport
+        kasumi_platform
+        kasumi_crypto
+        nlohmann_json::nlohmann_json
+        httplib::httplib
+        reproc++
+)
+target_include_directories(
+    kasumi_test_operational_gc_live_runner
+    PRIVATE
+    ${PROJECT_SOURCE_DIR}/tests/support/include
+
 )
 
 kasumi_add_test_suite(

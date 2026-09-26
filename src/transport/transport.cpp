@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <fstream>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -190,6 +191,55 @@ bool valid_batch_identifier(std::string_view identifier) noexcept {
     return path.lexically_normal() == path;
 }
 
+bool valid_object_identifier(std::string_view identifier) {
+    if (identifier.empty() || identifier.find('\\') != std::string_view::npos) {
+        return false;
+    }
+    const auto path = platform::path::from_utf8(identifier);
+    if (path.empty() || path.is_absolute() || path.has_root_name() ||
+        path.has_root_directory()) {
+        return false;
+    }
+    for (const auto& component : path) {
+        if (component == "." || component == "..") {
+            return false;
+        }
+    }
+    const auto normalized = path.lexically_normal();
+    return !normalized.empty() && normalized != "." &&
+           !normalized.is_absolute() && !normalized.has_root_name() &&
+           !normalized.has_root_directory();
+}
+
+std::expected<void, Error> validate_copy_batch(const CopyBatch& batch) {
+    if (batch.concurrency == 0) {
+        return std::unexpected(make_error(
+            ErrorCode::InvalidContext, "copy batch concurrency must be positive"));
+    }
+
+    std::unordered_set<std::string> destinations;
+    for (const auto& item : batch.items) {
+        const auto safe = [](std::string_view identifier) {
+            if (!valid_object_identifier(identifier) ||
+                std::any_of(identifier.begin(), identifier.end(),
+                            forbidden_character)) {
+                return false;
+            }
+            const auto path = platform::path::from_utf8(identifier);
+            return path.lexically_normal() == path;
+        };
+        if (!safe(item.source_identifier) ||
+            !safe(item.destination_identifier) ||
+            item.source_identifier == item.destination_identifier ||
+            !destinations.insert(item.destination_identifier).second) {
+            return std::unexpected(make_error(
+                ErrorCode::InvalidIdentifier,
+                "invalid, identical, or duplicate copy batch identifier"));
+        }
+    }
+    return {};
+}
+
 std::expected<void, Error> validate_batch(const PutBatch& batch) {
     std::error_code error;
     if (!std::filesystem::is_directory(batch.source_root, error)) {
@@ -262,6 +312,75 @@ std::expected<void, Error> validate_batch(const PutBatch& batch) {
     return {};
 }
 
+std::expected<void, Error>
+validate_put_files_batch(const PutFilesBatch& batch) {
+    if (batch.items.empty()) {
+        return {};
+    }
+    if (batch.concurrency == 0) {
+        return std::unexpected(make_error(
+            ErrorCode::InvalidContext,
+            "put files batch concurrency must be positive"));
+    }
+
+    std::unordered_set<std::string> destinations;
+    for (const auto& item : batch.items) {
+        if (!valid_batch_identifier(item.destination_identifier) ||
+            !destinations.insert(item.destination_identifier).second) {
+            return std::unexpected(make_error(
+                ErrorCode::InvalidIdentifier,
+                "invalid or duplicate put files batch destination"));
+        }
+
+        std::error_code error;
+        const auto absolute = std::filesystem::absolute(item.source, error);
+        if (error) {
+            return std::unexpected(make_error(ErrorCode::Io,
+                                              "failed to resolve batch source"));
+        }
+        const auto status = std::filesystem::symlink_status(absolute, error);
+        if (error || std::filesystem::is_symlink(status) ||
+            !std::filesystem::is_regular_file(status)) {
+            return std::unexpected(make_error(
+                error ? ErrorCode::Io : ErrorCode::ObjectNotFound,
+                "put files batch source must be a regular non-symlink file"));
+        }
+        std::ifstream readable(absolute, std::ios::binary);
+        if (!readable) {
+            return std::unexpected(make_error(
+                ErrorCode::PermissionDenied,
+                "put files batch source is not readable"));
+        }
+    }
+    return {};
+}
+
+std::expected<void, Error>
+validate_remove_batch(const RemoveBatch& batch) {
+    if (batch.items.empty()) {
+        return {};
+    }
+    if (batch.concurrency == 0) {
+        return std::unexpected(make_error(
+            ErrorCode::InvalidContext,
+            "remove batch concurrency must be positive"));
+    }
+
+    std::unordered_set<std::string> identifiers;
+    for (const auto& item : batch.items) {
+        if (!valid_batch_identifier(item.identifier) ||
+            std::any_of(item.identifier.begin(), item.identifier.end(),
+                        forbidden_character) ||
+            !identifiers.insert(item.identifier).second) {
+            return std::unexpected(make_error(
+                ErrorCode::InvalidIdentifier,
+                "invalid or duplicate remove batch identifier"));
+        }
+    }
+
+    return {};
+}
+
 std::expected<void, Error> validate_batch(const GetBatch& batch) {
     std::error_code error;
     if (!batch.source_prefix.empty() &&
@@ -319,6 +438,56 @@ validate_physical_hash_batch_request(const PhysicalHashBatchRequest& request) {
                            "duplicate identifiers in physical hash request"));
         }
     }
+    return {};
+}
+
+std::expected<void, Error>
+validate_physical_hash_batch_report(const PhysicalHashBatchReport& report,
+                                    const PhysicalHashBatchRequest& request) {
+    std::unordered_set<std::string> requested;
+    requested.reserve(request.objects.size());
+    for (const auto& object : request.objects) {
+        requested.insert(object.identifier);
+    }
+
+    std::unordered_set<std::string> seen;
+    seen.reserve(request.objects.size());
+
+    const std::vector<const std::vector<std::string>*> categories = {
+        &report.matched, &report.mismatched, &report.missing, &report.errors
+    };
+
+    for (const auto* list : categories) {
+        for (const auto& identifier : *list) {
+            if (identifier.empty() ||
+                identifier.find_first_of("\r\n") != std::string_view::npos) {
+                return std::unexpected(make_error(
+                    ErrorCode::ProtocolFailure,
+                    "invalid identifier in physical hash batch report"));
+            }
+            if (!requested.contains(identifier)) {
+                return std::unexpected(make_error(
+                    ErrorCode::ProtocolFailure,
+                    "unexpected identifier in physical hash batch report: " +
+                        identifier));
+            }
+            if (!seen.insert(identifier).second) {
+                return std::unexpected(make_error(
+                    ErrorCode::ProtocolFailure,
+                    "duplicate identifier in physical hash batch report: " +
+                        identifier));
+            }
+        }
+    }
+
+    if (seen.size() != requested.size()) {
+        return std::unexpected(make_error(
+            ErrorCode::ProtocolFailure,
+            "incomplete physical hash batch report: expected " +
+                std::to_string(requested.size()) + " objects, but classified " +
+                std::to_string(seen.size())));
+    }
+
     return {};
 }
 
@@ -450,6 +619,27 @@ Result put_batch(Transport& transport, const PutBatch& batch) {
     return {};
 }
 
+Result put_files_batch(Transport& transport, const PutFilesBatch& batch) {
+    auto validation = validate_put_files_batch(batch);
+    if (!validation) {
+        return std::unexpected(validation.error());
+    }
+    if (batch.items.empty()) {
+        return {};
+    }
+
+    auto* state = state_pointer(transport);
+    if (state == nullptr) {
+        return std::unexpected(invalid_transport_error());
+    }
+    if (transport.storage.put_files_batch == nullptr) {
+        return std::unexpected(make_error(
+            ErrorCode::Unsupported,
+            "transport does not support explicit put files batch"));
+    }
+    return transport.storage.put_files_batch(state, batch);
+}
+
 Result get(Transport& transport,
            std::string_view identifier,
            const std::filesystem::path& destination) {
@@ -459,6 +649,49 @@ Result get(Transport& transport,
     }
 
     return transport.storage.get(state, identifier, destination);
+}
+
+Result copy(Transport& transport,
+            std::string_view source_identifier,
+            std::string_view destination_identifier) {
+    auto* state = state_pointer(transport);
+    if (state == nullptr) {
+        return std::unexpected(invalid_transport_error());
+    }
+    if (!valid_object_identifier(source_identifier) ||
+        !valid_object_identifier(destination_identifier) ||
+        source_identifier == destination_identifier) {
+        return std::unexpected(
+            make_error(ErrorCode::InvalidIdentifier,
+                       "invalid or identical copy identifiers"));
+    }
+    if (transport.storage.copy == nullptr) {
+        return std::unexpected(
+            make_error(ErrorCode::Unsupported,
+                       "transport does not support remote object copy"));
+    }
+    return transport.storage.copy(
+        state, source_identifier, destination_identifier);
+}
+
+Result copy_batch(Transport& transport, const CopyBatch& batch) {
+    if (batch.items.empty()) {
+        return {};
+    }
+    const auto validation = validate_copy_batch(batch);
+    if (!validation) {
+        return std::unexpected(validation.error());
+    }
+    auto* state = state_pointer(transport);
+    if (state == nullptr) {
+        return std::unexpected(invalid_transport_error());
+    }
+    if (transport.storage.copy_batch == nullptr) {
+        return std::unexpected(make_error(
+            ErrorCode::Unsupported,
+            "transport does not support remote copy batch"));
+    }
+    return transport.storage.copy_batch(state, batch);
 }
 
 Result get_batch(Transport& transport, const GetBatch& batch) {
@@ -552,8 +785,17 @@ physical_hash_batch(Transport& transport,
             ErrorCode::Unsupported,
             "transport does not support batch remote physical hash"));
     }
-    return transport.storage.physical_hash_batch(transport.state.get(),
-                                                 request);
+    auto result = transport.storage.physical_hash_batch(transport.state.get(),
+                                                        request);
+    if (!result) {
+        return result;
+    }
+    auto report_validation =
+        validate_physical_hash_batch_report(*result, request);
+    if (!report_validation) {
+        return std::unexpected(report_validation.error());
+    }
+    return result;
 }
 
 bool prefers_physical_hash_batch(const Transport& transport,
@@ -598,6 +840,27 @@ RemovalResult remove(Transport& transport, std::string_view identifier) {
         return Removal::Removed;
     }
     return std::unexpected(removed.error());
+}
+
+RemoveBatchResult remove_batch(Transport& transport, const RemoveBatch& batch) {
+    auto validation = validate_remove_batch(batch);
+    if (!validation) {
+        return std::unexpected(validation.error());
+    }
+    if (batch.items.empty()) {
+        return RemoveBatchReport{};
+    }
+
+    auto* state = state_pointer(transport);
+    if (state == nullptr) {
+        return std::unexpected(invalid_transport_error());
+    }
+    if (transport.storage.remove_batch == nullptr) {
+        return std::unexpected(make_error(
+            ErrorCode::Unsupported,
+            "transport does not support explicit remove batch"));
+    }
+    return transport.storage.remove_batch(state, batch);
 }
 
 } // namespace kasumi::transport
