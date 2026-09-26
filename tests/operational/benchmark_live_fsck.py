@@ -302,7 +302,7 @@ def main():
             "fsck_explicit_verify_count": get_m("fsck.audit_verify_calls")["calls"],
             "fsck_encrypted_bytes": get_m("fsck.encrypted_bytes_downloaded")["calls"],
             "fsck_plaintext_bytes": get_m("fsck.plaintext_bytes_verified")["calls"],
-            "full_list_calls": get_m("content listing/audit")["calls"],
+            "full_list_calls": get_m("rc/list")["calls"] or get_m("rc/operations/list")["calls"] or get_m("content listing/audit")["calls"],
             "timers_us": {
                 "total": get_m("fsck.total_duration_us")["total_us"],
                 "collect_storage_state": get_m("fsck.collect_storage_state_duration_us")["total_us"],
