@@ -5713,6 +5713,78 @@ TEST(IntegrityMaintenanceTest, SnapshotCharacterizationReferencedContentCorrupte
     EXPECT_EQ(checked.error().code, IntegrityErrorCode::Unrecoverable);
 }
 
+TEST(IntegrityMaintenanceTest, HealthyFsckPerformsExactlyOnePhysicalListCall) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    const auto alpha = make_commit(0, {}, "alpha.txt", "alpha").value();
+    publish_remote(storage.transport, storage.workspace, alpha);
+    put_content(storage.transport, storage.workspace, "alpha", "alpha");
+
+    SnapshotProbeState probe;
+    SnapshotProbeTransportState probe_state;
+    auto wrapped_transport = make_snapshot_probe_transport(probe_state, storage.transport, probe);
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, wrapped_transport, test_key());
+    ASSERT_TRUE(checked.has_value()) << checked.error().detail;
+    EXPECT_EQ(probe.list_calls, 1U);
+}
+
+TEST(IntegrityMaintenanceTest, UnknownPhysicalIdentifierInSingleObservedSnapshotFailsClosed) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    const auto alpha = make_commit(0, {}, "alpha.txt", "alpha").value();
+    publish_remote(storage.transport, storage.workspace, alpha);
+    put_content(storage.transport, storage.workspace, "alpha", "alpha");
+
+    const auto storage_root = kasumi::test::workspace_path(storage.workspace, "storage");
+    std::filesystem::create_directories(storage_root / "foreign");
+    {
+        std::ofstream out(storage_root / "foreign" / "intruder.txt");
+        out << "foreign payload";
+    }
+
+    SnapshotProbeState probe;
+    SnapshotProbeTransportState probe_state;
+    auto wrapped_transport = make_snapshot_probe_transport(probe_state, storage.transport, probe);
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, wrapped_transport, test_key());
+    ASSERT_FALSE(checked.has_value());
+    EXPECT_EQ(checked.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_NE(checked.error().detail.find("foreign/intruder.txt"), std::string::npos);
+    EXPECT_EQ(probe.list_calls, 1U);
+}
+
+TEST(IntegrityMaintenanceTest, FsckUsesExactlyTheFirstObservedSnapshotWithoutSecondListing) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    const auto alpha = make_commit(0, {}, "alpha.txt", "alpha").value();
+    publish_remote(storage.transport, storage.workspace, alpha);
+    put_content(storage.transport, storage.workspace, "alpha", "alpha");
+
+    const auto storage_root = kasumi::test::workspace_path(storage.workspace, "storage");
+
+    SnapshotProbeState probe;
+    probe.on_list_finish = [&](std::size_t call_index) {
+        if (call_index == 1) {
+            std::filesystem::create_directories(storage_root / "foreign");
+            std::ofstream out(storage_root / "foreign" / "intruder.txt");
+            out << "foreign payload";
+        }
+    };
+    SnapshotProbeTransportState probe_state;
+    auto wrapped_transport = make_snapshot_probe_transport(probe_state, storage.transport, probe);
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, wrapped_transport, test_key());
+    EXPECT_EQ(probe.list_calls, 1U);
+    ASSERT_TRUE(checked.has_value()) << checked.error().detail;
+}
+
 } // namespace
 
 
