@@ -651,7 +651,8 @@ std::expected<std::size_t, Error> purge_expired_quarantine(
     const GarbageCollectionSnapshot& snapshot,
     history_storage::maintenance_protocol::RegistrationState& barrier,
     const std::vector<history_storage::maintenance_protocol::QuarantineEntry>&
-        entries) {
+        entries,
+    const std::function<void()>& on_mutation_starting = {}) {
     std::size_t purged = 0;
     for (const auto& entry : entries) {
         if (history_storage::maintenance_protocol::is_epoch_object(
@@ -687,6 +688,9 @@ std::expected<std::size_t, Error> purge_expired_quarantine(
             history_storage::maintenance_protocol::verify_registration(barrier);
         if (!owned) {
             return std::unexpected(protocol_error(owned.error()));
+        }
+        if (on_mutation_starting) {
+            on_mutation_starting();
         }
         auto metadata_removed =
             transport::remove(storage, entry.metadata_identifier);
@@ -1098,7 +1102,6 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                 }
                 if (!*online) {
                     if (on_progress) {
-                        on_progress({.stage = GarbageCollectStage::CheckingQuarantine});
                         on_progress({.stage = GarbageCollectStage::Analyzing});
                     }
                     auto analyzed = collect_garbage_collection_snapshot(
@@ -1110,7 +1113,6 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     if (on_progress) {
                         on_progress({.stage = GarbageCollectStage::Analyzing,
                                      .candidate_count = analyzed->candidates.size()});
-                        on_progress({.stage = GarbageCollectStage::Finalizing});
                     }
                     return GarbageCollectResult{
                         .candidate_objects = analyzed->candidates.size(),
@@ -1213,12 +1215,15 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                         "remote storage changed prior to destructive phase"));
                 }
                 bool applying_emitted = false;
-                if (!confirmed->candidates.empty()) {
-                    if (on_progress) {
-                        on_progress({.stage = GarbageCollectStage::Applying});
+                auto emit_applying_once = [&applying_emitted, &on_progress]() {
+                    if (!applying_emitted) {
+                        applying_emitted = true;
+                        if (on_progress) {
+                            on_progress({.stage = GarbageCollectStage::Applying});
+                        }
                     }
-                    applying_emitted = true;
-                }
+                };
+
                 const auto purge_trace = platform::perf_trace::begin();
                 auto purged = purge_expired_quarantine(storage,
                                                        layout,
@@ -1226,18 +1231,17 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                                        *now,
                                                        *confirmed,
                                                        *barrier,
-                                                       *quarantine);
+                                                       *quarantine,
+                                                       emit_applying_once);
                 platform::perf_trace::finish("gc expired quarantine purge",
                                              purge_trace);
                 if (!purged) {
                     return std::unexpected(purged.error());
                 }
                 result.purged_objects = *purged;
-                if (!applying_emitted && *purged > 0) {
-                    if (on_progress) {
-                        on_progress({.stage = GarbageCollectStage::Applying});
-                    }
-                    applying_emitted = true;
+
+                if (!confirmed->candidates.empty()) {
+                    emit_applying_once();
                 }
                 platform::perf_trace::count("gc.candidates_selected", confirmed->candidates.size());
                 struct BatchPhaseTraceGuard {

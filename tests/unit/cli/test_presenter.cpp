@@ -1437,8 +1437,6 @@ TEST(CliPresenterTest, PresentsGarbageCollectProgressAnalysisOnlyWarning) {
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Preparing});
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::CheckingQuarantine});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Analyzing});
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Analyzing,
@@ -1458,7 +1456,7 @@ TEST(CliPresenterTest, PresentsGarbageCollectProgressAnalysisOnlyWarning) {
 
     const auto output = testing::internal::GetCapturedStdout();
     EXPECT_NE(output.find("[1/5] Preparing garbage collection..."), std::string::npos);
-    EXPECT_NE(output.find("[2/5] Checking quarantine state..."), std::string::npos);
+    EXPECT_EQ(output.find("[2/5]"), std::string::npos);
     EXPECT_NE(output.find("[3/5] Analyzing remote state..."), std::string::npos);
     EXPECT_NE(output.find("42 candidates found."), std::string::npos);
     EXPECT_EQ(output.find("[4/5]"), std::string::npos);
