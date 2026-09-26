@@ -302,9 +302,11 @@ def main():
             "fsck_explicit_verify_count": get_m("fsck.audit_verify_calls")["calls"],
             "fsck_encrypted_bytes": get_m("fsck.encrypted_bytes_downloaded")["calls"],
             "fsck_plaintext_bytes": get_m("fsck.plaintext_bytes_verified")["calls"],
+            "full_list_calls": get_m("content listing/audit")["calls"],
             "timers_us": {
                 "total": get_m("fsck.total_duration_us")["total_us"],
                 "collect_storage_state": get_m("fsck.collect_storage_state_duration_us")["total_us"],
+                "observation_list": get_m("content listing/audit")["total_us"],
                 "physical_listing": get_m("fsck.physical_listing_duration_us")["total_us"],
                 "local_tree": get_m("fsck.local_tree_duration_us")["total_us"],
                 "inventory_analysis": get_m("fsck.inventory_analysis_duration_us")["total_us"],
@@ -325,6 +327,7 @@ def main():
 
         print("\n--- MEASURED RESULTS ---")
         print(f"FSCK Wall: {fsck_wall_seconds:.3f} s")
+        print(f"Physical List Calls: {result_data['full_list_calls']}")
         print(f"Concurrency: C={args.concurrency}, Peak={result_data['peak_in_flight']}, Workers={result_data['effective_worker_count']}, Completions={result_data['completion_count']}")
         print(f"Checked Objects: {result_data['checked_objects']}")
         print(f"Explicit FSCK GETs: {result_data['fsck_explicit_get_count']}")
