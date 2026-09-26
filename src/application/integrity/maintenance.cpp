@@ -931,16 +931,14 @@ void run_audit_worker(std::stop_token stop,
                       KeySpan key,
                       const std::vector<kasumi::maintenance::ObjectReference>& references,
                       const platform::Workspace& workspace) {
-    while (!stop.stop_requested()) {
+    while (true) {
         std::size_t index = 0;
         {
             std::unique_lock lock(state.mutex);
-            if (!state.changed.wait(lock, stop, [&] {
-                    return state.tasks[slot].has_value() || state.stop_requested;
-                })) {
-                return;
-            }
-            if (state.stop_requested && !state.tasks[slot].has_value()) {
+            state.changed.wait(lock, [&] {
+                return state.tasks[slot].has_value() || state.stop_requested || stop.stop_requested();
+            });
+            if (!state.tasks[slot].has_value()) {
                 return;
             }
             index = *state.tasks[slot];
@@ -952,7 +950,7 @@ void run_audit_worker(std::stop_token stop,
 
         AuditWorkResult result{.index = index, .state = AuditState::Healthy, .error = std::nullopt};
         try {
-            if (platform::cancellation::requested() || stop.stop_requested()) {
+            if (platform::cancellation::requested() || stop.stop_requested() || state.stop_requested) {
                 result.error = make_error(ErrorCode::StateFailure, "operation cancelled");
             } else {
                 auto audited = audit_object(storage, key, references[index], workspace, index);
@@ -974,6 +972,9 @@ void run_audit_worker(std::stop_token stop,
             state.completions[slot] = std::move(result);
         }
         state.changed.notify_all();
+        if (stop.stop_requested() || state.stop_requested) {
+            return;
+        }
     }
 }
 
@@ -1028,29 +1029,23 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
             make_error(ErrorCode::InvalidInput, "invalid fsck context"));
     }
     const auto history_workspace = maintenance_workspace_root(runtime_data);
-    auto storage_state = [&]() {
+    auto observation = [&]() {
         TraceGuard guard{"fsck.collect_storage_state_duration_us", platform::perf_trace::begin()};
-        return observation::collect_storage_state(
+        return observation::collect_storage_observation(
             storage, key, history_workspace, true);
     }();
-    if (!storage_state) {
+    if (!observation) {
         return std::unexpected(
-            make_error(ErrorCode::StateFailure, storage_state.error()));
+            make_error(ErrorCode::StateFailure, observation.error()));
     }
-    if (!storage_state->history_present) {
+    const auto& storage_state = observation->state;
+    if (!storage_state.history_present) {
         return std::unexpected(
             make_error(ErrorCode::IntegrityFailure, "remote history absent"));
     }
-    auto listing = [&]() {
-        TraceGuard guard{"fsck.physical_listing_duration_us", platform::perf_trace::begin()};
-        return transport::list(storage);
-    }();
-    if (!listing) {
-        return std::unexpected(transport_error(listing.error()));
-    }
     const auto layout = history_storage::derive_remote_layout(key);
     std::vector<std::string> unknown_storage_identifiers;
-    for (const auto& identifier : *listing) {
+    for (const auto& identifier : observation->physical_identifiers) {
         if (history_storage::is_history_object(layout, identifier) ||
             kasumi::hash_from_hex(identifier).has_value()) {
             continue;
@@ -1074,7 +1069,7 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
     }
     auto inventory = [&]() {
         TraceGuard guard{"fsck.inventory_analysis_duration_us", platform::perf_trace::begin()};
-        return analyze_inventory(storage_state->tree, *local_tree, *storage_state);
+        return analyze_inventory(storage_state.tree, *local_tree, storage_state);
     }();
     if (!inventory)
         return std::unexpected(inventory.error());

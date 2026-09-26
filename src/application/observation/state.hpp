@@ -52,6 +52,19 @@ std::expected<Snapshot, std::string>
 collect_local_tree(const std::filesystem::path& local_root,
                    LocalObservationSession* session);
 
+// Combines logical storage state with observed physical namespace snapshot.
+struct StorageObservation {
+    reconciliation::StorageState state;
+    std::vector<std::string> physical_identifiers;
+};
+
+// Collects and validates the observed remote state along with the observed physical namespace snapshot.
+std::expected<StorageObservation, std::string>
+collect_storage_observation(transport::Transport& storage,
+                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                            const std::filesystem::path& workspace_root,
+                            bool audit_storage_objects);
+
 // Collects and validates the observed remote state.
 std::expected<reconciliation::StorageState, std::string>
 collect_storage_state(transport::Transport& storage,

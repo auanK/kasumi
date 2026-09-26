@@ -264,6 +264,9 @@ ObserveResult observe(transport::Transport& storage,
                 remote_content_identifiers.end());
             std::ranges::sort(result.content_object_identifiers);
         }
+        if (remote_inventory) {
+            result.physical_identifiers = std::move(*remote_inventory);
+        }
         if (loaded->marked_heads.empty()) {
             result.orphan_content_count = remote_content_identifiers.size();
             return result;

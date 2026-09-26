@@ -370,11 +370,11 @@ collect_local_tree(const std::filesystem::path& local_root,
     }
 }
 
-std::expected<reconciliation::StorageState, std::string>
-collect_storage_state(transport::Transport& storage,
-                      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                      const std::filesystem::path& workspace_root,
-                      bool audit_storage_objects) {
+std::expected<StorageObservation, std::string>
+collect_storage_observation(transport::Transport& storage,
+                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                            const std::filesystem::path& workspace_root,
+                            bool audit_storage_objects) {
     auto observed =
         history::observe(storage, key, workspace_root, audit_storage_objects);
     if (!observed) {
@@ -402,7 +402,23 @@ collect_storage_state(transport::Transport& storage,
         .history_present = observed->history_present,
         .history_has_conflicts = observed->has_conflicts,
     };
-    return state;
+    return StorageObservation{
+        .state = std::move(state),
+        .physical_identifiers = std::move(observed->physical_identifiers),
+    };
+}
+
+std::expected<reconciliation::StorageState, std::string>
+collect_storage_state(transport::Transport& storage,
+                      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                      const std::filesystem::path& workspace_root,
+                      bool audit_storage_objects) {
+    auto observation = collect_storage_observation(
+        storage, key, workspace_root, audit_storage_objects);
+    if (!observation) {
+        return std::unexpected(observation.error());
+    }
+    return std::move(observation->state);
 }
 
 std::expected<reconciliation::Input, reconciliation::Error>

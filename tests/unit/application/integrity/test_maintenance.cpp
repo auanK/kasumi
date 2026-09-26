@@ -5132,7 +5132,7 @@ TEST(IntegrityMaintenanceTest,
 
     EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.total_duration_us"), 0U);
     EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.collect_storage_state_duration_us"), 0U);
-    EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.physical_listing_duration_us"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_time("fsck.physical_listing_duration_us"), 0U);
     EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.local_tree_duration_us"), 0U);
     EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.inventory_analysis_duration_us"), 0U);
     EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.referenced_audit_duration_us"), 0U);
@@ -5599,7 +5599,7 @@ TEST(IntegrityMaintenanceTest, SnapshotCharacterizationUnknownObjectBeforeFirstL
     EXPECT_NE(checked.error().detail.find("foreign/intruder.txt"), std::string::npos);
 }
 
-TEST(IntegrityMaintenanceTest, SnapshotCharacterizationUnknownObjectInjectedBetweenListsDetectedBySecondListInCurrentHead) {
+TEST(IntegrityMaintenanceTest, SnapshotSemanticsIgnoresForeignObjectInjectedAfterFirstList) {
     auto storage = make_local_storage();
     auto runtime = runtime_data(storage.workspace);
 
@@ -5622,10 +5622,8 @@ TEST(IntegrityMaintenanceTest, SnapshotCharacterizationUnknownObjectInjectedBetw
 
     const auto checked = kasumi::application::integrity::fsck(
         runtime, wrapped_transport, test_key());
-    EXPECT_EQ(probe.list_calls, 2U);
-    ASSERT_FALSE(checked.has_value());
-    EXPECT_EQ(checked.error().code, IntegrityErrorCode::IntegrityFailure);
-    EXPECT_NE(checked.error().detail.find("foreign/intruder.txt"), std::string::npos);
+    EXPECT_EQ(probe.list_calls, 1U);
+    ASSERT_TRUE(checked.has_value()) << checked.error().detail;
 }
 
 TEST(IntegrityMaintenanceTest, SnapshotCharacterizationCanonicalContentAppearingBetweenListsPassesValidationWithoutAlteringInventory) {
@@ -5651,7 +5649,7 @@ TEST(IntegrityMaintenanceTest, SnapshotCharacterizationCanonicalContentAppearing
 
     const auto checked = kasumi::application::integrity::fsck(
         runtime, wrapped_transport, test_key());
-    EXPECT_EQ(probe.list_calls, 2U);
+    EXPECT_EQ(probe.list_calls, 1U);
     ASSERT_TRUE(checked.has_value()) << checked.error().detail;
     EXPECT_EQ(checked->checked_objects, 1U);
 }
@@ -5679,7 +5677,7 @@ TEST(IntegrityMaintenanceTest, SnapshotCharacterizationReferencedContentDeletedA
 
     const auto checked = kasumi::application::integrity::fsck(
         runtime, wrapped_transport, test_key());
-    EXPECT_EQ(probe.list_calls, 2U);
+    EXPECT_EQ(probe.list_calls, 1U);
     ASSERT_FALSE(checked.has_value());
     EXPECT_EQ(checked.error().code, IntegrityErrorCode::Unrecoverable);
     EXPECT_NE(checked.error().detail.find("referenced objects missing or corrupted"), std::string::npos);
@@ -5708,7 +5706,7 @@ TEST(IntegrityMaintenanceTest, SnapshotCharacterizationReferencedContentCorrupte
 
     const auto checked = kasumi::application::integrity::fsck(
         runtime, wrapped_transport, test_key());
-    EXPECT_EQ(probe.list_calls, 2U);
+    EXPECT_EQ(probe.list_calls, 1U);
     ASSERT_FALSE(checked.has_value());
     EXPECT_EQ(checked.error().code, IntegrityErrorCode::Unrecoverable);
 }
