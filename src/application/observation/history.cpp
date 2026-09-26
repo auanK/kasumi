@@ -202,6 +202,7 @@ ObserveResult observe(transport::Transport& storage,
 
         std::optional<std::vector<std::string>> remote_inventory;
         if (audit_content_objects_requested || complete_history) {
+            platform::perf_trace::count("history.full_list_calls", 1);
             const auto content_trace = platform::perf_trace::begin();
             auto listing = transport::list(storage);
             platform::perf_trace::finish("content listing/audit",
@@ -249,11 +250,15 @@ ObserveResult observe(transport::Transport& storage,
             return std::unexpected(storage_error(loaded.error()));
         }
         std::unordered_set<std::string> remote_content_identifiers;
+        std::unordered_set<std::string> referenced_content_identifiers;
         if (audit_content_objects_requested) {
+            const auto content_inv_trace = platform::perf_trace::begin();
             if (!collect_content_identifiers_into(
                     *remote_inventory,
                     maximum_audited_content_object_count,
                     remote_content_identifiers)) {
+                platform::perf_trace::finish("content inventory derivation",
+                                             content_inv_trace);
                 return std::unexpected(Error{
                     .code = ErrorCode::LimitExceeded,
                     .detail = "too many content identifiers",
@@ -263,6 +268,8 @@ ObserveResult observe(transport::Transport& storage,
                 remote_content_identifiers.begin(),
                 remote_content_identifiers.end());
             std::ranges::sort(result.content_object_identifiers);
+            platform::perf_trace::finish("content inventory derivation",
+                                         content_inv_trace);
         }
         if (remote_inventory) {
             result.physical_identifiers = std::move(*remote_inventory);
@@ -272,7 +279,7 @@ ObserveResult observe(transport::Transport& storage,
             return result;
         }
         if (audit_content_objects_requested) {
-            std::unordered_set<std::string> referenced_content_identifiers;
+            const auto content_inv_trace = platform::perf_trace::begin();
             for (const auto& loaded_commit : loaded->commits) {
                 for (const auto& row : loaded_commit.commit.tree.rows) {
                     if (row.is_directory) {
@@ -283,6 +290,8 @@ ObserveResult observe(transport::Transport& storage,
                     if (referenced_content_identifiers.size() >=
                             maximum_audited_content_object_count &&
                         !referenced_content_identifiers.contains(identifier)) {
+                        platform::perf_trace::finish(
+                            "content inventory derivation", content_inv_trace);
                         return std::unexpected(Error{
                             .code = ErrorCode::LimitExceeded,
                             .detail = "too many referenced content identifiers",
@@ -306,7 +315,14 @@ ObserveResult observe(transport::Transport& storage,
                         return !referenced_content_identifiers.contains(
                             identifier);
                     }));
+            platform::perf_trace::finish("content inventory derivation",
+                                         content_inv_trace);
+            platform::perf_trace::count("content.physical_objects",
+                                        result.content_object_identifiers.size());
+            platform::perf_trace::count("content.referenced_ids",
+                                        referenced_content_identifiers.size());
         }
+        const auto resolution_trace = platform::perf_trace::begin();
         auto resolved =
             loaded->trusted_anchor_ids.empty()
                 ? kasumi::history::resolve_authenticated(loaded->commits,
@@ -315,13 +331,23 @@ ObserveResult observe(transport::Transport& storage,
                       loaded->commits,
                       loaded->marked_heads,
                       loaded->trusted_anchor_ids);
+        platform::perf_trace::finish("history resolution", resolution_trace);
         if (!resolved) {
             return std::unexpected(resolution_error(resolved.error()));
         }
+        const auto validation_trace = platform::perf_trace::begin();
         auto valid = validate_resolution(*resolved, loaded->marked_heads);
+        platform::perf_trace::finish("history validation", validation_trace);
         if (!valid) {
             return std::unexpected(valid.error());
         }
+
+        platform::perf_trace::count("history.reachable_commits",
+                                    loaded->commits.size());
+        platform::perf_trace::count("history.logical_heads",
+                                    resolved->heads.size());
+        platform::perf_trace::count("history.anchors_used",
+                                    loaded->trusted_anchor_ids.size());
 
         result.reachable_commits = std::move(loaded->commits);
         result.authenticated_commit_variants =

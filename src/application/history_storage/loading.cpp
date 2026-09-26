@@ -142,6 +142,7 @@ download_commit_candidate(transport::Transport& storage,
                           const HeadReference& reference,
                           const std::filesystem::path& destination) {
     remove_file(destination);
+    platform::perf_trace::count("commit.individual_get_calls", 1);
     const auto get_trace = platform::perf_trace::begin();
     auto result =
         transport::get(storage, commit_object(layout, reference), destination);
@@ -173,6 +174,7 @@ inspect_marker(transport::Transport& storage,
     const auto path =
         workspace / ("marker-inspect-" + std::to_string(sequence++));
     remove_file(path);
+    platform::perf_trace::count("marker.get_calls", 1);
     const auto get_trace = platform::perf_trace::begin();
     auto fetched =
         transport::get(storage, marker_object(layout, reference), path);
@@ -189,16 +191,23 @@ inspect_marker(transport::Transport& storage,
     remove_file(path);
     if (!bytes) {
         if (bytes.error().code == ErrorCode::LimitExceeded) {
+            platform::perf_trace::count("marker.invalid_count", 1);
             return MarkerState::Invalid;
         }
         return std::unexpected(bytes.error());
     }
+    platform::perf_trace::count("marker.bytes_downloaded", bytes->size());
     if (bytes->size() != marker_size) {
+        platform::perf_trace::count("marker.invalid_count", 1);
         return MarkerState::Invalid;
     }
     const auto decoded = decode_marker(*bytes);
-    return decoded && *decoded == reference ? MarkerState::Valid
-                                            : MarkerState::Invalid;
+    if (decoded && *decoded == reference) {
+        platform::perf_trace::count("marker.authenticated_count", 1);
+        return MarkerState::Valid;
+    }
+    platform::perf_trace::count("marker.invalid_count", 1);
+    return MarkerState::Invalid;
 }
 
 std::expected<MarkerState, Error>
@@ -300,8 +309,16 @@ try_load_variant(transport::Transport& storage,
         remove_file(plaintext);
         return std::unexpected(size_valid.error());
     }
+    const auto auth_trace = platform::perf_trace::begin();
+    platform::perf_trace::count("commit.decrypt_auth_count", 1);
+    std::error_code size_ec;
+    const auto cipher_size = std::filesystem::file_size(ciphertext, size_ec);
+    if (!size_ec) {
+        platform::perf_trace::count("commit.ciphertext_bytes", cipher_size);
+    }
     auto matches = ciphertext_matches(ciphertext, reference.ciphertext_id);
     if (!matches) {
+        platform::perf_trace::finish("commit decrypt/auth", auth_trace);
         remove_file(ciphertext);
         remove_file(plaintext);
         return std::unexpected(matches.error());
@@ -309,11 +326,13 @@ try_load_variant(transport::Transport& storage,
     if (!*matches ||
         !crypto::decrypt_file(
             ciphertext, plaintext, key, crypto::FilePurpose::History)) {
+        platform::perf_trace::finish("commit decrypt/auth", auth_trace);
         return invalid_ciphertext();
     }
 
     auto bytes = read_file(plaintext, history::maximum_commit_plaintext_size);
     if (!bytes) {
+        platform::perf_trace::finish("commit decrypt/auth", auth_trace);
         if (bytes.error().code == ErrorCode::LimitExceeded) {
             return invalid_commit();
         }
@@ -323,21 +342,26 @@ try_load_variant(transport::Transport& storage,
     }
     auto commit = history::deserialize(*bytes);
     if (!commit) {
+        platform::perf_trace::finish("commit decrypt/auth", auth_trace);
         return invalid_commit();
     }
     auto canonical = history::serialize(*commit);
     if (!canonical) {
+        platform::perf_trace::finish("commit decrypt/auth", auth_trace);
         return invalid_commit();
     }
     const bool valid_commit =
         crypto::commit_identifier(key, *canonical) == reference.commit_id &&
         *canonical == *bytes;
+    platform::perf_trace::finish("commit decrypt/auth", auth_trace);
     remove_file(ciphertext);
     remove_file(plaintext);
     if (!valid_commit) {
         return LoadedVariant{.state = VariantState::InvalidCommit,
                              .commit = std::nullopt};
     }
+    platform::perf_trace::count("commit.authenticated_variants", 1);
+    platform::perf_trace::count("commit.plaintext_bytes_authenticated", bytes->size());
     return LoadedVariant{
         .state = VariantState::Valid,
         .commit = history::LoadedCommit{.id = reference.commit_id,
@@ -609,7 +633,15 @@ LoadResult load_impl(transport::Transport& storage,
     if (!inventory) {
         return std::unexpected(inventory.error());
     }
+    std::size_t commit_variant_count = 0;
+    for (const auto& [unused, references] : inventory->commit_variants) {
+        static_cast<void>(unused);
+        commit_variant_count += references.size();
+    }
+    platform::perf_trace::count("commit.variants_observed", commit_variant_count);
+
     if (native_complete_batch) {
+        const auto commit_batch_trace = platform::perf_trace::begin();
         const auto commits_dir = layout.commits_prefix.ends_with('/')
                                      ? layout.commits_prefix.substr(
                                            0, layout.commits_prefix.size() - 1)
@@ -626,10 +658,15 @@ LoadResult load_impl(transport::Transport& storage,
             }
         }
         if (!batch.identifiers.empty()) {
+            platform::perf_trace::count("commit.get_batch_calls", 1);
+            platform::perf_trace::count("commit.get_batch_objects", batch.identifiers.size());
             auto prefetched = transport::get_batch(storage, batch);
+            platform::perf_trace::finish("commit batch fetch", commit_batch_trace);
             if (!prefetched) {
                 return std::unexpected(transport_error(prefetched.error()));
             }
+        } else {
+            platform::perf_trace::finish("commit batch fetch", commit_batch_trace);
         }
     }
     const KnownHistoryAnchor* cached_anchor = nullptr;
@@ -679,6 +716,13 @@ LoadResult load_impl(transport::Transport& storage,
             epoch_anchors.emplace(anchor.commit_id, anchor.height);
         }
     }
+
+    std::size_t marker_variant_count = 0;
+    for (const auto& [commit_id, references] : inventory->marker_variants) {
+        static_cast<void>(commit_id);
+        marker_variant_count += references.size();
+    }
+    platform::perf_trace::count("marker.variants_observed", marker_variant_count);
 
     const auto heads_trace = platform::perf_trace::begin();
     std::map<std::string, std::vector<HeadReference>> marker_candidates;
@@ -937,6 +981,7 @@ LoadResult load_impl(transport::Transport& storage,
     if (*discovered_epoch) {
         result.epoch = **discovered_epoch;
     }
+    platform::perf_trace::count("commit.loaded_logical_commits", loaded.size());
     platform::perf_trace::finish("commit loading", commits_trace);
     return result;
 }
