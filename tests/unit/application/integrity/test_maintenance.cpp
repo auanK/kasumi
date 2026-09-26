@@ -5529,6 +5529,190 @@ TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckCancellationStopsWorkAndClea
     kasumi::platform::cancellation::reset();
 }
 
+struct SnapshotProbeState {
+    std::size_t list_calls = 0;
+    std::function<void(std::size_t call_index)> on_list_finish;
+};
+
+struct SnapshotProbeTransportState {
+    kasumi::transport::Transport* base = nullptr;
+    SnapshotProbeState* probe = nullptr;
+};
+
+kasumi::transport::Transport make_snapshot_probe_transport(
+    SnapshotProbeTransportState& state,
+    kasumi::transport::Transport& base,
+    SnapshotProbeState& probe) {
+    state.base = &base;
+    state.probe = &probe;
+    kasumi::transport::Transport result;
+    result.state = {&state, [](void*) noexcept {}};
+    result.storage.initialize = [](void* ctx) {
+        return kasumi::transport::initialize(*static_cast<SnapshotProbeTransportState*>(ctx)->base);
+    };
+    result.storage.put = [](void* ctx, const std::filesystem::path& src, std::string_view id) {
+        return kasumi::transport::put(*static_cast<SnapshotProbeTransportState*>(ctx)->base, src, id);
+    };
+    result.storage.get = [](void* ctx, std::string_view id, const std::filesystem::path& dst) {
+        return kasumi::transport::get(*static_cast<SnapshotProbeTransportState*>(ctx)->base, id, dst);
+    };
+    result.storage.presence = [](void* ctx, std::string_view id) {
+        return kasumi::transport::presence(*static_cast<SnapshotProbeTransportState*>(ctx)->base, id);
+    };
+    result.storage.list = [](void* ctx) {
+        auto* st = static_cast<SnapshotProbeTransportState*>(ctx);
+        const auto idx = ++st->probe->list_calls;
+        auto res = kasumi::transport::list(*st->base);
+        if (st->probe->on_list_finish) {
+            st->probe->on_list_finish(idx);
+        }
+        return res;
+    };
+    result.storage.list_prefix = [](void* ctx, std::string_view pfx) {
+        return kasumi::transport::list(*static_cast<SnapshotProbeTransportState*>(ctx)->base, pfx);
+    };
+    result.storage.remove = [](void* ctx, std::string_view id) {
+        return kasumi::transport::remove(*static_cast<SnapshotProbeTransportState*>(ctx)->base, id);
+    };
+    return result;
+}
+
+TEST(IntegrityMaintenanceTest, SnapshotCharacterizationUnknownObjectBeforeFirstListFailsClosed) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    const auto alpha = make_commit(0, {}, "alpha.txt", "alpha").value();
+    publish_remote(storage.transport, storage.workspace, alpha);
+    put_content(storage.transport, storage.workspace, "alpha", "alpha");
+
+    const auto storage_root = kasumi::test::workspace_path(storage.workspace, "storage");
+    std::filesystem::create_directories(storage_root / "foreign");
+    {
+        std::ofstream out(storage_root / "foreign" / "intruder.txt");
+        out << "foreign payload";
+    }
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key());
+    ASSERT_FALSE(checked.has_value());
+    EXPECT_EQ(checked.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_NE(checked.error().detail.find("foreign/intruder.txt"), std::string::npos);
+}
+
+TEST(IntegrityMaintenanceTest, SnapshotCharacterizationUnknownObjectInjectedBetweenListsDetectedBySecondListInCurrentHead) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    const auto alpha = make_commit(0, {}, "alpha.txt", "alpha").value();
+    publish_remote(storage.transport, storage.workspace, alpha);
+    put_content(storage.transport, storage.workspace, "alpha", "alpha");
+
+    const auto storage_root = kasumi::test::workspace_path(storage.workspace, "storage");
+
+    SnapshotProbeState probe;
+    probe.on_list_finish = [&](std::size_t call_index) {
+        if (call_index == 1) {
+            std::filesystem::create_directories(storage_root / "foreign");
+            std::ofstream out(storage_root / "foreign" / "intruder.txt");
+            out << "foreign payload";
+        }
+    };
+    SnapshotProbeTransportState probe_state;
+    auto wrapped_transport = make_snapshot_probe_transport(probe_state, storage.transport, probe);
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, wrapped_transport, test_key());
+    EXPECT_EQ(probe.list_calls, 2U);
+    ASSERT_FALSE(checked.has_value());
+    EXPECT_EQ(checked.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_NE(checked.error().detail.find("foreign/intruder.txt"), std::string::npos);
+}
+
+TEST(IntegrityMaintenanceTest, SnapshotCharacterizationCanonicalContentAppearingBetweenListsPassesValidationWithoutAlteringInventory) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    const auto alpha = make_commit(0, {}, "alpha.txt", "alpha").value();
+    publish_remote(storage.transport, storage.workspace, alpha);
+    put_content(storage.transport, storage.workspace, "alpha", "alpha");
+
+    const auto storage_root = kasumi::test::workspace_path(storage.workspace, "storage");
+    const std::string concurrent_content_hash(64, 'e');
+
+    SnapshotProbeState probe;
+    probe.on_list_finish = [&](std::size_t call_index) {
+        if (call_index == 1) {
+            std::ofstream out(storage_root / concurrent_content_hash);
+            out << "concurrently added valid canonical hash object";
+        }
+    };
+    SnapshotProbeTransportState probe_state;
+    auto wrapped_transport = make_snapshot_probe_transport(probe_state, storage.transport, probe);
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, wrapped_transport, test_key());
+    EXPECT_EQ(probe.list_calls, 2U);
+    ASSERT_TRUE(checked.has_value()) << checked.error().detail;
+    EXPECT_EQ(checked->checked_objects, 1U);
+}
+
+TEST(IntegrityMaintenanceTest, SnapshotCharacterizationReferencedContentDeletedAfterFirstListFailsClosedOnPayloadAudit) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    const auto alpha = make_commit(0, {}, "alpha.txt", "alpha").value();
+    publish_remote(storage.transport, storage.workspace, alpha);
+    const auto alpha_content = put_content(storage.transport, storage.workspace, "alpha", "alpha");
+
+    const auto storage_root = kasumi::test::workspace_path(storage.workspace, "storage");
+    const auto content_path = storage_root / alpha_content;
+
+    SnapshotProbeState probe;
+    probe.on_list_finish = [&](std::size_t call_index) {
+        if (call_index == 1) {
+            std::error_code ec;
+            std::filesystem::remove(content_path, ec);
+        }
+    };
+    SnapshotProbeTransportState probe_state;
+    auto wrapped_transport = make_snapshot_probe_transport(probe_state, storage.transport, probe);
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, wrapped_transport, test_key());
+    EXPECT_EQ(probe.list_calls, 2U);
+    ASSERT_FALSE(checked.has_value());
+    EXPECT_EQ(checked.error().code, IntegrityErrorCode::Unrecoverable);
+    EXPECT_NE(checked.error().detail.find("referenced objects missing or corrupted"), std::string::npos);
+}
+
+TEST(IntegrityMaintenanceTest, SnapshotCharacterizationReferencedContentCorruptedAfterFirstListFailsClosedOnPayloadAudit) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    const auto alpha = make_commit(0, {}, "alpha.txt", "alpha").value();
+    publish_remote(storage.transport, storage.workspace, alpha);
+    const auto alpha_content = put_content(storage.transport, storage.workspace, "alpha", "alpha");
+
+    const auto storage_root = kasumi::test::workspace_path(storage.workspace, "storage");
+    const auto content_path = storage_root / alpha_content;
+
+    SnapshotProbeState probe;
+    probe.on_list_finish = [&](std::size_t call_index) {
+        if (call_index == 1) {
+            std::error_code ec;
+            std::filesystem::resize_file(content_path, 0, ec);
+        }
+    };
+    SnapshotProbeTransportState probe_state;
+    auto wrapped_transport = make_snapshot_probe_transport(probe_state, storage.transport, probe);
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, wrapped_transport, test_key());
+    EXPECT_EQ(probe.list_calls, 2U);
+    ASSERT_FALSE(checked.has_value());
+    EXPECT_EQ(checked.error().code, IntegrityErrorCode::Unrecoverable);
+}
+
 } // namespace
 
 
