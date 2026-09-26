@@ -4832,7 +4832,7 @@ TEST(IntegrityMaintenanceTest, RemoveBatchHappyPathQuarantinesAllCandidates) {
     state->copy_supported = true;
     state->copy_batch_supported = true;
     state->put_files_batch_supported = true;
-    state->remove_batch_supported = true;
+    enable_fake_remove_batch(transport, *state);
     enable_fake_physical_hash_batch(transport, *state, 6);
     const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
     auto runtime = runtime_data(workspace);
@@ -4871,7 +4871,7 @@ TEST(IntegrityMaintenanceTest,
     state->copy_supported = true;
     state->copy_batch_supported = true;
     state->put_files_batch_supported = true;
-    state->remove_batch_supported = true;
+    enable_fake_remove_batch(transport, *state);
     state->replace_barrier_after_metadata_verification = true;
     enable_fake_physical_hash_batch(transport, *state, 6);
     const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
@@ -4898,11 +4898,12 @@ TEST(IntegrityMaintenanceTest,
     state->copy_supported = true;
     state->copy_batch_supported = true;
     state->put_files_batch_supported = true;
-    state->remove_batch_supported = true;
+    enable_fake_remove_batch(transport, *state);
     state->remove_batch_failure = kasumi::transport::ErrorCode::Io;
     state->remove_batch_fail_after_items = 4; // 3 succeed, 4th fails
     enable_fake_physical_hash_batch(transport, *state, 6);
-    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    std::ranges::sort(candidates);
     auto runtime = runtime_data(workspace);
     reset_fake_traffic(*state);
 
@@ -4940,7 +4941,7 @@ TEST(IntegrityMaintenanceTest,
     state->copy_supported = true;
     state->copy_batch_supported = true;
     state->put_files_batch_supported = true;
-    state->remove_batch_supported = true;
+    enable_fake_remove_batch(transport, *state);
     enable_fake_physical_hash_batch(transport, *state, 6);
     const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
     // Erase candidate 7 before remove batch executes, so it returns AlreadyAbsent
@@ -4967,6 +4968,7 @@ TEST(IntegrityMaintenanceTest,
     state->copy_supported = true;
     state->copy_batch_supported = true;
     state->put_files_batch_supported = true;
+    enable_fake_remove_batch(transport, *state);
     state->remove_batch_supported = false; // unsupported
     enable_fake_physical_hash_batch(transport, *state, 6);
     const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
@@ -4979,7 +4981,7 @@ TEST(IntegrityMaintenanceTest,
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
     EXPECT_EQ(collected->quarantined_objects, 8U);
     EXPECT_EQ(state->remove_batch_count, 1U); // 1 attempted batch call returned Unsupported
-    EXPECT_EQ(state->remove_count, 8U); // Fallback to 8 sequential removes
+    EXPECT_EQ(state->source_remove_count, 8U); // Fallback to 8 sequential candidate removes
     for (const auto& candidate : candidates) {
         expect_presence(transport, candidate, Presence::Absent);
     }

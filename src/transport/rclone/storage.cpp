@@ -1230,6 +1230,198 @@ RemovalResult rclone_remove(void* context, std::string_view identifier) {
     return Removal::Removed;
 }
 
+RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
+    auto* state = ready_state(context);
+    if (state == nullptr) {
+        return std::unexpected(invalid_context_error());
+    }
+    if (batch.items.empty()) {
+        return RemoveBatchReport{};
+    }
+    if (batch.concurrency == 0) {
+        return std::unexpected(make_error(
+            ErrorCode::InvalidContext,
+            "remove batch concurrency must be positive"));
+    }
+
+    nlohmann::json inputs = nlohmann::json::array();
+    std::unordered_map<std::string, std::size_t> remote_to_index;
+    for (std::size_t index = 0; index < batch.items.size(); ++index) {
+        const auto& identifier = batch.items[index].identifier;
+        if (!valid_identifier(identifier)) {
+            return std::unexpected(invalid_identifier_error());
+        }
+        const auto remote = object_remote(*state, identifier);
+        if (!remote_to_index.emplace(remote, index).second) {
+            return std::unexpected(invalid_identifier_error());
+        }
+        inputs.push_back(nlohmann::json{
+            {"_path", "operations/deletefile"},
+            {"fs", remote_fs(*state)},
+            {"remote", remote},
+        });
+    }
+
+    platform::perf_trace::count("rclone.remove_batch_inputs_submitted",
+                                batch.items.size());
+    platform::perf_trace::count("rclone.remove_batch_concurrency_submitted",
+                                batch.concurrency);
+    const auto trace = platform::perf_trace::begin();
+    const auto response = request_json(
+        *state,
+        "job/batch",
+        nlohmann::json{{"inputs", inputs}, {"concurrency", batch.concurrency}},
+        maximum_response_size,
+        transfer_timeout);
+    platform::perf_trace::finish("rclone remove batch", trace);
+    if (!response) {
+        if (unsupported_job_batch_endpoint(response.error())) {
+            platform::perf_trace::count(
+                "rclone.remove_batch_unsupported_before_submission", 1);
+            return std::unexpected(make_error(
+                ErrorCode::Unsupported,
+                "rclone does not support job/batch",
+                response.error().native_code));
+        }
+        platform::perf_trace::count("rclone.remove_batch_transport_errors", 1);
+        return std::unexpected(response.error());
+    }
+
+    if (!response->is_object() || response->contains("error") ||
+        !response->contains("results") ||
+        !response->at("results").is_array() ||
+        response->at("results").size() != batch.items.size()) {
+        return std::unexpected(make_error(
+            ErrorCode::ProtocolFailure,
+            "invalid or incomplete remove job/batch response"));
+    }
+
+    RemoveBatchReport report;
+    report.items.resize(batch.items.size());
+    for (std::size_t index = 0; index < batch.items.size(); ++index) {
+        report.items[index].identifier = batch.items[index].identifier;
+    }
+
+    std::vector<bool> matched(batch.items.size(), false);
+    for (std::size_t index = 0; index < batch.items.size(); ++index) {
+        const auto& result = response->at("results").at(index);
+        if (!result.is_object()) {
+            return std::unexpected(make_error(
+                ErrorCode::ProtocolFailure,
+                "invalid remove job/batch subresult"));
+        }
+        if (result.contains("path") &&
+            (!result.at("path").is_string() ||
+             result.at("path") != "operations/deletefile")) {
+            return std::unexpected(make_error(
+                ErrorCode::ProtocolFailure,
+                "remove job/batch result path does not match input"));
+        }
+
+        std::size_t target_index = index;
+        if (result.contains("input")) {
+            const auto& input_echo = result.at("input");
+            if (!input_echo.is_object() || !input_echo.contains("remote") ||
+                !input_echo.at("remote").is_string()) {
+                return std::unexpected(make_error(
+                    ErrorCode::ProtocolFailure,
+                    "remove job/batch result input does not match request"));
+            }
+            const auto remote_echo = input_echo.at("remote").get<std::string>();
+            auto it = remote_to_index.find(remote_echo);
+            if (it == remote_to_index.end()) {
+                return std::unexpected(make_error(
+                    ErrorCode::ProtocolFailure,
+                    "unknown identifier in remove job/batch result"));
+            }
+            target_index = it->second;
+        }
+
+        if (matched[target_index]) {
+            return std::unexpected(make_error(
+                ErrorCode::ProtocolFailure,
+                "duplicate item in remove job/batch response"));
+        }
+        matched[target_index] = true;
+
+        bool has_status = result.contains("status");
+        int status = 200;
+        if (has_status) {
+            if (!result.at("status").is_number_integer()) {
+                return std::unexpected(make_error(
+                    ErrorCode::ProtocolFailure,
+                    "invalid remove job/batch result status"));
+            }
+            if (result.at("status").is_number_unsigned()) {
+                const auto val = result.at("status").get<std::uint64_t>();
+                if (val < 100 || val > 599) {
+                    return std::unexpected(make_error(
+                        ErrorCode::ProtocolFailure,
+                        "out-of-range remove job/batch result status"));
+                }
+                status = static_cast<int>(val);
+            } else {
+                const auto val = result.at("status").get<std::int64_t>();
+                if (val < 100 || val > 599) {
+                    return std::unexpected(make_error(
+                        ErrorCode::ProtocolFailure,
+                        "out-of-range remove job/batch result status"));
+                }
+                status = static_cast<int>(val);
+            }
+        }
+
+        std::string err_msg;
+        bool has_error = result.contains("error");
+        if (has_error) {
+            if (!result.at("error").is_string()) {
+                return std::unexpected(make_error(
+                    ErrorCode::ProtocolFailure,
+                    "invalid remove job/batch error result"));
+            }
+            err_msg = result.at("error").get<std::string>();
+        }
+
+        if (status == 404 || (has_error && (err_msg.find("not found") != std::string::npos ||
+                                            err_msg.find("directory not found") != std::string::npos))) {
+            report.items[target_index].result = Removal::AlreadyAbsent;
+        } else if (status >= 200 && status < 300 && !has_error) {
+            report.items[target_index].result = Removal::Removed;
+        } else {
+            report.items[target_index].result = std::unexpected(make_error(
+                ErrorCode::ProtocolFailure,
+                err_msg.empty() ? "remote remove failed" : err_msg,
+                status));
+        }
+    }
+
+    for (bool m : matched) {
+        if (!m) {
+            return std::unexpected(make_error(
+                ErrorCode::ProtocolFailure,
+                "missing item in remove job/batch response"));
+        }
+    }
+
+    std::size_t removed_count = 0;
+    std::size_t failed_count = 0;
+    for (const auto& item : report.items) {
+        if (item.result.has_value()) {
+            if (*item.result == Removal::Removed) {
+                ++removed_count;
+            }
+        } else {
+            ++failed_count;
+        }
+    }
+    if (failed_count > 0) {
+        platform::perf_trace::count("rclone.remove_batch_failures", 1);
+    }
+    platform::perf_trace::count("rclone.remove_batch_reported_successes",
+                                removed_count);
+    return report;
+}
+
 } // namespace
 
 ControlReadBatchResponse
@@ -1459,6 +1651,7 @@ StorageOperations make_storage_operations() noexcept {
         .physical_hash_batch = rclone_physical_hash_batch,
         .control_read_batch = rclone_control_read_batch,
         .remove = rclone_remove,
+        .remove_batch = rclone_remove_batch,
         .physical_hash_batch_min_objects = 6,
     };
 }

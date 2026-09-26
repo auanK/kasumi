@@ -835,7 +835,7 @@ inline kasumi::transport::RemoveBatchResult fake_remove_batch(
     for (std::size_t index = 0; index < batch.items.size(); ++index) {
         if (state->remove_batch_failure &&
             state->remove_batch_fail_after_items != 0 &&
-            index + 1 == state->remove_batch_fail_after_items) {
+            index + 1 >= state->remove_batch_fail_after_items) {
             report.items.push_back(kasumi::transport::RemoveBatchItemResult{
                 .identifier = batch.items[index].identifier,
                 .result = std::unexpected(kasumi::transport::Error{
@@ -1013,6 +1013,13 @@ kasumi::transport::ControlReadBatchResponse fake_control_read_batch(
     return result;
 }
 
+[[maybe_unused]] inline void enable_fake_remove_batch(
+    kasumi::transport::Transport& transport,
+    FakeState& state) {
+    state.remove_batch_supported = true;
+    transport.storage.remove_batch = fake_remove_batch;
+}
+
 [[maybe_unused]] inline void enable_fake_physical_hash_batch(
     kasumi::transport::Transport& transport,
     FakeState& state,
@@ -1042,7 +1049,7 @@ make_fake_transport(FakeState*& state) {
                 .physical_hash_batch = fake_physical_hash_batch,
                 .control_read_batch = fake_control_read_batch,
                 .remove = fake_remove,
-                .remove_batch = fake_remove_batch,
+                .remove_batch = nullptr,
             },
     };
 }

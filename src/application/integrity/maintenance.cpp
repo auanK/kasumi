@@ -1836,7 +1836,41 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                     "candidate metadata was not verified",
                                     item.source_identifier));
                             }
+                        }
 
+                        if (storage.storage.remove_batch == nullptr) {
+                            for (auto& item : batch_items) {
+                                platform::perf_trace::count(
+                                    "gc.pre_remove_barrier_verifications", 1);
+                                const auto before_remove_barrier_trace =
+                                    platform::perf_trace::begin();
+                                auto owned = history_storage::maintenance_protocol::
+                                    verify_registration(*barrier);
+                                platform::perf_trace::finish(
+                                    "gc candidate pre-remove barrier verification",
+                                    before_remove_barrier_trace);
+                                if (!owned) {
+                                    return std::unexpected(protocol_error(owned.error()));
+                                }
+
+                                platform::perf_trace::count("gc.source_removals", 1);
+                                const auto remove_trace = platform::perf_trace::begin();
+                                auto removed = transport::remove(storage, item.source_identifier);
+                                platform::perf_trace::finish(
+                                    "gc candidate remove", remove_trace);
+                                if (!removed) {
+                                    return std::unexpected(transport_error(
+                                        removed.error(), item.source_identifier));
+                                }
+                                if (*removed == transport::Removal::Removed) {
+                                    item.state = CandidateProcessingState::Removed;
+                                    ++result.quarantined_objects;
+                                    platform::perf_trace::count("gc.candidates_quarantined", 1);
+                                } else if (*removed == transport::Removal::AlreadyAbsent) {
+                                    platform::perf_trace::count("gc.source_removals_already_absent", 1);
+                                }
+                            }
+                        } else {
                             platform::perf_trace::count(
                                 "gc.pre_remove_barrier_verifications", 1);
                             const auto before_remove_barrier_trace =
@@ -1850,19 +1884,100 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                 return std::unexpected(protocol_error(owned.error()));
                             }
 
-                            platform::perf_trace::count("gc.source_removals", 1);
-                            const auto remove_trace = platform::perf_trace::begin();
-                            auto removed = transport::remove(storage, item.source_identifier);
-                            platform::perf_trace::finish(
-                                "gc candidate remove", remove_trace);
-                            if (!removed) {
-                                return std::unexpected(transport_error(
-                                    removed.error(), item.source_identifier));
+                            transport::RemoveBatch remove_request{
+                                .items = {},
+                                .concurrency = source_removal_concurrency,
+                            };
+                            remove_request.items.reserve(batch_items.size());
+                            for (const auto& item : batch_items) {
+                                remove_request.items.push_back({.identifier = item.source_identifier});
                             }
-                            if (*removed == transport::Removal::Removed) {
-                                item.state = CandidateProcessingState::Removed;
-                                ++result.quarantined_objects;
-                                platform::perf_trace::count("gc.candidates_quarantined", 1);
+
+                            platform::perf_trace::count("gc.remove_batch_calls", 1);
+                            platform::perf_trace::count(
+                                "gc.remove_batch_objects", batch_items.size());
+                            platform::perf_trace::count(
+                                "gc.remove_batch_concurrency", source_removal_concurrency);
+
+                            const auto remove_batch_trace = platform::perf_trace::begin();
+                            auto batch_removed = transport::remove_batch(
+                                storage, remove_request);
+                            platform::perf_trace::finish(
+                                "gc candidate remove batch", remove_batch_trace);
+
+                            if (batch_removed) {
+                                std::optional<Error> first_error;
+                                for (const auto& item_res : batch_removed->items) {
+                                    auto it = std::ranges::find_if(
+                                        batch_items, [&](const CandidateItem& ci) {
+                                            return ci.source_identifier == item_res.identifier;
+                                        });
+                                    if (it == batch_items.end()) {
+                                        return std::unexpected(make_error(
+                                            ErrorCode::IntegrityFailure,
+                                            "unknown identifier in remove batch response",
+                                            item_res.identifier));
+                                    }
+                                    if (item_res.result.has_value()) {
+                                        if (*item_res.result == transport::Removal::Removed) {
+                                            it->state = CandidateProcessingState::Removed;
+                                            ++result.quarantined_objects;
+                                            platform::perf_trace::count("gc.candidates_quarantined", 1);
+                                            platform::perf_trace::count("gc.source_removals", 1);
+                                        } else if (*item_res.result == transport::Removal::AlreadyAbsent) {
+                                            platform::perf_trace::count("gc.source_removals_already_absent", 1);
+                                        }
+                                    } else {
+                                        platform::perf_trace::count("gc.remove_batch_failures", 1);
+                                        if (!first_error) {
+                                            first_error = transport_error(
+                                                item_res.result.error(), item_res.identifier);
+                                        }
+                                    }
+                                }
+                                if (first_error) {
+                                    return std::unexpected(*first_error);
+                                }
+                            } else if (batch_removed.error().code == transport::ErrorCode::Unsupported) {
+                                platform::perf_trace::count("gc.remove_batch_unsupported", 1);
+                                platform::perf_trace::count("gc.remove_batch_fallback_sequential", 1);
+                                for (std::size_t i = 0; i < batch_items.size(); ++i) {
+                                    auto& item = batch_items[i];
+                                    if (i > 0) {
+                                        platform::perf_trace::count(
+                                            "gc.pre_remove_barrier_verifications", 1);
+                                        const auto seq_barrier_trace =
+                                            platform::perf_trace::begin();
+                                        auto seq_owned = history_storage::maintenance_protocol::
+                                            verify_registration(*barrier);
+                                        platform::perf_trace::finish(
+                                            "gc candidate pre-remove barrier verification",
+                                            seq_barrier_trace);
+                                        if (!seq_owned) {
+                                            return std::unexpected(protocol_error(seq_owned.error()));
+                                        }
+                                    }
+                                    platform::perf_trace::count("gc.source_removals", 1);
+                                    const auto remove_trace = platform::perf_trace::begin();
+                                    auto removed = transport::remove(storage, item.source_identifier);
+                                    platform::perf_trace::finish(
+                                        "gc candidate remove", remove_trace);
+                                    if (!removed) {
+                                        return std::unexpected(transport_error(
+                                            removed.error(), item.source_identifier));
+                                    }
+                                    if (*removed == transport::Removal::Removed) {
+                                        item.state = CandidateProcessingState::Removed;
+                                        ++result.quarantined_objects;
+                                        platform::perf_trace::count("gc.candidates_quarantined", 1);
+                                    } else if (*removed == transport::Removal::AlreadyAbsent) {
+                                        platform::perf_trace::count("gc.source_removals_already_absent", 1);
+                                    }
+                                }
+                            } else {
+                                platform::perf_trace::count("gc.remove_batch_failures", 1);
+                                platform::perf_trace::count("gc.remove_batch_ambiguous", 1);
+                                return std::unexpected(transport_error(batch_removed.error()));
                             }
                         }
                     }
