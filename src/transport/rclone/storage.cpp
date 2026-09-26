@@ -219,6 +219,35 @@ bool unsupported_job_batch_endpoint(const Error& error) noexcept {
             error.message.find("method not found") != std::string::npos);
 }
 
+std::expected<int, Error> parse_job_batch_status(
+    const nlohmann::json& status_json,
+    std::string_view operation_name) {
+    if (!status_json.is_number_integer()) {
+        return std::unexpected(make_error(
+            ErrorCode::ProtocolFailure,
+            std::string("invalid ") + std::string(operation_name) + " job/batch result status"));
+    }
+    std::int64_t status = 0;
+    if (status_json.is_number_unsigned()) {
+        const auto val = status_json.get<std::uint64_t>();
+        if (val < 100 || val > 599) {
+            return std::unexpected(make_error(
+                ErrorCode::ProtocolFailure,
+                std::string("out-of-range ") + std::string(operation_name) + " job/batch result status"));
+        }
+        status = static_cast<std::int64_t>(val);
+    } else {
+        const auto val = status_json.get<std::int64_t>();
+        if (val < 100 || val > 599) {
+            return std::unexpected(make_error(
+                ErrorCode::ProtocolFailure,
+                std::string("out-of-range ") + std::string(operation_name) + " job/batch result status"));
+        }
+        status = val;
+    }
+    return static_cast<int>(status);
+}
+
 Result parse_copy_batch_response(const nlohmann::json& response,
                                  const nlohmann::json& inputs) {
     if (!response.is_object() || response.contains("error") ||
@@ -260,30 +289,11 @@ Result parse_copy_batch_response(const nlohmann::json& response,
 
         bool item_failed = false;
         if (result.contains("status")) {
-            if (!result.at("status").is_number_integer()) {
-                return std::unexpected(make_error(
-                    ErrorCode::ProtocolFailure,
-                    "invalid copy job/batch result status"));
+            auto parsed_status = parse_job_batch_status(result.at("status"), "copy");
+            if (!parsed_status) {
+                return std::unexpected(parsed_status.error());
             }
-            int status = 0;
-            if (result.at("status").is_number_unsigned()) {
-                const auto value = result.at("status").get<std::uint64_t>();
-                if (value < 100 || value > 599) {
-                    return std::unexpected(make_error(
-                        ErrorCode::ProtocolFailure,
-                        "out-of-range copy job/batch result status"));
-                }
-                status = static_cast<int>(value);
-            } else {
-                const auto value = result.at("status").get<std::int64_t>();
-                if (value < 100 || value > 599) {
-                    return std::unexpected(make_error(
-                        ErrorCode::ProtocolFailure,
-                        "out-of-range copy job/batch result status"));
-                }
-                status = static_cast<int>(value);
-            }
-            item_failed = status < 200 || status >= 300;
+            item_failed = *parsed_status < 200 || *parsed_status >= 300;
         }
         if (result.contains("error")) {
             if (!result.at("error").is_string() ||
@@ -1344,31 +1354,13 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
         }
         matched[target_index] = true;
 
-        bool has_status = result.contains("status");
         int status = 200;
-        if (has_status) {
-            if (!result.at("status").is_number_integer()) {
-                return std::unexpected(make_error(
-                    ErrorCode::ProtocolFailure,
-                    "invalid remove job/batch result status"));
+        if (result.contains("status")) {
+            auto parsed_status = parse_job_batch_status(result.at("status"), "remove");
+            if (!parsed_status) {
+                return std::unexpected(parsed_status.error());
             }
-            if (result.at("status").is_number_unsigned()) {
-                const auto val = result.at("status").get<std::uint64_t>();
-                if (val < 100 || val > 599) {
-                    return std::unexpected(make_error(
-                        ErrorCode::ProtocolFailure,
-                        "out-of-range remove job/batch result status"));
-                }
-                status = static_cast<int>(val);
-            } else {
-                const auto val = result.at("status").get<std::int64_t>();
-                if (val < 100 || val > 599) {
-                    return std::unexpected(make_error(
-                        ErrorCode::ProtocolFailure,
-                        "out-of-range remove job/batch result status"));
-                }
-                status = static_cast<int>(val);
-            }
+            status = *parsed_status;
         }
 
         std::string err_msg;

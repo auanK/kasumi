@@ -1457,6 +1457,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                         }
 
                         if (!to_batch_verify.empty()) {
+                            bool used_batch_verification = false;
                             if (transport::prefers_physical_hash_batch(
                                     storage, to_batch_verify.size())) {
                                 transport::PhysicalHashBatchRequest request{
@@ -1481,6 +1482,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                     "gc candidate batch physical hash verification",
                                     batch_verify_trace);
                                 if (batch_result) {
+                                    used_batch_verification = true;
                                     platform::perf_trace::count("gc.batch_verify_supported", 1);
                                     const auto has = [](const std::vector<std::string>& list,
                                                         const std::string& val) {
@@ -1501,55 +1503,13 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                 } else if (batch_result.error().code ==
                                            transport::ErrorCode::Unsupported) {
                                     platform::perf_trace::count("gc.batch_verify_unsupported", 1);
-                                    for (auto* item : to_batch_verify) {
-                                        platform::perf_trace::count("gc.individual_destination_hash_attempts", 1);
-                                        const auto dest_hash_trace =
-                                            platform::perf_trace::begin();
-                                        auto dest_hash = transport::physical_hash(
-                                            storage, item->quarantine_identifier, "sha256");
-                                        platform::perf_trace::finish(
-                                            "verified copy destination physical hash",
-                                            dest_hash_trace);
-                                        if (dest_hash) {
-                                            if (!is_hex_sha256(*dest_hash) ||
-                                                *dest_hash != item->expected_physical_hash) {
-                                                item->state = CandidateProcessingState::Failed;
-                                                platform::perf_trace::count("gc.batch_verify_failures", 1);
-                                            } else {
-                                                item->state = CandidateProcessingState::Verified;
-                                                platform::perf_trace::count(
-                                                    "verified copy native copy verifications");
-                                                platform::perf_trace::count("gc.candidates_verified", 1);
-                                            }
-                                        } else if (dest_hash.error().code ==
-                                                   transport::ErrorCode::Unsupported) {
-                                            auto verified = history_storage::
-                                                maintenance_protocol::verify_destination_via_workspace(
-                                                    storage,
-                                                    item->quarantine_identifier,
-                                                    item->expected_physical_hash,
-                                                    workspace_root);
-                                            if (verified) {
-                                                item->state = CandidateProcessingState::Verified;
-                                                platform::perf_trace::count(
-                                                    "verified copy native copy verifications");
-                                                platform::perf_trace::count("gc.candidates_verified", 1);
-                                            } else {
-                                                item->state = CandidateProcessingState::Failed;
-                                                platform::perf_trace::count("gc.batch_verify_failures", 1);
-                                            }
-                                        } else {
-                                            platform::perf_trace::count("gc.batch_verify_failures", 1);
-                                            return std::unexpected(transport_error(
-                                                dest_hash.error(), item->quarantine_identifier));
-                                        }
-                                    }
                                 } else {
                                     platform::perf_trace::count("gc.batch_verify_failures", 1);
                                     return std::unexpected(
                                         transport_error(batch_result.error()));
                                 }
-                            } else {
+                            }
+                            if (!used_batch_verification) {
                                 for (auto* item : to_batch_verify) {
                                     platform::perf_trace::count("gc.individual_destination_hash_attempts", 1);
                                     const auto dest_hash_trace =
@@ -1588,14 +1548,13 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                             platform::perf_trace::count("gc.batch_verify_failures", 1);
                                         }
                                     } else {
-                                    platform::perf_trace::count("gc.batch_verify_failures", 1);
-                                    return std::unexpected(transport_error(
-                                        dest_hash.error(), item->quarantine_identifier));
+                                        platform::perf_trace::count("gc.batch_verify_failures", 1);
+                                        return std::unexpected(transport_error(
+                                            dest_hash.error(), item->quarantine_identifier));
+                                    }
                                 }
                             }
                         }
-
-                    }
                     }
 
                     // Phase 3: Metadata Publication and Removal
@@ -1838,50 +1797,57 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                             }
                         }
 
-                        if (storage.storage.remove_batch == nullptr) {
-                            for (auto& item : batch_items) {
-                                platform::perf_trace::count(
-                                    "gc.pre_remove_barrier_verifications", 1);
-                                const auto before_remove_barrier_trace =
-                                    platform::perf_trace::begin();
-                                auto owned = history_storage::maintenance_protocol::
-                                    verify_registration(*barrier);
-                                platform::perf_trace::finish(
-                                    "gc candidate pre-remove barrier verification",
-                                    before_remove_barrier_trace);
-                                if (!owned) {
-                                    return std::unexpected(protocol_error(owned.error()));
-                                }
-
-                                platform::perf_trace::count("gc.source_removals", 1);
-                                const auto remove_trace = platform::perf_trace::begin();
-                                auto removed = transport::remove(storage, item.source_identifier);
-                                platform::perf_trace::finish(
-                                    "gc candidate remove", remove_trace);
-                                if (!removed) {
-                                    return std::unexpected(transport_error(
-                                        removed.error(), item.source_identifier));
-                                }
-                                if (*removed == transport::Removal::Removed) {
-                                    item.state = CandidateProcessingState::Removed;
-                                    ++result.quarantined_objects;
-                                    platform::perf_trace::count("gc.candidates_quarantined", 1);
-                                } else if (*removed == transport::Removal::AlreadyAbsent) {
-                                    platform::perf_trace::count("gc.source_removals_already_absent", 1);
-                                }
-                            }
-                        } else {
+                        auto verify_pre_remove_barrier = [&]() -> std::expected<void, Error> {
                             platform::perf_trace::count(
                                 "gc.pre_remove_barrier_verifications", 1);
-                            const auto before_remove_barrier_trace =
-                                platform::perf_trace::begin();
+                            const auto trace = platform::perf_trace::begin();
                             auto owned = history_storage::maintenance_protocol::
                                 verify_registration(*barrier);
                             platform::perf_trace::finish(
                                 "gc candidate pre-remove barrier verification",
-                                before_remove_barrier_trace);
+                                trace);
                             if (!owned) {
                                 return std::unexpected(protocol_error(owned.error()));
+                            }
+                            return {};
+                        };
+
+                        auto remove_candidate_sequential =
+                            [&](CandidateItem& item) -> std::expected<void, Error> {
+                            platform::perf_trace::count("gc.source_removals", 1);
+                            const auto remove_trace = platform::perf_trace::begin();
+                            auto removed = transport::remove(storage, item.source_identifier);
+                            platform::perf_trace::finish(
+                                "gc candidate remove", remove_trace);
+                            if (!removed) {
+                                return std::unexpected(transport_error(
+                                    removed.error(), item.source_identifier));
+                            }
+                            if (*removed == transport::Removal::Removed) {
+                                item.state = CandidateProcessingState::Removed;
+                                ++result.quarantined_objects;
+                                platform::perf_trace::count("gc.candidates_quarantined", 1);
+                            } else if (*removed == transport::Removal::AlreadyAbsent) {
+                                platform::perf_trace::count("gc.source_removals_already_absent", 1);
+                            }
+                            return {};
+                        };
+
+                        if (storage.storage.remove_batch == nullptr) {
+                            for (auto& item : batch_items) {
+                                if (auto barrier_check = verify_pre_remove_barrier();
+                                    !barrier_check) {
+                                    return std::unexpected(barrier_check.error());
+                                }
+                                if (auto removed = remove_candidate_sequential(item);
+                                    !removed) {
+                                    return std::unexpected(removed.error());
+                                }
+                            }
+                        } else {
+                            if (auto barrier_check = verify_pre_remove_barrier();
+                                !barrier_check) {
+                                return std::unexpected(barrier_check.error());
                             }
 
                             transport::RemoveBatch remove_request{
@@ -1944,34 +1910,14 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                 for (std::size_t i = 0; i < batch_items.size(); ++i) {
                                     auto& item = batch_items[i];
                                     if (i > 0) {
-                                        platform::perf_trace::count(
-                                            "gc.pre_remove_barrier_verifications", 1);
-                                        const auto seq_barrier_trace =
-                                            platform::perf_trace::begin();
-                                        auto seq_owned = history_storage::maintenance_protocol::
-                                            verify_registration(*barrier);
-                                        platform::perf_trace::finish(
-                                            "gc candidate pre-remove barrier verification",
-                                            seq_barrier_trace);
-                                        if (!seq_owned) {
-                                            return std::unexpected(protocol_error(seq_owned.error()));
+                                        if (auto barrier_check = verify_pre_remove_barrier();
+                                            !barrier_check) {
+                                            return std::unexpected(barrier_check.error());
                                         }
                                     }
-                                    platform::perf_trace::count("gc.source_removals", 1);
-                                    const auto remove_trace = platform::perf_trace::begin();
-                                    auto removed = transport::remove(storage, item.source_identifier);
-                                    platform::perf_trace::finish(
-                                        "gc candidate remove", remove_trace);
-                                    if (!removed) {
-                                        return std::unexpected(transport_error(
-                                            removed.error(), item.source_identifier));
-                                    }
-                                    if (*removed == transport::Removal::Removed) {
-                                        item.state = CandidateProcessingState::Removed;
-                                        ++result.quarantined_objects;
-                                        platform::perf_trace::count("gc.candidates_quarantined", 1);
-                                    } else if (*removed == transport::Removal::AlreadyAbsent) {
-                                        platform::perf_trace::count("gc.source_removals_already_absent", 1);
+                                    if (auto removed = remove_candidate_sequential(item);
+                                        !removed) {
+                                        return std::unexpected(removed.error());
                                     }
                                 }
                             } else {
