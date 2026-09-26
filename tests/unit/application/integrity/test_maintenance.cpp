@@ -4987,4 +4987,126 @@ TEST(IntegrityMaintenanceTest,
     }
 }
 
+TEST(IntegrityMaintenanceTest,
+     AnalysisOnlyEmitsFinalizingExactlyOnceAndNoCheckingQuarantine) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-analysis-only-progress");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+    publish_remote(
+        transport, workspace, kasumi::history::make_empty_bootstrap().value());
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    state->hide_probe_listing = true;
+
+    std::vector<kasumi::application::GarbageCollectProgress> events;
+    auto on_progress = [&](const kasumi::application::GarbageCollectProgress& p) {
+        events.push_back(p);
+    };
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8, 8, on_progress);
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_TRUE(collected->analysis_only);
+
+    std::size_t finalizing_count = 0;
+    std::size_t checking_quarantine_count = 0;
+    std::size_t applying_count = 0;
+    for (const auto& ev : events) {
+        if (ev.stage == kasumi::application::GarbageCollectStage::Finalizing) {
+            ++finalizing_count;
+        } else if (ev.stage == kasumi::application::GarbageCollectStage::CheckingQuarantine) {
+            ++checking_quarantine_count;
+        } else if (ev.stage == kasumi::application::GarbageCollectStage::Applying) {
+            ++applying_count;
+        }
+    }
+
+    EXPECT_EQ(checking_quarantine_count, 0U);
+    EXPECT_EQ(finalizing_count, 1U);
+    EXPECT_EQ(applying_count, 0U);
+}
+
+TEST(IntegrityMaintenanceTest,
+     PurgeOnlyEmitsApplyingBeforeFirstPurgeMutation) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    const auto commit = kasumi::history::make_empty_bootstrap().value();
+    const auto first = add_variant(storage, commit);
+    const auto second = add_variant(storage, commit);
+    ASSERT_NE(first, second);
+    const auto redundant = std::min(first, second);
+    const auto head = std::max(first, second);
+    ASSERT_EQ(
+        kasumi::transport::remove(storage.transport, marker_path(redundant))
+            .value(),
+        kasumi::transport::Removal::Removed);
+    const auto quarantined =
+        protocol::quarantine_identifier(test_layout(), object_path(redundant))
+            .value();
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, storage.transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    const auto now = kasumi::platform::clock::unix_seconds();
+    ASSERT_TRUE(now.has_value()) << now.error();
+    const auto aged = protocol::record_quarantine(
+        storage.transport,
+        quarantined,
+        *now - protocol::quarantine_retention_seconds - 1,
+        test_key(),
+        kasumi::test::workspace_root(storage.workspace));
+    ASSERT_TRUE(aged.has_value()) << aged.error().detail;
+
+    bool applying_emitted = false;
+    bool metadata_present_when_applying = false;
+    std::size_t applying_count = 0;
+
+    auto on_progress = [&](const kasumi::application::GarbageCollectProgress& p) {
+        if (p.stage == kasumi::application::GarbageCollectStage::Applying) {
+            ++applying_count;
+            applying_emitted = true;
+            auto pres = kasumi::transport::presence(storage.transport, aged->metadata_identifier);
+            if (pres && *pres == Presence::Present) {
+                metadata_present_when_applying = true;
+            }
+        }
+    };
+
+    const auto purged = kasumi::application::integrity::garbage_collect(
+        runtime, storage.transport, test_key(), 8, 8, 8, on_progress);
+    ASSERT_TRUE(purged.has_value()) << purged.error().detail;
+    EXPECT_EQ(purged->candidate_objects, 0U);
+    EXPECT_EQ(purged->purged_objects, 1U);
+
+    EXPECT_TRUE(applying_emitted);
+    EXPECT_EQ(applying_count, 1U);
+    EXPECT_TRUE(metadata_present_when_applying);
+}
+
+TEST(IntegrityMaintenanceTest,
+     CZeroWithoutPurgeDoesNotEmitApplying) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    const auto commit = kasumi::history::make_empty_bootstrap().value();
+    const auto head = add_variant(storage, commit);
+
+    std::size_t applying_count = 0;
+    auto on_progress = [&](const kasumi::application::GarbageCollectProgress& p) {
+        if (p.stage == kasumi::application::GarbageCollectStage::Applying) {
+            ++applying_count;
+        }
+    };
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, storage.transport, test_key(), 8, 8, 8, on_progress);
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 0U);
+    EXPECT_EQ(collected->purged_objects, 0U);
+    EXPECT_EQ(applying_count, 0U);
+}
+
 } // namespace
