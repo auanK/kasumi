@@ -1599,31 +1599,21 @@ TEST(HistoryStorageTest, DemonstratesCurrentHistoryLoadingIsSerialOrConcurrent) 
 
     {
         std::unique_lock lock(gates.mutex);
-        gates.cv.wait(lock, [&] { return gates.batch_entered.load(); });
+        gates.cv.wait(lock, [&] {
+            return gates.batch_entered.load() &&
+                   gates.epoch_entered.load() &&
+                   gates.marker_entered.load();
+        });
     }
     EXPECT_TRUE(gates.batch_entered);
-    EXPECT_FALSE(gates.epoch_entered);
-    EXPECT_FALSE(gates.marker_entered);
+    EXPECT_TRUE(gates.epoch_entered);
+    EXPECT_TRUE(gates.marker_entered);
+    EXPECT_FALSE(gates.release_batch);
+    EXPECT_FALSE(gates.release_epoch);
+    EXPECT_FALSE(gates.release_marker);
 
     gates.release_batch = true;
-    gates.cv.notify_all();
-
-    {
-        std::unique_lock lock(gates.mutex);
-        gates.cv.wait(lock, [&] { return gates.epoch_entered.load(); });
-    }
-    EXPECT_TRUE(gates.epoch_entered);
-    EXPECT_FALSE(gates.marker_entered);
-
     gates.release_epoch = true;
-    gates.cv.notify_all();
-
-    {
-        std::unique_lock lock(gates.mutex);
-        gates.cv.wait(lock, [&] { return gates.marker_entered.load(); });
-    }
-    EXPECT_TRUE(gates.marker_entered);
-
     gates.release_marker = true;
     gates.cv.notify_all();
 
@@ -1631,8 +1621,9 @@ TEST(HistoryStorageTest, DemonstratesCurrentHistoryLoadingIsSerialOrConcurrent) 
     active_gates = nullptr;
 
     ASSERT_TRUE(loaded.has_value()) << loaded.error().detail;
-    EXPECT_EQ(gates.peak_in_flight, 1U);
+    EXPECT_EQ(gates.peak_in_flight, 3U);
 }
+
 
 TEST(HistoryStorageTest, NativeCompletePathOverlapsBatchEpochAndMarkerWithPeakThree) {
     auto fixture = make_test_history_fixture("history-concurrent-peak");
