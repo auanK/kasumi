@@ -186,6 +186,9 @@ struct FakeState {
     std::size_t put_files_batch_count = 0;
     std::size_t put_files_batch_item_count = 0;
     std::size_t put_files_batch_concurrency = 0;
+    std::size_t remove_batch_count = 0;
+    std::size_t remove_batch_item_count = 0;
+    std::size_t remove_batch_concurrency = 0;
     std::size_t commit_put_count = 0;
     std::size_t marker_put_count = 0;
     std::size_t commit_get_count = 0;
@@ -228,6 +231,9 @@ struct FakeState {
     bool put_files_batch_supported = false;
     std::optional<kasumi::transport::ErrorCode> put_files_batch_failure;
     std::size_t put_files_batch_fail_after_items = 0;
+    bool remove_batch_supported = false;
+    std::optional<kasumi::transport::ErrorCode> remove_batch_failure;
+    std::size_t remove_batch_fail_after_items = 0;
     bool fail_commit_get = false;
     bool fail_content_get = false;
     bool fail_marker_put = false;
@@ -285,6 +291,9 @@ FakeState* fake_state(void* context) {
     state.put_files_batch_count = 0;
     state.put_files_batch_item_count = 0;
     state.put_files_batch_concurrency = 0;
+    state.remove_batch_count = 0;
+    state.remove_batch_item_count = 0;
+    state.remove_batch_concurrency = 0;
     state.commit_get_count = state.marker_get_count = state.epoch_get_count = 0;
     state.orphan_payload_get_count = 0;
     state.orphan_payload_get_bytes = 0;
@@ -808,6 +817,47 @@ kasumi::transport::RemovalResult fake_remove(void* context,
                    : kasumi::transport::Removal::AlreadyAbsent;
 }
 
+inline kasumi::transport::RemoveBatchResult fake_remove_batch(
+    void* context, const kasumi::transport::RemoveBatch& batch) {
+    auto* state = fake_state(context);
+    ++state->remove_batch_count;
+    state->remove_batch_item_count += batch.items.size();
+    state->remove_batch_concurrency = batch.concurrency;
+    state->gc_events.emplace_back("remove_batch:" +
+                                  std::to_string(batch.items.size()));
+    if (!state->remove_batch_supported) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Unsupported,
+            .message = "explicit remove batch unavailable"});
+    }
+    kasumi::transport::RemoveBatchReport report;
+    report.items.reserve(batch.items.size());
+    for (std::size_t index = 0; index < batch.items.size(); ++index) {
+        if (state->remove_batch_failure &&
+            state->remove_batch_fail_after_items != 0 &&
+            index + 1 == state->remove_batch_fail_after_items) {
+            report.items.push_back(kasumi::transport::RemoveBatchItemResult{
+                .identifier = batch.items[index].identifier,
+                .result = std::unexpected(kasumi::transport::Error{
+                    .code = *state->remove_batch_failure,
+                    .message = "injected remove batch item failure"}),
+            });
+            continue;
+        }
+        auto result = fake_remove(context, batch.items[index].identifier);
+        report.items.push_back(kasumi::transport::RemoveBatchItemResult{
+            .identifier = batch.items[index].identifier,
+            .result = result,
+        });
+    }
+    if (state->remove_batch_failure && state->remove_batch_fail_after_items == 0) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = *state->remove_batch_failure,
+            .message = "injected remove batch failure"});
+    }
+    return report;
+}
+
 std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
     void* context, std::string_view identifier, std::string_view algorithm) {
     auto* state = fake_state(context);
@@ -992,6 +1042,7 @@ make_fake_transport(FakeState*& state) {
                 .physical_hash_batch = fake_physical_hash_batch,
                 .control_read_batch = fake_control_read_batch,
                 .remove = fake_remove,
+                .remove_batch = fake_remove_batch,
             },
     };
 }

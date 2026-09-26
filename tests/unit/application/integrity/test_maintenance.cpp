@@ -4823,4 +4823,166 @@ TEST(IntegrityMaintenanceTest,
     }
 }
 
+TEST(IntegrityMaintenanceTest, RemoveBatchHappyPathQuarantinesAllCandidates) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-remove-batch-happy");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    state->remove_batch_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8, 8);
+
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->quarantined_objects, 8U);
+    EXPECT_EQ(state->remove_batch_count, 1U);
+    EXPECT_EQ(state->remove_batch_item_count, 8U);
+    EXPECT_EQ(state->remove_batch_concurrency, 8U);
+    for (const auto& candidate : candidates) {
+        expect_presence(transport, candidate, Presence::Absent);
+    }
+    const auto entries = protocol::inventory_quarantine(
+        transport, test_key(), kasumi::test::workspace_root(workspace));
+    ASSERT_TRUE(entries.has_value());
+    EXPECT_EQ(entries->size(), 8U);
+    for (const auto& entry : *entries) {
+        auto verified = protocol::verify_quarantine(
+            transport, entry, kasumi::test::workspace_root(workspace));
+        ASSERT_TRUE(verified.has_value());
+        EXPECT_TRUE(*verified);
+    }
+}
+
+TEST(IntegrityMaintenanceTest,
+     LostBarrierBeforeRemoveBatchAbortsWithoutDeleting) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-remove-batch-lost-barrier");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    state->remove_batch_supported = true;
+    state->replace_barrier_after_metadata_verification = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8, 8);
+
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(state->remove_batch_count, 0U);
+    for (const auto& candidate : candidates) {
+        expect_presence(transport, candidate, Presence::Present);
+    }
+}
+
+TEST(IntegrityMaintenanceTest,
+     PartialRemoveBatchFailsClosedPreservingRemovedQuarantine) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-remove-batch-partial");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    state->remove_batch_supported = true;
+    state->remove_batch_failure = kasumi::transport::ErrorCode::Io;
+    state->remove_batch_fail_after_items = 4; // 3 succeed, 4th fails
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto failed = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8, 8);
+
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(state->remove_batch_count, 1U);
+    for (std::size_t i = 0; i < 3; ++i) {
+        expect_presence(transport, candidates[i], Presence::Absent);
+    }
+    for (std::size_t i = 3; i < 8; ++i) {
+        expect_presence(transport, candidates[i], Presence::Present);
+    }
+
+    // Subsequent GC run recovers and completes removal
+    state->remove_batch_failure.reset();
+    state->remove_batch_fail_after_items = 0;
+    reset_fake_traffic(*state);
+    const auto recovered = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8, 8);
+    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+    for (const auto& candidate : candidates) {
+        expect_presence(transport, candidate, Presence::Absent);
+    }
+}
+
+TEST(IntegrityMaintenanceTest,
+     RemoveBatchAlreadyAbsentDoesNotCountAsQuarantined) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-remove-batch-absent");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    state->remove_batch_supported = true;
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    // Erase candidate 7 before remove batch executes, so it returns AlreadyAbsent
+    state->objects.erase(candidates[7]);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8, 8);
+
+    // If candidate 7 was deleted between listing and remove, GC completes
+    // but quarantined_objects is 7 (not 8)
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->quarantined_objects, 7U);
+}
+
+TEST(IntegrityMaintenanceTest,
+     UnsupportedRemoveBatchFallsBackToSequential) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-remove-batch-unsupported");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    state->copy_batch_supported = true;
+    state->put_files_batch_supported = true;
+    state->remove_batch_supported = false; // unsupported
+    enable_fake_physical_hash_batch(transport, *state, 6);
+    const auto candidates = seed_copy_batch_gc(transport, workspace, 8);
+    auto runtime = runtime_data(workspace);
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 8, 8, 8);
+
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->quarantined_objects, 8U);
+    EXPECT_EQ(state->remove_batch_count, 1U); // 1 attempted batch call returned Unsupported
+    EXPECT_EQ(state->remove_count, 8U); // Fallback to 8 sequential removes
+    for (const auto& candidate : candidates) {
+        expect_presence(transport, candidate, Presence::Absent);
+    }
+}
+
 } // namespace

@@ -64,7 +64,8 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                 transport::Transport& storage,
                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                 std::size_t copy_batch_concurrency = 8,
-                std::size_t metadata_batch_concurrency = 8);
+                std::size_t metadata_batch_concurrency = 8,
+                std::size_t source_removal_concurrency = 8);
 
 } // namespace kasumi::application::integrity
 

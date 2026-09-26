@@ -1021,12 +1021,15 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                 transport::Transport& storage,
                 KeySpan key,
                 std::size_t copy_batch_concurrency,
-                std::size_t metadata_batch_concurrency) {
+                std::size_t metadata_batch_concurrency,
+                std::size_t source_removal_concurrency) {
     if (runtime_data.local_dir.empty() || runtime_data.database_path.empty() ||
         !transport::valid(storage) || copy_batch_concurrency == 0 ||
         copy_batch_concurrency > max_candidates_per_batch ||
         metadata_batch_concurrency == 0 ||
-        metadata_batch_concurrency > max_candidates_per_batch) {
+        metadata_batch_concurrency > max_candidates_per_batch ||
+        source_removal_concurrency == 0 ||
+        source_removal_concurrency > max_candidates_per_batch) {
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid GC context"));
     }

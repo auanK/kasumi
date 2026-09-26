@@ -142,6 +142,30 @@ using ControlReadBatchFunction = ControlReadBatchResponse (*)(
 using RemoveFunction = RemovalResult (*)(void* context,
                                          std::string_view identifier);
 
+// Explicit object deletions executed in one optional backend batch.
+struct RemoveBatchItem {
+    std::string identifier;
+};
+
+struct RemoveBatch {
+    std::vector<RemoveBatchItem> items;
+    std::size_t concurrency = 1;
+};
+
+struct RemoveBatchItemResult {
+    std::string identifier;
+    RemovalResult result;
+};
+
+struct RemoveBatchReport {
+    std::vector<RemoveBatchItemResult> items;
+};
+
+using RemoveBatchResult = std::expected<RemoveBatchReport, Error>;
+
+using RemoveBatchFunction = RemoveBatchResult (*)(void* context,
+                                                  const RemoveBatch& batch);
+
 // Operations table; copy, prefix listing and physical hash are optional.
 struct StorageOperations {
     InitializeFunction initialize = nullptr;
@@ -159,6 +183,7 @@ struct StorageOperations {
     PhysicalHashBatchFunction physical_hash_batch = nullptr;
     ControlReadBatchFunction control_read_batch = nullptr;
     RemoveFunction remove = nullptr;
+    RemoveBatchFunction remove_batch = nullptr;
     std::size_t physical_hash_batch_min_objects = 0;
 };
 
@@ -252,6 +277,10 @@ control_read_batch(Transport& transport,
 
 // Removes the object idempotently.
 RemovalResult remove(Transport& transport, std::string_view identifier);
+
+// Removes objects in one optional backend batch. Unsupported is returned
+// when the transport has no native batch removal implementation.
+RemoveBatchResult remove_batch(Transport& transport, const RemoveBatch& batch);
 
 } // namespace kasumi::transport
 

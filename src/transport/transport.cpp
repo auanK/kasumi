@@ -355,6 +355,32 @@ validate_put_files_batch(const PutFilesBatch& batch) {
     return {};
 }
 
+std::expected<void, Error>
+validate_remove_batch(const RemoveBatch& batch) {
+    if (batch.items.empty()) {
+        return {};
+    }
+    if (batch.concurrency == 0) {
+        return std::unexpected(make_error(
+            ErrorCode::InvalidContext,
+            "remove batch concurrency must be positive"));
+    }
+
+    std::unordered_set<std::string> identifiers;
+    for (const auto& item : batch.items) {
+        if (!valid_batch_identifier(item.identifier) ||
+            std::any_of(item.identifier.begin(), item.identifier.end(),
+                        forbidden_character) ||
+            !identifiers.insert(item.identifier).second) {
+            return std::unexpected(make_error(
+                ErrorCode::InvalidIdentifier,
+                "invalid or duplicate remove batch identifier"));
+        }
+    }
+
+    return {};
+}
+
 std::expected<void, Error> validate_batch(const GetBatch& batch) {
     std::error_code error;
     if (!batch.source_prefix.empty() &&
@@ -814,6 +840,27 @@ RemovalResult remove(Transport& transport, std::string_view identifier) {
         return Removal::Removed;
     }
     return std::unexpected(removed.error());
+}
+
+RemoveBatchResult remove_batch(Transport& transport, const RemoveBatch& batch) {
+    auto validation = validate_remove_batch(batch);
+    if (!validation) {
+        return std::unexpected(validation.error());
+    }
+    if (batch.items.empty()) {
+        return RemoveBatchReport{};
+    }
+
+    auto* state = state_pointer(transport);
+    if (state == nullptr) {
+        return std::unexpected(invalid_transport_error());
+    }
+    if (transport.storage.remove_batch == nullptr) {
+        return std::unexpected(make_error(
+            ErrorCode::Unsupported,
+            "transport does not support explicit remove batch"));
+    }
+    return transport.storage.remove_batch(state, batch);
 }
 
 } // namespace kasumi::transport
