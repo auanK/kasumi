@@ -144,6 +144,16 @@ int run(int argc, char* argv[]) {
                 present(*sync, application::Operation::Status);
             }
         };
+    } else if (request.operation == application::Operation::GarbageCollect) {
+        std::println(
+            "{}",
+            i18n::format(i18n::Key::GcStarting, request.profile_name));
+        on_progress = [](const application::ExecutionProgress& progress) {
+            if (const auto* gc =
+                    std::get_if<application::GarbageCollectProgress>(&progress)) {
+                present(*gc);
+            }
+        };
     }
 
     auto result =

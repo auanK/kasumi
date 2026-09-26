@@ -755,7 +755,36 @@ void present(const application::SyncProgress& progress,
     }
 }
 
-void present(const application::GarbageCollectProgress& /*progress*/) {}
+void present(const application::GarbageCollectProgress& progress) {
+    switch (progress.stage) {
+        case application::GarbageCollectStage::Preparing:
+            std::println("{}", i18n::tr(i18n::Key::GcStagePreparing));
+            break;
+        case application::GarbageCollectStage::CheckingQuarantine:
+            std::println("{}", i18n::tr(i18n::Key::GcStageCheckingQuarantine));
+            break;
+        case application::GarbageCollectStage::Analyzing:
+            if (!progress.candidate_count.has_value()) {
+                std::println("{}", i18n::tr(i18n::Key::GcStageAnalyzing));
+            } else if (*progress.candidate_count == 0) {
+                std::println("{}", i18n::tr(i18n::Key::GcCandidatesNone));
+            } else if (*progress.candidate_count == 1) {
+                std::println("{}", i18n::tr(i18n::Key::GcCandidatesSingular));
+            } else {
+                std::println("{}",
+                             i18n::format(i18n::Key::GcCandidatesPlural,
+                                          *progress.candidate_count));
+            }
+            break;
+        case application::GarbageCollectStage::Applying:
+            std::println("{}", i18n::tr(i18n::Key::GcStageApplying));
+            break;
+        case application::GarbageCollectStage::Finalizing:
+            std::println("{}", i18n::tr(i18n::Key::GcStageFinalizing));
+            std::println();
+            break;
+    }
+}
 
 int present(const application::Response& response, bool full) {
     if (const auto* sync =
@@ -795,18 +824,29 @@ int present(const application::Response& response, bool full) {
     }
     if (const auto* ptr =
             std::get_if<application::GarbageCollectCompleted>(&response.data)) {
-        std::println("{}", i18n::tr(i18n::Key::ErrorGcRunning));
         if (ptr->analysis_only) {
-            std::println("{}",
-                         i18n::format(i18n::Key::ErrorGcWarning,
-                                      ptr->candidate_objects));
+            const auto header = (ptr->candidate_objects == 1)
+                                    ? i18n::tr(i18n::Key::GcWarningHeaderSingular)
+                                    : i18n::format(i18n::Key::GcWarningHeaderPlural,
+                                                 ptr->candidate_objects);
+            const auto label = i18n::tr(i18n::Key::LabelWarning);
+            const std::string indent(label.size() + 1, ' ');
+            std::println("{}{}{} {}",
+                         style::yellow,
+                         label,
+                         style::reset,
+                         header);
+            std::println("{}{}", indent, i18n::tr(i18n::Key::GcWarningDetail1));
+            std::println("{}{}", indent, i18n::tr(i18n::Key::GcWarningDetail2));
             return 0;
         }
         std::println("{}{}{} {}",
                      style::green,
                      i18n::tr(i18n::Key::LabelOk),
                      style::reset,
-                     i18n::format(i18n::Key::ErrorGcCompleted,
+                     i18n::tr(i18n::Key::GcCompleted));
+        std::println("     {}",
+                     i18n::format(i18n::Key::GcSummary,
                                   ptr->candidate_objects,
                                   ptr->quarantined_objects,
                                   ptr->restored_objects,
@@ -1029,7 +1069,6 @@ int present(const application::Error& error) {
                 i18n::format(i18n::Key::ErrorFsckFailed, error.detail));
             break;
         case application::ErrorCode::GarbageCollectionFailure:
-            std::println("{}", i18n::tr(i18n::Key::ErrorGcRunning));
             std::println(
                 "{}{}{} {}",
                 style::red,

@@ -51,6 +51,23 @@
     "preview_starting": "Simulating synchronization of \"{}\"...\n",
     "status_starting": "Checking status of \"{}\"...\n"
   },
+  "gc": {
+    "starting": "Running garbage collection for \"{}\"...\n",
+    "stage_preparing": "[1/5] Preparing garbage collection...",
+    "stage_checking_quarantine": "[2/5] Checking quarantine state...",
+    "stage_analyzing": "[3/5] Analyzing remote state...",
+    "candidates_none": "No garbage collection candidates found.",
+    "candidates_singular": "1 candidate found.",
+    "candidates_plural": "{} candidates found.",
+    "stage_applying": "[4/5] Applying safe cleanup...",
+    "stage_finalizing": "[5/5] Finalizing...",
+    "completed": "Garbage collection completed.",
+    "summary": "{} candidates | {} quarantined | {} restored | {} purged",
+    "warning_header_singular": "Analysis completed with 1 candidate.",
+    "warning_header_plural": "Analysis completed with {} candidates.",
+    "warning_detail1": "Backend consistency was insufficient for online quarantine.",
+    "warning_detail2": "No candidate objects were moved."
+  },
   "errors": {
     "plan_calculation": "Could not compute sync plan: {}",
     "fsck_failed": "Audit finished with failures: {}",
@@ -58,7 +75,7 @@
     "fsck_auditing": "\n[Auditing destination integrity]",
     "gc_running": "\n[Running destination GC]",
     "gc_warning": "[WARNING] Analysis completed: {} candidate(s); backend lacks sufficient consistency for online quarantine.",
-    "gc_cancelled": "GC cancelled: {}",
+    "gc_cancelled": "Garbage collection failed: {}",
     "gc_completed": "Garbage collection completed. {} candidate object(s), {} quarantined, {} restored, {} purged.",
     "sync_failed": "Synchronization finished with failures: {}",
     "inconsistent_inspection": "Inconsistent inspection response.",

@@ -73,6 +73,23 @@ enum class Key {
     PreviewStarting,
     StatusStarting,
 
+    // Garbage Collection
+    GcStarting,
+    GcStagePreparing,
+    GcStageCheckingQuarantine,
+    GcStageAnalyzing,
+    GcCandidatesNone,
+    GcCandidatesSingular,
+    GcCandidatesPlural,
+    GcStageApplying,
+    GcStageFinalizing,
+    GcCompleted,
+    GcSummary,
+    GcWarningHeaderSingular,
+    GcWarningHeaderPlural,
+    GcWarningDetail1,
+    GcWarningDetail2,
+
     // Operations / Errors
     ErrorPlanCalculation,
     ErrorFsckFailed,
