@@ -114,26 +114,35 @@ int run(int argc, char* argv[]) {
     auto request = std::get<application::Request>(*parse_result);
     auto initial_credentials = credentials::from_environment();
 
-    application::SyncProgressCallback on_progress{};
+    application::ProgressCallback on_progress{};
     if (request.operation == application::Operation::Sync) {
         std::println(
             "{}", i18n::format(i18n::Key::SyncStarting, request.profile_name));
-        on_progress = [](const application::SyncProgress& progress) {
-            present(progress, application::Operation::Sync);
+        on_progress = [](const application::ExecutionProgress& progress) {
+            if (const auto* sync =
+                    std::get_if<application::SyncProgress>(&progress)) {
+                present(*sync, application::Operation::Sync);
+            }
         };
     } else if (request.operation == application::Operation::Preview) {
         std::println(
             "{}",
             i18n::format(i18n::Key::PreviewStarting, request.profile_name));
-        on_progress = [](const application::SyncProgress& progress) {
-            present(progress, application::Operation::Preview);
+        on_progress = [](const application::ExecutionProgress& progress) {
+            if (const auto* sync =
+                    std::get_if<application::SyncProgress>(&progress)) {
+                present(*sync, application::Operation::Preview);
+            }
         };
     } else if (request.operation == application::Operation::Status) {
         std::println(
             "{}",
             i18n::format(i18n::Key::StatusStarting, request.profile_name));
-        on_progress = [](const application::SyncProgress& progress) {
-            present(progress, application::Operation::Status);
+        on_progress = [](const application::ExecutionProgress& progress) {
+            if (const auto* sync =
+                    std::get_if<application::SyncProgress>(&progress)) {
+                present(*sync, application::Operation::Status);
+            }
         };
     }
 

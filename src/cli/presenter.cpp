@@ -755,6 +755,8 @@ void present(const application::SyncProgress& progress,
     }
 }
 
+void present(const application::GarbageCollectProgress& /*progress*/) {}
+
 int present(const application::Response& response, bool full) {
     if (const auto* sync =
             std::get_if<application::SyncCompleted>(&response.data)) {

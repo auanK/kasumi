@@ -766,4 +766,133 @@ TEST(ApplicationMaintenanceContract,
         kasumi::transport::Presence::Present);
 }
 
+TEST(SyncMaintenanceTest, EmitsGarbageCollectProgressStagesInDeterministicOrder) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-progress-order");
+    const ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "app")};
+    const Profile profile{
+        "demo",
+        kasumi::test::workspace_path(workspace, "local"),
+        kasumi::test::workspace_path(workspace, "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment, profile, MasterKeyHex{std::string(64, 'd')}));
+    ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
+    kasumi::test::write_text(profile.local_dir / "file.txt", "source");
+    auto opened = kasumi::transport::open_transport(
+        kasumi::test::workspace_path(workspace, "remote").string());
+    ASSERT_TRUE(opened.has_value());
+    auto& storage = *opened;
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, environment)));
+
+    const auto orphan = canonical_orphan();
+    const auto orphan_source =
+        kasumi::test::workspace_path(workspace, "orphan.txt");
+    kasumi::test::write_text(orphan_source, "orphan");
+    ASSERT_TRUE(kasumi::transport::put(storage, orphan_source, orphan));
+
+    std::vector<kasumi::application::GarbageCollectProgress> progress_events;
+    auto req = request(Operation::GarbageCollect, environment);
+    req.on_progress = [&](const kasumi::application::ExecutionProgress& p) {
+        if (const auto* gc = std::get_if<kasumi::application::GarbageCollectProgress>(&p)) {
+            progress_events.push_back(*gc);
+        }
+    };
+    const auto gc = kasumi::application::execute(req);
+    ASSERT_TRUE(gc.has_value()) << gc.error().detail;
+
+    ASSERT_GE(progress_events.size(), 5U);
+    EXPECT_EQ(progress_events[0].stage, kasumi::application::GarbageCollectStage::Preparing);
+    EXPECT_EQ(progress_events[1].stage, kasumi::application::GarbageCollectStage::CheckingQuarantine);
+    EXPECT_EQ(progress_events[2].stage, kasumi::application::GarbageCollectStage::Analyzing);
+    EXPECT_FALSE(progress_events[2].candidate_count.has_value());
+    EXPECT_EQ(progress_events[3].stage, kasumi::application::GarbageCollectStage::Analyzing);
+    ASSERT_TRUE(progress_events[3].candidate_count.has_value());
+    EXPECT_EQ(*progress_events[3].candidate_count, 1U);
+    EXPECT_EQ(progress_events[4].stage, kasumi::application::GarbageCollectStage::Applying);
+    EXPECT_EQ(progress_events.back().stage, kasumi::application::GarbageCollectStage::Finalizing);
+}
+
+TEST(SyncMaintenanceTest, EmitsGarbageCollectProgressOmittingApplyingWhenNoCandidates) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-progress-no-cand");
+    const ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "app")};
+    const Profile profile{
+        "demo",
+        kasumi::test::workspace_path(workspace, "local"),
+        kasumi::test::workspace_path(workspace, "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment, profile, MasterKeyHex{std::string(64, 'd')}));
+    ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
+    kasumi::test::write_text(profile.local_dir / "file.txt", "source");
+    auto opened = kasumi::transport::open_transport(
+        kasumi::test::workspace_path(workspace, "remote").string());
+    ASSERT_TRUE(opened.has_value());
+    auto& storage = *opened;
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, environment)));
+
+    std::vector<kasumi::application::GarbageCollectProgress> progress_events;
+    auto req = request(Operation::GarbageCollect, environment);
+    req.on_progress = [&](const kasumi::application::ExecutionProgress& p) {
+        if (const auto* gc = std::get_if<kasumi::application::GarbageCollectProgress>(&p)) {
+            progress_events.push_back(*gc);
+        }
+    };
+    const auto gc = kasumi::application::execute(req);
+    ASSERT_TRUE(gc.has_value()) << gc.error().detail;
+
+    ASSERT_GE(progress_events.size(), 4U);
+    EXPECT_EQ(progress_events[0].stage, kasumi::application::GarbageCollectStage::Preparing);
+    EXPECT_EQ(progress_events[1].stage, kasumi::application::GarbageCollectStage::CheckingQuarantine);
+    EXPECT_EQ(progress_events[2].stage, kasumi::application::GarbageCollectStage::Analyzing);
+    EXPECT_EQ(progress_events[3].stage, kasumi::application::GarbageCollectStage::Analyzing);
+    ASSERT_TRUE(progress_events[3].candidate_count.has_value());
+    EXPECT_EQ(*progress_events[3].candidate_count, 0U);
+    EXPECT_EQ(progress_events.back().stage, kasumi::application::GarbageCollectStage::Finalizing);
+
+    for (const auto& event : progress_events) {
+        EXPECT_NE(event.stage, kasumi::application::GarbageCollectStage::Applying);
+    }
+}
+
+TEST(SyncMaintenanceTest, GarbageCollectProgressDoesNotAlterResultOrState) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-progress-invariance");
+    const ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "app")};
+    const Profile profile{
+        "demo",
+        kasumi::test::workspace_path(workspace, "local"),
+        kasumi::test::workspace_path(workspace, "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment, profile, MasterKeyHex{std::string(64, 'd')}));
+    ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
+    kasumi::test::write_text(profile.local_dir / "file.txt", "source");
+    auto opened = kasumi::transport::open_transport(
+        kasumi::test::workspace_path(workspace, "remote").string());
+    ASSERT_TRUE(opened.has_value());
+    auto& storage = *opened;
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, environment)));
+
+    const auto orphan = canonical_orphan();
+    const auto orphan_source =
+        kasumi::test::workspace_path(workspace, "orphan.txt");
+    kasumi::test::write_text(orphan_source, "orphan");
+    ASSERT_TRUE(kasumi::transport::put(storage, orphan_source, orphan));
+
+    // Run without progress callback
+    auto req_plain = request(Operation::GarbageCollect, environment);
+    const auto gc_plain = kasumi::application::execute(req_plain);
+    ASSERT_TRUE(gc_plain.has_value());
+    const auto data_plain = std::get<kasumi::application::GarbageCollectCompleted>(gc_plain->data);
+
+    // Verify 1 quarantined
+    EXPECT_EQ(data_plain.candidate_objects, 1U);
+    EXPECT_EQ(data_plain.quarantined_objects, 1U);
+}
+
 } // namespace
