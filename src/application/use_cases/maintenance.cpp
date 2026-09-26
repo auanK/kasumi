@@ -28,8 +28,16 @@ std::expected<Response, Error> run_maintenance(OperationContext& context,
                         .data = FsckCompleted{}};
     }
 
+    integrity::GarbageCollectProgressCallback gc_progress{};
+    if (context.on_progress) {
+        gc_progress = [&context](const GarbageCollectProgress& p) {
+            context.on_progress(p);
+        };
+    }
+
     auto collected = integrity::garbage_collect(
-        context.runtime, context.storage, context.key);
+        context.runtime, context.storage, context.key,
+        8, 8, 8, std::move(gc_progress));
     if (!collected) {
         return std::unexpected(maintenance_error(
             context.operation, collected.error(), context.summary));

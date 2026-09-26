@@ -1022,7 +1022,8 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                 KeySpan key,
                 std::size_t copy_batch_concurrency,
                 std::size_t metadata_batch_concurrency,
-                std::size_t source_removal_concurrency) {
+                std::size_t source_removal_concurrency,
+                GarbageCollectProgressCallback on_progress) {
     if (runtime_data.local_dir.empty() || runtime_data.database_path.empty() ||
         !transport::valid(storage) || copy_batch_concurrency == 0 ||
         copy_batch_concurrency > max_candidates_per_batch ||
@@ -1032,6 +1033,10 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
         source_removal_concurrency > max_candidates_per_batch) {
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid GC context"));
+    }
+
+    if (on_progress) {
+        on_progress({.stage = GarbageCollectStage::Preparing});
     }
 
     try {
@@ -1092,11 +1097,20 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     return std::unexpected(protocol_error(online.error()));
                 }
                 if (!*online) {
+                    if (on_progress) {
+                        on_progress({.stage = GarbageCollectStage::CheckingQuarantine});
+                        on_progress({.stage = GarbageCollectStage::Analyzing});
+                    }
                     auto analyzed = collect_garbage_collection_snapshot(
                         storage, key, workspace_root,
                         analysis_snapshot_traces);
                     if (!analyzed) {
                         return std::unexpected(analyzed.error());
+                    }
+                    if (on_progress) {
+                        on_progress({.stage = GarbageCollectStage::Analyzing,
+                                     .candidate_count = analyzed->candidates.size()});
+                        on_progress({.stage = GarbageCollectStage::Finalizing});
                     }
                     return GarbageCollectResult{
                         .candidate_objects = analyzed->candidates.size(),
@@ -1110,6 +1124,9 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                         make_error(ErrorCode::StateFailure, now.error()));
                 }
 
+                if (on_progress) {
+                    on_progress({.stage = GarbageCollectStage::CheckingQuarantine});
+                }
                 const auto quarantine_inventory_trace =
                     platform::perf_trace::begin();
                 auto quarantine =
@@ -1137,6 +1154,9 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     return std::unexpected(metadata.error());
                 }
 
+                if (on_progress) {
+                    on_progress({.stage = GarbageCollectStage::Analyzing});
+                }
                 const auto first_observation_trace =
                     platform::perf_trace::begin();
                 auto first = collect_garbage_collection_snapshot(
@@ -1169,6 +1189,10 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     .candidate_objects = confirmed->candidates.size(),
                     .restored_objects = *restored,
                 };
+                if (on_progress) {
+                    on_progress({.stage = GarbageCollectStage::Analyzing,
+                                 .candidate_count = confirmed->candidates.size()});
+                }
                 const auto final_listing_trace = platform::perf_trace::begin();
                 auto final_listing = transport::list(storage);
                 if (!final_listing) {
@@ -1188,6 +1212,13 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                         ErrorCode::ConcurrentChange,
                         "remote storage changed prior to destructive phase"));
                 }
+                bool applying_emitted = false;
+                if (!confirmed->candidates.empty()) {
+                    if (on_progress) {
+                        on_progress({.stage = GarbageCollectStage::Applying});
+                    }
+                    applying_emitted = true;
+                }
                 const auto purge_trace = platform::perf_trace::begin();
                 auto purged = purge_expired_quarantine(storage,
                                                        layout,
@@ -1202,6 +1233,12 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     return std::unexpected(purged.error());
                 }
                 result.purged_objects = *purged;
+                if (!applying_emitted && *purged > 0) {
+                    if (on_progress) {
+                        on_progress({.stage = GarbageCollectStage::Applying});
+                    }
+                    applying_emitted = true;
+                }
                 platform::perf_trace::count("gc.candidates_selected", confirmed->candidates.size());
                 struct BatchPhaseTraceGuard {
                     std::string_view name;
@@ -1934,6 +1971,11 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     make_error(ErrorCode::StateFailure, exception.what()));
             }
         }();
+        if (outcome) {
+            if (on_progress) {
+                on_progress({.stage = GarbageCollectStage::Finalizing});
+            }
+        }
         const auto barrier_release_trace = platform::perf_trace::begin();
         if (barrier->verify_owner) {
             platform::perf_trace::count(
