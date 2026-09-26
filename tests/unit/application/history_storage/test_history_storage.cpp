@@ -1,8 +1,15 @@
+#include "application/history_storage/epoch.hpp"
 #include "application/history_storage/history_storage.hpp"
 #include "application/history_storage/publication.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
+#include "platform/cancellation.hpp"
+
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 namespace {
 
@@ -31,6 +38,108 @@ fake_get_batch(void* context, const kasumi::transport::GetBatch& batch) {
         fake_state(context)->remote_events.pop_back();
     }
     return {};
+}
+
+struct HistoryReadGates {
+    std::atomic_bool batch_entered{false};
+    std::atomic_bool epoch_entered{false};
+    std::atomic_bool marker_entered{false};
+
+    std::atomic_size_t current_in_flight{0};
+    std::atomic_size_t peak_in_flight{0};
+
+    std::atomic_bool release_batch{false};
+    std::atomic_bool release_epoch{false};
+    std::atomic_bool release_marker{false};
+
+    std::atomic_bool fail_batch{false};
+    std::atomic_bool fail_epoch{false};
+    std::atomic_bool fail_marker{false};
+
+    std::mutex mutex;
+    std::condition_variable cv;
+
+    void update_peak(std::size_t active) {
+        auto prev = peak_in_flight.load();
+        while (active > prev &&
+               !peak_in_flight.compare_exchange_weak(prev, active)) {
+        }
+    }
+};
+
+HistoryReadGates* active_gates = nullptr;
+
+kasumi::transport::Result
+gated_fake_get_batch(void* context, const kasumi::transport::GetBatch& batch) {
+    if (active_gates) {
+        active_gates->batch_entered = true;
+        const auto active = ++active_gates->current_in_flight;
+        active_gates->update_peak(active);
+        active_gates->cv.notify_all();
+        {
+            std::unique_lock lock(active_gates->mutex);
+            active_gates->cv.wait(lock, [&] {
+                return active_gates->release_batch.load() ||
+                       kasumi::platform::cancellation::requested();
+            });
+        }
+        --active_gates->current_in_flight;
+        if (active_gates->fail_batch.load()) {
+            return std::unexpected(kasumi::transport::Error{
+                .code = kasumi::transport::ErrorCode::Io,
+                .message = "injected batch failure",
+            });
+        }
+    }
+    return fake_get_batch(context, batch);
+}
+
+kasumi::transport::Result
+gated_fake_get(void* context,
+               std::string_view identifier,
+               const std::filesystem::path& destination) {
+    if (active_gates) {
+        if (is_epoch(identifier)) {
+            active_gates->epoch_entered = true;
+            const auto active = ++active_gates->current_in_flight;
+            active_gates->update_peak(active);
+            active_gates->cv.notify_all();
+            {
+                std::unique_lock lock(active_gates->mutex);
+                active_gates->cv.wait(lock, [&] {
+                    return active_gates->release_epoch.load() ||
+                           kasumi::platform::cancellation::requested();
+                });
+            }
+            --active_gates->current_in_flight;
+            if (active_gates->fail_epoch.load()) {
+                return std::unexpected(kasumi::transport::Error{
+                    .code = kasumi::transport::ErrorCode::Io,
+                    .message = "injected epoch failure",
+                });
+            }
+        } else if (is_marker(identifier)) {
+            active_gates->marker_entered = true;
+            const auto active = ++active_gates->current_in_flight;
+            active_gates->update_peak(active);
+            active_gates->cv.notify_all();
+            {
+                std::unique_lock lock(active_gates->mutex);
+                active_gates->cv.wait(lock, [&] {
+                    return active_gates->release_marker.load() ||
+                           kasumi::platform::cancellation::requested();
+                });
+            }
+            --active_gates->current_in_flight;
+            if (active_gates->fail_marker.load()) {
+                return std::unexpected(kasumi::transport::Error{
+                    .code = kasumi::transport::ErrorCode::Io,
+                    .message = "injected marker failure",
+                });
+            }
+        }
+    }
+    return fake_get(context, identifier, destination);
 }
 
 HeadReference seed_fake_commit(FakeState& state,
@@ -1427,6 +1536,307 @@ TEST(HistoryStorageTest, PartialMarkerRemovalCanBeRetriedIdempotently) {
     EXPECT_EQ(second_attempt->removed, 1U);
     EXPECT_FALSE(state->objects.contains(marker_path(second)));
     EXPECT_TRUE(state->objects.contains(marker_path(current)));
+}
+
+struct TestHistoryFixture {
+    kasumi::test::TempWorkspace workspace;
+    FakeState* state = nullptr;
+    kasumi::transport::Transport storage;
+    std::filesystem::path root;
+    Commit commit;
+    HeadReference head_ref;
+};
+
+TestHistoryFixture make_test_history_fixture(std::string_view name) {
+    auto workspace = kasumi::test::make_temp_workspace(name);
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    EXPECT_TRUE(kasumi::transport::initialize(storage));
+    const auto root = kasumi::test::workspace_root(workspace);
+
+    const auto commit = make_commit(0, {}, "file.txt", "content").value();
+    const auto head_ref = seed_fake_commit(*state, root, commit, "c1");
+
+    kasumi::application::history_storage::epoch::Epoch epoch_data{
+        .vault_id = std::string(64, 'a'),
+        .sequence = 0,
+        .issued_at = 100,
+        .policy = {
+            .min_history_depth = 1,
+            .min_history_age_hours = 1,
+        },
+        .anchors = {{.commit_id = commit_id(commit), .height = 0}},
+        .previous_epoch_id = {},
+    };
+    auto sealed =
+        kasumi::application::history_storage::epoch::seal(epoch_data, test_key());
+    EXPECT_TRUE(sealed.has_value());
+    EXPECT_TRUE(kasumi::application::history_storage::epoch::publish(
+        storage, test_key(), *sealed, root));
+
+    return TestHistoryFixture{
+        .workspace = std::move(workspace),
+        .state = state,
+        .storage = std::move(storage),
+        .root = root,
+        .commit = commit,
+        .head_ref = head_ref,
+    };
+}
+
+TEST(HistoryStorageTest, DemonstratesCurrentHistoryLoadingIsSerialOrConcurrent) {
+    auto fixture = make_test_history_fixture("history-serial-characterization");
+    HistoryReadGates gates;
+    active_gates = &gates;
+    fixture.storage.storage.get_batch = gated_fake_get_batch;
+    fixture.storage.storage.get = gated_fake_get;
+
+    kasumi::application::history_storage::LoadResult loaded;
+    std::jthread worker([&] {
+        loaded = kasumi::application::history_storage::load_history(
+            fixture.storage, test_key(), fixture.root);
+    });
+
+    {
+        std::unique_lock lock(gates.mutex);
+        gates.cv.wait(lock, [&] { return gates.batch_entered.load(); });
+    }
+    EXPECT_TRUE(gates.batch_entered);
+    EXPECT_FALSE(gates.epoch_entered);
+    EXPECT_FALSE(gates.marker_entered);
+
+    gates.release_batch = true;
+    gates.cv.notify_all();
+
+    {
+        std::unique_lock lock(gates.mutex);
+        gates.cv.wait(lock, [&] { return gates.epoch_entered.load(); });
+    }
+    EXPECT_TRUE(gates.epoch_entered);
+    EXPECT_FALSE(gates.marker_entered);
+
+    gates.release_epoch = true;
+    gates.cv.notify_all();
+
+    {
+        std::unique_lock lock(gates.mutex);
+        gates.cv.wait(lock, [&] { return gates.marker_entered.load(); });
+    }
+    EXPECT_TRUE(gates.marker_entered);
+
+    gates.release_marker = true;
+    gates.cv.notify_all();
+
+    worker.join();
+    active_gates = nullptr;
+
+    ASSERT_TRUE(loaded.has_value()) << loaded.error().detail;
+    EXPECT_EQ(gates.peak_in_flight, 1U);
+}
+
+TEST(HistoryStorageTest, NativeCompletePathOverlapsBatchEpochAndMarkerWithPeakThree) {
+    auto fixture = make_test_history_fixture("history-concurrent-peak");
+    HistoryReadGates gates;
+    active_gates = &gates;
+    fixture.storage.storage.get_batch = gated_fake_get_batch;
+    fixture.storage.storage.get = gated_fake_get;
+
+    kasumi::application::history_storage::LoadResult loaded;
+    std::jthread worker([&] {
+        loaded = kasumi::application::history_storage::load_history(
+            fixture.storage, test_key(), fixture.root);
+    });
+
+    bool all_three_entered = false;
+    {
+        std::unique_lock lock(gates.mutex);
+        all_three_entered = gates.cv.wait_for(
+            lock, std::chrono::milliseconds(200), [&] {
+                return gates.batch_entered.load() &&
+                       gates.epoch_entered.load() &&
+                       gates.marker_entered.load();
+            });
+    }
+
+    gates.release_batch = true;
+    gates.release_epoch = true;
+    gates.release_marker = true;
+    gates.cv.notify_all();
+    worker.join();
+    active_gates = nullptr;
+
+    EXPECT_TRUE(all_three_entered);
+    EXPECT_TRUE(gates.batch_entered);
+    EXPECT_TRUE(gates.epoch_entered);
+    EXPECT_TRUE(gates.marker_entered);
+    EXPECT_EQ(gates.peak_in_flight, 3U);
+    ASSERT_TRUE(loaded.has_value()) << loaded.error().detail;
+}
+
+TEST(HistoryStorageTest, DeterministicErrorPrecedenceBatchOverEpochAndMarker) {
+    auto fixture = make_test_history_fixture("history-precedence-batch");
+    HistoryReadGates gates;
+    gates.fail_batch = true;
+    gates.fail_epoch = true;
+    gates.fail_marker = false;
+    active_gates = &gates;
+    fixture.storage.storage.get_batch = gated_fake_get_batch;
+    fixture.storage.storage.get = gated_fake_get;
+
+    kasumi::application::history_storage::LoadResult loaded;
+    std::jthread worker([&] {
+        loaded = kasumi::application::history_storage::load_history(
+            fixture.storage, test_key(), fixture.root);
+    });
+
+    gates.release_marker = true;
+    gates.release_epoch = true;
+    gates.release_batch = true;
+    gates.cv.notify_all();
+    worker.join();
+    active_gates = nullptr;
+
+    ASSERT_FALSE(loaded.has_value());
+    EXPECT_EQ(loaded.error().code,
+              kasumi::application::history_storage::ErrorCode::TransportFailure);
+    EXPECT_NE(loaded.error().detail.find("injected batch failure"),
+              std::string::npos);
+}
+
+TEST(HistoryStorageTest, DeterministicErrorPrecedenceEpochOverMarker) {
+    auto fixture = make_test_history_fixture("history-precedence-epoch");
+    HistoryReadGates gates;
+    gates.fail_batch = false;
+    gates.fail_epoch = true;
+    gates.fail_marker = true;
+    active_gates = &gates;
+    fixture.storage.storage.get_batch = gated_fake_get_batch;
+    fixture.storage.storage.get = gated_fake_get;
+
+    kasumi::application::history_storage::LoadResult loaded;
+    std::jthread worker([&] {
+        loaded = kasumi::application::history_storage::load_history(
+            fixture.storage, test_key(), fixture.root);
+    });
+
+    gates.release_marker = true;
+    gates.release_batch = true;
+    gates.release_epoch = true;
+    gates.cv.notify_all();
+    worker.join();
+    active_gates = nullptr;
+
+    ASSERT_FALSE(loaded.has_value());
+    EXPECT_EQ(loaded.error().code,
+              kasumi::application::history_storage::ErrorCode::TransportFailure);
+    EXPECT_NE(loaded.error().detail.find("injected epoch failure"),
+              std::string::npos);
+}
+
+TEST(HistoryStorageTest, DeterministicErrorPrecedenceMarkerWhenBatchAndEpochSucceed) {
+    auto fixture = make_test_history_fixture("history-precedence-marker");
+    HistoryReadGates gates;
+    gates.fail_batch = false;
+    gates.fail_epoch = false;
+    gates.fail_marker = true;
+    active_gates = &gates;
+    fixture.storage.storage.get_batch = gated_fake_get_batch;
+    fixture.storage.storage.get = gated_fake_get;
+
+    kasumi::application::history_storage::LoadResult loaded;
+    std::jthread worker([&] {
+        loaded = kasumi::application::history_storage::load_history(
+            fixture.storage, test_key(), fixture.root);
+    });
+
+    gates.release_batch = true;
+    gates.release_epoch = true;
+    gates.release_marker = true;
+    gates.cv.notify_all();
+    worker.join();
+    active_gates = nullptr;
+
+    ASSERT_FALSE(loaded.has_value());
+    EXPECT_EQ(loaded.error().code,
+              kasumi::application::history_storage::ErrorCode::TransportFailure);
+    EXPECT_NE(loaded.error().detail.find("injected marker failure"),
+              std::string::npos);
+}
+
+TEST(HistoryStorageTest, DrainsAllLanesWhenOneFailsEarly) {
+    auto fixture = make_test_history_fixture("history-drain-early-failure");
+    HistoryReadGates gates;
+    gates.fail_batch = true;
+    gates.release_batch = true;
+    gates.release_epoch = false;
+    gates.release_marker = false;
+    active_gates = &gates;
+    fixture.storage.storage.get_batch = gated_fake_get_batch;
+    fixture.storage.storage.get = gated_fake_get;
+
+    kasumi::application::history_storage::LoadResult loaded;
+    std::jthread worker([&] {
+        loaded = kasumi::application::history_storage::load_history(
+            fixture.storage, test_key(), fixture.root);
+    });
+
+    // In a three-lane model, all lanes must be drained/joined before load_history returns.
+    // Give it a short moment, then release epoch and marker
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    gates.release_epoch = true;
+    gates.release_marker = true;
+    gates.cv.notify_all();
+    worker.join();
+    active_gates = nullptr;
+
+    ASSERT_FALSE(loaded.has_value());
+    EXPECT_EQ(loaded.error().code,
+              kasumi::application::history_storage::ErrorCode::TransportFailure);
+}
+
+TEST(HistoryStorageTest, RespectsGlobalCancellationAndDrains) {
+    auto fixture = make_test_history_fixture("history-cancellation");
+    HistoryReadGates gates;
+    active_gates = &gates;
+    fixture.storage.storage.get_batch = gated_fake_get_batch;
+    fixture.storage.storage.get = gated_fake_get;
+
+    kasumi::application::history_storage::LoadResult loaded;
+    std::jthread worker([&] {
+        loaded = kasumi::application::history_storage::load_history(
+            fixture.storage, test_key(), fixture.root);
+    });
+
+    {
+        std::unique_lock lock(gates.mutex);
+        gates.cv.wait(lock, [&] {
+            return gates.batch_entered.load() ||
+                   gates.epoch_entered.load() ||
+                   gates.marker_entered.load();
+        });
+    }
+
+    kasumi::platform::cancellation::request();
+    gates.release_batch = true;
+    gates.release_epoch = true;
+    gates.release_marker = true;
+    gates.cv.notify_all();
+    worker.join();
+    active_gates = nullptr;
+    kasumi::platform::cancellation::reset();
+
+    ASSERT_FALSE(loaded.has_value());
+}
+
+TEST(HistoryStorageTest, PreservesSequentialPathWhenGetBatchIsNull) {
+    auto fixture = make_test_history_fixture("history-no-get-batch");
+    fixture.storage.storage.get_batch = nullptr;
+
+    const auto loaded = kasumi::application::history_storage::load_history(
+        fixture.storage, test_key(), fixture.root);
+
+    ASSERT_TRUE(loaded.has_value()) << loaded.error().detail;
+    EXPECT_EQ(loaded->commits.size(), 1U);
 }
 
 } // namespace
