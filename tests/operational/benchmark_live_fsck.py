@@ -316,6 +316,7 @@ def main():
                 "observation_total": get_m("fsck.collect_storage_state_duration_us")["total_us"],
                 "physical_list": get_m("content listing/audit")["total_us"],
                 "history_inventory_build": get_m("history listing")["total_us"],
+                "history_remote_overlap": get_m("history remote overlap")["total_us"],
                 "commit_batch_fetch": get_m("commit batch fetch")["total_us"],
                 "epoch_loading": get_m("epoch loading")["total_us"],
                 "head_loading": get_m("head loading")["total_us"],
@@ -330,6 +331,8 @@ def main():
                 "fsck_total": get_m("fsck.total_duration_us")["total_us"],
             },
             "observation_counters": {
+                "history_remote_overlap_peak": get_m("history.remote_overlap_peak")["calls"],
+                "history_remote_overlap_completions": get_m("history.remote_overlap_completions")["calls"],
                 "epoch_candidates_observed": get_m("epoch.candidates_observed")["calls"],
                 "epoch_get_calls": get_m("epoch.get_calls")["calls"],
                 "epoch_bytes_downloaded": get_m("epoch.bytes_downloaded")["calls"],
@@ -402,7 +405,8 @@ def main():
         print(f"Observation Total Wall: {result_data['stage_walls_us']['observation_total'] / 1000.0:.2f} ms")
         print(f"  - Physical LIST: {result_data['stage_walls_us']['physical_list'] / 1000.0:.2f} ms")
         print(f"  - History Inventory Build: {result_data['stage_walls_us']['history_inventory_build'] / 1000.0:.2f} ms")
-        print(f"  - Commit Batch Fetch: {result_data['stage_walls_us']['commit_batch_fetch'] / 1000.0:.2f} ms")
+        print(f"  - History Remote Overlap: {result_data['stage_walls_us']['history_remote_overlap'] / 1000.0:.2f} ms (peak={result_data['observation_counters']['history_remote_overlap_peak']}, completions={result_data['observation_counters']['history_remote_overlap_completions']})")
+        print(f"    - Commit Batch Fetch: {result_data['stage_walls_us']['commit_batch_fetch'] / 1000.0:.2f} ms")
         print(f"  - Epoch Loading: {result_data['stage_walls_us']['epoch_loading'] / 1000.0:.2f} ms")
         print(f"  - Head Loading: {result_data['stage_walls_us']['head_loading'] / 1000.0:.2f} ms")
         print(f"  - Commit Loading (traversal+auth): {result_data['stage_walls_us']['commit_loading'] / 1000.0:.2f} ms")
