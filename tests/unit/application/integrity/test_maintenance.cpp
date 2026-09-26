@@ -5109,4 +5109,60 @@ TEST(IntegrityMaintenanceTest,
     EXPECT_EQ(applying_count, 0U);
 }
 
+TEST(IntegrityMaintenanceTest,
+     FsckProfilingRecordsCountersAndPreservesIntegrityFailures) {
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    const auto alpha = make_commit(0, {}, "alpha.txt", "alpha").value();
+    const auto alpha_published =
+        publish_remote(storage.transport, storage.workspace, alpha);
+    const auto alpha_content =
+        put_content(storage.transport, storage.workspace, "alpha", "alpha");
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key());
+    ASSERT_TRUE(checked.has_value()) << checked.error().detail;
+    EXPECT_EQ(checked->checked_objects, 1U);
+
+    EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.total_duration_us"), 0U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.collect_storage_state_duration_us"), 0U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.physical_listing_duration_us"), 0U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.local_tree_duration_us"), 0U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.inventory_analysis_duration_us"), 0U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.referenced_audit_duration_us"), 0U);
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_objects"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_get_calls"), 1U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.audit_get_duration_us"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_decrypt_calls"), 1U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.audit_decrypt_duration_us"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_verify_calls"), 1U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.audit_verify_duration_us"), 0U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_count("fsck.encrypted_bytes_downloaded"), 0U);
+    EXPECT_GT(kasumi::platform::perf_trace::get_count("fsck.plaintext_bytes_verified"), 0U);
+
+    // Reachability audit does not audit payloads in fsck
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("reachability.audit_objects"), 0U);
+
+    // Corrupt the content payload and ensure fsck fails closed
+    const auto content_file =
+        kasumi::test::workspace_path(storage.workspace, "storage") / alpha_content;
+    ASSERT_TRUE(std::filesystem::exists(content_file));
+    std::filesystem::resize_file(content_file, 0);
+
+    const auto corrupt_checked = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key());
+    ASSERT_FALSE(corrupt_checked.has_value());
+    EXPECT_EQ(corrupt_checked.error().code,
+              kasumi::application::integrity::ErrorCode::Unrecoverable);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
 } // namespace
+
