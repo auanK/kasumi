@@ -5783,6 +5783,46 @@ TEST(IntegrityMaintenanceTest, FsckUsesExactlyTheFirstObservedSnapshotWithoutSec
     ASSERT_TRUE(checked.has_value()) << checked.error().detail;
 }
 
+TEST(IntegrityMaintenanceTest, PerfTraceEnabledVsDisabledProducesIdenticalFsckResultAndInvariants) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    const auto alpha = make_commit(0, {}, "alpha.txt", "alpha").value();
+    const auto pub_alpha = publish_remote(storage.transport, storage.workspace, alpha);
+    put_content(storage.transport, storage.workspace, "alpha", "alpha");
+
+    const std::vector<std::string> parents{pub_alpha.head.commit_id};
+    const auto beta = make_commit(1, parents, "beta.txt", "beta").value();
+    publish_remote(storage.transport, storage.workspace, beta);
+    put_content(storage.transport, storage.workspace, "beta", "beta");
+
+    kasumi::platform::perf_trace::force_enable(false);
+    kasumi::platform::perf_trace::reset();
+    const auto checked_disabled = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key());
+    ASSERT_TRUE(checked_disabled.has_value()) << checked_disabled.error().detail;
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+    const auto checked_enabled = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key());
+    ASSERT_TRUE(checked_enabled.has_value()) << checked_enabled.error().detail;
+
+    EXPECT_EQ(checked_disabled->checked_objects, checked_enabled->checked_objects);
+    EXPECT_EQ(checked_disabled->repaired_objects, checked_enabled->repaired_objects);
+
+    EXPECT_GE(kasumi::platform::perf_trace::get_count("history.full_list_calls"), 1U);
+    EXPECT_GE(kasumi::platform::perf_trace::get_count("marker.variants_observed"), 1U);
+    EXPECT_GE(kasumi::platform::perf_trace::get_count("commit.variants_observed"), 2U);
+    EXPECT_GE(kasumi::platform::perf_trace::get_count("history.reachable_commits"), 2U);
+    EXPECT_GE(kasumi::platform::perf_trace::get_count("content.physical_objects"), 2U);
+    EXPECT_GE(kasumi::platform::perf_trace::get_count("content.referenced_ids"), 2U);
+
+    kasumi::platform::perf_trace::force_enable(false);
+    kasumi::platform::perf_trace::reset();
+}
+
 } // namespace
+
 
 
