@@ -215,6 +215,54 @@ TEST(CliAppTest, AcceptsFullFlagOnStatusAndPreview) {
     EXPECT_NE(output.find("[ERROR]"), std::string::npos);
 }
 
+TEST(CliAppTest, PrintsGarbageCollectStartingProgressOnce) {
+    auto workspace = kasumi::test::make_temp_workspace("cli-gc-progress");
+#if defined(_WIN32)
+    auto scoped_root = kasumi::test::scoped_environment_variable(
+        "APPDATA", kasumi::test::workspace_path(workspace, "appdata").string());
+#else
+    auto scoped_root = kasumi::test::scoped_environment_variable(
+        "XDG_CONFIG_HOME",
+        kasumi::test::workspace_path(workspace, "config").string());
+#endif
+    char command[] = "kasumi";
+    char operation[] = "gc";
+    char profile[] = "missing";
+    char* argv[] = {command, operation, profile};
+    testing::internal::CaptureStdout();
+
+    EXPECT_EQ(kasumi::cli::run(3, argv), 1);
+
+    const auto output = testing::internal::GetCapturedStdout();
+    const auto expected_starting = "Running garbage collection for \"missing\"...";
+    EXPECT_NE(output.find(expected_starting), std::string::npos);
+}
+
+TEST(CliAppTest, PrintsGarbageCollectStartingProgressInPortuguese) {
+    auto workspace = kasumi::test::make_temp_workspace("cli-gc-progress-pt");
+#if defined(_WIN32)
+    auto scoped_root = kasumi::test::scoped_environment_variable(
+        "APPDATA", kasumi::test::workspace_path(workspace, "appdata").string());
+#else
+    auto scoped_root = kasumi::test::scoped_environment_variable(
+        "XDG_CONFIG_HOME",
+        kasumi::test::workspace_path(workspace, "config").string());
+#endif
+    char command[] = "kasumi";
+    char operation[] = "gc";
+    char profile[] = "missing";
+    char lang_flag[] = "--lang";
+    char lang_val[] = "pt-BR";
+    char* argv[] = {command, operation, profile, lang_flag, lang_val};
+    testing::internal::CaptureStdout();
+
+    EXPECT_EQ(kasumi::cli::run(5, argv), 1);
+
+    const auto output = testing::internal::GetCapturedStdout();
+    const auto expected_starting = "Executando coleta de lixo em \"missing\"...";
+    EXPECT_NE(output.find(expected_starting), std::string::npos);
+}
+
 TEST(CliWizardTest, RejectsDuplicateNameBeforeOtherPrompts) {
     auto workspace = kasumi::test::make_temp_workspace("cli-duplicate-profile");
     const kasumi::application::ExecutionEnvironment environment{
