@@ -48,7 +48,7 @@ def is_remote_local(remote: str) -> bool:
     return ":" not in remote
 
 
-def setup_environment(base_dir: Path, local_dir: Path, remote_dir: str, rclone_config: str | None = None):
+def setup_environment(base_dir: Path, local_dir: Path, remote_dir: str, rclone_config: str | None = None, concurrency: int = 8):
     app_data = base_dir / "appdata" / "kasumi"
     app_data.mkdir(parents=True, exist_ok=True)
     local_dir.mkdir(parents=True, exist_ok=True)
@@ -66,6 +66,7 @@ def setup_environment(base_dir: Path, local_dir: Path, remote_dir: str, rclone_c
     env["KASUMI_MASTER_KEY"] = MASTER_KEY
     env["KASUMI_PERF_TRACE"] = "1"
     env["KASUMI_LANG"] = "en"
+    env["KASUMI_CONTENT_CONCURRENCY"] = str(concurrency)
     if rclone_config and os.path.exists(rclone_config):
         env["RCLONE_CONFIG"] = rclone_config
     else:
@@ -198,6 +199,7 @@ def main():
     parser.add_argument("--remote", required=True, help="Remote storage path (rclone remote or local dir)")
     parser.add_argument("--files", type=int, default=10, help="Number of files (F)")
     parser.add_argument("--file-size", type=int, default=4096, help="File size in bytes")
+    parser.add_argument("--concurrency", type=int, default=8, help="Content concurrency setting (C)")
     parser.add_argument("--scenario", default="profile", help="Scenario label (e.g. L50, R10)")
     parser.add_argument("--output", help="Output JSON path")
     parser.add_argument("--work-dir", default="temp_benchmark_fsck", help="Scratch directory")
@@ -216,9 +218,9 @@ def main():
 
     is_local = is_remote_local(args.remote)
     local_dir = work_dir / "local"
-    env = setup_environment(work_dir, local_dir, args.remote, args.rclone_config)
+    env = setup_environment(work_dir, local_dir, args.remote, args.rclone_config, args.concurrency)
 
-    print(f"[{time.strftime('%X')}] Starting scenario {args.scenario}: F={args.files}, file_size={args.file_size} bytes")
+    print(f"[{time.strftime('%X')}] Starting scenario {args.scenario}: F={args.files}, C={args.concurrency}, file_size={args.file_size} bytes")
     print(f"[{time.strftime('%X')}] Remote: {args.remote} (is_local={is_local})")
 
     try:
@@ -268,8 +270,13 @@ def main():
         result_data = {
             "scenario": args.scenario,
             "F": args.files,
+            "C": args.concurrency,
             "file_size": args.file_size,
             "plaintext_bytes": plaintext_bytes,
+            "configured_concurrency": get_m("fsck.audit_configured_concurrency")["calls"] or args.concurrency,
+            "effective_worker_count": get_m("fsck.audit_worker_count")["calls"],
+            "peak_in_flight": get_m("fsck.audit_peak_in_flight")["calls"],
+            "completion_count": get_m("fsck.audit_completion_count")["calls"],
             "physical_content_count": remote_info["content_object_count"],
             "remote_object_count": remote_info["remote_object_count"],
             "remote_bytes": remote_info["remote_bytes"],
@@ -318,6 +325,7 @@ def main():
 
         print("\n--- MEASURED RESULTS ---")
         print(f"FSCK Wall: {fsck_wall_seconds:.3f} s")
+        print(f"Concurrency: C={args.concurrency}, Peak={result_data['peak_in_flight']}, Workers={result_data['effective_worker_count']}, Completions={result_data['completion_count']}")
         print(f"Checked Objects: {result_data['checked_objects']}")
         print(f"Explicit FSCK GETs: {result_data['fsck_explicit_get_count']}")
         print(f"Reachability Audits: {result_data['reachability_audit_object_count']}")
