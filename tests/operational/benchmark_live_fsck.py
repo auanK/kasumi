@@ -102,7 +102,7 @@ def generate_unique_files(target_dir: Path, count: int, size_bytes: int):
 
 def parse_perf_trace(stderr_text: str):
     metrics = {}
-    pattern = re.compile(r"^KASUMI_PERF\s+name=([^\s]+)\s+calls=(\d+)\s+total_us=(\d+)")
+    pattern = re.compile(r"^KASUMI_PERF\s+name=(.+?)\s+calls=(\d+)\s+total_us=(\d+)")
     outcome_pattern = re.compile(r"^KASUMI_PERF\s+outcome=([^\s]+)")
     outcome = "unknown"
     for line in stderr_text.splitlines():
