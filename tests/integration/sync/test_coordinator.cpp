@@ -4639,6 +4639,12 @@ TEST(ReobservationTest,
         kasumi::application::sync::publication::prepare_commit(
             remote_tree, false, 0, {}, 100, key);
     ASSERT_TRUE(prepared.has_value()) << prepared.error().detail;
+    const auto* prepared_missing =
+        kasumi::find_row(prepared->commit.tree, "missing.txt");
+    ASSERT_NE(prepared_missing, nullptr);
+    EXPECT_EQ(prepared_missing->mtime,
+              std::filesystem::file_time_type{});
+    EXPECT_EQ(prepared_missing->mtime.time_since_epoch().count(), 0);
     auto base = kasumi::transport::open_transport(storage_path.string());
     ASSERT_TRUE(base.has_value());
     ASSERT_TRUE(kasumi::transport::initialize(*base));
@@ -4720,6 +4726,12 @@ TEST(ReobservationTest,
         kasumi::state_storage::load_state(runtime_data.database_path);
     ASSERT_TRUE(restored_state.has_value() && *restored_state);
     EXPECT_TRUE((*restored_state)->pending_materializations.empty());
+    std::error_code restored_mtime_error;
+    const auto restored_mtime =
+        std::filesystem::last_write_time(local / "missing.txt",
+                                         restored_mtime_error);
+    ASSERT_FALSE(restored_mtime_error);
+    EXPECT_NE(restored_mtime, std::filesystem::file_time_type{});
 
     const auto accepted_commit = (*restored_state)->commit_id;
     const auto timeout_hash = kasumi::hasher::hash_string("timeout");

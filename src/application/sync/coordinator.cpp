@@ -557,6 +557,9 @@ bool same_materialized_head_rows(const std::vector<NodeRow>& expected_rows,
                 return false;
             }
         }
+        if (exp.mtime == std::filesystem::file_time_type{}) {
+            continue;
+        }
         if (exp.mtime != act.mtime) {
             const auto* obs = find_row(observed_local_tree, act.path);
             const bool pre_existing_equivalent =
@@ -570,6 +573,21 @@ bool same_materialized_head_rows(const std::vector<NodeRow>& expected_rows,
         }
     }
     return true;
+}
+
+bool same_materialized_row(const NodeRow& expected,
+                          const NodeRow& actual) noexcept {
+    return expected.path == actual.path && expected.hash == actual.hash &&
+           expected.size == actual.size &&
+           (expected.mtime == std::filesystem::file_time_type{} ||
+            expected.mtime == actual.mtime) &&
+           expected.is_directory == actual.is_directory;
+}
+
+bool same_materialized_rows(std::span<const NodeRow> expected,
+                            std::span<const NodeRow> actual) noexcept {
+    return expected.size() == actual.size() &&
+           std::ranges::equal(expected, actual, same_materialized_row);
 }
 
 transaction::Record
@@ -1073,6 +1091,10 @@ restore_transaction_metadata(const Snapshot& expected_tree,
                     ErrorCode::ConcurrentModification,
                     "entry modified after observation: " + path_name));
             }
+        }
+        if (row->mtime == std::filesystem::file_time_type{}) {
+            // Canonical history uses default mtime as an unspecified sentinel.
+            continue;
         }
         auto written =
             ::kasumi::platform::metadata::set_last_write_time(path, row->mtime);
@@ -1808,8 +1830,9 @@ execute(const runtime::RuntimeData& runtime_data,
     }
 
     if (record->publication_required &&
-        !same_rows(publication_tree->rows,
-                   reconciliation_result.candidate_shared_tree.rows)) {
+        !detail::same_materialized_rows(
+            reconciliation_result.candidate_shared_tree.rows,
+            publication_tree->rows)) {
         auto rolled = rollback_terminal();
         if (!rolled)
             return std::unexpected(rolled.error());
@@ -1837,13 +1860,9 @@ execute(const runtime::RuntimeData& runtime_data,
                 mismatch_index = index;
                 break;
             }
-            if (!actual.is_directory && !expected.is_directory) {
-                if (actual.hash != expected.hash ||
-                    actual.size != expected.size ||
-                    actual.mtime != expected.mtime) {
-                    mismatch_index = index;
-                    break;
-                }
+            if (!detail::same_materialized_row(expected, actual)) {
+                mismatch_index = index;
+                break;
             }
         }
         if (mismatch_index >= count) {
@@ -1886,9 +1905,10 @@ execute(const runtime::RuntimeData& runtime_data,
                     ")";
             } else {
                 for (std::size_t index = 0; index < count; ++index) {
-                    if (publication_tree->rows[index] !=
-                        reconciliation_result.candidate_shared_tree
-                            .rows[index]) {
+                    if (!detail::same_materialized_row(
+                            reconciliation_result.candidate_shared_tree
+                                .rows[index],
+                            publication_tree->rows[index])) {
                         mismatch_index = index;
                         break;
                     }
@@ -1905,7 +1925,8 @@ execute(const runtime::RuntimeData& runtime_data,
             if (actual.path != expected.path) {
                 detail_message += ", actual_path=" + actual.path;
             }
-            if (actual.mtime != expected.mtime) {
+            if (expected.mtime != std::filesystem::file_time_type{} &&
+                actual.mtime != expected.mtime) {
                 detail_message +=
                     ", actual_mtime=" +
                     std::to_string(actual.mtime.time_since_epoch().count()) +
@@ -1966,7 +1987,9 @@ execute(const runtime::RuntimeData& runtime_data,
                     if (actual.path != expected.path ||
                         actual.hash != expected.hash ||
                         actual.size != expected.size ||
-                        actual.mtime != expected.mtime ||
+                        (expected.mtime !=
+                             std::filesystem::file_time_type{} &&
+                         actual.mtime != expected.mtime) ||
                         actual.is_directory != expected.is_directory) {
                         detail_message +=
                             " (path=" + expected.path + ", actual_mtime=" +
