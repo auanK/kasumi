@@ -47,6 +47,13 @@ struct LocalTarget {
     std::string ownership_token;
 };
 
+struct ProviderTarget {
+    std::string provider_id;
+    std::string transport;
+    std::string locator;
+    std::filesystem::path workspace_root;
+};
+
 struct Report {
     int schema_version = 1;
     std::string provider_id = "local-filesystem";
@@ -68,8 +75,10 @@ std::expected<std::filesystem::path, std::string>
 target_path(const LocalTarget& target, const std::filesystem::path& relative);
 
 Report run_local_certification(const std::filesystem::path& owned_root);
+std::vector<std::string> scenario_registry(const ProviderTarget& target);
 std::string derive_status(const Report& report);
 nlohmann::json to_json(const Report& report);
+nlohmann::json aggregate_reports(const std::vector<Report>& reports);
 
 std::string_view name(CapabilityStatus status) noexcept;
 std::string_view name(ScenarioStatus status) noexcept;

@@ -107,6 +107,55 @@ TEST(ProviderCertificationReportTest, DerivesCorrectnessAndRetainsEvidence) {
     EXPECT_EQ(derive_status(report), "FAIL");
 }
 
+TEST(ProviderCertificationMatrixTest,
+     TargetConfigurationDoesNotSelectScenarioRegistry) {
+    const ProviderTarget local{.provider_id = "local-filesystem",
+                               .transport = "Local",
+                               .locator = "D:/fixtures/local-a",
+                               .workspace_root = "D:/fixtures/work-a"};
+    const ProviderTarget s3{.provider_id = "aws-s3",
+                            .transport = "Rclone",
+                            .locator = "s3test:bucket/child",
+                            .workspace_root = "D:/fixtures/work-b"};
+
+    EXPECT_EQ(scenario_registry(local), scenario_registry(s3));
+    EXPECT_EQ(scenario_registry(local).front(), "transport-round-trip");
+    EXPECT_EQ(scenario_registry(local).back(), "cleanup");
+}
+
+TEST(ProviderCertificationMatrixTest,
+     AggregatesCorrectnessAndCapabilitiesIndependently) {
+    Report local{.provider_id = "local-filesystem", .transport = "Local"};
+    local.cleanup = "CLEANED";
+    local.capabilities.push_back(
+        {.name = "physical_hash", .status = CapabilityStatus::Unsupported});
+    local.scenarios.push_back(
+        {.name = "bootstrap-publish", .status = ScenarioStatus::Pass});
+    local.status = derive_status(local);
+
+    Report drive{.provider_id = "google-drive", .transport = "Rclone"};
+    drive.cleanup = "CLEANED";
+    drive.capabilities.push_back(
+        {.name = "physical_hash", .status = CapabilityStatus::Supported});
+    drive.scenarios.push_back(
+        {.name = "bootstrap-publish", .status = ScenarioStatus::Pass});
+    drive.status = derive_status(drive);
+
+    const auto matrix = aggregate_reports({local, drive});
+    ASSERT_EQ(matrix["scenarios"].size(), 1U);
+    EXPECT_EQ(matrix["scenarios"][0]["name"], "bootstrap-publish");
+    EXPECT_EQ(matrix["scenarios"][0]["targets"]["local-filesystem"],
+              "Pass");
+    EXPECT_EQ(matrix["scenarios"][0]["targets"]["google-drive"], "Pass");
+    ASSERT_EQ(matrix["capabilities"].size(), 1U);
+    EXPECT_EQ(matrix["capabilities"][0]["targets"]["local-filesystem"],
+              "Unsupported");
+    EXPECT_EQ(matrix["capabilities"][0]["targets"]["google-drive"],
+              "Supported");
+    EXPECT_EQ(local.status, "PASS");
+    EXPECT_EQ(drive.status, "PASS");
+}
+
 TEST(ProviderCertificationTest, LocalReferenceScenariosPass) {
     auto target = create_local_target(std::filesystem::temp_directory_path());
     ASSERT_TRUE(target.has_value());
