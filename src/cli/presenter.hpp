@@ -15,6 +15,7 @@ namespace kasumi::cli {
 struct FsckProgressDisplayState {
     std::optional<application::FsckStage> last_stage;
     std::optional<unsigned> last_object_percent;
+    bool empty_inventory_reported = false;
 };
 
 // Formats a byte count into a human-readable representation.

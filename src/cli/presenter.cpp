@@ -786,6 +786,82 @@ void present(const application::GarbageCollectProgress& progress) {
     }
 }
 
+void present(const application::FsckProgress& progress,
+             FsckProgressDisplayState& state) {
+    if (state.last_stage != progress.stage) {
+        const auto stage_key = [&] {
+            switch (progress.stage) {
+                case application::FsckStage::Preparing:
+                    return i18n::Key::FsckStagePreparing;
+                case application::FsckStage::Observing:
+                    return i18n::Key::FsckStageObserving;
+                case application::FsckStage::Analyzing:
+                    return i18n::Key::FsckStageAnalyzing;
+                case application::FsckStage::AuditingContent:
+                    return i18n::Key::FsckStageAuditingContent;
+                case application::FsckStage::Finalizing:
+                    return i18n::Key::FsckStageFinalizing;
+            }
+            return i18n::Key::FsckStageFinalizing;
+        }();
+        std::println("{}", i18n::tr(stage_key));
+        state.last_stage = progress.stage;
+    }
+
+    if (progress.stage != application::FsckStage::AuditingContent) {
+        return;
+    }
+    if (!progress.total_objects.has_value()) {
+        return;
+    }
+    if (*progress.total_objects == 0) {
+        if (!state.empty_inventory_reported) {
+            std::println("{}", i18n::tr(i18n::Key::FsckNoContent));
+            state.empty_inventory_reported = true;
+        }
+        return;
+    }
+
+    const auto completed =
+        std::min(progress.completed_objects, *progress.total_objects);
+    const auto percent = completed == *progress.total_objects
+                             ? 100u
+                             : static_cast<unsigned>(
+                                   static_cast<long double>(completed) * 100.0L /
+                                   *progress.total_objects);
+    if (state.last_object_percent == percent) {
+        return;
+    }
+    state.last_object_percent = percent;
+
+    std::string line = i18n::format(
+        *progress.total_objects == 1 ? i18n::Key::FsckProgressObject
+                                     : i18n::Key::FsckProgressObjects,
+        completed, *progress.total_objects, percent);
+    if (progress.completed_plaintext_bytes.has_value() &&
+        progress.total_plaintext_bytes.has_value()) {
+        const auto completed_bytes = std::min(
+            *progress.completed_plaintext_bytes,
+            *progress.total_plaintext_bytes);
+        const auto completed_size = format_size(completed_bytes);
+        const auto total_size = format_size(*progress.total_plaintext_bytes);
+        if (*progress.total_plaintext_bytes == 0) {
+            line += i18n::format(i18n::Key::FsckProgressBytes,
+                                 completed_size, total_size);
+        } else {
+            const auto byte_percent =
+                completed_bytes == *progress.total_plaintext_bytes
+                    ? 100u
+                    : static_cast<unsigned>(
+                          static_cast<long double>(completed_bytes) * 100.0L /
+                          *progress.total_plaintext_bytes);
+            line += i18n::format(i18n::Key::FsckProgressBytesPercent,
+                                 completed_size, total_size, byte_percent);
+        }
+    }
+    std::println("{}.", line);
+}
+
 int present(const application::Response& response, bool full) {
     if (const auto* sync =
             std::get_if<application::SyncCompleted>(&response.data)) {
@@ -813,13 +889,24 @@ int present(const application::Response& response, bool full) {
         }
         return 0;
     }
-    if (std::holds_alternative<application::FsckCompleted>(response.data)) {
-        std::println("{}", i18n::tr(i18n::Key::ErrorFsckAuditing));
+    if (const auto* fsck =
+            std::get_if<application::FsckCompleted>(&response.data)) {
         std::println("{}{}{} {}",
                      style::green,
                      i18n::tr(i18n::Key::LabelOk),
                      style::reset,
                      i18n::tr(i18n::Key::ErrorFsckClean));
+        if (fsck->checked_objects == 1) {
+            std::println("{}", i18n::tr(i18n::Key::FsckSummarySingular));
+        } else {
+            std::println("{}", i18n::format(i18n::Key::FsckSummaryPlural,
+                                             fsck->checked_objects));
+        }
+        if (fsck->checked_plaintext_bytes.has_value()) {
+            std::println("{}", i18n::format(i18n::Key::FsckSummaryBytes,
+                                             format_size(
+                                                 *fsck->checked_plaintext_bytes)));
+        }
         return 0;
     }
     if (const auto* ptr =

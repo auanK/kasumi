@@ -68,6 +68,22 @@
     "warning_detail1": "A consistência do backend foi insuficiente para quarentena online.",
     "warning_detail2": "Nenhum objeto candidato foi movido."
   },
+  "fsck": {
+    "starting": "Auditando \"{}\"...\n",
+    "stage_preparing": "[1/5] Preparando auditoria de integridade...",
+    "stage_observing": "[2/5] Observando histórico remoto...",
+    "stage_analyzing": "[3/5] Analisando inventário autenticado...",
+    "stage_auditing_content": "[4/5] Auditando conteúdo referenciado...",
+    "stage_finalizing": "[5/5] Finalizando auditoria...",
+    "no_content": "Nenhum objeto de conteúdo referenciado.",
+    "progress_object": "Auditado {}/{} objeto único ({}%)",
+    "progress_objects": "Auditados {}/{} objetos únicos ({}%)",
+    "progress_bytes": "; {} / {}",
+    "progress_bytes_percent": "; {} / {} ({}%)",
+    "summary_singular": "1 objeto único auditado.",
+    "summary_plural": "{} objetos únicos auditados.",
+    "summary_bytes": "Plaintext esperado: {}."
+  },
   "errors": {
     "plan_calculation": "Não foi possível calcular o plano: {}",
     "fsck_failed": "Auditoria finalizada com falhas: {}",

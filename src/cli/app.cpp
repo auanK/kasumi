@@ -115,6 +115,7 @@ int run(int argc, char* argv[]) {
     auto initial_credentials = credentials::from_environment();
 
     application::ProgressCallback on_progress{};
+    FsckProgressDisplayState fsck_display_state;
     if (request.operation == application::Operation::Sync) {
         std::println(
             "{}", i18n::format(i18n::Key::SyncStarting, request.profile_name));
@@ -142,6 +143,17 @@ int run(int argc, char* argv[]) {
             if (const auto* sync =
                     std::get_if<application::SyncProgress>(&progress)) {
                 present(*sync, application::Operation::Status);
+            }
+        };
+    } else if (request.operation == application::Operation::Fsck) {
+        std::println(
+            "{}",
+            i18n::format(i18n::Key::FsckStarting, request.profile_name));
+        on_progress = [&fsck_display_state](
+                          const application::ExecutionProgress& progress) {
+            if (const auto* fsck =
+                    std::get_if<application::FsckProgress>(&progress)) {
+                present(*fsck, fsck_display_state);
             }
         };
     } else if (request.operation == application::Operation::GarbageCollect) {

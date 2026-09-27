@@ -68,6 +68,22 @@
     "warning_detail1": "Backend consistency was insufficient for online quarantine.",
     "warning_detail2": "No candidate objects were moved."
   },
+  "fsck": {
+    "starting": "Auditing \"{}\"...\n",
+    "stage_preparing": "[1/5] Preparing integrity audit...",
+    "stage_observing": "[2/5] Observing remote history...",
+    "stage_analyzing": "[3/5] Analyzing authenticated inventory...",
+    "stage_auditing_content": "[4/5] Auditing referenced content...",
+    "stage_finalizing": "[5/5] Finalizing audit...",
+    "no_content": "No referenced content objects.",
+    "progress_object": "Audited {}/{} unique object ({}%)",
+    "progress_objects": "Audited {}/{} unique objects ({}%)",
+    "progress_bytes": "; {} / {}",
+    "progress_bytes_percent": "; {} / {} ({}%)",
+    "summary_singular": "1 unique object audited.",
+    "summary_plural": "{} unique objects audited.",
+    "summary_bytes": "Expected plaintext: {}."
+  },
   "errors": {
     "plan_calculation": "Could not compute sync plan: {}",
     "fsck_failed": "Audit finished with failures: {}",

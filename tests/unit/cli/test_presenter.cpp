@@ -83,6 +83,19 @@ TEST(CliPresenterTest, PresentsSuccessfulResponseVariants) {
               0);
 }
 
+TEST(CliPresenterTest, PresentsPluralFsckSummaryAndOmitsUnknownBytes) {
+    const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
+    testing::internal::CaptureStdout();
+
+    EXPECT_EQ(kasumi::cli::present(
+                  response(FsckCompleted{.checked_objects = 2},
+                           Operation::Fsck)),
+              0);
+    const auto output = testing::internal::GetCapturedStdout();
+    EXPECT_NE(output.find("2 unique objects audited."), std::string::npos);
+    EXPECT_EQ(output.find("Expected plaintext:"), std::string::npos);
+}
+
 TEST(CliPresenterTest, PresentsSynchronizationErrorsWithoutSecrets) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
     const Error error{.operation = Operation::Sync,
@@ -1506,8 +1519,37 @@ TEST(CliPresenterTest, PresentsFsckProgressInPortugueseIncludingZeroBytes) {
     EXPECT_NE(output.find("Analisando inventário autenticado"), std::string::npos);
     EXPECT_NE(output.find("Auditando conteúdo referenciado"), std::string::npos);
     EXPECT_NE(output.find("Finalizando auditoria"), std::string::npos);
+    EXPECT_NE(output.find("Auditado 0/1 objeto único (0%)"), std::string::npos);
     EXPECT_NE(output.find("0 bytes / 0 bytes"), std::string::npos);
     EXPECT_NE(output.find("100%"), std::string::npos);
+}
+
+TEST(CliPresenterTest, PresentsObjectAndBytePercentagesInEnglish) {
+    const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
+    kasumi::cli::FsckProgressDisplayState state;
+
+    testing::internal::CaptureStdout();
+    kasumi::cli::present(FsckProgress{
+        .stage = FsckStage::AuditingContent,
+        .completed_objects = 1,
+        .total_objects = 4,
+        .completed_plaintext_bytes = 50,
+        .total_plaintext_bytes = 100,
+    }, state);
+    kasumi::cli::present(FsckProgress{
+        .stage = FsckStage::AuditingContent,
+        .completed_objects = 4,
+        .total_objects = 4,
+        .completed_plaintext_bytes = 100,
+        .total_plaintext_bytes = 100,
+    }, state);
+    const auto output = testing::internal::GetCapturedStdout();
+
+    EXPECT_NE(output.find("1/4 unique objects (25%)"), std::string::npos);
+    EXPECT_NE(output.find("50 bytes / 100 bytes (50%)"), std::string::npos);
+    EXPECT_NE(output.find("4/4 unique objects (100%)"), std::string::npos);
+    EXPECT_NE(output.find("100 bytes / 100 bytes (100%)"), std::string::npos);
+    EXPECT_EQ(output.find("80%"), std::string::npos); // Stage 4/5 is not overall progress.
 }
 
 TEST(CliPresenterTest, BoundsFsckProgressOutputAndOmitsUnknownByteTotals) {
@@ -1535,6 +1577,11 @@ TEST(CliPresenterTest, BoundsFsckProgressOutputAndOmitsUnknownByteTotals) {
     EXPECT_NE(output.find("0%"), std::string::npos);
     EXPECT_NE(output.find("100%"), std::string::npos);
     EXPECT_NE(output.find("10000"), std::string::npos);
+    EXPECT_NE(output.find("[1/5] Preparing integrity audit"), std::string::npos);
+    EXPECT_NE(output.find("[2/5] Observing remote history"), std::string::npos);
+    EXPECT_NE(output.find("[3/5] Analyzing authenticated inventory"), std::string::npos);
+    EXPECT_NE(output.find("[4/5] Auditing referenced content"), std::string::npos);
+    EXPECT_NE(output.find("[5/5] Finalizing audit"), std::string::npos);
     EXPECT_EQ(output.find("bytes"), std::string::npos);
 }
 
@@ -1552,6 +1599,33 @@ TEST(CliPresenterTest, PresentsEmptyFsckInventoryWithoutAFalsePercentage) {
     const auto output = testing::internal::GetCapturedStdout();
     EXPECT_NE(output.find("No referenced content objects"), std::string::npos);
     EXPECT_EQ(output.find("%"), std::string::npos);
+}
+
+TEST(CliPresenterTest, FullObjectProgressFollowedByFailureHasNoSuccessSummary) {
+    const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
+    kasumi::cli::FsckProgressDisplayState state;
+    const Error error{.operation = Operation::Fsck,
+                      .code = ErrorCode::FsckFailure,
+                      .detail = "corrupt content",
+                      .runtime = std::nullopt};
+
+    testing::internal::CaptureStdout();
+    kasumi::cli::present(FsckProgress{
+        .stage = FsckStage::AuditingContent,
+        .completed_objects = 1,
+        .total_objects = 1,
+        .completed_plaintext_bytes = 6,
+        .total_plaintext_bytes = 6,
+    }, state);
+    kasumi::cli::present(error);
+    const auto output = testing::internal::GetCapturedStdout();
+
+    EXPECT_NE(output.find("100%"), std::string::npos);
+    EXPECT_NE(output.find("Audit finished with failures"), std::string::npos);
+    EXPECT_EQ(output.find("unique object audited"), std::string::npos);
+    EXPECT_EQ(output.find("Expected plaintext:"), std::string::npos);
+    EXPECT_EQ(output.find("Remote audit completed without failures."),
+              std::string::npos);
 }
 
 TEST(CliPresenterTest, PresentsGarbageCollectCancellationAsWarningWithExitCode130) {

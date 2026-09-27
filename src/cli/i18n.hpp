@@ -73,6 +73,22 @@ enum class Key {
     PreviewStarting,
     StatusStarting,
 
+    // Integrity audit
+    FsckStarting,
+    FsckStagePreparing,
+    FsckStageObserving,
+    FsckStageAnalyzing,
+    FsckStageAuditingContent,
+    FsckStageFinalizing,
+    FsckNoContent,
+    FsckProgressObject,
+    FsckProgressObjects,
+    FsckProgressBytes,
+    FsckProgressBytesPercent,
+    FsckSummarySingular,
+    FsckSummaryPlural,
+    FsckSummaryBytes,
+
     // Garbage Collection
     GcStarting,
     GcStagePreparing,
