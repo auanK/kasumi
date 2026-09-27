@@ -465,6 +465,7 @@ add_library(kasumi_application STATIC
     src/application/sync/coordinator.cpp
     src/application/sync/coordinator_recovery.cpp
     src/application/integrity/maintenance.cpp
+    src/application/integrity/fsck_checkpoint.cpp
     src/application/inspection/inspect.cpp
     src/application/credentials.cpp
     src/application/concurrency.cpp

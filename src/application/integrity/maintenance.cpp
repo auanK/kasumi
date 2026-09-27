@@ -4,9 +4,11 @@
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
+#include "application/integrity/fsck_checkpoint.hpp"
 #include "application/observation/state.hpp"
 #include "core/maintenance.hpp"
 #include "crypto/content.hpp"
+#include "crypto/physical_hash.hpp"
 #include "platform/cancellation.hpp"
 #include "platform/clock.hpp"
 #include "platform/path.hpp"
@@ -818,7 +820,13 @@ std::expected<void, Error> verify_content(const std::filesystem::path& path,
     return {};
 }
 
-std::expected<AuditState, Error>
+struct AuditObjectResult {
+    AuditState state = AuditState::Healthy;
+    std::string remote_content_id;
+    std::string physical_sha256;
+};
+
+std::expected<AuditObjectResult, Error>
 audit_object(transport::Transport& storage,
              KeySpan key,
              const kasumi::maintenance::ObjectReference& reference,
@@ -855,7 +863,7 @@ audit_object(transport::Transport& storage,
         if (!removed)
             return std::unexpected(removed.error());
         if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
-            return AuditState::Missing;
+            return AuditObjectResult{.state = AuditState::Missing};
         }
         return std::unexpected(
             transport_error(downloaded.error(), reference.identifier));
@@ -899,19 +907,33 @@ audit_object(transport::Transport& storage,
             result = AuditState::Corrupt;
         }
     }
+
+    std::string physical_sha256;
+    if (result == AuditState::Healthy) {
+        auto hash_res = crypto::physical::hash_file(encrypted, "sha256");
+        if (hash_res) {
+            physical_sha256 = std::move(*hash_res);
+        }
+    }
+
     auto removed = remove_temporary_file(encrypted);
     if (!removed)
         return std::unexpected(removed.error());
     removed = remove_temporary_file(plaintext);
     if (!removed)
         return std::unexpected(removed.error());
-    return result;
+    return AuditObjectResult{
+        .state = result,
+        .remote_content_id = remote_identifier,
+        .physical_sha256 = std::move(physical_sha256)};
 }
 
 struct AuditWorkResult {
     std::size_t index = 0;
     AuditState state = AuditState::Healthy;
     std::optional<Error> error;
+    std::string remote_content_id;
+    std::string physical_sha256;
 };
 
 struct AuditWindowState {
@@ -957,7 +979,9 @@ void run_audit_worker(std::stop_token stop,
                 if (!audited) {
                     result.error = audited.error();
                 } else {
-                    result.state = *audited;
+                    result.state = audited->state;
+                    result.remote_content_id = std::move(audited->remote_content_id);
+                    result.physical_sha256 = std::move(audited->physical_sha256);
                 }
             }
         } catch (const std::exception& exception) {
@@ -1107,6 +1131,76 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                 return fsck_result;
             }
 
+            const auto determine_vault_identity = [](const reconciliation::StorageState& state) -> std::string {
+                if (!state.epoch_vault_id.empty()) {
+                    return state.epoch_vault_id;
+                }
+                if (!state.reachable_commit_ids.empty()) {
+                    return "genesis:" + state.reachable_commit_ids.front();
+                }
+                return {};
+            };
+
+            const auto profile_dir = runtime_data.database_path.parent_path();
+            const auto vault_identity = determine_vault_identity(storage_state);
+            std::optional<FsckCheckpoint> loaded_checkpoint;
+            if (!profile_dir.empty() && !vault_identity.empty()) {
+                auto loaded = load_checkpoint(profile_dir, key);
+                if (loaded && loaded->has_value()) {
+                    if ((*loaded)->header.vault_id != vault_identity) {
+                        platform::perf_trace::count("fsck.checkpoint_vault_mismatch");
+                        platform::perf_trace::count("fsck.checkpoint_rejected");
+                    } else {
+                        loaded_checkpoint = std::move(*loaded);
+                    }
+                }
+            }
+
+            std::unordered_map<std::string, const VerifiedObjectEntry*> candidate_entries;
+            if (loaded_checkpoint) {
+                for (const auto& entry : loaded_checkpoint->entries) {
+                    candidate_entries[entry.logical_content_hash] = &entry;
+                }
+            }
+
+            for (const auto& ref : inventory->referenced_objects) {
+                const auto p_hash = hash_from_hex(ref.identifier);
+                if (!p_hash) {
+                    continue;
+                }
+                const auto remote_id = crypto::content_identifier(key, *p_hash);
+                auto it = candidate_entries.find(ref.identifier);
+                if (it != candidate_entries.end() &&
+                    it->second->remote_content_id == remote_id &&
+                    it->second->plaintext_size == ref.size) {
+                    platform::perf_trace::count("fsck.resume_candidates");
+                    if (storage.storage.physical_hash != nullptr) {
+                        platform::perf_trace::count("fsck.resume_physical_hash_checks");
+                        auto hash_res = storage.storage.physical_hash(
+                            storage.state.get(), remote_id, "sha256");
+                        if (!hash_res) {
+                            if (hash_res.error().code == transport::ErrorCode::Unsupported) {
+                                platform::perf_trace::count("fsck.resume_hash_unsupported");
+                            } else {
+                                platform::perf_trace::count("fsck.resume_hash_errors");
+                            }
+                            platform::perf_trace::count("fsck.resume_full_audit_fallbacks");
+                        } else if (*hash_res != it->second->physical_ciphertext_sha256) {
+                            platform::perf_trace::count("fsck.resume_hash_mismatches");
+                            platform::perf_trace::count("fsck.resume_full_audit_fallbacks");
+                        } else {
+                            // Under Threat A (untrusted remote storage),
+                            // unauthenticated provider hash cannot eliminate cryptographic verification of bytes.
+                            // Fail-closed fall back to full audit.
+                            platform::perf_trace::count("fsck.resume_full_audit_fallbacks");
+                        }
+                    } else {
+                        platform::perf_trace::count("fsck.resume_hash_unsupported");
+                        platform::perf_trace::count("fsck.resume_full_audit_fallbacks");
+                    }
+                }
+            }
+
             AuditWindowState state;
             state.tasks.resize(worker_count);
             state.completions.resize(worker_count);
@@ -1140,6 +1234,8 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
 
             std::optional<std::pair<std::size_t, Error>> lowest_hard_failure;
             std::vector<std::filesystem::path> unrecoverable;
+            std::map<std::string, VerifiedObjectEntry> verified_map;
+            std::size_t unpersisted_verified = 0;
             bool cancelled = false;
 
             while (outstanding != 0) {
@@ -1194,6 +1290,33 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                         unrecoverable.insert(unrecoverable.end(),
                                              reference.referenced_paths.begin(),
                                              reference.referenced_paths.end());
+                    } else {
+                        const auto& reference = inventory->referenced_objects[work_result.index];
+                        verified_map[reference.identifier] = VerifiedObjectEntry{
+                            .logical_content_hash = reference.identifier,
+                            .remote_content_id = std::move(work_result.remote_content_id),
+                            .plaintext_size = reference.size,
+                            .physical_ciphertext_sha256 = std::move(work_result.physical_sha256),
+                        };
+                        platform::perf_trace::count("fsck.checkpoint_verified_entries_recorded");
+                        ++unpersisted_verified;
+
+                        if (unpersisted_verified >= 64 && !profile_dir.empty() && !vault_identity.empty()) {
+                            FsckCheckpoint partial_checkpoint{
+                                .header = {
+                                    .format_version = checkpoint_format_version_1,
+                                    .audit_semantics_version = checkpoint_audit_semantics_version_1,
+                                    .vault_id = vault_identity,
+                                    .entry_count = verified_map.size(),
+                                },
+                            };
+                            partial_checkpoint.entries.reserve(verified_map.size());
+                            for (const auto& [_, entry] : verified_map) {
+                                partial_checkpoint.entries.push_back(entry);
+                            }
+                            (void)save_checkpoint(profile_dir, partial_checkpoint, key);
+                            unpersisted_verified = 0;
+                        }
                     }
                 }
 
@@ -1226,6 +1349,22 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
             workers.clear();
 
             platform::perf_trace::count("fsck.audit_peak_in_flight", state.peak_in_flight);
+
+            if (!profile_dir.empty() && !vault_identity.empty() && unrecoverable.empty() && !cancelled && !lowest_hard_failure) {
+                FsckCheckpoint final_checkpoint{
+                    .header = {
+                        .format_version = checkpoint_format_version_1,
+                        .audit_semantics_version = checkpoint_audit_semantics_version_1,
+                        .vault_id = vault_identity,
+                        .entry_count = verified_map.size(),
+                    },
+                };
+                final_checkpoint.entries.reserve(verified_map.size());
+                for (auto& [_, entry] : verified_map) {
+                    final_checkpoint.entries.push_back(std::move(entry));
+                }
+                (void)save_checkpoint(profile_dir, final_checkpoint, key);
+            }
 
             if (lowest_hard_failure) {
                 return std::unexpected(std::move(lowest_hard_failure->second));
