@@ -18,6 +18,8 @@ constexpr std::string_view domain(KeyPurpose purpose) noexcept {
             return "kasumi/v2/key/journal";
         case KeyPurpose::RemoteIdentifier:
             return "kasumi/v2/key/remote-id";
+        case KeyPurpose::FsckCheckpoint:
+            return "kasumi/v2/key/fsck-checkpoint";
     }
     return {};
 }

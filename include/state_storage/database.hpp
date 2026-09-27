@@ -24,6 +24,8 @@ struct StoredState {
     // Latest Epoch certificate accepted locally.
     std::string epoch_id;
     std::uint64_t epoch_sequence = 0;
+    // Logical files accepted but not yet materialized locally.
+    std::vector<NodeRow> pending_materializations;
 };
 
 // Persisted entry for safe reuse of the local hash.
@@ -47,7 +49,7 @@ struct ObservationCheckpoint {
     bool lineage_complete = false;
 };
 
-// Creates, migrates, or validates the database schema.
+// Creates or validates the canonical database schema.
 bool initialize(const std::filesystem::path& database_path);
 
 // Loads the state or returns nullopt when it does not exist yet.

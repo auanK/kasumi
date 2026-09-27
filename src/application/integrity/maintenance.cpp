@@ -4,22 +4,30 @@
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
+#include "application/integrity/fsck_checkpoint.hpp"
 #include "application/observation/state.hpp"
 #include "core/maintenance.hpp"
 #include "crypto/content.hpp"
+#include "crypto/physical_hash.hpp"
+#include "platform/cancellation.hpp"
 #include "platform/clock.hpp"
 #include "platform/path.hpp"
+#include "platform/perf_trace.hpp"
 #include "platform/workspace.hpp"
 
 #include <algorithm>
+#include <condition_variable>
 #include <exception>
 #include <filesystem>
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <mutex>
+#include <optional>
 #include <ranges>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -27,7 +35,78 @@ namespace kasumi::application::integrity {
 
 namespace {
 
+constexpr std::size_t max_candidates_per_batch = 8;
+
+enum class CandidateProcessingState {
+    Initial,
+    Copied,
+    Verified,
+    MetadataPublished,
+    Removed,
+    Failed,
+};
+
+struct CandidateItem {
+    std::string source_identifier;
+    std::string quarantine_identifier;
+    std::string expected_physical_hash;
+    CandidateProcessingState state = CandidateProcessingState::Initial;
+    bool native_copied = false;
+};
+
+bool is_hex_sha256(std::string_view value) noexcept {
+    return value.size() == 64 &&
+           std::ranges::all_of(value, [](char character) {
+               return (character >= '0' && character <= '9') ||
+                      (character >= 'a' && character <= 'f');
+           });
+}
+
 using KeySpan = std::span<const std::uint8_t, crypto::KEY_SIZE>;
+
+struct TraceGuard {
+    std::string_view name;
+    platform::perf_trace::Token token;
+    bool active = true;
+    void stop() noexcept {
+        if (active) {
+            platform::perf_trace::finish(name, token);
+            active = false;
+        }
+    }
+    ~TraceGuard() noexcept { stop(); }
+};
+
+struct SnapshotTraceNames {
+    std::string_view physical_listing;
+    std::string_view history_reconstruction;
+    std::string_view history_validation;
+    std::string_view content_reachability;
+    std::string_view candidate_selection;
+    std::string_view history_scope;
+};
+
+constexpr SnapshotTraceNames analysis_snapshot_traces{
+    "gc.snapshot.analysis.physical_listing_us",
+    "gc.snapshot.analysis.history_reconstruction_us",
+    "gc.snapshot.analysis.validate_history_us",
+    "gc.snapshot.analysis.content_reachability_us",
+    "gc.snapshot.analysis.candidate_selection_us",
+    "gc.snapshot.analysis"};
+constexpr SnapshotTraceNames first_snapshot_traces{
+    "gc.snapshot.first.physical_listing_us",
+    "gc.snapshot.first.history_reconstruction_us",
+    "gc.snapshot.first.validate_history_us",
+    "gc.snapshot.first.content_reachability_us",
+    "gc.snapshot.first.candidate_selection_us",
+    "gc.snapshot.first"};
+constexpr SnapshotTraceNames second_snapshot_traces{
+    "gc.snapshot.second.physical_listing_us",
+    "gc.snapshot.second.history_reconstruction_us",
+    "gc.snapshot.second.validate_history_us",
+    "gc.snapshot.second.content_reachability_us",
+    "gc.snapshot.second.candidate_selection_us",
+    "gc.snapshot.second"};
 
 enum class AuditState {
     Healthy,
@@ -254,27 +333,45 @@ std::expected<GarbageCollectionSnapshot, Error>
 collect_garbage_collection_snapshot(
     transport::Transport& storage,
     KeySpan key,
-    const std::filesystem::path& workspace_root) {
+    const std::filesystem::path& workspace_root,
+    const SnapshotTraceNames& traces) {
+    TraceGuard list_guard{traces.physical_listing,
+                          platform::perf_trace::begin()};
     auto listing = transport::list(storage);
     if (!listing) {
         return std::unexpected(transport_error(listing.error()));
     }
     std::ranges::sort(*listing);
+    list_guard.stop();
 
+    TraceGuard history_guard{traces.history_reconstruction,
+                             platform::perf_trace::begin()};
     auto history = history_storage::inventory_reachability(
-        storage, key, *listing, workspace_root);
+        storage, key, *listing, workspace_root,
+        platform::perf_trace::enabled() ? traces.history_scope
+                                        : std::string_view{});
     if (!history) {
         return std::unexpected(history_storage_error(history.error()));
     }
+    history_guard.stop();
+    TraceGuard val_hist_guard{traces.history_validation,
+                              platform::perf_trace::begin()};
     if (auto valid = validate_history_inventory(*history); !valid) {
         return std::unexpected(valid.error());
     }
+    val_hist_guard.stop();
 
+    TraceGuard content_guard{traces.content_reachability,
+                             platform::perf_trace::begin()};
     auto content = history_storage::inventory_content_reachability(
         storage, key, *listing, *history, workspace_root, false);
     if (!content) {
         return std::unexpected(history_storage_error(content.error()));
     }
+    content_guard.stop();
+
+    TraceGuard cand_guard{traces.candidate_selection,
+                          platform::perf_trace::begin()};
     if (auto valid = validate_content_inventory(*content); !valid) {
         return std::unexpected(valid.error());
     }
@@ -561,7 +658,8 @@ std::expected<std::size_t, Error> purge_expired_quarantine(
     const GarbageCollectionSnapshot& snapshot,
     history_storage::maintenance_protocol::RegistrationState& barrier,
     const std::vector<history_storage::maintenance_protocol::QuarantineEntry>&
-        entries) {
+        entries,
+    const std::function<void()>& on_mutation_starting = {}) {
     std::size_t purged = 0;
     for (const auto& entry : entries) {
         if (history_storage::maintenance_protocol::is_epoch_object(
@@ -597,6 +695,9 @@ std::expected<std::size_t, Error> purge_expired_quarantine(
             history_storage::maintenance_protocol::verify_registration(barrier);
         if (!owned) {
             return std::unexpected(protocol_error(owned.error()));
+        }
+        if (on_mutation_starting) {
+            on_mutation_starting();
         }
         auto metadata_removed =
             transport::remove(storage, entry.metadata_identifier);
@@ -719,12 +820,19 @@ std::expected<void, Error> verify_content(const std::filesystem::path& path,
     return {};
 }
 
-std::expected<AuditState, Error>
+struct AuditObjectResult {
+    AuditState state = AuditState::Healthy;
+    std::string remote_content_id;
+    std::string physical_sha256;
+};
+
+std::expected<AuditObjectResult, Error>
 audit_object(transport::Transport& storage,
              KeySpan key,
              const kasumi::maintenance::ObjectReference& reference,
              const platform::Workspace& workspace,
              std::size_t index) {
+    platform::perf_trace::count("fsck.audit_objects");
     const auto plaintext_hash = hash_from_hex(reference.identifier);
     if (!plaintext_hash) {
         return std::unexpected(make_error(ErrorCode::IntegrityFailure,
@@ -743,7 +851,10 @@ audit_object(transport::Transport& storage,
     if (!prepared)
         return std::unexpected(prepared.error());
 
+    platform::perf_trace::count("fsck.audit_get_calls");
+    const auto get_token = platform::perf_trace::begin();
     auto downloaded = transport::get(storage, remote_identifier, encrypted);
+    platform::perf_trace::finish("fsck.audit_get_duration_us", get_token);
     if (!downloaded) {
         auto removed = remove_temporary_file(encrypted);
         if (!removed)
@@ -752,10 +863,16 @@ audit_object(transport::Transport& storage,
         if (!removed)
             return std::unexpected(removed.error());
         if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
-            return AuditState::Missing;
+            return AuditObjectResult{.state = AuditState::Missing};
         }
         return std::unexpected(
             transport_error(downloaded.error(), reference.identifier));
+    }
+
+    std::error_code enc_size_error;
+    const auto enc_size = std::filesystem::file_size(encrypted, enc_size_error);
+    if (!enc_size_error) {
+        platform::perf_trace::count("fsck.encrypted_bytes_downloaded", enc_size);
     }
 
     auto regular = require_regular_file(
@@ -764,13 +881,25 @@ audit_object(transport::Transport& storage,
         return std::unexpected(regular.error());
 
     AuditState result = AuditState::Healthy;
-    if (!crypto::decrypt_file(encrypted, plaintext, key)) {
+    platform::perf_trace::count("fsck.audit_decrypt_calls");
+    const auto decrypt_token = platform::perf_trace::begin();
+    const bool decrypted = crypto::decrypt_file(encrypted, plaintext, key);
+    platform::perf_trace::finish("fsck.audit_decrypt_duration_us", decrypt_token);
+    if (!decrypted) {
         result = AuditState::Corrupt;
     } else {
+        std::error_code plain_size_error;
+        const auto plain_size = std::filesystem::file_size(plaintext, plain_size_error);
+        if (!plain_size_error) {
+            platform::perf_trace::count("fsck.plaintext_bytes_verified", plain_size);
+        }
+        platform::perf_trace::count("fsck.audit_verify_calls");
+        const auto verify_token = platform::perf_trace::begin();
         auto verified = verify_content(plaintext,
                                        reference.identifier,
                                        reference.size,
                                        ErrorCode::WorkspaceFailure);
+        platform::perf_trace::finish("fsck.audit_verify_duration_us", verify_token);
         if (!verified) {
             if (verified.error().code != ErrorCode::IntegrityFailure) {
                 return std::unexpected(verified.error());
@@ -778,13 +907,99 @@ audit_object(transport::Transport& storage,
             result = AuditState::Corrupt;
         }
     }
+
+    std::string physical_sha256;
+    if (result == AuditState::Healthy) {
+        auto hash_res = crypto::physical::hash_file(encrypted, "sha256");
+        if (hash_res) {
+            physical_sha256 = std::move(*hash_res);
+        }
+    }
+
     auto removed = remove_temporary_file(encrypted);
     if (!removed)
         return std::unexpected(removed.error());
     removed = remove_temporary_file(plaintext);
     if (!removed)
         return std::unexpected(removed.error());
-    return result;
+    return AuditObjectResult{
+        .state = result,
+        .remote_content_id = remote_identifier,
+        .physical_sha256 = std::move(physical_sha256)};
+}
+
+struct AuditWorkResult {
+    std::size_t index = 0;
+    AuditState state = AuditState::Healthy;
+    std::optional<Error> error;
+    std::string remote_content_id;
+    std::string physical_sha256;
+};
+
+struct AuditWindowState {
+    std::mutex mutex;
+    std::condition_variable_any changed;
+    std::vector<std::optional<std::size_t>> tasks;
+    std::vector<std::optional<AuditWorkResult>> completions;
+    std::size_t in_flight = 0;
+    std::size_t peak_in_flight = 0;
+    bool stop_requested = false;
+};
+
+void run_audit_worker(std::stop_token stop,
+                      std::size_t slot,
+                      AuditWindowState& state,
+                      transport::Transport& storage,
+                      KeySpan key,
+                      const std::vector<kasumi::maintenance::ObjectReference>& references,
+                      const platform::Workspace& workspace) {
+    while (true) {
+        std::size_t index = 0;
+        {
+            std::unique_lock lock(state.mutex);
+            state.changed.wait(lock, [&] {
+                return state.tasks[slot].has_value() || state.stop_requested || stop.stop_requested();
+            });
+            if (!state.tasks[slot].has_value()) {
+                return;
+            }
+            index = *state.tasks[slot];
+            state.tasks[slot].reset();
+            ++state.in_flight;
+            state.peak_in_flight =
+                std::max(state.peak_in_flight, state.in_flight);
+        }
+
+        AuditWorkResult result{.index = index, .state = AuditState::Healthy, .error = std::nullopt};
+        try {
+            if (platform::cancellation::requested() || stop.stop_requested() || state.stop_requested) {
+                result.error = make_error(ErrorCode::StateFailure, "operation cancelled");
+            } else {
+                auto audited = audit_object(storage, key, references[index], workspace, index);
+                if (!audited) {
+                    result.error = audited.error();
+                } else {
+                    result.state = audited->state;
+                    result.remote_content_id = std::move(audited->remote_content_id);
+                    result.physical_sha256 = std::move(audited->physical_sha256);
+                }
+            }
+        } catch (const std::exception& exception) {
+            result.error = make_error(ErrorCode::StateFailure, exception.what());
+        } catch (...) {
+            result.error = make_error(ErrorCode::StateFailure, "audit worker failed");
+        }
+
+        {
+            std::lock_guard lock(state.mutex);
+            --state.in_flight;
+            state.completions[slot] = std::move(result);
+        }
+        state.changed.notify_all();
+        if (stop.stop_requested() || state.stop_requested) {
+            return;
+        }
+    }
 }
 
 } // namespace
@@ -830,29 +1045,55 @@ std::string describe(const Error& error) {
 
 std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                                       transport::Transport& storage,
-                                      KeySpan key) {
+                                      KeySpan key,
+                                      std::size_t audit_concurrency,
+                                      FsckProgressCallback on_progress) {
+    std::size_t completed_objects = 0;
+    std::optional<std::size_t> progress_total_objects;
+    std::optional<std::uint64_t> completed_plaintext_bytes =
+        on_progress ? std::optional<std::uint64_t>{0} : std::nullopt;
+    std::optional<std::uint64_t> total_plaintext_bytes;
+    const auto report_progress = [&](application::FsckStage stage) noexcept {
+        if (!on_progress) {
+            return;
+        }
+        try {
+            on_progress(application::FsckProgress{
+                .stage = stage,
+                .completed_objects = completed_objects,
+                .total_objects = progress_total_objects,
+                .completed_plaintext_bytes = completed_plaintext_bytes,
+                .total_plaintext_bytes = total_plaintext_bytes,
+            });
+        } catch (...) {
+            // Progress is observational and must not alter the audit result.
+        }
+    };
+    TraceGuard total_guard{"fsck.total_duration_us", platform::perf_trace::begin()};
     if (runtime_data.local_dir.empty() || !transport::valid(storage)) {
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid fsck context"));
     }
+    report_progress(application::FsckStage::Observing);
     const auto history_workspace = maintenance_workspace_root(runtime_data);
-    auto storage_state = observation::collect_storage_state(
-        storage, key, history_workspace, true);
-    if (!storage_state) {
+    auto observation = [&]() {
+        TraceGuard guard{"fsck.collect_storage_state_duration_us", platform::perf_trace::begin()};
+        return observation::collect_storage_observation(
+            storage, key, history_workspace, true);
+    }();
+    if (!observation) {
         return std::unexpected(
-            make_error(ErrorCode::StateFailure, storage_state.error()));
+            make_error(ErrorCode::StateFailure, observation.error()));
     }
-    if (!storage_state->history_present) {
+    report_progress(application::FsckStage::Analyzing);
+    const auto& storage_state = observation->state;
+    if (!storage_state.history_present) {
         return std::unexpected(
             make_error(ErrorCode::IntegrityFailure, "remote history absent"));
     }
-    auto listing = transport::list(storage);
-    if (!listing) {
-        return std::unexpected(transport_error(listing.error()));
-    }
     const auto layout = history_storage::derive_remote_layout(key);
     std::vector<std::string> unknown_storage_identifiers;
-    for (const auto& identifier : *listing) {
+    for (const auto& identifier : observation->physical_identifiers) {
         if (history_storage::is_history_object(layout, identifier) ||
             kasumi::hash_from_hex(identifier).has_value()) {
             continue;
@@ -866,13 +1107,18 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                        list_detail("unknown physical identifiers: ",
                                    unknown_storage_identifiers)));
     }
-    auto local_tree = observation::collect_local_tree(runtime_data.local_dir);
+    auto local_tree = [&]() {
+        TraceGuard guard{"fsck.local_tree_duration_us", platform::perf_trace::begin()};
+        return observation::collect_local_tree(runtime_data.local_dir);
+    }();
     if (!local_tree) {
         return std::unexpected(
             make_error(ErrorCode::StateFailure, local_tree.error()));
     }
-    auto inventory =
-        analyze_inventory(storage_state->tree, *local_tree, *storage_state);
+    auto inventory = [&]() {
+        TraceGuard guard{"fsck.inventory_analysis_duration_us", platform::perf_trace::begin()};
+        return analyze_inventory(storage_state.tree, *local_tree, storage_state);
+    }();
     if (!inventory)
         return std::unexpected(inventory.error());
     if (!inventory->unknown_identifiers.empty()) {
@@ -882,31 +1128,314 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                                    inventory->unknown_identifiers)));
     }
 
+    if (on_progress) {
+        progress_total_objects = inventory->referenced_objects.size();
+        total_plaintext_bytes = 0;
+        for (const auto& reference : inventory->referenced_objects) {
+            if (reference.size > std::numeric_limits<std::uint64_t>::max() -
+                                     *total_plaintext_bytes) {
+                total_plaintext_bytes.reset();
+                break;
+            }
+            *total_plaintext_bytes += reference.size;
+        }
+    }
+
+    const auto ws_token = platform::perf_trace::begin();
     auto workspace = platform::create_workspace("fsck");
+    platform::perf_trace::finish("fsck.workspace_duration_us", ws_token);
     if (!workspace) {
         return std::unexpected(
             make_error(ErrorCode::WorkspaceFailure, workspace.error()));
     }
     auto result = [&]() -> std::expected<FsckResult, Error> {
+        TraceGuard referenced_guard{"fsck.referenced_audit_duration_us", platform::perf_trace::begin()};
         try {
-            FsckResult fsck_result{
-                .checked_objects = inventory->referenced_objects.size(),
-            };
-            std::vector<std::filesystem::path> unrecoverable;
-            for (std::size_t index = 0;
-                 index < inventory->referenced_objects.size();
-                 ++index) {
-                const auto& reference = inventory->referenced_objects[index];
-                auto audited =
-                    audit_object(storage, key, reference, *workspace, index);
-                if (!audited)
-                    return std::unexpected(audited.error());
-                if (*audited == AuditState::Healthy)
-                    continue;
-                unrecoverable.insert(unrecoverable.end(),
-                                     reference.referenced_paths.begin(),
-                                     reference.referenced_paths.end());
+            const auto total_objects = inventory->referenced_objects.size();
+            if (on_progress) {
+                report_progress(application::FsckStage::AuditingContent);
             }
+            FsckResult fsck_result{
+                .checked_objects = total_objects,
+            };
+
+            const auto effective_concurrency = std::max<std::size_t>(1, audit_concurrency);
+            const auto worker_count =
+                std::min<std::size_t>(effective_concurrency, total_objects);
+
+            platform::perf_trace::count("fsck.audit_configured_concurrency", effective_concurrency);
+            platform::perf_trace::count("fsck.audit_worker_count", worker_count);
+
+            if (total_objects == 0) {
+                platform::perf_trace::count("fsck.audit_peak_in_flight", 0);
+                report_progress(application::FsckStage::Finalizing);
+                return fsck_result;
+            }
+
+            const auto determine_vault_identity = [](const reconciliation::StorageState& state) -> std::string {
+                if (!state.epoch_vault_id.empty()) {
+                    return state.epoch_vault_id;
+                }
+                if (!state.reachable_commit_ids.empty()) {
+                    return "genesis:" + state.reachable_commit_ids.front();
+                }
+                return {};
+            };
+
+            const auto profile_dir = runtime_data.database_path.parent_path();
+            const auto vault_identity = determine_vault_identity(storage_state);
+            std::optional<FsckCheckpoint> loaded_checkpoint;
+            if (!profile_dir.empty() && !vault_identity.empty()) {
+                const auto checkpoint_load_trace = platform::perf_trace::begin();
+                auto loaded = load_checkpoint(profile_dir, key);
+                platform::perf_trace::finish("fsck.checkpoint_load_wall_us",
+                                             checkpoint_load_trace);
+                if (loaded && loaded->has_value()) {
+                    if ((*loaded)->header.vault_id != vault_identity) {
+                        platform::perf_trace::count("fsck.checkpoint_vault_mismatch");
+                        platform::perf_trace::count("fsck.checkpoint_rejected");
+                    } else {
+                        loaded_checkpoint = std::move(*loaded);
+                    }
+                }
+            }
+
+            std::unordered_map<std::string, const VerifiedObjectEntry*> candidate_entries;
+            if (loaded_checkpoint) {
+                for (const auto& entry : loaded_checkpoint->entries) {
+                    candidate_entries[entry.logical_content_hash] = &entry;
+                }
+            }
+
+            for (const auto& ref : inventory->referenced_objects) {
+                const auto p_hash = hash_from_hex(ref.identifier);
+                if (!p_hash) {
+                    continue;
+                }
+                const auto remote_id = crypto::content_identifier(key, *p_hash);
+                auto it = candidate_entries.find(ref.identifier);
+                if (it != candidate_entries.end() &&
+                    it->second->remote_content_id == remote_id &&
+                    it->second->plaintext_size == ref.size) {
+                    platform::perf_trace::count("fsck.resume_candidates");
+                    if (storage.storage.physical_hash != nullptr) {
+                        platform::perf_trace::count("fsck.resume_physical_hash_checks");
+                        auto hash_res = storage.storage.physical_hash(
+                            storage.state.get(), remote_id, "sha256");
+                        if (!hash_res) {
+                            if (hash_res.error().code == transport::ErrorCode::Unsupported) {
+                                platform::perf_trace::count("fsck.resume_hash_unsupported");
+                            } else {
+                                platform::perf_trace::count("fsck.resume_hash_errors");
+                            }
+                            platform::perf_trace::count("fsck.resume_full_audit_fallbacks");
+                        } else if (*hash_res != it->second->physical_ciphertext_sha256) {
+                            platform::perf_trace::count("fsck.resume_hash_mismatches");
+                            platform::perf_trace::count("fsck.resume_full_audit_fallbacks");
+                        } else {
+                            // Under Threat A (untrusted remote storage),
+                            // unauthenticated provider hash cannot eliminate cryptographic verification of bytes.
+                            // Fail-closed fall back to full audit.
+                            platform::perf_trace::count("fsck.resume_full_audit_fallbacks");
+                        }
+                    } else {
+                        platform::perf_trace::count("fsck.resume_hash_unsupported");
+                        platform::perf_trace::count("fsck.resume_full_audit_fallbacks");
+                    }
+                }
+            }
+
+            AuditWindowState state;
+            state.tasks.resize(worker_count);
+            state.completions.resize(worker_count);
+
+            std::vector<std::jthread> workers;
+            workers.reserve(worker_count);
+            for (std::size_t slot = 0; slot < worker_count; ++slot) {
+                workers.emplace_back(run_audit_worker,
+                                     slot,
+                                     std::ref(state),
+                                     std::ref(storage),
+                                     key,
+                                     std::cref(inventory->referenced_objects),
+                                     std::cref(*workspace));
+            }
+
+            std::size_t next = 0;
+            std::size_t outstanding = 0;
+            const auto admit = [&](std::size_t slot) {
+                {
+                    std::lock_guard lock(state.mutex);
+                    state.tasks[slot] = next++;
+                    ++outstanding;
+                }
+                state.changed.notify_all();
+            };
+
+            for (std::size_t slot = 0; slot < worker_count; ++slot) {
+                admit(slot);
+            }
+
+            std::optional<std::pair<std::size_t, Error>> lowest_hard_failure;
+            std::vector<std::filesystem::path> unrecoverable;
+            std::map<std::string, VerifiedObjectEntry> verified_map;
+            std::size_t unpersisted_verified = 0;
+            bool cancelled = false;
+
+            while (outstanding != 0) {
+                std::size_t slot = 0;
+                AuditWorkResult work_result;
+                {
+                    std::unique_lock lock(state.mutex);
+                    state.changed.wait(lock, [&] {
+                        return std::ranges::any_of(state.completions,
+                                                   [](const auto& item) {
+                                                       return item.has_value();
+                                                   });
+                    });
+                    auto it = std::ranges::find_if(state.completions,
+                                                   [](const auto& item) {
+                                                       return item.has_value();
+                                                   });
+                    slot = static_cast<std::size_t>(it - state.completions.begin());
+                    work_result = std::move(**it);
+                    it->reset();
+                }
+                --outstanding;
+                platform::perf_trace::count("fsck.audit_completion_count");
+                bool object_classified = false;
+                std::uint64_t classified_size = 0;
+
+                if (platform::cancellation::requested()) {
+                    cancelled = true;
+                    {
+                        std::lock_guard lock(state.mutex);
+                        state.stop_requested = true;
+                    }
+                    state.changed.notify_all();
+                    for (auto& w : workers) {
+                        w.request_stop();
+                    }
+                }
+
+                if (work_result.error) {
+                    if (!lowest_hard_failure || work_result.index < lowest_hard_failure->first) {
+                        lowest_hard_failure = std::pair{work_result.index, std::move(*work_result.error)};
+                    }
+                    {
+                        std::lock_guard lock(state.mutex);
+                        state.stop_requested = true;
+                    }
+                    state.changed.notify_all();
+                    for (auto& w : workers) {
+                        w.request_stop();
+                    }
+                } else {
+                    const auto& reference =
+                        inventory->referenced_objects[work_result.index];
+                    classified_size = reference.size;
+                    if (work_result.state != AuditState::Healthy) {
+                        unrecoverable.insert(unrecoverable.end(),
+                                             reference.referenced_paths.begin(),
+                                             reference.referenced_paths.end());
+                    } else {
+                        verified_map[reference.identifier] = VerifiedObjectEntry{
+                            .logical_content_hash = reference.identifier,
+                            .remote_content_id = std::move(work_result.remote_content_id),
+                            .plaintext_size = reference.size,
+                            .physical_ciphertext_sha256 = std::move(work_result.physical_sha256),
+                        };
+                        platform::perf_trace::count("fsck.checkpoint_verified_entries_recorded");
+                        ++unpersisted_verified;
+
+                        if (unpersisted_verified >= 64 && !profile_dir.empty() && !vault_identity.empty()) {
+                            FsckCheckpoint partial_checkpoint{
+                                .header = {
+                                    .format_version = checkpoint_format_version_1,
+                                    .audit_semantics_version = checkpoint_audit_semantics_version_1,
+                                    .vault_id = vault_identity,
+                                    .entry_count = verified_map.size(),
+                                },
+                            };
+                            partial_checkpoint.entries.reserve(verified_map.size());
+                            for (const auto& [_, entry] : verified_map) {
+                                partial_checkpoint.entries.push_back(entry);
+                            }
+                            (void)save_checkpoint(profile_dir, partial_checkpoint, key);
+                            unpersisted_verified = 0;
+                        }
+                    }
+                    object_classified = true;
+                }
+
+                if (!state.stop_requested && !cancelled && !lowest_hard_failure &&
+                    next < total_objects) {
+                    if (platform::cancellation::requested()) {
+                        cancelled = true;
+                        {
+                            std::lock_guard lock(state.mutex);
+                            state.stop_requested = true;
+                        }
+                        state.changed.notify_all();
+                        for (auto& w : workers) {
+                            w.request_stop();
+                        }
+                    } else {
+                        admit(slot);
+                    }
+                }
+                if (object_classified && on_progress) {
+                    ++completed_objects;
+                    if (completed_plaintext_bytes) {
+                        if (classified_size >
+                            std::numeric_limits<std::uint64_t>::max() -
+                                *completed_plaintext_bytes) {
+                            completed_plaintext_bytes.reset();
+                        } else {
+                            *completed_plaintext_bytes += classified_size;
+                        }
+                    }
+                    report_progress(application::FsckStage::AuditingContent);
+                }
+            }
+
+            {
+                std::lock_guard lock(state.mutex);
+                state.stop_requested = true;
+            }
+            state.changed.notify_all();
+            for (auto& w : workers) {
+                w.request_stop();
+            }
+            workers.clear();
+            report_progress(application::FsckStage::Finalizing);
+
+            platform::perf_trace::count("fsck.audit_peak_in_flight", state.peak_in_flight);
+
+            if (!profile_dir.empty() && !vault_identity.empty() && unrecoverable.empty() && !cancelled && !lowest_hard_failure) {
+                FsckCheckpoint final_checkpoint{
+                    .header = {
+                        .format_version = checkpoint_format_version_1,
+                        .audit_semantics_version = checkpoint_audit_semantics_version_1,
+                        .vault_id = vault_identity,
+                        .entry_count = verified_map.size(),
+                    },
+                };
+                final_checkpoint.entries.reserve(verified_map.size());
+                for (auto& [_, entry] : verified_map) {
+                    final_checkpoint.entries.push_back(std::move(entry));
+                }
+                (void)save_checkpoint(profile_dir, final_checkpoint, key);
+            }
+
+            if (lowest_hard_failure) {
+                return std::unexpected(std::move(lowest_hard_failure->second));
+            }
+            if (cancelled || platform::cancellation::requested()) {
+                return std::unexpected(
+                    make_error(ErrorCode::StateFailure, "operation cancelled"));
+            }
+
             std::ranges::sort(unrecoverable, {}, [](const auto& path) {
                 return platform::path::to_logical_utf8(path);
             });
@@ -922,38 +1451,67 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                 make_error(ErrorCode::StateFailure, exception.what()));
         }
     }();
+    const auto ws_cleanup_token = platform::perf_trace::begin();
     platform::cleanup_workspace(*workspace);
+    platform::perf_trace::finish("fsck.workspace_duration_us", ws_cleanup_token);
     return result;
 }
 
 std::expected<GarbageCollectResult, Error>
 garbage_collect(const runtime::RuntimeData& runtime_data,
                 transport::Transport& storage,
-                KeySpan key) {
+                KeySpan key,
+                std::size_t copy_batch_concurrency,
+                std::size_t metadata_batch_concurrency,
+                std::size_t source_removal_concurrency,
+                GarbageCollectProgressCallback on_progress) {
     if (runtime_data.local_dir.empty() || runtime_data.database_path.empty() ||
-        !transport::valid(storage)) {
+        !transport::valid(storage) || copy_batch_concurrency == 0 ||
+        copy_batch_concurrency > max_candidates_per_batch ||
+        metadata_batch_concurrency == 0 ||
+        metadata_batch_concurrency > max_candidates_per_batch ||
+        source_removal_concurrency == 0 ||
+        source_removal_concurrency > max_candidates_per_batch) {
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid GC context"));
     }
 
+    if (on_progress) {
+        on_progress({.stage = GarbageCollectStage::Preparing});
+    }
+
     try {
+        const auto gc_total_trace = platform::perf_trace::begin();
+        struct GcTotalTraceGuard {
+            platform::perf_trace::Token token;
+            ~GcTotalTraceGuard() {
+                platform::perf_trace::finish("gc.total_duration_us", token);
+            }
+        } total_guard{.token = gc_total_trace};
         const auto layout = history_storage::derive_remote_layout(key);
         const auto workspace_root = maintenance_workspace_root(runtime_data);
+        const auto barrier_acquire_trace = platform::perf_trace::begin();
         auto barrier = history_storage::maintenance_protocol::establish_barrier(
             storage, layout, workspace_root);
+        platform::perf_trace::finish("gc barrier acquire", barrier_acquire_trace);
         if (!barrier) {
             return std::unexpected(protocol_error(barrier.error()));
         }
         auto outcome = [&]() -> std::expected<GarbageCollectResult, Error> {
             try {
+                const auto writer_check_trace = platform::perf_trace::begin();
                 for (int observation = 0; observation < 2; ++observation) {
                     auto writers =
                         history_storage::maintenance_protocol::active_writers(
                             storage, layout);
                     if (!writers) {
+                        platform::perf_trace::finish(
+                            "gc writer consistency checks", writer_check_trace);
                         return std::unexpected(protocol_error(writers.error()));
                     }
                     if (!writers->empty()) {
+                        platform::perf_trace::finish(
+                            "gc writer consistency checks", writer_check_trace);
                         return std::unexpected(make_error(
                             ErrorCode::ConcurrentChange,
                             list_detail("active or abandoned writers: ",
@@ -962,20 +1520,36 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     auto owned = history_storage::maintenance_protocol::
                         verify_registration(*barrier);
                     if (!owned) {
+                        platform::perf_trace::finish(
+                            "gc writer consistency checks", writer_check_trace);
                         return std::unexpected(protocol_error(owned.error()));
                     }
                 }
+                platform::perf_trace::finish("gc writer consistency checks",
+                                             writer_check_trace);
 
+                const auto consistency_probe_trace =
+                    platform::perf_trace::begin();
                 auto online = history_storage::maintenance_protocol::
                     supports_online_collection(storage, layout, workspace_root);
+                platform::perf_trace::finish("gc backend consistency probe",
+                                             consistency_probe_trace);
                 if (!online) {
                     return std::unexpected(protocol_error(online.error()));
                 }
                 if (!*online) {
+                    if (on_progress) {
+                        on_progress({.stage = GarbageCollectStage::Analyzing});
+                    }
                     auto analyzed = collect_garbage_collection_snapshot(
-                        storage, key, workspace_root);
+                        storage, key, workspace_root,
+                        analysis_snapshot_traces);
                     if (!analyzed) {
                         return std::unexpected(analyzed.error());
+                    }
+                    if (on_progress) {
+                        on_progress({.stage = GarbageCollectStage::Analyzing,
+                                     .candidate_count = analyzed->candidates.size()});
                     }
                     return GarbageCollectResult{
                         .candidate_objects = analyzed->candidates.size(),
@@ -989,34 +1563,62 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                         make_error(ErrorCode::StateFailure, now.error()));
                 }
 
+                if (on_progress) {
+                    on_progress({.stage = GarbageCollectStage::CheckingQuarantine});
+                }
+                const auto quarantine_inventory_trace =
+                    platform::perf_trace::begin();
                 auto quarantine =
                     history_storage::maintenance_protocol::inventory_quarantine(
                         storage, key, workspace_root);
+                platform::perf_trace::finish("gc quarantine inventory",
+                                             quarantine_inventory_trace);
                 if (!quarantine) {
                     return std::unexpected(protocol_error(quarantine.error()));
                 }
+                const auto restore_trace = platform::perf_trace::begin();
                 auto restored = restore_reachable_quarantine(
                     storage, key, workspace_root, *barrier, *quarantine);
+                platform::perf_trace::finish("gc quarantine restoration",
+                                             restore_trace);
                 if (!restored) {
                     return std::unexpected(restored.error());
                 }
+                const auto metadata_init_trace = platform::perf_trace::begin();
                 auto metadata = initialize_quarantine_metadata(
                     storage, key, workspace_root, *now, *barrier, *quarantine);
+                platform::perf_trace::finish("gc prior metadata initialization",
+                                             metadata_init_trace);
                 if (!metadata) {
                     return std::unexpected(metadata.error());
                 }
 
+                if (on_progress) {
+                    on_progress({.stage = GarbageCollectStage::Analyzing});
+                }
+                const auto first_observation_trace =
+                    platform::perf_trace::begin();
                 auto first = collect_garbage_collection_snapshot(
-                    storage, key, workspace_root);
+                    storage, key, workspace_root, first_snapshot_traces);
+                platform::perf_trace::finish("gc reachability observation 1",
+                                             first_observation_trace);
                 if (!first) {
                     return std::unexpected(first.error());
                 }
+                const auto second_observation_trace =
+                    platform::perf_trace::begin();
                 auto confirmed = collect_garbage_collection_snapshot(
-                    storage, key, workspace_root);
+                    storage, key, workspace_root, second_snapshot_traces);
+                platform::perf_trace::finish("gc reachability observation 2",
+                                             second_observation_trace);
                 if (!confirmed) {
                     return std::unexpected(confirmed.error());
                 }
-                if (!same_reachable_state(*first, *confirmed)) {
+                const auto stable_compare_trace = platform::perf_trace::begin();
+                const bool stable = same_reachable_state(*first, *confirmed);
+                platform::perf_trace::finish("gc stable-state comparison",
+                                             stable_compare_trace);
+                if (!stable) {
                     return std::unexpected(make_error(
                         ErrorCode::ConcurrentChange,
                         "reachability or inventory changed during GC"));
@@ -1026,82 +1628,782 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     .candidate_objects = confirmed->candidates.size(),
                     .restored_objects = *restored,
                 };
+                if (on_progress) {
+                    on_progress({.stage = GarbageCollectStage::Analyzing,
+                                 .candidate_count = confirmed->candidates.size()});
+                }
+                const auto final_listing_trace = platform::perf_trace::begin();
                 auto final_listing = transport::list(storage);
                 if (!final_listing) {
+                    platform::perf_trace::finish(
+                        "gc final namespace verification",
+                        final_listing_trace);
                     return std::unexpected(
                         transport_error(final_listing.error()));
                 }
                 std::ranges::sort(*final_listing);
-                if (*final_listing != confirmed->physical_namespace) {
+                const bool namespace_matches =
+                    *final_listing == confirmed->physical_namespace;
+                platform::perf_trace::finish(
+                    "gc final namespace verification", final_listing_trace);
+                if (!namespace_matches) {
                     return std::unexpected(make_error(
                         ErrorCode::ConcurrentChange,
                         "remote storage changed prior to destructive phase"));
                 }
+                bool applying_emitted = false;
+                auto emit_applying_once = [&applying_emitted, &on_progress]() {
+                    if (!applying_emitted) {
+                        applying_emitted = true;
+                        if (on_progress) {
+                            on_progress({.stage = GarbageCollectStage::Applying});
+                        }
+                    }
+                };
+
+                const auto purge_trace = platform::perf_trace::begin();
                 auto purged = purge_expired_quarantine(storage,
                                                        layout,
                                                        workspace_root,
                                                        *now,
                                                        *confirmed,
                                                        *barrier,
-                                                       *quarantine);
+                                                       *quarantine,
+                                                       emit_applying_once);
+                platform::perf_trace::finish("gc expired quarantine purge",
+                                             purge_trace);
                 if (!purged) {
                     return std::unexpected(purged.error());
                 }
                 result.purged_objects = *purged;
-                for (const auto& identifier : confirmed->candidates) {
-                    if (history_storage::maintenance_protocol::is_epoch_object(
-                            layout, identifier)) {
-                        return std::unexpected(make_error(
-                            ErrorCode::IntegrityFailure,
-                            "epoch candidate blocked from quarantine",
-                            identifier));
+
+                if (!confirmed->candidates.empty()) {
+                    emit_applying_once();
+                }
+                platform::perf_trace::count("gc.candidates_selected", confirmed->candidates.size());
+                struct BatchPhaseTraceGuard {
+                    std::string_view name;
+                    platform::perf_trace::Token token;
+                    ~BatchPhaseTraceGuard() {
+                        platform::perf_trace::finish(name, token);
                     }
-                    auto owned = history_storage::maintenance_protocol::
-                        verify_registration(*barrier);
-                    if (!owned) {
-                        return std::unexpected(protocol_error(owned.error()));
+                };
+                for (std::size_t batch_start = 0;
+                     batch_start < confirmed->candidates.size();
+                     batch_start += max_candidates_per_batch) {
+                    const auto batch_count = std::min(
+                        max_candidates_per_batch,
+                        confirmed->candidates.size() - batch_start);
+                    std::span<const std::string> candidate_slice{
+                        confirmed->candidates.data() + batch_start, batch_count
+                    };
+                    platform::perf_trace::count("gc.candidate_batches", 1);
+                    platform::perf_trace::count("gc.batch_sizes", candidate_slice.size());
+
+                    std::vector<CandidateItem> batch_items;
+                    batch_items.reserve(candidate_slice.size());
+                    for (const auto& identifier : candidate_slice) {
+                        if (history_storage::maintenance_protocol::is_epoch_object(
+                                layout, identifier)) {
+                            return std::unexpected(make_error(
+                                ErrorCode::IntegrityFailure,
+                                "epoch candidate blocked from quarantine",
+                                identifier));
+                        }
+                        auto quarantine_identifier =
+                            history_storage::maintenance_protocol::
+                                quarantine_identifier(layout, identifier);
+                        if (!quarantine_identifier) {
+                            return std::unexpected(make_error(
+                                ErrorCode::IntegrityFailure,
+                                "candidate cannot be quarantined",
+                                identifier));
+                        }
+                        batch_items.push_back(CandidateItem{
+                            .source_identifier = identifier,
+                            .quarantine_identifier = std::move(*quarantine_identifier),
+                            .expected_physical_hash = {},
+                            .state = CandidateProcessingState::Initial,
+                            .native_copied = false,
+                        });
                     }
-                    auto quarantine_identifier =
-                        history_storage::maintenance_protocol::
-                            quarantine_identifier(layout, identifier);
-                    if (!quarantine_identifier) {
-                        return std::unexpected(
-                            make_error(ErrorCode::IntegrityFailure,
-                                       "candidate cannot be quarantined",
-                                       identifier));
+
+                    // Phase 1: prepare source hashes serially.
+                    {
+                        BatchPhaseTraceGuard phase1_guard{
+                            "gc.batch_prepare_duration_us",
+                            platform::perf_trace::begin()};
+                        std::vector<CandidateItem*> to_batch_copy;
+                        std::vector<CandidateItem*> to_workspace_copy;
+                        to_batch_copy.reserve(batch_items.size());
+                        to_workspace_copy.reserve(batch_items.size());
+                        for (auto& item : batch_items) {
+                            TraceGuard candidate_copy_trace{
+                                "gc candidate verified copy",
+                                platform::perf_trace::begin()};
+                            const auto before_copy_barrier_trace =
+                                platform::perf_trace::begin();
+                            platform::perf_trace::count(
+                                "gc.pre_copy_barrier_verifications", 1);
+                            auto owned = history_storage::maintenance_protocol::
+                                verify_registration(*barrier);
+                            platform::perf_trace::finish(
+                                "gc candidate pre-copy barrier verification",
+                                before_copy_barrier_trace);
+                            if (!owned) {
+                                return std::unexpected(protocol_error(owned.error()));
+                            }
+
+                            const auto source_hash_trace =
+                                platform::perf_trace::begin();
+                            platform::perf_trace::count(
+                                "gc.source_physical_hash_calls", 1);
+                            auto source_hash = transport::physical_hash(
+                                storage, item.source_identifier, "sha256");
+                            platform::perf_trace::finish(
+                                "verified copy source physical hash",
+                                source_hash_trace);
+                            if (source_hash) {
+                                if (!is_hex_sha256(*source_hash)) {
+                                    return std::unexpected(make_error(
+                                        ErrorCode::IntegrityFailure,
+                                        "invalid source physical SHA-256",
+                                        item.source_identifier));
+                                }
+                                item.expected_physical_hash = std::move(*source_hash);
+                                to_batch_copy.push_back(&item);
+                            } else if (source_hash.error().code !=
+                                       transport::ErrorCode::Unsupported) {
+                                return std::unexpected(transport_error(
+                                    source_hash.error(), item.source_identifier));
+                            } else {
+                                platform::perf_trace::count("gc.native_copy_unsupported", 1);
+                                to_workspace_copy.push_back(&item);
+                            }
+                        }
+
+                        if (!to_batch_copy.empty()) {
+                            const auto batch_barrier_trace =
+                                platform::perf_trace::begin();
+                            platform::perf_trace::count(
+                                "gc.pre_batch_copy_barrier_verifications", 1);
+                            auto owned = history_storage::maintenance_protocol::
+                                verify_registration(*barrier);
+                            platform::perf_trace::finish(
+                                "gc candidate pre-batch copy barrier verification",
+                                batch_barrier_trace);
+                            if (!owned) {
+                                return std::unexpected(protocol_error(owned.error()));
+                            }
+
+                            transport::CopyBatch request{
+                                .items = {},
+                                .concurrency = copy_batch_concurrency,
+                            };
+                            request.items.reserve(to_batch_copy.size());
+                            for (const auto* item : to_batch_copy) {
+                                request.items.push_back(transport::CopyBatchItem{
+                                    .source_identifier = item->source_identifier,
+                                    .destination_identifier = item->quarantine_identifier,
+                                });
+                            }
+                            platform::perf_trace::count("gc.copy_batch_calls", 1);
+                            platform::perf_trace::count(
+                                "gc.copy_batch_inputs", request.items.size());
+                            platform::perf_trace::count(
+                                "gc.copy_batch_concurrency", copy_batch_concurrency);
+                            const auto copy_batch_trace = platform::perf_trace::begin();
+                            auto copied = transport::copy_batch(storage, request);
+                            platform::perf_trace::finish(
+                                "gc candidate copy batch", copy_batch_trace);
+                            if (copied) {
+                                platform::perf_trace::count(
+                                    "gc.native_copy_attempts", request.items.size());
+                                platform::perf_trace::count(
+                                    "verified copy native copy successes",
+                                    request.items.size());
+                                platform::perf_trace::count(
+                                    "gc.native_copy_successes", request.items.size());
+                                for (auto* item : to_batch_copy) {
+                                    item->native_copied = true;
+                                    item->state = CandidateProcessingState::Copied;
+                                }
+                            } else if (copied.error().code ==
+                                       transport::ErrorCode::Unsupported) {
+                                platform::perf_trace::count(
+                                    "gc.copy_batch_unsupported", 1);
+                                for (auto* item : to_batch_copy) {
+                                    auto item_owned = history_storage::
+                                        maintenance_protocol::verify_registration(*barrier);
+                                    if (!item_owned) {
+                                        return std::unexpected(
+                                            protocol_error(item_owned.error()));
+                                    }
+                                    platform::perf_trace::count(
+                                        "gc.native_copy_attempts", 1);
+                                    const auto individual_native_copy_trace =
+                                        platform::perf_trace::begin();
+                                    auto individual = transport::copy(
+                                        storage, item->source_identifier,
+                                        item->quarantine_identifier);
+                                    platform::perf_trace::finish(
+                                        "verified copy native copy",
+                                        individual_native_copy_trace);
+                                    if (individual) {
+                                        platform::perf_trace::count(
+                                            "verified copy native copy successes");
+                                        platform::perf_trace::count(
+                                            "gc.native_copy_successes", 1);
+                                        item->native_copied = true;
+                                        item->state = CandidateProcessingState::Copied;
+                                        continue;
+                                    }
+                                    if (individual.error().code !=
+                                        transport::ErrorCode::Unsupported) {
+                                        return std::unexpected(transport_error(
+                                            individual.error(), item->source_identifier));
+                                    }
+                                    platform::perf_trace::count(
+                                        "gc.native_copy_unsupported", 1);
+                                    platform::perf_trace::count(
+                                        "gc.fallback_copy_attempts", 1);
+                                    auto fallback = history_storage::
+                                        maintenance_protocol::copy_verified_via_workspace(
+                                            storage, item->source_identifier,
+                                            item->quarantine_identifier, workspace_root);
+                                    if (!fallback) {
+                                        return std::unexpected(
+                                            protocol_error(fallback.error()));
+                                    }
+                                    item->expected_physical_hash = std::move(*fallback);
+                                    item->state = CandidateProcessingState::Verified;
+                                    platform::perf_trace::count(
+                                        "gc.candidates_verified", 1);
+                                }
+                            } else {
+                                platform::perf_trace::count("gc.copy_batch_errors", 1);
+                                platform::perf_trace::count("gc.copy_batch_ambiguous", 1);
+                                platform::perf_trace::count(
+                                    "gc.native_copy_attempts", request.items.size());
+                                return std::unexpected(transport_error(
+                                    copied.error(),
+                                    to_batch_copy.front()->source_identifier));
+                            }
+                        }
+
+                        for (auto* item : to_workspace_copy) {
+                            const auto fallback_barrier_trace =
+                                platform::perf_trace::begin();
+                            platform::perf_trace::count(
+                                "gc.pre_fallback_copy_barrier_verifications", 1);
+                            auto fallback_owned = history_storage::
+                                maintenance_protocol::verify_registration(*barrier);
+                            platform::perf_trace::finish(
+                                "gc candidate pre-fallback copy barrier verification",
+                                fallback_barrier_trace);
+                            if (!fallback_owned) {
+                                return std::unexpected(
+                                    protocol_error(fallback_owned.error()));
+                            }
+                            platform::perf_trace::count(
+                                "gc.fallback_copy_attempts", 1);
+                            auto fallback = history_storage::maintenance_protocol::
+                                copy_verified_via_workspace(
+                                    storage, item->source_identifier,
+                                    item->quarantine_identifier, workspace_root);
+                            if (!fallback) {
+                                return std::unexpected(
+                                    protocol_error(fallback.error()));
+                            }
+                            item->expected_physical_hash = std::move(*fallback);
+                            item->state = CandidateProcessingState::Verified;
+                            platform::perf_trace::count(
+                                "gc.candidates_verified", 1);
+                        }
                     }
-                    auto copied =
-                        history_storage::maintenance_protocol::copy_verified(
-                            storage,
-                            identifier,
-                            *quarantine_identifier,
-                            workspace_root);
-                    if (!copied) {
-                        return std::unexpected(protocol_error(copied.error()));
+
+                    // Phase 2: Batch Verification of Native Copies
+                    {
+                        BatchPhaseTraceGuard phase2_guard{
+                            "gc.batch_verify_duration_us",
+                            platform::perf_trace::begin()};
+                        std::vector<CandidateItem*> to_batch_verify;
+                        for (auto& item : batch_items) {
+                            if (item.state == CandidateProcessingState::Copied) {
+                                to_batch_verify.push_back(&item);
+                            }
+                        }
+
+                        if (!to_batch_verify.empty()) {
+                            bool used_batch_verification = false;
+                            if (transport::prefers_physical_hash_batch(
+                                    storage, to_batch_verify.size())) {
+                                transport::PhysicalHashBatchRequest request{
+                                    .scratch_root = workspace_root,
+                                    .objects = {},
+                                    .algorithm = "sha256",
+                                };
+                                request.objects.reserve(to_batch_verify.size());
+                                for (const auto* item : to_batch_verify) {
+                                    request.objects.push_back(
+                                        transport::PhysicalHashExpectation{
+                                            .identifier = item->quarantine_identifier,
+                                            .expected_hash = item->expected_physical_hash,
+                                        });
+                                }
+                                platform::perf_trace::count("gc.batch_verify_attempts", 1);
+                                const auto batch_verify_trace =
+                                    platform::perf_trace::begin();
+                                auto batch_result = transport::physical_hash_batch(
+                                    storage, request);
+                                platform::perf_trace::finish(
+                                    "gc candidate batch physical hash verification",
+                                    batch_verify_trace);
+                                if (batch_result) {
+                                    used_batch_verification = true;
+                                    platform::perf_trace::count("gc.batch_verify_supported", 1);
+                                    const auto has = [](const std::vector<std::string>& list,
+                                                        const std::string& val) {
+                                        return std::ranges::find(list, val) != list.end();
+                                    };
+                                    for (auto* item : to_batch_verify) {
+                                        if (has(batch_result->matched,
+                                                item->quarantine_identifier)) {
+                                            item->state = CandidateProcessingState::Verified;
+                                            platform::perf_trace::count(
+                                                "verified copy native copy verifications");
+                                            platform::perf_trace::count("gc.candidates_verified", 1);
+                                        } else {
+                                            item->state = CandidateProcessingState::Failed;
+                                            platform::perf_trace::count("gc.batch_verify_failures", 1);
+                                        }
+                                    }
+                                } else if (batch_result.error().code ==
+                                           transport::ErrorCode::Unsupported) {
+                                    platform::perf_trace::count("gc.batch_verify_unsupported", 1);
+                                } else {
+                                    platform::perf_trace::count("gc.batch_verify_failures", 1);
+                                    return std::unexpected(
+                                        transport_error(batch_result.error()));
+                                }
+                            }
+                            if (!used_batch_verification) {
+                                for (auto* item : to_batch_verify) {
+                                    platform::perf_trace::count("gc.individual_destination_hash_attempts", 1);
+                                    const auto dest_hash_trace =
+                                        platform::perf_trace::begin();
+                                    auto dest_hash = transport::physical_hash(
+                                        storage, item->quarantine_identifier, "sha256");
+                                    platform::perf_trace::finish(
+                                        "verified copy destination physical hash",
+                                        dest_hash_trace);
+                                    if (dest_hash) {
+                                        if (!is_hex_sha256(*dest_hash) ||
+                                            *dest_hash != item->expected_physical_hash) {
+                                            item->state = CandidateProcessingState::Failed;
+                                            platform::perf_trace::count("gc.batch_verify_failures", 1);
+                                        } else {
+                                            item->state = CandidateProcessingState::Verified;
+                                            platform::perf_trace::count(
+                                                "verified copy native copy verifications");
+                                            platform::perf_trace::count("gc.candidates_verified", 1);
+                                        }
+                                    } else if (dest_hash.error().code ==
+                                               transport::ErrorCode::Unsupported) {
+                                        auto verified = history_storage::
+                                            maintenance_protocol::verify_destination_via_workspace(
+                                                storage,
+                                                item->quarantine_identifier,
+                                                item->expected_physical_hash,
+                                                workspace_root);
+                                        if (verified) {
+                                            item->state = CandidateProcessingState::Verified;
+                                            platform::perf_trace::count(
+                                                "verified copy native copy verifications");
+                                            platform::perf_trace::count("gc.candidates_verified", 1);
+                                        } else {
+                                            item->state = CandidateProcessingState::Failed;
+                                            platform::perf_trace::count("gc.batch_verify_failures", 1);
+                                        }
+                                    } else {
+                                        platform::perf_trace::count("gc.batch_verify_failures", 1);
+                                        return std::unexpected(transport_error(
+                                            dest_hash.error(), item->quarantine_identifier));
+                                    }
+                                }
+                            }
+                        }
                     }
-                    auto recorded = history_storage::maintenance_protocol::
-                        record_quarantine(storage,
-                                          *quarantine_identifier,
-                                          *now,
-                                          key,
-                                          workspace_root,
-                                          *copied);
-                    if (!recorded) {
-                        return std::unexpected(
-                            protocol_error(recorded.error()));
-                    }
-                    owned = history_storage::maintenance_protocol::
-                        verify_registration(*barrier);
-                    if (!owned) {
-                        return std::unexpected(protocol_error(owned.error()));
-                    }
-                    auto removed = transport::remove(storage, identifier);
-                    if (!removed) {
-                        return std::unexpected(
-                            transport_error(removed.error(), identifier));
-                    }
-                    if (*removed == transport::Removal::Removed) {
-                        ++result.quarantined_objects;
+
+                    // Phase 3: Metadata Publication and Removal
+                    {
+                        BatchPhaseTraceGuard phase3_guard{
+                            "gc.batch_publish_remove_duration_us",
+                            platform::perf_trace::begin()};
+                        const auto post_copy_barrier_trace =
+                            platform::perf_trace::begin();
+                        platform::perf_trace::count(
+                            "gc.post_copy_barrier_verifications", 1);
+                        auto post_copy_owned = history_storage::maintenance_protocol::
+                            verify_registration(*barrier);
+                        platform::perf_trace::finish(
+                            "gc candidate post-copy barrier verification",
+                            post_copy_barrier_trace);
+                        if (!post_copy_owned) {
+                            return std::unexpected(
+                                protocol_error(post_copy_owned.error()));
+                        }
+                        for (const auto& item : batch_items) {
+                            if (item.state != CandidateProcessingState::Verified) {
+                                return std::unexpected(make_error(
+                                    ErrorCode::IntegrityFailure,
+                                    "candidate verification failed",
+                                    item.source_identifier));
+                            }
+                        }
+
+                        auto metadata_workspace =
+                            history_storage::detail::make_workspace(workspace_root);
+                        if (!metadata_workspace) {
+                            return std::unexpected(make_error(
+                                ErrorCode::WorkspaceFailure,
+                                metadata_workspace.error().detail));
+                        }
+                        std::vector<history_storage::maintenance_protocol::
+                                        PreparedQuarantineMetadata> prepared;
+                        prepared.reserve(batch_items.size());
+                        const auto prepare_trace = platform::perf_trace::begin();
+                        for (std::size_t index = 0; index < batch_items.size();
+                             ++index) {
+                            const auto& item = batch_items[index];
+                            const auto path = (*metadata_workspace)->root /
+                                ("metadata-" + std::to_string(index) + ".enc");
+                            auto prepared_item = history_storage::maintenance_protocol::
+                                prepare_quarantine_metadata(
+                                    item.quarantine_identifier, *now, key, path,
+                                    item.expected_physical_hash);
+                            if (!prepared_item) {
+                                return std::unexpected(
+                                    protocol_error(prepared_item.error()));
+                            }
+                            prepared.push_back(std::move(*prepared_item));
+                            platform::perf_trace::count("gc.metadata_prepared", 1);
+                        }
+                        platform::perf_trace::finish(
+                            "gc.metadata_prepare_duration_us", prepare_trace);
+
+                        transport::PutFilesBatch publish_request{
+                            .items = {},
+                            .concurrency = metadata_batch_concurrency,
+                        };
+                        publish_request.items.reserve(prepared.size());
+                        for (const auto& prepared_item : prepared) {
+                            publish_request.items.push_back(
+                                transport::PutFilesBatchItem{
+                                    .source = prepared_item.ciphertext_path,
+                                    .destination_identifier =
+                                        prepared_item.entry.metadata_identifier,
+                                });
+                        }
+
+                        platform::perf_trace::count("gc.metadata_batch_calls", 1);
+                        platform::perf_trace::count(
+                            "gc.metadata_objects_submitted", prepared.size());
+                        platform::perf_trace::count(
+                            "gc.metadata_concurrency", metadata_batch_concurrency);
+                        const auto publish_trace = platform::perf_trace::begin();
+                        auto published = transport::put_files_batch(
+                            storage, publish_request);
+                        platform::perf_trace::finish(
+                            "gc.metadata_publish_batch_duration_us", publish_trace);
+                        bool metadata_batch_published = false;
+                        if (published) {
+                            metadata_batch_published = true;
+                            platform::perf_trace::count(
+                                "gc.metadata_batch_publish_successes", 1);
+                        } else if (published.error().code ==
+                                   transport::ErrorCode::Unsupported) {
+                            platform::perf_trace::count(
+                                "gc.metadata_batch_unsupported", 1);
+                            for (std::size_t index = 0; index < batch_items.size();
+                                 ++index) {
+                                auto recorded = history_storage::maintenance_protocol::
+                                    record_quarantine(
+                                        storage, batch_items[index].quarantine_identifier,
+                                        *now, key, workspace_root,
+                                        batch_items[index].expected_physical_hash);
+                                if (!recorded) {
+                                    return std::unexpected(
+                                        protocol_error(recorded.error()));
+                                }
+                                batch_items[index].state =
+                                    CandidateProcessingState::MetadataPublished;
+                                platform::perf_trace::count(
+                                    "gc.metadata_publications", 1);
+                                platform::perf_trace::count(
+                                    "gc candidate metadata publish", 1);
+                                platform::perf_trace::count(
+                                    "gc.metadata_verified", 1);
+                            }
+                        } else {
+                            platform::perf_trace::count(
+                                "gc.metadata_publication_failures", 1);
+                            return std::unexpected(transport_error(
+                                published.error()));
+                        }
+
+                        if (metadata_batch_published) {
+                            const auto verify_one = [&](
+                                const history_storage::maintenance_protocol::
+                                    PreparedQuarantineMetadata& prepared_item)
+                                -> std::expected<void, Error> {
+                                platform::perf_trace::count(
+                                    "gc.metadata_physical_hash_calls", 1);
+                                auto observed = transport::physical_hash(
+                                    storage,
+                                    prepared_item.entry.metadata_identifier,
+                                    "sha256");
+                                if (observed) {
+                                    if (!is_hex_sha256(*observed) ||
+                                        *observed !=
+                                            prepared_item.expected_physical_sha256) {
+                                        return std::unexpected(make_error(
+                                            ErrorCode::IntegrityFailure,
+                                            "published quarantine metadata hash mismatch",
+                                            prepared_item.entry.metadata_identifier));
+                                    }
+                                    return {};
+                                }
+                                if (observed.error().code !=
+                                    transport::ErrorCode::Unsupported) {
+                                    return std::unexpected(transport_error(
+                                        observed.error(),
+                                        prepared_item.entry.metadata_identifier));
+                                }
+                                auto downloaded = history_storage::
+                                    maintenance_protocol::
+                                        verify_destination_via_workspace(
+                                            storage,
+                                            prepared_item.entry.metadata_identifier,
+                                            prepared_item.expected_physical_sha256,
+                                            workspace_root);
+                                if (!downloaded) {
+                                    return std::unexpected(
+                                        protocol_error(downloaded.error()));
+                                }
+                                return {};
+                            };
+
+                            const auto verify_trace =
+                                platform::perf_trace::begin();
+                            bool used_batch_verification = false;
+                            if (transport::prefers_physical_hash_batch(
+                                    storage, prepared.size())) {
+                                transport::PhysicalHashBatchRequest request{
+                                    .scratch_root = workspace_root,
+                                    .objects = {},
+                                    .algorithm = "sha256",
+                                };
+                                request.objects.reserve(prepared.size());
+                                for (const auto& prepared_item : prepared) {
+                                    request.objects.push_back(
+                                        transport::PhysicalHashExpectation{
+                                            .identifier = prepared_item.entry
+                                                              .metadata_identifier,
+                                            .expected_hash = prepared_item
+                                                               .expected_physical_sha256,
+                                        });
+                                }
+                                platform::perf_trace::count(
+                                    "gc.metadata_physical_hash_batch_calls", 1);
+                                auto verified = transport::physical_hash_batch(
+                                    storage, request);
+                                if (verified) {
+                                    used_batch_verification = true;
+                                    for (const auto& prepared_item : prepared) {
+                                        if (std::ranges::find(
+                                                verified->matched,
+                                                prepared_item.entry.metadata_identifier) ==
+                                            verified->matched.end()) {
+                                            return std::unexpected(make_error(
+                                                ErrorCode::IntegrityFailure,
+                                                "published quarantine metadata failed batch verification",
+                                                prepared_item.entry.metadata_identifier));
+                                        }
+                                    }
+                                } else if (verified.error().code !=
+                                           transport::ErrorCode::Unsupported) {
+                                    return std::unexpected(transport_error(
+                                        verified.error()));
+                                } else {
+                                    platform::perf_trace::count(
+                                        "gc.metadata_physical_hash_batch_unsupported",
+                                        1);
+                                }
+                            }
+                            if (!used_batch_verification) {
+                                for (const auto& prepared_item : prepared) {
+                                    auto verified = verify_one(prepared_item);
+                                    if (!verified) {
+                                        return std::unexpected(verified.error());
+                                    }
+                                }
+                            }
+                            platform::perf_trace::finish(
+                                "gc.metadata_verify_batch_duration_us",
+                                verify_trace);
+
+                            for (auto& item : batch_items) {
+                                item.state =
+                                    CandidateProcessingState::MetadataPublished;
+                                platform::perf_trace::count(
+                                    "gc.metadata_publications", 1);
+                                platform::perf_trace::count(
+                                    "gc candidate metadata publish", 1);
+                                platform::perf_trace::count(
+                                    "gc.metadata_verified", 1);
+                            }
+                        }
+
+                        for (auto& item : batch_items) {
+                            if (item.state !=
+                                CandidateProcessingState::MetadataPublished) {
+                                return std::unexpected(make_error(
+                                    ErrorCode::IntegrityFailure,
+                                    "candidate metadata was not verified",
+                                    item.source_identifier));
+                            }
+                        }
+
+                        auto verify_pre_remove_barrier = [&]() -> std::expected<void, Error> {
+                            platform::perf_trace::count(
+                                "gc.pre_remove_barrier_verifications", 1);
+                            const auto trace = platform::perf_trace::begin();
+                            auto owned = history_storage::maintenance_protocol::
+                                verify_registration(*barrier);
+                            platform::perf_trace::finish(
+                                "gc candidate pre-remove barrier verification",
+                                trace);
+                            if (!owned) {
+                                return std::unexpected(protocol_error(owned.error()));
+                            }
+                            return {};
+                        };
+
+                        auto remove_candidate_sequential =
+                            [&](CandidateItem& item) -> std::expected<void, Error> {
+                            platform::perf_trace::count("gc.source_removals", 1);
+                            const auto remove_trace = platform::perf_trace::begin();
+                            auto removed = transport::remove(storage, item.source_identifier);
+                            platform::perf_trace::finish(
+                                "gc candidate remove", remove_trace);
+                            if (!removed) {
+                                return std::unexpected(transport_error(
+                                    removed.error(), item.source_identifier));
+                            }
+                            if (*removed == transport::Removal::Removed) {
+                                item.state = CandidateProcessingState::Removed;
+                                ++result.quarantined_objects;
+                                platform::perf_trace::count("gc.candidates_quarantined", 1);
+                            } else if (*removed == transport::Removal::AlreadyAbsent) {
+                                platform::perf_trace::count("gc.source_removals_already_absent", 1);
+                            }
+                            return {};
+                        };
+
+                        if (storage.storage.remove_batch == nullptr) {
+                            for (auto& item : batch_items) {
+                                if (auto barrier_check = verify_pre_remove_barrier();
+                                    !barrier_check) {
+                                    return std::unexpected(barrier_check.error());
+                                }
+                                if (auto removed = remove_candidate_sequential(item);
+                                    !removed) {
+                                    return std::unexpected(removed.error());
+                                }
+                            }
+                        } else {
+                            if (auto barrier_check = verify_pre_remove_barrier();
+                                !barrier_check) {
+                                return std::unexpected(barrier_check.error());
+                            }
+
+                            transport::RemoveBatch remove_request{
+                                .items = {},
+                                .concurrency = source_removal_concurrency,
+                            };
+                            remove_request.items.reserve(batch_items.size());
+                            for (const auto& item : batch_items) {
+                                remove_request.items.push_back({.identifier = item.source_identifier});
+                            }
+
+                            platform::perf_trace::count("gc.remove_batch_calls", 1);
+                            platform::perf_trace::count(
+                                "gc.remove_batch_objects", batch_items.size());
+                            platform::perf_trace::count(
+                                "gc.remove_batch_concurrency", source_removal_concurrency);
+
+                            const auto remove_batch_trace = platform::perf_trace::begin();
+                            auto batch_removed = transport::remove_batch(
+                                storage, remove_request);
+                            platform::perf_trace::finish(
+                                "gc candidate remove batch", remove_batch_trace);
+
+                            if (batch_removed) {
+                                std::optional<Error> first_error;
+                                for (const auto& item_res : batch_removed->items) {
+                                    auto it = std::ranges::find_if(
+                                        batch_items, [&](const CandidateItem& ci) {
+                                            return ci.source_identifier == item_res.identifier;
+                                        });
+                                    if (it == batch_items.end()) {
+                                        return std::unexpected(make_error(
+                                            ErrorCode::IntegrityFailure,
+                                            "unknown identifier in remove batch response",
+                                            item_res.identifier));
+                                    }
+                                    if (item_res.result.has_value()) {
+                                        if (*item_res.result == transport::Removal::Removed) {
+                                            it->state = CandidateProcessingState::Removed;
+                                            ++result.quarantined_objects;
+                                            platform::perf_trace::count("gc.candidates_quarantined", 1);
+                                            platform::perf_trace::count("gc.source_removals", 1);
+                                        } else if (*item_res.result == transport::Removal::AlreadyAbsent) {
+                                            platform::perf_trace::count("gc.source_removals_already_absent", 1);
+                                        }
+                                    } else {
+                                        platform::perf_trace::count("gc.remove_batch_failures", 1);
+                                        if (!first_error) {
+                                            first_error = transport_error(
+                                                item_res.result.error(), item_res.identifier);
+                                        }
+                                    }
+                                }
+                                if (first_error) {
+                                    return std::unexpected(*first_error);
+                                }
+                            } else if (batch_removed.error().code == transport::ErrorCode::Unsupported) {
+                                platform::perf_trace::count("gc.remove_batch_unsupported", 1);
+                                platform::perf_trace::count("gc.remove_batch_fallback_sequential", 1);
+                                for (std::size_t i = 0; i < batch_items.size(); ++i) {
+                                    auto& item = batch_items[i];
+                                    if (i > 0) {
+                                        if (auto barrier_check = verify_pre_remove_barrier();
+                                            !barrier_check) {
+                                            return std::unexpected(barrier_check.error());
+                                        }
+                                    }
+                                    if (auto removed = remove_candidate_sequential(item);
+                                        !removed) {
+                                        return std::unexpected(removed.error());
+                                    }
+                                }
+                            } else {
+                                platform::perf_trace::count("gc.remove_batch_failures", 1);
+                                platform::perf_trace::count("gc.remove_batch_ambiguous", 1);
+                                return std::unexpected(transport_error(batch_removed.error()));
+                            }
+                        }
                     }
                 }
                 return result;
@@ -1110,9 +2412,21 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                     make_error(ErrorCode::StateFailure, exception.what()));
             }
         }();
+        if (outcome) {
+            if (on_progress) {
+                on_progress({.stage = GarbageCollectStage::Finalizing});
+            }
+        }
+        const auto barrier_release_trace = platform::perf_trace::begin();
+        if (barrier->verify_owner) {
+            platform::perf_trace::count(
+                "gc.barrier_release_owner_verifications", 1);
+        }
         auto released =
             history_storage::maintenance_protocol::release_registration(
                 *barrier);
+        platform::perf_trace::finish("gc barrier release",
+                                     barrier_release_trace);
         if (!outcome) {
             return outcome;
         }

@@ -31,6 +31,8 @@ TEST(CliI18nTest, DefaultLanguageIsEnglish) {
     EXPECT_EQ(tr(Key::PlanStageCalculating), "[2/2] Calculating changes...");
     EXPECT_EQ(format(Key::SyncPlanOmittedSingular, 1), "1 more item");
     EXPECT_EQ(format(Key::SyncPlanOmittedPlural, 5), "5 more items");
+    EXPECT_EQ(format(Key::SyncPendingSingular, 1),
+              "1 file is waiting for unavailable remote content.");
 }
 
 TEST(CliI18nTest, SwitchingToPortugueseUpdatesStrings) {
@@ -52,6 +54,8 @@ TEST(CliI18nTest, SwitchingToPortugueseUpdatesStrings) {
     EXPECT_EQ(tr(Key::PlanStageCalculating), "[2/2] Calculando alterações...");
     EXPECT_EQ(format(Key::SyncPlanOmittedSingular, 1), "mais 1 item");
     EXPECT_EQ(format(Key::SyncPlanOmittedPlural, 5), "mais 5 itens");
+    EXPECT_EQ(format(Key::SyncPendingPlural, 2),
+              "2 arquivos aguardam conteúdo remoto indisponível.");
     set_language(Language::English); // Restore default
 }
 

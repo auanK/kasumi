@@ -568,7 +568,10 @@ apply_download(const Operation& operation,
                 std::error_code cleanup_error;
                 std::filesystem::remove(encrypted, cleanup_error);
                 return std::unexpected(
-                    make_error(MutationErrorCode::TransportFailure,
+                    make_error(downloaded.error().code ==
+                                       transport::ErrorCode::ObjectNotFound
+                                   ? MutationErrorCode::RemoteContentMissing
+                                   : MutationErrorCode::TransportFailure,
                                transport::describe(downloaded.error()),
                                destination,
                                operation_index));
@@ -713,6 +716,8 @@ std::string mutation_code_name(MutationErrorCode code) noexcept {
             return "local_io";
         case MutationErrorCode::TransportFailure:
             return "transport_failure";
+        case MutationErrorCode::RemoteContentMissing:
+            return "remote_content_missing";
         case MutationErrorCode::RemoteResultUnknown:
             return "remote_result_unknown";
         case MutationErrorCode::CryptoFailure:

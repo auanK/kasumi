@@ -104,6 +104,12 @@ struct Input {
     // Current snapshot of the local directory.
     Snapshot local_tree;
 
+    // Accepted logical files that are not physically present locally.
+    std::vector<NodeRow> pending_materializations;
+
+    // Content known missing from demand-driven probes in this run.
+    HashSet known_missing_content_objects{0, hash_key};
+
     // Last shared tree persisted locally.
     Snapshot base_tree;
 
@@ -138,8 +144,12 @@ struct Result {
     // Remote rows whose physical objects are missing.
     std::vector<NodeRow> pending_storage_rows;
 
-    // Missing remote paths without a compatible local source.
-    std::vector<std::filesystem::path> unrecoverable_paths;
+    // Target pending rows to persist with the accepted base.
+    std::vector<NodeRow> pending_materializations;
+
+    // Pending remote paths without a compatible local source.
+    std::vector<std::filesystem::path>
+        missing_content_paths_without_local_source;
 
     // Remote generation used in computation.
     std::uint64_t observed_storage_generation = 0;

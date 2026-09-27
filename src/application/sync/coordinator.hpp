@@ -34,6 +34,7 @@ enum class ErrorCode {
     JournalFailure,
     WorkspaceFailure,
     MutationFailure,
+    RemoteContentMissing,
     PublicationFailure,
     DatabaseFailure,
     CompositionMismatch,

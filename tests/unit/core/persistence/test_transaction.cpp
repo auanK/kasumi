@@ -89,8 +89,11 @@ std::vector<std::byte> minimal_record(std::uint8_t phase,
     wire::write<std::uint8_t>(writer, phase);
     wire::write<std::uint8_t>(writer, 1);
     wire::write_string(writer, "");
+    wire::write_string(writer, "");
     wire::write<std::uint64_t>(writer, 1);
     wire::write<std::uint64_t>(writer, 2);
+    wire::write<std::uint32_t>(writer, 0);
+    wire::write<std::uint32_t>(writer, 0);
     wire::write<std::uint64_t>(writer, 3);
     wire::write_string(writer,
                        phase >= static_cast<std::uint8_t>(Phase::CommitPrepared)
@@ -292,6 +295,10 @@ TEST(TransactionCodecTest, RoundTripsAllActionsAndProgressFields) {
     EXPECT_EQ(decoded->phase, original.phase);
     EXPECT_EQ(decoded->publication_required, original.publication_required);
     EXPECT_EQ(decoded->observed_head_id, original.observed_head_id);
+    EXPECT_EQ(decoded->observed_base_id, original.observed_base_id);
+    EXPECT_EQ(decoded->observed_pending_paths,
+              original.observed_pending_paths);
+    EXPECT_EQ(decoded->pending_paths, original.pending_paths);
     EXPECT_EQ(decoded->local_generation, original.local_generation);
     EXPECT_EQ(decoded->storage_generation, original.storage_generation);
     EXPECT_EQ(decoded->commit_id, original.commit_id);
@@ -398,6 +405,9 @@ TEST(TransactionCodecTest, RoundTripsLocalOnlyMaterializationRecord) {
         std::string(32, '2'), 1, 7, plan, false, std::string(64, 'b'));
     ASSERT_TRUE(record.has_value());
     record->phase = Phase::LocalChangesApplied;
+    record->observed_base_id = std::string(64, 'c');
+    record->observed_pending_paths = {"docs/a.txt"};
+    record->pending_paths = {"docs/b.txt", "other.txt"};
     record->progress[0].state = OperationState::Applied;
     const auto encoded = kasumi::transaction::codec::encode(*record);
     ASSERT_TRUE(encoded.has_value());
@@ -405,6 +415,11 @@ TEST(TransactionCodecTest, RoundTripsLocalOnlyMaterializationRecord) {
     ASSERT_TRUE(decoded.has_value());
     EXPECT_FALSE(decoded->publication_required);
     EXPECT_EQ(decoded->observed_head_id, std::string(64, 'b'));
+    EXPECT_EQ(decoded->observed_base_id, std::string(64, 'c'));
+    EXPECT_EQ(decoded->observed_pending_paths,
+              (std::vector<std::string>{"docs/a.txt"}));
+    EXPECT_EQ(decoded->pending_paths,
+              (std::vector<std::string>{"docs/b.txt", "other.txt"}));
     EXPECT_EQ(decoded->plan.target_generation, 7U);
     EXPECT_EQ(decoded->phase, Phase::LocalChangesApplied);
 }
@@ -542,6 +557,13 @@ TEST(TransactionCodecTest, RejectsInvalidEnumsAndInvalidRecords) {
     invalid_record.progress.pop_back();
     EXPECT_FALSE(
         kasumi::transaction::codec::encode(invalid_record).has_value());
+
+    auto invalid_pending = representative_record();
+    invalid_pending.pending_paths = {"../outside"};
+    EXPECT_FALSE(kasumi::transaction::codec::encode(invalid_pending).has_value());
+    invalid_pending = representative_record();
+    invalid_pending.pending_paths = {"same.txt", "same.txt"};
+    EXPECT_FALSE(kasumi::transaction::codec::encode(invalid_pending).has_value());
 }
 
 } // namespace

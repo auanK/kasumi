@@ -30,7 +30,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
           std::span<const std::uint8_t, crypto::KEY_SIZE> key,
           reconciliation::Input observed_input,
           reconciliation::Result reconciliation_result,
-          observation::LocalObservationSession* session = nullptr);
+          observation::LocalObservationSession* session = nullptr,
+          std::span<const Hash> confirmed_missing = {});
 
 } // namespace kasumi::application::sync::coordinator::reobservation
 

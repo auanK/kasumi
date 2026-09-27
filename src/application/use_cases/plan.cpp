@@ -44,10 +44,27 @@ core_action_to_plan_action(Action action) {
 }
 
 std::expected<PlanReport, std::string>
-reconciliation_to_report(const reconciliation::Result& result) {
+reconciliation_to_report(
+    const reconciliation::Input& input,
+    const reconciliation::Result& result) {
     PlanReport report;
     report.target_generation = result.plan.target_generation;
     report.has_conflicts = result.has_conflicts;
+    for (const auto& row : input.pending_materializations) {
+        const auto* candidate = find_row(result.candidate_shared_tree, row.path);
+        if (find_row(input.local_tree, row.path) == nullptr &&
+            candidate != nullptr && !candidate->is_directory &&
+            candidate->hash == row.hash && candidate->size == row.size) {
+            report.pending_paths.push_back(platform::path::from_utf8(row.path));
+        }
+    }
+    for (const auto& row : result.pending_materializations) {
+        report.pending_paths.push_back(platform::path::from_utf8(row.path));
+    }
+    std::ranges::sort(report.pending_paths);
+    report.pending_paths.erase(
+        std::ranges::unique(report.pending_paths).begin(),
+        report.pending_paths.end());
 
     for (const auto& operation : sync_plan_operations(result.plan)) {
         auto action = core_action_to_plan_action(operation.action);
@@ -89,27 +106,6 @@ std::string describe_reconciliation_error(const reconciliation::Error& error) {
     return detail;
 }
 
-std::string
-describe_unrecoverable_paths(std::span<const std::filesystem::path> paths) {
-    constexpr std::size_t path_limit = 20;
-    const auto displayed = std::min(paths.size(), path_limit);
-    std::string detail =
-        "remote objects missing without recoverable local source (paths: ";
-    for (std::size_t index = 0; index < displayed; ++index) {
-        if (index != 0) {
-            detail += ", ";
-        }
-        detail += platform::path::to_utf8(paths[index]);
-    }
-    if (paths.size() > path_limit) {
-        detail += "; and ";
-        detail += std::to_string(paths.size() - path_limit);
-        detail += " more";
-    }
-    detail += ')';
-    return detail;
-}
-
 std::expected<Response, Error> run_plan(OperationContext& context) {
     if (context.on_progress) {
         context.on_progress(SyncProgress{
@@ -141,7 +137,7 @@ std::expected<Response, Error> run_plan(OperationContext& context) {
         return std::unexpected(err);
     }
 
-    auto report = reconciliation_to_report(*reconciled);
+    auto report = reconciliation_to_report(*collected, *reconciled);
     if (!report) {
         auto err =
             plan_error(context.operation, report.error(), context.summary);

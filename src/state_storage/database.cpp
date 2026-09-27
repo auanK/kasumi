@@ -40,6 +40,12 @@ constexpr std::array node_columns{
     ColumnDefinition{"is_dir", "INTEGER", true, 0},
 };
 
+constexpr std::array pending_columns{
+    ColumnDefinition{"path", "TEXT", true, 1},
+    ColumnDefinition{"hash", "TEXT", true, 0},
+    ColumnDefinition{"size", "INTEGER", true, 0},
+    ColumnDefinition{"mtime", "INTEGER", true, 0}};
+
 constexpr std::array metadata_columns{
     ColumnDefinition{"key", "TEXT", false, 1},
     ColumnDefinition{"value", "TEXT", true, 0},
@@ -209,8 +215,13 @@ bool has_binary_primary_key(sqlite3* database,
 
 bool has_expected_schema(sqlite3* database) {
     return object_kind(database, "nodes") == ObjectKind::Table &&
+           object_kind(database, "pending_materializations") ==
+               ObjectKind::Table &&
            object_kind(database, "metadata") == ObjectKind::Table &&
            has_columns(database, "nodes", node_columns) &&
+           has_columns(database,
+                       "pending_materializations",
+                       pending_columns) &&
            has_columns(database, "metadata", metadata_columns) &&
            object_kind(database, "file_cache") == ObjectKind::Table &&
            has_columns(database, "file_cache", file_cache_columns) &&
@@ -226,6 +237,8 @@ bool has_expected_schema(sqlite3* database) {
            object_kind(database, "directory_lineage") == ObjectKind::Table &&
            has_columns(database, "directory_lineage", lineage_columns) &&
            has_binary_primary_key(database, "nodes", "path") &&
+           has_binary_primary_key(
+               database, "pending_materializations", "path") &&
            has_binary_primary_key(database, "metadata", "key") &&
            has_binary_primary_key(database, "file_cache", "path") &&
            has_binary_primary_key(
@@ -296,6 +309,13 @@ void create_schema(sqlite3* database) {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         ))"));
+    require(sqlite::execute(database, R"(
+        CREATE TABLE pending_materializations (
+            path TEXT PRIMARY KEY NOT NULL,
+            hash TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            mtime INTEGER NOT NULL
+        ))"));
     create_file_cache(database);
     create_observation_checkpoint(database);
     create_directory_lineage(database);
@@ -315,6 +335,86 @@ bool same_node(const NodeRow& left, const NodeRow& right) {
     return left.path == right.path && left.hash == right.hash &&
            left.size == right.size && left.mtime == right.mtime &&
            left.is_directory == right.is_directory;
+}
+
+bool valid_pending_materializations(
+    const Snapshot& tree,
+    std::span<const NodeRow> pending_materializations) {
+    constexpr std::size_t maximum_pending_materializations = 1'000'000;
+    if (pending_materializations.size() > maximum_pending_materializations) {
+        return false;
+    }
+    const NodeRow* previous = nullptr;
+    for (const auto& row : pending_materializations) {
+        const auto* accepted = find_row(tree, row.path);
+        if (row.is_directory || accepted == nullptr ||
+            accepted->is_directory || !same_node(*accepted, row) ||
+            row.size > static_cast<std::uint64_t>(
+                           std::numeric_limits<std::int64_t>::max()) ||
+            (previous != nullptr && !path_less(previous->path, row.path))) {
+            return false;
+        }
+        previous = &row;
+    }
+    return true;
+}
+
+std::vector<NodeRow> load_pending_materializations(sqlite3* database,
+                                                   const Snapshot& tree) {
+    constexpr std::size_t maximum_pending_materializations = 1'000'000;
+    auto query = require_statement(sqlite::prepare(
+        database,
+        "SELECT path, hash, size, mtime FROM pending_materializations"));
+    std::vector<NodeRow> rows;
+    while (require_step(query)) {
+        if (rows.size() == maximum_pending_materializations) {
+            throw std::runtime_error("too many pending materializations");
+        }
+        const auto path = sqlite::text(query, 0);
+        const auto hash = hash_from_hex(sqlite::text(query, 1));
+        const auto size = sqlite::integer(query, 2);
+        const auto raw_nanos = sqlite::integer(query, 3);
+        if (!hash || size < 0) {
+            throw std::runtime_error("invalid pending materialization row");
+        }
+        std::filesystem::file_time_type mtime{};
+        if (raw_nanos != 0) {
+            const auto sys_dur = std::chrono::duration_cast<
+                std::chrono::system_clock::duration>(
+                std::chrono::nanoseconds{raw_nanos});
+            mtime = std::chrono::clock_cast<std::chrono::file_clock>(
+                std::chrono::time_point<std::chrono::system_clock>{sys_dur});
+        }
+        rows.push_back(NodeRow{.path = path,
+                               .hash = *hash,
+                               .size = static_cast<std::uint64_t>(size),
+                               .mtime = mtime,
+                               .is_directory = false});
+    }
+    std::ranges::sort(rows, path_less, &NodeRow::path);
+    if (!valid_pending_materializations(tree, rows)) {
+        throw std::runtime_error(
+            "pending materializations do not match accepted state");
+    }
+    return rows;
+}
+
+void write_pending_materializations(
+    sqlite3* database,
+    std::span<const NodeRow> pending_materializations) {
+    require(sqlite::execute(database, "DELETE FROM pending_materializations"));
+    auto insert = require_statement(sqlite::prepare(
+        database,
+        "INSERT INTO pending_materializations (path, hash, size, mtime) "
+        "VALUES (?, ?, ?, ?)"));
+    for (const auto& row : pending_materializations) {
+        require(sqlite::bind(insert, 1, row.path));
+        require(sqlite::bind(insert, 2, hash_hex(row.hash)));
+        require(sqlite::bind(insert, 3, static_cast<std::int64_t>(row.size)));
+        require(sqlite::bind(insert, 4, mtime_value(row)));
+        require(sqlite::run(insert));
+        require(sqlite::reset(insert));
+    }
 }
 
 void bind_node(sqlite::Statement& query, const NodeRow& row) {
@@ -676,6 +776,13 @@ load_state(const std::filesystem::path& database_path) {
             auto nodes = require_statement(
                 sqlite::prepare(opened->get(), "SELECT 1 FROM nodes LIMIT 1"));
             if (!require_step(nodes)) {
+                auto pending = require_statement(sqlite::prepare(
+                    opened->get(),
+                    "SELECT 1 FROM pending_materializations LIMIT 1"));
+                if (require_step(pending)) {
+                    return std::unexpected(
+                        "state.db has pending rows without accepted state");
+                }
                 require(sqlite::commit(*transaction));
                 return std::optional<StoredState>{};
             }
@@ -701,6 +808,7 @@ load_state(const std::filesystem::path& database_path) {
         if (!tree) {
             return std::unexpected(tree.error());
         }
+        auto pending = load_pending_materializations(opened->get(), *tree);
         std::size_t consumed = 0;
         const auto height = std::stoull(generation, &consumed);
         if (consumed != generation.size() ||
@@ -726,7 +834,8 @@ load_state(const std::filesystem::path& database_path) {
                           .commit_id = std::move(commit_id),
                           .ciphertext_id = std::move(ciphertext_id),
                           .epoch_id = std::move(epoch_id),
-                          .epoch_sequence = parsed_epoch_sequence};
+                          .epoch_sequence = parsed_epoch_sequence,
+                          .pending_materializations = std::move(pending)};
         platform::perf_trace::finish("state db load wall", state_trace);
         return state;
     } catch (const std::exception& exception) {
@@ -740,6 +849,8 @@ bool save_state(const std::filesystem::path& database_path,
     const auto state_trace = platform::perf_trace::begin();
     platform::perf_trace::count("state db save calls");
     if (!valid_snapshot(state.tree, false) ||
+        !valid_pending_materializations(state.tree,
+                                        state.pending_materializations) ||
         state.height == std::numeric_limits<std::uint64_t>::max() ||
         !history::valid_commit_id(state.commit_id) ||
         (!state.ciphertext_id.empty() &&
@@ -768,6 +879,8 @@ bool save_state(const std::filesystem::path& database_path,
                                     previous_tree->rows.size());
         const auto node_diff_trace = platform::perf_trace::begin();
         write_tree_delta(opened->get(), *previous_tree, state.tree);
+        write_pending_materializations(opened->get(),
+                                       state.pending_materializations);
         platform::perf_trace::finish("state db node diff wall",
                                      node_diff_trace);
         require(sqlite::execute(opened->get(),

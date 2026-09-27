@@ -100,6 +100,63 @@ int present_cancellation(application::Operation operation) {
 
 namespace {
 
+void render_bounded(const auto& items,
+                    bool full,
+                    const auto& print_item,
+                    const auto& print_omitted) {
+    constexpr std::size_t head_count = 5;
+    constexpr std::size_t tail_count = 5;
+    if (full || items.size() <= head_count + tail_count) {
+        for (const auto& item : items) {
+            print_item(item);
+        }
+        return;
+    }
+
+    for (std::size_t index = 0; index < head_count; ++index) {
+        print_item(items[index]);
+    }
+    print_omitted(items.size() - head_count - tail_count);
+    for (std::size_t index = items.size() - tail_count;
+         index < items.size();
+         ++index) {
+        print_item(items[index]);
+    }
+}
+
+void render_pending_status(std::size_t count) {
+    std::println("{}{}{} {}",
+                 style::yellow,
+                 i18n::tr(i18n::Key::LabelWarning),
+                 style::reset,
+                 i18n::tr(i18n::Key::SyncPartialHeader));
+    i18n::println(count == 1 ? i18n::Key::SyncPendingSingular
+                             : i18n::Key::SyncPendingPlural,
+                  count);
+}
+
+void render_pending_paths(
+    const std::vector<std::filesystem::path>& paths,
+    bool full) {
+    if (paths.empty()) {
+        return;
+    }
+    render_pending_status(paths.size());
+    std::println("{}", i18n::tr(i18n::Key::SyncPendingLabel));
+
+    auto ordered = paths;
+    std::ranges::sort(ordered);
+    const auto print_path = [](const auto& path) {
+        std::println("  {}", platform::path::to_utf8(path));
+    };
+    const auto print_omitted = [](std::size_t omitted) {
+        i18n::println(omitted == 1 ? i18n::Key::SyncPendingOmittedSingular
+                                  : i18n::Key::SyncPendingOmittedPlural,
+                      omitted);
+    };
+    render_bounded(ordered, full, print_path, print_omitted);
+}
+
 void render_plan_report(const application::PlanReport& report,
                         bool full = false) {
     if (report.has_conflicts) {
@@ -107,8 +164,13 @@ void render_plan_report(const application::PlanReport& report,
         std::println("{}", i18n::tr(i18n::Key::SyncConflictsStatusHint));
     }
 
-    if (report.items.empty()) {
+    if (report.items.empty() && report.pending_paths.empty()) {
         std::println("{}", i18n::tr(i18n::Key::SyncNothingToDo));
+        return;
+    }
+
+    if (report.items.empty()) {
+        render_pending_paths(report.pending_paths, full);
         return;
     }
 
@@ -142,29 +204,13 @@ void render_plan_report(const application::PlanReport& report,
         }
     };
 
-    constexpr std::size_t HEAD_COUNT = 5;
-    constexpr std::size_t TAIL_COUNT = 5;
-    constexpr std::size_t THRESHOLD = HEAD_COUNT + TAIL_COUNT;
-
-    if (full || report.items.size() <= THRESHOLD) {
-        for (const auto& item : report.items) {
-            print_item(item);
-        }
-    } else {
-        for (std::size_t i = 0; i < HEAD_COUNT; ++i) {
-            print_item(report.items[i]);
-        }
-        const auto omitted = report.items.size() - THRESHOLD;
+    const auto print_omitted = [](std::size_t omitted) {
         const auto omitted_key = (omitted == 1)
                                      ? i18n::Key::SyncPlanOmittedSingular
                                      : i18n::Key::SyncPlanOmittedPlural;
         std::println("  ... ({}) ...", i18n::format(omitted_key, omitted));
-        for (std::size_t i = report.items.size() - TAIL_COUNT;
-             i < report.items.size();
-             ++i) {
-            print_item(report.items[i]);
-        }
-    }
+    };
+    render_bounded(report.items, full, print_item, print_omitted);
 
     std::println("{}", i18n::tr(i18n::Key::SyncSummaryHeader));
     for (std::size_t i = 0; i < report.action_counts.size(); ++i) {
@@ -185,6 +231,7 @@ void render_plan_report(const application::PlanReport& report,
             i18n::println(i18n::Key::SyncDownload,
                           format_size(report.download_bytes));
     }
+    render_pending_paths(report.pending_paths, full);
 }
 
 std::string_view entry_name(std::string_view path) {
@@ -649,7 +696,11 @@ int present_remote_health(const application::RemoteHealthReport& report) {
 
 void render_sync_summary(const application::SyncCompleted& summary) {
     if (summary.total == 0) {
-        std::println("      {}", i18n::tr(i18n::Key::SyncEverythingInSync));
+        if (summary.partial) {
+            render_pending_status(summary.pending);
+        } else {
+            std::println("      {}", i18n::tr(i18n::Key::SyncEverythingInSync));
+        }
         std::println();
         return;
     }
@@ -698,6 +749,12 @@ void render_sync_summary(const application::SyncCompleted& summary) {
                                          ? i18n::Key::SyncRemovedDirSingular
                                          : i18n::Key::SyncRemovedDirPlural,
                                      summary.removed_dirs));
+    }
+    if (summary.partial) {
+        parts.push_back(i18n::format(
+            summary.pending == 1 ? i18n::Key::SyncPendingSingular
+                                 : i18n::Key::SyncPendingPlural,
+            summary.pending));
     }
 
     std::string line = "      ";
@@ -755,9 +812,120 @@ void present(const application::SyncProgress& progress,
     }
 }
 
+void present(const application::GarbageCollectProgress& progress) {
+    switch (progress.stage) {
+        case application::GarbageCollectStage::Preparing:
+            std::println("{}", i18n::tr(i18n::Key::GcStagePreparing));
+            break;
+        case application::GarbageCollectStage::CheckingQuarantine:
+            std::println("{}", i18n::tr(i18n::Key::GcStageCheckingQuarantine));
+            break;
+        case application::GarbageCollectStage::Analyzing:
+            if (!progress.candidate_count.has_value()) {
+                std::println("{}", i18n::tr(i18n::Key::GcStageAnalyzing));
+            } else if (*progress.candidate_count == 0) {
+                std::println("{}", i18n::tr(i18n::Key::GcCandidatesNone));
+            } else if (*progress.candidate_count == 1) {
+                std::println("{}", i18n::tr(i18n::Key::GcCandidatesSingular));
+            } else {
+                std::println("{}",
+                             i18n::format(i18n::Key::GcCandidatesPlural,
+                                          *progress.candidate_count));
+            }
+            break;
+        case application::GarbageCollectStage::Applying:
+            std::println("{}", i18n::tr(i18n::Key::GcStageApplying));
+            break;
+        case application::GarbageCollectStage::Finalizing:
+            std::println("{}", i18n::tr(i18n::Key::GcStageFinalizing));
+            std::println();
+            break;
+    }
+}
+
+void present(const application::FsckProgress& progress,
+             FsckProgressDisplayState& state) {
+    if (state.last_stage != progress.stage) {
+        const auto stage_key = [&] {
+            switch (progress.stage) {
+                case application::FsckStage::Preparing:
+                    return i18n::Key::FsckStagePreparing;
+                case application::FsckStage::Observing:
+                    return i18n::Key::FsckStageObserving;
+                case application::FsckStage::Analyzing:
+                    return i18n::Key::FsckStageAnalyzing;
+                case application::FsckStage::AuditingContent:
+                    return i18n::Key::FsckStageAuditingContent;
+                case application::FsckStage::Finalizing:
+                    return i18n::Key::FsckStageFinalizing;
+            }
+            return i18n::Key::FsckStageFinalizing;
+        }();
+        std::println("{}", i18n::tr(stage_key));
+        state.last_stage = progress.stage;
+    }
+
+    if (progress.stage != application::FsckStage::AuditingContent) {
+        return;
+    }
+    if (!progress.total_objects.has_value()) {
+        return;
+    }
+    if (*progress.total_objects == 0) {
+        if (!state.empty_inventory_reported) {
+            std::println("{}", i18n::tr(i18n::Key::FsckNoContent));
+            state.empty_inventory_reported = true;
+        }
+        return;
+    }
+
+    const auto completed =
+        std::min(progress.completed_objects, *progress.total_objects);
+    const auto percent = completed == *progress.total_objects
+                             ? 100u
+                             : static_cast<unsigned>(
+                                   static_cast<long double>(completed) * 100.0L /
+                                   *progress.total_objects);
+    if (state.last_object_percent == percent) {
+        return;
+    }
+    state.last_object_percent = percent;
+
+    std::string line = i18n::format(
+        *progress.total_objects == 1 ? i18n::Key::FsckProgressObject
+                                     : i18n::Key::FsckProgressObjects,
+        completed, *progress.total_objects, percent);
+    if (progress.completed_plaintext_bytes.has_value() &&
+        progress.total_plaintext_bytes.has_value()) {
+        const auto completed_bytes = std::min(
+            *progress.completed_plaintext_bytes,
+            *progress.total_plaintext_bytes);
+        const auto completed_size = format_size(completed_bytes);
+        const auto total_size = format_size(*progress.total_plaintext_bytes);
+        if (*progress.total_plaintext_bytes == 0) {
+            line += i18n::format(i18n::Key::FsckProgressBytes,
+                                 completed_size, total_size);
+        } else {
+            const auto byte_percent =
+                completed_bytes == *progress.total_plaintext_bytes
+                    ? 100u
+                    : static_cast<unsigned>(
+                          static_cast<long double>(completed_bytes) * 100.0L /
+                          *progress.total_plaintext_bytes);
+            line += i18n::format(i18n::Key::FsckProgressBytesPercent,
+                                 completed_size, total_size, byte_percent);
+        }
+    }
+    std::println("{}.", line);
+}
+
 int present(const application::Response& response, bool full) {
     if (const auto* sync =
             std::get_if<application::SyncCompleted>(&response.data)) {
+        if (sync->partial) {
+            render_pending_paths(sync->pending_paths, full);
+            return 2;
+        }
         if (sync->duration.has_value()) {
             std::println("{}{}{} {}",
                          style::green,
@@ -780,31 +948,53 @@ int present(const application::Response& response, bool full) {
         if (response.operation == application::Operation::Preview) {
             std::println("{}", i18n::tr(i18n::Key::PreviewCompleted));
         }
-        return 0;
+        return ptr->pending_paths.empty() ? 0 : 2;
     }
-    if (std::holds_alternative<application::FsckCompleted>(response.data)) {
-        std::println("{}", i18n::tr(i18n::Key::ErrorFsckAuditing));
+    if (const auto* fsck =
+            std::get_if<application::FsckCompleted>(&response.data)) {
         std::println("{}{}{} {}",
                      style::green,
                      i18n::tr(i18n::Key::LabelOk),
                      style::reset,
                      i18n::tr(i18n::Key::ErrorFsckClean));
+        if (fsck->checked_objects == 1) {
+            std::println("{}", i18n::tr(i18n::Key::FsckSummarySingular));
+        } else {
+            std::println("{}", i18n::format(i18n::Key::FsckSummaryPlural,
+                                             fsck->checked_objects));
+        }
+        if (fsck->checked_plaintext_bytes.has_value()) {
+            std::println("{}", i18n::format(i18n::Key::FsckSummaryBytes,
+                                             format_size(
+                                                 *fsck->checked_plaintext_bytes)));
+        }
         return 0;
     }
     if (const auto* ptr =
             std::get_if<application::GarbageCollectCompleted>(&response.data)) {
-        std::println("{}", i18n::tr(i18n::Key::ErrorGcRunning));
         if (ptr->analysis_only) {
-            std::println("{}",
-                         i18n::format(i18n::Key::ErrorGcWarning,
-                                      ptr->candidate_objects));
+            const auto header = (ptr->candidate_objects == 1)
+                                    ? i18n::tr(i18n::Key::GcWarningHeaderSingular)
+                                    : i18n::format(i18n::Key::GcWarningHeaderPlural,
+                                                 ptr->candidate_objects);
+            const auto label = i18n::tr(i18n::Key::LabelWarning);
+            const std::string indent(label.size() + 1, ' ');
+            std::println("{}{}{} {}",
+                         style::yellow,
+                         label,
+                         style::reset,
+                         header);
+            std::println("{}{}", indent, i18n::tr(i18n::Key::GcWarningDetail1));
+            std::println("{}{}", indent, i18n::tr(i18n::Key::GcWarningDetail2));
             return 0;
         }
         std::println("{}{}{} {}",
                      style::green,
                      i18n::tr(i18n::Key::LabelOk),
                      style::reset,
-                     i18n::format(i18n::Key::ErrorGcCompleted,
+                     i18n::tr(i18n::Key::GcCompleted));
+        std::println("     {}",
+                     i18n::format(i18n::Key::GcSummary,
                                   ptr->candidate_objects,
                                   ptr->quarantined_objects,
                                   ptr->restored_objects,
@@ -1027,7 +1217,6 @@ int present(const application::Error& error) {
                 i18n::format(i18n::Key::ErrorFsckFailed, error.detail));
             break;
         case application::ErrorCode::GarbageCollectionFailure:
-            std::println("{}", i18n::tr(i18n::Key::ErrorGcRunning));
             std::println(
                 "{}{}{} {}",
                 style::red,

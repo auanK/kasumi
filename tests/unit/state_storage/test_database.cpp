@@ -149,7 +149,127 @@ TEST(StateStorageDatabaseTest, FreshDatabaseCreatesInitialSchemaAndEmptyCache) {
             database_path,
             "SELECT name FROM sqlite_master WHERE name='directory_lineage'")
             .size() == 1);
+    EXPECT_EQ(query_text(database_path,
+                         "SELECT name FROM sqlite_master WHERE "
+                         "name='pending_materializations'")
+                  .size(),
+              1U);
     EXPECT_TRUE(kasumi::state_storage::load_file_cache(database_path)->empty());
+}
+
+TEST(StateStorageDatabaseTest, PendingMaterializationsRoundTrip) {
+    auto workspace = kasumi::test::make_temp_workspace("pending-round-trip");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "state.db");
+    const auto snapshot = make_snapshot("docs/state.txt", "state", 9);
+    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    ASSERT_TRUE(kasumi::state_storage::save_state(
+        database_path,
+        {.tree = snapshot,
+         .height = 7,
+         .commit_id = std::string(64, 'a'),
+         .pending_materializations = {*kasumi::find_row(snapshot,
+                                                        "docs/state.txt")}}));
+    const auto loaded = kasumi::state_storage::load_state(database_path);
+    ASSERT_TRUE(loaded.has_value() && *loaded);
+    EXPECT_EQ((*loaded)->commit_id, std::string(64, 'a'));
+    EXPECT_EQ((*loaded)->tree, snapshot);
+    ASSERT_EQ((*loaded)->pending_materializations.size(), 1U);
+    EXPECT_EQ((*loaded)->pending_materializations.front(),
+              *kasumi::find_row(snapshot, "docs/state.txt"));
+}
+
+TEST(StateStorageDatabaseTest, EmptyPendingMaterializationsClearPersistedRows) {
+    auto workspace = kasumi::test::make_temp_workspace("pending-clear");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "state.db");
+    const auto snapshot = make_snapshot("a.txt", "a", 1);
+    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    ASSERT_TRUE(kasumi::state_storage::save_state(
+        database_path,
+        {.tree = snapshot,
+         .height = 1,
+         .commit_id = std::string(64, 'a'),
+         .pending_materializations = {*kasumi::find_row(snapshot, "a.txt")}}));
+    ASSERT_TRUE(kasumi::state_storage::save_state(
+        database_path,
+        {.tree = snapshot, .height = 2, .commit_id = std::string(64, 'b')}));
+    const auto loaded = kasumi::state_storage::load_state(database_path);
+    ASSERT_TRUE(loaded.has_value() && *loaded);
+    EXPECT_TRUE((*loaded)->pending_materializations.empty());
+}
+
+TEST(StateStorageDatabaseTest, RejectsPendingRowsOutsideAcceptedFileRows) {
+    auto workspace = kasumi::test::make_temp_workspace("pending-invalid");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "state.db");
+    const auto snapshot = make_snapshot("a.txt", "a", 1);
+    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    const auto file = *kasumi::find_row(snapshot, "a.txt");
+    auto changed = file;
+    changed.hash = kasumi::hasher::hash_string("different");
+    const kasumi::state_storage::StoredState invalid{
+        .tree = snapshot,
+        .height = 1,
+        .commit_id = std::string(64, 'a'),
+        .pending_materializations = {changed}};
+    EXPECT_FALSE(kasumi::state_storage::save_state(database_path, invalid));
+    EXPECT_FALSE(kasumi::state_storage::save_state(
+        database_path,
+        {.tree = snapshot,
+         .height = 1,
+         .commit_id = std::string(64, 'a'),
+         .pending_materializations = {file, file}}));
+    const auto directory = *kasumi::find_row(snapshot, "docs");
+    EXPECT_FALSE(kasumi::state_storage::save_state(
+        database_path,
+        {.tree = snapshot,
+         .height = 1,
+         .commit_id = std::string(64, 'a'),
+         .pending_materializations = {directory}}));
+}
+
+TEST(StateStorageDatabaseTest, StateAndPendingRowsCommitAtomically) {
+    auto workspace = kasumi::test::make_temp_workspace("pending-atomic");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "state.db");
+    const auto original = make_snapshot("a.txt", "a", 1);
+    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    ASSERT_TRUE(kasumi::state_storage::save_state(
+        database_path,
+        {.tree = original,
+         .height = 1,
+         .commit_id = std::string(64, 'a'),
+         .pending_materializations = {*kasumi::find_row(original, "a.txt")}}));
+    execute_sql(database_path,
+                "CREATE TRIGGER fail_pending_insert BEFORE INSERT ON "
+                "pending_materializations BEGIN SELECT RAISE(ABORT, "
+                "'injected pending write failure'); END");
+
+    const auto replacement = make_snapshot("a.txt", "replacement", 2);
+    EXPECT_FALSE(kasumi::state_storage::save_state(
+        database_path,
+        {.tree = replacement,
+         .height = 2,
+         .commit_id = std::string(64, 'b'),
+         .pending_materializations = {*kasumi::find_row(replacement,
+                                                        "a.txt")}}));
+    const auto loaded = kasumi::state_storage::load_state(database_path);
+    ASSERT_TRUE(loaded.has_value() && *loaded);
+    EXPECT_EQ((*loaded)->tree, original);
+    ASSERT_EQ((*loaded)->pending_materializations.size(), 1U);
+    EXPECT_EQ((*loaded)->pending_materializations.front(),
+              *kasumi::find_row(original, "a.txt"));
+}
+
+TEST(StateStorageDatabaseTest, MissingCanonicalPendingTableFailsClosed) {
+    auto workspace = kasumi::test::make_temp_workspace("pending-schema");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "state.db");
+    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    execute_sql(database_path, "DROP TABLE pending_materializations");
+    EXPECT_FALSE(kasumi::state_storage::initialize(database_path));
+    EXPECT_FALSE(kasumi::state_storage::load_state(database_path).has_value());
 }
 
 TEST(StateStorageDatabaseTest, FileCacheDeltaIsNonAuthoritative) {

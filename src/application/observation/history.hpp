@@ -62,6 +62,8 @@ struct StorageView {
     bool history_present = false;
     bool has_conflicts = false;
     std::optional<history_storage::epoch::VerifiedEpoch> epoch;
+    // Raw physical namespace identifiers observed in the remote snapshot.
+    std::vector<std::string> physical_identifiers;
 };
 
 // Storage observation result.

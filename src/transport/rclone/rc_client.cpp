@@ -54,6 +54,37 @@ enum class RcMethod {
     CoreQuit,
 };
 
+
+void record_endpoint_request(std::string_view path_suffix) noexcept {
+    if (!platform::perf_trace::enabled()) {
+        return;
+    }
+    if (path_suffix == "operations/check") {
+        platform::perf_trace::count("rc.http_requests_by_endpoint.operations/check", 1);
+    } else if (path_suffix == "operations/hashsumfile") {
+        platform::perf_trace::count("rc.http_requests_by_endpoint.operations/hashsumfile", 1);
+    } else if (path_suffix == "operations/copyfile") {
+        platform::perf_trace::count("rc.http_requests_by_endpoint.operations/copyfile", 1);
+    } else if (path_suffix == "operations/deletefile") {
+        platform::perf_trace::count("rc.http_requests_by_endpoint.operations/deletefile", 1);
+    } else if (path_suffix == "operations/stat") {
+        platform::perf_trace::count("rc.http_requests_by_endpoint.operations/stat", 1);
+    } else if (path_suffix == "operations/mkdir") {
+        platform::perf_trace::count("rc.http_requests_by_endpoint.operations/mkdir", 1);
+    } else if (path_suffix == "operations/list") {
+        platform::perf_trace::count("rc.http_requests_by_endpoint.operations/list", 1);
+    } else if (path_suffix == "sync/copy") {
+        platform::perf_trace::count("rc.http_requests_by_endpoint.sync/copy", 1);
+    } else if (path_suffix == "core/pid") {
+        platform::perf_trace::count("rc.http_requests_by_endpoint.core/pid", 1);
+    } else if (path_suffix == "core/quit") {
+        platform::perf_trace::count("rc.http_requests_by_endpoint.core/quit", 1);
+    } else {
+        std::string dynamic_metric = "rc.http_requests_by_endpoint." + std::string{path_suffix};
+        platform::perf_trace::count(dynamic_metric, 1);
+    }
+}
+
 std::expected<std::string, Error>
 post_rc_impl(State& state,
              std::string_view endpoint,
@@ -159,21 +190,29 @@ post_rc_impl(State& state,
                                     std::chrono::milliseconds{50});
         }
     });
+    platform::perf_trace::count("rc.http_requests_attempted", 1);
+    record_endpoint_request(path_suffix);
+    platform::perf_trace::count("rc.bytes_sent_control_json", request_body.size());
+
     const auto response =
         client.Post(path, std::string{request_body}, "application/json");
     watcher.request_stop();
     if (platform::cancellation::requested()) {
+        platform::perf_trace::count("rc.http_requests_failed", 1);
         return std::unexpected(
             make_error(ErrorCode::Cancelled, "operation cancelled by user"));
     }
     if (!response) {
+        platform::perf_trace::count("rc.http_requests_failed", 1);
         return std::unexpected(
             make_error(ErrorCode::Io,
                        std::string{"RC HTTP failure: "} +
                            httplib::to_string(response.error()),
                        static_cast<int>(response.error())));
     }
+    platform::perf_trace::count("rc.bytes_received_control_json", response->body.size());
     if (response->body.size() > response_limit) {
+        platform::perf_trace::count("rc.http_requests_failed", 1);
         return std::unexpected(make_error(
             ErrorCode::ProtocolFailure,
             "RC response exceeds limit",
@@ -182,11 +221,13 @@ post_rc_impl(State& state,
                 static_cast<std::size_t>((std::numeric_limits<int>::max)())))));
     }
     if (response->status == 401 || response->status == 403) {
+        platform::perf_trace::count("rc.http_requests_failed", 1);
         return std::unexpected(make_error(ErrorCode::PermissionDenied,
                                           "RC authentication rejected",
                                           response->status));
     }
     if (response->status < 200 || response->status >= 300) {
+        platform::perf_trace::count("rc.http_requests_failed", 1);
         std::string detail = "unexpected RC HTTP status; body omitted";
         try {
             const auto json = nlohmann::json::parse(response->body);
@@ -198,6 +239,7 @@ post_rc_impl(State& state,
         return std::unexpected(
             make_error(ErrorCode::ProtocolFailure, detail, response->status));
     }
+    platform::perf_trace::count("rc.http_requests_completed", 1);
     return response->body;
 }
 

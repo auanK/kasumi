@@ -1,5 +1,6 @@
 #include "application/sync/coordinator.hpp"
 
+#include "application/concurrency.hpp"
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/scanner.hpp"
@@ -556,6 +557,9 @@ bool same_materialized_head_rows(const std::vector<NodeRow>& expected_rows,
                 return false;
             }
         }
+        if (exp.mtime == std::filesystem::file_time_type{}) {
+            continue;
+        }
         if (exp.mtime != act.mtime) {
             const auto* obs = find_row(observed_local_tree, act.path);
             const bool pre_existing_equivalent =
@@ -569,6 +573,21 @@ bool same_materialized_head_rows(const std::vector<NodeRow>& expected_rows,
         }
     }
     return true;
+}
+
+bool same_materialized_row(const NodeRow& expected,
+                          const NodeRow& actual) noexcept {
+    return expected.path == actual.path && expected.hash == actual.hash &&
+           expected.size == actual.size &&
+           (expected.mtime == std::filesystem::file_time_type{} ||
+            expected.mtime == actual.mtime) &&
+           expected.is_directory == actual.is_directory;
+}
+
+bool same_materialized_rows(std::span<const NodeRow> expected,
+                            std::span<const NodeRow> actual) noexcept {
+    return expected.size() == actual.size() &&
+           std::ranges::equal(expected, actual, same_materialized_row);
 }
 
 transaction::Record
@@ -707,24 +726,8 @@ rollback_local_mutations(transaction::Record& record,
     return {};
 }
 
-constexpr std::size_t default_content_concurrency = 8;
-constexpr std::size_t maximum_experimental_content_concurrency = 16;
-
 std::size_t content_concurrency() noexcept {
-    const char* setting = std::getenv("KASUMI_CONTENT_CONCURRENCY");
-    if (setting == nullptr) {
-        return default_content_concurrency;
-    }
-    const std::string_view text{setting};
-    unsigned value = 0;
-    const auto parsed =
-        std::from_chars(text.data(), text.data() + text.size(), value);
-    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() ||
-        value == 0) {
-        return default_content_concurrency;
-    }
-    return std::min<std::size_t>(value,
-                                 maximum_experimental_content_concurrency);
+    return application::content_concurrency();
 }
 
 } // namespace detail
@@ -732,7 +735,12 @@ std::size_t content_concurrency() noexcept {
 namespace {
 
 Error mutation_error(const mutation::MutationError& error) {
-    return detail::make_error(ErrorCode::MutationFailure,
+    return detail::make_error(
+                              error.code ==
+                                      mutation::MutationErrorCode::
+                                          RemoteContentMissing
+                                  ? ErrorCode::RemoteContentMissing
+                                  : ErrorCode::MutationFailure,
                               mutation::describe(error),
                               error.operation_index);
 }
@@ -1084,6 +1092,10 @@ restore_transaction_metadata(const Snapshot& expected_tree,
                     "entry modified after observation: " + path_name));
             }
         }
+        if (row->mtime == std::filesystem::file_time_type{}) {
+            // Canonical history uses default mtime as an unspecified sentinel.
+            continue;
+        }
         auto written =
             ::kasumi::platform::metadata::set_last_write_time(path, row->mtime);
         if (!written) {
@@ -1101,7 +1113,10 @@ bool same_result(const reconciliation::Result& left,
     return same_plan(left.plan, right.plan) &&
            left.missing_objects == right.missing_objects &&
            same_rows(left.pending_storage_rows, right.pending_storage_rows) &&
-           left.unrecoverable_paths == right.unrecoverable_paths &&
+           same_rows(left.pending_materializations,
+                     right.pending_materializations) &&
+           left.missing_content_paths_without_local_source ==
+               right.missing_content_paths_without_local_source &&
            left.observed_storage_generation ==
                right.observed_storage_generation &&
            left.target_generation == right.target_generation &&
@@ -1150,6 +1165,9 @@ std::string describe(const Error& error) {
             break;
         case ErrorCode::MutationFailure:
             result = "mutation_failure";
+            break;
+        case ErrorCode::RemoteContentMissing:
+            result = "remote_content_missing";
             break;
         case ErrorCode::PublicationFailure:
             result = "publication_failure";
@@ -1253,6 +1271,20 @@ execute(const runtime::RuntimeData& runtime_data,
         }
         observed_head_id = observed_input.storage.logical_heads.front();
     }
+    std::vector<std::string> observed_pending_paths;
+    observed_pending_paths.reserve(
+        observed_input.pending_materializations.size());
+    for (const auto& row : observed_input.pending_materializations) {
+        observed_pending_paths.push_back(row.path);
+    }
+    std::vector<std::string> pending_paths;
+    pending_paths.reserve(reconciliation_result.pending_materializations.size());
+    for (const auto& row : reconciliation_result.pending_materializations) {
+        pending_paths.push_back(row.path);
+    }
+    const auto observed_base_id = observed_input.base_state_present
+                                      ? observed_input.base_commit_id
+                                      : std::string{};
 
     std::optional<transaction::Record> record_storage;
     if (*existing) {
@@ -1261,6 +1293,9 @@ execute(const runtime::RuntimeData& runtime_data,
             (*existing)->local_generation == observed_input.local_generation &&
             (*existing)->storage_generation ==
                 observed_input.storage.generation &&
+            (*existing)->observed_base_id == observed_base_id &&
+            (*existing)->observed_pending_paths == observed_pending_paths &&
+            (*existing)->pending_paths == pending_paths &&
             same_plan_operations((*existing)->plan,
                                  reconciliation_result.plan)) {
             record_storage = std::move(**existing);
@@ -1279,6 +1314,10 @@ execute(const runtime::RuntimeData& runtime_data,
             return std::unexpected(detail::journal_error(record.error()));
         }
         record_storage = std::move(*record);
+        record_storage->observed_base_id = observed_base_id;
+        record_storage->observed_pending_paths =
+            std::move(observed_pending_paths);
+        record_storage->pending_paths = std::move(pending_paths);
     }
     auto& record = record_storage;
     const auto content_upload_required = required_content_uploads(
@@ -1474,6 +1513,18 @@ execute(const runtime::RuntimeData& runtime_data,
     const auto fail_mutation = [&](std::size_t index,
                                    const mutation::MutationError& failure)
         -> std::expected<void, Error> {
+        if (failure.code ==
+            mutation::MutationErrorCode::RemoteContentMissing) {
+            auto rolled = detail::rollback_transaction(*paths,
+                                                       *record,
+                                                       transaction_workspace,
+                                                       runtime_data.local_dir,
+                                                       key);
+            if (!rolled) {
+                return std::unexpected(rolled.error());
+            }
+            return std::unexpected(mutation_error(failure));
+        }
         if (!record->publication_required &&
             is_storage_repair_operation(observed_input,
                                         reconciliation_result,
@@ -1780,8 +1831,9 @@ execute(const runtime::RuntimeData& runtime_data,
     }
 
     if (record->publication_required &&
-        !same_rows(publication_tree->rows,
-                   reconciliation_result.candidate_shared_tree.rows)) {
+        !detail::same_materialized_rows(
+            reconciliation_result.candidate_shared_tree.rows,
+            publication_tree->rows)) {
         auto rolled = rollback_terminal();
         if (!rolled)
             return std::unexpected(rolled.error());
@@ -1809,13 +1861,9 @@ execute(const runtime::RuntimeData& runtime_data,
                 mismatch_index = index;
                 break;
             }
-            if (!actual.is_directory && !expected.is_directory) {
-                if (actual.hash != expected.hash ||
-                    actual.size != expected.size ||
-                    actual.mtime != expected.mtime) {
-                    mismatch_index = index;
-                    break;
-                }
+            if (!detail::same_materialized_row(expected, actual)) {
+                mismatch_index = index;
+                break;
             }
         }
         if (mismatch_index >= count) {
@@ -1858,9 +1906,10 @@ execute(const runtime::RuntimeData& runtime_data,
                     ")";
             } else {
                 for (std::size_t index = 0; index < count; ++index) {
-                    if (publication_tree->rows[index] !=
-                        reconciliation_result.candidate_shared_tree
-                            .rows[index]) {
+                    if (!detail::same_materialized_row(
+                            reconciliation_result.candidate_shared_tree
+                                .rows[index],
+                            publication_tree->rows[index])) {
                         mismatch_index = index;
                         break;
                     }
@@ -1877,7 +1926,8 @@ execute(const runtime::RuntimeData& runtime_data,
             if (actual.path != expected.path) {
                 detail_message += ", actual_path=" + actual.path;
             }
-            if (actual.mtime != expected.mtime) {
+            if (expected.mtime != std::filesystem::file_time_type{} &&
+                actual.mtime != expected.mtime) {
                 detail_message +=
                     ", actual_mtime=" +
                     std::to_string(actual.mtime.time_since_epoch().count()) +
@@ -1938,7 +1988,9 @@ execute(const runtime::RuntimeData& runtime_data,
                     if (actual.path != expected.path ||
                         actual.hash != expected.hash ||
                         actual.size != expected.size ||
-                        actual.mtime != expected.mtime ||
+                        (expected.mtime !=
+                             std::filesystem::file_time_type{} &&
+                         actual.mtime != expected.mtime) ||
                         actual.is_directory != expected.is_directory) {
                         detail_message +=
                             " (path=" + expected.path + ", actual_mtime=" +
@@ -1985,7 +2037,9 @@ execute(const runtime::RuntimeData& runtime_data,
                     .commit_id = found->id,
                     .ciphertext_id = ff_ciphertext_id,
                     .epoch_id = observed_input.storage.epoch_id,
-                    .epoch_sequence = observed_input.storage.epoch_sequence})) {
+                    .epoch_sequence = observed_input.storage.epoch_sequence,
+                    .pending_materializations =
+                        reconciliation_result.pending_materializations})) {
             const auto database_error = detail::make_error(
                 ErrorCode::DatabaseFailure, "failed to save state.db");
             auto rolled = rollback_terminal();
@@ -2279,7 +2333,9 @@ execute(const runtime::RuntimeData& runtime_data,
                 .epoch_id = *epoch_reference ? (**epoch_reference).epoch_id
                                              : std::string{},
                 .epoch_sequence =
-                    *epoch_reference ? (**epoch_reference).sequence : 0});
+                    *epoch_reference ? (**epoch_reference).sequence : 0,
+                .pending_materializations =
+                    reconciliation_result.pending_materializations});
     platform::perf_trace::finish("local DB commit", database_trace);
     if (!database_saved) {
         return std::unexpected(detail::make_error(ErrorCode::DatabaseFailure,
