@@ -160,13 +160,80 @@ TEST(ProviderCertificationMatrixTest,
     EXPECT_EQ(drive.status, "PASS");
 }
 
+TEST(ProviderCertificationMatrixTest,
+     Phase41ReportsRemainReadableWithNewRowsAbsent) {
+    Report phase41{.provider_id = "google-drive", .transport = "Rclone"};
+    phase41.cleanup = "CLEANED";
+    phase41.scenarios = {
+        {.name = "transport-round-trip", .status = ScenarioStatus::Pass},
+        {.name = "bootstrap-publish", .status = ScenarioStatus::Pass},
+        {.name = "gc-lifecycle", .status = ScenarioStatus::NotRun},
+        {.name = "cleanup", .status = ScenarioStatus::Pass},
+    };
+    phase41.status = derive_status(phase41);
+
+    Report expanded{.provider_id = "local-filesystem", .transport = "Local"};
+    expanded.cleanup = "CLEANED";
+    expanded.scenarios = {
+        {.name = "transport-round-trip", .status = ScenarioStatus::Pass},
+        {.name = "bidirectional-update", .status = ScenarioStatus::Pass},
+        {.name = "logical-delete", .status = ScenarioStatus::Pass},
+        {.name = "two-client-conflict", .status = ScenarioStatus::Pass},
+        {.name = "gc-lifecycle", .status = ScenarioStatus::Pass},
+        {.name = "cleanup", .status = ScenarioStatus::Pass},
+    };
+    expanded.status = derive_status(expanded);
+
+    const auto matrix = aggregate_reports({phase41, expanded});
+    ASSERT_EQ(matrix["status"], "PASS");
+    const auto find = [&](std::string_view name) {
+        return std::ranges::find_if(matrix["scenarios"], [&](const auto& row) {
+            return row.at("name") == name;
+        });
+    };
+    const auto update = find("bidirectional-update");
+    ASSERT_NE(update, matrix["scenarios"].end());
+    EXPECT_EQ(update->at("targets").at("google-drive"), "NotRun");
+    EXPECT_EQ(update->at("targets").at("local-filesystem"), "Pass");
+}
+
+TEST(ProviderCertificationMatrixTest, RegistersCompleteProviderContract) {
+    const ProviderTarget local{.provider_id = "local-filesystem",
+                               .transport = "Local",
+                               .locator = "D:/fixtures/local-a",
+                               .workspace_root = "D:/fixtures/work-a"};
+    EXPECT_EQ(scenario_registry(local),
+              (std::vector<std::string>{
+                  "transport-round-trip",
+                  "bootstrap-publish",
+                  "bootstrap-second-client",
+                  "bidirectional-update",
+                  "no-op",
+                  "logical-delete",
+                  "two-client-conflict",
+                  "partial-missing",
+                  "publication-while-missing",
+                  "restore-pending",
+                  "local-source-repair",
+                  "fsck-healthy",
+                  "fsck-missing",
+                  "fsck-corrupt",
+                  "gc-lifecycle",
+                  "cleanup",
+              }));
+}
+
 TEST(ProviderCertificationTest, LocalReferenceScenariosPass) {
     auto target = create_local_target(std::filesystem::temp_directory_path());
     ASSERT_TRUE(target.has_value());
     auto report = run_local_certification(target->root);
-    EXPECT_EQ(report.scenarios.size(), 13U) << to_json(report).dump(2);
+    EXPECT_EQ(report.scenarios.size(), 16U) << to_json(report).dump(2);
     for (const auto& scenario : report.scenarios) {
         EXPECT_NE(scenario.status, ScenarioStatus::Fail)
+            << scenario.name << ": " << to_json(report).dump(2);
+        EXPECT_NE(scenario.status, ScenarioStatus::Blocked)
+            << scenario.name << ": " << to_json(report).dump(2);
+        EXPECT_NE(scenario.status, ScenarioStatus::NotRun)
             << scenario.name << ": " << to_json(report).dump(2);
     }
     auto cleanup = cleanup_local_target(*target);
