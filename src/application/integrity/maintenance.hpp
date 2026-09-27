@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -44,6 +45,9 @@ struct FsckResult {
     std::size_t repaired_objects = 0;
 };
 
+using FsckProgressCallback =
+    std::function<void(const FsckProgress&)>;
+
 // Counts produced by recoverable garbage collection.
 struct GarbageCollectResult {
     std::size_t candidate_objects = 0;
@@ -58,7 +62,8 @@ std::expected<FsckResult, Error>
 fsck(const runtime::RuntimeData& runtime_data,
      transport::Transport& storage,
      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-     std::size_t audit_concurrency = 1);
+     std::size_t audit_concurrency = 1,
+     FsckProgressCallback on_progress = {});
 
 // Callback type for receiving garbage collection progress updates.
 using GarbageCollectProgressCallback =

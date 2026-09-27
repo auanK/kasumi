@@ -1046,7 +1046,8 @@ std::string describe(const Error& error) {
 std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                                       transport::Transport& storage,
                                       KeySpan key,
-                                      std::size_t audit_concurrency) {
+                                      std::size_t audit_concurrency,
+                                      [[maybe_unused]] FsckProgressCallback on_progress) {
     TraceGuard total_guard{"fsck.total_duration_us", platform::perf_trace::begin()};
     if (runtime_data.local_dir.empty() || !transport::valid(storage)) {
         return std::unexpected(

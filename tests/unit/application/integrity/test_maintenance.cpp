@@ -5284,6 +5284,91 @@ std::vector<std::string> setup_multi_file_dataset(
     return identifiers;
 }
 
+TEST(IntegrityMaintenanceTest, FsckProgressCountsUniqueReferencedObjects) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    std::vector<std::pair<std::string, std::string>> files;
+    for (std::size_t i = 0; i < 100; ++i) {
+        files.emplace_back("file_" + std::to_string(i),
+                           "payload_" + std::to_string(i % 10));
+    }
+    (void)setup_multi_file_dataset(storage, files);
+
+    std::vector<kasumi::application::FsckProgress> events;
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key(), 4,
+        [&](const auto& progress) { events.push_back(progress); });
+    ASSERT_TRUE(checked.has_value()) << (checked ? "" : checked.error().detail);
+
+    const auto audit = std::find_if(events.begin(), events.end(), [](const auto& event) {
+        return event.stage == kasumi::application::FsckStage::AuditingContent;
+    });
+    ASSERT_NE(audit, events.end());
+    EXPECT_EQ(audit->completed_objects, 0U);
+    EXPECT_EQ(audit->total_objects, 10U);
+    EXPECT_EQ(audit->completed_plaintext_bytes, 0U);
+    EXPECT_EQ(audit->total_plaintext_bytes, 90U);
+    EXPECT_EQ(events.back().stage, kasumi::application::FsckStage::Finalizing);
+    EXPECT_EQ(events.back().completed_objects, 10U);
+    EXPECT_EQ(events.back().completed_plaintext_bytes, 90U);
+}
+
+TEST(IntegrityMaintenanceTest, FsckProgressCountsMissingAndCorruptAsCompletedWork) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    const auto identifiers = setup_multi_file_dataset(storage, {
+        {"healthy.txt", "h"},
+        {"missing.txt", "miss"},
+        {"corrupt.txt", "corrupt"},
+    });
+    std::filesystem::remove(
+        kasumi::test::workspace_path(storage.workspace, "storage") / identifiers[1]);
+    std::filesystem::resize_file(
+        kasumi::test::workspace_path(storage.workspace, "storage") / identifiers[2], 0);
+
+    std::vector<kasumi::application::FsckProgress> events;
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key(), 3,
+        [&](const auto& progress) { events.push_back(progress); });
+    ASSERT_FALSE(checked.has_value());
+    EXPECT_EQ(checked.error().code, IntegrityErrorCode::Unrecoverable);
+
+    ASSERT_FALSE(events.empty());
+    const auto& final = events.back();
+    EXPECT_EQ(final.stage, kasumi::application::FsckStage::Finalizing);
+    EXPECT_EQ(final.total_objects, 3U);
+    EXPECT_EQ(final.completed_objects, 3U);
+    EXPECT_EQ(final.total_plaintext_bytes, 12U);
+    EXPECT_EQ(final.completed_plaintext_bytes, 12U);
+}
+
+TEST(IntegrityMaintenanceTest, FsckHardFailureDoesNotFakeCompleteProgress) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    (void)setup_multi_file_dataset(storage, {
+        {"f0.txt", "payload_0"},
+        {"f1.txt", "payload_1"},
+        {"f2.txt", "payload_2"},
+        {"f3.txt", "payload_3"},
+    });
+    AuditProbeState probe;
+    probe.fail_ordinal = 1;
+    probe.fail_code = kasumi::transport::ErrorCode::PermissionDenied;
+    AuditProbeTransportState probe_state;
+    auto wrapped_transport = make_audit_probe_transport(probe_state, storage.transport, probe);
+    std::vector<kasumi::application::FsckProgress> events;
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, wrapped_transport, test_key(), 4,
+        [&](const auto& progress) { events.push_back(progress); });
+    ASSERT_FALSE(checked.has_value());
+    EXPECT_EQ(checked.error().code, IntegrityErrorCode::TransportFailure);
+    ASSERT_FALSE(events.empty());
+    EXPECT_EQ(events.back().stage, kasumi::application::FsckStage::Finalizing);
+    EXPECT_LT(events.back().completed_objects, *events.back().total_objects);
+}
+
 TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckAuditsWithPeakInFlight) {
     kasumi::platform::perf_trace::force_enable(true);
     kasumi::platform::perf_trace::reset();
