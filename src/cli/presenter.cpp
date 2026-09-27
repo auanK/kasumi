@@ -100,6 +100,30 @@ int present_cancellation(application::Operation operation) {
 
 namespace {
 
+void render_bounded(const auto& items,
+                    bool full,
+                    const auto& print_item,
+                    const auto& print_omitted) {
+    constexpr std::size_t head_count = 5;
+    constexpr std::size_t tail_count = 5;
+    if (full || items.size() <= head_count + tail_count) {
+        for (const auto& item : items) {
+            print_item(item);
+        }
+        return;
+    }
+
+    for (std::size_t index = 0; index < head_count; ++index) {
+        print_item(items[index]);
+    }
+    print_omitted(items.size() - head_count - tail_count);
+    for (std::size_t index = items.size() - tail_count;
+         index < items.size();
+         ++index) {
+        print_item(items[index]);
+    }
+}
+
 void render_pending_status(std::size_t count) {
     std::println("{}{}{} {}",
                  style::yellow,
@@ -122,29 +146,15 @@ void render_pending_paths(
 
     auto ordered = paths;
     std::ranges::sort(ordered);
-    constexpr std::size_t head_count = 5;
-    constexpr std::size_t tail_count = 5;
     const auto print_path = [](const auto& path) {
         std::println("  {}", platform::path::to_utf8(path));
     };
-    if (full || ordered.size() <= head_count + tail_count) {
-        for (const auto& path : ordered) {
-            print_path(path);
-        }
-    } else {
-        for (std::size_t index = 0; index < head_count; ++index) {
-            print_path(ordered[index]);
-        }
-        const auto omitted = ordered.size() - head_count - tail_count;
+    const auto print_omitted = [](std::size_t omitted) {
         i18n::println(omitted == 1 ? i18n::Key::SyncPendingOmittedSingular
                                   : i18n::Key::SyncPendingOmittedPlural,
                       omitted);
-        for (std::size_t index = ordered.size() - tail_count;
-             index < ordered.size();
-             ++index) {
-            print_path(ordered[index]);
-        }
-    }
+    };
+    render_bounded(ordered, full, print_path, print_omitted);
 }
 
 void render_plan_report(const application::PlanReport& report,
@@ -194,29 +204,13 @@ void render_plan_report(const application::PlanReport& report,
         }
     };
 
-    constexpr std::size_t HEAD_COUNT = 5;
-    constexpr std::size_t TAIL_COUNT = 5;
-    constexpr std::size_t THRESHOLD = HEAD_COUNT + TAIL_COUNT;
-
-    if (full || report.items.size() <= THRESHOLD) {
-        for (const auto& item : report.items) {
-            print_item(item);
-        }
-    } else {
-        for (std::size_t i = 0; i < HEAD_COUNT; ++i) {
-            print_item(report.items[i]);
-        }
-        const auto omitted = report.items.size() - THRESHOLD;
+    const auto print_omitted = [](std::size_t omitted) {
         const auto omitted_key = (omitted == 1)
                                      ? i18n::Key::SyncPlanOmittedSingular
                                      : i18n::Key::SyncPlanOmittedPlural;
         std::println("  ... ({}) ...", i18n::format(omitted_key, omitted));
-        for (std::size_t i = report.items.size() - TAIL_COUNT;
-             i < report.items.size();
-             ++i) {
-            print_item(report.items[i]);
-        }
-    }
+    };
+    render_bounded(report.items, full, print_item, print_omitted);
 
     std::println("{}", i18n::tr(i18n::Key::SyncSummaryHeader));
     for (std::size_t i = 0; i < report.action_counts.size(); ++i) {
