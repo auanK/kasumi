@@ -276,8 +276,8 @@ TEST(GcLiveRunnerHappyPathTest, FullExecutionSucceedsWithRealGcAndPhase3Metrics)
     EXPECT_EQ(report.gc.result, "SUCCESS");
     EXPECT_EQ(report.gc.candidate_objects, 1U);
     EXPECT_EQ(report.gc.quarantined_objects, 1U);
-    EXPECT_EQ(report.gc.restored_objects, 0U);
-    EXPECT_EQ(report.gc.purged_objects, 0U);
+    EXPECT_EQ(report.gc.restored_objects, 1U);
+    EXPECT_EQ(report.gc.purged_objects, 1U);
 
     // Validation invariants
     EXPECT_TRUE(report.validation.reachable_preserved);
@@ -484,6 +484,14 @@ TEST(GcLiveRunnerCleanupTest, SuccessfulCleanupRemovesOwnerMarkerLast) {
     auto parent = harness.make_parent_transport();
     auto child = harness.make_child_transport();
 
+    bool empty_directory_cleanup_called = false;
+    options.cleanup_empty_directories = [&]() -> std::expected<void, std::string> {
+        empty_directory_cleanup_called = true;
+        EXPECT_TRUE(harness.child_state->objects.contains("owner.marker"));
+        EXPECT_EQ(harness.child_state->objects.size(), 1U);
+        return {};
+    };
+
     std::vector<std::string> removal_order;
     static std::vector<std::string>* s_order = nullptr;
     s_order = &removal_order;
@@ -499,6 +507,7 @@ TEST(GcLiveRunnerCleanupTest, SuccessfulCleanupRemovesOwnerMarkerLast) {
 
     EXPECT_EQ(report.status, "PASS");
     EXPECT_EQ(report.cleanup.result, "removed");
+    EXPECT_TRUE(empty_directory_cleanup_called);
     ASSERT_FALSE(removal_order.empty());
     // Invariant: owner.marker must be the LAST removed object
     EXPECT_EQ(removal_order.back(), "owner.marker");
