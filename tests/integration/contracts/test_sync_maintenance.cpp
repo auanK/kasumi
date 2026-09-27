@@ -494,7 +494,53 @@ TEST(ApplicationMaintenanceContract, SyncBetweenTwoClientsIsIdempotent) {
 }
 
 TEST(ApplicationMaintenanceContract,
-     NormalSyncTrustsInheritedContentButFsckAndRequiredGetFailClosed) {
+     PreviewAndStatusReportPersistedPendingMaterializations) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("application-pending-plan");
+    const ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "app")};
+    const Profile profile{
+        "demo",
+        kasumi::test::workspace_path(workspace, "local"),
+        kasumi::test::workspace_path(workspace, "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment, profile, MasterKeyHex{std::string(64, '8')}));
+    ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
+    kasumi::test::write_text(profile.local_dir / "pending.txt", "payload");
+    ASSERT_TRUE(kasumi::application::execute(
+        request(Operation::Sync, environment)));
+
+    const auto paths = kasumi::runtime::resolve_profile_paths(
+        environment.app_data_dir, "demo");
+    ASSERT_TRUE(paths.has_value());
+    auto state = kasumi::state_storage::load_state(paths->database_path);
+    ASSERT_TRUE(state.has_value() && *state);
+    const auto* row = kasumi::find_row((*state)->tree, "pending.txt");
+    ASSERT_NE(row, nullptr);
+    (*state)->pending_materializations = {*row};
+    ASSERT_TRUE(kasumi::state_storage::save_state(paths->database_path,
+                                                  **state));
+    ASSERT_TRUE(std::filesystem::remove(profile.local_dir / "pending.txt"));
+
+    for (const auto operation : {Operation::Preview, Operation::Status}) {
+        const auto report =
+            kasumi::application::execute(request(operation, environment));
+        ASSERT_TRUE(report.has_value()) << report.error().detail;
+        const auto* plan = std::get_if<PlanReport>(&report->data);
+        ASSERT_NE(plan, nullptr);
+        ASSERT_EQ(plan->pending_paths.size(), 1U);
+        EXPECT_EQ(plan->pending_paths.front(), "pending.txt");
+        EXPECT_TRUE(std::ranges::none_of(
+            plan->items, [](const kasumi::application::PlanItem& item) {
+                return item.action == kasumi::application::PlanAction::
+                           DeleteRemote;
+            }));
+        EXPECT_FALSE(std::filesystem::exists(profile.local_dir / "pending.txt"));
+    }
+}
+
+TEST(ApplicationMaintenanceContract,
+     FsckFailsClosedAndRequiredGetReturnsPartial) {
     auto workspace =
         kasumi::test::make_temp_workspace("application-fsck-repair");
     const ExecutionEnvironment environment{
@@ -539,9 +585,14 @@ TEST(ApplicationMaintenanceContract,
     ASSERT_TRUE(std::filesystem::create_directories(receiver.local_dir));
     const auto required = kasumi::application::execute(
         request(Operation::Sync, environment, receiver.name));
-    ASSERT_FALSE(required.has_value());
-    EXPECT_EQ(required.error().code,
-              kasumi::application::ErrorCode::SynchronizationFailure);
+    ASSERT_TRUE(required.has_value()) << required.error().detail;
+    const auto* partial = std::get_if<kasumi::application::SyncCompleted>(
+        &required->data);
+    ASSERT_NE(partial, nullptr);
+    EXPECT_TRUE(partial->partial);
+    ASSERT_EQ(partial->pending_paths.size(), 1U);
+    EXPECT_EQ(partial->pending_paths.front(), "file.txt");
+    EXPECT_FALSE(std::filesystem::exists(receiver.local_dir / "file.txt"));
 
     kasumi::test::write_text(kasumi::test::workspace_path(workspace, "remote") /
                                  identifier,
@@ -553,6 +604,21 @@ TEST(ApplicationMaintenanceContract,
               kasumi::application::ErrorCode::FsckFailure);
     EXPECT_EQ(kasumi::transport::presence(storage, identifier).value(),
               kasumi::transport::Presence::Present);
+
+    const Profile corrupt_receiver{
+        "corrupt_receiver",
+        kasumi::test::workspace_path(workspace, "corrupt-receiver"),
+        kasumi::test::workspace_path(workspace, "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment, corrupt_receiver, key));
+    ASSERT_TRUE(std::filesystem::create_directories(
+        corrupt_receiver.local_dir));
+    const auto corrupt_download = kasumi::application::execute(
+        request(Operation::Sync, environment, corrupt_receiver.name));
+    ASSERT_FALSE(corrupt_download.has_value());
+    EXPECT_EQ(corrupt_download.error().code,
+              kasumi::application::ErrorCode::SynchronizationFailure);
+    EXPECT_FALSE(std::filesystem::exists(corrupt_receiver.local_dir / "file.txt"));
 }
 
 TEST(ApplicationMaintenanceContract,

@@ -23,6 +23,7 @@ enum class MutationErrorCode {
     UnsafePath,
     LocalIo,
     TransportFailure,
+    RemoteContentMissing,
     RemoteResultUnknown,
     CryptoFailure,
     IntegrityMismatch,

@@ -87,10 +87,15 @@ struct Record {
     bool publication_required = true;
     // Pinned logical head for non-publishing execution.
     std::string observed_head_id;
+    // Previously accepted local base, distinct from a newer pinned remote head.
+    std::string observed_base_id;
     // Local base height at transaction start.
     std::uint64_t local_generation = 0;
     // Observed remote height at transaction start.
     std::uint64_t storage_generation = 0;
+    // Pending logical paths before and after this transaction.
+    std::vector<std::string> observed_pending_paths;
+    std::vector<std::string> pending_paths;
     // Prepared commit ID for publication.
     std::string commit_id;
     // Physical ID of published encrypted commit.

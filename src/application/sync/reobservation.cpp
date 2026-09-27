@@ -4,7 +4,10 @@
 #include "application/sync/coordinator_detail.hpp"
 #include "application/sync/journal.hpp"
 #include "application/sync/mutation.hpp"
+#include "crypto/key_derivation.hpp"
 #include "core/reconciliation/plan.hpp"
+#include "platform/path.hpp"
+#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -60,6 +63,106 @@ bool same_storage(const reconciliation::StorageState& left,
                normalized_ids(right.reachable_commit_ids);
 }
 
+bool same_rows(std::span<const NodeRow> left,
+               std::span<const NodeRow> right) noexcept {
+    return left.size() == right.size() &&
+           std::ranges::equal(left, right);
+}
+
+std::expected<void, Error>
+observe_content_availability(reconciliation::Input& input,
+                             const reconciliation::Result& result,
+                             transport::Transport& storage,
+                             std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                             std::span<const Hash> confirmed_missing) {
+    HashSet hashes{0, hash_key};
+    const auto add_hash = [&](const Hash& hash) { hashes.insert(hash); };
+    for (const auto& operation : sync_plan_operations(result.plan)) {
+        if (operation.action == Action::Download) {
+            if (const auto hash = hash_from_hex(operation.hash)) {
+                add_hash(*hash);
+            }
+        }
+    }
+    const auto add_relevant_pending = [&](std::span<const NodeRow> rows) {
+        for (const auto& row : rows) {
+            if (const auto* remote = find_row(input.storage.tree, row.path);
+                remote != nullptr && !remote->is_directory &&
+                remote->hash == row.hash && remote->size == row.size &&
+                find_row(input.local_tree, row.path) == nullptr) {
+                add_hash(remote->hash);
+            }
+        }
+    };
+    add_relevant_pending(input.pending_materializations);
+    add_relevant_pending(result.pending_materializations);
+    add_relevant_pending(result.pending_storage_rows);
+
+    input.known_missing_content_objects.clear();
+    input.known_missing_content_objects.insert(confirmed_missing.begin(),
+                                               confirmed_missing.end());
+    if (hashes.empty()) {
+        return {};
+    }
+    std::vector<std::pair<Hash, std::string>> requested;
+    requested.reserve(hashes.size());
+    for (const auto& hash : hashes) {
+        requested.emplace_back(hash, crypto::content_identifier(key, hash));
+    }
+    std::ranges::sort(requested, {}, [](const auto& item) {
+        return item.second;
+    });
+    platform::perf_trace::count("sync content presence requests",
+                                requested.size());
+
+    std::vector<transport::Presence> presences;
+    if (storage.storage.control_read_batch != nullptr) {
+        transport::ControlReadBatchRequest request;
+        request.presence_identifiers.reserve(requested.size());
+        for (const auto& [hash, identifier] : requested) {
+            request.presence_identifiers.push_back(identifier);
+        }
+        auto batch = transport::control_read_batch(storage, request);
+        if (batch) {
+            if (batch->presences.size() != requested.size()) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    "presence batch returned an invalid result count"));
+            }
+            presences = std::move(batch->presences);
+        } else if (batch.error().code != transport::ErrorCode::Unsupported) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::ObservationFailure,
+                transport::describe(batch.error())));
+        }
+    }
+    if (presences.empty() && storage.storage.presence != nullptr) {
+        presences.reserve(requested.size());
+        for (const auto& [hash, identifier] : requested) {
+            auto observed = transport::presence(storage, identifier);
+            if (!observed) {
+                if (observed.error().code == transport::ErrorCode::Unsupported) {
+                    presences.clear();
+                    break;
+                }
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    transport::describe(observed.error())));
+            }
+            presences.push_back(*observed);
+        }
+    }
+    if (presences.empty()) {
+        return {}; // No probe capability: the verified GET remains authoritative.
+    }
+    for (std::size_t index = 0; index < requested.size(); ++index) {
+        if (presences[index] == transport::Presence::Absent) {
+            input.known_missing_content_objects.insert(requested[index].first);
+        }
+    }
+    return {};
+}
+
 std::expected<void, Error>
 stage_attempt(const runtime::RuntimeData& runtime_data,
               const reconciliation::Input& input,
@@ -108,6 +211,10 @@ stage_attempt(const runtime::RuntimeData& runtime_data,
 bool same_observation(const reconciliation::Input& left,
                       const reconciliation::Input& right) noexcept {
     return same_snapshot(left.local_tree, right.local_tree) &&
+           same_rows(left.pending_materializations,
+                     right.pending_materializations) &&
+           left.known_missing_content_objects ==
+               right.known_missing_content_objects &&
            same_snapshot(left.base_tree, right.base_tree) &&
            left.base_commit_id == right.base_commit_id &&
            left.base_state_present == right.base_state_present &&
@@ -123,7 +230,20 @@ stabilize(const runtime::RuntimeData& runtime_data,
           std::span<const std::uint8_t, crypto::KEY_SIZE> key,
           reconciliation::Input observed_input,
           reconciliation::Result reconciliation_result,
-          observation::LocalObservationSession* session) {
+          observation::LocalObservationSession* session,
+          std::span<const Hash> confirmed_missing) {
+    auto availability = observe_content_availability(
+        observed_input, reconciliation_result, storage, key, confirmed_missing);
+    if (!availability) {
+        return std::unexpected(availability.error());
+    }
+    auto available_result = reconciliation::reconcile(observed_input);
+    if (!available_result) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::ObservationFailure, available_result.error().detail));
+    }
+    reconciliation_result = std::move(*available_result);
+
     if (!reconciliation_result.requires_publication &&
         !reconciliation_result.requires_local_mutation &&
         !reconciliation_result.requires_storage_repair &&
@@ -202,8 +322,25 @@ stabilize(const runtime::RuntimeData& runtime_data,
             return std::unexpected(detail::make_error(
                 ErrorCode::ObservationFailure, recalculated.error().detail));
         }
-        if (recalculated->unrecoverable_paths.empty() &&
-            same_observation(input, *observed)) {
+        auto reobserved_availability = observe_content_availability(
+            *observed, *recalculated, storage, key, confirmed_missing);
+        if (!reobserved_availability) {
+            auto removed = detail::remove_transaction_workspace(workspace);
+            if (!removed) {
+                return std::unexpected(removed.error());
+            }
+            return std::unexpected(reobserved_availability.error());
+        }
+        recalculated = reconciliation::reconcile(*observed);
+        if (!recalculated) {
+            auto removed = detail::remove_transaction_workspace(workspace);
+            if (!removed) {
+                return std::unexpected(removed.error());
+            }
+            return std::unexpected(detail::make_error(
+                ErrorCode::ObservationFailure, recalculated.error().detail));
+        }
+        if (same_observation(input, *observed)) {
             auto removed = detail::remove_transaction_workspace(workspace);
             if (!removed) {
                 return std::unexpected(removed.error());
@@ -223,11 +360,6 @@ stabilize(const runtime::RuntimeData& runtime_data,
         }
         input = std::move(*observed);
         result = std::move(*recalculated);
-        if (!result.unrecoverable_paths.empty()) {
-            return std::unexpected(
-                detail::make_error(ErrorCode::ObservationFailure,
-                                   "observation found unrecoverable paths"));
-        }
     }
 
     return std::unexpected(

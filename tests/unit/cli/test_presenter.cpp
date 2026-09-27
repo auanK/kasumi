@@ -83,6 +83,58 @@ TEST(CliPresenterTest, PresentsSuccessfulResponseVariants) {
               0);
 }
 
+TEST(CliPresenterTest, PartialSyncIsLocalizedAndReturnsDistinctExitCode) {
+    SyncCompleted partial{.pending = 1,
+                          .pending_paths = {"docs/missing.txt"},
+                          .partial = true};
+    const ScopedLanguage english{kasumi::cli::i18n::Language::English};
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(response(partial, Operation::Sync)), 2);
+    const auto english_output = testing::internal::GetCapturedStdout();
+    EXPECT_NE(english_output.find("Synchronization completed partially"),
+              std::string::npos);
+    EXPECT_NE(english_output.find("1 file is waiting"), std::string::npos);
+    EXPECT_NE(english_output.find("docs/missing.txt"), std::string::npos);
+    EXPECT_EQ(english_output.find("[OK]"), std::string::npos);
+    EXPECT_EQ(english_output.find("Everything in sync"), std::string::npos);
+
+    kasumi::cli::i18n::set_language(
+        kasumi::cli::i18n::Language::Portuguese);
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(response(partial, Operation::Sync)), 2);
+    const auto portuguese_output = testing::internal::GetCapturedStdout();
+    EXPECT_NE(portuguese_output.find("concluída parcialmente"),
+              std::string::npos);
+    EXPECT_NE(portuguese_output.find("1 arquivo aguarda"),
+              std::string::npos);
+    EXPECT_NE(portuguese_output.find("Pendentes:"), std::string::npos);
+}
+
+TEST(CliPresenterTest, PendingPathsAreBoundedUnlessFullIsRequested) {
+    PlanReport report;
+    for (int index = 0; index < 12; ++index) {
+        report.pending_paths.emplace_back(
+            std::string{"pending-"} + static_cast<char>('a' + index));
+    }
+    const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(response(report)), 2);
+    const auto bounded = testing::internal::GetCapturedStdout();
+    EXPECT_NE(bounded.find("pending-a"), std::string::npos);
+    EXPECT_NE(bounded.find("pending-e"), std::string::npos);
+    EXPECT_EQ(bounded.find("pending-f"), std::string::npos);
+    EXPECT_NE(bounded.find("pending-h"), std::string::npos);
+    EXPECT_NE(bounded.find("pending-l"), std::string::npos);
+    EXPECT_NE(bounded.find("2 paths omitted"), std::string::npos);
+    EXPECT_EQ(bounded.find("Nothing to do"), std::string::npos);
+
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(response(report), true), 2);
+    const auto complete = testing::internal::GetCapturedStdout();
+    EXPECT_NE(complete.find("pending-f"), std::string::npos);
+    EXPECT_EQ(complete.find("paths omitted"), std::string::npos);
+}
+
 TEST(CliPresenterTest, PresentsPluralFsckSummaryAndOmitsUnknownBytes) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
     testing::internal::CaptureStdout();

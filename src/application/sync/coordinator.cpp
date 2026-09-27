@@ -717,7 +717,12 @@ std::size_t content_concurrency() noexcept {
 namespace {
 
 Error mutation_error(const mutation::MutationError& error) {
-    return detail::make_error(ErrorCode::MutationFailure,
+    return detail::make_error(
+                              error.code ==
+                                      mutation::MutationErrorCode::
+                                          RemoteContentMissing
+                                  ? ErrorCode::RemoteContentMissing
+                                  : ErrorCode::MutationFailure,
                               mutation::describe(error),
                               error.operation_index);
 }
@@ -1086,6 +1091,8 @@ bool same_result(const reconciliation::Result& left,
     return same_plan(left.plan, right.plan) &&
            left.missing_objects == right.missing_objects &&
            same_rows(left.pending_storage_rows, right.pending_storage_rows) &&
+           same_rows(left.pending_materializations,
+                     right.pending_materializations) &&
            left.unrecoverable_paths == right.unrecoverable_paths &&
            left.observed_storage_generation ==
                right.observed_storage_generation &&
@@ -1135,6 +1142,9 @@ std::string describe(const Error& error) {
             break;
         case ErrorCode::MutationFailure:
             result = "mutation_failure";
+            break;
+        case ErrorCode::RemoteContentMissing:
+            result = "remote_content_missing";
             break;
         case ErrorCode::PublicationFailure:
             result = "publication_failure";
@@ -1238,6 +1248,20 @@ execute(const runtime::RuntimeData& runtime_data,
         }
         observed_head_id = observed_input.storage.logical_heads.front();
     }
+    std::vector<std::string> observed_pending_paths;
+    observed_pending_paths.reserve(
+        observed_input.pending_materializations.size());
+    for (const auto& row : observed_input.pending_materializations) {
+        observed_pending_paths.push_back(row.path);
+    }
+    std::vector<std::string> pending_paths;
+    pending_paths.reserve(reconciliation_result.pending_materializations.size());
+    for (const auto& row : reconciliation_result.pending_materializations) {
+        pending_paths.push_back(row.path);
+    }
+    const auto observed_base_id = observed_input.base_state_present
+                                      ? observed_input.base_commit_id
+                                      : std::string{};
 
     std::optional<transaction::Record> record_storage;
     if (*existing) {
@@ -1246,6 +1270,9 @@ execute(const runtime::RuntimeData& runtime_data,
             (*existing)->local_generation == observed_input.local_generation &&
             (*existing)->storage_generation ==
                 observed_input.storage.generation &&
+            (*existing)->observed_base_id == observed_base_id &&
+            (*existing)->observed_pending_paths == observed_pending_paths &&
+            (*existing)->pending_paths == pending_paths &&
             same_plan_operations((*existing)->plan,
                                  reconciliation_result.plan)) {
             record_storage = std::move(**existing);
@@ -1264,6 +1291,10 @@ execute(const runtime::RuntimeData& runtime_data,
             return std::unexpected(detail::journal_error(record.error()));
         }
         record_storage = std::move(*record);
+        record_storage->observed_base_id = observed_base_id;
+        record_storage->observed_pending_paths =
+            std::move(observed_pending_paths);
+        record_storage->pending_paths = std::move(pending_paths);
     }
     auto& record = record_storage;
     const auto content_upload_required = required_content_uploads(
@@ -1459,6 +1490,18 @@ execute(const runtime::RuntimeData& runtime_data,
     const auto fail_mutation = [&](std::size_t index,
                                    const mutation::MutationError& failure)
         -> std::expected<void, Error> {
+        if (failure.code ==
+            mutation::MutationErrorCode::RemoteContentMissing) {
+            auto rolled = detail::rollback_transaction(*paths,
+                                                       *record,
+                                                       transaction_workspace,
+                                                       runtime_data.local_dir,
+                                                       key);
+            if (!rolled) {
+                return std::unexpected(rolled.error());
+            }
+            return std::unexpected(mutation_error(failure));
+        }
         if (!record->publication_required &&
             is_storage_repair_operation(observed_input,
                                         reconciliation_result,
@@ -1970,7 +2013,9 @@ execute(const runtime::RuntimeData& runtime_data,
                     .commit_id = found->id,
                     .ciphertext_id = ff_ciphertext_id,
                     .epoch_id = observed_input.storage.epoch_id,
-                    .epoch_sequence = observed_input.storage.epoch_sequence})) {
+                    .epoch_sequence = observed_input.storage.epoch_sequence,
+                    .pending_materializations =
+                        reconciliation_result.pending_materializations})) {
             const auto database_error = detail::make_error(
                 ErrorCode::DatabaseFailure, "failed to save state.db");
             auto rolled = rollback_terminal();
@@ -2264,7 +2309,9 @@ execute(const runtime::RuntimeData& runtime_data,
                 .epoch_id = *epoch_reference ? (**epoch_reference).epoch_id
                                              : std::string{},
                 .epoch_sequence =
-                    *epoch_reference ? (**epoch_reference).sequence : 0});
+                    *epoch_reference ? (**epoch_reference).sequence : 0,
+                .pending_materializations =
+                    reconciliation_result.pending_materializations});
     platform::perf_trace::finish("local DB commit", database_trace);
     if (!database_saved) {
         return std::unexpected(detail::make_error(ErrorCode::DatabaseFailure,

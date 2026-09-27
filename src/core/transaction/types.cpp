@@ -1,6 +1,7 @@
 #include "core/transaction/types.hpp"
 
 #include "core/history.hpp"
+#include "core/node.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -10,6 +11,37 @@
 namespace kasumi::transaction {
 
 namespace {
+
+bool valid_pending_paths(const std::vector<std::string>& paths) noexcept {
+    constexpr std::size_t maximum_pending_count = 1'000'000;
+    constexpr std::size_t maximum_path_size = 4096;
+    if (paths.size() > maximum_pending_count) {
+        return false;
+    }
+    std::string_view previous;
+    for (const auto& path : paths) {
+        if (path.empty() || path.size() > maximum_path_size ||
+            path.front() == '/' || path.back() == '/') {
+            return false;
+        }
+        std::size_t start = 0;
+        while (start < path.size()) {
+            const auto end = path.find('/', start);
+            const auto component = std::string_view{path}.substr(
+                start, end == std::string::npos ? path.size() - start
+                                                : end - start);
+            if (!valid_logical_path_component(component)) {
+                return false;
+            }
+            start = end == std::string::npos ? path.size() : end + 1;
+        }
+        if (!previous.empty() && !path_less(previous, path)) {
+            return false;
+        }
+        previous = path;
+    }
+    return true;
+}
 
 bool valid_local_only_phase(Phase phase) noexcept {
     switch (phase) {
@@ -81,6 +113,10 @@ bool valid(const Record& record) noexcept {
             std::numeric_limits<std::uint64_t>::max() ||
         (record.publication_required && !record.observed_head_id.empty() &&
          !kasumi::history::valid_commit_id(record.observed_head_id)) ||
+        (!record.observed_base_id.empty() &&
+         !kasumi::history::valid_commit_id(record.observed_base_id)) ||
+        !valid_pending_paths(record.observed_pending_paths) ||
+        !valid_pending_paths(record.pending_paths) ||
         (!record.publication_required &&
          (!kasumi::history::valid_commit_id(record.observed_head_id) ||
           !valid_local_only_phase(record.phase))) ||
@@ -190,6 +226,7 @@ std::expected<Record, std::string> make_record(std::string transaction_id,
         .phase = Phase::Started,
         .publication_required = publication_required,
         .observed_head_id = std::move(observed_head_id),
+        .observed_base_id = {},
         .local_generation = local_generation,
         .storage_generation = storage_generation,
         .commit_id = {},

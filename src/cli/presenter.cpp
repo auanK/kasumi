@@ -100,6 +100,53 @@ int present_cancellation(application::Operation operation) {
 
 namespace {
 
+void render_pending_status(std::size_t count) {
+    std::println("{}{}{} {}",
+                 style::yellow,
+                 i18n::tr(i18n::Key::LabelWarning),
+                 style::reset,
+                 i18n::tr(i18n::Key::SyncPartialHeader));
+    i18n::println(count == 1 ? i18n::Key::SyncPendingSingular
+                             : i18n::Key::SyncPendingPlural,
+                  count);
+}
+
+void render_pending_paths(
+    const std::vector<std::filesystem::path>& paths,
+    bool full) {
+    if (paths.empty()) {
+        return;
+    }
+    render_pending_status(paths.size());
+    std::println("{}", i18n::tr(i18n::Key::SyncPendingLabel));
+
+    auto ordered = paths;
+    std::ranges::sort(ordered);
+    constexpr std::size_t head_count = 5;
+    constexpr std::size_t tail_count = 5;
+    const auto print_path = [](const auto& path) {
+        std::println("  {}", platform::path::to_utf8(path));
+    };
+    if (full || ordered.size() <= head_count + tail_count) {
+        for (const auto& path : ordered) {
+            print_path(path);
+        }
+    } else {
+        for (std::size_t index = 0; index < head_count; ++index) {
+            print_path(ordered[index]);
+        }
+        const auto omitted = ordered.size() - head_count - tail_count;
+        i18n::println(omitted == 1 ? i18n::Key::SyncPendingOmittedSingular
+                                  : i18n::Key::SyncPendingOmittedPlural,
+                      omitted);
+        for (std::size_t index = ordered.size() - tail_count;
+             index < ordered.size();
+             ++index) {
+            print_path(ordered[index]);
+        }
+    }
+}
+
 void render_plan_report(const application::PlanReport& report,
                         bool full = false) {
     if (report.has_conflicts) {
@@ -107,8 +154,13 @@ void render_plan_report(const application::PlanReport& report,
         std::println("{}", i18n::tr(i18n::Key::SyncConflictsStatusHint));
     }
 
-    if (report.items.empty()) {
+    if (report.items.empty() && report.pending_paths.empty()) {
         std::println("{}", i18n::tr(i18n::Key::SyncNothingToDo));
+        return;
+    }
+
+    if (report.items.empty()) {
+        render_pending_paths(report.pending_paths, full);
         return;
     }
 
@@ -185,6 +237,7 @@ void render_plan_report(const application::PlanReport& report,
             i18n::println(i18n::Key::SyncDownload,
                           format_size(report.download_bytes));
     }
+    render_pending_paths(report.pending_paths, full);
 }
 
 std::string_view entry_name(std::string_view path) {
@@ -649,7 +702,11 @@ int present_remote_health(const application::RemoteHealthReport& report) {
 
 void render_sync_summary(const application::SyncCompleted& summary) {
     if (summary.total == 0) {
-        std::println("      {}", i18n::tr(i18n::Key::SyncEverythingInSync));
+        if (summary.partial) {
+            render_pending_status(summary.pending);
+        } else {
+            std::println("      {}", i18n::tr(i18n::Key::SyncEverythingInSync));
+        }
         std::println();
         return;
     }
@@ -698,6 +755,12 @@ void render_sync_summary(const application::SyncCompleted& summary) {
                                          ? i18n::Key::SyncRemovedDirSingular
                                          : i18n::Key::SyncRemovedDirPlural,
                                      summary.removed_dirs));
+    }
+    if (summary.partial) {
+        parts.push_back(i18n::format(
+            summary.pending == 1 ? i18n::Key::SyncPendingSingular
+                                 : i18n::Key::SyncPendingPlural,
+            summary.pending));
     }
 
     std::string line = "      ";
@@ -865,6 +928,10 @@ void present(const application::FsckProgress& progress,
 int present(const application::Response& response, bool full) {
     if (const auto* sync =
             std::get_if<application::SyncCompleted>(&response.data)) {
+        if (sync->partial) {
+            render_pending_paths(sync->pending_paths, full);
+            return 2;
+        }
         if (sync->duration.has_value()) {
             std::println("{}{}{} {}",
                          style::green,
@@ -887,7 +954,7 @@ int present(const application::Response& response, bool full) {
         if (response.operation == application::Operation::Preview) {
             std::println("{}", i18n::tr(i18n::Key::PreviewCompleted));
         }
-        return 0;
+        return ptr->pending_paths.empty() ? 0 : 2;
     }
     if (const auto* fsck =
             std::get_if<application::FsckCompleted>(&response.data)) {

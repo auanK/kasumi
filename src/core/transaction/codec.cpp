@@ -16,6 +16,7 @@ namespace {
 inline constexpr std::uint8_t format_version = 9;
 inline constexpr std::size_t maximum_string_size = 4096;
 inline constexpr std::uint32_t maximum_operation_count = 1'000'000;
+inline constexpr std::uint32_t maximum_pending_path_count = 1'000'000;
 
 bool valid_string(std::string_view value) noexcept {
     return value.size() <= maximum_string_size;
@@ -38,12 +39,16 @@ EncodeResult encode(const Record& record) {
         if (sync_plan_size(record.plan) > maximum_operation_count ||
             !valid_string(record.operation_id) ||
             !valid_string(record.observed_head_id) ||
+            !valid_string(record.observed_base_id) ||
             !valid_string(record.commit_id) ||
             !valid_string(record.ciphertext_id) ||
             !valid_string(record.marker_id) ||
             !valid_string(record.epoch_vault_id) ||
             !valid_string(record.epoch_id) ||
-            record.parent_ids.size() > history::maximum_parent_count) {
+            record.parent_ids.size() > history::maximum_parent_count ||
+            record.observed_pending_paths.size() >
+                maximum_pending_path_count ||
+            record.pending_paths.size() > maximum_pending_path_count) {
             return std::unexpected("transaction record exceeds codec limits");
         }
         for (std::size_t index = 0; index < sync_plan_size(record.plan);
@@ -61,8 +66,18 @@ EncodeResult encode(const Record& record) {
                                   static_cast<std::uint8_t>(record.phase));
         wire::write<std::uint8_t>(writer, record.publication_required ? 1 : 0);
         wire::write_string(writer, record.observed_head_id);
+        wire::write_string(writer, record.observed_base_id);
         wire::write<std::uint64_t>(writer, record.local_generation);
         wire::write<std::uint64_t>(writer, record.storage_generation);
+        const auto write_pending_paths = [&](const auto& paths) {
+            wire::write<std::uint32_t>(
+                writer, static_cast<std::uint32_t>(paths.size()));
+            for (const auto& path : paths) {
+                wire::write_string(writer, path);
+            }
+        };
+        write_pending_paths(record.observed_pending_paths);
+        write_pending_paths(record.pending_paths);
         wire::write<std::uint64_t>(writer, record.plan.target_generation);
         wire::write_string(writer, record.commit_id);
         wire::write_string(writer, record.ciphertext_id);
@@ -126,8 +141,29 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
         auto phase_raw = wire::read<std::uint8_t>(reader);
         auto publication_required = wire::read<std::uint8_t>(reader);
         auto observed_head_id = wire::read_string(reader, maximum_string_size);
+        auto observed_base_id = wire::read_string(reader, maximum_string_size);
         auto local = wire::read<std::uint64_t>(reader);
         auto storage = wire::read<std::uint64_t>(reader);
+        const auto read_pending_paths = [&](auto& paths) {
+            auto count = wire::read<std::uint32_t>(reader);
+            if (!count || *count > maximum_pending_path_count) {
+                return false;
+            }
+            paths.reserve(*count);
+            for (std::uint32_t index = 0; index < *count; ++index) {
+                auto path = wire::read_string(reader, maximum_string_size);
+                if (!path) {
+                    return false;
+                }
+                paths.push_back(std::move(*path));
+            }
+            return true;
+        };
+        std::vector<std::string> observed_pending_paths;
+        std::vector<std::string> pending_paths;
+        const bool pending_fields_present =
+            read_pending_paths(observed_pending_paths) &&
+            read_pending_paths(pending_paths);
         auto target = wire::read<std::uint64_t>(reader);
         auto commit_id = wire::read_string(reader, maximum_string_size);
         auto ciphertext_id = wire::read_string(reader, maximum_string_size);
@@ -139,7 +175,8 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
         auto epoch_min_history_age_hours = wire::read<std::uint32_t>(reader);
         auto parent_count = wire::read<std::uint32_t>(reader);
         if (!id || !phase_raw || !publication_required || !observed_head_id ||
-            !local || !storage || !target || !commit_id || !ciphertext_id ||
+            !observed_base_id || !local || !storage || !pending_fields_present ||
+            !target || !commit_id || !ciphertext_id ||
             !marker_id || !epoch_vault_id || !epoch_id || !epoch_issued_at ||
             !epoch_min_history_depth || !epoch_min_history_age_hours ||
             !parent_count) {
@@ -159,8 +196,11 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
         record.phase = phase;
         record.publication_required = *publication_required == 1;
         record.observed_head_id = std::move(*observed_head_id);
+        record.observed_base_id = std::move(*observed_base_id);
         record.local_generation = *local;
         record.storage_generation = *storage;
+        record.observed_pending_paths = std::move(observed_pending_paths);
+        record.pending_paths = std::move(pending_paths);
         record.plan.target_generation = *target;
         record.commit_id = std::move(*commit_id);
         record.ciphertext_id = std::move(*ciphertext_id);

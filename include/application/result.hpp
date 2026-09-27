@@ -58,6 +58,7 @@ struct PlanReport {
     std::uint64_t download_bytes = 0;
     bool has_conflicts = false;
     std::vector<PlanItem> items;
+    std::vector<std::filesystem::path> pending_paths;
 };
 
 // High-level phases of synchronization execution.
@@ -83,6 +84,9 @@ struct SyncCompleted {
     std::uint64_t download_bytes = 0;
 
     bool published = false;
+    std::uint32_t pending = 0;
+    std::vector<std::filesystem::path> pending_paths;
+    bool partial = false;
     std::optional<std::chrono::nanoseconds> duration = std::nullopt;
 };
 

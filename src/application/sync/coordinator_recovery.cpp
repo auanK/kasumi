@@ -101,6 +101,36 @@ bool same_tree(const Snapshot& left, const Snapshot& right) noexcept {
     return true;
 }
 
+bool same_pending_paths(std::span<const NodeRow> rows,
+                        std::span<const std::string> paths) noexcept {
+    if (rows.size() != paths.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+        if (rows[index].path != paths[index]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::expected<std::vector<NodeRow>, Error>
+resolve_pending_paths(const Snapshot& tree,
+                      std::span<const std::string> paths) {
+    std::vector<NodeRow> rows;
+    rows.reserve(paths.size());
+    for (const auto& path : paths) {
+        const auto* row = find_row(tree, path);
+        if (row == nullptr || row->is_directory) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::RecoveryConflict,
+                "journal pending path is absent from authenticated commit"));
+        }
+        rows.push_back(*row);
+    }
+    return rows;
+}
+
 std::expected<void, Error>
 ensure_state(const runtime::RuntimeData& runtime_data,
              const transaction::Record& record,
@@ -125,16 +155,29 @@ ensure_state(const runtime::RuntimeData& runtime_data,
             ErrorCode::RecoveryConflict,
             "remote Epoch regressed relative to locally accepted Epoch"));
     }
+    auto target_pending = resolve_pending_paths(
+        commit.commit.tree, record.pending_paths);
+    if (!target_pending) {
+        return std::unexpected(target_pending.error());
+    }
     if (*current && (*current)->commit_id == commit.id &&
         (*current)->height == commit.commit.height &&
         same_tree((*current)->tree, commit.commit.tree) &&
+        same_pending_paths((*current)->pending_materializations,
+                          record.pending_paths) &&
         (epoch_id.empty() || (*current)->epoch_id == epoch_id)) {
         return {};
     }
-    if (*current &&
-        (record.observed_head_id.empty() ||
-         (*current)->commit_id != record.observed_head_id ||
-         (*current)->height != record.local_generation)) {
+    const bool matches_old =
+        *current
+            ? !record.observed_base_id.empty() &&
+                  (*current)->commit_id == record.observed_base_id &&
+                  (*current)->height == record.local_generation &&
+                  same_pending_paths((*current)->pending_materializations,
+                                     record.observed_pending_paths)
+            : record.observed_base_id.empty() &&
+                  record.observed_pending_paths.empty();
+    if (!matches_old) {
         return std::unexpected(detail::make_error(
             ErrorCode::RecoveryConflict,
             "state.db does not match the pending publication transition"));
@@ -146,7 +189,9 @@ ensure_state(const runtime::RuntimeData& runtime_data,
                                        .commit_id = commit.id,
                                        .ciphertext_id = ciphertext_id,
                                        .epoch_id = epoch_id,
-                                       .epoch_sequence = epoch_sequence})) {
+                                       .epoch_sequence = epoch_sequence,
+                                       .pending_materializations =
+                                           std::move(*target_pending)})) {
         return std::unexpected(detail::make_error(ErrorCode::DatabaseFailure,
                                                   "failed to save state.db"));
     }
@@ -208,18 +253,46 @@ roll_forward_local_only(const journal::Paths& paths,
             return std::unexpected(detail::make_error(
                 ErrorCode::DatabaseFailure, current.error()));
         }
-        if (*current && (*current)->commit_id == record.observed_head_id &&
-            (*current)->height == record.storage_generation) {
-            // Database advanced before new phase was persisted in the journal.
-        } else {
+        const bool target_committed =
+            *current && (*current)->commit_id == record.observed_head_id &&
+            (*current)->height == record.storage_generation &&
+            same_pending_paths((*current)->pending_materializations,
+                               record.pending_paths);
+        const bool old_state =
+            *current
+                ? !record.observed_base_id.empty() &&
+                      (*current)->commit_id == record.observed_base_id &&
+                      (*current)->height == record.local_generation &&
+                      same_pending_paths(
+                          (*current)->pending_materializations,
+                          record.observed_pending_paths)
+                : record.observed_base_id.empty() &&
+                      record.observed_pending_paths.empty();
+        if (target_committed) {
+            // Database advanced before the journal phase was saved.
+        } else if (old_state) {
             return rollback_before_publication(
                 paths, record, workspace, runtime_data, key);
+        } else {
+            return std::unexpected(detail::make_error(
+                ErrorCode::RecoveryConflict,
+                "state.db matches neither old nor target pending state"));
         }
         if (auto saved = save_phase(
                 paths, record, transaction::Phase::DatabaseCommitted, key);
             !saved) {
             return std::unexpected(saved.error());
         }
+    }
+    auto current = state_storage::load_state(runtime_data.database_path);
+    if (!current || !*current ||
+        (*current)->commit_id != record.observed_head_id ||
+        (*current)->height != record.storage_generation ||
+        !same_pending_paths((*current)->pending_materializations,
+                            record.pending_paths)) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::RecoveryConflict,
+            "committed state does not match journal pending intent"));
     }
     if (record.phase < transaction::Phase::CleanupCompleted) {
         if (auto saved = save_phase(
@@ -721,6 +794,16 @@ roll_forward(const journal::Paths& paths,
             !saved) {
             return std::unexpected(saved.error());
         }
+    }
+    auto current = state_storage::load_state(runtime_data.database_path);
+    if (!current || !*current || (*current)->commit_id != commit->id ||
+        (*current)->height != commit->commit.height ||
+        !same_tree((*current)->tree, commit->commit.tree) ||
+        !same_pending_paths((*current)->pending_materializations,
+                            record.pending_paths)) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::RecoveryConflict,
+            "committed state does not match journal pending intent"));
     }
     if (record.phase < transaction::Phase::CleanupCompleted) {
         auto pruned = publication::prune_current_ancestral_markers(

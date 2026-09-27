@@ -454,6 +454,8 @@ collect_reconciliation_input(
     reconciliation::Input input;
     if (persisted && *persisted) {
         input.base_tree = std::move((*persisted)->tree);
+        input.pending_materializations =
+            std::move((*persisted)->pending_materializations);
         if (session != nullptr && session->checkpoint) {
             session->last_snapshot = input.base_tree;
         }

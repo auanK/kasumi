@@ -24,6 +24,101 @@ namespace {
 
 using LocalSources = std::unordered_map<Hash, NodeRow, decltype(&hash_key)>;
 
+bool same_node(const NodeRow& left, const NodeRow& right) {
+    return left.path == right.path && left.hash == right.hash &&
+           left.size == right.size && left.mtime == right.mtime &&
+           left.is_directory == right.is_directory;
+}
+
+bool valid_pending_rows(const Input& input) {
+    if (!input.base_state_present && !input.pending_materializations.empty()) {
+        return false;
+    }
+    const NodeRow* previous = nullptr;
+    for (const auto& pending : input.pending_materializations) {
+        const auto* base = find_row(input.base_tree, pending.path);
+        if (pending.is_directory || base == nullptr || base->is_directory ||
+            !same_node(*base, pending) ||
+            (previous != nullptr && !path_less(previous->path, pending.path))) {
+            return false;
+        }
+        previous = &pending;
+    }
+    return true;
+}
+
+Snapshot logical_local_view(const Input& input) {
+    Snapshot result = input.local_tree;
+    std::unordered_set<std::string> additions;
+    for (const auto& pending : input.pending_materializations) {
+        if (find_row(input.local_tree, pending.path) != nullptr) {
+            continue;
+        }
+        bool safe = true;
+        for (auto parent = row_parent(pending.path); !parent.empty();
+             parent = row_parent(parent)) {
+            const auto* actual = find_row(input.local_tree, parent);
+            if (actual != nullptr) {
+                if (!actual->is_directory) {
+                    safe = false;
+                    break;
+                }
+                continue;
+            }
+            const auto* accepted = find_row(input.base_tree, parent);
+            if (accepted == nullptr || !accepted->is_directory) {
+                safe = false;
+                break;
+            }
+            additions.emplace(parent);
+        }
+        if (safe) {
+            additions.emplace(pending.path);
+        }
+    }
+    for (const auto& path : additions) {
+        if (const auto* accepted = find_row(input.base_tree, path)) {
+            result.rows.push_back(*accepted);
+        }
+    }
+    std::ranges::sort(result.rows, path_less, &NodeRow::path);
+    finalize_snapshot(result);
+    return result;
+}
+
+void append_pending_materialization_downloads(const Input& input,
+                                              const HashSet& missing_objects,
+                                              std::vector<Operation>& operations) {
+    for (const auto& pending : input.pending_materializations) {
+        if (find_row(input.local_tree, pending.path) != nullptr) {
+            continue;
+        }
+        const auto* remote = find_row(input.storage.tree, pending.path);
+        if (remote == nullptr || remote->is_directory ||
+            remote->hash != pending.hash || remote->size != pending.size ||
+            missing_objects.contains(remote->hash)) {
+            continue;
+        }
+        const auto already_scheduled = std::ranges::any_of(
+            operations, [&](const Operation& operation) {
+                return operation.action == Action::Download &&
+                       operation.path ==
+                           platform::path::from_utf8(remote->path) &&
+                       operation.hash == hash_hex(remote->hash);
+            });
+        if (!already_scheduled) {
+            operations.push_back(Operation{
+                .action = Action::Download,
+                .path = platform::path::from_utf8(remote->path),
+                .hash = hash_hex(remote->hash),
+                .alt_path = {},
+                .size = remote->size,
+                .exclusive_destination = false,
+            });
+        }
+    }
+}
+
 bool is_conflict(const Operation& operation) {
     const auto marked = [](const std::filesystem::path& path) {
         return platform::path::to_logical_utf8(path).find(".kasumiconflict_") !=
@@ -611,6 +706,12 @@ ReconcileResult reconcile(const Input& input) {
             .paths = {},
         });
     }
+
+    if (!valid_pending_rows(input)) {
+        return std::unexpected(invalid_tree_error(
+            ErrorCode::InvalidLocalBaseState,
+            "pending materializations do not match the accepted base"));
+    }
     if (input.base_state_present && input.storage.history_present) {
         const auto found =
             std::ranges::find(input.storage.reachable_commits,
@@ -655,6 +756,8 @@ ReconcileResult reconcile(const Input& input) {
                                           input.storage.object_identifiers,
                                           missing_objects);
     }
+    missing_objects.insert(input.known_missing_content_objects.begin(),
+                           input.known_missing_content_objects.end());
 
     LocalSources local_sources{0, hash_key};
 
@@ -670,11 +773,28 @@ ReconcileResult reconcile(const Input& input) {
                          pending_storage_rows,
                          unrecoverable_paths);
 
-    auto operations = diff::compare_trees(input.local_tree,
+    auto logical_local = logical_local_view(input);
+    auto operations = diff::compare_trees(logical_local,
                                           input.base_tree,
                                           effective_storage_tree,
                                           missing_objects,
                                           &input.ignore_list);
+
+    std::erase_if(operations, [&](const Operation& operation) {
+        if (operation.action != Action::Upload ||
+            find_row(input.local_tree,
+                     platform::path::to_logical_utf8(operation.path)) !=
+                nullptr) {
+            return false;
+        }
+        return std::ranges::any_of(
+            input.pending_materializations, [&](const NodeRow& pending) {
+                return pending.path ==
+                       platform::path::to_logical_utf8(operation.path);
+            });
+    });
+    append_pending_materialization_downloads(
+        input, missing_objects, operations);
 
     reserve_conflict_destinations(
         input.local_tree, effective_storage_tree, operations);
@@ -716,6 +836,22 @@ ReconcileResult reconcile(const Input& input) {
     if (!candidate) {
         return std::unexpected(std::move(candidate.error()));
     }
+    std::erase_if(pending_storage_rows, [&](NodeRow& pending) {
+        const auto* candidate_row = find_row(candidate->tree, pending.path);
+        if (candidate_row == nullptr || candidate_row->is_directory ||
+            candidate_row->hash != pending.hash ||
+            candidate_row->size != pending.size) {
+            return true;
+        }
+        pending = *candidate_row;
+        return false;
+    });
+    std::vector<NodeRow> pending_materializations;
+    for (const auto& row : pending_storage_rows) {
+        if (!local_sources.contains(row.hash)) {
+            pending_materializations.push_back(row);
+        }
+    }
     const bool shared_tree_changed = candidate->changed;
     const bool requires_storage_repair = !repair_upload_paths.empty();
     const bool requires_publication = !input.storage.history_present ||
@@ -735,12 +871,14 @@ ReconcileResult reconcile(const Input& input) {
         input.storage.history_present &&
         (!input.base_state_present ||
          input.storage.logical_heads.size() != 1 ||
-         input.base_commit_id != input.storage.logical_heads.front());
+         input.base_commit_id != input.storage.logical_heads.front() ||
+         input.pending_materializations != pending_materializations);
 
     return Result{
         .plan = std::move(plan),
         .missing_objects = std::move(missing_objects),
         .pending_storage_rows = std::move(pending_storage_rows),
+        .pending_materializations = std::move(pending_materializations),
         .unrecoverable_paths = std::move(unrecoverable_paths),
         .observed_storage_generation = observed_storage_generation,
         .target_generation = target_generation,
