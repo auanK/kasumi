@@ -210,6 +210,10 @@ kasumi_add_test_suite(
         reproc++
 )
 
+if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(kasumi_test_unit_transport PRIVATE -Wa,-mbig-obj)
+endif()
+
 kasumi_add_test_suite(
     kasumi_test_operational_gc_live_runner
     "operational.gc_live_runner"
