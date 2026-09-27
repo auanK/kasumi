@@ -65,8 +65,17 @@ TEST(CliPresenterTest, PresentsSuccessfulResponseVariants) {
     EXPECT_EQ(sync_output.find("Local:"), std::string::npos);
     EXPECT_EQ(sync_output.find("Destino:"), std::string::npos);
 
-    EXPECT_EQ(kasumi::cli::present(response(FsckCompleted{}, Operation::Fsck)),
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(
+                  response(FsckCompleted{.checked_objects = 1,
+                                         .checked_plaintext_bytes = 6},
+                           Operation::Fsck)),
               0);
+    const auto fsck_output = testing::internal::GetCapturedStdout();
+    EXPECT_NE(fsck_output.find("1 objeto único auditado"), std::string::npos);
+    EXPECT_NE(fsck_output.find("6 bytes"), std::string::npos);
+    EXPECT_EQ(fsck_output.find("[Auditing destination integrity]"),
+              std::string::npos);
     EXPECT_EQ(kasumi::cli::present(
                   response(GarbageCollectCompleted{.candidate_objects = 3,
                                                    .quarantined_objects = 3},
