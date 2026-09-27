@@ -9,6 +9,7 @@
 #include "crypto/file_crypto.hpp"
 #include "crypto/key_derivation.hpp"
 #include "kasumi/test/filesystem.hpp"
+#include "kasumi/test/provider_scenarios.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "runtime/paths.hpp"
 #include "runtime/vault.hpp"
@@ -365,10 +366,9 @@ TEST(ApplicationMaintenanceContract, NoOpSyncDoesNotRewriteStateOrRemote) {
     const auto listing_before = kasumi::transport::list(storage);
     ASSERT_TRUE(listing_before.has_value());
 
-    const auto result =
-        kasumi::application::execute(request(Operation::Sync, environment));
-    ASSERT_TRUE(result.has_value()) << result.error().detail;
-    EXPECT_EQ(result->operation, Operation::Sync);
+    const auto no_op = kasumi::test::scenarios::no_op_sync(environment, "demo");
+    ASSERT_TRUE(no_op.has_value()) << no_op.error();
+    EXPECT_TRUE(*no_op);
     EXPECT_EQ(kasumi::test::read_binary(paths->database_path), state_before);
     EXPECT_EQ(kasumi::test::snapshot_tree(profile.remote_dir), remote_before);
     const auto listing_after = kasumi::transport::list(storage);

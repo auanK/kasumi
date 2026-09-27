@@ -5,6 +5,7 @@
 #include "application/sync/journal.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/hash_mutation.hpp"
+#include "kasumi/test/provider_scenarios.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/change_journal.hpp"
 #include "platform/metadata.hpp"
@@ -100,14 +101,8 @@ Client make_client(Scenario& scenario, std::string name) {
 }
 
 std::expected<void, std::string> sync(const Client& client) {
-    auto result = kasumi::application::execute(
-        {Request{Operation::Sync, client_name(client)},
-         Credentials{NoCredentials{}},
-         client_environment(client)});
-    if (!result) {
-        return std::unexpected(result.error().detail);
-    }
-    return {};
+    return kasumi::test::scenarios::sync(client_environment(client),
+                                         client_name(client));
 }
 
 testing::AssertionResult sync_succeeds(const Client& client) {
@@ -347,16 +342,17 @@ TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
     const std::string expected_dir_utf8 = "pasta-日本";
     const std::string expected_file_utf8 = "pasta-日本/usuário-☁.txt";
 
-    kasumi::test::write_text(client_local_dir(a) / "alpha.txt", "alpha");
-    kasumi::test::write_text(client_local_dir(a) / "beta.txt", "beta");
-    kasumi::test::write_text(client_local_dir(a) / "docs/readme.txt", "readme");
-    kasumi::test::write_text(client_local_dir(a) / "docs/nested/data.txt",
-                             "data");
-    kasumi::test::write_text(client_local_dir(a) / "images/image.bin",
-                             "binary");
-    kasumi::test::write_text(a_unicode, "unicode-v1");
-
-    ASSERT_TRUE(sync_succeeds(a));
+    const std::vector<kasumi::test::scenarios::SeedFile> seed_files{
+        {"alpha.txt", "alpha"},
+        {"beta.txt", "beta"},
+        {"docs/readme.txt", "readme"},
+        {"docs/nested/data.txt", "data"},
+        {"images/image.bin", "binary"},
+        {"pasta-日本/usuário-☁.txt", "unicode-v1"},
+    };
+    const auto published = kasumi::test::scenarios::publish_seed_files(
+        client_environment(a), client_name(a), client_local_dir(a), seed_files);
+    ASSERT_TRUE(published.has_value()) << published.error();
     auto observed_remote = remote(scenario);
     ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
     expect_remote_present(*observed_remote, "alpha.txt");
@@ -374,7 +370,9 @@ TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
     EXPECT_FALSE(r_file->is_directory);
     EXPECT_EQ(r_file->path, expected_file_utf8);
 
-    ASSERT_TRUE(sync_succeeds(b));
+    const auto materialized = kasumi::test::scenarios::materialize_files(
+        client_environment(b), client_name(b), client_local_dir(b), seed_files);
+    ASSERT_TRUE(materialized.has_value()) << materialized.error();
     expect_file(b, "alpha.txt", "alpha");
     expect_file(b, "docs/readme.txt", "readme");
     expect_file(b, "docs/nested/data.txt", "data");

@@ -42,6 +42,11 @@ option(
     "Build the controlled live GC remote copy benchmark runner"
     OFF
 )
+option(
+    KASUMI_BUILD_PROVIDER_CERTIFICATION
+    "Build the Local-only provider certification runner"
+    OFF
+)
 
 add_library(kasumi_warnings INTERFACE)
 if(WIN32)
@@ -790,4 +795,35 @@ if(BUILD_TESTING)
         endif()
     endif()
     add_subdirectory(tests)
+endif()
+
+if(KASUMI_BUILD_PROVIDER_CERTIFICATION)
+    if(NOT BUILD_TESTING)
+        message(FATAL_ERROR
+            "KASUMI_BUILD_PROVIDER_CERTIFICATION requires BUILD_TESTING=ON")
+    endif()
+    add_executable(
+        kasumi_provider_certification
+        tests/operational/provider_certification.cpp
+        tests/operational/provider_certification_support.cpp
+        tests/support/src/provider_scenarios.cpp
+        tests/support/src/transport_scenarios.cpp
+    )
+    target_include_directories(
+        kasumi_provider_certification
+        PRIVATE
+        ${PROJECT_SOURCE_DIR}/tests/operational
+        ${PROJECT_SOURCE_DIR}/src
+    )
+    target_link_libraries(
+        kasumi_provider_certification
+        PRIVATE
+        kasumi_application
+        kasumi_transport
+        kasumi_platform
+        kasumi_crypto
+        kasumi_test_support
+        nlohmann_json::nlohmann_json
+        kasumi_warnings
+    )
 endif()
