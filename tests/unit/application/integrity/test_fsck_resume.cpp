@@ -2,6 +2,7 @@
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
 #include "application/history_storage/remote_layout.hpp"
+#include "application/concurrency.hpp"
 #include "application/integrity/fsck_checkpoint.hpp"
 #include "application/integrity/maintenance.hpp"
 #include "core/maintenance.hpp"
@@ -12,6 +13,7 @@
 #include "platform/private_storage.hpp"
 
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -200,34 +202,108 @@ TEST(FsckResumeTest, RemoteCiphertextChangedMismatchedHashTriggersFullAuditAndDe
     auto storage = make_local_storage();
     auto runtime = make_test_runtime_data(storage.workspace);
 
-    const auto commit = make_commit(0, {}, "changed.txt", "initial content").value();
+    auto tree = make_tree("changed.txt", "initial content");
+    tree.rows.push_back(kasumi::NodeRow{.path = "stable.txt",
+                                       .hash = kasumi::hasher::hash_string("stable content"),
+                                       .size = 14,
+                                       .mtime = {},
+                                       .is_directory = false});
+    kasumi::finalize_snapshot(tree);
+    const auto commit = kasumi::history::make_commit(0, {}, tree).value();
     (void)publish_remote(storage.transport, storage.workspace, commit);
     const auto content_id = put_content(storage.transport, storage.workspace, "initial content", "chg");
+    (void)put_content(storage.transport, storage.workspace, "stable content", "stable");
 
     // Cold audit creates checkpoint
     auto cold_result = kasumi::application::integrity::fsck(runtime, storage.transport, test_key());
     ASSERT_TRUE(cold_result.has_value());
+    ASSERT_EQ(cold_result->checked_objects, 2U);
+
+    auto checkpoint = kasumi::application::integrity::load_checkpoint(
+        runtime.database_path.parent_path(), test_key());
+    ASSERT_TRUE(checkpoint.has_value()) << checkpoint.error();
+    ASSERT_TRUE(checkpoint->has_value());
+    ASSERT_EQ((*checkpoint)->entries.size(), 2U);
+    const auto checkpoint_entry = std::find_if(
+        (*checkpoint)->entries.begin(), (*checkpoint)->entries.end(),
+        [&content_id](const auto& entry) {
+            return entry.remote_content_id == content_id;
+        });
+    ASSERT_NE(checkpoint_entry, (*checkpoint)->entries.end());
+    const auto old_physical_hash = checkpoint_entry->physical_ciphertext_sha256;
+    ASSERT_FALSE(old_physical_hash.empty());
 
     // Mutate ciphertext on storage
     const auto remote_file_path = kasumi::test::workspace_path(storage.workspace, "storage/" + content_id);
+    const auto old_actual_hash =
+        kasumi::crypto::physical::hash_file(remote_file_path, "sha256");
+    ASSERT_TRUE(old_actual_hash.has_value()) << old_actual_hash.error();
+    ASSERT_EQ(*old_actual_hash, old_physical_hash);
+
+    const auto tamper_offset = kasumi::crypto::FILE_HEADER_SIZE - 1;
+    char original_byte = 0;
+    {
+        std::ifstream file(remote_file_path, std::ios::binary);
+        ASSERT_TRUE(file.is_open());
+        file.seekg(static_cast<std::streamoff>(tamper_offset));
+        ASSERT_TRUE(file.read(&original_byte, 1));
+    }
+    const char tampered_byte = static_cast<char>(
+        static_cast<unsigned char>(original_byte) ^ 0x01U);
+    ASSERT_NE(tampered_byte, original_byte);
     {
         std::fstream file(remote_file_path, std::ios::in | std::ios::out | std::ios::binary);
-        file.seekp(50);
-        char bad = 'X';
-        file.write(&bad, 1);
+        ASSERT_TRUE(file.is_open());
+        file.seekp(static_cast<std::streamoff>(tamper_offset));
+        ASSERT_TRUE(file);
+        file.write(&tampered_byte, 1);
+        file.flush();
+        ASSERT_TRUE(file);
         file.close();
     }
+    const auto new_actual_hash =
+        kasumi::crypto::physical::hash_file(remote_file_path, "sha256");
+    ASSERT_TRUE(new_actual_hash.has_value()) << new_actual_hash.error();
+    ASSERT_NE(*new_actual_hash, old_physical_hash);
 
-    // Transport reports mismatched hash H_mismatched != H_old
+    // Return the actual changed ciphertext hash so FSCK sees H_new != H_old.
     g_fake_lying_target_id = content_id;
-    g_fake_lying_reported_hash = "0000000000000000000000000000000000000000000000000000000000000000";
+    g_fake_lying_reported_hash = *new_actual_hash;
     g_fake_lying_hash_called = false;
     storage.transport.storage.physical_hash = fake_lying_physical_hash;
 
-    auto result = kasumi::application::integrity::fsck(runtime, storage.transport, test_key());
+    const bool tracing_was_enabled = kasumi::platform::perf_trace::enabled();
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+    const auto concurrency = kasumi::application::content_concurrency();
+    auto result = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key(), concurrency);
+    const auto audit_get_calls =
+        kasumi::platform::perf_trace::get_count("fsck.audit_get_calls");
+    const auto audit_decrypt_calls =
+        kasumi::platform::perf_trace::get_count("fsck.audit_decrypt_calls");
+    const auto audit_verify_calls =
+        kasumi::platform::perf_trace::get_count("fsck.audit_verify_calls");
+    const auto checkpoint_entries_loaded =
+        kasumi::platform::perf_trace::get_count("fsck.checkpoint_entries_loaded");
+    const auto resume_hash_mismatches =
+        kasumi::platform::perf_trace::get_count("fsck.resume_hash_mismatches");
+    const auto audit_worker_count =
+        kasumi::platform::perf_trace::get_count("fsck.audit_worker_count");
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(tracing_was_enabled);
+
     EXPECT_TRUE(g_fake_lying_hash_called);
+    EXPECT_EQ(checkpoint_entries_loaded, 2U);
+    EXPECT_EQ(resume_hash_mismatches, 1U);
+    EXPECT_EQ(audit_get_calls, 2U);
+    EXPECT_EQ(audit_decrypt_calls, 2U);
+    EXPECT_EQ(audit_verify_calls, 1U);
+    EXPECT_EQ(audit_worker_count, std::min<std::size_t>(concurrency, 2U));
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, kasumi::application::integrity::ErrorCode::Unrecoverable);
+    EXPECT_EQ(result.error().code,
+              kasumi::application::integrity::ErrorCode::Unrecoverable);
+    EXPECT_NE(result.error().detail.find("changed.txt"), std::string::npos);
 }
 
 TEST(FsckResumeTest, WrongVaultIdentityRejectsCheckpointAndExecutesFullAudit) {
