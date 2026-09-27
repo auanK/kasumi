@@ -11,16 +11,20 @@
 #include "platform/path.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <set>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -5172,10 +5176,13 @@ struct AuditProbeState {
     std::size_t active = 0;
     std::size_t peak_active = 0;
     std::size_t get_count = 0;
+    std::size_t list_count = 0;
     std::size_t barrier_target = 0;
+    std::string gate_small_identifier;
+    std::string gate_medium_identifier;
+    std::size_t progress_completions = 0;
     std::optional<std::size_t> fail_ordinal;
     kasumi::transport::ErrorCode fail_code = kasumi::transport::ErrorCode::Io;
-    bool cancel_on_barrier = false;
 };
 
 struct AuditProbeTransportState {
@@ -5199,14 +5206,27 @@ kasumi::transport::Result audit_probe_get(void* context,
         ++probe->active;
         probe->peak_active = std::max(probe->peak_active, probe->active);
         probe->changed.notify_all();
+        const auto gate_completion_count =
+            identifier == probe->gate_small_identifier ? 2U : 1U;
+        if (identifier == probe->gate_small_identifier ||
+            identifier == probe->gate_medium_identifier) {
+            if (!probe->changed.wait_for(
+                    lock, std::chrono::seconds{5}, [&] {
+                        return probe->progress_completions >= gate_completion_count;
+                    })) {
+                --probe->active;
+                lock.unlock();
+                probe->changed.notify_all();
+                return std::unexpected(kasumi::transport::Error{
+                    .code = kasumi::transport::ErrorCode::Timeout,
+                    .message = "ordered progress gate timed out"});
+            }
+        }
         if (probe->barrier_target > 0 && ordinal < probe->barrier_target) {
             probe->changed.wait_until(
                 lock,
                 std::chrono::steady_clock::now() + std::chrono::milliseconds{300},
                 [&] { return probe->get_count >= probe->barrier_target; });
-            if (probe->cancel_on_barrier && probe->get_count >= probe->barrier_target) {
-                kasumi::platform::cancellation::request();
-            }
         }
     }
 
@@ -5241,7 +5261,12 @@ kasumi::transport::Transport make_audit_probe_transport(
         return kasumi::transport::presence(*static_cast<AuditProbeTransportState*>(ctx)->base, id);
     };
     result.storage.list = [](void* ctx) {
-        return kasumi::transport::list(*static_cast<AuditProbeTransportState*>(ctx)->base);
+        auto* transport_state = static_cast<AuditProbeTransportState*>(ctx);
+        if (transport_state->probe != nullptr) {
+            std::lock_guard lock(transport_state->probe->mutex);
+            ++transport_state->probe->list_count;
+        }
+        return kasumi::transport::list(*transport_state->base);
     };
     result.storage.list_prefix = [](void* ctx, std::string_view pfx) {
         return kasumi::transport::list(*static_cast<AuditProbeTransportState*>(ctx)->base, pfx);
@@ -5312,6 +5337,201 @@ TEST(IntegrityMaintenanceTest, FsckProgressCountsUniqueReferencedObjects) {
     EXPECT_EQ(events.back().stage, kasumi::application::FsckStage::Finalizing);
     EXPECT_EQ(events.back().completed_objects, 10U);
     EXPECT_EQ(events.back().completed_plaintext_bytes, 90U);
+    EXPECT_EQ(events.front().stage, kasumi::application::FsckStage::Observing);
+    EXPECT_FALSE(events.front().total_objects.has_value());
+    EXPECT_EQ(events[1].stage, kasumi::application::FsckStage::Analyzing);
+    EXPECT_FALSE(events[1].total_objects.has_value());
+    std::size_t previous_objects = 0;
+    std::uint64_t previous_bytes = 0;
+    for (const auto& event : events) {
+        EXPECT_GE(event.completed_objects, previous_objects);
+        previous_objects = event.completed_objects;
+        ASSERT_TRUE(event.completed_plaintext_bytes.has_value());
+        EXPECT_GE(*event.completed_plaintext_bytes, previous_bytes);
+        previous_bytes = *event.completed_plaintext_bytes;
+    }
+}
+
+TEST(IntegrityMaintenanceTest, FsckProgressByteTotalsBecomeUnknownOnOverflow) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    kasumi::Snapshot tree;
+    tree.rows.push_back(kasumi::NodeRow{
+        .path = "",
+        .hash = {},
+        .size = 0,
+        .mtime = {},
+        .is_directory = true});
+    tree.rows.push_back(kasumi::NodeRow{
+        .path = "huge.bin",
+        .hash = kasumi::hasher::hash_string("huge"),
+        .size = std::numeric_limits<std::uint64_t>::max(),
+        .mtime = {},
+        .is_directory = false});
+    tree.rows.push_back(kasumi::NodeRow{
+        .path = "one.bin",
+        .hash = kasumi::hasher::hash_string("one"),
+        .size = 1,
+        .mtime = {},
+        .is_directory = false});
+    kasumi::finalize_snapshot(tree);
+    auto commit = kasumi::history::make_commit(0, {}, tree).value();
+    publish_remote(storage.transport, storage.workspace, commit);
+
+    std::vector<kasumi::application::FsckProgress> events;
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key(), 2,
+        [&](const auto& progress) { events.push_back(progress); });
+    ASSERT_FALSE(checked.has_value());
+    EXPECT_EQ(checked.error().code, IntegrityErrorCode::Unrecoverable);
+    ASSERT_FALSE(events.empty());
+    const auto audit = std::find_if(events.begin(), events.end(), [](const auto& event) {
+        return event.stage == kasumi::application::FsckStage::AuditingContent;
+    });
+    ASSERT_NE(audit, events.end());
+    EXPECT_EQ(audit->total_objects, 2U);
+    EXPECT_FALSE(audit->total_plaintext_bytes.has_value());
+    EXPECT_EQ(events.back().completed_objects, 2U);
+    EXPECT_FALSE(events.back().completed_plaintext_bytes.has_value());
+}
+
+TEST(IntegrityMaintenanceTest, FsckProgressByteTotalsFollowOutOfOrderCompletions) {
+    constexpr std::size_t small_size = 1024;
+    constexpr std::size_t medium_size = 16 * 1024;
+    constexpr std::size_t large_size = 1024 * 1024;
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    const auto identifiers = setup_multi_file_dataset(storage, {
+        {"a-small.bin", std::string(small_size, 'a')},
+        {"b-large.bin", std::string(large_size, 'b')},
+        {"c-medium.bin", std::string(medium_size, 'c')},
+    });
+    AuditProbeState probe;
+    probe.gate_small_identifier = identifiers[0];
+    probe.gate_medium_identifier = identifiers[2];
+    AuditProbeTransportState probe_state;
+    auto wrapped_transport = make_audit_probe_transport(probe_state, storage.transport, probe);
+    const auto calling_thread = std::this_thread::get_id();
+    std::vector<std::uint64_t> completed_byte_totals;
+    std::mutex completed_byte_totals_mutex;
+    std::atomic_bool callback_on_calling_thread{true};
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, wrapped_transport, test_key(), 3,
+        [&](const auto& progress) {
+            if (std::this_thread::get_id() != calling_thread) {
+                callback_on_calling_thread.store(false);
+            }
+            if (progress.stage != kasumi::application::FsckStage::AuditingContent ||
+                progress.completed_objects == 0) {
+                return;
+            }
+            ASSERT_TRUE(progress.completed_plaintext_bytes.has_value());
+            {
+                std::lock_guard lock(completed_byte_totals_mutex);
+                completed_byte_totals.push_back(*progress.completed_plaintext_bytes);
+            }
+            {
+                std::lock_guard lock(probe.mutex);
+                probe.progress_completions = progress.completed_objects;
+            }
+            probe.changed.notify_all();
+        });
+    ASSERT_TRUE(checked.has_value()) << (checked ? "" : checked.error().detail);
+    EXPECT_TRUE(callback_on_calling_thread.load());
+    ASSERT_EQ(completed_byte_totals.size(), 3U);
+    EXPECT_EQ(completed_byte_totals[0], large_size);
+    EXPECT_EQ(completed_byte_totals[1], large_size + medium_size);
+    EXPECT_EQ(completed_byte_totals[2], large_size + medium_size + small_size);
+}
+
+TEST(IntegrityMaintenanceTest, FsckProgressCallbackPreservesRequestsAndConcurrency) {
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    (void)setup_multi_file_dataset(storage, {
+        {"f0.txt", "payload_0"},
+        {"f1.txt", "payload_1"},
+        {"f2.txt", "payload_2"},
+        {"f3.txt", "payload_3"},
+    });
+
+    AuditProbeState plain_probe;
+    plain_probe.barrier_target = 4;
+    AuditProbeTransportState plain_state;
+    auto plain_transport = make_audit_probe_transport(plain_state, storage.transport, plain_probe);
+    const auto plain = kasumi::application::integrity::fsck(
+        runtime, plain_transport, test_key(), 4);
+    ASSERT_TRUE(plain.has_value());
+    const auto plain_gets =
+        kasumi::platform::perf_trace::get_count("fsck.audit_get_calls");
+    const auto plain_decrypts =
+        kasumi::platform::perf_trace::get_count("fsck.audit_decrypt_calls");
+    const auto plain_verifies =
+        kasumi::platform::perf_trace::get_count("fsck.audit_verify_calls");
+    const auto plain_lists =
+        kasumi::platform::perf_trace::get_count("history.full_list_calls");
+
+    kasumi::platform::perf_trace::reset();
+    AuditProbeState progress_probe;
+    progress_probe.barrier_target = 4;
+    AuditProbeTransportState progress_state;
+    auto progress_transport =
+        make_audit_probe_transport(progress_state, storage.transport, progress_probe);
+    std::size_t event_count = 0;
+    const auto with_progress = kasumi::application::integrity::fsck(
+        runtime, progress_transport, test_key(), 4,
+        [&](const auto&) { ++event_count; });
+    ASSERT_TRUE(with_progress.has_value());
+
+    EXPECT_EQ(with_progress->checked_objects, plain->checked_objects);
+    EXPECT_EQ(plain_probe.get_count, progress_probe.get_count);
+    EXPECT_EQ(plain_probe.get_count, 4U);
+    EXPECT_EQ(plain_probe.list_count, 1U);
+    EXPECT_EQ(progress_probe.list_count, 1U);
+    EXPECT_EQ(plain_probe.peak_active, 4U);
+    EXPECT_EQ(progress_probe.peak_active, 4U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_get_calls"), plain_gets);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_decrypt_calls"), plain_decrypts);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_verify_calls"), plain_verifies);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("history.full_list_calls"), plain_lists);
+    EXPECT_GT(event_count, 0U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(IntegrityMaintenanceTest, FsckProgressCallbackExceptionsDoNotChangeResult) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    (void)setup_multi_file_dataset(storage, {{"file.txt", "payload"}});
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key(), 1,
+        [](const auto&) { throw std::runtime_error("display failed"); });
+    ASSERT_TRUE(checked.has_value()) << (checked ? "" : checked.error().detail);
+    EXPECT_EQ(checked->checked_objects, 1U);
+}
+
+TEST(IntegrityMaintenanceTest, FsckProgressDoesNotRequirePerfTracing) {
+    kasumi::platform::perf_trace::force_enable(false);
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    (void)setup_multi_file_dataset(storage, {{"file.txt", "payload"}});
+    std::vector<kasumi::application::FsckProgress> events;
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key(), 1,
+        [&](const auto& progress) { events.push_back(progress); });
+    ASSERT_TRUE(checked.has_value());
+    ASSERT_FALSE(events.empty());
+    EXPECT_EQ(events.back().stage,
+              kasumi::application::FsckStage::Finalizing);
+    EXPECT_EQ(events.back().completed_objects, 1U);
+    EXPECT_EQ(events.back().total_objects, 1U);
+
+    kasumi::platform::perf_trace::reset();
+    kasumi::platform::perf_trace::force_enable(false);
 }
 
 TEST(IntegrityMaintenanceTest, FsckProgressCountsMissingAndCorruptAsCompletedWork) {
@@ -5594,23 +5814,45 @@ TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckCancellationStopsWorkAndClea
     auto storage = make_local_storage();
     auto runtime = runtime_data(storage.workspace);
 
-    setup_multi_file_dataset(storage, {
+    const std::vector<std::pair<std::string, std::string>> files{
         {"f0.txt", "payload_0"},
         {"f1.txt", "payload_1"},
         {"f2.txt", "payload_2"},
         {"f3.txt", "payload_3"},
-    });
+    };
+    const auto identifiers = setup_multi_file_dataset(storage, files);
 
     AuditProbeState probe;
-    probe.barrier_target = 2;
-    probe.cancel_on_barrier = true;
+    std::vector<std::pair<std::string, std::string>> ordered_ids;
+    for (std::size_t i = 0; i < files.size(); ++i) {
+        ordered_ids.emplace_back(
+            kasumi::hash_hex(kasumi::hasher::hash_string(files[i].second)), identifiers[i]);
+    }
+    std::ranges::sort(ordered_ids);
+    probe.gate_medium_identifier = ordered_ids[1].second;
     AuditProbeTransportState probe_state;
     auto wrapped_transport = make_audit_probe_transport(probe_state, storage.transport, probe);
+    std::vector<kasumi::application::FsckProgress> events;
 
     const auto checked = kasumi::application::integrity::fsck(
-        runtime, wrapped_transport, test_key(), 4);
+        runtime, wrapped_transport, test_key(), 2,
+        [&](const auto& progress) {
+            events.push_back(progress);
+            if (progress.stage == kasumi::application::FsckStage::AuditingContent &&
+                progress.completed_objects == 1) {
+                {
+                    std::lock_guard lock(probe.mutex);
+                    probe.progress_completions = 1;
+                }
+                probe.changed.notify_all();
+                kasumi::platform::cancellation::request();
+            }
+        });
     ASSERT_FALSE(checked.has_value());
     EXPECT_TRUE(kasumi::platform::cancellation::requested());
+    ASSERT_FALSE(events.empty());
+    EXPECT_EQ(events.back().stage, kasumi::application::FsckStage::Finalizing);
+    EXPECT_LT(events.back().completed_objects, *events.back().total_objects);
     kasumi::platform::cancellation::reset();
 }
 

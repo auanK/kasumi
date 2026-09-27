@@ -5,11 +5,27 @@
 #include "application/use_cases/context.hpp"
 #include "application/use_cases/error_mapping.hpp"
 
+#include <optional>
+
 namespace kasumi::application::detail {
 namespace {
 
 std::expected<Response, Error> run_maintenance(OperationContext& context,
                                                bool fsck) {
+    std::optional<FsckProgress> last_fsck_progress;
+    integrity::FsckProgressCallback fsck_progress{};
+    if (fsck && context.on_progress) {
+        fsck_progress = [&context, &last_fsck_progress](const FsckProgress& progress) noexcept {
+            last_fsck_progress = progress;
+            try {
+                context.on_progress(progress);
+            } catch (...) {
+                // Progress is observational and must not alter the operation.
+            }
+        };
+        fsck_progress(FsckProgress{.stage = FsckStage::Preparing});
+    }
+
     auto recovery = sync::coordinator::recover_if_needed(
         context.runtime, context.storage, context.key);
     if (!recovery) {
@@ -18,15 +34,21 @@ std::expected<Response, Error> run_maintenance(OperationContext& context,
     }
 
     if (fsck) {
-        auto checked =
-            integrity::fsck(context.runtime, context.storage, context.key, content_concurrency());
+        auto checked = integrity::fsck(context.runtime, context.storage, context.key,
+                                        content_concurrency(),
+                                        std::move(fsck_progress));
         if (!checked) {
             return std::unexpected(maintenance_error(
                 context.operation, checked.error(), context.summary));
         }
         return Response{.operation = context.operation,
                         .runtime = context.summary,
-                        .data = FsckCompleted{}};
+                        .data = FsckCompleted{
+                            .checked_objects = checked->checked_objects,
+                            .checked_plaintext_bytes = last_fsck_progress
+                                                         ? last_fsck_progress->completed_plaintext_bytes
+                                                         : std::nullopt,
+                        }};
     }
 
     integrity::GarbageCollectProgressCallback gc_progress{};

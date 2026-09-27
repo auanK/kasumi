@@ -5,6 +5,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -85,8 +86,11 @@ struct SyncCompleted {
     std::optional<std::chrono::nanoseconds> duration = std::nullopt;
 };
 
-// Indicates completed integrity check.
-struct FsckCompleted {};
+// Summary of a completed integrity check.
+struct FsckCompleted {
+    std::size_t checked_objects = 0;
+    std::optional<std::uint64_t> checked_plaintext_bytes = std::nullopt;
+};
 
 // Result of completed recoverable garbage collection.
 struct GarbageCollectCompleted {

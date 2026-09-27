@@ -1047,12 +1047,34 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                                       transport::Transport& storage,
                                       KeySpan key,
                                       std::size_t audit_concurrency,
-                                      [[maybe_unused]] FsckProgressCallback on_progress) {
+                                      FsckProgressCallback on_progress) {
+    std::size_t completed_objects = 0;
+    std::optional<std::size_t> progress_total_objects;
+    std::optional<std::uint64_t> completed_plaintext_bytes =
+        on_progress ? std::optional<std::uint64_t>{0} : std::nullopt;
+    std::optional<std::uint64_t> total_plaintext_bytes;
+    const auto report_progress = [&](application::FsckStage stage) noexcept {
+        if (!on_progress) {
+            return;
+        }
+        try {
+            on_progress(application::FsckProgress{
+                .stage = stage,
+                .completed_objects = completed_objects,
+                .total_objects = progress_total_objects,
+                .completed_plaintext_bytes = completed_plaintext_bytes,
+                .total_plaintext_bytes = total_plaintext_bytes,
+            });
+        } catch (...) {
+            // Progress is observational and must not alter the audit result.
+        }
+    };
     TraceGuard total_guard{"fsck.total_duration_us", platform::perf_trace::begin()};
     if (runtime_data.local_dir.empty() || !transport::valid(storage)) {
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid fsck context"));
     }
+    report_progress(application::FsckStage::Observing);
     const auto history_workspace = maintenance_workspace_root(runtime_data);
     auto observation = [&]() {
         TraceGuard guard{"fsck.collect_storage_state_duration_us", platform::perf_trace::begin()};
@@ -1063,6 +1085,7 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
         return std::unexpected(
             make_error(ErrorCode::StateFailure, observation.error()));
     }
+    report_progress(application::FsckStage::Analyzing);
     const auto& storage_state = observation->state;
     if (!storage_state.history_present) {
         return std::unexpected(
@@ -1105,6 +1128,19 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                                    inventory->unknown_identifiers)));
     }
 
+    if (on_progress) {
+        progress_total_objects = inventory->referenced_objects.size();
+        total_plaintext_bytes = 0;
+        for (const auto& reference : inventory->referenced_objects) {
+            if (reference.size > std::numeric_limits<std::uint64_t>::max() -
+                                     *total_plaintext_bytes) {
+                total_plaintext_bytes.reset();
+                break;
+            }
+            *total_plaintext_bytes += reference.size;
+        }
+    }
+
     const auto ws_token = platform::perf_trace::begin();
     auto workspace = platform::create_workspace("fsck");
     platform::perf_trace::finish("fsck.workspace_duration_us", ws_token);
@@ -1116,6 +1152,9 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
         TraceGuard referenced_guard{"fsck.referenced_audit_duration_us", platform::perf_trace::begin()};
         try {
             const auto total_objects = inventory->referenced_objects.size();
+            if (on_progress) {
+                report_progress(application::FsckStage::AuditingContent);
+            }
             FsckResult fsck_result{
                 .checked_objects = total_objects,
             };
@@ -1129,6 +1168,7 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
 
             if (total_objects == 0) {
                 platform::perf_trace::count("fsck.audit_peak_in_flight", 0);
+                report_progress(application::FsckStage::Finalizing);
                 return fsck_result;
             }
 
@@ -1263,6 +1303,8 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                 }
                 --outstanding;
                 platform::perf_trace::count("fsck.audit_completion_count");
+                bool object_classified = false;
+                std::uint64_t classified_size = 0;
 
                 if (platform::cancellation::requested()) {
                     cancelled = true;
@@ -1289,13 +1331,14 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                         w.request_stop();
                     }
                 } else {
+                    const auto& reference =
+                        inventory->referenced_objects[work_result.index];
+                    classified_size = reference.size;
                     if (work_result.state != AuditState::Healthy) {
-                        const auto& reference = inventory->referenced_objects[work_result.index];
                         unrecoverable.insert(unrecoverable.end(),
                                              reference.referenced_paths.begin(),
                                              reference.referenced_paths.end());
                     } else {
-                        const auto& reference = inventory->referenced_objects[work_result.index];
                         verified_map[reference.identifier] = VerifiedObjectEntry{
                             .logical_content_hash = reference.identifier,
                             .remote_content_id = std::move(work_result.remote_content_id),
@@ -1322,6 +1365,7 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                             unpersisted_verified = 0;
                         }
                     }
+                    object_classified = true;
                 }
 
                 if (!state.stop_requested && !cancelled && !lowest_hard_failure &&
@@ -1340,6 +1384,19 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                         admit(slot);
                     }
                 }
+                if (object_classified && on_progress) {
+                    ++completed_objects;
+                    if (completed_plaintext_bytes) {
+                        if (classified_size >
+                            std::numeric_limits<std::uint64_t>::max() -
+                                *completed_plaintext_bytes) {
+                            completed_plaintext_bytes.reset();
+                        } else {
+                            *completed_plaintext_bytes += classified_size;
+                        }
+                    }
+                    report_progress(application::FsckStage::AuditingContent);
+                }
             }
 
             {
@@ -1351,6 +1408,7 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                 w.request_stop();
             }
             workers.clear();
+            report_progress(application::FsckStage::Finalizing);
 
             platform::perf_trace::count("fsck.audit_peak_in_flight", state.peak_in_flight);
 
