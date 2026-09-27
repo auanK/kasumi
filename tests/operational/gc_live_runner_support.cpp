@@ -118,7 +118,14 @@ transport::Result vault_put(void* context,
             .message = "cannot overwrite owner marker via vault transport",
         });
     }
-    return transport::put(*ctx->underlying, source, identifier);
+    auto result = transport::put(*ctx->underlying, source, identifier);
+    if (!result) {
+        auto failure = result.error();
+        failure.message = "GC vault PUT '" + std::string{identifier} +
+                          "' failed: " + failure.message;
+        return std::unexpected(std::move(failure));
+    }
+    return {};
 }
 
 transport::Result vault_put_batch(void* context, const transport::PutBatch& batch) {
@@ -144,7 +151,14 @@ transport::Result vault_get(void* context,
             .message = "object not found",
         });
     }
-    return transport::get(*ctx->underlying, identifier, destination);
+    auto result = transport::get(*ctx->underlying, identifier, destination);
+    if (!result) {
+        auto failure = result.error();
+        failure.message = "GC vault GET '" + std::string{identifier} +
+                          "' failed: " + failure.message;
+        return std::unexpected(std::move(failure));
+    }
+    return {};
 }
 
 transport::Result vault_get_batch(void* context, const transport::GetBatch& batch) {
@@ -322,7 +336,9 @@ setup_scenario(transport::Transport& vault_storage,
     result.reachable_content_id = kasumi::crypto::content_identifier(key, kasumi::hasher::hash_string(reachable_text));
     auto put_reachable = transport::put(vault_storage, reachable_enc, result.reachable_content_id);
     if (!put_reachable) {
-        return std::unexpected(put_reachable.error());
+        auto failure = put_reachable.error();
+        failure.message = "failed to publish reachable content: " + failure.message;
+        return std::unexpected(std::move(failure));
     }
 
     // 2. Reachable commit referencing reachable content
@@ -339,10 +355,113 @@ setup_scenario(transport::Transport& vault_storage,
     }
     auto published = kasumi::application::history_storage::publish_commit(vault_storage, key, *commit_res, scratch_root);
     if (!published) {
-        return std::unexpected(transport::Error{.code = transport::ErrorCode::Io, .message = published.error().detail});
+        return std::unexpected(transport::Error{
+            .code = transport::ErrorCode::Io,
+            .message = "failed to publish reachable commit: " +
+                       published.error().detail});
     }
     result.reachable_commit_id = kasumi::application::history_storage::commit_object(layout, published->head);
     result.reachable_marker_id = kasumi::application::history_storage::marker_object(layout, published->head);
+
+    // Exercise restoration of reachable content from its authenticated quarantine.
+    auto restore_q_id =
+        kasumi::application::history_storage::maintenance_protocol::
+            quarantine_identifier(layout, result.reachable_content_id);
+    auto now = kasumi::platform::clock::unix_seconds();
+    if (!restore_q_id || !now) {
+        return std::unexpected(transport::Error{
+            .code = transport::ErrorCode::Io,
+            .message = "failed to prepare reachable quarantine fixture"});
+    }
+    auto restore_copy =
+        kasumi::application::history_storage::maintenance_protocol::
+            copy_verified(vault_storage,
+                          result.reachable_content_id,
+                          *restore_q_id,
+                          scratch_root);
+    if (!restore_copy) {
+        return std::unexpected(transport::Error{
+            .code = transport::ErrorCode::Io,
+            .message = "failed to stage reachable quarantine fixture: " +
+                       restore_copy.error().detail});
+    }
+    auto restore_metadata =
+        kasumi::application::history_storage::maintenance_protocol::
+            record_quarantine(vault_storage,
+                              *restore_q_id,
+                              *now,
+                              key,
+                              scratch_root,
+                              *restore_copy);
+    if (!restore_metadata) {
+        return std::unexpected(transport::Error{
+            .code = transport::ErrorCode::Io,
+            .message = "failed to authenticate reachable quarantine fixture: " +
+                       restore_metadata.error().detail});
+    }
+    auto removed_reachable =
+        transport::remove(vault_storage, result.reachable_content_id);
+    if (!removed_reachable ||
+        *removed_reachable != transport::Removal::Removed) {
+        return std::unexpected(transport::Error{
+            .code = transport::ErrorCode::Io,
+            .message = "failed to hide reachable content for restore fixture"});
+    }
+
+    // Seed one expired, unreachable quarantine entry for GC's purge path.
+    constexpr std::string_view expired_text =
+        "kasumi live gc expired quarantine content v1";
+    const auto expired_plain = scenario_dir / "expired.plain";
+    const auto expired_enc = scenario_dir / "expired.enc";
+    if (!write_file_string(expired_plain, expired_text)) {
+        return std::unexpected(transport::Error{
+            .code = transport::ErrorCode::Io,
+            .message = "failed to write expired quarantine fixture"});
+    }
+    auto expired_hash = kasumi::crypto::content::hash_file(expired_plain);
+    auto expired_encrypted =
+        kasumi::crypto::encrypt_file_with_hashes(
+            expired_plain, expired_enc, key,
+            kasumi::crypto::FilePurpose::Content);
+    if (!expired_hash || !expired_encrypted ||
+        *now <= kasumi::application::history_storage::
+                    maintenance_protocol::quarantine_retention_seconds) {
+        return std::unexpected(transport::Error{
+            .code = transport::ErrorCode::Io,
+            .message = "failed to encrypt expired quarantine fixture"});
+    }
+    const auto expired_original_id =
+        kasumi::crypto::content_identifier(key, *expired_hash);
+    auto expired_q_id =
+        kasumi::application::history_storage::maintenance_protocol::
+            quarantine_identifier(layout, expired_original_id);
+    if (!expired_q_id) {
+        return std::unexpected(transport::Error{
+            .code = transport::ErrorCode::InvalidIdentifier,
+            .message = "failed to compute expired quarantine identifier"});
+    }
+    auto put_expired =
+        transport::put(vault_storage, expired_enc, *expired_q_id);
+    if (!put_expired) {
+        return std::unexpected(put_expired.error());
+    }
+    auto expired_metadata =
+        kasumi::application::history_storage::maintenance_protocol::
+            record_quarantine(
+                vault_storage,
+                *expired_q_id,
+                *now - kasumi::application::history_storage::
+                           maintenance_protocol::quarantine_retention_seconds -
+                    1,
+                key,
+                scratch_root,
+                expired_encrypted->ciphertext_sha256);
+    if (!expired_metadata) {
+        return std::unexpected(transport::Error{
+            .code = transport::ErrorCode::Io,
+            .message = "failed to authenticate expired quarantine fixture: " +
+                       expired_metadata.error().detail});
+    }
 
     // 3. Orphan candidate
     const auto orphan_plain = scenario_dir / "orphan.plain";
@@ -381,7 +500,9 @@ setup_scenario(transport::Transport& vault_storage,
 
     auto put_orphan = transport::put(vault_storage, orphan_enc, result.candidate_id);
     if (!put_orphan) {
-        return std::unexpected(put_orphan.error());
+        auto failure = put_orphan.error();
+        failure.message = "failed to publish orphan candidate: " + failure.message;
+        return std::unexpected(std::move(failure));
     }
 
     // 4. Expected quarantine identifiers
@@ -393,9 +514,12 @@ setup_scenario(transport::Transport& vault_storage,
     result.expected_quarantine_meta_id = *q_id + ".meta";
 
     result.expected_pre_vault_objects = {
-        result.reachable_content_id,
         result.reachable_commit_id,
         result.reachable_marker_id,
+        *restore_q_id,
+        restore_metadata->metadata_identifier,
+        *expired_q_id,
+        expired_metadata->metadata_identifier,
         result.candidate_id,
     };
     std::ranges::sort(result.expected_pre_vault_objects);
@@ -404,6 +528,8 @@ setup_scenario(transport::Transport& vault_storage,
         result.reachable_content_id,
         result.reachable_commit_id,
         result.reachable_marker_id,
+        *restore_q_id,
+        restore_metadata->metadata_identifier,
         result.expected_quarantine_id,
         result.expected_quarantine_meta_id,
     };
@@ -857,7 +983,11 @@ RunnerReport run(
 
         // Attempt safe cleanup of owned objects if ownership still verifiable
         report.cleanup = preflight::cleanup_owned_child(
-            child_storage, owner_token, scenario->expected_pre_vault_objects, options.local_scratch);
+            child_storage,
+            owner_token,
+            scenario->expected_pre_vault_objects,
+            options.local_scratch,
+            options.cleanup_empty_directories);
         return report;
     }
 
@@ -890,23 +1020,38 @@ RunnerReport run(
     report.validation.source_removed = !post_ids.contains(scenario->candidate_id);
     report.validation.quarantine_present = post_ids.contains(scenario->expected_quarantine_id);
 
-    // Verify quarantine hash matches source
+    // Compare bytes so targets without physical_hash can certify the copy too.
     if (report.validation.quarantine_present) {
         auto q_it = std::ranges::find_if(report.inventory_after.vault_objects, [&](const auto& item) {
             return item.identifier == scenario->expected_quarantine_id;
         });
-        if (q_it != report.inventory_after.vault_objects.end()) {
-            report.validation.quarantine_verified = (q_it->physical_sha256 == scenario->candidate_sha256);
+        const auto source_it = std::ranges::find_if(
+            report.inventory_before.vault_objects, [&](const auto& item) {
+                return item.identifier == scenario->candidate_id;
+            });
+        if (q_it != report.inventory_after.vault_objects.end() &&
+            source_it != report.inventory_before.vault_objects.end() &&
+            q_it->exact_bytes && source_it->exact_bytes) {
+            auto source_hash = crypto::physical::sha256_init();
+            crypto::physical::sha256_update(source_hash, *source_it->exact_bytes);
+            report.validation.quarantine_verified =
+                *q_it->exact_bytes == *source_it->exact_bytes &&
+                crypto::physical::sha256_finish(source_hash) ==
+                    scenario->candidate_sha256;
         }
     }
 
     // Verify quarantine metadata authentication
     auto q_inventory = kasumi::application::history_storage::maintenance_protocol::inventory_quarantine(
         vault_transport, key, options.local_scratch);
-    if (q_inventory && q_inventory->size() == 1) {
-        auto verified_meta = kasumi::application::history_storage::maintenance_protocol::verify_quarantine(
-            vault_transport, q_inventory->front(), options.local_scratch);
-        report.validation.metadata_authenticated = verified_meta.has_value() && *verified_meta;
+    if (q_inventory && !q_inventory->empty()) {
+        report.validation.metadata_authenticated = std::ranges::all_of(
+            *q_inventory, [&](const auto& entry) {
+                auto verified_meta =
+                    kasumi::application::history_storage::maintenance_protocol::verify_quarantine(
+                        vault_transport, entry, options.local_scratch);
+                return verified_meta.has_value() && *verified_meta;
+            });
     }
 
     for (const auto& expected : scenario->expected_post_vault_objects) {
@@ -959,7 +1104,11 @@ RunnerReport run(
     }
 
     report.cleanup = preflight::cleanup_owned_child(
-        child_storage, owner_token, scenario->expected_post_vault_objects, options.local_scratch);
+        child_storage,
+        owner_token,
+        scenario->expected_post_vault_objects,
+        options.local_scratch,
+        options.cleanup_empty_directories);
     if (report.cleanup.result == "removed") {
         report.stage_reached = LiveGcStage::CleanupCompleted;
         report.status = "PASS";

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
@@ -64,6 +65,8 @@ struct ChildStorage {
     transport::Transport storage;
 };
 
+using EmptyDirectoryCleanup = std::function<std::expected<void, std::string>()>;
+
 std::expected<std::string, std::string>
 child_namespace(std::string_view random_hex);
 bool valid_child(std::string_view child) noexcept;
@@ -100,7 +103,8 @@ CleanupResult cleanup_owned_child(
     ChildStorage& child,
     std::string_view owner_token,
     const std::vector<std::string>& object_identifiers,
-    const std::filesystem::path& local_scratch);
+    const std::filesystem::path& local_scratch,
+    const EmptyDirectoryCleanup& cleanup_empty_directories = {});
 
 std::string sanitize_rc_message(std::string message,
                                 std::string_view username,

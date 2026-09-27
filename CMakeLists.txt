@@ -806,6 +806,9 @@ if(KASUMI_BUILD_PROVIDER_CERTIFICATION)
         kasumi_provider_certification
         tests/operational/provider_certification.cpp
         tests/operational/provider_certification_support.cpp
+        tests/operational/gc_live_runner_support.cpp
+        tests/operational/gc_live_preflight_support.cpp
+        tests/operational/remote_copy_smoke_support.cpp
         tests/support/src/provider_scenarios.cpp
         tests/support/src/transport_scenarios.cpp
     )
@@ -824,6 +827,7 @@ if(KASUMI_BUILD_PROVIDER_CERTIFICATION)
         kasumi_platform
         kasumi_crypto
         kasumi_test_support
+        httplib::httplib
         nlohmann_json::nlohmann_json
         kasumi_warnings
     )

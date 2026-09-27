@@ -151,6 +151,7 @@ struct RunnerOptions {
     std::optional<std::array<std::uint8_t, kasumi::crypto::KEY_SIZE>> explicit_key = std::nullopt;
     std::optional<std::string> explicit_child = std::nullopt;
     std::optional<std::string> explicit_owner_token = std::nullopt;
+    preflight::EmptyDirectoryCleanup cleanup_empty_directories;
     using RandomGenerator = std::function<std::optional<std::string>()>;
     std::optional<RandomGenerator> random_generator = std::nullopt;
 };

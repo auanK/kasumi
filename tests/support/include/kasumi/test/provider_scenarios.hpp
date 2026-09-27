@@ -22,6 +22,19 @@ struct TransportRoundTripObservation {
     std::vector<std::string> diagnostics;
 };
 
+struct SyncScenarioClient {
+    std::string profile;
+    std::filesystem::path local_root;
+    application::ExecutionEnvironment environment;
+};
+
+struct TwoClientSyncScenario {
+    std::string remote_locator;
+    std::filesystem::path scratch_root;
+    SyncScenarioClient a;
+    SyncScenarioClient b;
+};
+
 TransportRoundTripObservation
 transport_round_trip(transport::Transport& storage,
                      const std::filesystem::path& scratch_root);
@@ -45,6 +58,13 @@ materialize_files(const application::ExecutionEnvironment& environment,
 std::expected<bool, std::string>
 no_op_sync(const application::ExecutionEnvironment& environment,
            std::string_view profile);
+
+std::expected<void, std::string>
+bidirectional_update(const TwoClientSyncScenario& scenario);
+std::expected<void, std::string>
+logical_delete(const TwoClientSyncScenario& scenario);
+std::expected<void, std::string>
+two_client_conflict(const TwoClientSyncScenario& scenario);
 
 } // namespace kasumi::test::scenarios
 

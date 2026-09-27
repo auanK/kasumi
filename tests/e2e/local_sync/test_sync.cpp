@@ -100,6 +100,24 @@ Client make_client(Scenario& scenario, std::string name) {
     return result;
 }
 
+kasumi::test::scenarios::TwoClientSyncScenario
+shared_scenario(Scenario& scenario,
+                const Client& a,
+                const Client& b,
+                std::string_view name) {
+    return {
+        .remote_locator = kasumi::platform::path::to_utf8(std::get<1>(scenario)),
+        .scratch_root = kasumi::test::workspace_path(
+            std::get<0>(scenario), "shared-scenarios/" + std::string{name}),
+        .a = {.profile = client_name(a),
+              .local_root = client_local_dir(a),
+              .environment = client_environment(a)},
+        .b = {.profile = client_name(b),
+              .local_root = client_local_dir(b),
+              .environment = client_environment(b)},
+    };
+}
+
 std::expected<void, std::string> sync(const Client& client) {
     return kasumi::test::scenarios::sync(client_environment(client),
                                          client_name(client));
@@ -497,73 +515,24 @@ TEST(H3LocalSyncTest, CreatesSubtreesAndEmptyDirectoriesInBothDirections) {
     expect_fixed_point(scenario, b);
 }
 
-TEST(H3LocalSyncTest, ModifiesFilesAndAppliesCreateModifyDeleteTogether) {
+TEST(H3LocalSyncTest, BidirectionalUpdatesConverge) {
     auto scenario = make_scenario();
     const auto a = make_client(scenario, "a");
     const auto b = make_client(scenario, "b");
-
-    kasumi::test::write_text(client_local_dir(a) / "alpha.txt", "A1");
-    kasumi::test::write_text(client_local_dir(a) / "beta.txt", "B1");
-    kasumi::test::write_text(client_local_dir(a) / "old.txt", "old");
-    kasumi::test::write_text(client_local_dir(a) / "keep.txt", "keep");
-    ASSERT_TRUE(sync(a));
-    ASSERT_TRUE(sync(b));
-
-    kasumi::test::write_text(client_local_dir(a) / "alpha.txt", "A2");
-    kasumi::test::write_text(client_local_dir(a) / "beta.txt", "B2");
-    ASSERT_TRUE(sync(a));
-    ASSERT_TRUE(sync(b));
-    expect_file(b, "alpha.txt", "A2");
-    expect_file(b, "beta.txt", "B2");
-
-    kasumi::test::write_text(client_local_dir(b) / "alpha.txt", "A3");
-    remove_file(b, "old.txt");
-    kasumi::test::write_text(client_local_dir(b) / "gamma.txt", "G1");
-    ASSERT_TRUE(sync(b));
-    ASSERT_TRUE(sync(a));
-    expect_file(a, "alpha.txt", "A3");
-    expect_file(a, "beta.txt", "B2");
-    expect_absent(a, "old.txt");
-    expect_file(a, "gamma.txt", "G1");
-    expect_file(a, "keep.txt", "keep");
-    expect_converged(scenario, {&a, &b});
-    expect_fixed_point(scenario, a);
+    const auto result = kasumi::test::scenarios::bidirectional_update(
+        shared_scenario(scenario, a, b, "bidirectional-update"));
+    ASSERT_TRUE(result.has_value()) << result.error();
 }
 
 TEST(H3LocalSyncTest, DeletesRootFilesAndPreservesAnEmptyRoot) {
     auto scenario = make_scenario();
     const auto a = make_client(scenario, "a");
     const auto b = make_client(scenario, "b");
-
-    for (const auto& [path, contents] : {std::pair{"alpha.txt", "alpha"},
-                                         std::pair{"beta.txt", "beta"},
-                                         std::pair{"gamma.txt", "gamma"},
-                                         std::pair{"keep.txt", "keep"}}) {
-        kasumi::test::write_text(client_local_dir(a) / path, contents);
-    }
-    ASSERT_TRUE(sync(a));
-    ASSERT_TRUE(sync(b));
-
-    remove_file(b, "alpha.txt");
-    remove_file(b, "beta.txt");
-    ASSERT_TRUE(sync(b));
-    auto observed_remote = remote(scenario);
-    ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
-    expect_remote_absent(*observed_remote, "alpha.txt");
-    expect_remote_absent(*observed_remote, "beta.txt");
-    ASSERT_TRUE(sync(a));
-    expect_absent(a, "alpha.txt");
-    expect_absent(a, "beta.txt");
-    expect_file(a, "keep.txt", "keep");
-
-    remove_file(b, "gamma.txt");
-    remove_file(b, "keep.txt");
-    ASSERT_TRUE(sync(b));
-    ASSERT_TRUE(sync(a));
+    const auto result = kasumi::test::scenarios::logical_delete(
+        shared_scenario(scenario, a, b, "logical-delete"));
+    ASSERT_TRUE(result.has_value()) << result.error();
     EXPECT_TRUE(std::filesystem::is_directory(client_local_dir(a)));
     EXPECT_TRUE(std::filesystem::is_directory(client_local_dir(b)));
-    expect_converged(scenario, {&a, &b});
-    expect_fixed_point(scenario, a);
 }
 
 TEST(H3LocalSyncTest, DeletesEmptyNestedDeepAndMixedDirectories) {
@@ -882,35 +851,9 @@ TEST(H3LocalSyncTest, SameFileModifyModifyPreservesBothVersions) {
     auto scenario = make_scenario();
     const auto a = make_client(scenario, "a");
     const auto b = make_client(scenario, "b");
-
-    kasumi::test::write_text(client_local_dir(a) / "file.txt", "BASE");
-    ASSERT_TRUE(sync(a));
-    ASSERT_TRUE(sync(b));
-
-    kasumi::test::write_text(client_local_dir(a) / "file.txt", "A-V2");
-    kasumi::test::write_text(client_local_dir(b) / "file.txt", "B-V2");
-    const auto base_time = std::filesystem::file_time_type::clock::now();
-    set_mtime(a, "file.txt", base_time + std::chrono::hours{2});
-    set_mtime(b, "file.txt", base_time + std::chrono::hours{1});
-
-    ASSERT_TRUE(sync(a)); // A publica A-V2.
-    ASSERT_TRUE(sync(b)); // B publica o merge com o artefato de conflito.
-    ASSERT_TRUE(sync(a)); // A consome a nova head de B.
-
-    expect_file(a, "file.txt", "A-V2");
-    expect_file(b, "file.txt", "A-V2");
-    expect_file(a, "file.txt.kasumiconflict_local", "B-V2");
-    expect_file(b, "file.txt.kasumiconflict_local", "B-V2");
-    expect_absent(a, "file.txt.kasumiconflict_remote");
-    expect_absent(b, "file.txt.kasumiconflict_remote");
-    auto observed_remote = remote(scenario);
-    ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
-    expect_remote_present(*observed_remote, "file.txt");
-    expect_remote_present(*observed_remote, "file.txt.kasumiconflict_local");
-
-    expect_converged(scenario, {&a, &b});
-    expect_fixed_point(scenario, a);
-    expect_fixed_point(scenario, b);
+    const auto result = kasumi::test::scenarios::two_client_conflict(
+        shared_scenario(scenario, a, b, "two-client-conflict"));
+    ASSERT_TRUE(result.has_value()) << result.error();
 }
 
 TEST(H3LocalSyncTest, IndependentFileChangesConvergeWithoutFalseConflict) {

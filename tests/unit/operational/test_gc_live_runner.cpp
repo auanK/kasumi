@@ -269,7 +269,7 @@ TEST(GcLiveRunnerHappyPathTest, FullExecutionSucceedsWithRealGcAndPhase3Metrics)
 
     const auto report = runner::run(options, &parent, &child);
 
-    EXPECT_EQ(report.status, "PASS");
+    EXPECT_EQ(report.status, "PASS") << runner::to_json(report).dump(2);
     EXPECT_EQ(report.stage_reached, runner::LiveGcStage::CleanupCompleted);
     EXPECT_EQ(report.gc.called, true);
     EXPECT_EQ(report.gc.call_count, 1U);
@@ -288,12 +288,12 @@ TEST(GcLiveRunnerHappyPathTest, FullExecutionSucceedsWithRealGcAndPhase3Metrics)
     EXPECT_EQ(report.validation.unexpected_removed, 0U);
     EXPECT_EQ(report.validation.unexpected_created, 0U);
 
-    // Metrics for 1 candidate
-    EXPECT_EQ(report.metrics.verified_copy_source_physical_hash, 1U);
-    EXPECT_EQ(report.metrics.verified_copy_native_copy, 1U);
-    EXPECT_EQ(report.metrics.verified_copy_native_copy_successes, 1U);
-    EXPECT_EQ(report.metrics.verified_copy_destination_physical_hash, 1U);
-    EXPECT_EQ(report.metrics.verified_copy_native_copy_verifications, 1U);
+    // One fixture restore and one orphan quarantine copy.
+    EXPECT_EQ(report.metrics.verified_copy_source_physical_hash, 2U);
+    EXPECT_EQ(report.metrics.verified_copy_native_copy, 2U);
+    EXPECT_EQ(report.metrics.verified_copy_native_copy_successes, 2U);
+    EXPECT_EQ(report.metrics.verified_copy_destination_physical_hash, 2U);
+    EXPECT_EQ(report.metrics.verified_copy_native_copy_verifications, 2U);
     EXPECT_EQ(report.metrics.gc_candidate_verified_copy, 1U);
     EXPECT_EQ(report.metrics.gc_candidate_metadata_publish, 1U);
     EXPECT_EQ(report.metrics.gc_candidate_pre_remove_barrier_verification, 1U);
@@ -408,9 +408,14 @@ TEST(GcLiveRunnerFailureTest, GcFailurePreservesEvidenceByDefault) {
     EXPECT_EQ(report.gc.called, true);
     EXPECT_EQ(report.gc.call_count, 1U);
     EXPECT_EQ(report.cleanup.result, "preserved");
-    // All objects including owner marker remain untouched
+    // The fixture deliberately hides reachable content before GC to exercise
+    // restore. A failed GC preserves that fixture and its ownership evidence.
     EXPECT_TRUE(harness.child_state->objects.contains("owner.marker"));
-    EXPECT_TRUE(harness.child_state->objects.contains(report.scenario.reachable_identifier));
+    EXPECT_FALSE(harness.child_state->objects.contains(report.scenario.reachable_identifier));
+    for (const auto& item : report.inventory_before.vault_objects) {
+        EXPECT_TRUE(harness.child_state->objects.contains(item.identifier))
+            << item.identifier;
+    }
     EXPECT_TRUE(harness.child_state->objects.contains(report.scenario.candidate_identifier));
 }
 
@@ -1087,11 +1092,12 @@ TEST(GcLiveRunnerNativeTest, NativeCopyRemainsFunctional) {
     EXPECT_EQ(report.gc.call_count, 1U);
     EXPECT_EQ(report.gc.result, "SUCCESS");
 
-    // Proves native copy was attempted, succeeded, and verified:
-    EXPECT_EQ(report.metrics.verified_copy_native_copy, 1U);
-    EXPECT_EQ(report.metrics.verified_copy_native_copy_successes, 1U);
-    EXPECT_EQ(report.metrics.verified_copy_native_copy_verifications, 1U);
-    EXPECT_EQ(copy_call_count, 1U);
+    // The measured verified copies are fixture seeding and reachable restore;
+    // orphan quarantine uses the batch copy path.
+    EXPECT_EQ(report.metrics.verified_copy_native_copy, 2U);
+    EXPECT_EQ(report.metrics.verified_copy_native_copy_successes, 2U);
+    EXPECT_EQ(report.metrics.verified_copy_native_copy_verifications, 2U);
+    EXPECT_EQ(copy_call_count, 3U);
     EXPECT_EQ(report.cleanup.result, "removed");
 }
 

@@ -447,7 +447,8 @@ CleanupResult cleanup_owned_child(
     ChildStorage& child,
     std::string_view owner_token,
     const std::vector<std::string>& object_identifiers,
-    const std::filesystem::path& local_scratch) {
+    const std::filesystem::path& local_scratch,
+    const EmptyDirectoryCleanup& cleanup_empty_directories) {
     std::error_code fs_error;
     const auto scratch_status =
         std::filesystem::symlink_status(local_scratch, fs_error);
@@ -511,6 +512,55 @@ CleanupResult cleanup_owned_child(
         }
         result.removed_objects +=
             *removed == transport::Removal::Removed ? 1U : 0U;
+    }
+    auto remaining = transport::list(child.storage);
+    if (!remaining ||
+        *remaining != std::vector<std::string>{std::string{owner_identifier}}) {
+        return CleanupResult{
+            .result = "refused",
+            .detail = "unexpected child residue retains owner marker",
+            .removed_objects = result.removed_objects,
+            .error_category = remaining
+                                 ? std::nullopt
+                                 : std::optional{remaining.error().code},
+        };
+    }
+    if (cleanup_empty_directories) {
+        const auto directories_removed = cleanup_empty_directories();
+        if (!directories_removed) {
+            return CleanupResult{
+                .result = "failed",
+                .detail = "could not safely remove owned empty directories: " +
+                          directories_removed.error(),
+                .removed_objects = result.removed_objects,
+            };
+        }
+        remaining = transport::list(child.storage);
+        if (!remaining ||
+            *remaining !=
+                std::vector<std::string>{std::string{owner_identifier}}) {
+            return CleanupResult{
+                .result = "refused",
+                .detail = "child changed during owned directory cleanup",
+                .removed_objects = result.removed_objects,
+                .error_category = remaining
+                                     ? std::nullopt
+                                     : std::optional{remaining.error().code},
+            };
+        }
+    }
+    auto marker_rechecked = transport::get(child.storage,
+                                           owner_identifier,
+                                           marker_path);
+    const auto rechecked_bytes = marker_rechecked
+                                     ? read_text(marker_path)
+                                     : std::nullopt;
+    fs_error.clear();
+    const bool check_file_removed =
+        std::filesystem::remove(marker_path, fs_error);
+    if (fs_error || !check_file_removed || !rechecked_bytes ||
+        *rechecked_bytes != owner_token) {
+        return refused("ownership marker changed during owned cleanup");
     }
     const auto marker_removed = transport::remove(child.storage, owner_identifier);
     if (!marker_removed) {
