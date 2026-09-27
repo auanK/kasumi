@@ -147,8 +147,9 @@ struct Result {
     // Target pending rows to persist with the accepted base.
     std::vector<NodeRow> pending_materializations;
 
-    // Missing remote paths without a compatible local source.
-    std::vector<std::filesystem::path> unrecoverable_paths;
+    // Pending remote paths without a compatible local source.
+    std::vector<std::filesystem::path>
+        missing_content_paths_without_local_source;
 
     // Remote generation used in computation.
     std::uint64_t observed_storage_generation = 0;

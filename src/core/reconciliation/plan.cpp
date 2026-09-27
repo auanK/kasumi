@@ -293,7 +293,8 @@ void collect_pending_rows(const Snapshot& storage_tree,
                           const HashSet& missing_objects,
                           const LocalSources& local_sources,
                           std::vector<NodeRow>& pending,
-                          std::vector<std::filesystem::path>& unrecoverable) {
+                          std::vector<std::filesystem::path>&
+                              pending_without_local_source) {
     for (const auto& row : storage_tree.rows) {
         if (row.is_directory) {
             continue;
@@ -306,11 +307,12 @@ void collect_pending_rows(const Snapshot& storage_tree,
         pending.push_back(row);
 
         if (!local_sources.contains(row.hash)) {
-            unrecoverable.push_back(platform::path::from_utf8(row.path));
+            pending_without_local_source.push_back(
+                platform::path::from_utf8(row.path));
         }
     }
 
-    std::ranges::sort(unrecoverable, {}, [](const auto& path) {
+    std::ranges::sort(pending_without_local_source, {}, [](const auto& path) {
         return platform::path::to_logical_utf8(path);
     });
 }
@@ -765,13 +767,13 @@ ReconcileResult reconcile(const Input& input) {
 
     std::vector<NodeRow> pending_storage_rows;
 
-    std::vector<std::filesystem::path> unrecoverable_paths;
+    std::vector<std::filesystem::path> pending_without_local_source;
 
     collect_pending_rows(effective_storage_tree,
                          missing_objects,
                          local_sources,
                          pending_storage_rows,
-                         unrecoverable_paths);
+                         pending_without_local_source);
 
     auto logical_local = logical_local_view(input);
     auto operations = diff::compare_trees(logical_local,
@@ -879,7 +881,8 @@ ReconcileResult reconcile(const Input& input) {
         .missing_objects = std::move(missing_objects),
         .pending_storage_rows = std::move(pending_storage_rows),
         .pending_materializations = std::move(pending_materializations),
-        .unrecoverable_paths = std::move(unrecoverable_paths),
+        .missing_content_paths_without_local_source =
+            std::move(pending_without_local_source),
         .observed_storage_generation = observed_storage_generation,
         .target_generation = target_generation,
         .recovering_missing_history = !input.storage.history_present,

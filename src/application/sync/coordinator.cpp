@@ -1115,7 +1115,8 @@ bool same_result(const reconciliation::Result& left,
            same_rows(left.pending_storage_rows, right.pending_storage_rows) &&
            same_rows(left.pending_materializations,
                      right.pending_materializations) &&
-           left.unrecoverable_paths == right.unrecoverable_paths &&
+           left.missing_content_paths_without_local_source ==
+               right.missing_content_paths_without_local_source &&
            left.observed_storage_generation ==
                right.observed_storage_generation &&
            left.target_generation == right.target_generation &&

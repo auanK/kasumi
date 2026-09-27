@@ -4195,7 +4195,7 @@ TEST(SyncCoordinatorTest, RejectsInvalidCompositionRootInput) {
         .plan = kasumi::make_sync_plan({}, 1),
         .missing_objects = kasumi::HashSet{0, kasumi::hash_key},
         .pending_storage_rows = {},
-        .unrecoverable_paths = {},
+        .missing_content_paths_without_local_source = {},
         .observed_storage_generation = 0,
         .target_generation = 1,
         .recovering_missing_history = false,
@@ -6652,7 +6652,8 @@ TEST(ReconciliationTest, UnicodeMissingObjectPathsPreserveRecoverySources) {
     const auto repaired = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(repaired.has_value()) << repaired.error().detail;
     EXPECT_TRUE(repaired->requires_storage_repair);
-    EXPECT_TRUE(repaired->unrecoverable_paths.empty());
+    EXPECT_TRUE(
+        repaired->missing_content_paths_without_local_source.empty());
     const auto uploads =
         kasumi::sync_plan_phase(repaired->plan, kasumi::Action::Upload);
     ASSERT_EQ(uploads.size(), 1U);
@@ -6667,8 +6668,8 @@ TEST(ReconciliationTest, UnicodeMissingObjectPathsPreserveRecoverySources) {
     kasumi::finalize_snapshot(input.local_tree);
     const auto pending = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(pending.has_value()) << pending.error().detail;
-    ASSERT_EQ(pending->unrecoverable_paths.size(), 1U);
-    EXPECT_EQ(pending->unrecoverable_paths.front(),
+    ASSERT_EQ(pending->missing_content_paths_without_local_source.size(), 1U);
+    EXPECT_EQ(pending->missing_content_paths_without_local_source.front(),
               kasumi::platform::path::from_utf8(missing_path));
     ASSERT_EQ(pending->pending_storage_rows.size(), 1U);
     EXPECT_EQ(pending->pending_storage_rows.front().path, missing_path);
@@ -7648,9 +7649,10 @@ TEST(SyncCoordinatorTest, CompositionMismatchMatrixHasNoSideEffects) {
              value.pending_storage_rows.push_back(
                  kasumi::NodeRow{.path = "pending", .is_directory = false});
          }},
-        {"unrecoverable paths",
+        {"pending paths without local source",
          [](auto& value) {
-             value.unrecoverable_paths.emplace_back("unrecoverable");
+             value.missing_content_paths_without_local_source.emplace_back(
+                 "pending");
          }},
         {"offsets",
          [](auto& value) {

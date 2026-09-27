@@ -106,27 +106,6 @@ std::string describe_reconciliation_error(const reconciliation::Error& error) {
     return detail;
 }
 
-std::string
-describe_unrecoverable_paths(std::span<const std::filesystem::path> paths) {
-    constexpr std::size_t path_limit = 20;
-    const auto displayed = std::min(paths.size(), path_limit);
-    std::string detail =
-        "remote objects missing without recoverable local source (paths: ";
-    for (std::size_t index = 0; index < displayed; ++index) {
-        if (index != 0) {
-            detail += ", ";
-        }
-        detail += platform::path::to_utf8(paths[index]);
-    }
-    if (paths.size() > path_limit) {
-        detail += "; and ";
-        detail += std::to_string(paths.size() - path_limit);
-        detail += " more";
-    }
-    detail += ')';
-    return detail;
-}
-
 std::expected<Response, Error> run_plan(OperationContext& context) {
     if (context.on_progress) {
         context.on_progress(SyncProgress{
