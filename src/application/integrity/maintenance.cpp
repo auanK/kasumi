@@ -1145,7 +1145,10 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
             const auto vault_identity = determine_vault_identity(storage_state);
             std::optional<FsckCheckpoint> loaded_checkpoint;
             if (!profile_dir.empty() && !vault_identity.empty()) {
+                const auto checkpoint_load_trace = platform::perf_trace::begin();
                 auto loaded = load_checkpoint(profile_dir, key);
+                platform::perf_trace::finish("fsck.checkpoint_load_wall_us",
+                                             checkpoint_load_trace);
                 if (loaded && loaded->has_value()) {
                     if ((*loaded)->header.vault_id != vault_identity) {
                         platform::perf_trace::count("fsck.checkpoint_vault_mismatch");

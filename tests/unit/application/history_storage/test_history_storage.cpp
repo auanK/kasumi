@@ -57,6 +57,7 @@ struct HistoryReadGates {
     std::atomic_bool fail_marker{false};
 
     std::mutex mutex;
+    std::mutex fake_state_mutex;
     std::condition_variable cv;
 
     void update_peak(std::size_t active) {
@@ -90,6 +91,10 @@ gated_fake_get_batch(void* context, const kasumi::transport::GetBatch& batch) {
                 .message = "injected batch failure",
             });
         }
+    }
+    if (active_gates) {
+        std::scoped_lock lock(active_gates->fake_state_mutex);
+        return fake_get_batch(context, batch);
     }
     return fake_get_batch(context, batch);
 }
@@ -138,6 +143,10 @@ gated_fake_get(void* context,
                 });
             }
         }
+    }
+    if (active_gates) {
+        std::scoped_lock lock(active_gates->fake_state_mutex);
+        return fake_get(context, identifier, destination);
     }
     return fake_get(context, identifier, destination);
 }

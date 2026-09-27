@@ -20,6 +20,14 @@ std::mutex metrics_mutex;
 std::map<std::string, Metric> metrics;
 bool forced_enable_state = false;
 
+bool live_progress_enabled() noexcept {
+    static const bool value = [] {
+        const char* setting = std::getenv("KASUMI_PERF_TRACE_LIVE");
+        return setting != nullptr && std::string_view{setting} == "1";
+    }();
+    return value;
+}
+
 } // namespace
 
 bool enabled() noexcept {
@@ -66,10 +74,25 @@ void finish(std::string_view name, Token token) noexcept {
 void count(std::string_view name, std::uint64_t amount) noexcept {
     if (!enabled() || name.empty())
         return;
+    const bool live_progress =
+        name == "fsck.audit_completion_count" ||
+        name == "fsck.checkpoint_durable_writes";
+    std::uint64_t calls = 0;
     try {
         std::lock_guard lock(metrics_mutex);
-        metrics[std::string{name}].calls += amount;
+        auto& metric = metrics[std::string{name}];
+        metric.calls += amount;
+        calls = metric.calls;
     } catch (...) {
+        return;
+    }
+    if (live_progress && live_progress_enabled()) {
+        std::fprintf(stderr,
+                     "KASUMI_PERF_LIVE name=%.*s calls=%llu\n",
+                     static_cast<int>(name.size()),
+                     name.data(),
+                     static_cast<unsigned long long>(calls));
+        std::fflush(stderr);
     }
 }
 

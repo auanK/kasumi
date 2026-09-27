@@ -19,13 +19,13 @@ def log(msg: str):
     print(f"[{time.strftime('%X')}] {msg}", flush=True)
 
 
-def run_cmd(cmd, env=None, cwd=None, check=True):
+def run_cmd(cmd, env=None, cwd=None, check=True, capture_output=True):
     started = time.perf_counter()
     res = subprocess.run(
         [str(c) for c in cmd],
         env=env,
         cwd=cwd,
-        capture_output=True,
+        capture_output=capture_output,
         text=True,
         check=False,
     )
@@ -85,19 +85,36 @@ def setup_environment(base_dir: Path, local_dir: Path, remote_dir: str, rclone_c
     return env
 
 
-def generate_unique_files(target_dir: Path, count: int, size_bytes: int):
+def parse_size_buckets(value: str | None, count: int):
+    if value is None:
+        return None
+    sizes = []
+    for bucket in value.split(","):
+        bucket_count, size_bytes = map(int, bucket.split(":", 1))
+        if bucket_count <= 0 or size_bytes <= 0:
+            raise ValueError("size buckets must use positive count:bytes pairs")
+        sizes.extend([size_bytes] * bucket_count)
+    if len(sizes) != count:
+        raise ValueError(f"size buckets describe {len(sizes)} files, expected {count}")
+    return sizes
+
+
+def generate_unique_files(target_dir: Path, count: int, size_bytes: int, sizes=None):
     target_dir.mkdir(parents=True, exist_ok=True)
     total_bytes = 0
+    distribution = {}
     for i in range(count):
+        current_size = sizes[i] if sizes is not None else size_bytes
         file_path = target_dir / f"file_{i:04d}.bin"
         prefix = f"kasumi_fsck_unique_payload_{i:04d}_{uuid.uuid4().hex}_".encode("ascii")
-        if size_bytes <= len(prefix):
-            data = prefix[:size_bytes]
+        if current_size <= len(prefix):
+            data = prefix[:current_size]
         else:
-            data = prefix + os.urandom(size_bytes - len(prefix))
+            data = prefix + os.urandom(current_size - len(prefix))
         file_path.write_bytes(data)
         total_bytes += len(data)
-    return total_bytes
+        distribution[current_size] = distribution.get(current_size, 0) + 1
+    return total_bytes, distribution
 
 
 def parse_perf_trace(stderr_text: str):
@@ -121,6 +138,7 @@ def parse_perf_trace(stderr_text: str):
 def classify_objects(file_paths_and_sizes):
     total_bytes = sum(size for _, size in file_paths_and_sizes)
     content_objects = 0
+    content_ciphertext_bytes = 0
     commit_count = 0
     head_count = 0
     epoch_count = 0
@@ -131,6 +149,7 @@ def classify_objects(file_paths_and_sizes):
         path = path.replace("\\", "/")
         if "/" not in path and len(path) == 64 and all(c in hex_chars for c in path):
             content_objects += 1
+            content_ciphertext_bytes += size
         else:
             name = path.split("/")[-1]
             if len(name) == 85 and name[20] == "-":
@@ -145,6 +164,7 @@ def classify_objects(file_paths_and_sizes):
         "remote_object_count": len(file_paths_and_sizes),
         "remote_bytes": total_bytes,
         "content_object_count": content_objects,
+        "content_ciphertext_bytes": content_ciphertext_bytes,
         "commit_count": commit_count,
         "head_count": head_count,
         "epoch_count": epoch_count,
@@ -160,6 +180,7 @@ def inspect_remote(remote: str, is_local: bool, env: dict):
                 "remote_object_count": 0,
                 "remote_bytes": 0,
                 "content_object_count": 0,
+                "content_ciphertext_bytes": 0,
                 "commit_count": 0,
                 "head_count": 0,
                 "epoch_count": 0,
@@ -200,6 +221,7 @@ def main():
     parser.add_argument("--files", type=int, default=10, help="Number of files (F)")
     parser.add_argument("--history-commits", type=int, default=1, help="Reachable history commit count (H)")
     parser.add_argument("--file-size", type=int, default=4096, help="File size in bytes")
+    parser.add_argument("--size-buckets", help="Comma-separated count:bytes buckets, e.g. 800:4096,180:1048576,20:16777216")
     parser.add_argument("--concurrency", type=int, default=8, help="Content concurrency setting (C)")
     parser.add_argument("--scenario", default="profile", help="Scenario label (e.g. O1, O5, O10, F25)")
     parser.add_argument("--output", help="Output JSON path")
@@ -207,6 +229,10 @@ def main():
     parser.add_argument("--rclone-config", help="Explicit path to rclone.conf")
     parser.add_argument("--skip-cleanup", action="store_true", help="Skip post-run cleanup")
     args = parser.parse_args()
+    try:
+        sizes = parse_size_buckets(args.size_buckets, args.files)
+    except (TypeError, ValueError) as error:
+        parser.error(str(error))
 
     kasumi_bin = Path(args.kasumi).resolve()
     if not kasumi_bin.exists():
@@ -235,18 +261,24 @@ def main():
             Path(args.remote).mkdir(parents=True, exist_ok=True)
 
         # Step 1: Generate unique files
-        print(f"[{time.strftime('%X')}] Generating {args.files} unique files of {args.file_size} bytes...")
-        plaintext_bytes = generate_unique_files(local_dir, args.files, args.file_size)
+        print(f"[{time.strftime('%X')}] Generating {args.files} unique files...")
+        generation_started = time.perf_counter()
+        plaintext_bytes, file_size_distribution = generate_unique_files(
+            local_dir, args.files, args.file_size, sizes
+        )
+        fixture_generation_wall_seconds = time.perf_counter() - generation_started
 
         # Prepare alternate payload for file_0000 to oscillate and create valid historical commits
         file_0 = local_dir / "file_0000.bin"
         content_a = file_0.read_bytes()
         prefix_b = f"kasumi_fsck_unique_payload_0000_b_{uuid.uuid4().hex}_".encode("ascii")
-        content_b = prefix_b + (os.urandom(args.file_size - len(prefix_b)) if args.file_size > len(prefix_b) else b"")
-        content_b = content_b[:args.file_size]
+        file_0_size = len(content_a)
+        content_b = prefix_b + (os.urandom(file_0_size - len(prefix_b)) if file_0_size > len(prefix_b) else b"")
+        content_b = content_b[:file_0_size]
 
         # Step 2: Setup sync iterations (history depth)
         total_sync_wall_seconds = 0.0
+        setup_sync_metrics = {}
         for h in range(1, args.history_commits + 1):
             if h > 1:
                 # Alternate content of file_0000 to trigger a new valid commit with full protocol sync
@@ -257,6 +289,11 @@ def main():
                 [kasumi_bin, "sync", "test_audit"], env=env, cwd=local_dir, check=True
             )
             total_sync_wall_seconds += sync_wall_seconds
+            sync_metrics, _ = parse_perf_trace(sync_err)
+            for name, metric in sync_metrics.items():
+                total = setup_sync_metrics.setdefault(name, {"calls": 0, "total_us": 0})
+                total["calls"] += metric["calls"]
+                total["total_us"] += metric["total_us"]
             print(f"[{time.strftime('%X')}] Setup sync {h} completed in {sync_wall_seconds:.3f}s")
 
         # Step 3: Fixture validation
@@ -274,20 +311,28 @@ def main():
 
         # Step 4: Official FSCK measurement
         print(f"\n[{time.strftime('%X')}] === OFFICIAL FSCK MEASUREMENT ({args.scenario}) ===")
+        live_trace = env.get("KASUMI_PERF_TRACE_LIVE") == "1"
         fsck_wall_seconds, fsck_code, fsck_out, fsck_err = run_cmd(
-            [kasumi_bin, "fsck", "test_audit"], env=env, cwd=local_dir, check=True
+            [kasumi_bin, "fsck", "test_audit"], env=env, cwd=local_dir, check=True,
+            capture_output=not live_trace,
         )
         print(f"[{time.strftime('%X')}] FSCK completed in {fsck_wall_seconds:.3f}s (code {fsck_code})")
 
         # Step 5: Collect metrics
-        metrics, outcome = parse_perf_trace(fsck_err)
+        metrics, outcome = parse_perf_trace(fsck_err or "")
 
         # Helper to extract metrics
         def get_m(name):
             return metrics.get(name, {"calls": 0, "total_us": 0})
 
+        profile_dir = work_dir / "appdata" / "kasumi" / "profiles" / "test_audit"
+        checkpoint_file = profile_dir / "fsck_checkpoint.bin.enc"
+        checkpoint_file_bytes = checkpoint_file.stat().st_size if checkpoint_file.is_file() else 0
+        checkpoint_temp_files = len(list(profile_dir.glob("fsck_checkpoint.bin.enc.*.new")))
+        checkpoint_verified_entries = get_m("fsck.checkpoint_verified_entries_recorded")["calls"]
         result_data = {
             "scenario": args.scenario,
+            "remote": args.remote,
             "F": args.files,
             "H": args.history_commits,
             "actual_reachable_commits": get_m("history.reachable_commits")["calls"] or args.history_commits,
@@ -295,18 +340,27 @@ def main():
             "anchors_used": get_m("history.anchors_used")["calls"],
             "C": args.concurrency,
             "file_size": args.file_size,
+            "file_size_distribution": {str(size): count for size, count in sorted(file_size_distribution.items())},
             "plaintext_bytes": plaintext_bytes,
             "configured_concurrency": get_m("fsck.audit_configured_concurrency")["calls"] or args.concurrency,
             "effective_worker_count": get_m("fsck.audit_worker_count")["calls"],
             "peak_in_flight": get_m("fsck.audit_peak_in_flight")["calls"],
             "completion_count": get_m("fsck.audit_completion_count")["calls"],
             "physical_content_count": remote_info["content_object_count"],
+            "logical_unique_content_hashes": get_m("content.referenced_ids")["calls"],
             "remote_object_count": remote_info["remote_object_count"],
             "remote_bytes": remote_info["remote_bytes"],
+            "content_ciphertext_bytes": remote_info["content_ciphertext_bytes"],
             "commit_count": remote_info["commit_count"],
             "head_count": remote_info["head_count"],
             "epoch_count": remote_info["epoch_count"],
+            "checkpoint_file_bytes": checkpoint_file_bytes,
+            "checkpoint_verified_entries": checkpoint_verified_entries,
+            "checkpoint_bytes_per_verified_entry": checkpoint_file_bytes / checkpoint_verified_entries if checkpoint_verified_entries else None,
+            "checkpoint_temp_files": checkpoint_temp_files,
+            "fixture_generation_wall_seconds": fixture_generation_wall_seconds,
             "setup_sync_wall_seconds": total_sync_wall_seconds,
+            "setup_sync_perf_metrics": setup_sync_metrics,
             "fsck_wall_seconds": fsck_wall_seconds,
             "outcome": outcome,
             "checked_objects": get_m("fsck.audit_objects")["calls"],
@@ -384,17 +438,21 @@ def main():
             },
             "payload_audit": {
                 "checked_objects": get_m("fsck.audit_objects")["calls"],
+                "content_get_calls": get_m("fsck.audit_get_calls")["calls"],
+                "decrypt_auth_calls": get_m("fsck.audit_decrypt_calls")["calls"],
+                "content_verify_calls": get_m("fsck.audit_verify_calls")["calls"],
                 "concurrency": args.concurrency,
                 "worker_count": get_m("fsck.audit_worker_count")["calls"],
                 "peak_in_flight": get_m("fsck.audit_peak_in_flight")["calls"],
                 "referenced_audit_wall_us": get_m("fsck.referenced_audit_duration_us")["total_us"],
-                "accumulated_get_us": get_m("fsck.referenced_get_duration_us")["total_us"],
-                "accumulated_aead_us": get_m("fsck.referenced_aead_duration_us")["total_us"],
-                "accumulated_blake3_us": get_m("fsck.referenced_blake3_duration_us")["total_us"],
-                "downloaded_bytes": get_m("fsck.referenced_content_bytes_downloaded")["calls"],
+                "accumulated_get_us": get_m("fsck.audit_get_duration_us")["total_us"],
+                "accumulated_aead_us": get_m("fsck.audit_decrypt_duration_us")["total_us"],
+                "accumulated_blake3_us": get_m("fsck.audit_verify_duration_us")["total_us"],
+                "downloaded_bytes": get_m("fsck.encrypted_bytes_downloaded")["calls"],
             },
             "retry_count": get_m("rclone.retry_count")["calls"] + get_m("RC idempotent read retries")["calls"],
             "rate_limit_count": get_m("rclone.rate_limit_count")["calls"],
+            "physical_hash_calls": get_m("fsck.resume_physical_hash_checks")["calls"],
             "unexpected_transport_errors": get_m("rclone.unexpected_transport_errors")["calls"] + get_m("rc.http_requests_failed")["calls"],
             "all_perf_metrics": metrics,
         }
