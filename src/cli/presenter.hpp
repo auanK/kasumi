@@ -7,9 +7,15 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace kasumi::cli {
+
+struct FsckProgressDisplayState {
+    std::optional<application::FsckStage> last_stage;
+    std::optional<unsigned> last_object_percent;
+};
 
 // Formats a byte count into a human-readable representation.
 std::string format_size(std::uint64_t bytes);
@@ -27,6 +33,10 @@ void present(const application::SyncProgress& progress,
 
 // Displays a garbage collection progress event.
 void present(const application::GarbageCollectProgress& progress);
+
+// Displays an FSCK stage and throttled unique-object progress.
+void present(const application::FsckProgress& progress,
+             FsckProgressDisplayState& state);
 
 // Displays success and returns 0.
 int present(const application::Response& response, bool full = false);
