@@ -95,10 +95,14 @@ TEST(ProviderCertificationReportTest, DerivesCorrectnessAndRetainsEvidence) {
          .requests = {{"get", 2}}},
         {.name = "gc-lifecycle", .status = ScenarioStatus::NotRun},
     };
+    report.transport_requests.emplace("rc.http_requests_attempted", 4);
+    report.transport_requests.emplace("RC idempotent read retries", 0);
     EXPECT_EQ(derive_status(report), "PASS");
     const auto json = to_json(report);
     EXPECT_EQ(json["scenarios"][0]["name"], "first");
     EXPECT_EQ(json["scenarios"][0]["requests"]["get"], 2);
+    EXPECT_EQ(json["transport_requests"]["rc.http_requests_attempted"], 4);
+    EXPECT_EQ(json["transport_requests"]["RC idempotent read retries"], 0);
 
     report.scenarios[0].status = ScenarioStatus::Fail;
     EXPECT_EQ(derive_status(report), "FAIL");
@@ -160,7 +164,7 @@ TEST(ProviderCertificationTest, LocalReferenceScenariosPass) {
     auto target = create_local_target(std::filesystem::temp_directory_path());
     ASSERT_TRUE(target.has_value());
     auto report = run_local_certification(target->root);
-    EXPECT_EQ(report.scenarios.size(), 12U) << to_json(report).dump(2);
+    EXPECT_EQ(report.scenarios.size(), 13U) << to_json(report).dump(2);
     for (const auto& scenario : report.scenarios) {
         EXPECT_NE(scenario.status, ScenarioStatus::Fail)
             << scenario.name << ": " << to_json(report).dump(2);
@@ -168,8 +172,10 @@ TEST(ProviderCertificationTest, LocalReferenceScenariosPass) {
     auto cleanup = cleanup_local_target(*target);
     ASSERT_TRUE(cleanup.has_value()) << cleanup.error();
     report.cleanup = "CLEANED";
-    report.scenarios.push_back(
-        {.name = "cleanup", .status = ScenarioStatus::Pass});
+    auto cleanup_scenario = std::ranges::find(
+        report.scenarios, std::string{"cleanup"}, &Scenario::name);
+    ASSERT_NE(cleanup_scenario, report.scenarios.end());
+    cleanup_scenario->status = ScenarioStatus::Pass;
     report.status = derive_status(report);
     EXPECT_EQ(report.status, "PASS") << to_json(report).dump(2);
 }

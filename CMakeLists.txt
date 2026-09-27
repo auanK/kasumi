@@ -44,7 +44,7 @@ option(
 )
 option(
     KASUMI_BUILD_PROVIDER_CERTIFICATION
-    "Build the Local-only provider certification runner"
+    "Build the multi-target provider certification runner"
     OFF
 )
 
@@ -820,6 +820,7 @@ if(KASUMI_BUILD_PROVIDER_CERTIFICATION)
         PRIVATE
         kasumi_application
         kasumi_transport
+        reproc++
         kasumi_platform
         kasumi_crypto
         kasumi_test_support

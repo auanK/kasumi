@@ -23,6 +23,8 @@
 #include <stdexcept>
 #include <system_error>
 
+#include <reproc++/run.hpp>
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -34,9 +36,26 @@ namespace kasumi::operational::provider_certification {
 namespace {
 
 constexpr std::string_view owner_file = ".kasumi-certification-owner";
+constexpr std::string_view remote_owner_name =
+    "provider-certification-owner";
 constexpr std::string_view master_hex =
     "7777777777777777777777777777777777777777777777777777777777777777";
 constexpr std::string_view demo_payload = "provider-certification-payload";
+constexpr std::array<std::string_view, 13> scenario_names{
+    "transport-round-trip",
+    "bootstrap-publish",
+    "bootstrap-second-client",
+    "no-op",
+    "partial-missing",
+    "publication-while-missing",
+    "restore-pending",
+    "local-source-repair",
+    "fsck-healthy",
+    "fsck-missing",
+    "fsck-corrupt",
+    "gc-lifecycle",
+    "cleanup",
+};
 
 std::string unique_token() {
     std::random_device random;
@@ -124,7 +143,7 @@ std::expected<void, std::string>
 create_profile(const application::ExecutionEnvironment& environment,
                std::string name,
                const std::filesystem::path& local,
-               const std::filesystem::path& remote) {
+               std::string_view remote) {
     auto local_result = make_directory(local);
     if (!local_result) {
         return local_result;
@@ -133,7 +152,7 @@ create_profile(const application::ExecutionEnvironment& environment,
         environment,
         application::Profile{.name = std::move(name),
                              .local_dir = local,
-                             .remote_dir = platform::path::to_utf8(remote)},
+                             .remote_dir = std::string{remote}},
         application::MasterKeyHex{std::string{master_hex}});
     if (!result) {
         return std::unexpected(result.error().detail);
@@ -177,7 +196,24 @@ void add_scenario(Report& report,
     report.scenarios.push_back(std::move(result));
 }
 
-void record_trace(Scenario& scenario) {
+void record_transport_requests(Report& report) {
+    if (report.transport != "Rclone") {
+        return;
+    }
+    constexpr std::array metrics{
+        "rc.http_requests_attempted",
+        "rc.http_requests_completed",
+        "rc.http_requests_failed",
+        "RC idempotent read retries",
+        "RC readiness retries",
+    };
+    for (const auto* metric : metrics) {
+        report.transport_requests[metric] +=
+            platform::perf_trace::get_count(metric);
+    }
+}
+
+void record_trace(Report& report, Scenario& scenario) {
     constexpr std::array metrics{
         "transport list",
         "transport list prefix",
@@ -197,6 +233,7 @@ void record_trace(Scenario& scenario) {
             scenario.requests.emplace(metric, value);
         }
     }
+    record_transport_requests(report);
 }
 
 void record_direct(Report& report, std::string_view operation) {
@@ -204,8 +241,8 @@ void record_direct(Report& report, std::string_view operation) {
 }
 
 std::expected<transport::Transport, std::string>
-open_storage(const std::filesystem::path& root) {
-    auto result = transport::open_transport(platform::path::to_utf8(root));
+open_storage(std::string_view root) {
+    auto result = transport::open_transport(root);
     if (!result) {
         return std::unexpected(transport::describe(result.error()));
     }
@@ -351,7 +388,7 @@ void characterize_capabilities(Report& report,
         record_direct(report, "remove");
         if (!valid || !remove_destination || !remove_source) {
             fail_optional(
-                "copy", "Local copy capability did not preserve source bytes");
+                "copy", "transport copy capability did not preserve source bytes");
         } else {
             std::ranges::find(
                 report.capabilities, std::string{"copy"}, &Capability::name)
@@ -375,7 +412,7 @@ void characterize_capabilities(Report& report,
         if (!valid || !removed) {
             fail_optional(
                 "list_prefix",
-                "Local prefix listing did not return the direct child");
+                "transport prefix listing did not return the direct child");
         } else {
             std::ranges::find(report.capabilities,
                               std::string{"list_prefix"},
@@ -385,10 +422,10 @@ void characterize_capabilities(Report& report,
     }
     for (auto& item : report.capabilities) {
         if (item.status == CapabilityStatus::Unsupported) {
-            item.detail =
-                "optional operation is not exposed by Local transport";
+            item.detail = "optional operation is not exposed by this transport";
         }
     }
+    record_transport_requests(report);
 }
 
 } // namespace
@@ -564,12 +601,263 @@ std::expected<void, std::string> cleanup_local_target(LocalTarget& target) {
     return {};
 }
 
-Report run_local_certification(const std::filesystem::path& owned_root) {
-    Report report{.platform = platform_name(), .target_root = owned_root};
+namespace {
+
+std::expected<std::string, std::string>
+rclone_command(const std::vector<std::string>& arguments) {
+    std::string output;
+    std::string error_output;
+    reproc::options options;
+    options.redirect.out.type = reproc::redirect::pipe;
+    options.redirect.err.type = reproc::redirect::pipe;
+    options.stop = reproc::stop_actions{
+        {reproc::stop::wait, reproc::milliseconds(60000)},
+        {reproc::stop::terminate, reproc::milliseconds(2000)},
+        {reproc::stop::kill, reproc::milliseconds(2000)},
+    };
+    const auto result = reproc::run(reproc::arguments{arguments},
+                                    options,
+                                    reproc::sink::string(output),
+                                    reproc::sink::string(error_output));
+    if (result.second || result.first != 0) {
+        return std::unexpected("rclone target operation failed");
+    }
+    return output;
+}
+
+std::expected<std::vector<std::string>, std::string>
+rclone_child_names(std::string_view parent) {
+    auto listing = rclone_command({"rclone", "lsf", "--max-depth", "1",
+                                   std::string{parent}});
+    if (!listing) {
+        return std::unexpected("authorized Rclone parent is unavailable");
+    }
+    std::vector<std::string> names;
+    std::size_t begin = 0;
+    while (begin < listing->size()) {
+        auto end = listing->find('\n', begin);
+        if (end == std::string::npos) {
+            end = listing->size();
+        }
+        auto name = listing->substr(begin, end - begin);
+        if (!name.empty() && name.back() == '/') {
+            name.pop_back();
+        }
+        if (!name.empty()) {
+            names.push_back(std::move(name));
+        }
+        begin = end + 1;
+    }
+    return names;
+}
+
+bool valid_remote_component(std::string_view value) {
+    return !value.empty() &&
+           std::ranges::all_of(value, [](unsigned char character) {
+               return std::isalnum(character) != 0 || character == '-' ||
+                      character == '_';
+           });
+}
+
+bool remote_child_name(std::string_view parent,
+                       std::string_view child,
+                       std::string_view locator) {
+    return locator.size() > parent.size() + 1 &&
+           locator.starts_with(parent) && locator[parent.size()] == '/' &&
+           locator.find('/', parent.size() + 1) == std::string_view::npos &&
+           locator.substr(parent.size() + 1) == child;
+}
+
+void replace_all(std::string& value,
+                 std::string_view from,
+                 std::string_view to) {
+    if (from.empty()) {
+        return;
+    }
+    std::size_t position = 0;
+    while ((position = value.find(from, position)) != std::string::npos) {
+        value.replace(position, from.size(), to);
+        position += to.size();
+    }
+}
+
+} // namespace
+
+std::expected<ProviderTarget, std::string>
+create_rclone_target(std::string provider_id,
+                     std::string remote_name,
+                     std::string authorized_parent) {
+    if (!valid_remote_component(provider_id) ||
+        !valid_remote_component(remote_name) ||
+        !authorized_parent.starts_with(remote_name + ":") ||
+        authorized_parent.size() <= remote_name.size() + 1 ||
+        authorized_parent.back() == '/' ||
+        !transport::validate_transport_location(authorized_parent)) {
+        return std::unexpected("Rclone target requires an explicit provider, "
+                               "configured remote, and non-root authorized "
+                               "parent");
+    }
+    const auto parent_path =
+        std::string_view{authorized_parent}.substr(remote_name.size() + 1);
+    std::size_t segment_begin = 0;
+    while (segment_begin <= parent_path.size()) {
+        const auto segment_end = parent_path.find('/', segment_begin);
+        const auto segment = parent_path.substr(
+            segment_begin,
+            segment_end == std::string_view::npos
+                ? parent_path.size() - segment_begin
+                : segment_end - segment_begin);
+        if (segment.empty() || segment == "." || segment == ".." ||
+            segment.find('\\') != std::string_view::npos) {
+            return std::unexpected("Rclone authorized parent is not a safe "
+                                   "non-root path");
+        }
+        if (segment_end == std::string_view::npos) {
+            break;
+        }
+        segment_begin = segment_end + 1;
+    }
+
+    const auto existing = rclone_child_names(authorized_parent);
+    if (!existing) {
+        return std::unexpected(existing.error());
+    }
+    std::string token;
+    std::string child;
+    constexpr std::size_t attempts = 8;
+    for (std::size_t attempt = 0; attempt < attempts; ++attempt) {
+        token = unique_token();
+        child = "provider-certification-" + token;
+        if (std::ranges::find(*existing, child) == existing->end()) {
+            break;
+        }
+        child.clear();
+    }
+    if (child.empty()) {
+        return std::unexpected("could not choose an unused Rclone child");
+    }
+
+    auto workspace = create_local_target(std::filesystem::temp_directory_path());
+    if (!workspace) {
+        return std::unexpected(workspace.error());
+    }
+    const auto remote_root = authorized_parent + "/" + child;
+    const auto locator = remote_root + "/objects";
+    const auto revalidated_parent = rclone_child_names(authorized_parent);
+    if (!revalidated_parent ||
+        std::ranges::find(*revalidated_parent, child) !=
+            revalidated_parent->end()) {
+        (void)cleanup_local_target(*workspace);
+        return std::unexpected("Rclone child appeared after preflight");
+    }
+    const auto marker_source = workspace->root / "remote-owner-marker";
+    if (!write_bytes(marker_source,
+                     std::vector<std::uint8_t>(token.begin(), token.end()))) {
+        (void)cleanup_local_target(*workspace);
+        return std::unexpected("could not stage Rclone ownership marker");
+    }
+    const auto marker_locator = remote_root + "/" +
+                                std::string{remote_owner_name};
+    const auto put = rclone_command(
+        {"rclone", "copyto", platform::path::to_utf8(marker_source),
+         marker_locator});
+    if (!put) {
+        return std::unexpected("could not create Rclone ownership marker");
+    }
+    const auto readback = rclone_command({"rclone", "cat", marker_locator});
+    if (!readback || *readback != token) {
+        (void)cleanup_local_target(*workspace);
+        return std::unexpected("Rclone ownership marker readback did not "
+                               "match exactly; target left untouched");
+    }
+
+    return ProviderTarget{
+        .provider_id = std::move(provider_id),
+        .transport = "Rclone",
+        .locator = locator,
+        .workspace_root = workspace->root,
+        .workspace_ownership = std::move(*workspace),
+        .authorized_remote_parent = std::move(authorized_parent),
+        .remote_root = remote_root,
+        .remote_ownership_token = std::move(token),
+    };
+}
+
+std::expected<void, std::string>
+cleanup_rclone_target(ProviderTarget& target) {
+    if (target.transport != "Rclone" || target.locator.empty() ||
+        target.remote_root.empty() ||
+        target.authorized_remote_parent.empty() ||
+        target.remote_ownership_token.empty() ||
+        target.remote_root.size() <=
+            target.authorized_remote_parent.size() + 1 ||
+        !remote_child_name(target.authorized_remote_parent,
+                           target.remote_root.substr(
+                               target.authorized_remote_parent.size() + 1),
+                           target.remote_root) ||
+        target.locator != target.remote_root + "/objects") {
+        return std::unexpected("refusing cleanup: Rclone target is not the "
+                               "owned direct child");
+    }
+    const auto child = target.remote_root.substr(
+        target.authorized_remote_parent.size() + 1);
+    const auto before = rclone_child_names(target.authorized_remote_parent);
+    if (!before || std::ranges::find(*before, child) == before->end()) {
+        return std::unexpected("refusing cleanup: owned Rclone child changed");
+    }
+    const auto marker_locator = target.remote_root + "/" +
+                                std::string{remote_owner_name};
+    const auto marker = rclone_command(
+        {"rclone", "cat", marker_locator});
+    if (!marker || *marker != target.remote_ownership_token) {
+        return std::unexpected("refusing cleanup: Rclone ownership marker "
+                               "does not match");
+    }
+    const auto purged =
+        rclone_command({"rclone", "purge", target.remote_root});
+    if (!purged) {
+        return std::unexpected("Rclone refused cleanup of the owned child");
+    }
+    const auto after = rclone_child_names(target.authorized_remote_parent);
+    if (!after || std::ranges::find(*after, child) != after->end()) {
+        return std::unexpected("Rclone owned child remains after cleanup");
+    }
+    target.remote_ownership_token.clear();
+    target.remote_root.clear();
+    if (target.workspace_ownership) {
+        auto cleaned = cleanup_local_target(*target.workspace_ownership);
+        if (!cleaned) {
+            return cleaned;
+        }
+        target.workspace_ownership.reset();
+    }
+    target.locator.clear();
+    return {};
+}
+
+std::vector<std::string> scenario_registry(const ProviderTarget& target) {
+    (void)target;
+    std::vector<std::string> result;
+    result.reserve(scenario_names.size());
+    for (const auto scenario : scenario_names) {
+        result.emplace_back(scenario);
+    }
+    return result;
+}
+
+Report run_certification(const ProviderTarget& target) {
+    const auto& owned_root = target.workspace_root;
+    const auto& remote = target.locator;
+    Report report{.provider_id = target.provider_id,
+                  .transport = target.transport,
+                  .platform = platform_name(),
+                  .target_root = target.transport == "Local"
+                                     ? owned_root
+                                     : std::filesystem::path{}};
     platform::perf_trace::force_enable(true);
+    platform::perf_trace::reset();
     try {
         const auto app_data = owned_root / "app-data";
-        const auto remote = owned_root / "remote";
         const auto test_space = owned_root / "harness";
         auto key = runtime::vault::decode_hex(master_hex);
         if (!key) {
@@ -607,7 +895,7 @@ Report run_local_certification(const std::filesystem::path& owned_root) {
                      "bootstrap-publish",
                      published.has_value(),
                      published ? "" : published.error());
-        record_trace(report.scenarios.back());
+        record_trace(report, report.scenarios.back());
         const auto second =
             published ? test::scenarios::materialize_files(
                             environment, "b", clients[1].second, files)
@@ -618,7 +906,7 @@ Report run_local_certification(const std::filesystem::path& owned_root) {
                                                 : ScenarioStatus::Fail};
         if (!second)
             second_result.diagnostics.push_back(second.error());
-        record_trace(second_result);
+        record_trace(report, second_result);
         report.scenarios.push_back(std::move(second_result));
 
         if (!published || !second) {
@@ -645,7 +933,7 @@ Report run_local_certification(const std::filesystem::path& owned_root) {
                 no_op_result.diagnostics.push_back(
                     "no-op published, remained partial, or retained pending "
                     "paths");
-            record_trace(no_op_result);
+            record_trace(report, no_op_result);
             report.scenarios.push_back(std::move(no_op_result));
 
             const auto object_b = content_id(*key, demo_payload);
@@ -684,7 +972,7 @@ Report run_local_certification(const std::filesystem::path& owned_root) {
                 partial_result.diagnostics.emplace_back(
                     "missing ciphertext was not preserved as one pending "
                     "logical reference");
-            record_trace(partial_result);
+            record_trace(report, partial_result);
             report.scenarios.push_back(std::move(partial_result));
 
             test::write_text(clients[2].second / "d.txt", "independent");
@@ -714,7 +1002,7 @@ Report run_local_certification(const std::filesystem::path& owned_root) {
                 publication_result.diagnostics.emplace_back(
                     "independent D publication lost B or failed to retain "
                     "pending state");
-            record_trace(publication_result);
+            record_trace(report, publication_result);
             report.scenarios.push_back(std::move(publication_result));
 
             const auto restore_put =
@@ -739,7 +1027,7 @@ Report run_local_certification(const std::filesystem::path& owned_root) {
                 restore_result.diagnostics.emplace_back(
                     "restored ciphertext did not materialize and clear pending "
                     "state");
-            record_trace(restore_result);
+            record_trace(report, restore_result);
             report.scenarios.push_back(std::move(restore_result));
 
             const std::vector<test::scenarios::SeedFile> repair_files{
@@ -816,7 +1104,7 @@ Report run_local_certification(const std::filesystem::path& owned_root) {
                     detail += "; object remains absent";
                 repair_result.diagnostics.push_back(std::move(detail));
             }
-            record_trace(repair_result);
+            record_trace(report, repair_result);
             report.scenarios.push_back(std::move(repair_result));
 
             const auto fsck_healthy =
@@ -832,7 +1120,7 @@ Report run_local_certification(const std::filesystem::path& owned_root) {
             if (!healthy_ok && !fsck_healthy)
                 healthy_result.diagnostics.push_back(
                     fsck_healthy.error().detail);
-            record_trace(healthy_result);
+            record_trace(report, healthy_result);
             report.scenarios.push_back(std::move(healthy_result));
 
             auto current_state = load_state(app_data, "a");
@@ -859,7 +1147,7 @@ Report run_local_certification(const std::filesystem::path& owned_root) {
             if (!missing_ok && !fsck_missing)
                 missing_result.diagnostics.push_back(
                     fsck_missing.error().detail);
-            record_trace(missing_result);
+            record_trace(report, missing_result);
             report.scenarios.push_back(std::move(missing_result));
 
             const auto fsck_put =
@@ -887,7 +1175,7 @@ Report run_local_certification(const std::filesystem::path& owned_root) {
             if (!corrupt_ok && !fsck_corrupt)
                 corrupt_result.diagnostics.push_back(
                     fsck_corrupt.error().detail);
-            record_trace(corrupt_result);
+            record_trace(report, corrupt_result);
             report.scenarios.push_back(std::move(corrupt_result));
         }
         report.scenarios.push_back(
@@ -899,9 +1187,67 @@ Report run_local_certification(const std::filesystem::path& owned_root) {
     } catch (const std::exception& error) {
         report.diagnostics.push_back(error.what());
     }
+    for (const auto& scenario_name : scenario_registry(target)) {
+        const auto present = std::ranges::find(
+            report.scenarios, scenario_name, &Scenario::name);
+        if (present == report.scenarios.end()) {
+            report.scenarios.push_back(
+                {.name = scenario_name,
+                 .status = scenario_name == "cleanup"
+                               ? ScenarioStatus::NotRun
+                               : ScenarioStatus::Blocked,
+                 .diagnostics =
+                     scenario_name == "cleanup"
+                         ? std::vector<std::string>{}
+                         : std::vector<std::string>{
+                               "not reached after an earlier setup failure"}});
+        }
+    }
+    const auto scenario_index = [](std::string_view scenario_name) {
+        return std::ranges::find(scenario_names, scenario_name) -
+               scenario_names.begin();
+    };
+    std::ranges::stable_sort(report.scenarios,
+                             [&](const auto& left, const auto& right) {
+                                 return scenario_index(left.name) <
+                                        scenario_index(right.name);
+                             });
     platform::perf_trace::force_enable(false);
+    if (target.transport == "Rclone") {
+        const auto separator = target.locator.find(':');
+        const auto remote_name = separator == std::string::npos
+                                     ? std::string{}
+                                     : target.locator.substr(0, separator + 1);
+        const auto redact = [&](std::string& value) {
+            replace_all(value, target.locator, "<target>");
+            replace_all(value, target.remote_root, "<target-root>");
+            replace_all(value, target.authorized_remote_parent,
+                        "<authorized-parent>");
+            replace_all(value, remote_name, "<remote>");
+        };
+        for (auto& diagnostic : report.diagnostics) {
+            redact(diagnostic);
+        }
+        for (auto& item : report.capabilities) {
+            redact(item.detail);
+        }
+        for (auto& item : report.scenarios) {
+            for (auto& diagnostic : item.diagnostics) {
+                redact(diagnostic);
+            }
+        }
+    }
     report.status = derive_status(report);
     return report;
+}
+
+Report run_local_certification(const std::filesystem::path& owned_root) {
+    return run_certification(ProviderTarget{
+        .provider_id = "local-filesystem",
+        .transport = "Local",
+        .locator = platform::path::to_utf8(owned_root / "remote"),
+        .workspace_root = owned_root,
+    });
 }
 
 nlohmann::json to_json(const Report& report) {
@@ -914,11 +1260,14 @@ nlohmann::json to_json(const Report& report) {
         {"cleanup", report.cleanup},
         {"target_root", report.target_root.string()},
         {"harness_requests", report.harness_requests},
+        {"transport_requests", report.transport_requests},
         {"diagnostics", report.diagnostics},
         {"request_metrics_scope",
-         "Kasumi perf_trace counters available for the selected operations; "
-         "the Local transport does not expose generic GET/PUT call counters. "
-         "Harness direct operations are counted separately."},
+         "harness_requests counts direct Transport calls. transport_requests "
+         "sums Rclone RC counters captured after capability probes and each "
+         "shared application scenario; it excludes direct harness mutations, "
+         "external rclone preflight/cleanup, and provider-internal API calls. "
+         "Provider throttling is not separately instrumented."},
         {"capabilities", nlohmann::json::array()},
         {"scenarios", nlohmann::json::array()}};
     for (const auto& item : report.capabilities) {
@@ -936,6 +1285,83 @@ nlohmann::json to_json(const Report& report) {
                                        {"status", name(item.status)},
                                        {"requests", item.requests},
                                        {"diagnostics", item.diagnostics}});
+    }
+    return result;
+}
+
+nlohmann::json aggregate_reports(const std::vector<Report>& reports) {
+    nlohmann::json result{{"schema_version", 1},
+                          {"status", "INCOMPLETE"},
+                          {"targets", nlohmann::json::array()},
+                          {"capabilities", nlohmann::json::array()},
+                          {"scenarios", nlohmann::json::array()}};
+    std::vector<std::string> target_keys;
+    std::map<std::string, std::vector<std::string>> capability_values;
+    std::map<std::string, std::vector<std::string>> scenario_values;
+    std::map<std::string, std::size_t> duplicate_ids;
+    bool failed = false;
+    for (const auto& report : reports) {
+        auto key = report.provider_id;
+        const auto duplicate = ++duplicate_ids[key];
+        if (duplicate > 1) {
+            key += "#" + std::to_string(duplicate);
+        }
+        target_keys.push_back(key);
+        result["targets"].push_back({{"target_id", key},
+                                     {"provider_id", report.provider_id},
+                                     {"transport", report.transport},
+                                     {"status", report.status},
+                                     {"cleanup", report.cleanup}});
+        failed = failed || report.status == "FAIL";
+        for (const auto& item : report.capabilities) {
+            capability_values[item.name].resize(reports.size(), "NotRun");
+            capability_values[item.name][target_keys.size() - 1] =
+                std::string{name(item.status)};
+        }
+        for (const auto& item : report.scenarios) {
+            scenario_values[item.name].resize(reports.size(), "NotRun");
+            scenario_values[item.name][target_keys.size() - 1] =
+                std::string{name(item.status)};
+        }
+    }
+    for (const auto& [capability_name, values] : capability_values) {
+        nlohmann::json targets = nlohmann::json::object();
+        for (std::size_t index = 0; index < target_keys.size(); ++index) {
+            targets[target_keys[index]] = values[index];
+        }
+        result["capabilities"].push_back(
+            {{"name", capability_name}, {"targets", std::move(targets)}});
+    }
+    const auto scenario_order = [&](std::string_view value) {
+        const auto found = std::ranges::find(scenario_names, value);
+        return found == scenario_names.end()
+                   ? scenario_names.size()
+                   : static_cast<std::size_t>(found - scenario_names.begin());
+    };
+    std::vector<std::string> ordered_scenarios;
+    ordered_scenarios.reserve(scenario_values.size());
+    for (const auto& [scenario_name, _] : scenario_values) {
+        ordered_scenarios.push_back(scenario_name);
+    }
+    std::ranges::sort(ordered_scenarios, [&](const auto& left, const auto& right) {
+        return scenario_order(left) < scenario_order(right);
+    });
+    for (const auto& scenario_name : ordered_scenarios) {
+        nlohmann::json targets = nlohmann::json::object();
+        const auto& values = scenario_values.at(scenario_name);
+        for (std::size_t index = 0; index < target_keys.size(); ++index) {
+            targets[target_keys[index]] = values[index];
+        }
+        result["scenarios"].push_back(
+            {{"name", scenario_name}, {"targets", std::move(targets)}});
+    }
+    if (failed) {
+        result["status"] = "FAIL";
+    } else if (!reports.empty() &&
+               std::ranges::all_of(reports, [](const auto& report) {
+                   return report.status == "PASS";
+               })) {
+        result["status"] = "PASS";
     }
     return result;
 }

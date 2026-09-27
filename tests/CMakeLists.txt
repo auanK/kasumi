@@ -253,6 +253,7 @@ kasumi_add_test_suite(
     LIBRARIES
         kasumi_application
         kasumi_transport
+        reproc++
         kasumi_platform
         kasumi_crypto
         nlohmann_json::nlohmann_json

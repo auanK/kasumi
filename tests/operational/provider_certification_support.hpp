@@ -52,6 +52,11 @@ struct ProviderTarget {
     std::string transport;
     std::string locator;
     std::filesystem::path workspace_root;
+    std::optional<LocalTarget> local_ownership;
+    std::optional<LocalTarget> workspace_ownership;
+    std::string authorized_remote_parent;
+    std::string remote_root;
+    std::string remote_ownership_token;
 };
 
 struct Report {
@@ -65,15 +70,23 @@ struct Report {
     std::vector<Capability> capabilities;
     std::vector<Scenario> scenarios;
     std::map<std::string, std::uint64_t> harness_requests;
+    std::map<std::string, std::uint64_t> transport_requests;
     std::vector<std::string> diagnostics;
 };
 
 std::expected<LocalTarget, std::string>
 create_local_target(const std::filesystem::path& authorized_parent);
 std::expected<void, std::string> cleanup_local_target(LocalTarget& target);
+std::expected<ProviderTarget, std::string>
+create_rclone_target(std::string provider_id,
+                     std::string remote_name,
+                     std::string authorized_parent);
+std::expected<void, std::string>
+cleanup_rclone_target(ProviderTarget& target);
 std::expected<std::filesystem::path, std::string>
 target_path(const LocalTarget& target, const std::filesystem::path& relative);
 
+Report run_certification(const ProviderTarget& target);
 Report run_local_certification(const std::filesystem::path& owned_root);
 std::vector<std::string> scenario_registry(const ProviderTarget& target);
 std::string derive_status(const Report& report);
