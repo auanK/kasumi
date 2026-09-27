@@ -6,6 +6,8 @@
 #include "application/request.hpp"
 #include "application/result.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <functional>
 #include <optional>
@@ -36,8 +38,26 @@ struct GarbageCollectProgress {
     std::optional<std::size_t> candidate_count = std::nullopt;
 };
 
+// Progress notification for a read-only integrity audit.
+enum class FsckStage {
+    Preparing,
+    Observing,
+    Analyzing,
+    AuditingContent,
+    Finalizing,
+};
+
+struct FsckProgress {
+    FsckStage stage = FsckStage::Preparing;
+    std::size_t completed_objects = 0;
+    std::optional<std::size_t> total_objects = std::nullopt;
+    std::optional<std::uint64_t> completed_plaintext_bytes = 0;
+    std::optional<std::uint64_t> total_plaintext_bytes = std::nullopt;
+};
+
 // Unified progress notification for application executions.
-using ExecutionProgress = std::variant<SyncProgress, GarbageCollectProgress>;
+using ExecutionProgress =
+    std::variant<SyncProgress, GarbageCollectProgress, FsckProgress>;
 
 // Callback type for receiving execution progress updates.
 using ProgressCallback = std::function<void(const ExecutionProgress&)>;

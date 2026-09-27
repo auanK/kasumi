@@ -895,4 +895,51 @@ TEST(SyncMaintenanceTest, GarbageCollectProgressDoesNotAlterResultOrState) {
     EXPECT_EQ(data_plain.quarantined_objects, 1U);
 }
 
+TEST(SyncMaintenanceTest, FsckPublishesOrderedStagesAndAuthenticatedTotals) {
+    auto workspace = kasumi::test::make_temp_workspace("fsck-progress-stages");
+    const ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "app")};
+    const Profile profile{
+        "demo",
+        kasumi::test::workspace_path(workspace, "local"),
+        kasumi::test::workspace_path(workspace, "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment, profile, MasterKeyHex{std::string(64, 'd')}));
+    ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
+    kasumi::test::write_text(profile.local_dir / "file.txt", "source");
+    auto opened = kasumi::transport::open_transport(
+        kasumi::test::workspace_path(workspace, "remote").string());
+    ASSERT_TRUE(opened.has_value());
+    ASSERT_TRUE(kasumi::transport::initialize(*opened));
+    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, environment)));
+
+    std::vector<kasumi::application::FsckProgress> events;
+    auto req = request(Operation::Fsck, environment);
+    req.on_progress = [&](const kasumi::application::ExecutionProgress& progress) {
+        if (const auto* fsck = std::get_if<kasumi::application::FsckProgress>(&progress)) {
+            events.push_back(*fsck);
+        }
+    };
+    const auto result = kasumi::application::execute(std::move(req));
+    ASSERT_TRUE(result.has_value()) << (result ? "" : result.error().detail);
+
+    ASSERT_EQ(events.size(), 6U);
+    EXPECT_EQ(events[0].stage, kasumi::application::FsckStage::Preparing);
+    EXPECT_FALSE(events[0].total_objects.has_value());
+    EXPECT_EQ(events[1].stage, kasumi::application::FsckStage::Observing);
+    EXPECT_FALSE(events[1].total_objects.has_value());
+    EXPECT_EQ(events[2].stage, kasumi::application::FsckStage::Analyzing);
+    EXPECT_FALSE(events[2].total_objects.has_value());
+    EXPECT_EQ(events[3].stage, kasumi::application::FsckStage::AuditingContent);
+    EXPECT_EQ(events[3].completed_objects, 0U);
+    EXPECT_EQ(events[3].total_objects, 1U);
+    EXPECT_EQ(events[3].completed_plaintext_bytes, 0U);
+    EXPECT_EQ(events[3].total_plaintext_bytes, 6U);
+    EXPECT_EQ(events[4].completed_objects, 1U);
+    EXPECT_EQ(events[4].completed_plaintext_bytes, 6U);
+    EXPECT_EQ(events[5].stage, kasumi::application::FsckStage::Finalizing);
+    EXPECT_EQ(events[5].completed_objects, 1U);
+    EXPECT_EQ(events[5].completed_plaintext_bytes, 6U);
+}
+
 } // namespace
