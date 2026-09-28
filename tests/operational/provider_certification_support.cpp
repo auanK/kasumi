@@ -64,6 +64,11 @@ constexpr std::array<std::string_view, 16> scenario_names{
     "cleanup",
 };
 
+std::expected<std::string, std::string>
+rclone_command(const std::vector<std::string>& arguments);
+std::expected<std::vector<std::string>, std::string>
+rclone_child_names(std::string_view parent);
+
 std::string unique_token() {
     std::random_device random;
     return std::to_string(random()) + "-" +
@@ -571,7 +576,40 @@ Scenario run_gc_lifecycle(const ProviderTarget& target,
             }
         }
     } else {
+        auto nonce = platform::random::hex_id();
+        if (!nonce) {
+            result.status = ScenarioStatus::Fail;
+            result.diagnostics.push_back("could not generate Rclone GC child name");
+            return result;
+        }
+        auto child_name = gc_live_preflight::child_namespace(*nonce);
+        if (!child_name) {
+            result.status = ScenarioStatus::Fail;
+            result.diagnostics.push_back(child_name.error());
+            return result;
+        }
+        const auto remote_gc_root = options.remote_parent + "/" + *child_name;
+        options.explicit_child = *child_name;
+        options.explicit_owner_token = unique_token();
+        options.cleanup_empty_directories = [remote_gc_root] {
+            const auto removed =
+                rclone_command({"rclone", "rmdirs", "--leave-root", remote_gc_root});
+            if (!removed) {
+                return std::expected<void, std::string>{
+                    std::unexpected("could not remove owned Rclone GC subdirectories")};
+            }
+            return std::expected<void, std::string>{};
+        };
         gc = gc_live_runner::run(options);
+        if (gc.status == "PASS" && gc.cleanup.result == "removed") {
+            const auto removed = rclone_command({"rclone", "rmdir", remote_gc_root});
+            const auto remaining = rclone_child_names(options.remote_parent);
+            if (!removed || !remaining ||
+                std::ranges::find(*remaining, *child_name) != remaining->end()) {
+                gc.status = "FAILED";
+                gc.error_message = "owned Rclone GC child remains after cleanup";
+            }
+        }
     }
 
     const bool passed =
