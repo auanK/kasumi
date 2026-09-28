@@ -1769,8 +1769,8 @@ execute(const runtime::RuntimeData& runtime_data,
     }
 
     const auto final_scan_trace = platform::perf_trace::begin();
-    auto scanned =
-        observation::collect_local_tree(runtime_data.local_dir, session);
+    auto scanned = observation::collect_local_tree(
+        runtime_data.local_dir, session, observed_input.ignore_list);
     platform::perf_trace::finish("final local validation", final_scan_trace);
     if (!scanned) {
         auto rolled = rollback_terminal();

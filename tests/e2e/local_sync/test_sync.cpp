@@ -5,6 +5,7 @@
 #include "application/profile.hpp"
 #include "application/sync/journal.hpp"
 #include "core/reconciliation/plan.hpp"
+#include "crypto/key_derivation.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/hash_mutation.hpp"
 #include "kasumi/test/provider_scenarios.hpp"
@@ -735,11 +736,22 @@ TEST(H3LocalSyncTest,
             *runtime, *storage, key, false);
     ASSERT_TRUE(input.has_value()) << input.error().detail;
     EXPECT_NE(kasumi::find_row(input->storage.tree, ".kasumiignore"), nullptr);
-    EXPECT_NE(kasumi::find_row(input->local_tree, "Screenshots/local-only.png"),
+    EXPECT_EQ(kasumi::find_row(input->local_tree, "Screenshots"), nullptr);
+    EXPECT_EQ(kasumi::find_row(input->local_tree,
+                               "Screenshots/local-only.png"),
               nullptr);
+    EXPECT_TRUE(kasumi::ignore::is_ignored(
+        "Screenshots/local-only.png", input->ignore_list, false));
 
     const auto preview = kasumi::reconciliation::reconcile(*input);
     ASSERT_TRUE(preview.has_value()) << preview.error().detail;
+    ASSERT_EQ(input->storage.tree.rows.size(), 4U);
+    ASSERT_EQ(preview->candidate_shared_tree.rows.size(), 4U);
+    EXPECT_FALSE(preview->requires_publication);
+    EXPECT_FALSE(std::ranges::any_of(
+        preview->plan.operations, [](const kasumi::Operation& operation) {
+            return operation.action == kasumi::Action::Upload;
+        }));
     EXPECT_EQ(kasumi::find_row(preview->candidate_shared_tree, "Screenshots"),
               nullptr)
         << "candidate contains the pre-existing ignored directory";
@@ -763,6 +775,14 @@ TEST(H3LocalSyncTest,
     ASSERT_TRUE(remote_before.has_value()) << remote_before.error();
     const auto identifiers_before = remote_identifiers(scenario);
     ASSERT_TRUE(identifiers_before.has_value()) << identifiers_before.error();
+    const auto* ignored_row =
+        kasumi::find_row(initial_physical_tree->snapshot,
+                         "Screenshots/local-only.png");
+    ASSERT_NE(ignored_row, nullptr);
+    const auto ignored_content_id =
+        kasumi::crypto::content_identifier(key, ignored_row->hash);
+    EXPECT_EQ(std::ranges::find(*identifiers_before, ignored_content_id),
+              identifiers_before->end());
     const auto synchronized = sync(fresh);
     if (!synchronized) {
         ADD_FAILURE() << synchronized.error();
@@ -794,7 +814,25 @@ TEST(H3LocalSyncTest,
     const auto identifiers_after = remote_identifiers(scenario);
     ASSERT_TRUE(identifiers_after.has_value()) << identifiers_after.error();
     EXPECT_EQ(*identifiers_after, *identifiers_before)
+        << "no remote writes are expected: preview has no Upload or "
+           "publication";
+    EXPECT_EQ(std::ranges::find(*identifiers_after, ignored_content_id),
+              identifiers_after->end())
         << "first sync must not upload local-only ignored content";
+    auto materialized =
+        kasumi::application::observation::collect_local_tree(
+            client_local_dir(fresh), input->ignore_list);
+    ASSERT_TRUE(materialized.has_value());
+    ASSERT_EQ(materialized->rows.size(),
+              preview->candidate_shared_tree.rows.size());
+    for (std::size_t index = 0; index < materialized->rows.size(); ++index) {
+        const auto& actual = materialized->rows[index];
+        const auto& expected = preview->candidate_shared_tree.rows[index];
+        EXPECT_EQ(actual.path, expected.path);
+        EXPECT_EQ(actual.hash, expected.hash);
+        EXPECT_EQ(actual.size, expected.size);
+        EXPECT_EQ(actual.is_directory, expected.is_directory);
+    }
 }
 
 TEST(H3LocalSyncTest,
@@ -829,6 +867,91 @@ TEST(H3LocalSyncTest,
     const auto identifiers_after = remote_identifiers(scenario);
     ASSERT_TRUE(identifiers_after.has_value()) << identifiers_after.error();
     EXPECT_EQ(*identifiers_after, *identifiers_before);
+}
+
+TEST(H3LocalSyncTest, RemoteIgnoreChangeOverridesStaleLocalProjection) {
+    auto scenario = make_scenario();
+    const auto seed = make_client(scenario, "seed");
+    seed_remote_ignore_vault(scenario, seed);
+    const auto client = make_client(scenario, "stale-ignore");
+    ASSERT_TRUE(sync_succeeds(client));
+
+    const auto local_only = client_local_dir(client) / "Cache" / "local.txt";
+    kasumi::test::write_text(local_only, "keep while ignored remotely");
+    kasumi::test::write_text(client_local_dir(seed) / ".kasumiignore",
+                             "/Cache/\n");
+    ASSERT_TRUE(sync_succeeds(seed));
+
+    auto runtime = kasumi::runtime::resolve(
+        client_environment(client).app_data_dir,
+        client_name(client),
+        kasumi::runtime::AccessMode::ReadOnly);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().detail;
+    auto storage = kasumi::transport::open_transport(
+        kasumi::platform::path::to_utf8(std::get<1>(scenario)));
+    ASSERT_TRUE(storage.has_value()) << storage.error().message;
+    const auto key = decode_key();
+    const auto input =
+        kasumi::application::observation::collect_reconciliation_input(
+            *runtime, *storage, key, false);
+    ASSERT_TRUE(input.has_value()) << input.error().detail;
+    EXPECT_TRUE(kasumi::ignore::is_ignored("Cache/local.txt",
+                                          input->ignore_list,
+                                          false));
+    EXPECT_EQ(kasumi::find_row(input->local_tree, "Cache"), nullptr);
+    EXPECT_EQ(kasumi::find_row(input->local_tree, "Cache/local.txt"), nullptr);
+    const auto preview = kasumi::reconciliation::reconcile(*input);
+    ASSERT_TRUE(preview.has_value()) << preview.error().detail;
+    EXPECT_FALSE(std::ranges::any_of(
+        preview->plan.operations, [](const kasumi::Operation& operation) {
+            return operation.action == kasumi::Action::Upload &&
+                   kasumi::platform::path::to_logical_utf8(operation.path) ==
+                       "Cache/local.txt";
+        }));
+    ASSERT_TRUE(sync_succeeds(client));
+    expect_file(client, "Cache/local.txt", "keep while ignored remotely");
+    auto observed = remote(scenario);
+    ASSERT_TRUE(observed.has_value()) << observed.error();
+    expect_remote_absent(*observed, "Cache");
+}
+
+TEST(H3LocalSyncTest, MissingAuthenticatedRemoteIgnoreFailsClosed) {
+    auto scenario = make_scenario();
+    const auto seed = make_client(scenario, "seed");
+    seed_remote_ignore_vault(scenario, seed);
+    const auto fresh = make_client(scenario, "fresh-missing-ignore");
+    kasumi::test::write_text(
+        client_local_dir(fresh) / "Screenshots" / "local-only.png",
+        "keep this ignored file");
+
+    auto before = remote(scenario);
+    ASSERT_TRUE(before.has_value()) << before.error();
+    const auto* ignore_row =
+        kasumi::find_row(before->effective_tree, ".kasumiignore");
+    ASSERT_NE(ignore_row, nullptr);
+    const auto key = decode_key();
+    const auto ignore_id =
+        kasumi::crypto::content_identifier(key, ignore_row->hash);
+    auto storage = kasumi::transport::open_transport(
+        kasumi::platform::path::to_utf8(std::get<1>(scenario)));
+    ASSERT_TRUE(storage.has_value()) << storage.error().message;
+    ASSERT_TRUE(kasumi::transport::remove(*storage, ignore_id));
+
+    auto runtime = kasumi::runtime::resolve(
+        client_environment(fresh).app_data_dir,
+        client_name(fresh),
+        kasumi::runtime::AccessMode::ReadOnly);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().detail;
+    const auto input =
+        kasumi::application::observation::collect_reconciliation_input(
+            *runtime, *storage, key, false);
+    ASSERT_FALSE(input.has_value());
+    EXPECT_NE(input.error().detail.find("authenticated remote .kasumiignore"),
+              std::string::npos);
+    expect_file(fresh, "Screenshots/local-only.png", "keep this ignored file");
+    auto accepted = state(fresh);
+    ASSERT_TRUE(accepted.has_value()) << accepted.error();
+    EXPECT_FALSE(accepted->has_value());
 }
 
 TEST(H3LocalSyncTest,

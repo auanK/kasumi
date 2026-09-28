@@ -1,6 +1,7 @@
 #ifndef KASUMI_APPLICATION_OBSERVATION_STATE_HPP
 #define KASUMI_APPLICATION_OBSERVATION_STATE_HPP
 
+#include "core/ignore.hpp"
 #include "core/reconciliation/types.hpp"
 #include "crypto/file_crypto.hpp"
 #include "runtime/resolver.hpp"
@@ -51,6 +52,16 @@ collect_local_tree(const std::filesystem::path& local_root);
 std::expected<Snapshot, std::string>
 collect_local_tree(const std::filesystem::path& local_root,
                    LocalObservationSession* session);
+
+// Collects a managed projection using rules selected from authenticated state.
+std::expected<Snapshot, std::string>
+collect_local_tree(const std::filesystem::path& local_root,
+                   const kasumi::ignore::IgnoreList& ignore_list);
+
+std::expected<Snapshot, std::string>
+collect_local_tree(const std::filesystem::path& local_root,
+                   LocalObservationSession* session,
+                   const kasumi::ignore::IgnoreList& ignore_list);
 
 // Combines logical storage state with observed physical namespace snapshot.
 struct StorageObservation {

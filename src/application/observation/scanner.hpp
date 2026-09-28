@@ -1,6 +1,7 @@
 #ifndef KASUMI_APPLICATION_OBSERVATION_SCANNER_HPP
 #define KASUMI_APPLICATION_OBSERVATION_SCANNER_HPP
 
+#include "core/ignore.hpp"
 #include "core/node.hpp"
 #include "platform/file_fingerprint.hpp"
 #include "state_storage/database.hpp"
@@ -69,6 +70,14 @@ std::expected<ScanResult, ScanError> scan_result(
     std::span<const state_storage::FileCacheRow> previous_cache = {},
     ScanPolicy policy = ScanPolicy::FullHash,
     FingerprintQuery fingerprint_query = platform::regular_file_fingerprint);
+
+// Scans using the ignore rules selected by the current reconciliation.
+std::expected<ScanResult, ScanError>
+scan_result(const std::filesystem::path& local_root,
+            std::span<const state_storage::FileCacheRow> previous_cache,
+            ScanPolicy policy,
+            FingerprintQuery fingerprint_query,
+            const kasumi::ignore::IgnoreList& ignore_list);
 
 // Observes a single safe relative path.
 std::expected<TargetedFileObservation, ScanError> observe_file(

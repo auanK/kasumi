@@ -214,6 +214,17 @@ scan_result(const std::filesystem::path& local_root,
             std::span<const state_storage::FileCacheRow> previous_cache,
             ScanPolicy policy,
             FingerprintQuery fingerprint_query) {
+    const auto ignore_list = load_ignore_list(local_root / ".kasumiignore");
+    return scan_result(
+        local_root, previous_cache, policy, fingerprint_query, ignore_list);
+}
+
+std::expected<ScanResult, ScanError>
+scan_result(const std::filesystem::path& local_root,
+            std::span<const state_storage::FileCacheRow> previous_cache,
+            ScanPolicy policy,
+            FingerprintQuery fingerprint_query,
+            const IgnoreList& ignore_list) {
     const auto scan_trace = platform::perf_trace::begin();
     ScanContext context{.policy = policy,
                         .fingerprint_query = fingerprint_query,
@@ -226,7 +237,6 @@ scan_result(const std::filesystem::path& local_root,
     context.previous.reserve(previous_cache.size());
     for (const auto& row : previous_cache)
         context.previous.emplace(row.path, &row);
-    const auto ignore_list = load_ignore_list(local_root / ".kasumiignore");
     std::error_code error;
     const auto status = std::filesystem::symlink_status(local_root, error);
     if (error)
