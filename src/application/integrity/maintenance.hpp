@@ -49,6 +49,7 @@ using FsckProgressCallback =
     std::function<void(const FsckProgress&)>;
 
 namespace testing {
+// Allows integrity tests to hold workers at deterministic window boundaries.
 enum class FsckWorkerEvent { BeforeAudit, WindowStopRequested };
 using FsckWorkerEventCallback =
     std::function<void(FsckWorkerEvent, std::size_t)>;

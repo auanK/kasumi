@@ -5969,6 +5969,7 @@ TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckCancellationStopsWorkAndClea
             }
         });
     ASSERT_FALSE(checked.has_value());
+    EXPECT_EQ(checked.error().code, IntegrityErrorCode::StateFailure);
     EXPECT_TRUE(kasumi::platform::cancellation::requested());
     ASSERT_FALSE(events.empty());
     EXPECT_EQ(events.back().stage, kasumi::application::FsckStage::Finalizing);

@@ -929,7 +929,10 @@ audit_object(transport::Transport& storage,
 }
 
 struct AuditWorkResult {
+    enum class Disposition { Completed, HardFailure, AbortedByWindowStop, UserCancelled };
+
     std::size_t index = 0;
+    Disposition disposition = Disposition::Completed;
     AuditState state = AuditState::Healthy;
     std::optional<Error> error;
     std::string remote_content_id;
@@ -971,7 +974,7 @@ void run_audit_worker(std::stop_token stop,
                 std::max(state.peak_in_flight, state.in_flight);
         }
 
-        AuditWorkResult result{.index = index, .state = AuditState::Healthy, .error = std::nullopt};
+        AuditWorkResult result{.index = index};
         try {
             if (on_worker_event) {
                 try {
@@ -980,11 +983,19 @@ void run_audit_worker(std::stop_token stop,
                     // Test observation cannot alter the audit result.
                 }
             }
-            if (platform::cancellation::requested() || stop.stop_requested() || state.stop_requested) {
-                result.error = make_error(ErrorCode::StateFailure, "operation cancelled");
+            bool window_stop_requested = false;
+            {
+                std::lock_guard lock(state.mutex);
+                window_stop_requested = state.stop_requested || stop.stop_requested();
+            }
+            if (platform::cancellation::requested()) {
+                result.disposition = AuditWorkResult::Disposition::UserCancelled;
+            } else if (window_stop_requested) {
+                result.disposition = AuditWorkResult::Disposition::AbortedByWindowStop;
             } else {
                 auto audited = audit_object(storage, key, references[index], workspace, index);
                 if (!audited) {
+                    result.disposition = AuditWorkResult::Disposition::HardFailure;
                     result.error = audited.error();
                 } else {
                     result.state = audited->state;
@@ -993,8 +1004,10 @@ void run_audit_worker(std::stop_token stop,
                 }
             }
         } catch (const std::exception& exception) {
+            result.disposition = AuditWorkResult::Disposition::HardFailure;
             result.error = make_error(ErrorCode::StateFailure, exception.what());
         } catch (...) {
+            result.disposition = AuditWorkResult::Disposition::HardFailure;
             result.error = make_error(ErrorCode::StateFailure, "audit worker failed");
         }
 
@@ -1004,9 +1017,6 @@ void run_audit_worker(std::stop_token stop,
             state.completions[slot] = std::move(result);
         }
         state.changed.notify_all();
-        if (stop.stop_requested() || state.stop_requested) {
-            return;
-        }
     }
 }
 
@@ -1343,12 +1353,18 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                     request_window_stop();
                 }
 
-                if (work_result.error) {
-                    if (!lowest_hard_failure || work_result.index < lowest_hard_failure->first) {
-                        lowest_hard_failure = std::pair{work_result.index, std::move(*work_result.error)};
+                using Disposition = AuditWorkResult::Disposition;
+                if (work_result.disposition == Disposition::HardFailure) {
+                    if (work_result.error &&
+                        (!lowest_hard_failure || work_result.index < lowest_hard_failure->first)) {
+                        lowest_hard_failure =
+                            std::pair{work_result.index, std::move(*work_result.error)};
                     }
                     request_window_stop();
-                } else {
+                } else if (work_result.disposition == Disposition::UserCancelled) {
+                    cancelled = true;
+                    request_window_stop();
+                } else if (work_result.disposition == Disposition::Completed) {
                     const auto& reference =
                         inventory->referenced_objects[work_result.index];
                     classified_size = reference.size;
