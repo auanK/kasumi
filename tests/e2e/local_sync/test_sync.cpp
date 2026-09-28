@@ -970,12 +970,14 @@ TEST(H3LocalSyncTest,
     ASSERT_NE(before_ignore, nullptr);
     const auto original_hash = before_ignore->hash;
     const auto original_size = before_ignore->size;
+    const auto before_native_mtime =
+        kasumi::platform::metadata::file_time_from_unix_nanoseconds(
+            before_ignore->mtime);
+    ASSERT_TRUE(before_native_mtime.has_value());
     using FileDuration = std::filesystem::file_time_type::duration;
-    const auto local_subsecond = std::filesystem::file_time_type{FileDuration{
-        before_ignore->mtime.time_since_epoch().count() +
+    const auto local_subsecond = *before_native_mtime +
         std::chrono::duration_cast<FileDuration>(
-            std::chrono::seconds{1} + std::chrono::nanoseconds{915178000})
-            .count()}};
+            std::chrono::seconds{1} + std::chrono::nanoseconds{915178000});
     const auto written = kasumi::platform::metadata::set_last_write_time(
         ignore, local_subsecond);
     ASSERT_TRUE(written.has_value()) << written.error();
@@ -983,7 +985,10 @@ TEST(H3LocalSyncTest,
     const auto observed_local_mtime =
         std::filesystem::last_write_time(ignore, error);
     ASSERT_FALSE(error);
-    ASSERT_NE(observed_local_mtime, before_ignore->mtime);
+    const auto observed_local_mtime_ns =
+        kasumi::platform::metadata::unix_nanoseconds(observed_local_mtime);
+    ASSERT_TRUE(observed_local_mtime_ns.has_value());
+    ASSERT_NE(*observed_local_mtime_ns, before_ignore->mtime);
 
     kasumi::test::write_text(client_local_dir(client) / "B.txt", "new");
     ASSERT_TRUE(sync_succeeds(client));
@@ -995,7 +1000,7 @@ TEST(H3LocalSyncTest,
     ASSERT_NE(after_ignore, nullptr);
     EXPECT_EQ(after_ignore->hash, original_hash);
     EXPECT_EQ(after_ignore->size, original_size);
-    EXPECT_EQ(after_ignore->mtime, observed_local_mtime);
+    EXPECT_EQ(after_ignore->mtime, *observed_local_mtime_ns);
     expect_remote_present(*after, "B.txt");
     EXPECT_FALSE(after->has_conflicts);
     expect_file(client, ".kasumiignore", "ignored.txt\n");
@@ -1019,12 +1024,14 @@ TEST(H3LocalSyncTest, EquivalentFileMtimeDriftSucceedsWithoutPublication) {
     const auto original_hash = before_ignore->hash;
     const auto original_size = before_ignore->size;
 
+    const auto before_native_mtime =
+        kasumi::platform::metadata::file_time_from_unix_nanoseconds(
+            before_ignore->mtime);
+    ASSERT_TRUE(before_native_mtime.has_value());
     using FileDuration = std::filesystem::file_time_type::duration;
-    const auto local_subsecond = std::filesystem::file_time_type{
-        FileDuration{before_ignore->mtime.time_since_epoch().count() +
-                     std::chrono::duration_cast<FileDuration>(
-                         std::chrono::nanoseconds{685272100})
-                         .count()}};
+    const auto local_subsecond = *before_native_mtime +
+        std::chrono::duration_cast<FileDuration>(
+            std::chrono::nanoseconds{685272100});
     const auto written = kasumi::platform::metadata::set_last_write_time(
         ignore, local_subsecond);
     ASSERT_TRUE(written.has_value()) << written.error();

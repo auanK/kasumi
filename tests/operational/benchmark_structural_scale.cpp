@@ -44,7 +44,7 @@ Snapshot make_snapshot(std::size_t files, bool long_path) {
     snapshot.rows.reserve(files + 1);
     snapshot.rows.push_back(NodeRow{
         .path = "",
-        .mtime = std::filesystem::file_time_type(std::chrono::nanoseconds(1)),
+        .mtime = 1,
         .is_directory = true});
     for (std::size_t index = 0; index < files; ++index) {
         const auto path = file_name(index, long_path);
@@ -53,8 +53,7 @@ Snapshot make_snapshot(std::size_t files, bool long_path) {
             NodeRow{.path = path,
                     .hash = kasumi::hasher::hash_string(content),
                     .size = content.size(),
-                    .mtime = std::filesystem::file_time_type(
-                        std::chrono::nanoseconds(index + 2)),
+                    .mtime = static_cast<std::int64_t>(index + 2),
                     .is_directory = false});
     }
     return snapshot;
@@ -85,7 +84,7 @@ Snapshot scenario_snapshot(const Snapshot& base, std::string_view scenario) {
         auto& row = snapshot.rows[1];
         row.hash = kasumi::hasher::hash_string("changed-content");
         row.size += 1;
-        row.mtime += std::chrono::nanoseconds(7);
+        row.mtime += std::chrono::nanoseconds(7).count();
     } else if (scenario == "one_added") {
         const auto index = snapshot.rows.size() - 1;
         const auto path = file_name(index, false);
@@ -93,8 +92,7 @@ Snapshot scenario_snapshot(const Snapshot& base, std::string_view scenario) {
             NodeRow{.path = path,
                     .hash = kasumi::hasher::hash_string("added-content"),
                     .size = 13,
-                    .mtime = std::filesystem::file_time_type(
-                        std::chrono::nanoseconds(index + 2)),
+                    .mtime = static_cast<std::int64_t>(index + 2),
                     .is_directory = false});
     } else if (scenario == "one_deleted") {
         if (snapshot.rows.size() > 1)

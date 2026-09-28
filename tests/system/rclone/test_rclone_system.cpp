@@ -16,6 +16,7 @@
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/clock.hpp"
+#include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "runtime/paths.hpp"
@@ -75,7 +76,7 @@ std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> test_key() {
 
 kasumi::Snapshot tree_with(std::string_view path,
                            std::string_view contents,
-                           std::filesystem::file_time_type mtime = {}) {
+                           kasumi::TimestampNs mtime = 0) {
     kasumi::Snapshot tree{
         .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
                  kasumi::NodeRow{.path = std::string{path},
@@ -92,7 +93,7 @@ make_commit(std::uint64_t height,
             std::vector<std::string> parents,
             std::string_view path,
             std::string_view contents,
-            std::filesystem::file_time_type mtime = {}) {
+            kasumi::TimestampNs mtime = 0) {
     return kasumi::history::make_commit(height,
                                         std::move(parents),
                                         tree_with(path, contents, mtime),
@@ -845,28 +846,37 @@ TEST(RcloneSystemTest, ThreeConcurrentPublishersConvergeThroughRealTransport) {
     kasumi::test::write_text(reconciler.local_dir / "beta.txt", "branch-b");
     kasumi::test::write_text(reconciler.local_dir / "gamma.txt", "branch-c");
     std::error_code mtime_error;
-    const auto alpha_mtime = std::filesystem::last_write_time(
+    const auto alpha_file_time = std::filesystem::last_write_time(
         reconciler.local_dir / "alpha.txt", mtime_error);
     ASSERT_FALSE(mtime_error);
-    const auto beta_mtime = std::filesystem::last_write_time(
+    const auto beta_file_time = std::filesystem::last_write_time(
         reconciler.local_dir / "beta.txt", mtime_error);
     ASSERT_FALSE(mtime_error);
-    const auto gamma_mtime = std::filesystem::last_write_time(
+    const auto gamma_file_time = std::filesystem::last_write_time(
         reconciler.local_dir / "gamma.txt", mtime_error);
     ASSERT_FALSE(mtime_error);
+    const auto alpha_mtime =
+        kasumi::platform::metadata::unix_nanoseconds(alpha_file_time);
+    const auto beta_mtime =
+        kasumi::platform::metadata::unix_nanoseconds(beta_file_time);
+    const auto gamma_mtime =
+        kasumi::platform::metadata::unix_nanoseconds(gamma_file_time);
+    ASSERT_TRUE(alpha_mtime.has_value());
+    ASSERT_TRUE(beta_mtime.has_value());
+    ASSERT_TRUE(gamma_mtime.has_value());
 
     auto branch_a = make_commit(base->commit.height + 1,
                                 {base_id},
                                 "alpha.txt",
                                 "branch-a",
-                                alpha_mtime);
+                                *alpha_mtime);
     auto branch_b = make_commit(
-        base->commit.height + 1, {base_id}, "beta.txt", "branch-b", beta_mtime);
+        base->commit.height + 1, {base_id}, "beta.txt", "branch-b", *beta_mtime);
     auto branch_c = make_commit(base->commit.height + 1,
                                 {base_id},
                                 "gamma.txt",
                                 "branch-c",
-                                gamma_mtime);
+                                *gamma_mtime);
     ASSERT_TRUE(branch_a.has_value());
     ASSERT_TRUE(branch_b.has_value());
     ASSERT_TRUE(branch_c.has_value());
