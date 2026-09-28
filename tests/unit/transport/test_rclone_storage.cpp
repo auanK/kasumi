@@ -757,6 +757,39 @@ TEST(RcloneStorageTest, MissingHashsumfileMethodIsNotMissingObject) {
     EXPECT_EQ(result.error().code, kasumi::transport::ErrorCode::Unsupported);
 }
 
+TEST(RcloneStorageTest, UnsupportedPhysicalHashTypeIsCachedAsUnsupported) {
+    RcServerState remote;
+    std::atomic_int calls = 0;
+    remote.server.Post(
+        "/rc/operations/hashsumfile",
+        [&](const httplib::Request&, httplib::Response& response) {
+            ++calls;
+            response.status = 500;
+            response.set_content(R"({"error":"hash type not supported"})",
+                                 "application/json");
+        });
+    start_rc_server(remote);
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    const auto first =
+        operations.physical_hash(&state, "nested/object", "sha256");
+    const auto calls_after_first = calls.load();
+    const auto second =
+        operations.physical_hash(&state, "nested/object", "sha256");
+    stop_rc_server(remote);
+
+    ASSERT_FALSE(first.has_value());
+    EXPECT_EQ(first.error().code, kasumi::transport::ErrorCode::Unsupported);
+    ASSERT_FALSE(second.has_value());
+    EXPECT_EQ(second.error().code, kasumi::transport::ErrorCode::Unsupported);
+    EXPECT_TRUE(state.sha256_unsupported.load());
+    EXPECT_GT(calls_after_first, 0);
+    EXPECT_EQ(calls.load(), calls_after_first);
+}
+
 TEST(RcloneStorageTest, MissingPhysicalHashObjectRemainsObjectNotFound) {
     RcServerState remote;
     remote.server.Post(
