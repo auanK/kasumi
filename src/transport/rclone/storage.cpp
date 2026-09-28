@@ -994,7 +994,9 @@ std::expected<std::string, Error> rclone_physical_hash(
         }
         if (response.error().code == ErrorCode::Unsupported ||
             response.error().native_code == 400 ||
-            response.error().native_code == 501) {
+            response.error().native_code == 501 ||
+            response.error().message.find("hash type not supported") !=
+                std::string::npos) {
             state->sha256_unsupported.store(true, std::memory_order_relaxed);
             return std::unexpected(
                 make_error(ErrorCode::Unsupported,
