@@ -1287,7 +1287,7 @@ TEST(GcLiveSmokeCliTest, RejectsMissingRemoteOrOutput) {
 TEST(GcLiveCliPathTest, RejectsUnauthorizedRemote) {
     auto res = runner::prepare_cli_paths("kasumi:unauthorized", "out.json", std::nullopt, "scratch");
     ASSERT_FALSE(res.has_value());
-    EXPECT_NE(res.error().find("Remote parent must be exactly"), std::string::npos);
+    EXPECT_NE(res.error().find("not an authorized integration parent"), std::string::npos);
 }
 
 TEST(GcLiveCliPathTest, RejectsExistingOutputFile) {

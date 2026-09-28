@@ -12,14 +12,14 @@ namespace {
 namespace runner = kasumi::operational::gc_live_runner;
 
 void print_usage(std::ostream& output) {
-    output << "Usage: kasumi_gc_live_benchmark --remote <kasumi:integration-tests> \\\n"
+    output << "Usage: kasumi_gc_live_benchmark --remote <kasumi:integration-tests|onedrive:KasumiIntegrationTests> \\\n"
               "         --output <new-local-json> --mode <native|fallback> \\\n"
               "         --payload-bytes <bytes> --execute-live-benchmark \\\n"
               "         [--rclone-config <config-file>] [--preserve-evidence-on-failure]\n\n"
               "Controlled live GC remote copy benchmark runner for Kasumi.\n"
               "This operational tool executes exactly ONE complete garbage collection sequence\n"
               "under a new owned child namespace and measures client-side latency metrics:\n"
-              "  --remote: authorized remote parent (strictly kasumi:integration-tests)\n"
+              "  --remote: one of the explicitly authorized integration parents\n"
               "  --output: path for writing the benchmark JSON report\n"
               "  --mode: copy mode ('native' for transport::copy or 'fallback' for GET/PUT)\n"
               "  --payload-bytes: synthetic candidate size in bytes (1 to 67108864 [64 MiB], default 8 MiB)\n"

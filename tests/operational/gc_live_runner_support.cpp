@@ -267,7 +267,8 @@ std::string_view stage_name(LiveGcStage stage) noexcept {
 }
 
 bool is_authorized_live_parent(std::string_view remote_parent) noexcept {
-    return remote_parent == "kasumi:integration-tests";
+    return remote_parent == "kasumi:integration-tests" ||
+           remote_parent == "onedrive:KasumiIntegrationTests";
 }
 
 transport::Transport make_vault_transport(transport::Transport& underlying,
@@ -1332,7 +1333,7 @@ prepare_cli_paths(std::string_view remote,
                   const std::optional<std::filesystem::path>& rclone_config,
                   std::string_view scratch_dirname) {
     if (!is_authorized_live_parent(remote)) {
-        return std::unexpected("Remote parent must be exactly 'kasumi:integration-tests'; no remote request made.");
+        return std::unexpected("Remote parent is not an authorized integration parent; no remote request made.");
     }
 
     std::error_code fs_error;
