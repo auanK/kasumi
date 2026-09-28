@@ -8,6 +8,7 @@
 #include "application/observation/history.hpp"
 #include "application/profile.hpp"
 #include "core/hasher.hpp"
+#include "crypto/physical_hash.hpp"
 #include "crypto/key_derivation.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/provider_scenarios.hpp"
@@ -374,6 +375,16 @@ void characterize_capabilities(Report& report,
             item->detail = std::move(detail);
         }
     };
+    const auto mark_unsupported = [&](std::string_view name_value,
+                                      std::string detail) {
+        auto item = std::ranges::find(
+            report.capabilities, name_value, &Capability::name);
+        if (item != report.capabilities.end()) {
+            item->status = CapabilityStatus::Unsupported;
+            item->error = transport::ErrorCode::Unsupported;
+            item->detail = std::move(detail);
+        }
+    };
     if (ops.copy != nullptr) {
         const auto source = workspace / "capability-copy-source";
         const auto destination = workspace / "capability-copy-destination";
@@ -432,8 +443,95 @@ void characterize_capabilities(Report& report,
                 ->detail = "exercised; returned only the direct child";
         }
     }
+    if (ops.physical_hash != nullptr || ops.physical_hash_batch != nullptr) {
+        constexpr std::string_view identifier =
+            "capabilities/physical-hash/item";
+        const auto source = workspace / "capability-physical-hash";
+        test::write_text(source, "physical-hash-capability");
+        const auto expected = crypto::physical::hash_file(source, "sha256");
+        const auto put = transport::put(storage, source, identifier);
+        record_direct(report, "put");
+        if (!expected || !put) {
+            if (ops.physical_hash != nullptr) {
+                fail_optional("physical_hash",
+                              "could not stage physical hash capability probe");
+            }
+            if (ops.physical_hash_batch != nullptr) {
+                fail_optional("physical_hash_batch",
+                              "could not stage physical hash capability probe");
+            }
+        } else {
+            if (ops.physical_hash != nullptr) {
+                const auto observed =
+                    transport::physical_hash(storage, identifier, "sha256");
+                record_direct(report, "physical_hash");
+                if (!observed && observed.error().code ==
+                                     transport::ErrorCode::Unsupported) {
+                    mark_unsupported(
+                        "physical_hash",
+                        "target reports SHA-256 physical hash unsupported");
+                } else if (!observed) {
+                    fail_optional("physical_hash",
+                                  transport::describe(observed.error()));
+                } else if (*observed != *expected) {
+                    fail_optional("physical_hash",
+                                  "physical hash differs from local SHA-256");
+                } else {
+                    std::ranges::find(report.capabilities,
+                                      std::string{"physical_hash"},
+                                      &Capability::name)
+                        ->detail = "exercised and matched local SHA-256";
+                }
+            }
+            if (ops.physical_hash_batch != nullptr) {
+                const transport::PhysicalHashBatchRequest request{
+                    .scratch_root = workspace,
+                    .objects = {{std::string{identifier}, *expected}},
+                    .algorithm = "sha256",
+                };
+                const auto observed =
+                    transport::physical_hash_batch(storage, request);
+                record_direct(report, "physical_hash_batch");
+                if (!observed && observed.error().code ==
+                                     transport::ErrorCode::Unsupported) {
+                    mark_unsupported(
+                        "physical_hash_batch",
+                        "target reports SHA-256 physical hash batch unsupported");
+                } else if (!observed) {
+                    fail_optional("physical_hash_batch",
+                                  transport::describe(observed.error()));
+                } else if (observed->matched != std::vector<std::string>{
+                               std::string{identifier}} ||
+                           !observed->mismatched.empty() ||
+                           !observed->missing.empty() ||
+                           !observed->errors.empty()) {
+                    fail_optional("physical_hash_batch",
+                                  "batch physical hash did not match local SHA-256");
+                } else {
+                    std::ranges::find(report.capabilities,
+                                      std::string{"physical_hash_batch"},
+                                      &Capability::name)
+                        ->detail = "exercised and matched local SHA-256";
+                }
+            }
+        }
+        if (put) {
+            const auto removed = transport::remove(storage, identifier);
+            record_direct(report, "remove");
+            if (!removed) {
+                if (ops.physical_hash != nullptr) {
+                    fail_optional("physical_hash",
+                                  "could not remove physical hash probe object");
+                }
+                if (ops.physical_hash_batch != nullptr) {
+                    fail_optional("physical_hash_batch",
+                                  "could not remove physical hash probe object");
+                }
+            }
+        }
+    }
     for (auto& item : report.capabilities) {
-        if (item.status == CapabilityStatus::Unsupported) {
+        if (item.status == CapabilityStatus::Unsupported && item.detail.empty()) {
             item.detail = "optional operation is not exposed by this transport";
         }
     }
