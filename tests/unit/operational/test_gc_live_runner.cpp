@@ -74,7 +74,9 @@ struct FakeHarness {
 // Gate: Parent validation
 TEST(GcLiveRunnerGateTest, RejectsUnauthorizedParentsBeforeRemote) {
     EXPECT_TRUE(runner::is_authorized_live_parent("kasumi:integration-tests"));
+    EXPECT_TRUE(runner::is_authorized_live_parent("onedrive:KasumiIntegrationTests"));
     for (const auto parent : {"kasumi:", "kasumi:anything-else", "other:integration-tests",
+                              "onedrive:", "onedrive:KasumiIntegrationTests/child",
                               "/tmp/local", "C:/Windows", "archive:test-parent"}) {
         EXPECT_FALSE(runner::is_authorized_live_parent(parent)) << parent;
     }
