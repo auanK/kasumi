@@ -48,13 +48,6 @@ struct FsckResult {
 using FsckProgressCallback =
     std::function<void(const FsckProgress&)>;
 
-namespace testing {
-// Allows integrity tests to hold workers at deterministic window boundaries.
-enum class FsckWorkerEvent { BeforeAudit, WindowStopRequested };
-using FsckWorkerEventCallback =
-    std::function<void(FsckWorkerEvent, std::size_t)>;
-} // namespace testing
-
 // Counts produced by recoverable garbage collection.
 struct GarbageCollectResult {
     std::size_t candidate_objects = 0;
@@ -70,8 +63,7 @@ fsck(const runtime::RuntimeData& runtime_data,
      transport::Transport& storage,
      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
      std::size_t audit_concurrency = 1,
-     FsckProgressCallback on_progress = {},
-     testing::FsckWorkerEventCallback on_worker_event = {});
+     FsckProgressCallback on_progress = {});
 
 // Callback type for receiving garbage collection progress updates.
 using GarbageCollectProgressCallback =

@@ -5,6 +5,7 @@
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/fsck_checkpoint.hpp"
+#include "application/integrity/maintenance_test.hpp"
 #include "application/observation/state.hpp"
 #include "core/maintenance.hpp"
 #include "crypto/content.hpp"
@@ -1061,12 +1062,15 @@ std::string describe(const Error& error) {
     return result;
 }
 
-std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
-                                      transport::Transport& storage,
-                                      KeySpan key,
-                                      std::size_t audit_concurrency,
-                                      FsckProgressCallback on_progress,
-                                      testing::FsckWorkerEventCallback on_worker_event) {
+namespace {
+
+std::expected<FsckResult, Error> fsck_impl(
+    const runtime::RuntimeData& runtime_data,
+    transport::Transport& storage,
+    KeySpan key,
+    std::size_t audit_concurrency,
+    FsckProgressCallback on_progress,
+    const testing::FsckWorkerEventCallback& on_worker_event) {
     std::size_t completed_objects = 0;
     std::optional<std::size_t> progress_total_objects;
     std::optional<std::uint64_t> completed_plaintext_bytes =
@@ -1475,6 +1479,36 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
     platform::cleanup_workspace(*workspace);
     platform::perf_trace::finish("fsck.workspace_duration_us", ws_cleanup_token);
     return result;
+}
+
+} // namespace
+
+std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
+                                      transport::Transport& storage,
+                                      KeySpan key,
+                                      std::size_t audit_concurrency,
+                                      FsckProgressCallback on_progress) {
+    return fsck_impl(runtime_data,
+                     storage,
+                     key,
+                     audit_concurrency,
+                     std::move(on_progress),
+                     {});
+}
+
+std::expected<FsckResult, Error> testing::fsck_with_worker_events(
+    const runtime::RuntimeData& runtime_data,
+    transport::Transport& storage,
+    KeySpan key,
+    std::size_t audit_concurrency,
+    FsckProgressCallback on_progress,
+    testing::FsckWorkerEventCallback on_worker_event) {
+    return fsck_impl(runtime_data,
+                     storage,
+                     key,
+                     audit_concurrency,
+                     std::move(on_progress),
+                     on_worker_event);
 }
 
 std::expected<GarbageCollectResult, Error>

@@ -3,6 +3,7 @@
 #include "application/history_storage/reachability.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/maintenance.hpp"
+#include "application/integrity/maintenance_test.hpp"
 #include "core/maintenance.hpp"
 #include "kasumi/test/history_storage.hpp"
 #include "platform/cancellation.hpp"
@@ -25,6 +26,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -34,6 +36,23 @@ namespace protocol = kasumi::application::history_storage::maintenance_protocol;
 using IntegrityErrorCode = kasumi::application::integrity::ErrorCode;
 using kasumi::runtime::RuntimeData;
 using kasumi::transport::Presence;
+
+using FsckNormalApi = std::expected<kasumi::application::integrity::FsckResult,
+                                   kasumi::application::integrity::Error> (*)(
+    const kasumi::runtime::RuntimeData&,
+    kasumi::transport::Transport&,
+    std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE>,
+    std::size_t,
+    kasumi::application::integrity::FsckProgressCallback);
+static_assert(std::is_same_v<decltype(&kasumi::application::integrity::fsck), FsckNormalApi>);
+
+[[maybe_unused]] auto fsck_without_worker_test_hooks(
+    const kasumi::runtime::RuntimeData& runtime,
+    kasumi::transport::Transport& storage,
+    std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key) {
+    return kasumi::application::integrity::fsck(
+        runtime, storage, key, 4, kasumi::application::integrity::FsckProgressCallback{});
+}
 
 inline const auto& test_layout() {
     static const auto layout =
@@ -5851,7 +5870,7 @@ TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckHardTransportFailureDrainsAn
             }
         };
 
-    const auto checked = kasumi::application::integrity::fsck(
+    const auto checked = kasumi::application::integrity::testing::fsck_with_worker_events(
         runtime, wrapped_transport, test_key(), 2, {}, std::move(worker_event));
     ASSERT_FALSE(checked.has_value());
     EXPECT_EQ(checked.error().code, IntegrityErrorCode::TransportFailure);
@@ -5911,7 +5930,7 @@ TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckInternalStopDoesNotMaskCausa
             }
         };
 
-    const auto checked = kasumi::application::integrity::fsck(
+    const auto checked = kasumi::application::integrity::testing::fsck_with_worker_events(
         runtime,
         wrapped_transport,
         test_key(),
