@@ -5183,6 +5183,11 @@ struct AuditProbeState {
     std::size_t progress_completions = 0;
     std::optional<std::size_t> fail_ordinal;
     kasumi::transport::ErrorCode fail_code = kasumi::transport::ErrorCode::Io;
+    std::map<std::string, kasumi::transport::ErrorCode> failures_by_identifier;
+    std::string wait_for_failure_identifier;
+    std::string signal_failure_identifier;
+    bool waiting_get_entered = false;
+    bool failure_signaled = false;
 };
 
 struct AuditProbeTransportState {
@@ -5206,6 +5211,11 @@ kasumi::transport::Result audit_probe_get(void* context,
         ++probe->active;
         probe->peak_active = std::max(probe->peak_active, probe->active);
         probe->changed.notify_all();
+        if (identifier == probe->wait_for_failure_identifier) {
+            probe->waiting_get_entered = true;
+            probe->changed.notify_all();
+            probe->changed.wait(lock, [&] { return probe->failure_signaled; });
+        }
         const auto gate_completion_count =
             identifier == probe->gate_small_identifier ? 2U : 1U;
         if (identifier == probe->gate_small_identifier ||
@@ -5230,11 +5240,27 @@ kasumi::transport::Result audit_probe_get(void* context,
         }
     }
 
-    auto result = (probe->fail_ordinal && *probe->fail_ordinal == ordinal)
-        ? kasumi::transport::Result{std::unexpect,
-              kasumi::transport::Error{.code = probe->fail_code,
-                                       .message = "injected get failure"}}
+    const auto failure = probe->failures_by_identifier.find(std::string{identifier});
+    const bool fail = failure != probe->failures_by_identifier.end() ||
+        (probe->fail_ordinal && *probe->fail_ordinal == ordinal);
+    const auto error_code = failure != probe->failures_by_identifier.end()
+        ? failure->second
+        : probe->fail_code;
+    auto result = fail
+        ? kasumi::transport::Result{
+              std::unexpect,
+              kasumi::transport::Error{
+                  .code = error_code,
+                  .message = "injected get failure for " + std::string{identifier}}}
         : kasumi::transport::get(*state->base, identifier, destination);
+
+    if (fail && identifier == probe->signal_failure_identifier) {
+        {
+            std::lock_guard lock(probe->mutex);
+            probe->failure_signaled = true;
+        }
+        probe->changed.notify_all();
+    }
 
     {
         std::lock_guard lock(probe->mutex);
@@ -5791,23 +5817,117 @@ TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckHardTransportFailureDrainsAn
     auto storage = make_local_storage();
     auto runtime = runtime_data(storage.workspace);
 
-    setup_multi_file_dataset(storage, {
+    const std::vector<std::pair<std::string, std::string>> files{
         {"f0.txt", "payload_0"},
         {"f1.txt", "payload_1"},
-        {"f2.txt", "payload_2"},
-        {"f3.txt", "payload_3"},
-    });
+    };
+    const auto identifiers = setup_multi_file_dataset(storage, files);
+    std::vector<std::pair<std::string, std::string>> logical_order;
+    for (std::size_t i = 0; i < files.size(); ++i) {
+        logical_order.emplace_back(
+            kasumi::hash_hex(kasumi::hasher::hash_string(files[i].second)),
+            identifiers[i]);
+    }
+    std::ranges::sort(logical_order);
 
     AuditProbeState probe;
-    probe.fail_ordinal = 1;
-    probe.fail_code = kasumi::transport::ErrorCode::PermissionDenied;
+    const auto& lower_index_id = logical_order.front().second;
+    const auto& lower_index_hash = logical_order.front().first;
+    const auto& higher_index_id = logical_order.back().second;
+    probe.failures_by_identifier.emplace(
+        lower_index_id, kasumi::transport::ErrorCode::PermissionDenied);
+    probe.failures_by_identifier.emplace(
+        higher_index_id, kasumi::transport::ErrorCode::Io);
+    probe.wait_for_failure_identifier = lower_index_id;
+    probe.signal_failure_identifier = higher_index_id;
     AuditProbeTransportState probe_state;
     auto wrapped_transport = make_audit_probe_transport(probe_state, storage.transport, probe);
+    kasumi::application::integrity::testing::FsckWorkerEventCallback worker_event =
+        [&](auto event, std::size_t index) {
+            if (event == kasumi::application::integrity::testing::FsckWorkerEvent::BeforeAudit &&
+                index == 1) {
+                std::unique_lock lock(probe.mutex);
+                probe.changed.wait(lock, [&] { return probe.waiting_get_entered; });
+            }
+        };
 
     const auto checked = kasumi::application::integrity::fsck(
-        runtime, wrapped_transport, test_key(), 4);
+        runtime, wrapped_transport, test_key(), 2, {}, std::move(worker_event));
     ASSERT_FALSE(checked.has_value());
     EXPECT_EQ(checked.error().code, IntegrityErrorCode::TransportFailure);
+    EXPECT_EQ(checked.error().object_identifier, lower_index_hash);
+    EXPECT_NE(checked.error().detail.find("injected get failure for " + lower_index_id),
+              std::string::npos);
+    EXPECT_TRUE(probe.failure_signaled);
+}
+
+TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckInternalStopDoesNotMaskCausalTransportFailure) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    const std::vector<std::pair<std::string, std::string>> files{
+        {"f0.txt", "payload_0"},
+        {"f1.txt", "payload_1"},
+    };
+    const auto identifiers = setup_multi_file_dataset(storage, files);
+    std::vector<std::pair<std::string, std::string>> logical_order;
+    for (std::size_t i = 0; i < files.size(); ++i) {
+        logical_order.emplace_back(
+            kasumi::hash_hex(kasumi::hasher::hash_string(files[i].second)),
+            identifiers[i]);
+    }
+    std::ranges::sort(logical_order);
+
+    AuditProbeState probe;
+    const auto& higher_index_id = logical_order.back().second;
+    const auto& higher_index_hash = logical_order.back().first;
+    probe.failures_by_identifier.emplace(
+        higher_index_id, kasumi::transport::ErrorCode::PermissionDenied);
+    AuditProbeTransportState probe_state;
+    auto wrapped_transport = make_audit_probe_transport(probe_state, storage.transport, probe);
+    std::mutex gate_mutex;
+    std::condition_variable gate_changed;
+    bool lower_worker_waiting = false;
+    bool window_stop_requested = false;
+    bool lower_worker_observed_stop = false;
+    std::vector<kasumi::application::FsckProgress> events;
+    kasumi::application::integrity::testing::FsckWorkerEventCallback worker_event =
+        [&](auto event, std::size_t index) {
+            using Event = kasumi::application::integrity::testing::FsckWorkerEvent;
+            if (event == Event::BeforeAudit && index == 0) {
+                std::unique_lock lock(gate_mutex);
+                lower_worker_waiting = true;
+                gate_changed.notify_all();
+                gate_changed.wait(lock, [&] { return window_stop_requested; });
+                lower_worker_observed_stop = true;
+            } else if (event == Event::BeforeAudit && index == 1) {
+                std::unique_lock lock(gate_mutex);
+                gate_changed.wait(lock, [&] { return lower_worker_waiting; });
+            } else if (event == Event::WindowStopRequested) {
+                {
+                    std::lock_guard lock(gate_mutex);
+                    window_stop_requested = true;
+                }
+                gate_changed.notify_all();
+            }
+        };
+
+    const auto checked = kasumi::application::integrity::fsck(
+        runtime,
+        wrapped_transport,
+        test_key(),
+        2,
+        [&](const auto& progress) { events.push_back(progress); },
+        std::move(worker_event));
+    ASSERT_FALSE(checked.has_value());
+    EXPECT_EQ(checked.error().code, IntegrityErrorCode::TransportFailure);
+    EXPECT_EQ(checked.error().object_identifier, higher_index_hash);
+    EXPECT_NE(checked.error().detail.find("injected get failure for " + higher_index_id),
+              std::string::npos);
+    EXPECT_TRUE(lower_worker_observed_stop);
+    ASSERT_FALSE(events.empty());
+    EXPECT_EQ(events.back().stage, kasumi::application::FsckStage::Finalizing);
+    ASSERT_TRUE(events.back().total_objects.has_value());
+    EXPECT_LT(events.back().completed_objects, *events.back().total_objects);
 }
 
 TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckCancellationStopsWorkAndCleansWorkspace) {

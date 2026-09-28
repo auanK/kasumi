@@ -952,7 +952,8 @@ void run_audit_worker(std::stop_token stop,
                       transport::Transport& storage,
                       KeySpan key,
                       const std::vector<kasumi::maintenance::ObjectReference>& references,
-                      const platform::Workspace& workspace) {
+                      const platform::Workspace& workspace,
+                      const testing::FsckWorkerEventCallback& on_worker_event) {
     while (true) {
         std::size_t index = 0;
         {
@@ -972,6 +973,13 @@ void run_audit_worker(std::stop_token stop,
 
         AuditWorkResult result{.index = index, .state = AuditState::Healthy, .error = std::nullopt};
         try {
+            if (on_worker_event) {
+                try {
+                    on_worker_event(testing::FsckWorkerEvent::BeforeAudit, index);
+                } catch (...) {
+                    // Test observation cannot alter the audit result.
+                }
+            }
             if (platform::cancellation::requested() || stop.stop_requested() || state.stop_requested) {
                 result.error = make_error(ErrorCode::StateFailure, "operation cancelled");
             } else {
@@ -1047,7 +1055,8 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                                       transport::Transport& storage,
                                       KeySpan key,
                                       std::size_t audit_concurrency,
-                                      FsckProgressCallback on_progress) {
+                                      FsckProgressCallback on_progress,
+                                      testing::FsckWorkerEventCallback on_worker_event) {
     std::size_t completed_objects = 0;
     std::optional<std::size_t> progress_total_objects;
     std::optional<std::uint64_t> completed_plaintext_bytes =
@@ -1258,7 +1267,8 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                                      std::ref(storage),
                                      key,
                                      std::cref(inventory->referenced_objects),
-                                     std::cref(*workspace));
+                                     std::cref(*workspace),
+                                     std::cref(on_worker_event));
             }
 
             std::size_t next = 0;
@@ -1281,6 +1291,28 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
             std::map<std::string, VerifiedObjectEntry> verified_map;
             std::size_t unpersisted_verified = 0;
             bool cancelled = false;
+            bool stop_event_notified = false;
+            const auto request_window_stop = [&] {
+                {
+                    std::lock_guard lock(state.mutex);
+                    state.stop_requested = true;
+                }
+                state.changed.notify_all();
+                for (auto& worker : workers) {
+                    worker.request_stop();
+                }
+                if (!stop_event_notified) {
+                    stop_event_notified = true;
+                    if (on_worker_event) {
+                        try {
+                            on_worker_event(
+                                testing::FsckWorkerEvent::WindowStopRequested, 0);
+                        } catch (...) {
+                            // Test observation cannot alter the audit result.
+                        }
+                    }
+                }
+            };
 
             while (outstanding != 0) {
                 std::size_t slot = 0;
@@ -1308,28 +1340,14 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
 
                 if (platform::cancellation::requested()) {
                     cancelled = true;
-                    {
-                        std::lock_guard lock(state.mutex);
-                        state.stop_requested = true;
-                    }
-                    state.changed.notify_all();
-                    for (auto& w : workers) {
-                        w.request_stop();
-                    }
+                    request_window_stop();
                 }
 
                 if (work_result.error) {
                     if (!lowest_hard_failure || work_result.index < lowest_hard_failure->first) {
                         lowest_hard_failure = std::pair{work_result.index, std::move(*work_result.error)};
                     }
-                    {
-                        std::lock_guard lock(state.mutex);
-                        state.stop_requested = true;
-                    }
-                    state.changed.notify_all();
-                    for (auto& w : workers) {
-                        w.request_stop();
-                    }
+                    request_window_stop();
                 } else {
                     const auto& reference =
                         inventory->referenced_objects[work_result.index];
@@ -1372,14 +1390,7 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                     next < total_objects) {
                     if (platform::cancellation::requested()) {
                         cancelled = true;
-                        {
-                            std::lock_guard lock(state.mutex);
-                            state.stop_requested = true;
-                        }
-                        state.changed.notify_all();
-                        for (auto& w : workers) {
-                            w.request_stop();
-                        }
+                        request_window_stop();
                     } else {
                         admit(slot);
                     }
@@ -1399,14 +1410,7 @@ std::expected<FsckResult, Error> fsck(const runtime::RuntimeData& runtime_data,
                 }
             }
 
-            {
-                std::lock_guard lock(state.mutex);
-                state.stop_requested = true;
-            }
-            state.changed.notify_all();
-            for (auto& w : workers) {
-                w.request_stop();
-            }
+            request_window_stop();
             workers.clear();
             report_progress(application::FsckStage::Finalizing);
 
