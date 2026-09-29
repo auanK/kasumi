@@ -16,6 +16,7 @@
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
+#include "platform/change_journal.hpp"
 #include "platform/clock.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
@@ -602,9 +603,21 @@ TEST(RcloneSystemTest, TwoPersistedClientsPropagateRemoteDeletes) {
     EXPECT_FALSE(std::filesystem::exists(client_a.local_dir / "dir"));
     auto checkpoint_a = kasumi::state_storage::load_observation_checkpoint(
         runtime_a->database_path);
-    ASSERT_TRUE(checkpoint_a && *checkpoint_a);
-    EXPECT_EQ((*checkpoint_a)->tree_root_hash,
-              (*state_a)->tree.rows.front().hash);
+    ASSERT_TRUE(checkpoint_a.has_value()) << checkpoint_a.error();
+    const bool checkpoint_supported =
+        kasumi::platform::capture_change_journal_checkpoint(
+            client_a.local_dir)
+            .has_value();
+    if (checkpoint_supported) {
+        ASSERT_TRUE(checkpoint_a->has_value());
+        ASSERT_FALSE((*state_a)->tree.rows.empty());
+        EXPECT_EQ((*checkpoint_a)->tree_root_hash,
+                  (*state_a)->tree.rows.front().hash);
+        EXPECT_EQ((*checkpoint_a)->row_count,
+                  static_cast<std::uint64_t>((*state_a)->tree.rows.size()));
+    } else {
+        EXPECT_FALSE(checkpoint_a->has_value());
+    }
     ASSERT_TRUE(sync_client(client_b));
 
     ensure_workspace(harness_root(harness) / "delete-final-observation");
@@ -1634,8 +1647,21 @@ TEST(RcloneSystemTest, RcReadinessUsesPidWithoutVersionProbe) {
         FAIL() << detail;
     }
 
+    const auto pid_requests =
+        kasumi::platform::perf_trace::get_count("rc/core/pid");
+    const auto readiness_attempts =
+        kasumi::platform::perf_trace::get_count("RC readiness attempts");
+    const auto readiness_successes =
+        kasumi::platform::perf_trace::get_count(
+            "RC readiness successful attempts");
+    const auto readiness_retries =
+        kasumi::platform::perf_trace::get_count("RC readiness retries");
     EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/core/version"), 0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/core/pid"), 1U);
+    EXPECT_GE(pid_requests, 1U);
+    EXPECT_GE(readiness_attempts, 1U);
+    EXPECT_EQ(readiness_successes, 1U);
+    EXPECT_EQ(readiness_attempts, pid_requests);
+    EXPECT_EQ(readiness_attempts, readiness_retries + 1U);
     storage = {};
     kasumi::platform::perf_trace::reset();
     kasumi::platform::perf_trace::force_enable(false);
