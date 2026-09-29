@@ -1,4 +1,5 @@
 #include "provider_certification_support.hpp"
+#include "provider_target_config.hpp"
 
 #include "platform/path.hpp"
 
@@ -119,10 +120,20 @@ int main(int argc, char** argv) {
     auto output_path = std::filesystem::current_path() /
                        "benchmark-results/phase41-multi-backend-certification/"
                        "local-certification.json";
-    std::string target_kind = "local";
-    std::string provider_id;
-    std::string remote_name;
-    std::string authorized_parent;
+    std::vector<std::string_view> arguments;
+    arguments.reserve(static_cast<std::size_t>(argc));
+    for (int index = 0; index < argc; ++index) {
+        arguments.emplace_back(argv[index]);
+    }
+    auto target_selection =
+        kasumi::operational::provider_target_config::
+            parse_target_selection_arguments(arguments);
+    if (!target_selection) {
+        std::cerr << target_selection.error() << '\n';
+        return 2;
+    }
+
+    const std::string target_kind = target_selection->target_kind;
     bool preserve_on_failure = false;
     bool aggregate_only = false;
     bool output_explicit = false;
@@ -130,18 +141,13 @@ int main(int argc, char** argv) {
 
     for (int index = 1; index < argc; ++index) {
         const std::string argument{argv[index]};
-        if (argument == "--target" && index + 1 < argc) {
-            target_kind = argv[++index];
+        if (argument == "--target" || argument == "--config" ||
+            argument == "--target-id") {
+            ++index;
         } else if ((argument == "--local-parent" ||
                     argument == "--local-root") &&
-                   index + 1 < argc) {
+            index + 1 < argc) {
             local_parent = argv[++index];
-        } else if (argument == "--provider-id" && index + 1 < argc) {
-            provider_id = argv[++index];
-        } else if (argument == "--remote" && index + 1 < argc) {
-            remote_name = argv[++index];
-        } else if (argument == "--authorized-parent" && index + 1 < argc) {
-            authorized_parent = argv[++index];
         } else if (argument == "--output" && index + 1 < argc) {
             output_path = argv[++index];
             output_explicit = true;
@@ -181,6 +187,14 @@ int main(int argc, char** argv) {
         return matrix.at("status") == "PASS" ? 0 : 1;
     }
 
+    auto selected_live_target =
+        kasumi::operational::provider_target_config::resolve_target(
+            *target_selection);
+    if (!selected_live_target) {
+        std::cerr << selected_live_target.error() << '\n';
+        return 2;
+    }
+
     std::expected<ProviderTarget, std::string> target =
         std::unexpected("unsupported target; choose local or rclone");
     if (target_kind == "local") {
@@ -197,16 +211,14 @@ int main(int argc, char** argv) {
             .local_ownership = std::move(*local),
         };
     } else if (target_kind == "rclone") {
-        if (provider_id.empty() || remote_name.empty() ||
-            authorized_parent.empty()) {
-            std::cerr <<
-                "Rclone requires --provider-id, --remote, and "
-                "--authorized-parent\n";
+        if (!selected_live_target->has_value()) {
+            std::cerr << "Rclone target was not selected\n";
             return 2;
         }
-        target = create_rclone_target(std::move(provider_id),
-                                      std::move(remote_name),
-                                      std::move(authorized_parent));
+        target = create_rclone_target(
+            (*selected_live_target)->provider_id,
+            (*selected_live_target)->remote,
+            (*selected_live_target)->authorized_parent);
         if (!target) {
             std::cerr << target.error() << '\n';
             return 2;

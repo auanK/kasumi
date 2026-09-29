@@ -27,6 +27,8 @@ namespace kasumi::operational::phase11 {
 namespace transport = kasumi::transport;
 namespace preflight = kasumi::operational::gc_live_preflight;
 namespace smoke = kasumi::operational::remote_copy_smoke;
+namespace provider_target_config =
+    kasumi::operational::provider_target_config;
 
 enum class BenchmarkMode {
     Individual,
@@ -55,7 +57,8 @@ constexpr std::string_view capability_status_name(CapabilityStatus status) noexc
 }
 
 struct Phase11Config {
-    std::string remote_parent = "kasumi:integration-tests";
+    std::string remote_parent;
+    provider_target_config::LiveTargetAuthorization authorization;
     std::optional<std::filesystem::path> rclone_config = std::nullopt;
     std::filesystem::path output_path;
     std::filesystem::path local_scratch;
@@ -134,9 +137,6 @@ struct Phase11RunReport {
     } cleanup;
 };
 
-// Guardrail validations
-bool is_authorized_parent(std::string_view remote_parent) noexcept;
-bool is_disallowed_root(std::string_view remote) noexcept;
 std::expected<std::string, std::string> generate_benchmark_child(std::string_view random_hex);
 
 // Phase 3 Capability Test

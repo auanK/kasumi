@@ -2,6 +2,7 @@
 #define KASUMI_GC_LIVE_RUNNER_SUPPORT_HPP
 
 #include "gc_live_preflight_support.hpp"
+#include "provider_target_config.hpp"
 #include "remote_copy_smoke_support.hpp"
 
 #include "application/history_storage/maintenance_protocol.hpp"
@@ -140,6 +141,7 @@ struct PostGcValidation {
 
 struct RunnerOptions {
     std::string remote_parent;
+    provider_target_config::LiveTargetAuthorization authorization;
     std::optional<std::filesystem::path> rclone_config;
     std::filesystem::path output_path;
     std::filesystem::path local_scratch;
@@ -228,8 +230,6 @@ struct RunnerReport {
     preflight::CleanupResult cleanup;
 };
 
-bool is_authorized_live_parent(std::string_view remote_parent) noexcept;
-
 transport::Transport make_vault_transport(transport::Transport& underlying,
                                           std::string hidden_marker = "owner.marker",
                                           CopyMode copy_mode = CopyMode::Native);
@@ -271,13 +271,17 @@ struct PreparedCliPaths {
 };
 
 std::expected<PreparedCliPaths, std::string>
-prepare_cli_paths(std::string_view remote,
+prepare_cli_paths(const provider_target_config::LiveTargetAuthorization& authorization,
+                  std::string_view remote,
                   const std::filesystem::path& raw_output,
                   const std::optional<std::filesystem::path>& rclone_config,
                   std::string_view scratch_dirname);
 
 struct SmokeArguments {
     std::string remote;
+    provider_target_config::LiveTargetAuthorization authorization;
+    std::filesystem::path config_path;
+    std::string target_id;
     std::optional<std::filesystem::path> rclone_config;
     std::filesystem::path output;
     bool execute_live_gc = false;
@@ -289,6 +293,9 @@ parse_smoke_arguments(std::span<const std::string_view> args);
 
 struct BenchmarkArguments {
     std::string remote;
+    provider_target_config::LiveTargetAuthorization authorization;
+    std::filesystem::path config_path;
+    std::string target_id;
     std::optional<std::filesystem::path> rclone_config;
     std::filesystem::path output;
     CopyMode mode = CopyMode::Native;

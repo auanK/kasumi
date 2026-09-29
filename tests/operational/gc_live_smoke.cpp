@@ -10,12 +10,12 @@ namespace {
 namespace runner = kasumi::operational::gc_live_runner;
 
 void print_usage(std::ostream& output) {
-    output << "Usage: kasumi_gc_live_smoke --remote <kasumi:integration-tests|onedrive:KasumiIntegrationTests> "
+    output << "Usage: kasumi_gc_live_smoke --config <targets.toml> --target-id <id> "
               "[--rclone-config <config-file>] --output <new-local-json> --execute-live-gc "
               "[--preserve-evidence-on-failure]\n\n"
               "Guarded live GC collection runner for Kasumi.\n"
               "This operational tool executes exactly ONE complete garbage collection sequence:\n"
-              "  1. Validates one of the explicitly authorized integration parents\n"
+              "  1. Validates the selected target's explicitly authorized parent\n"
               "  2. Probes a newly-generated unique child namespace (PRE_INITIALIZE == UNUSED)\n"
               "  3. Initializes the child namespace and verifies POST_INITIALIZE is empty\n"
               "  4. Establishes an operational ownership marker with exact readback verification\n"
@@ -33,7 +33,8 @@ int execute(const runner::SmokeArguments& arguments) {
     runner::RcloneConfigEnvironment restore_environment;
 
     auto prepared = runner::prepare_cli_paths(
-        arguments.remote, arguments.output, arguments.rclone_config, "kasumi-gc-smoke-scratch");
+        arguments.authorization, arguments.remote, arguments.output,
+        arguments.rclone_config, "kasumi-gc-smoke-scratch");
     if (!prepared) {
         std::cerr << prepared.error() << '\n';
         return 2;
@@ -41,6 +42,7 @@ int execute(const runner::SmokeArguments& arguments) {
 
     runner::RunnerOptions options{
         .remote_parent = arguments.remote,
+        .authorization = arguments.authorization,
         .rclone_config = arguments.rclone_config,
         .output_path = prepared->output_path,
         .local_scratch = prepared->scratch_root,

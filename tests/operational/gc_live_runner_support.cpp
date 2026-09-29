@@ -266,12 +266,6 @@ std::string_view stage_name(LiveGcStage stage) noexcept {
     return "UNKNOWN";
 }
 
-bool is_authorized_live_parent(std::string_view remote_parent) noexcept {
-    return remote_parent == "kasumi:integration-tests" ||
-           remote_parent == "onedrive:KasumiIntegrationTests" ||
-           remote_parent == "kita-sftp:KasumiIntegrationTests";
-}
-
 transport::Transport make_vault_transport(transport::Transport& underlying,
                                           std::string hidden_marker,
                                           CopyMode copy_mode) {
@@ -601,17 +595,11 @@ RunnerReport run(
         return report;
     }
 
-    // Gate 2: Check remote parent authorization (strict for live runs)
-    if (!parent_transport_override && !is_authorized_live_parent(options.remote_parent)) {
+    // Gate 2: Check the caller's exact target authorization before any I/O.
+    if (!provider_target_config::authorized_live_parent(
+            options.authorization, options.remote_parent)) {
         report.status = "REFUSED";
         report.error_message = "remote parent not authorized for live GC";
-        return report;
-    }
-
-    // Gate 3: Check candidate payload limit
-    if (options.candidate_payload_bytes > 64 * 1024 * 1024) {
-        report.status = "REFUSED";
-        report.error_message = "candidate_payload_bytes exceeds maximum allowed limit (64 MiB)";
         return report;
     }
 
@@ -619,6 +607,13 @@ RunnerReport run(
     if (!parsed_parent) {
         report.status = "REFUSED";
         report.error_message = "invalid remote parent format";
+        return report;
+    }
+
+    // Gate 3: Check candidate payload limit
+    if (options.candidate_payload_bytes > 64 * 1024 * 1024) {
+        report.status = "REFUSED";
+        report.error_message = "candidate_payload_bytes exceeds maximum allowed limit (64 MiB)";
         return report;
     }
 
@@ -1254,6 +1249,8 @@ nlohmann::json to_json(const RunnerReport& report) {
 std::expected<BenchmarkArguments, std::string>
 parse_benchmark_arguments(std::span<const std::string_view> args) {
     BenchmarkArguments result;
+    std::optional<std::filesystem::path> config_path;
+    std::optional<std::string> target_id;
     const std::size_t count = args.size();
     for (std::size_t index = 1; index < count; ++index) {
         const auto option = args[index];
@@ -1272,8 +1269,10 @@ parse_benchmark_arguments(std::span<const std::string_view> args) {
             return std::unexpected("missing value for " + std::string{option});
         }
         const auto value = args[++index];
-        if (option == "--remote" && result.remote.empty()) {
-            result.remote = std::string{value};
+        if (option == "--config" && !config_path) {
+            config_path = std::filesystem::path{value};
+        } else if (option == "--target-id" && !target_id) {
+            target_id = std::string{value};
         } else if (option == "--rclone-config" && !result.rclone_config) {
             result.rclone_config = std::filesystem::path{value};
         } else if (option == "--output" && result.output.empty()) {
@@ -1301,12 +1300,25 @@ parse_benchmark_arguments(std::span<const std::string_view> args) {
         }
     }
 
-    if (result.remote.empty() || result.output.empty()) {
-        return std::unexpected("--remote and --output are required");
+    if (result.output.empty()) {
+        return std::unexpected("--output is required");
     }
     if (!result.execute_live_benchmark) {
         return std::unexpected("--execute-live-benchmark is required to execute live benchmark");
     }
+    auto target = provider_target_config::resolve_target(
+        provider_target_config::TargetSelectionArguments{
+            .target_kind = "rclone",
+            .config_path = config_path,
+            .target_id = target_id,
+        });
+    if (!target) {
+        return std::unexpected(target.error());
+    }
+    result.config_path = *config_path;
+    result.target_id = *target_id;
+    result.remote = (*target)->authorized_parent;
+    result.authorization.authorized_parent = (*target)->authorized_parent;
     return result;
 }
 
@@ -1329,12 +1341,15 @@ RcloneConfigEnvironment::~RcloneConfigEnvironment() {
 }
 
 std::expected<PreparedCliPaths, std::string>
-prepare_cli_paths(std::string_view remote,
+prepare_cli_paths(
+                  const provider_target_config::LiveTargetAuthorization& authorization,
+                  std::string_view remote,
                   const std::filesystem::path& raw_output,
                   const std::optional<std::filesystem::path>& rclone_config,
                   std::string_view scratch_dirname) {
-    if (!is_authorized_live_parent(remote)) {
-        return std::unexpected("Remote parent is not an authorized integration parent; no remote request made.");
+    if (!provider_target_config::authorized_live_parent(authorization, remote) ||
+        !smoke::parse_remote_parent(remote)) {
+        return std::unexpected("Remote parent does not match the selected authorization; no remote request made.");
     }
 
     std::error_code fs_error;
@@ -1384,6 +1399,8 @@ prepare_cli_paths(std::string_view remote,
 std::expected<SmokeArguments, std::string>
 parse_smoke_arguments(std::span<const std::string_view> args) {
     SmokeArguments result;
+    std::optional<std::filesystem::path> config_path;
+    std::optional<std::string> target_id;
     const std::size_t count = args.size();
     for (std::size_t index = 1; index < count; ++index) {
         const auto option = args[index];
@@ -1402,8 +1419,10 @@ parse_smoke_arguments(std::span<const std::string_view> args) {
             return std::unexpected("missing value for " + std::string{option});
         }
         const auto value = args[++index];
-        if (option == "--remote" && result.remote.empty()) {
-            result.remote = std::string{value};
+        if (option == "--config" && !config_path) {
+            config_path = std::filesystem::path{value};
+        } else if (option == "--target-id" && !target_id) {
+            target_id = std::string{value};
         } else if (option == "--rclone-config" && !result.rclone_config) {
             result.rclone_config = std::filesystem::path{value};
         } else if (option == "--output" && result.output.empty()) {
@@ -1413,12 +1432,25 @@ parse_smoke_arguments(std::span<const std::string_view> args) {
         }
     }
 
-    if (result.remote.empty() || result.output.empty()) {
-        return std::unexpected("--remote and --output are required");
+    if (result.output.empty()) {
+        return std::unexpected("--output is required");
     }
     if (!result.execute_live_gc) {
         return std::unexpected("--execute-live-gc is required to execute live GC collection");
     }
+    auto target = provider_target_config::resolve_target(
+        provider_target_config::TargetSelectionArguments{
+            .target_kind = "rclone",
+            .config_path = config_path,
+            .target_id = target_id,
+        });
+    if (!target) {
+        return std::unexpected(target.error());
+    }
+    result.config_path = *config_path;
+    result.target_id = *target_id;
+    result.remote = (*target)->authorized_parent;
+    result.authorization.authorized_parent = (*target)->authorized_parent;
     return result;
 }
 

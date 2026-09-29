@@ -1,0 +1,5 @@
+[[targets]]
+id = "example-drive"
+provider_id = "example-drive"
+remote = "example-rclone-remote"
+authorized_parent = "example-rclone-remote:integration-tests"

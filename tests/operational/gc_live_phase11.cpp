@@ -16,7 +16,8 @@ namespace {
 namespace phase11 = kasumi::operational::phase11;
 
 struct CliArgs {
-    std::string remote = "kasumi:integration-tests";
+    std::optional<std::filesystem::path> provider_config;
+    std::optional<std::string> target_id;
     std::optional<std::filesystem::path> rclone_config;
     std::filesystem::path output;
     std::filesystem::path scratch;
@@ -32,7 +33,8 @@ void print_usage(std::ostream& out) {
     out << "Usage: kasumi_gc_live_phase11 [options]\n\n"
         << "Phase 11 Controlled Live Remote GC Batch Gain Benchmark\n\n"
         << "Options:\n"
-        << "  --remote <kasumi:integration-tests>     Authorized remote parent\n"
+        << "  --config <path>                         Live target configuration\n"
+        << "  --target-id <id>                        Exact configured target id\n"
         << "  --output <path>                         Path to save output JSON\n"
         << "  --mode <individual|batch>               Benchmark mode (default: batch)\n"
         << "  --candidates <N>                        Candidate count (default: 8)\n"
@@ -56,9 +58,16 @@ std::optional<CliArgs> parse_args(std::span<std::string_view> args) {
             result.capability_test = true;
         } else if (arg == "--execute-live") {
             result.execute_live = true;
-        } else if (arg == "--remote") {
-            if (++i >= args.size()) return std::nullopt;
-            result.remote = std::string{args[i]};
+        } else if (arg == "--config") {
+            if (result.provider_config || ++i >= args.size()) {
+                return std::nullopt;
+            }
+            result.provider_config = std::filesystem::path{args[i]};
+        } else if (arg == "--target-id") {
+            if (result.target_id || ++i >= args.size()) {
+                return std::nullopt;
+            }
+            result.target_id = std::string{args[i]};
         } else if (arg == "--output") {
             if (++i >= args.size()) return std::nullopt;
             result.output = std::filesystem::path{args[i]};
@@ -109,8 +118,21 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    auto selected = phase11::provider_target_config::resolve_target(
+        phase11::provider_target_config::TargetSelectionArguments{
+            .target_kind = "rclone",
+            .config_path = parsed->provider_config,
+            .target_id = parsed->target_id,
+        });
+    if (!selected || !selected->has_value()) {
+        std::cerr << (selected ? "Rclone target was not selected"
+                               : selected.error()) << '\n';
+        return 2;
+    }
+
     phase11::Phase11Config config{
-        .remote_parent = parsed->remote,
+        .remote_parent = (*selected)->authorized_parent,
+        .authorization = {.authorized_parent = (*selected)->authorized_parent},
         .rclone_config = parsed->rclone_config,
         .output_path = parsed->output,
         .local_scratch = parsed->scratch.empty() ? (std::filesystem::current_path() / "phase11_scratch") : parsed->scratch,

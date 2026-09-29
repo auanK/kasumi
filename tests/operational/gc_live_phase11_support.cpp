@@ -60,14 +60,6 @@ double elapsed_ms(std::chrono::steady_clock::time_point start, std::chrono::stea
 
 } // namespace
 
-bool is_authorized_parent(std::string_view remote_parent) noexcept {
-    return remote_parent == "kasumi:integration-tests";
-}
-
-bool is_disallowed_root(std::string_view remote) noexcept {
-    return remote == "kasumi:" || remote == "kasumi" || remote.empty();
-}
-
 std::expected<std::string, std::string> generate_benchmark_child(std::string_view random_hex) {
     if (random_hex.size() != 32) {
         return std::unexpected("namespace nonce must be 128-bit lowercase hex");
@@ -101,7 +93,8 @@ CapabilityStatus run_capability_test(
     }
 
     // Gate 2: Check remote parent authorization
-    if (!parent_transport_override && !is_authorized_parent(config.remote_parent)) {
+    if (!provider_target_config::authorized_live_parent(
+            config.authorization, config.remote_parent)) {
         report.status = "REFUSED";
         report.error_message = "remote parent not authorized for live benchmark";
         return CapabilityStatus::Refused;
@@ -479,7 +472,8 @@ Phase11RunReport run_benchmark_trial(
     }
 
     // Gate 2: Check remote parent authorization
-    if (!parent_transport_override && !is_authorized_parent(config.remote_parent)) {
+    if (!provider_target_config::authorized_live_parent(
+            config.authorization, config.remote_parent)) {
         report.status = "REFUSED";
         report.error_message = "remote parent not authorized for live benchmark";
         return report;

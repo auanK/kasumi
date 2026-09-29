@@ -231,6 +231,7 @@ kasumi_add_test_suite(
         kasumi_transport
         kasumi_platform
         kasumi_crypto
+        kasumi_operational_provider_target_config
         nlohmann_json::nlohmann_json
         httplib::httplib
         reproc++
@@ -247,6 +248,7 @@ kasumi_add_test_suite(
     "operational.provider_certification"
     SOURCES
         unit/operational/test_provider_certification.cpp
+        unit/operational/test_provider_target_config.cpp
         operational/provider_certification_support.cpp
         operational/gc_live_runner_support.cpp
         operational/gc_live_preflight_support.cpp
@@ -256,6 +258,7 @@ kasumi_add_test_suite(
     LIBRARIES
         kasumi_application
         kasumi_transport
+        kasumi_operational_provider_target_config
         reproc++
         kasumi_platform
         kasumi_crypto

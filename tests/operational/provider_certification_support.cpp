@@ -612,6 +612,7 @@ Scenario run_gc_lifecycle(const ProviderTarget& target,
     options.remote_parent = target.transport == "Local"
                                 ? "local:provider-certification"
                                 : target.authorized_remote_parent;
+    options.authorization.authorized_parent = options.remote_parent;
     options.local_scratch = scratch;
     options.execute_live_gc = true;
     options.preserve_evidence_on_failure = true;

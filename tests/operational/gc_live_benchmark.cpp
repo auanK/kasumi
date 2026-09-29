@@ -12,14 +12,14 @@ namespace {
 namespace runner = kasumi::operational::gc_live_runner;
 
 void print_usage(std::ostream& output) {
-    output << "Usage: kasumi_gc_live_benchmark --remote <kasumi:integration-tests|onedrive:KasumiIntegrationTests> \\\n"
+    output << "Usage: kasumi_gc_live_benchmark --config <targets.toml> --target-id <id> \\\n"
               "         --output <new-local-json> --mode <native|fallback> \\\n"
               "         --payload-bytes <bytes> --execute-live-benchmark \\\n"
               "         [--rclone-config <config-file>] [--preserve-evidence-on-failure]\n\n"
               "Controlled live GC remote copy benchmark runner for Kasumi.\n"
               "This operational tool executes exactly ONE complete garbage collection sequence\n"
               "under a new owned child namespace and measures client-side latency metrics:\n"
-              "  --remote: one of the explicitly authorized integration parents\n"
+              "  --config and --target-id: select one explicitly authorized parent\n"
               "  --output: path for writing the benchmark JSON report\n"
               "  --mode: copy mode ('native' for transport::copy or 'fallback' for GET/PUT)\n"
               "  --payload-bytes: synthetic candidate size in bytes (1 to 67108864 [64 MiB], default 8 MiB)\n"
@@ -31,7 +31,8 @@ int execute(const runner::BenchmarkArguments& arguments) {
     runner::RcloneConfigEnvironment restore_environment;
 
     auto prepared = runner::prepare_cli_paths(
-        arguments.remote, arguments.output, arguments.rclone_config, "kasumi-gc-benchmark-scratch");
+        arguments.authorization, arguments.remote, arguments.output,
+        arguments.rclone_config, "kasumi-gc-benchmark-scratch");
     if (!prepared) {
         std::cerr << prepared.error() << '\n';
         return 2;
@@ -39,6 +40,7 @@ int execute(const runner::BenchmarkArguments& arguments) {
 
     runner::RunnerOptions options{
         .remote_parent = arguments.remote,
+        .authorization = arguments.authorization,
         .rclone_config = arguments.rclone_config,
         .output_path = prepared->output_path,
         .local_scratch = prepared->scratch_root,

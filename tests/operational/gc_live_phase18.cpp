@@ -14,6 +14,7 @@
 #include "platform/random.hpp"
 #include "runtime/resolver.hpp"
 #include "transport/transport.hpp"
+#include "provider_target_config.hpp"
 
 #include <algorithm>
 #include <array>
@@ -26,6 +27,7 @@
 #include <limits>
 #include <map>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -43,7 +45,6 @@ using Json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
 namespace history_storage = kasumi::application::history_storage;
 
-constexpr std::string_view default_remote_parent = "kasumi:integration-tests";
 constexpr std::size_t file_bytes = 1024;
 
 std::string pad_index(std::size_t value) {
@@ -342,7 +343,11 @@ Json gc_counters_json() {
 }
 
 struct GcLiveOptions {
-    std::string remote_parent{default_remote_parent};
+    std::string remote_parent;
+    kasumi::operational::provider_target_config::LiveTargetAuthorization
+        authorization;
+    std::optional<std::filesystem::path> provider_config;
+    std::optional<std::string> target_id;
     std::string output_path{"gc_live_result.json"};
     std::size_t files = 10;
     std::size_t candidates = 8;
@@ -360,7 +365,8 @@ void print_help() {
               << "Options:\n"
               << "  --help, -h                  Show this help message\n"
               << "  --self-test                 Run internal sanity checks\n"
-              << "  --remote-parent <path>      Remote storage root (default: " << default_remote_parent << ")\n"
+              << "  --config <path>             Live target configuration\n"
+              << "  --target-id <id>            Exact configured target id\n"
               << "  --output <path>             Path for output JSON result (default: gc_live_result.json)\n"
               << "  -F, --files <N>             Number of protected live files (default: 10)\n"
               << "  -C, --candidates <N>        Number of orphan candidate files (default: 8)\n"
@@ -384,8 +390,12 @@ std::optional<GcLiveOptions> parse_arguments(int argc, char** argv) {
             options.preflight_only = true;
         } else if (arg == "--execute-live") {
             options.execute_live = true;
-        } else if (arg == "--remote-parent" && i + 1 < argc) {
-            options.remote_parent = argv[++i];
+        } else if (arg == "--config" && i + 1 < argc &&
+                   !options.provider_config) {
+            options.provider_config = std::filesystem::path{argv[++i]};
+        } else if (arg == "--target-id" && i + 1 < argc &&
+                   !options.target_id) {
+            options.target_id = argv[++i];
         } else if (arg == "--output" && i + 1 < argc) {
             options.output_path = argv[++i];
         } else if ((arg == "-F" || arg == "--files") && i + 1 < argc) {
@@ -402,6 +412,24 @@ std::optional<GcLiveOptions> parse_arguments(int argc, char** argv) {
             std::cerr << "Unknown or incomplete argument: " << arg << "\n";
             return std::nullopt;
         }
+    }
+    if (!options.help && !options.self_test) {
+        auto target =
+            kasumi::operational::provider_target_config::resolve_target(
+                kasumi::operational::provider_target_config::
+                    TargetSelectionArguments{
+                        .target_kind = "rclone",
+                        .config_path = options.provider_config,
+                        .target_id = options.target_id,
+                    });
+        if (!target || !target->has_value()) {
+            std::cerr << (target ? "Rclone target was not selected"
+                                 : target.error()) << '\n';
+            return std::nullopt;
+        }
+        options.remote_parent = (*target)->authorized_parent;
+        options.authorization.authorized_parent =
+            (*target)->authorized_parent;
     }
     return options;
 }
@@ -436,6 +464,12 @@ bool run_self_test() {
 }
 
 bool run_live_gc(const GcLiveOptions& options) {
+    if (!kasumi::operational::provider_target_config::authorized_live_parent(
+            options.authorization, options.remote_parent) ||
+        !kasumi::transport::validate_transport_location(options.remote_parent)) {
+        std::cerr << "[ERROR] selected target authorization is invalid.\n";
+        return false;
+    }
     const auto run_id = kasumi::platform::random::hex_id().value_or("run");
     const auto output = std::filesystem::absolute(options.output_path);
     std::error_code ec;

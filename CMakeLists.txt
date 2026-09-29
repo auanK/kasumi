@@ -525,6 +525,20 @@ target_link_libraries(kasumi_runtime
     kasumi_hardening
 )
 
+add_library(kasumi_operational_provider_target_config STATIC
+    tests/operational/provider_target_config.cpp
+)
+target_include_directories(
+    kasumi_operational_provider_target_config
+    PUBLIC
+    ${PROJECT_SOURCE_DIR}/tests/operational
+)
+target_link_libraries(
+    kasumi_operational_provider_target_config
+    PUBLIC kasumi_transport
+    PRIVATE tomlplusplus::tomlplusplus kasumi_warnings
+)
+
 add_library(kasumi_cli STATIC
     src/cli/app.cpp
     src/cli/credentials.cpp
@@ -637,6 +651,7 @@ if(KASUMI_BUILD_GC_LIVE_SMOKE)
         kasumi_transport
         kasumi_platform
         kasumi_crypto
+        kasumi_operational_provider_target_config
         nlohmann_json::nlohmann_json
         reproc++
         kasumi_warnings
@@ -664,6 +679,7 @@ if(KASUMI_BUILD_GC_LIVE_BENCHMARK)
         kasumi_transport
         kasumi_platform
         kasumi_crypto
+        kasumi_operational_provider_target_config
         nlohmann_json::nlohmann_json
         reproc++
         kasumi_warnings
@@ -690,6 +706,7 @@ if(KASUMI_BUILD_GC_LIVE_BENCHMARK)
         kasumi_transport
         kasumi_platform
         kasumi_crypto
+        kasumi_operational_provider_target_config
         nlohmann_json::nlohmann_json
         reproc++
         kasumi_warnings
@@ -718,6 +735,7 @@ if(KASUMI_BUILD_GC_LIVE_BENCHMARK)
         kasumi_transport
         kasumi_platform
         kasumi_crypto
+        kasumi_operational_provider_target_config
         nlohmann_json::nlohmann_json
         reproc++
         kasumi_warnings
@@ -823,6 +841,7 @@ if(KASUMI_BUILD_PROVIDER_CERTIFICATION)
         PRIVATE
         kasumi_application
         kasumi_transport
+        kasumi_operational_provider_target_config
         reproc++
         kasumi_platform
         kasumi_crypto
