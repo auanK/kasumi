@@ -1,6 +1,7 @@
 #ifndef KASUMI_PROVIDER_CERTIFICATION_SUPPORT_HPP
 #define KASUMI_PROVIDER_CERTIFICATION_SUPPORT_HPP
 
+#include "application/result.hpp"
 #include "transport/transport.hpp"
 
 #include <cstdint>
@@ -74,6 +75,15 @@ struct Report {
     std::vector<std::string> diagnostics;
 };
 
+struct FsckCorruptEvidence {
+    bool corruption_installed = false;
+    bool fsck_failed = false;
+    application::ErrorCode error_code =
+        application::ErrorCode::RuntimeFailure;
+    std::uint64_t audit_get_calls = 0;
+    std::uint64_t audit_decrypt_calls = 0;
+};
+
 std::expected<LocalTarget, std::string>
 create_local_target(const std::filesystem::path& authorized_parent);
 std::expected<void, std::string> cleanup_local_target(LocalTarget& target);
@@ -88,6 +98,8 @@ target_path(const LocalTarget& target, const std::filesystem::path& relative);
 
 Report run_certification(const ProviderTarget& target);
 Report run_local_certification(const std::filesystem::path& owned_root);
+bool fsck_corrupt_evidence_passes(
+    const FsckCorruptEvidence& evidence) noexcept;
 std::expected<void, std::string> install_verified_object(
     Report& report,
     transport::Transport& storage,

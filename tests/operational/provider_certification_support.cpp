@@ -1560,9 +1560,21 @@ Report run_certification(const ProviderTarget& target) {
             }
             const auto fsck_corrupt =
                 execute(environment, "a", application::Operation::Fsck);
-            const bool corrupt_ok = corruption_install && !fsck_corrupt &&
-                                    fsck_corrupt.error().code ==
-                                        application::ErrorCode::FsckFailure;
+            const auto audit_get_calls =
+                platform::perf_trace::get_count("fsck.audit_get_calls");
+            const auto audit_decrypt_calls =
+                platform::perf_trace::get_count("fsck.audit_decrypt_calls");
+            const FsckCorruptEvidence corrupt_evidence{
+                .corruption_installed = corruption_install.has_value(),
+                .fsck_failed = !fsck_corrupt,
+                .error_code = fsck_corrupt
+                                  ? application::ErrorCode::RuntimeFailure
+                                  : fsck_corrupt.error().code,
+                .audit_get_calls = audit_get_calls,
+                .audit_decrypt_calls = audit_decrypt_calls,
+            };
+            const bool corrupt_ok =
+                fsck_corrupt_evidence_passes(corrupt_evidence);
             Scenario corrupt_result{.name = "fsck-corrupt",
                                     .status = corrupt_ok
                                                   ? ScenarioStatus::Pass
@@ -1577,6 +1589,14 @@ Report run_certification(const ProviderTarget& target) {
                        application::ErrorCode::FsckFailure) {
                 corrupt_result.diagnostics.push_back(
                     fsck_corrupt.error().detail);
+            } else if (audit_get_calls == 0 ||
+                       audit_decrypt_calls != audit_get_calls) {
+                corrupt_result.diagnostics.push_back(
+                    "FSCK corruption scenario did not reach cryptographic "
+                    "audit: audit_get_calls=" +
+                    std::to_string(audit_get_calls) +
+                    " audit_decrypt_calls=" +
+                    std::to_string(audit_decrypt_calls));
             }
             record_trace(report, corrupt_result);
             report.scenarios.push_back(std::move(corrupt_result));
@@ -1648,6 +1668,14 @@ Report run_local_certification(const std::filesystem::path& owned_root) {
         .locator = platform::path::to_utf8(owned_root / "remote"),
         .workspace_root = owned_root,
     });
+}
+
+bool fsck_corrupt_evidence_passes(
+    const FsckCorruptEvidence& evidence) noexcept {
+    return evidence.corruption_installed && evidence.fsck_failed &&
+           evidence.error_code == application::ErrorCode::FsckFailure &&
+           evidence.audit_get_calls > 0 &&
+           evidence.audit_decrypt_calls == evidence.audit_get_calls;
 }
 
 nlohmann::json to_json(const Report& report) {

@@ -12,6 +12,26 @@ namespace {
 
 using namespace kasumi::operational::provider_certification;
 
+kasumi::transport::Result fake_get_wrong_readback(
+    void* context,
+    std::string_view identifier,
+    const std::filesystem::path& destination) {
+    auto result = fake_get(context, identifier, destination);
+    if (!result) {
+        return result;
+    }
+    const std::vector<std::uint8_t> wrong{'X'};
+    std::ofstream output(destination, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char*>(wrong.data()),
+                 static_cast<std::streamsize>(wrong.size()));
+    if (!output.good()) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Io,
+            .message = "injected readback write failure"});
+    }
+    return {};
+}
+
 kasumi::transport::Result ignore_existing_put(
     void* context,
     const std::filesystem::path& source,
@@ -34,6 +54,43 @@ struct TempCertificationFiles {
         std::filesystem::remove(readback, error);
     }
 };
+
+TEST(ProviderCertificationEvidenceTest,
+     MissingLikeAuditCannotCertifyFsckCorruption) {
+    EXPECT_FALSE(fsck_corrupt_evidence_passes(FsckCorruptEvidence{
+        .corruption_installed = true,
+        .fsck_failed = true,
+        .error_code = kasumi::application::ErrorCode::FsckFailure,
+        .audit_get_calls = 9,
+        .audit_decrypt_calls = 8,
+    }));
+}
+
+TEST(ProviderCertificationEvidenceTest,
+     RequiresVerifiedInstallationFsckFailureAndCompleteCryptoEntry) {
+    const FsckCorruptEvidence audited{
+        .corruption_installed = true,
+        .fsck_failed = true,
+        .error_code = kasumi::application::ErrorCode::FsckFailure,
+        .audit_get_calls = 9,
+        .audit_decrypt_calls = 9,
+    };
+    EXPECT_TRUE(fsck_corrupt_evidence_passes(audited));
+    EXPECT_FALSE(fsck_corrupt_evidence_passes(FsckCorruptEvidence{
+        .corruption_installed = true,
+        .fsck_failed = true,
+        .error_code = kasumi::application::ErrorCode::FsckFailure,
+    }));
+    auto uninstalled = audited;
+    uninstalled.corruption_installed = false;
+    EXPECT_FALSE(fsck_corrupt_evidence_passes(uninstalled));
+    auto succeeded = audited;
+    succeeded.fsck_failed = false;
+    EXPECT_FALSE(fsck_corrupt_evidence_passes(succeeded));
+    auto wrong_error = audited;
+    wrong_error.error_code = kasumi::application::ErrorCode::RuntimeFailure;
+    EXPECT_FALSE(fsck_corrupt_evidence_passes(wrong_error));
+}
 
 TEST(ProviderCertificationMutationTest,
      VerifiedUploadReplacesSameSizeObjectWhenBackendSkipsOverwrite) {
@@ -73,6 +130,40 @@ TEST(ProviderCertificationMutationTest,
     EXPECT_EQ(report.harness_requests.at("remove"), 1U);
     EXPECT_EQ(report.harness_requests.at("put"), 1U);
     EXPECT_EQ(report.harness_requests.at("get"), 1U);
+}
+
+TEST(ProviderCertificationMutationTest,
+     VerifiedUploadRejectsSuccessfulGetWithWrongBytes) {
+    const auto suffix = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    TempCertificationFiles files{
+        .source = std::filesystem::temp_directory_path() /
+                  ("kasumi-cert-source-" + suffix),
+        .readback = std::filesystem::temp_directory_path() /
+                    ("kasumi-cert-readback-" + suffix),
+    };
+    const std::vector<std::uint8_t> replacement{'B', 'B', 'B'};
+    {
+        std::ofstream output(files.source,
+                             std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(replacement.data()),
+                     static_cast<std::streamsize>(replacement.size()));
+        ASSERT_TRUE(output.good());
+    }
+
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    storage.storage.get = fake_get_wrong_readback;
+    Report report;
+    const auto installed = install_verified_object(
+        report, storage, files.source, "object", files.readback);
+
+    ASSERT_FALSE(installed.has_value());
+    EXPECT_EQ(installed.error(),
+              "remote replacement bytes do not match the source");
+    EXPECT_EQ(state->remove_count, 1U);
+    EXPECT_EQ(state->put_count, 1U);
+    EXPECT_EQ(state->get_count, 1U);
 }
 
 TEST(ProviderCertificationTargetTest, OwnsUniqueChildAndRejectsEscape) {
