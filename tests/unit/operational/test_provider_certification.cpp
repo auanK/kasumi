@@ -1,12 +1,79 @@
 #include "provider_certification_support.hpp"
+#include "kasumi/test/history_storage.hpp"
 
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <vector>
 #include <gtest/gtest.h>
 
 namespace {
 
 using namespace kasumi::operational::provider_certification;
+
+kasumi::transport::Result ignore_existing_put(
+    void* context,
+    const std::filesystem::path& source,
+    std::string_view identifier) {
+    auto* state = fake_state(context);
+    if (state->objects.contains(std::string{identifier})) {
+        ++state->put_count;
+        return {};
+    }
+    return fake_put(context, source, identifier);
+}
+
+struct TempCertificationFiles {
+    std::filesystem::path source;
+    std::filesystem::path readback;
+
+    ~TempCertificationFiles() {
+        std::error_code error;
+        std::filesystem::remove(source, error);
+        std::filesystem::remove(readback, error);
+    }
+};
+
+TEST(ProviderCertificationMutationTest,
+     VerifiedUploadReplacesSameSizeObjectWhenBackendSkipsOverwrite) {
+    const auto suffix = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    TempCertificationFiles files{
+        .source = std::filesystem::temp_directory_path() /
+                  ("kasumi-cert-source-" + suffix),
+        .readback = std::filesystem::temp_directory_path() /
+                    ("kasumi-cert-readback-" + suffix),
+    };
+    const std::vector<std::uint8_t> original{'A', 'A', 'A', 'A', 'A'};
+    const std::vector<std::uint8_t> replacement{'B', 'B', 'B', 'B', 'B'};
+    {
+        std::ofstream output(files.source,
+                             std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(replacement.data()),
+                     static_cast<std::streamsize>(replacement.size()));
+        ASSERT_TRUE(output.good());
+    }
+
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    state->objects["object"] = original;
+    storage.storage.put = ignore_existing_put;
+
+    Report report;
+    const auto installed = install_verified_object(
+        report, storage, files.source, "object", files.readback);
+
+    ASSERT_TRUE(installed.has_value())
+        << (installed ? "" : installed.error());
+    EXPECT_EQ(state->objects.at("object"), replacement);
+    EXPECT_EQ(state->remove_count, 1U);
+    EXPECT_EQ(state->put_count, 1U);
+    EXPECT_EQ(state->get_count, 1U);
+    EXPECT_EQ(report.harness_requests.at("remove"), 1U);
+    EXPECT_EQ(report.harness_requests.at("put"), 1U);
+    EXPECT_EQ(report.harness_requests.at("get"), 1U);
+}
 
 TEST(ProviderCertificationTargetTest, OwnsUniqueChildAndRejectsEscape) {
     const auto parent = std::filesystem::temp_directory_path();

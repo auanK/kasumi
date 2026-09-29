@@ -739,6 +739,49 @@ Scenario run_gc_lifecycle(const ProviderTarget& target,
 
 } // namespace
 
+std::expected<void, std::string> install_verified_object(
+    Report& report,
+    transport::Transport& storage,
+    const std::filesystem::path& source,
+    std::string_view identifier,
+    const std::filesystem::path& readback) {
+    const auto expected = read_bytes(source);
+    if (!expected) {
+        return std::unexpected(expected.error());
+    }
+
+    const auto removed = transport::remove(storage, identifier);
+    record_direct(report, "remove");
+    if (!removed) {
+        return std::unexpected("could not clear remote object: " +
+                               transport::describe(removed.error()));
+    }
+
+    const auto uploaded = transport::put(storage, source, identifier);
+    record_direct(report, "put");
+    if (!uploaded) {
+        return std::unexpected("could not upload replacement object: " +
+                               transport::describe(uploaded.error()));
+    }
+
+    const auto fetched = transport::get(storage, identifier, readback);
+    record_direct(report, "get");
+    if (!fetched) {
+        return std::unexpected("could not read back replacement object: " +
+                               transport::describe(fetched.error()));
+    }
+
+    const auto observed = read_bytes(readback);
+    if (!observed) {
+        return std::unexpected(observed.error());
+    }
+    if (*observed != *expected) {
+        return std::unexpected(
+            "remote replacement bytes do not match the source");
+    }
+    return {};
+}
+
 std::string_view name(CapabilityStatus status) noexcept {
     switch (status) {
         case CapabilityStatus::Supported:
@@ -1498,31 +1541,43 @@ Report run_certification(const ProviderTarget& target) {
             record_trace(report, missing_result);
             report.scenarios.push_back(std::move(missing_result));
 
-            const auto fsck_put =
-                transport::put(storage, saved_ciphertext, fsck_object);
-            record_direct(report, "put");
             const auto corrupt_file = test_space / "corrupt-b.ciphertext";
+            const auto corrupt_readback =
+                test_space / "corrupt-b-readback.ciphertext";
             auto ciphertext = read_bytes(saved_ciphertext);
-            bool corrupted = false;
-            if (fsck_put && ciphertext && !ciphertext->empty()) {
+            std::expected<void, std::string> corruption_install =
+                std::unexpected("saved ciphertext is unavailable");
+            if (ciphertext && !ciphertext->empty()) {
                 ciphertext->back() ^= 1U;
-                corrupted = write_bytes(corrupt_file, *ciphertext) &&
-                            transport::put(storage, corrupt_file, fsck_object)
-                                .has_value();
-                record_direct(report, "put");
+                if (write_bytes(corrupt_file, *ciphertext)) {
+                    corruption_install = install_verified_object(
+                        report, storage, corrupt_file, fsck_object,
+                        corrupt_readback);
+                } else {
+                    corruption_install = std::unexpected(
+                        "could not write altered ciphertext fixture");
+                }
             }
             const auto fsck_corrupt =
                 execute(environment, "a", application::Operation::Fsck);
-            const bool corrupt_ok = corrupted && !fsck_corrupt &&
+            const bool corrupt_ok = corruption_install && !fsck_corrupt &&
                                     fsck_corrupt.error().code ==
                                         application::ErrorCode::FsckFailure;
             Scenario corrupt_result{.name = "fsck-corrupt",
                                     .status = corrupt_ok
                                                   ? ScenarioStatus::Pass
                                                   : ScenarioStatus::Fail};
-            if (!corrupt_ok && !fsck_corrupt)
+            if (!corruption_install) {
+                corrupt_result.diagnostics.push_back(
+                    corruption_install.error());
+            } else if (fsck_corrupt) {
+                corrupt_result.diagnostics.push_back(
+                    "FSCK accepted remotely verified corrupt ciphertext");
+            } else if (fsck_corrupt.error().code !=
+                       application::ErrorCode::FsckFailure) {
                 corrupt_result.diagnostics.push_back(
                     fsck_corrupt.error().detail);
+            }
             record_trace(report, corrupt_result);
             report.scenarios.push_back(std::move(corrupt_result));
         }

@@ -88,6 +88,12 @@ target_path(const LocalTarget& target, const std::filesystem::path& relative);
 
 Report run_certification(const ProviderTarget& target);
 Report run_local_certification(const std::filesystem::path& owned_root);
+std::expected<void, std::string> install_verified_object(
+    Report& report,
+    transport::Transport& storage,
+    const std::filesystem::path& source,
+    std::string_view identifier,
+    const std::filesystem::path& readback);
 std::vector<std::string> scenario_registry(const ProviderTarget& target);
 std::string derive_status(const Report& report);
 nlohmann::json to_json(const Report& report);
