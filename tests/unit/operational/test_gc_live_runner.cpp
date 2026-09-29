@@ -75,8 +75,14 @@ struct FakeHarness {
 TEST(GcLiveRunnerGateTest, RejectsUnauthorizedParentsBeforeRemote) {
     EXPECT_TRUE(runner::is_authorized_live_parent("kasumi:integration-tests"));
     EXPECT_TRUE(runner::is_authorized_live_parent("onedrive:KasumiIntegrationTests"));
+    EXPECT_TRUE(runner::is_authorized_live_parent("kita-sftp:KasumiIntegrationTests"));
     for (const auto parent : {"kasumi:", "kasumi:anything-else", "other:integration-tests",
                               "onedrive:", "onedrive:KasumiIntegrationTests/child",
+                              "kita-sftp:", "kita-sftp:KasumiIntegrationTests/",
+                              "kita-sftp:KasumiIntegrationTests/child",
+                              "kita-sftp:Other", "other:KasumiIntegrationTests",
+                              "kita-sftp:../KasumiIntegrationTests",
+                              "kita-sftp:/home/auank/KasumiIntegrationTests",
                               "/tmp/local", "C:/Windows", "archive:test-parent"}) {
         EXPECT_FALSE(runner::is_authorized_live_parent(parent)) << parent;
     }

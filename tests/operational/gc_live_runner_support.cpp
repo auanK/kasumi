@@ -268,7 +268,8 @@ std::string_view stage_name(LiveGcStage stage) noexcept {
 
 bool is_authorized_live_parent(std::string_view remote_parent) noexcept {
     return remote_parent == "kasumi:integration-tests" ||
-           remote_parent == "onedrive:KasumiIntegrationTests";
+           remote_parent == "onedrive:KasumiIntegrationTests" ||
+           remote_parent == "kita-sftp:KasumiIntegrationTests";
 }
 
 transport::Transport make_vault_transport(transport::Transport& underlying,
