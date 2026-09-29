@@ -50,62 +50,191 @@ std::string windows_error(DWORD code) {
         .message();
 }
 
+std::filesystem::path extended_path(const std::filesystem::path& path,
+                                    std::error_code& error) {
+    if (path.native().starts_with(L"\\\\?\\")) {
+        return path;
+    }
+    auto absolute = path.is_absolute() ? path
+                                      : std::filesystem::absolute(path, error);
+    if (error) {
+        return {};
+    }
+    absolute = absolute.lexically_normal();
+    auto native = absolute.native();
+    if (native.starts_with(L"\\\\")) {
+        native.replace(0, 2, L"\\\\?\\UNC\\");
+    } else {
+        native.insert(0, L"\\\\?\\");
+    }
+    return std::filesystem::path{std::move(native)};
+}
+
 std::expected<void, std::string>
 clear_read_only(const std::filesystem::path& root) {
-    std::vector<std::filesystem::path> paths{root};
     std::error_code error;
-    {
-        std::filesystem::recursive_directory_iterator entries(root, error);
-        if (error) {
-            return std::unexpected("could not enumerate workspace '" +
-                                   platform::path::to_utf8(root) +
-                                   "': " + error.message());
-        }
-        const std::filesystem::recursive_directory_iterator end;
-        while (entries != end) {
-            const auto path = entries->path();
-            const auto attributes = GetFileAttributesW(path.c_str());
-            if (attributes == INVALID_FILE_ATTRIBUTES) {
-                return std::unexpected("could not inspect workspace path '" +
-                                       platform::path::to_utf8(path) +
-                                       "': " + windows_error(GetLastError()));
-            }
-            if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                return std::unexpected("invalid workspace path '" +
-                                       platform::path::to_utf8(path) +
-                                       "': reparse point is not allowed");
-            }
-            paths.push_back(path);
-            entries.increment(error);
-            if (error) {
-                return std::unexpected("could not enumerate workspace '" +
-                                       platform::path::to_utf8(root) +
-                                       "': " + error.message());
-            }
-        }
+    const auto native_root = extended_path(root, error);
+    if (error) {
+        return std::unexpected("could not resolve workspace '" +
+                               platform::path::to_utf8(root) + "': " +
+                               error.message());
     }
 
-    for (const auto& path : paths) {
-        const auto attributes = GetFileAttributesW(path.c_str());
-        if (attributes == INVALID_FILE_ATTRIBUTES) {
-            const auto code = GetLastError();
-            if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
-                continue;
-            }
-            return std::unexpected("could not inspect workspace path '" +
-                                   platform::path::to_utf8(path) +
-                                   "': " + windows_error(code));
-        }
-        if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-            continue;
-        }
+    const auto clear_attribute = [](const std::filesystem::path& path,
+                                    DWORD attributes)
+        -> std::expected<void, std::string> {
         if ((attributes & FILE_ATTRIBUTE_READONLY) != 0 &&
             !SetFileAttributesW(
                 path.c_str(),
                 attributes & ~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY))) {
-            return std::unexpected("could not clear read-only attribute on '" +
-                                   platform::path::to_utf8(path) +
-                                   "': " + windows_error(GetLastError()));
+            const auto code = GetLastError();
+            if (code != ERROR_FILE_NOT_FOUND && code != ERROR_PATH_NOT_FOUND) {
+                return std::unexpected(
+                    "could not clear read-only attribute on '" +
+                    platform::path::to_utf8(path) + "': " +
+                    windows_error(code));
+            }
+        }
+        return {};
+    };
+
+    auto attributes = GetFileAttributesW(native_root.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        return std::unexpected("could not inspect workspace '" +
+                               platform::path::to_utf8(root) +
+                               "': " + windows_error(GetLastError()));
+    }
+    if (auto cleared = clear_attribute(native_root, attributes); !cleared) {
+        return cleared;
+    }
+
+    std::vector<std::filesystem::path> directories{native_root};
+    while (!directories.empty()) {
+        auto directory = std::move(directories.back());
+        directories.pop_back();
+        WIN32_FIND_DATAW entry{};
+        auto pattern = directory.native();
+        pattern.append(L"\\*");
+        const auto search = FindFirstFileW(pattern.c_str(), &entry);
+        if (search == INVALID_HANDLE_VALUE) {
+            const auto code = GetLastError();
+            if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
+                continue;
+            }
+            return std::unexpected("could not enumerate workspace '" +
+                                   platform::path::to_utf8(directory) +
+                                   "': " + windows_error(code));
+        }
+
+        std::string failure;
+        do {
+            const std::wstring_view name{entry.cFileName};
+            if (name == L"." || name == L"..") {
+                continue;
+            }
+            auto native_path = directory.native();
+            native_path.push_back(L'\\');
+            native_path.append(entry.cFileName);
+            const std::filesystem::path path{std::move(native_path)};
+            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                failure = "invalid workspace path '" +
+                          platform::path::to_utf8(path) +
+                          "': reparse point is not allowed";
+                break;
+            }
+            auto cleared = clear_attribute(path, entry.dwFileAttributes);
+            if (!cleared) {
+                failure = cleared.error();
+                break;
+            }
+            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                directories.push_back(path);
+            }
+        } while (FindNextFileW(search, &entry));
+
+        const auto enumeration_error = GetLastError();
+        FindClose(search);
+        if (!failure.empty()) {
+            return std::unexpected(std::move(failure));
+        }
+        if (enumeration_error != ERROR_NO_MORE_FILES &&
+            enumeration_error != ERROR_FILE_NOT_FOUND &&
+            enumeration_error != ERROR_PATH_NOT_FOUND) {
+            return std::unexpected("could not advance in workspace '" +
+                                   platform::path::to_utf8(directory) +
+                                   "': " + windows_error(enumeration_error));
+        }
+    }
+    return {};
+}
+
+std::error_code remove_tree_windows(const std::filesystem::path& root) {
+    std::vector<std::pair<std::filesystem::path, bool>> pending{
+        {root, false}};
+    while (!pending.empty()) {
+        auto [path, postorder] = std::move(pending.back());
+        pending.pop_back();
+        if (postorder) {
+            if (!RemoveDirectoryW(path.c_str())) {
+                const auto code = GetLastError();
+                if (code != ERROR_FILE_NOT_FOUND &&
+                    code != ERROR_PATH_NOT_FOUND) {
+                    return {static_cast<int>(code), std::system_category()};
+                }
+            }
+            continue;
+        }
+
+        auto pattern = path.native();
+        pattern.append(L"\\*");
+        WIN32_FIND_DATAW entry{};
+        const auto search = FindFirstFileW(pattern.c_str(), &entry);
+        if (search == INVALID_HANDLE_VALUE) {
+            const auto code = GetLastError();
+            if (code != ERROR_FILE_NOT_FOUND && code != ERROR_PATH_NOT_FOUND) {
+                return {static_cast<int>(code), std::system_category()};
+            }
+            pending.emplace_back(std::move(path), true);
+            continue;
+        }
+
+        pending.emplace_back(path, true);
+        std::error_code failure;
+        do {
+            const std::wstring_view name{entry.cFileName};
+            if (name == L"." || name == L"..") {
+                continue;
+            }
+            auto native_child = path.native();
+            native_child.push_back(L'\\');
+            native_child.append(entry.cFileName);
+            std::filesystem::path child{std::move(native_child)};
+            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                failure = std::make_error_code(std::errc::operation_not_permitted);
+                break;
+            }
+            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                pending.emplace_back(std::move(child), false);
+            } else if (!DeleteFileW(child.c_str())) {
+                const auto code = GetLastError();
+                if (code != ERROR_FILE_NOT_FOUND &&
+                    code != ERROR_PATH_NOT_FOUND) {
+                    failure = {static_cast<int>(code), std::system_category()};
+                    break;
+                }
+            }
+        } while (FindNextFileW(search, &entry));
+
+        const auto enumeration_error = GetLastError();
+        FindClose(search);
+        if (failure) {
+            return failure;
+        }
+        if (enumeration_error != ERROR_NO_MORE_FILES &&
+            enumeration_error != ERROR_FILE_NOT_FOUND &&
+            enumeration_error != ERROR_PATH_NOT_FOUND) {
+            return {static_cast<int>(enumeration_error),
+                    std::system_category()};
         }
     }
     return {};
@@ -178,7 +307,17 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
         return {};
     }
     std::error_code error;
-    const auto status = std::filesystem::symlink_status(workspace.root, error);
+#ifdef _WIN32
+    const auto native_root = extended_path(workspace.root, error);
+    if (error) {
+        return std::unexpected("could not resolve workspace '" +
+                               platform::path::to_utf8(workspace.root) +
+                               "': " + error.message());
+    }
+#else
+    const auto& native_root = workspace.root;
+#endif
+    const auto status = std::filesystem::symlink_status(native_root, error);
     if (error == std::errc::no_such_file_or_directory) {
         return {};
     }
@@ -192,13 +331,13 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
         return std::unexpected("invalid workspace '" +
                                platform::path::to_utf8(workspace.root) + "'");
     }
-    auto secured = private_storage::protect_tree(workspace.root);
+    auto secured = private_storage::protect_tree(native_root);
     if (!secured) {
         return std::unexpected(secured.error());
     }
 
 #ifdef _WIN32
-    const auto attributes = GetFileAttributesW(workspace.root.c_str());
+    const auto attributes = GetFileAttributesW(native_root.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
         return std::unexpected("could not inspect workspace '" +
                                platform::path::to_utf8(workspace.root) +
@@ -208,7 +347,7 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
         return std::unexpected("invalid workspace '" +
                                platform::path::to_utf8(workspace.root) + "'");
     }
-    auto writable = clear_read_only(workspace.root);
+    auto writable = clear_read_only(native_root);
     if (!writable) {
         return std::unexpected(writable.error());
     }
@@ -216,7 +355,7 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
     constexpr std::size_t maximum_attempts = 4;
     for (std::size_t attempt = 0; attempt < maximum_attempts; ++attempt) {
         error.clear();
-        std::filesystem::remove_all(workspace.root, error);
+        error = remove_tree_windows(native_root);
         if (!error) {
             return {};
         }
@@ -226,7 +365,7 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
 #else
-    std::filesystem::remove_all(workspace.root, error);
+    std::filesystem::remove_all(native_root, error);
 #endif
     if (error) {
         return std::unexpected("could not remove workspace '" +
