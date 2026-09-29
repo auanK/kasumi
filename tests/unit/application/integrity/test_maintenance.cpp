@@ -2215,7 +2215,6 @@ TEST(IntegrityMaintenanceTest, GarbageCollectionBatchBaselineScale) {
         std::vector<std::pair<std::string, std::vector<std::uint8_t>>> orphans;
         orphans.reserve(orphan_count);
         std::set<std::string> unique_orphan_identifiers;
-        std::set<std::vector<std::uint8_t>> unique_orphan_ciphertexts;
         std::size_t orphan_bytes = 0;
         for (std::size_t index = 0; index < orphan_count; ++index) {
             const auto suffix = "orphan-" + std::to_string(index);
@@ -2224,7 +2223,9 @@ TEST(IntegrityMaintenanceTest, GarbageCollectionBatchBaselineScale) {
             state->observed_payload_identifiers.insert(identifier);
             const auto& ciphertext = state->objects.at(identifier);
             EXPECT_TRUE(unique_orphan_identifiers.insert(identifier).second);
-            EXPECT_TRUE(unique_orphan_ciphertexts.insert(ciphertext).second);
+            EXPECT_FALSE(std::ranges::any_of(orphans, [&](const auto& orphan) {
+                return orphan.second == ciphertext;
+            }));
             orphans.emplace_back(identifier, ciphertext);
             orphan_bytes += state->objects.at(identifier).size();
         }

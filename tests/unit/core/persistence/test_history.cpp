@@ -1313,12 +1313,18 @@ namespace {
 std::vector<std::uint8_t>
 forge_commit_with_component(std::string_view component_name) {
     std::vector<std::uint8_t> tree;
+    const auto append_zero_bytes = [](std::vector<std::uint8_t>& bytes,
+                                      std::size_t count) {
+        for (std::size_t i = 0; i < count; ++i) {
+            bytes.push_back(0);
+        }
+    };
     tree.insert(tree.end(), {'K', 'A', 'S', 'U'});
-    tree.resize(tree.size() + 8, 0);  // height: 0
-    tree.resize(tree.size() + 4, 0);  // root name len: 0
-    tree.resize(tree.size() + 32, 0); // root hash
-    tree.resize(tree.size() + 8, 0);  // root size
-    tree.resize(tree.size() + 8, 0);  // root nanos
+    append_zero_bytes(tree, 8);  // height: 0
+    append_zero_bytes(tree, 4);  // root name len: 0
+    append_zero_bytes(tree, 32); // root hash
+    append_zero_bytes(tree, 8);  // root size
+    append_zero_bytes(tree, 8);  // root nanos
     tree.push_back(1);                // root is_directory
     tree.push_back(1);                // root children count = 1
     tree.push_back(0);
@@ -1331,18 +1337,18 @@ forge_commit_with_component(std::string_view component_name) {
     tree.push_back(static_cast<std::uint8_t>((name_len >> 16) & 0xFF));
     tree.push_back(static_cast<std::uint8_t>((name_len >> 24) & 0xFF));
     tree.insert(tree.end(), component_name.begin(), component_name.end());
-    tree.resize(tree.size() + 32, 0); // child hash
-    tree.resize(tree.size() + 8, 0);  // child size
-    tree.resize(tree.size() + 8, 0);  // child nanos
+    append_zero_bytes(tree, 32); // child hash
+    append_zero_bytes(tree, 8);  // child size
+    append_zero_bytes(tree, 8);  // child nanos
     tree.push_back(0);                // child is_directory = 0
-    tree.resize(tree.size() + 4, 0);  // child children count = 0
+    append_zero_bytes(tree, 4);      // child children count = 0
 
     std::vector<std::uint8_t> commit;
     commit.insert(commit.end(), {'K', 'C', 'O', 'M'});
     commit.push_back(2);                 // version = 2
-    commit.resize(commit.size() + 8, 0); // height: 0
-    commit.resize(commit.size() + 8, 0); // created_at: 0
-    commit.resize(commit.size() + 4, 0); // parent_count: 0
+    append_zero_bytes(commit, 8); // height: 0
+    append_zero_bytes(commit, 8); // created_at: 0
+    append_zero_bytes(commit, 4); // parent_count: 0
     const auto tree_size = static_cast<std::uint64_t>(tree.size());
     for (std::size_t i = 0; i < 8; ++i) {
         commit.push_back(

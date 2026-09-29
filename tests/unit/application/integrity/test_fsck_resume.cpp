@@ -316,22 +316,15 @@ TEST(FsckResumeTest, WrongVaultIdentityRejectsCheckpointAndExecutesFullAudit) {
     (void)put_content(storage.transport, storage.workspace, "vault content", "vlt");
 
     // Create checkpoint with wrong vault identity
-    kasumi::application::integrity::FsckCheckpoint wrong_vault_checkpoint{
-        .header = {
-            .format_version = kasumi::application::integrity::checkpoint_format_version_1,
-            .audit_semantics_version = kasumi::application::integrity::checkpoint_audit_semantics_version_1,
-            .vault_id = "completely_different_vault_id",
-            .entry_count = 1,
-        },
-        .entries = {
-            {
-                .logical_content_hash = kasumi::hash_hex(kasumi::hasher::hash_string("vault content")),
-                .remote_content_id = "some_remote_id",
-                .plaintext_size = 13,
-                .physical_ciphertext_sha256 = std::string(64, 'a'),
-            },
-        },
-    };
+    kasumi::application::integrity::FsckCheckpoint wrong_vault_checkpoint{};
+    wrong_vault_checkpoint.header.vault_id = "completely_different_vault_id";
+    wrong_vault_checkpoint.header.entry_count = 1;
+    wrong_vault_checkpoint.entries.push_back({
+        .logical_content_hash = kasumi::hash_hex(kasumi::hasher::hash_string("vault content")),
+        .remote_content_id = "some_remote_id",
+        .plaintext_size = 13,
+        .physical_ciphertext_sha256 = std::string(64, 'a'),
+    });
 
     const auto profile_dir = runtime.database_path.parent_path();
     ASSERT_TRUE(kasumi::application::integrity::save_checkpoint(

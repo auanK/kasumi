@@ -1415,7 +1415,7 @@ TEST(GcLivePreflightRcTest,
     auto storage = make_preflight_transport(state);
 
     std::vector<gc_live::PreInitializeObservation> observations;
-    for (const auto& scenario : scenarios) {
+    for (std::size_t index = 0; index < scenarios.size(); ++index) {
         observations.push_back(gc_live::observe_pre_initialize(
             storage, *parent, child, std::chrono::seconds{1}));
     }

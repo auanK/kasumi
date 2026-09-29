@@ -78,7 +78,7 @@ make_commit(std::uint64_t height,
         height, parents, make_tree(path, contents));
 }
 
-std::string commit_id(const Commit& commit) {
+[[maybe_unused]] std::string commit_id(const Commit& commit) {
     const auto canonical = kasumi::history::serialize(commit).value();
     return kasumi::crypto::commit_identifier(test_key(), canonical);
 }
