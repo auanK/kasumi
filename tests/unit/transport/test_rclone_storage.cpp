@@ -780,7 +780,7 @@ TEST(RcloneStorageTest, StorageRequestsAreScopedToConfiguredRemoteRoot) {
     for (std::size_t index = 0; index < expected.size(); ++index) {
         SCOPED_TRACE(expected[index].endpoint);
         EXPECT_EQ(requests[index].endpoint, expected[index].endpoint);
-        EXPECT_EQ(requests[index].body, expected[index].body);
+        EXPECT_EQ(requests[index].body.dump(), expected[index].body.dump());
     }
 }
 
@@ -1526,7 +1526,7 @@ TEST(RcloneStorageTest, ControlReadBatchIsScopedToConfiguredRemoteRoot) {
             {{"filesOnly", true},
              {"noModTime", true},
              {"noMimeType", true}}}}}}};
-    EXPECT_EQ(request_body, expected);
+    EXPECT_EQ(request_body.dump(), expected.dump());
 }
 
 TEST(RcloneStorageTest, ControlBatchRejectsMalformedEnvelope) {
@@ -1609,6 +1609,7 @@ TEST(GcLivePreflightRcTest,
     RcServerState remote;
     std::atomic_int calls = 0;
     std::vector<nlohmann::json> requests;
+    std::vector<nlohmann::json> fsinfo_requests;
     remote.server.Post(
         "/rc/operations/list",
         [&](const httplib::Request& request, httplib::Response& response) {
@@ -1618,6 +1619,14 @@ TEST(GcLivePreflightRcTest,
                 static_cast<std::size_t>((request_number - 1) / 2));
             response.status = scenario.status;
             response.set_content(scenario.body, "application/json");
+        });
+    remote.server.Post(
+        "/rc/operations/fsinfo",
+        [&](const httplib::Request& request, httplib::Response& response) {
+            fsinfo_requests.push_back(nlohmann::json::parse(request.body));
+            response.set_content(
+                R"({"Features":{"CanHaveEmptyDirectories":true}})",
+                "application/json");
         });
     start_rc_server(remote);
     transport::rclone_detail::State state;
@@ -1645,8 +1654,14 @@ TEST(GcLivePreflightRcTest,
         EXPECT_EQ(requests[index * 2]["fs"], "archive:");
         EXPECT_EQ(requests[index * 2]["remote"],
                   "dedicated-test-parent/" + std::string{child});
-        EXPECT_EQ(requests[index * 2]["opt"]["recurse"], false);
+        EXPECT_EQ(requests[index * 2]["opt"]["recurse"], true);
         EXPECT_EQ(requests[index * 2]["opt"]["filesOnly"], true);
+    }
+    ASSERT_EQ(fsinfo_requests.size(), scenarios.size());
+    const nlohmann::json expected_fsinfo_request{
+        {"fs", parent->location}};
+    for (const auto& request : fsinfo_requests) {
+        EXPECT_EQ(request.dump(), expected_fsinfo_request.dump());
     }
     const auto generic_report = gc_live::to_json(
         observations[1],
@@ -1659,6 +1674,66 @@ TEST(GcLivePreflightRcTest,
     EXPECT_EQ(generic_report["raw_rc_probe_result"], "FAILED");
     EXPECT_EQ(report_text.find("rc-user-secret"), std::string::npos);
     EXPECT_EQ(report_text.find("rc-password-secret"), std::string::npos);
+}
+
+TEST(GcLivePreflightRcTest, RawPreflightListingFindsNestedObjects) {
+    namespace gc_live = kasumi::operational::gc_live_preflight;
+    namespace smoke = kasumi::operational::remote_copy_smoke;
+    namespace transport = kasumi::transport;
+    constexpr std::string_view child =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-parent");
+    ASSERT_TRUE(parent);
+
+    RcServerState remote;
+    std::vector<nlohmann::json> list_requests;
+    std::atomic_size_t fsinfo_calls = 0;
+    remote.server.Post(
+        "/rc/operations/list",
+        [&](const httplib::Request& request, httplib::Response& response) {
+            list_requests.push_back(nlohmann::json::parse(request.body));
+            response.set_content(
+                R"({"list":[{"Path":"nested/object.bin"}]})",
+                "application/json");
+        });
+    remote.server.Post(
+        "/rc/operations/fsinfo",
+        [&](const httplib::Request&, httplib::Response& response) {
+            ++fsinfo_calls;
+            response.set_content(
+                R"({"Features":{"CanHaveEmptyDirectories":false}})",
+                "application/json");
+        });
+    start_rc_server(remote);
+
+    transport::rclone_detail::State state;
+    configure_preflight_state(state, remote.port, *parent);
+    auto storage = make_preflight_transport(state);
+    const auto observation =
+        gc_live::observe_pre_initialize(storage, *parent, child);
+    stop_rc_server(remote);
+
+    ASSERT_EQ(list_requests.size(), 2U);
+    const auto& raw_request = list_requests.front();
+    EXPECT_EQ(raw_request.at("fs").get<std::string>(),
+              parent->remote_name + ":");
+    EXPECT_EQ(raw_request.at("remote").get<std::string>(),
+              parent->directory + "/" + std::string{child});
+    EXPECT_TRUE(raw_request.at("opt").at("recurse").get<bool>());
+    EXPECT_TRUE(raw_request.at("opt").at("filesOnly").get<bool>());
+    EXPECT_EQ(fsinfo_calls.load(), 1U);
+
+    EXPECT_EQ(observation.raw_rc.result, "SUCCESS");
+    EXPECT_TRUE(observation.raw_rc.recurse);
+    EXPECT_TRUE(observation.raw_rc.files_only);
+    EXPECT_EQ(observation.raw_rc.entry_count, 1U)
+        << "the recursive files-only probe must see nested/object.bin";
+    EXPECT_EQ(observation.transport.entry_count, 1U);
+    EXPECT_EQ(observation.backend.capability,
+              gc_live::EmptyDirectoryCapability::CannotHave);
+    EXPECT_EQ(gc_live::classify_pre_initialize(observation, *parent, child)
+                  .disposition,
+              gc_live::ChildDisposition::Existing);
 }
 
 TEST(GcLivePreflightRcTest, ReadOnlyDiagnosticTimeoutFailsClosed) {
@@ -1693,6 +1768,92 @@ TEST(GcLivePreflightRcTest, ReadOnlyDiagnosticTimeoutFailsClosed) {
     EXPECT_EQ(gc_live::classify_pre_initialize(observation, *parent, child)
                   .disposition,
               gc_live::ChildDisposition::Refused);
+}
+
+TEST(GcLivePreflightRcTest,
+     FsinfoFailureMalformedAndTimeoutFailClosed) {
+    namespace gc_live = kasumi::operational::gc_live_preflight;
+    namespace smoke = kasumi::operational::remote_copy_smoke;
+    namespace transport = kasumi::transport;
+    constexpr std::string_view child =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(parent);
+
+    struct Scenario {
+        std::string_view name;
+        int status;
+        std::string body;
+        std::chrono::milliseconds delay{};
+        gc_live::EmptyDirectoryCapability expected_capability;
+        gc_live::ChildDisposition expected_disposition;
+        std::optional<transport::ErrorCode> expected_error;
+    };
+    const std::vector<Scenario> scenarios{
+        {"valid false feature", 200,
+         R"({"Features":{"CanHaveEmptyDirectories":false}})", {},
+         gc_live::EmptyDirectoryCapability::CannotHave,
+         gc_live::ChildDisposition::Unused, std::nullopt},
+        {"missing feature", 200, R"({"Features":{}})", {},
+         gc_live::EmptyDirectoryCapability::Unknown,
+         gc_live::ChildDisposition::Refused,
+         transport::ErrorCode::ProtocolFailure},
+        {"wrong feature type", 200,
+         R"({"Features":{"CanHaveEmptyDirectories":"false"}})",
+         {}, gc_live::EmptyDirectoryCapability::Unknown,
+         gc_live::ChildDisposition::Refused,
+         transport::ErrorCode::ProtocolFailure},
+        {"permission failure", 403, R"({"error":"permission denied"})",
+         {}, gc_live::EmptyDirectoryCapability::Unknown,
+         gc_live::ChildDisposition::Refused,
+         transport::ErrorCode::PermissionDenied},
+        {"timeout", 200,
+         R"({"Features":{"CanHaveEmptyDirectories":false}})",
+         std::chrono::milliseconds{80},
+         gc_live::EmptyDirectoryCapability::Unknown,
+         gc_live::ChildDisposition::Refused, transport::ErrorCode::Timeout},
+    };
+
+    for (const auto& scenario : scenarios) {
+        SCOPED_TRACE(scenario.name);
+        RcServerState remote;
+        remote.server.Post(
+            "/rc/operations/list",
+            [](const httplib::Request&, httplib::Response& response) {
+                response.set_content(R"({"list":[]})", "application/json");
+            });
+        remote.server.Post(
+            "/rc/operations/fsinfo",
+            [&scenario](const httplib::Request&,
+                        httplib::Response& response) {
+                if (scenario.delay > std::chrono::milliseconds::zero()) {
+                    std::this_thread::sleep_for(scenario.delay);
+                }
+                response.status = scenario.status;
+                response.set_content(scenario.body, "application/json");
+            });
+        start_rc_server(remote);
+        transport::rclone_detail::State state;
+        configure_preflight_state(state, remote.port, *parent);
+        auto storage = make_preflight_transport(state);
+        const auto deadline = scenario.name == "timeout"
+                                  ? std::chrono::milliseconds{20}
+                                  : std::chrono::seconds{1};
+        const auto observation = gc_live::observe_pre_initialize(
+            storage, *parent, child, deadline);
+        stop_rc_server(remote);
+
+        EXPECT_EQ(observation.backend.result,
+                  scenario.expected_capability ==
+                          gc_live::EmptyDirectoryCapability::CannotHave
+                      ? "SUCCESS"
+                      : "FAILED");
+        EXPECT_EQ(observation.backend.capability, scenario.expected_capability);
+        EXPECT_EQ(observation.backend.error_category, scenario.expected_error);
+        EXPECT_EQ(gc_live::classify_pre_initialize(observation, *parent, child)
+                      .disposition,
+                  scenario.expected_disposition);
+    }
 }
 
 
@@ -1889,9 +2050,11 @@ TEST(RcloneStorageTest, CopyBatchUsesOneJobBatchWithExplicitCopyfileInputs) {
         const auto& input = requests[0].at("inputs").at(index);
         EXPECT_EQ(input.at("_path"), "operations/copyfile");
         EXPECT_EQ(input.at("srcFs"), "test:root");
-        EXPECT_EQ(input.at("srcRemote"), pairs[index].first);
+        EXPECT_EQ(input.at("srcRemote").get<std::string>(),
+                  std::string{pairs[index].first});
         EXPECT_EQ(input.at("dstFs"), "test:root");
-        EXPECT_EQ(input.at("dstRemote"), pairs[index].second);
+        EXPECT_EQ(input.at("dstRemote").get<std::string>(),
+                  std::string{pairs[index].second});
         EXPECT_EQ(input.size(), 5U);
     }
 }

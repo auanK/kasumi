@@ -18,6 +18,7 @@ namespace kasumi::operational::gc_live_preflight {
 
 enum class ChildDisposition { Unused, Existing, Refused };
 enum class PostInitializeDisposition { Empty, Refused };
+enum class EmptyDirectoryCapability { Unknown, CanHave, CannotHave };
 
 struct ListingObservation {
     std::string result = "FAILED";
@@ -31,8 +32,20 @@ struct RcDiagnostic {
     std::string endpoint = "operations/list";
     std::string request_fs;
     std::string request_remote;
+    bool recurse = false;
+    bool files_only = false;
     std::string result = "FAILED";
     std::optional<std::size_t> entry_count;
+    std::optional<int> native_status;
+    std::optional<transport::ErrorCode> error_category;
+    std::string error_message;
+};
+
+struct EmptyDirectoryCapabilityObservation {
+    std::string endpoint = "operations/fsinfo";
+    std::string request_fs;
+    std::string result = "FAILED";
+    EmptyDirectoryCapability capability = EmptyDirectoryCapability::Unknown;
     std::optional<int> native_status;
     std::optional<transport::ErrorCode> error_category;
     std::string error_message;
@@ -41,6 +54,7 @@ struct RcDiagnostic {
 struct PreInitializeObservation {
     ListingObservation transport;
     RcDiagnostic raw_rc;
+    EmptyDirectoryCapabilityObservation backend;
 };
 
 struct PostInitializeObservation {

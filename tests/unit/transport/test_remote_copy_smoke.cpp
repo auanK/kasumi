@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 #include <chrono>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -391,6 +392,101 @@ TEST(GcLivePreflightTest, ExistingObjectsAndExistingEmptyChildAreRefused) {
     EXPECT_NE(empty_classification.reason.find("empty"), std::string::npos);
 }
 
+TEST(GcLivePreflightTest, EmptyExactListingRequiresTrustedBackendCapability) {
+    constexpr std::string_view child =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(parent);
+
+    const auto empty_success = [&] {
+        auto observation = proven_absent_observation(*parent, child);
+        observation.transport = {.result = "SUCCESS", .entry_count = 0};
+        observation.raw_rc.result = "SUCCESS";
+        observation.raw_rc.entry_count = 0;
+        observation.raw_rc.native_status.reset();
+        observation.raw_rc.error_category.reset();
+        observation.raw_rc.error_message.clear();
+        observation.raw_rc.recurse = true;
+        observation.raw_rc.files_only = true;
+        observation.backend.request_fs = parent->location;
+        observation.backend.result = "SUCCESS";
+        observation.backend.capability =
+            gc_live::EmptyDirectoryCapability::CannotHave;
+        return observation;
+    };
+
+    struct Case {
+        std::string_view name;
+        gc_live::PreInitializeObservation observation;
+        gc_live::ChildDisposition expected;
+    };
+
+    auto existing = empty_success();
+    existing.transport.entry_count = 1;
+    existing.raw_rc.entry_count = 1;
+    auto mismatched = empty_success();
+    mismatched.raw_rc.request_fs = "other:";
+    auto shallow = empty_success();
+    shallow.raw_rc.recurse = false;
+    auto capability_true = empty_success();
+    capability_true.backend.capability =
+        gc_live::EmptyDirectoryCapability::CanHave;
+    auto capability_absent = empty_success();
+    capability_absent.backend.capability =
+        gc_live::EmptyDirectoryCapability::Unknown;
+    capability_absent.backend.result = "FAILED";
+    auto capability_failed = capability_absent;
+    capability_failed.backend.error_category = transport::ErrorCode::Io;
+    auto capability_timeout = capability_absent;
+    capability_timeout.backend.error_category = transport::ErrorCode::Timeout;
+    auto capability_malformed = capability_absent;
+    capability_malformed.backend.error_category =
+        transport::ErrorCode::ProtocolFailure;
+    auto capability_mismatched = empty_success();
+    capability_mismatched.backend.request_fs = "other:root";
+    auto contradictory_backend = empty_success();
+    contradictory_backend.backend.error_category =
+        transport::ErrorCode::Timeout;
+    auto contradictory_listing = empty_success();
+    contradictory_listing.raw_rc.error_category =
+        transport::ErrorCode::ProtocolFailure;
+
+    const std::vector<Case> cases{
+        {"capability false with complete recursive listing", empty_success(),
+         gc_live::ChildDisposition::Unused},
+        {"capability true", capability_true,
+         gc_live::ChildDisposition::Refused},
+        {"capability absent", capability_absent,
+         gc_live::ChildDisposition::Refused},
+        {"capability lookup failed", capability_failed,
+         gc_live::ChildDisposition::Refused},
+        {"capability timeout", capability_timeout,
+         gc_live::ChildDisposition::Refused},
+        {"capability response malformed", capability_malformed,
+         gc_live::ChildDisposition::Refused},
+        {"capability filesystem mismatch", capability_mismatched,
+         gc_live::ChildDisposition::Refused},
+        {"capability success with error", contradictory_backend,
+         gc_live::ChildDisposition::Refused},
+        {"listing success with error", contradictory_listing,
+         gc_live::ChildDisposition::Refused},
+        {"incomplete shallow listing", shallow,
+         gc_live::ChildDisposition::Refused},
+        {"objects found", existing,
+         gc_live::ChildDisposition::Existing},
+        {"raw RC filesystem mismatch", mismatched,
+         gc_live::ChildDisposition::Refused},
+    };
+
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        const auto classification = gc_live::classify_pre_initialize(
+            test_case.observation, *parent, child);
+        EXPECT_EQ(classification.disposition, test_case.expected)
+            << classification.reason;
+    }
+}
+
 TEST(GcLivePreflightTest,
      NormalizedStorageNotFoundWithoutStrictRcEvidenceIsRefused) {
     constexpr std::string_view child =
@@ -501,8 +597,11 @@ TEST(GcLivePreflightTest, RefusedGatesNeverInitializeOrWriteOwnerMarker) {
     empty_existing.transport = {.result = "SUCCESS", .entry_count = 0};
     empty_existing.raw_rc.result = "SUCCESS";
     empty_existing.raw_rc.entry_count = 0;
+    empty_existing.raw_rc.recurse = true;
+    empty_existing.raw_rc.files_only = true;
     EXPECT_FALSE(gc_live::initialize_child(child, empty_existing));
     EXPECT_EQ(state->initialize_count, 0U);
+    EXPECT_EQ(state->put_count, 0U);
 
     const auto post = gc_live::PostInitializeObservation{
         .transport = {.result = "FAILED",
