@@ -95,10 +95,6 @@ State* ready_state(void* context) noexcept {
     return state;
 }
 
-std::string remote_fs(const State& state) {
-    return state.configuration.remote_name + ":";
-}
-
 std::string join_remote_path(std::string_view root, std::string_view suffix) {
     while (root.ends_with('/')) {
         root.remove_suffix(1);
@@ -118,16 +114,13 @@ std::string join_remote_path(std::string_view root, std::string_view suffix) {
     return std::string{root} + "/" + std::string{suffix};
 }
 
-std::string objects_remote(const State& state) {
-    return state.configuration.remote_root;
+std::string rooted_remote_fs(const State& state) {
+    return state.configuration.remote_name + ":" +
+           state.configuration.remote_root;
 }
 
-std::string objects_remote_fs(const State& state) {
-    return remote_fs(state) + objects_remote(state);
-}
-
-std::string object_remote(const State& state, std::string_view identifier) {
-    return join_remote_path(objects_remote(state), identifier);
+std::string relative_remote(std::string_view identifier) {
+    return std::string{identifier};
 }
 
 std::expected<nlohmann::json, Error>
@@ -372,7 +365,7 @@ stat_remote(State& state, std::string_view remote, bool files_only = true) {
     return request_read_json(state,
                              "operations/stat",
                              nlohmann::json{
-                                 {"fs", remote_fs(state)},
+                                 {"fs", rooted_remote_fs(state)},
                                  {"remote", remote},
                                  {"opt",
                                   {{"filesOnly", files_only},
@@ -407,8 +400,8 @@ Result rclone_initialize(void* context) {
     const auto created =
         request_json(*state,
                      "operations/mkdir",
-                     nlohmann::json{{"fs", remote_fs(*state)},
-                                    {"remote", objects_remote(*state)}},
+                     nlohmann::json{{"fs", rooted_remote_fs(*state)},
+                                    {"remote", ""}},
                      maximum_response_size,
                      quick_timeout);
     if (!created) {
@@ -453,8 +446,8 @@ Result rclone_put(void* context,
                      nlohmann::json{
                          {"srcFs", source_parent},
                          {"srcRemote", source_name},
-                         {"dstFs", remote_fs(*state)},
-                         {"dstRemote", object_remote(*state, identifier)},
+                         {"dstFs", rooted_remote_fs(*state)},
+                         {"dstRemote", std::string{identifier}},
                      },
                      maximum_response_size,
                      transfer_timeout);
@@ -482,7 +475,7 @@ Result rclone_put_batch(void* context, const PutBatch& batch) {
     const auto source_path = platform::path::to_utf8(*absolute_source);
 
     nlohmann::json payload = {{"srcFs", source_path},
-                              {"dstFs", objects_remote_fs(*state)},
+                              {"dstFs", rooted_remote_fs(*state)},
                               {"createEmptySrcDirs", false}};
     nlohmann::json config = {{"NoTraverse", true},
                              {"NoUpdateModTime", true}};
@@ -540,8 +533,8 @@ Result rclone_put_files_batch(void* context, const PutFilesBatch& batch) {
             {"_path", "operations/copyfile"},
             {"srcFs", source_parent},
             {"srcRemote", source_name},
-            {"dstFs", remote_fs(*state)},
-            {"dstRemote", object_remote(*state, item.destination_identifier)},
+            {"dstFs", rooted_remote_fs(*state)},
+            {"dstRemote", relative_remote(item.destination_identifier)},
         });
     }
 
@@ -615,8 +608,8 @@ Result rclone_get(void* context,
         request_json(*state,
                      "operations/copyfile",
                      nlohmann::json{
-                         {"srcFs", remote_fs(*state)},
-                         {"srcRemote", object_remote(*state, identifier)},
+                         {"srcFs", rooted_remote_fs(*state)},
+                         {"srcRemote", std::string{identifier}},
                          {"dstFs", destination_parent},
                          {"dstRemote", destination_name},
                      },
@@ -661,12 +654,10 @@ Result rclone_copy(void* context,
         request_json(*state,
                      "operations/copyfile",
                      nlohmann::json{
-                         {"srcFs", remote_fs(*state)},
-                         {"srcRemote",
-                          object_remote(*state, source_identifier)},
-                         {"dstFs", remote_fs(*state)},
-                         {"dstRemote",
-                          object_remote(*state, destination_identifier)},
+                         {"srcFs", rooted_remote_fs(*state)},
+                         {"srcRemote", std::string{source_identifier}},
+                         {"dstFs", rooted_remote_fs(*state)},
+                         {"dstRemote", std::string{destination_identifier}},
                      },
                      maximum_response_size,
                      transfer_timeout);
@@ -704,10 +695,10 @@ Result rclone_copy_batch(void* context, const CopyBatch& batch) {
         }
         inputs.push_back(nlohmann::json{
             {"_path", "operations/copyfile"},
-            {"srcFs", remote_fs(*state)},
-            {"srcRemote", object_remote(*state, item.source_identifier)},
-            {"dstFs", remote_fs(*state)},
-            {"dstRemote", object_remote(*state, item.destination_identifier)},
+            {"srcFs", rooted_remote_fs(*state)},
+            {"srcRemote", relative_remote(item.source_identifier)},
+            {"dstFs", rooted_remote_fs(*state)},
+            {"dstRemote", relative_remote(item.destination_identifier)},
         });
     }
 
@@ -767,8 +758,8 @@ Result rclone_get_batch(void* context, const GetBatch& batch) {
     nlohmann::json payload = {
         {"srcFs",
          batch.source_prefix.empty()
-             ? objects_remote_fs(*state)
-             : join_remote_path(objects_remote_fs(*state),
+             ? rooted_remote_fs(*state)
+             : join_remote_path(rooted_remote_fs(*state),
                                 batch.source_prefix)},
         {"dstFs", platform::path::to_utf8(*absolute_destination)},
         {"createEmptySrcDirs", false},
@@ -839,8 +830,7 @@ PresenceResult rclone_presence(void* context, std::string_view identifier) {
     }
 
     const auto presence_trace = platform::perf_trace::begin();
-    const auto response =
-        stat_remote(*state, object_remote(*state, identifier));
+    const auto response = stat_remote(*state, identifier);
     platform::perf_trace::finish("rc/presence", presence_trace);
     if (!response) {
         if (not_found(response.error())) {
@@ -885,8 +875,8 @@ ListingResult rclone_list(void* context) {
         request_read_json(*state,
                           "operations/list",
                           nlohmann::json{
-                              {"fs", remote_fs(*state)},
-                              {"remote", objects_remote(*state)},
+                              {"fs", rooted_remote_fs(*state)},
+                              {"remote", ""},
                               {"opt",
                                {{"recurse", true},
                                 {"filesOnly", true},
@@ -904,7 +894,7 @@ ListingResult rclone_list(void* context) {
         }
         return std::unexpected(response.error());
     }
-    return parse_list_response_json(*response, objects_remote(*state));
+    return parse_list_response_json(*response);
 }
 
 ListingResult rclone_list_prefix(void* context, std::string_view prefix) {
@@ -916,12 +906,12 @@ ListingResult rclone_list_prefix(void* context, std::string_view prefix) {
         return std::unexpected(invalid_identifier_error());
     }
 
-    const auto remote = join_remote_path(objects_remote(*state), prefix);
+    const auto remote = std::string{prefix};
     const auto list_trace = platform::perf_trace::begin();
     const auto response = request_read_json(*state,
                                             "operations/list",
                                             nlohmann::json{
-                                                {"fs", remote_fs(*state)},
+                                                {"fs", rooted_remote_fs(*state)},
                                                 {"remote", remote},
                                                 {"opt",
                                                  {{"recurse", false},
@@ -940,17 +930,7 @@ ListingResult rclone_list_prefix(void* context, std::string_view prefix) {
         }
         return std::unexpected(response.error());
     }
-    auto result = parse_list_response_json(*response, remote);
-    if (!result) {
-        return result;
-    }
-    const auto relative_prefix = std::string{prefix} + "/";
-    for (auto& name : *result) {
-        if (name.starts_with(relative_prefix)) {
-            name.erase(0, relative_prefix.size());
-        }
-    }
-    return result;
+    return parse_list_response_json(*response, remote);
 }
 
 std::expected<std::string, Error> rclone_physical_hash(
@@ -972,8 +952,8 @@ std::expected<std::string, Error> rclone_physical_hash(
     const auto response = request_read_json(
         *state,
         "operations/hashsumfile",
-        nlohmann::json{{"fs", remote_fs(*state)},
-                       {"remote", object_remote(*state, identifier)},
+        nlohmann::json{{"fs", rooted_remote_fs(*state)},
+                       {"remote", relative_remote(identifier)},
                        {"hashType", "SHA-256"}},
         maximum_response_size,
         control_read_deadline);
@@ -1113,7 +1093,7 @@ rclone_physical_hash_batch(void* context,
         *state,
         "operations/check",
         nlohmann::json{
-            {"dstFs", objects_remote_fs(*state)},
+            {"dstFs", rooted_remote_fs(*state)},
             {"checkFileHash", "SHA-256"},
             {"checkFileFs", manifest_parent},
             {"checkFileRemote", platform::path::to_utf8(manifest.filename())},
@@ -1169,8 +1149,8 @@ rclone_control_read_batch(void* context,
     for (const auto& prefix : request.list_prefixes) {
         inputs.push_back(nlohmann::json{
             {"_path", "operations/list"},
-            {"fs", remote_fs(*state)},
-            {"remote", join_remote_path(objects_remote(*state), prefix)},
+            {"fs", rooted_remote_fs(*state)},
+            {"remote", relative_remote(prefix)},
             {"opt",
              {{"recurse", false},
               {"filesOnly", true},
@@ -1180,8 +1160,8 @@ rclone_control_read_batch(void* context,
     for (const auto& identifier : request.presence_identifiers) {
         inputs.push_back(
             nlohmann::json{{"_path", "operations/stat"},
-                           {"fs", remote_fs(*state)},
-                           {"remote", object_remote(*state, identifier)},
+                           {"fs", rooted_remote_fs(*state)},
+                           {"remote", relative_remote(identifier)},
                            {"opt",
                             {{"filesOnly", true},
                              {"noModTime", true},
@@ -1205,8 +1185,7 @@ rclone_control_read_batch(void* context,
         }
         return std::unexpected(response.error());
     }
-    auto result = parse_control_read_batch_response(
-        response->dump(), request, objects_remote(*state));
+    auto result = parse_control_read_batch_response(response->dump(), request);
     if (!result) {
         return result;
     }
@@ -1229,8 +1208,8 @@ RemovalResult rclone_remove(void* context, std::string_view identifier) {
     const auto deleted = request_json(
         *state,
         "operations/deletefile",
-        nlohmann::json{{"fs", remote_fs(*state)},
-                       {"remote", object_remote(*state, identifier)}},
+        nlohmann::json{{"fs", rooted_remote_fs(*state)},
+                       {"remote", std::string{identifier}}},
         maximum_response_size,
         quick_timeout);
     if (!deleted) {
@@ -1263,13 +1242,13 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
         if (!valid_identifier(identifier)) {
             return std::unexpected(invalid_identifier_error());
         }
-        const auto remote = object_remote(*state, identifier);
+        const auto remote = relative_remote(identifier);
         if (!remote_to_index.emplace(remote, index).second) {
             return std::unexpected(invalid_identifier_error());
         }
         inputs.push_back(nlohmann::json{
             {"_path", "operations/deletefile"},
-            {"fs", remote_fs(*state)},
+            {"fs", rooted_remote_fs(*state)},
             {"remote", remote},
         });
     }
@@ -1420,8 +1399,7 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
 
 ControlReadBatchResponse
 parse_control_read_batch_response(std::string_view response_body,
-                                  const ControlReadBatchRequest& request,
-                                  std::string_view objects_root) {
+                                  const ControlReadBatchRequest& request) {
     try {
         const auto response = nlohmann::json::parse(response_body);
         const auto expected_size =
@@ -1492,8 +1470,7 @@ parse_control_read_batch_response(std::string_view response_body,
                 continue;
             }
             auto listing = parse_list_response_json(
-                item,
-                join_remote_path(objects_root, request.list_prefixes[index]));
+                item, request.list_prefixes[index]);
             if (!listing) {
                 return std::unexpected(listing.error());
             }
