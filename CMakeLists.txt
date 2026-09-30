@@ -850,4 +850,18 @@ if(KASUMI_BUILD_PROVIDER_CERTIFICATION)
         nlohmann_json::nlohmann_json
         kasumi_warnings
     )
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
+        target_link_options(kasumi_provider_certification PRIVATE
+            -static-libgcc
+            -static-libstdc++
+            -Wl,--allow-multiple-definition
+        )
+    endif()
+    add_test(
+        NAME kasumi_provider_certification_startup
+        COMMAND
+            ${CMAKE_COMMAND}
+            "-DKASUMI_PROVIDER_CERTIFICATION_EXECUTABLE=$<TARGET_FILE:kasumi_provider_certification>"
+            -P ${PROJECT_SOURCE_DIR}/tests/operational/check_provider_certification_startup.cmake
+    )
 endif()
