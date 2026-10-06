@@ -557,7 +557,8 @@ bool same_materialized_head_rows(const std::vector<NodeRow>& expected_rows,
                 return false;
             }
         }
-        if (exp.mtime == std::filesystem::file_time_type{}) {
+        if (exp.mtime == 0 ||
+            platform::metadata::filesystem_equivalent(exp.mtime, act.mtime)) {
             continue;
         }
         if (exp.mtime != act.mtime) {
@@ -579,8 +580,9 @@ bool same_materialized_row(const NodeRow& expected,
                           const NodeRow& actual) noexcept {
     return expected.path == actual.path && expected.hash == actual.hash &&
            expected.size == actual.size &&
-           (expected.mtime == std::filesystem::file_time_type{} ||
-            expected.mtime == actual.mtime) &&
+           (expected.mtime == 0 ||
+            platform::metadata::filesystem_equivalent(expected.mtime,
+                                                      actual.mtime)) &&
            expected.is_directory == actual.is_directory;
 }
 
@@ -1086,18 +1088,31 @@ restore_transaction_metadata(const Snapshot& expected_tree,
                     "failed to confirm observed timestamp for " + path_name +
                         ": " + error.message()));
             }
-            if (observed == nullptr || current != observed->mtime) {
+            const auto current_ns =
+                ::kasumi::platform::metadata::unix_nanoseconds(current);
+            if (observed == nullptr || !current_ns ||
+                *current_ns != observed->mtime) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::ConcurrentModification,
                     "entry modified after observation: " + path_name));
             }
         }
-        if (row->mtime == std::filesystem::file_time_type{}) {
+        if (row->mtime == 0) {
             // Canonical history uses default mtime as an unspecified sentinel.
             continue;
         }
+        const auto native_mtime =
+            ::kasumi::platform::metadata::file_time_from_unix_nanoseconds(
+                row->mtime);
+        if (!native_mtime) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::MutationFailure,
+                "failed to restore materialized timestamp for " + path_name +
+                    ": timestamp is out of range"));
+        }
         auto written =
-            ::kasumi::platform::metadata::set_last_write_time(path, row->mtime);
+            ::kasumi::platform::metadata::set_last_write_time(path,
+                                                              *native_mtime);
         if (!written) {
             return std::unexpected(detail::make_error(
                 ErrorCode::MutationFailure,
@@ -1769,8 +1784,8 @@ execute(const runtime::RuntimeData& runtime_data,
     }
 
     const auto final_scan_trace = platform::perf_trace::begin();
-    auto scanned =
-        observation::collect_local_tree(runtime_data.local_dir, session);
+    auto scanned = observation::collect_local_tree(
+        runtime_data.local_dir, session, observed_input.ignore_list);
     platform::perf_trace::finish("final local validation", final_scan_trace);
     if (!scanned) {
         auto rolled = rollback_terminal();
@@ -1926,13 +1941,13 @@ execute(const runtime::RuntimeData& runtime_data,
             if (actual.path != expected.path) {
                 detail_message += ", actual_path=" + actual.path;
             }
-            if (expected.mtime != std::filesystem::file_time_type{} &&
+            if (expected.mtime != 0 &&
                 actual.mtime != expected.mtime) {
                 detail_message +=
                     ", actual_mtime=" +
-                    std::to_string(actual.mtime.time_since_epoch().count()) +
+                    std::to_string(actual.mtime) +
                     ", expected_mtime=" +
-                    std::to_string(expected.mtime.time_since_epoch().count());
+                    std::to_string(expected.mtime);
             }
             if (actual.size != expected.size) {
                 detail_message +=
@@ -1988,17 +2003,14 @@ execute(const runtime::RuntimeData& runtime_data,
                     if (actual.path != expected.path ||
                         actual.hash != expected.hash ||
                         actual.size != expected.size ||
-                        (expected.mtime !=
-                             std::filesystem::file_time_type{} &&
+                        (expected.mtime != 0 &&
                          actual.mtime != expected.mtime) ||
                         actual.is_directory != expected.is_directory) {
                         detail_message +=
                             " (path=" + expected.path + ", actual_mtime=" +
-                            std::to_string(
-                                actual.mtime.time_since_epoch().count()) +
+                            std::to_string(actual.mtime) +
                             ", expected_mtime=" +
-                            std::to_string(
-                                expected.mtime.time_since_epoch().count()) +
+                            std::to_string(expected.mtime) +
                             ", actual_type=" +
                             std::to_string(actual.is_directory) +
                             ", expected_type=" +

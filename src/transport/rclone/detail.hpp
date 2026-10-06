@@ -88,8 +88,7 @@ parse_physical_hash_batch_response(std::string_view response_body,
 // Decodes a control-plane read job/batch envelope.
 ControlReadBatchResponse
 parse_control_read_batch_response(std::string_view response_body,
-                                  const ControlReadBatchRequest& request,
-                                  std::string_view objects_remote);
+                                  const ControlReadBatchRequest& request);
 
 // Builds the storage operations table for the rclone transport.
 StorageOperations make_storage_operations() noexcept;

@@ -97,18 +97,18 @@ void update_generation(const std::filesystem::path& path,
 kasumi::Snapshot make_snapshot(std::string_view file_path,
                                std::string_view contents,
                                std::int64_t time_offset) {
-    const auto epoch = std::chrono::clock_cast<std::chrono::file_clock>(
-        std::chrono::system_clock::time_point{});
-    const auto root_time = epoch + std::chrono::seconds{time_offset};
+    const auto root_time = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::seconds{time_offset})
+                               .count();
     kasumi::Snapshot snapshot{{
         {.path = "", .mtime = root_time, .is_directory = true},
         {.path = "docs",
-         .mtime = root_time + std::chrono::seconds{1},
+         .mtime = root_time + 1'000'000'000,
          .is_directory = true},
         {.path = std::string{file_path},
          .hash = kasumi::hasher::hash_string(contents),
          .size = static_cast<std::uint64_t>(contents.size()),
-         .mtime = root_time + std::chrono::seconds{2},
+         .mtime = root_time + 2'000'000'000,
          .is_directory = false},
     }};
     kasumi::finalize_snapshot(snapshot);
@@ -161,7 +161,9 @@ TEST(StateStorageDatabaseTest, PendingMaterializationsRoundTrip) {
     auto workspace = kasumi::test::make_temp_workspace("pending-round-trip");
     const auto database_path =
         kasumi::test::workspace_path(workspace, "state.db");
-    const auto snapshot = make_snapshot("docs/state.txt", "state", 9);
+    auto snapshot = make_snapshot("docs/state.txt", "state", 9);
+    kasumi::find_row(snapshot, "docs/state.txt")->mtime = 123456789;
+    kasumi::finalize_snapshot(snapshot);
     ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
@@ -177,6 +179,29 @@ TEST(StateStorageDatabaseTest, PendingMaterializationsRoundTrip) {
     ASSERT_EQ((*loaded)->pending_materializations.size(), 1U);
     EXPECT_EQ((*loaded)->pending_materializations.front(),
               *kasumi::find_row(snapshot, "docs/state.txt"));
+}
+
+TEST(StateStorageDatabaseTest, PreservesCanonicalNanosecondSnapshots) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-canonical-mtime");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "state.db");
+    auto expected = make_snapshot("docs/readme.txt", "persistence", 0);
+    expected.rows[1].mtime = -123456789;
+    expected.rows[2].mtime = 123456789;
+    kasumi::finalize_snapshot(expected);
+
+    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    ASSERT_TRUE(kasumi::state_storage::save_state(
+        database_path,
+        kasumi::state_storage::StoredState{
+            .tree = expected, .height = 1, .commit_id = std::string(64, 'b')}));
+    const auto loaded = kasumi::state_storage::load_state(database_path);
+    ASSERT_TRUE(loaded.has_value() && *loaded);
+    ASSERT_EQ((*loaded)->tree.rows.size(), expected.rows.size());
+    for (std::size_t index = 0; index < expected.rows.size(); ++index) {
+        EXPECT_EQ((*loaded)->tree.rows[index].mtime, expected.rows[index].mtime);
+    }
 }
 
 TEST(StateStorageDatabaseTest, EmptyPendingMaterializationsClearPersistedRows) {

@@ -4,12 +4,13 @@
 #include "hasher.hpp"
 
 #include <cstdint>
-#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace kasumi {
+
+using TimestampNs = std::int64_t;
 
 // File or directory in a snapshot.
 struct NodeRow {
@@ -19,8 +20,8 @@ struct NodeRow {
     Hash hash{};
     // Files use byte length; directories sum descendant content sizes.
     uint64_t size = 0;
-    // Observed last modification time.
-    std::filesystem::file_time_type mtime{};
+    // Unix nanoseconds. Zero means the timestamp was not observed.
+    TimestampNs mtime = 0;
     // Distinguishes directories from regular files.
     bool is_directory = false;
 };

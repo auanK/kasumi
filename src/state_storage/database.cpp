@@ -10,7 +10,6 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
-#include <chrono>
 #include <limits>
 #include <ranges>
 #include <stdexcept>
@@ -322,13 +321,7 @@ void create_schema(sqlite3* database) {
 }
 
 std::int64_t mtime_value(const NodeRow& row) {
-    if (row.mtime == std::filesystem::file_time_type{}) {
-        return 0;
-    }
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::clock_cast<std::chrono::system_clock>(row.mtime)
-                   .time_since_epoch())
-        .count();
+    return row.mtime;
 }
 
 bool same_node(const NodeRow& left, const NodeRow& right) {
@@ -377,18 +370,10 @@ std::vector<NodeRow> load_pending_materializations(sqlite3* database,
         if (!hash || size < 0) {
             throw std::runtime_error("invalid pending materialization row");
         }
-        std::filesystem::file_time_type mtime{};
-        if (raw_nanos != 0) {
-            const auto sys_dur = std::chrono::duration_cast<
-                std::chrono::system_clock::duration>(
-                std::chrono::nanoseconds{raw_nanos});
-            mtime = std::chrono::clock_cast<std::chrono::file_clock>(
-                std::chrono::time_point<std::chrono::system_clock>{sys_dur});
-        }
         rows.push_back(NodeRow{.path = path,
                                .hash = *hash,
                                .size = static_cast<std::uint64_t>(size),
-                               .mtime = mtime,
+                               .mtime = raw_nanos,
                                .is_directory = false});
     }
     std::ranges::sort(rows, path_less, &NodeRow::path);
@@ -489,20 +474,10 @@ std::expected<Snapshot, std::string> load_tree(sqlite3* database) {
                 throw std::runtime_error("invalid node fields");
             }
             const auto raw_nanos = sqlite::integer(query, 3);
-            std::filesystem::file_time_type mtime{};
-            if (raw_nanos != 0) {
-                const auto sys_dur = std::chrono::duration_cast<
-                    std::chrono::system_clock::duration>(
-                    std::chrono::nanoseconds{raw_nanos});
-                const auto sys_tp =
-                    std::chrono::time_point<std::chrono::system_clock>{sys_dur};
-                mtime =
-                    std::chrono::clock_cast<std::chrono::file_clock>(sys_tp);
-            }
             snapshot.rows.push_back({.path = sqlite::text(query, 0),
                                      .hash = *hash,
                                      .size = static_cast<std::uint64_t>(size),
-                                     .mtime = mtime,
+                                     .mtime = raw_nanos,
                                      .is_directory = is_directory == 1});
         }
         std::ranges::sort(snapshot.rows, path_less, &NodeRow::path);

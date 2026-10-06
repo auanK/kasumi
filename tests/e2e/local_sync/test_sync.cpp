@@ -1,10 +1,14 @@
 #include "application/execute.hpp"
 #include "application/observation/history.hpp"
 #include "application/observation/scanner.hpp"
+#include "application/observation/state.hpp"
 #include "application/profile.hpp"
 #include "application/sync/journal.hpp"
+#include "core/reconciliation/plan.hpp"
+#include "crypto/key_derivation.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/hash_mutation.hpp"
+#include "kasumi/test/provider_scenarios.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/change_journal.hpp"
 #include "platform/metadata.hpp"
@@ -99,15 +103,27 @@ Client make_client(Scenario& scenario, std::string name) {
     return result;
 }
 
+kasumi::test::scenarios::TwoClientSyncScenario
+shared_scenario(Scenario& scenario,
+                const Client& a,
+                const Client& b,
+                std::string_view name) {
+    return {
+        .remote_locator = kasumi::platform::path::to_utf8(std::get<1>(scenario)),
+        .scratch_root = kasumi::test::workspace_path(
+            std::get<0>(scenario), "shared-scenarios/" + std::string{name}),
+        .a = {.profile = client_name(a),
+              .local_root = client_local_dir(a),
+              .environment = client_environment(a)},
+        .b = {.profile = client_name(b),
+              .local_root = client_local_dir(b),
+              .environment = client_environment(b)},
+    };
+}
+
 std::expected<void, std::string> sync(const Client& client) {
-    auto result = kasumi::application::execute(
-        {Request{Operation::Sync, client_name(client)},
-         Credentials{NoCredentials{}},
-         client_environment(client)});
-    if (!result) {
-        return std::unexpected(result.error().detail);
-    }
-    return {};
+    return kasumi::test::scenarios::sync(client_environment(client),
+                                         client_name(client));
 }
 
 testing::AssertionResult sync_succeeds(const Client& client) {
@@ -320,6 +336,23 @@ void expect_remote_absent(const StorageView& remote, std::string_view path) {
     EXPECT_EQ(kasumi::find_row(remote.effective_tree, path), nullptr);
 }
 
+void seed_remote_ignore_vault(Scenario& scenario, const Client& seed) {
+    kasumi::test::write_text(client_local_dir(seed) / ".kasumiignore",
+                             "/Screenshots/\n");
+    kasumi::test::write_text(client_local_dir(seed) / "Alpha.jpg", "alpha");
+    kasumi::test::write_text(client_local_dir(seed) / "Zulu.jpg", "zulu");
+    ASSERT_TRUE(sync_succeeds(seed));
+    expect_file(seed, ".kasumiignore", "/Screenshots/\n");
+
+    auto observed = remote(scenario);
+    ASSERT_TRUE(observed.has_value()) << observed.error();
+    ASSERT_FALSE(observed->logical_heads.empty());
+    expect_remote_present(*observed, ".kasumiignore");
+    expect_remote_present(*observed, "Alpha.jpg");
+    expect_remote_present(*observed, "Zulu.jpg");
+    expect_remote_absent(*observed, "Screenshots");
+}
+
 void expect_no_transaction_artifacts(
     const kasumi::runtime::RuntimeData& runtime) {
     const auto profile = runtime.database_path.parent_path();
@@ -347,16 +380,17 @@ TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
     const std::string expected_dir_utf8 = "pasta-日本";
     const std::string expected_file_utf8 = "pasta-日本/usuário-☁.txt";
 
-    kasumi::test::write_text(client_local_dir(a) / "alpha.txt", "alpha");
-    kasumi::test::write_text(client_local_dir(a) / "beta.txt", "beta");
-    kasumi::test::write_text(client_local_dir(a) / "docs/readme.txt", "readme");
-    kasumi::test::write_text(client_local_dir(a) / "docs/nested/data.txt",
-                             "data");
-    kasumi::test::write_text(client_local_dir(a) / "images/image.bin",
-                             "binary");
-    kasumi::test::write_text(a_unicode, "unicode-v1");
-
-    ASSERT_TRUE(sync_succeeds(a));
+    const std::vector<kasumi::test::scenarios::SeedFile> seed_files{
+        {"alpha.txt", "alpha"},
+        {"beta.txt", "beta"},
+        {"docs/readme.txt", "readme"},
+        {"docs/nested/data.txt", "data"},
+        {"images/image.bin", "binary"},
+        {"pasta-日本/usuário-☁.txt", "unicode-v1"},
+    };
+    const auto published = kasumi::test::scenarios::publish_seed_files(
+        client_environment(a), client_name(a), client_local_dir(a), seed_files);
+    ASSERT_TRUE(published.has_value()) << published.error();
     auto observed_remote = remote(scenario);
     ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
     expect_remote_present(*observed_remote, "alpha.txt");
@@ -374,7 +408,9 @@ TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
     EXPECT_FALSE(r_file->is_directory);
     EXPECT_EQ(r_file->path, expected_file_utf8);
 
-    ASSERT_TRUE(sync_succeeds(b));
+    const auto materialized = kasumi::test::scenarios::materialize_files(
+        client_environment(b), client_name(b), client_local_dir(b), seed_files);
+    ASSERT_TRUE(materialized.has_value()) << materialized.error();
     expect_file(b, "alpha.txt", "alpha");
     expect_file(b, "docs/readme.txt", "readme");
     expect_file(b, "docs/nested/data.txt", "data");
@@ -499,73 +535,24 @@ TEST(H3LocalSyncTest, CreatesSubtreesAndEmptyDirectoriesInBothDirections) {
     expect_fixed_point(scenario, b);
 }
 
-TEST(H3LocalSyncTest, ModifiesFilesAndAppliesCreateModifyDeleteTogether) {
+TEST(H3LocalSyncTest, BidirectionalUpdatesConverge) {
     auto scenario = make_scenario();
     const auto a = make_client(scenario, "a");
     const auto b = make_client(scenario, "b");
-
-    kasumi::test::write_text(client_local_dir(a) / "alpha.txt", "A1");
-    kasumi::test::write_text(client_local_dir(a) / "beta.txt", "B1");
-    kasumi::test::write_text(client_local_dir(a) / "old.txt", "old");
-    kasumi::test::write_text(client_local_dir(a) / "keep.txt", "keep");
-    ASSERT_TRUE(sync(a));
-    ASSERT_TRUE(sync(b));
-
-    kasumi::test::write_text(client_local_dir(a) / "alpha.txt", "A2");
-    kasumi::test::write_text(client_local_dir(a) / "beta.txt", "B2");
-    ASSERT_TRUE(sync(a));
-    ASSERT_TRUE(sync(b));
-    expect_file(b, "alpha.txt", "A2");
-    expect_file(b, "beta.txt", "B2");
-
-    kasumi::test::write_text(client_local_dir(b) / "alpha.txt", "A3");
-    remove_file(b, "old.txt");
-    kasumi::test::write_text(client_local_dir(b) / "gamma.txt", "G1");
-    ASSERT_TRUE(sync(b));
-    ASSERT_TRUE(sync(a));
-    expect_file(a, "alpha.txt", "A3");
-    expect_file(a, "beta.txt", "B2");
-    expect_absent(a, "old.txt");
-    expect_file(a, "gamma.txt", "G1");
-    expect_file(a, "keep.txt", "keep");
-    expect_converged(scenario, {&a, &b});
-    expect_fixed_point(scenario, a);
+    const auto result = kasumi::test::scenarios::bidirectional_update(
+        shared_scenario(scenario, a, b, "bidirectional-update"));
+    ASSERT_TRUE(result.has_value()) << result.error();
 }
 
 TEST(H3LocalSyncTest, DeletesRootFilesAndPreservesAnEmptyRoot) {
     auto scenario = make_scenario();
     const auto a = make_client(scenario, "a");
     const auto b = make_client(scenario, "b");
-
-    for (const auto& [path, contents] : {std::pair{"alpha.txt", "alpha"},
-                                         std::pair{"beta.txt", "beta"},
-                                         std::pair{"gamma.txt", "gamma"},
-                                         std::pair{"keep.txt", "keep"}}) {
-        kasumi::test::write_text(client_local_dir(a) / path, contents);
-    }
-    ASSERT_TRUE(sync(a));
-    ASSERT_TRUE(sync(b));
-
-    remove_file(b, "alpha.txt");
-    remove_file(b, "beta.txt");
-    ASSERT_TRUE(sync(b));
-    auto observed_remote = remote(scenario);
-    ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
-    expect_remote_absent(*observed_remote, "alpha.txt");
-    expect_remote_absent(*observed_remote, "beta.txt");
-    ASSERT_TRUE(sync(a));
-    expect_absent(a, "alpha.txt");
-    expect_absent(a, "beta.txt");
-    expect_file(a, "keep.txt", "keep");
-
-    remove_file(b, "gamma.txt");
-    remove_file(b, "keep.txt");
-    ASSERT_TRUE(sync(b));
-    ASSERT_TRUE(sync(a));
+    const auto result = kasumi::test::scenarios::logical_delete(
+        shared_scenario(scenario, a, b, "logical-delete"));
+    ASSERT_TRUE(result.has_value()) << result.error();
     EXPECT_TRUE(std::filesystem::is_directory(client_local_dir(a)));
     EXPECT_TRUE(std::filesystem::is_directory(client_local_dir(b)));
-    expect_converged(scenario, {&a, &b});
-    expect_fixed_point(scenario, a);
 }
 
 TEST(H3LocalSyncTest, DeletesEmptyNestedDeepAndMixedDirectories) {
@@ -709,6 +696,265 @@ TEST(H3LocalSyncTest,
 }
 
 TEST(H3LocalSyncTest,
+     FreshClientPreexistingRemoteIgnoredDirectoryConverges) {
+    auto scenario = make_scenario();
+    const auto seed = make_client(scenario, "seed");
+    seed_remote_ignore_vault(scenario, seed);
+
+    const auto fresh = make_client(scenario, "fresh");
+    const auto initial_state = state(fresh);
+    ASSERT_TRUE(initial_state.has_value()) << initial_state.error();
+    ASSERT_FALSE(initial_state->has_value());
+    ASSERT_FALSE(std::filesystem::exists(client_local_dir(fresh) /
+                                          ".kasumiignore"));
+
+    const auto local_only = client_local_dir(fresh) / "Screenshots" /
+                            "local-only.png";
+    kasumi::test::write_text(local_only, "keep this ignored file");
+    const auto initial_physical_tree =
+        kasumi::application::observation::scanner::scan_result(
+            client_local_dir(fresh));
+    ASSERT_TRUE(initial_physical_tree.has_value());
+    EXPECT_NE(kasumi::find_row(initial_physical_tree->snapshot, "Screenshots"),
+              nullptr);
+    EXPECT_NE(kasumi::find_row(initial_physical_tree->snapshot,
+                               "Screenshots/local-only.png"),
+              nullptr);
+
+    auto runtime = kasumi::runtime::resolve(
+        client_environment(fresh).app_data_dir,
+        client_name(fresh),
+        kasumi::runtime::AccessMode::ReadOnly);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().detail;
+    const auto& remote_path = std::get<1>(scenario);
+    auto storage = kasumi::transport::open_transport(
+        kasumi::platform::path::to_utf8(remote_path));
+    ASSERT_TRUE(storage.has_value()) << storage.error().message;
+    const auto key = decode_key();
+    const auto input =
+        kasumi::application::observation::collect_reconciliation_input(
+            *runtime, *storage, key, false);
+    ASSERT_TRUE(input.has_value()) << input.error().detail;
+    EXPECT_NE(kasumi::find_row(input->storage.tree, ".kasumiignore"), nullptr);
+    EXPECT_EQ(kasumi::find_row(input->local_tree, "Screenshots"), nullptr);
+    EXPECT_EQ(kasumi::find_row(input->local_tree,
+                               "Screenshots/local-only.png"),
+              nullptr);
+    EXPECT_TRUE(kasumi::ignore::is_ignored(
+        "Screenshots/local-only.png", input->ignore_list, false));
+
+    const auto preview = kasumi::reconciliation::reconcile(*input);
+    ASSERT_TRUE(preview.has_value()) << preview.error().detail;
+    ASSERT_EQ(input->storage.tree.rows.size(), 4U);
+    ASSERT_EQ(preview->candidate_shared_tree.rows.size(), 4U);
+    EXPECT_FALSE(preview->requires_publication);
+    EXPECT_FALSE(std::ranges::any_of(
+        preview->plan.operations, [](const kasumi::Operation& operation) {
+            return operation.action == kasumi::Action::Upload;
+        }));
+    EXPECT_EQ(kasumi::find_row(preview->candidate_shared_tree, "Screenshots"),
+              nullptr)
+        << "candidate contains the pre-existing ignored directory";
+    EXPECT_EQ(kasumi::find_row(preview->candidate_shared_tree,
+                               "Screenshots/local-only.png"),
+              nullptr)
+        << "candidate contains local-only ignored content";
+    EXPECT_FALSE(std::ranges::any_of(
+        preview->plan.operations, [](const kasumi::Operation& operation) {
+            return operation.action == kasumi::Action::Upload &&
+                   kasumi::platform::path::to_logical_utf8(operation.path) ==
+                       "Screenshots/local-only.png";
+        })) << "plan uploads local-only ignored content";
+    EXPECT_FALSE(std::ranges::any_of(
+        preview->pending_materializations, [](const kasumi::NodeRow& row) {
+            return row.path == "Screenshots" ||
+                   row.path.starts_with("Screenshots/");
+        }));
+
+    const auto remote_before = remote(scenario);
+    ASSERT_TRUE(remote_before.has_value()) << remote_before.error();
+    const auto identifiers_before = remote_identifiers(scenario);
+    ASSERT_TRUE(identifiers_before.has_value()) << identifiers_before.error();
+    const auto* ignored_row =
+        kasumi::find_row(initial_physical_tree->snapshot,
+                         "Screenshots/local-only.png");
+    ASSERT_NE(ignored_row, nullptr);
+    const auto ignored_content_id =
+        kasumi::crypto::content_identifier(key, ignored_row->hash);
+    EXPECT_EQ(std::ranges::find(*identifiers_before, ignored_content_id),
+              identifiers_before->end());
+    const auto synchronized = sync(fresh);
+    if (!synchronized) {
+        ADD_FAILURE() << synchronized.error();
+        EXPECT_FALSE(std::filesystem::exists(client_local_dir(fresh) /
+                                              ".kasumiignore"))
+            << "rollback must restore the pre-sync local namespace";
+    }
+
+    expect_file(fresh, "Screenshots/local-only.png", "keep this ignored file");
+    auto accepted = state(fresh);
+    ASSERT_TRUE(accepted.has_value()) << accepted.error();
+    EXPECT_TRUE(accepted->has_value())
+        << "successful first sync must persist accepted state";
+    if (accepted->has_value()) {
+        EXPECT_TRUE((*accepted)->pending_materializations.empty());
+        EXPECT_EQ(kasumi::find_row((*accepted)->tree, "Screenshots"), nullptr);
+        EXPECT_EQ(kasumi::find_row((*accepted)->tree,
+                                   "Screenshots/local-only.png"),
+                  nullptr);
+    }
+
+    auto observed_after = remote(scenario);
+    ASSERT_TRUE(observed_after.has_value()) << observed_after.error();
+    EXPECT_EQ(observed_after->logical_heads, remote_before->logical_heads);
+    EXPECT_EQ(observed_after->effective_tree, remote_before->effective_tree);
+    expect_remote_absent(*observed_after, "Screenshots");
+    expect_remote_present(*observed_after, "Alpha.jpg");
+    expect_remote_present(*observed_after, "Zulu.jpg");
+    const auto identifiers_after = remote_identifiers(scenario);
+    ASSERT_TRUE(identifiers_after.has_value()) << identifiers_after.error();
+    EXPECT_EQ(*identifiers_after, *identifiers_before)
+        << "no remote writes are expected: preview has no Upload or "
+           "publication";
+    EXPECT_EQ(std::ranges::find(*identifiers_after, ignored_content_id),
+              identifiers_after->end())
+        << "first sync must not upload local-only ignored content";
+    auto materialized =
+        kasumi::application::observation::collect_local_tree(
+            client_local_dir(fresh), input->ignore_list);
+    ASSERT_TRUE(materialized.has_value());
+    ASSERT_EQ(materialized->rows.size(),
+              preview->candidate_shared_tree.rows.size());
+    for (std::size_t index = 0; index < materialized->rows.size(); ++index) {
+        const auto& actual = materialized->rows[index];
+        const auto& expected = preview->candidate_shared_tree.rows[index];
+        EXPECT_EQ(actual.path, expected.path);
+        EXPECT_EQ(actual.hash, expected.hash);
+        EXPECT_EQ(actual.size, expected.size);
+        EXPECT_EQ(actual.is_directory, expected.is_directory);
+    }
+}
+
+TEST(H3LocalSyncTest,
+     FreshClientWithoutPreexistingRemoteIgnoredDirectoryConverges) {
+    auto scenario = make_scenario();
+    const auto seed = make_client(scenario, "seed");
+    seed_remote_ignore_vault(scenario, seed);
+
+    const auto fresh = make_client(scenario, "fresh");
+    const auto initial_state = state(fresh);
+    ASSERT_TRUE(initial_state.has_value()) << initial_state.error();
+    ASSERT_FALSE(initial_state->has_value());
+    ASSERT_FALSE(std::filesystem::exists(client_local_dir(fresh) /
+                                          "Screenshots"));
+    const auto identifiers_before = remote_identifiers(scenario);
+    ASSERT_TRUE(identifiers_before.has_value()) << identifiers_before.error();
+
+    ASSERT_TRUE(sync_succeeds(fresh));
+    expect_file(fresh, ".kasumiignore", "/Screenshots/\n");
+    expect_file(fresh, "Alpha.jpg", "alpha");
+    expect_file(fresh, "Zulu.jpg", "zulu");
+
+    auto accepted = state(fresh);
+    ASSERT_TRUE(accepted.has_value()) << accepted.error();
+    ASSERT_TRUE(accepted->has_value());
+    EXPECT_TRUE((*accepted)->pending_materializations.empty());
+    EXPECT_EQ(kasumi::find_row((*accepted)->tree, "Screenshots"), nullptr);
+    auto observed_after = remote(scenario);
+    ASSERT_TRUE(observed_after.has_value()) << observed_after.error();
+    expect_remote_absent(*observed_after, "Screenshots");
+    EXPECT_EQ((*accepted)->tree, observed_after->effective_tree);
+    const auto identifiers_after = remote_identifiers(scenario);
+    ASSERT_TRUE(identifiers_after.has_value()) << identifiers_after.error();
+    EXPECT_EQ(*identifiers_after, *identifiers_before);
+}
+
+TEST(H3LocalSyncTest, RemoteIgnoreChangeOverridesStaleLocalProjection) {
+    auto scenario = make_scenario();
+    const auto seed = make_client(scenario, "seed");
+    seed_remote_ignore_vault(scenario, seed);
+    const auto client = make_client(scenario, "stale-ignore");
+    ASSERT_TRUE(sync_succeeds(client));
+
+    const auto local_only = client_local_dir(client) / "Cache" / "local.txt";
+    kasumi::test::write_text(local_only, "keep while ignored remotely");
+    kasumi::test::write_text(client_local_dir(seed) / ".kasumiignore",
+                             "/Cache/\n");
+    ASSERT_TRUE(sync_succeeds(seed));
+
+    auto runtime = kasumi::runtime::resolve(
+        client_environment(client).app_data_dir,
+        client_name(client),
+        kasumi::runtime::AccessMode::ReadOnly);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().detail;
+    auto storage = kasumi::transport::open_transport(
+        kasumi::platform::path::to_utf8(std::get<1>(scenario)));
+    ASSERT_TRUE(storage.has_value()) << storage.error().message;
+    const auto key = decode_key();
+    const auto input =
+        kasumi::application::observation::collect_reconciliation_input(
+            *runtime, *storage, key, false);
+    ASSERT_TRUE(input.has_value()) << input.error().detail;
+    EXPECT_TRUE(kasumi::ignore::is_ignored("Cache/local.txt",
+                                          input->ignore_list,
+                                          false));
+    EXPECT_EQ(kasumi::find_row(input->local_tree, "Cache"), nullptr);
+    EXPECT_EQ(kasumi::find_row(input->local_tree, "Cache/local.txt"), nullptr);
+    const auto preview = kasumi::reconciliation::reconcile(*input);
+    ASSERT_TRUE(preview.has_value()) << preview.error().detail;
+    EXPECT_FALSE(std::ranges::any_of(
+        preview->plan.operations, [](const kasumi::Operation& operation) {
+            return operation.action == kasumi::Action::Upload &&
+                   kasumi::platform::path::to_logical_utf8(operation.path) ==
+                       "Cache/local.txt";
+        }));
+    ASSERT_TRUE(sync_succeeds(client));
+    expect_file(client, "Cache/local.txt", "keep while ignored remotely");
+    auto observed = remote(scenario);
+    ASSERT_TRUE(observed.has_value()) << observed.error();
+    expect_remote_absent(*observed, "Cache");
+}
+
+TEST(H3LocalSyncTest, MissingAuthenticatedRemoteIgnoreFailsClosed) {
+    auto scenario = make_scenario();
+    const auto seed = make_client(scenario, "seed");
+    seed_remote_ignore_vault(scenario, seed);
+    const auto fresh = make_client(scenario, "fresh-missing-ignore");
+    kasumi::test::write_text(
+        client_local_dir(fresh) / "Screenshots" / "local-only.png",
+        "keep this ignored file");
+
+    auto before = remote(scenario);
+    ASSERT_TRUE(before.has_value()) << before.error();
+    const auto* ignore_row =
+        kasumi::find_row(before->effective_tree, ".kasumiignore");
+    ASSERT_NE(ignore_row, nullptr);
+    const auto key = decode_key();
+    const auto ignore_id =
+        kasumi::crypto::content_identifier(key, ignore_row->hash);
+    auto storage = kasumi::transport::open_transport(
+        kasumi::platform::path::to_utf8(std::get<1>(scenario)));
+    ASSERT_TRUE(storage.has_value()) << storage.error().message;
+    ASSERT_TRUE(kasumi::transport::remove(*storage, ignore_id));
+
+    auto runtime = kasumi::runtime::resolve(
+        client_environment(fresh).app_data_dir,
+        client_name(fresh),
+        kasumi::runtime::AccessMode::ReadOnly);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().detail;
+    const auto input =
+        kasumi::application::observation::collect_reconciliation_input(
+            *runtime, *storage, key, false);
+    ASSERT_FALSE(input.has_value());
+    EXPECT_NE(input.error().detail.find("authenticated remote .kasumiignore"),
+              std::string::npos);
+    expect_file(fresh, "Screenshots/local-only.png", "keep this ignored file");
+    auto accepted = state(fresh);
+    ASSERT_TRUE(accepted.has_value()) << accepted.error();
+    EXPECT_FALSE(accepted->has_value());
+}
+
+TEST(H3LocalSyncTest,
      IdenticalKasumiIgnoreMtimeDoesNotBlockUnrelatedPublication) {
     auto scenario = make_scenario();
     const auto client = make_client(scenario, "mtime-regression");
@@ -724,12 +970,14 @@ TEST(H3LocalSyncTest,
     ASSERT_NE(before_ignore, nullptr);
     const auto original_hash = before_ignore->hash;
     const auto original_size = before_ignore->size;
+    const auto before_native_mtime =
+        kasumi::platform::metadata::file_time_from_unix_nanoseconds(
+            before_ignore->mtime);
+    ASSERT_TRUE(before_native_mtime.has_value());
     using FileDuration = std::filesystem::file_time_type::duration;
-    const auto local_subsecond = std::filesystem::file_time_type{FileDuration{
-        before_ignore->mtime.time_since_epoch().count() +
+    const auto local_subsecond = *before_native_mtime +
         std::chrono::duration_cast<FileDuration>(
-            std::chrono::seconds{1} + std::chrono::nanoseconds{915178000})
-            .count()}};
+            std::chrono::seconds{1} + std::chrono::nanoseconds{915178000});
     const auto written = kasumi::platform::metadata::set_last_write_time(
         ignore, local_subsecond);
     ASSERT_TRUE(written.has_value()) << written.error();
@@ -737,7 +985,10 @@ TEST(H3LocalSyncTest,
     const auto observed_local_mtime =
         std::filesystem::last_write_time(ignore, error);
     ASSERT_FALSE(error);
-    ASSERT_NE(observed_local_mtime, before_ignore->mtime);
+    const auto observed_local_mtime_ns =
+        kasumi::platform::metadata::unix_nanoseconds(observed_local_mtime);
+    ASSERT_TRUE(observed_local_mtime_ns.has_value());
+    ASSERT_NE(*observed_local_mtime_ns, before_ignore->mtime);
 
     kasumi::test::write_text(client_local_dir(client) / "B.txt", "new");
     ASSERT_TRUE(sync_succeeds(client));
@@ -749,7 +1000,7 @@ TEST(H3LocalSyncTest,
     ASSERT_NE(after_ignore, nullptr);
     EXPECT_EQ(after_ignore->hash, original_hash);
     EXPECT_EQ(after_ignore->size, original_size);
-    EXPECT_EQ(after_ignore->mtime, observed_local_mtime);
+    EXPECT_EQ(after_ignore->mtime, *observed_local_mtime_ns);
     expect_remote_present(*after, "B.txt");
     EXPECT_FALSE(after->has_conflicts);
     expect_file(client, ".kasumiignore", "ignored.txt\n");
@@ -773,12 +1024,14 @@ TEST(H3LocalSyncTest, EquivalentFileMtimeDriftSucceedsWithoutPublication) {
     const auto original_hash = before_ignore->hash;
     const auto original_size = before_ignore->size;
 
+    const auto before_native_mtime =
+        kasumi::platform::metadata::file_time_from_unix_nanoseconds(
+            before_ignore->mtime);
+    ASSERT_TRUE(before_native_mtime.has_value());
     using FileDuration = std::filesystem::file_time_type::duration;
-    const auto local_subsecond = std::filesystem::file_time_type{
-        FileDuration{before_ignore->mtime.time_since_epoch().count() +
-                     std::chrono::duration_cast<FileDuration>(
-                         std::chrono::nanoseconds{685272100})
-                         .count()}};
+    const auto local_subsecond = *before_native_mtime +
+        std::chrono::duration_cast<FileDuration>(
+            std::chrono::nanoseconds{685272100});
     const auto written = kasumi::platform::metadata::set_last_write_time(
         ignore, local_subsecond);
     ASSERT_TRUE(written.has_value()) << written.error();
@@ -884,35 +1137,9 @@ TEST(H3LocalSyncTest, SameFileModifyModifyPreservesBothVersions) {
     auto scenario = make_scenario();
     const auto a = make_client(scenario, "a");
     const auto b = make_client(scenario, "b");
-
-    kasumi::test::write_text(client_local_dir(a) / "file.txt", "BASE");
-    ASSERT_TRUE(sync(a));
-    ASSERT_TRUE(sync(b));
-
-    kasumi::test::write_text(client_local_dir(a) / "file.txt", "A-V2");
-    kasumi::test::write_text(client_local_dir(b) / "file.txt", "B-V2");
-    const auto base_time = std::filesystem::file_time_type::clock::now();
-    set_mtime(a, "file.txt", base_time + std::chrono::hours{2});
-    set_mtime(b, "file.txt", base_time + std::chrono::hours{1});
-
-    ASSERT_TRUE(sync(a)); // A publica A-V2.
-    ASSERT_TRUE(sync(b)); // B publica o merge com o artefato de conflito.
-    ASSERT_TRUE(sync(a)); // A consome a nova head de B.
-
-    expect_file(a, "file.txt", "A-V2");
-    expect_file(b, "file.txt", "A-V2");
-    expect_file(a, "file.txt.kasumiconflict_local", "B-V2");
-    expect_file(b, "file.txt.kasumiconflict_local", "B-V2");
-    expect_absent(a, "file.txt.kasumiconflict_remote");
-    expect_absent(b, "file.txt.kasumiconflict_remote");
-    auto observed_remote = remote(scenario);
-    ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
-    expect_remote_present(*observed_remote, "file.txt");
-    expect_remote_present(*observed_remote, "file.txt.kasumiconflict_local");
-
-    expect_converged(scenario, {&a, &b});
-    expect_fixed_point(scenario, a);
-    expect_fixed_point(scenario, b);
+    const auto result = kasumi::test::scenarios::two_client_conflict(
+        shared_scenario(scenario, a, b, "two-client-conflict"));
+    ASSERT_TRUE(result.has_value()) << result.error();
 }
 
 TEST(H3LocalSyncTest, IndependentFileChangesConvergeWithoutFalseConflict) {

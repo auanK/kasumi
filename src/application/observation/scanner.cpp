@@ -3,6 +3,7 @@
 #include "core/ignore.hpp"
 #include "crypto/content.hpp"
 #include "platform/file_fingerprint.hpp"
+#include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 
@@ -79,7 +80,14 @@ process_file(const std::filesystem::path& file_path,
                                           error,
                                           ScanErrorCode::Metadata));
     }
-    row.mtime = modified;
+    const auto canonical_mtime = platform::metadata::unix_nanoseconds(modified);
+    if (!canonical_mtime) {
+        return std::unexpected(ScanError{ScanErrorCode::Metadata,
+                                         file_path,
+                                         "convert modification time",
+                                         "timestamp is out of range"});
+    }
+    row.mtime = *canonical_mtime;
     row.size = std::filesystem::file_size(file_path, error);
     if (error) {
         return std::unexpected(
@@ -117,10 +125,11 @@ process_file(const std::filesystem::path& file_path,
         std::expected<Hash, std::string> hash = std::unexpected("unhashed");
         bool cache_allowed = fingerprint->has_value();
         bool stable = false;
+        auto observed_mtime = modified;
         for (int attempt = 0; attempt < 2; ++attempt) {
             const auto before_fingerprint = fingerprint;
             const auto before_size = row.size;
-            const auto before_mtime = row.mtime;
+            const auto before_mtime = observed_mtime;
             const auto hash_trace = platform::perf_trace::begin();
             hash = crypto::content::hash_file(file_path);
             platform::perf_trace::finish("local content hashing wall",
@@ -149,6 +158,15 @@ process_file(const std::filesystem::path& file_path,
                                "read modification time after hashing",
                                after_error,
                                ScanErrorCode::Metadata));
+            const auto after_mtime_ns =
+                platform::metadata::unix_nanoseconds(after_mtime);
+            if (!after_mtime_ns) {
+                return std::unexpected(ScanError{
+                    ScanErrorCode::Metadata,
+                    file_path,
+                    "convert modification time after hashing",
+                    "timestamp is out of range"});
+            }
             const auto after_fingerprint_trace = platform::perf_trace::begin();
             auto after_fingerprint = context.fingerprint_query(file_path);
             platform::perf_trace::finish("local fingerprint query wall",
@@ -179,7 +197,8 @@ process_file(const std::filesystem::path& file_path,
             if (!*before_fingerprint || !*after_fingerprint)
                 break;
             row.size = static_cast<std::uint64_t>(after_size);
-            row.mtime = after_mtime;
+            row.mtime = *after_mtime_ns;
+            observed_mtime = after_mtime;
             fingerprint = std::move(after_fingerprint);
         }
         if (!hash)
@@ -214,6 +233,17 @@ scan_result(const std::filesystem::path& local_root,
             std::span<const state_storage::FileCacheRow> previous_cache,
             ScanPolicy policy,
             FingerprintQuery fingerprint_query) {
+    const auto ignore_list = load_ignore_list(local_root / ".kasumiignore");
+    return scan_result(
+        local_root, previous_cache, policy, fingerprint_query, ignore_list);
+}
+
+std::expected<ScanResult, ScanError>
+scan_result(const std::filesystem::path& local_root,
+            std::span<const state_storage::FileCacheRow> previous_cache,
+            ScanPolicy policy,
+            FingerprintQuery fingerprint_query,
+            const IgnoreList& ignore_list) {
     const auto scan_trace = platform::perf_trace::begin();
     ScanContext context{.policy = policy,
                         .fingerprint_query = fingerprint_query,
@@ -226,7 +256,6 @@ scan_result(const std::filesystem::path& local_root,
     context.previous.reserve(previous_cache.size());
     for (const auto& row : previous_cache)
         context.previous.emplace(row.path, &row);
-    const auto ignore_list = load_ignore_list(local_root / ".kasumiignore");
     std::error_code error;
     const auto status = std::filesystem::symlink_status(local_root, error);
     if (error)
@@ -261,9 +290,16 @@ scan_result(const std::filesystem::path& local_root,
                                           "read modification time",
                                           error,
                                           ScanErrorCode::Metadata));
+    const auto root_mtime = platform::metadata::unix_nanoseconds(modified);
+    if (!root_mtime) {
+        return std::unexpected(ScanError{ScanErrorCode::Metadata,
+                                         local_root,
+                                         "convert modification time",
+                                         "timestamp is out of range"});
+    }
     // The parent must precede its descendants.
     snapshot.rows.push_back(
-        {.path = "", .mtime = modified, .is_directory = true});
+        {.path = "", .mtime = *root_mtime, .is_directory = true});
 
     std::filesystem::directory_iterator iterator(local_root, error);
     if (error)
@@ -322,8 +358,15 @@ scan_result(const std::filesystem::path& local_root,
                                               "read modification time",
                                               error,
                                               ScanErrorCode::Metadata));
+        const auto mtime_ns = platform::metadata::unix_nanoseconds(mtime);
+        if (!mtime_ns) {
+            return std::unexpected(ScanError{ScanErrorCode::Metadata,
+                                             entry.path(),
+                                             "convert modification time",
+                                             "timestamp is out of range"});
+        }
         snapshot.rows.push_back(
-            {.path = relative, .mtime = mtime, .is_directory = true});
+            {.path = relative, .mtime = *mtime_ns, .is_directory = true});
         remember_directory(entry.path(), context);
         std::filesystem::directory_iterator nested(entry.path(), error);
         if (error)

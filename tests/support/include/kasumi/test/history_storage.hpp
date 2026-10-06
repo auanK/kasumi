@@ -78,7 +78,7 @@ make_commit(std::uint64_t height,
         height, parents, make_tree(path, contents));
 }
 
-std::string commit_id(const Commit& commit) {
+[[maybe_unused]] std::string commit_id(const Commit& commit) {
     const auto canonical = kasumi::history::serialize(commit).value();
     return kasumi::crypto::commit_identifier(test_key(), canonical);
 }
@@ -116,10 +116,9 @@ struct LocalStorage {
     return storage;
 }
 
-[[maybe_unused]] HeadReference add_variant(LocalStorage& storage,
-                                           const Commit& commit) {
+[[maybe_unused]] HeadReference add_variant_bytes(
+    LocalStorage& storage, std::span<const std::uint8_t> canonical) {
     const auto key = test_key();
-    const auto canonical = kasumi::history::serialize(commit).value();
     const auto plaintext =
         kasumi::test::workspace_path(storage.workspace, "variant.canonical");
     const auto ciphertext =
@@ -128,7 +127,8 @@ struct LocalStorage {
     EXPECT_TRUE(kasumi::crypto::encrypt_file(
         plaintext, ciphertext, key, kasumi::crypto::FilePurpose::History));
     const auto hash = kasumi::crypto::content::hash_file(ciphertext).value();
-    HeadReference reference{.commit_id = commit_id(commit),
+    HeadReference reference{
+        .commit_id = kasumi::crypto::commit_identifier(key, canonical),
                             .ciphertext_id = kasumi::hash_hex(hash)};
     EXPECT_TRUE(kasumi::transport::put(
         storage.transport, ciphertext, object_path(reference)));
@@ -140,6 +140,12 @@ struct LocalStorage {
     EXPECT_TRUE(kasumi::transport::put(
         storage.transport, marker_file, marker_path(reference)));
     return reference;
+}
+
+[[maybe_unused]] HeadReference add_variant(LocalStorage& storage,
+                                           const Commit& commit) {
+    const auto canonical = kasumi::history::serialize(commit).value();
+    return add_variant_bytes(storage, canonical);
 }
 
 [[maybe_unused]] kasumi::application::history_storage::PublishedCommit

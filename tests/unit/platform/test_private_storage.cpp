@@ -1,10 +1,12 @@
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/private_storage.hpp"
+#include "platform/workspace.hpp"
 
 #include <array>
 #include <cstddef>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <string>
 #include <vector>
 
 #if defined(_WIN32)
@@ -105,6 +107,57 @@ TEST(PrivateStorageTest, CreatesRestrictedDirectoryAndFile) {
     expect_mode(file, 0600);
 #endif
 }
+
+#if defined(_WIN32)
+TEST(PrivateStorageTest, RemovesWorkspaceWithNestedLongPath) {
+    auto owner = kasumi::test::make_temp_workspace("long-workspace-cleanup");
+    const auto root = kasumi::test::workspace_root(owner);
+    auto nested = root;
+    std::vector<std::filesystem::path> directories;
+    const std::wstring segment(64, L'a');
+    const std::wstring filename(64, L'b');
+    while ((nested / filename).native().size() <= MAX_PATH) {
+        nested /= segment;
+        auto extended = L"\\\\?\\" + nested.wstring();
+        ASSERT_TRUE(CreateDirectoryW(extended.c_str(), nullptr))
+            << GetLastError();
+        directories.push_back(nested);
+    }
+    const auto file = nested / filename;
+    ASSERT_GT(file.native().size(), MAX_PATH);
+    const auto extended_file = L"\\\\?\\" + file.wstring();
+    const auto handle = CreateFileW(extended_file.c_str(),
+                                    GENERIC_WRITE,
+                                    0,
+                                    nullptr,
+                                    CREATE_NEW,
+                                    FILE_ATTRIBUTE_NORMAL,
+                                    nullptr);
+    ASSERT_NE(handle, INVALID_HANDLE_VALUE) << GetLastError();
+    ASSERT_TRUE(CloseHandle(handle));
+
+    const auto extended_root = L"\\\\?\\" + root.wstring();
+    ASSERT_TRUE(kasumi::platform::private_storage::protect_tree(extended_root));
+    expect_private_dacl(extended_file);
+
+    const auto removed =
+        kasumi::platform::remove_workspace(kasumi::platform::Workspace{root});
+    EXPECT_TRUE(removed.has_value()) << (removed ? "" : removed.error());
+    EXPECT_FALSE(std::filesystem::exists(root));
+    if (!removed) {
+        const auto extended_file_path = L"\\\\?\\" + file.wstring();
+        static_cast<void>(DeleteFileW(extended_file_path.c_str()));
+        for (auto iterator = directories.rbegin();
+             iterator != directories.rend();
+             ++iterator) {
+            const auto extended_directory_path =
+                L"\\\\?\\" + iterator->wstring();
+            static_cast<void>(
+                RemoveDirectoryW(extended_directory_path.c_str()));
+        }
+    }
+}
+#endif
 
 TEST(PrivateStorageTest, AtomicWriteReplacesContentAndLeavesNoTemporaryFile) {
     auto workspace =

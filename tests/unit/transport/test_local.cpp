@@ -1,4 +1,5 @@
 #include "kasumi/test/filesystem.hpp"
+#include "kasumi/test/provider_scenarios.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "transport/transport.hpp"
 
@@ -42,26 +43,10 @@ TEST(LocalTransportTest, StoresListsAndRemovesObjects) {
     auto& transport = *opened;
     ASSERT_TRUE(kasumi::transport::initialize(transport));
 
-    const auto source_a = kasumi::test::workspace_path(workspace, "a.bin");
-    const auto source_b = kasumi::test::workspace_path(workspace, "b.bin");
-    const auto destination =
-        kasumi::test::workspace_path(workspace, "destination.bin");
-    kasumi::test::write_text(source_a, "first");
-    kasumi::test::write_text(source_b, "second");
-
-    ASSERT_TRUE(kasumi::transport::put(transport, source_a, "zeta"));
-    ASSERT_TRUE(kasumi::transport::put(transport, source_b, "alpha"));
-    ASSERT_EQ(kasumi::transport::presence(transport, "alpha").value(),
-              Presence::Present);
-    ASSERT_EQ(kasumi::transport::list(transport).value(),
-              (std::vector<std::string>{"alpha", "zeta"}));
-
-    ASSERT_TRUE(kasumi::transport::get(transport, "alpha", destination));
-    EXPECT_EQ(kasumi::test::read_text(destination), "second");
-    ASSERT_EQ(kasumi::transport::remove(transport, "alpha").value(),
-              Removal::Removed);
-    EXPECT_EQ(kasumi::transport::remove(transport, "alpha").value(),
-              Removal::AlreadyAbsent);
+    const auto result = kasumi::test::scenarios::transport_round_trip(
+        transport, kasumi::test::workspace_root(workspace));
+    ASSERT_TRUE(result.passed);
+    EXPECT_TRUE(result.diagnostics.empty());
 }
 
 TEST(LocalTransportTest, CopiesNestedObjectsWithoutRemovingTheSource) {

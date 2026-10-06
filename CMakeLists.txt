@@ -42,12 +42,17 @@ option(
     "Build the controlled live GC remote copy benchmark runner"
     OFF
 )
+option(
+    KASUMI_BUILD_PROVIDER_CERTIFICATION
+    "Build the multi-target provider certification runner"
+    OFF
+)
 
 add_library(kasumi_warnings INTERFACE)
 if(WIN32)
     add_compile_definitions(NOMINMAX _CRT_SECURE_NO_WARNINGS)
     if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-        add_compile_options(/bigobj)
+        add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
     endif()
 endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
@@ -520,6 +525,20 @@ target_link_libraries(kasumi_runtime
     kasumi_hardening
 )
 
+add_library(kasumi_operational_provider_target_config STATIC
+    tests/operational/provider_target_config.cpp
+)
+target_include_directories(
+    kasumi_operational_provider_target_config
+    PUBLIC
+    ${PROJECT_SOURCE_DIR}/tests/operational
+)
+target_link_libraries(
+    kasumi_operational_provider_target_config
+    PUBLIC kasumi_transport
+    PRIVATE tomlplusplus::tomlplusplus kasumi_warnings
+)
+
 add_library(kasumi_cli STATIC
     src/cli/app.cpp
     src/cli/credentials.cpp
@@ -632,6 +651,7 @@ if(KASUMI_BUILD_GC_LIVE_SMOKE)
         kasumi_transport
         kasumi_platform
         kasumi_crypto
+        kasumi_operational_provider_target_config
         nlohmann_json::nlohmann_json
         reproc++
         kasumi_warnings
@@ -659,6 +679,7 @@ if(KASUMI_BUILD_GC_LIVE_BENCHMARK)
         kasumi_transport
         kasumi_platform
         kasumi_crypto
+        kasumi_operational_provider_target_config
         nlohmann_json::nlohmann_json
         reproc++
         kasumi_warnings
@@ -685,6 +706,7 @@ if(KASUMI_BUILD_GC_LIVE_BENCHMARK)
         kasumi_transport
         kasumi_platform
         kasumi_crypto
+        kasumi_operational_provider_target_config
         nlohmann_json::nlohmann_json
         reproc++
         kasumi_warnings
@@ -713,6 +735,7 @@ if(KASUMI_BUILD_GC_LIVE_BENCHMARK)
         kasumi_transport
         kasumi_platform
         kasumi_crypto
+        kasumi_operational_provider_target_config
         nlohmann_json::nlohmann_json
         reproc++
         kasumi_warnings
@@ -771,7 +794,10 @@ set_target_properties(${KASUMI_FIRST_PARTY_TARGETS} PROPERTIES POSITION_INDEPEND
 include(CheckIPOSupported)
 check_ipo_supported(RESULT ipo_supported)
 if(ipo_supported AND NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND WIN32))
-    set_target_properties(${KASUMI_FIRST_PARTY_TARGETS} PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set_target_properties(${KASUMI_FIRST_PARTY_TARGETS} PROPERTIES
+        INTERPROCEDURAL_OPTIMIZATION TRUE
+        INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE
+    )
 endif()
 
 include(GNUInstallDirs)
@@ -790,4 +816,55 @@ if(BUILD_TESTING)
         endif()
     endif()
     add_subdirectory(tests)
+endif()
+
+if(KASUMI_BUILD_PROVIDER_CERTIFICATION)
+    if(NOT BUILD_TESTING)
+        message(FATAL_ERROR
+            "KASUMI_BUILD_PROVIDER_CERTIFICATION requires BUILD_TESTING=ON")
+    endif()
+    add_executable(
+        kasumi_provider_certification
+        tests/operational/provider_certification.cpp
+        tests/operational/provider_certification_support.cpp
+        tests/operational/gc_live_runner_support.cpp
+        tests/operational/gc_live_preflight_support.cpp
+        tests/operational/remote_copy_smoke_support.cpp
+        tests/support/src/provider_scenarios.cpp
+        tests/support/src/transport_scenarios.cpp
+    )
+    target_include_directories(
+        kasumi_provider_certification
+        PRIVATE
+        ${PROJECT_SOURCE_DIR}/tests/operational
+        ${PROJECT_SOURCE_DIR}/src
+    )
+    target_link_libraries(
+        kasumi_provider_certification
+        PRIVATE
+        kasumi_application
+        kasumi_transport
+        kasumi_operational_provider_target_config
+        reproc++
+        kasumi_platform
+        kasumi_crypto
+        kasumi_test_support
+        httplib::httplib
+        nlohmann_json::nlohmann_json
+        kasumi_warnings
+    )
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
+        target_link_options(kasumi_provider_certification PRIVATE
+            -static-libgcc
+            -static-libstdc++
+            -Wl,--allow-multiple-definition
+        )
+    endif()
+    add_test(
+        NAME kasumi_provider_certification_startup
+        COMMAND
+            ${CMAKE_COMMAND}
+            "-DKASUMI_PROVIDER_CERTIFICATION_EXECUTABLE=$<TARGET_FILE:kasumi_provider_certification>"
+            -P ${PROJECT_SOURCE_DIR}/tests/operational/check_provider_certification_startup.cmake
+    )
 endif()

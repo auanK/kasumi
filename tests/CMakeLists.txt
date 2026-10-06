@@ -98,6 +98,7 @@ kasumi_add_test_suite(
     "e2e.local_sync"
     SOURCES
         e2e/local_sync/test_sync.cpp
+        support/src/provider_scenarios.cpp
         support/src/hash_mutation.cpp
     LIBRARIES
         kasumi_application
@@ -198,6 +199,7 @@ kasumi_add_test_suite(
     "unit.transport"
     SOURCES
         unit/transport/test_local.cpp
+        support/src/transport_scenarios.cpp
         unit/transport/test_rclone_storage.cpp
         unit/transport/test_remote_copy_smoke.cpp
         operational/gc_live_preflight_support.cpp
@@ -229,6 +231,7 @@ kasumi_add_test_suite(
         kasumi_transport
         kasumi_platform
         kasumi_crypto
+        kasumi_operational_provider_target_config
         nlohmann_json::nlohmann_json
         httplib::httplib
         reproc++
@@ -238,6 +241,34 @@ target_include_directories(
     PRIVATE
     ${PROJECT_SOURCE_DIR}/tests/support/include
 
+)
+
+kasumi_add_test_suite(
+    kasumi_test_provider_certification
+    "operational.provider_certification"
+    SOURCES
+        unit/operational/test_provider_certification.cpp
+        unit/operational/test_provider_target_config.cpp
+        operational/provider_certification_support.cpp
+        operational/gc_live_runner_support.cpp
+        operational/gc_live_preflight_support.cpp
+        operational/remote_copy_smoke_support.cpp
+        support/src/provider_scenarios.cpp
+        support/src/transport_scenarios.cpp
+    LIBRARIES
+        kasumi_application
+        kasumi_transport
+        kasumi_operational_provider_target_config
+        reproc++
+        kasumi_platform
+        kasumi_crypto
+        httplib::httplib
+        nlohmann_json::nlohmann_json
+)
+target_include_directories(
+    kasumi_test_provider_certification
+    PRIVATE
+    ${PROJECT_SOURCE_DIR}/tests/operational
 )
 
 kasumi_add_test_suite(
@@ -256,6 +287,7 @@ kasumi_add_test_suite(
         integration/contracts/test_application_contracts.cpp
         integration/contracts/test_remote_heads.cpp
         integration/contracts/test_sync_maintenance.cpp
+        support/src/provider_scenarios.cpp
     LIBRARIES
         kasumi_application
         kasumi_cli

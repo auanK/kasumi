@@ -4,6 +4,7 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
+#include "kasumi/test/history_timestamp_fixture.hpp"
 #include "platform/cancellation.hpp"
 
 #include <atomic>
@@ -198,6 +199,26 @@ TEST(HistoryStorageTest, CompleteLoadConsumesOneNativeCommitBatch) {
     EXPECT_EQ(loaded->commits.size(), 2U);
     EXPECT_EQ(state->get_batch_count, 1U);
     EXPECT_EQ(state->commit_get_count, 0U);
+}
+
+TEST(HistoryStorageTest, LinuxNanosecondGoldenVariantAuthenticates) {
+    auto storage = make_local_storage();
+    const auto reference = add_variant_bytes(
+        storage,
+        std::span<const std::uint8_t>{
+            kasumi::test::fixtures::linux_nanosecond_commit});
+
+    const auto loaded = kasumi::application::history_storage::load_history(
+        storage.transport,
+        test_key(),
+        kasumi::test::workspace_root(storage.workspace));
+
+    ASSERT_TRUE(loaded.has_value())
+        << (loaded.has_value() ? "" : loaded.error().detail);
+    ASSERT_EQ(loaded->commits.size(), 1U);
+    EXPECT_EQ(loaded->commits.front().id, reference.commit_id);
+    EXPECT_EQ(loaded->authenticated_commit_variants,
+              std::vector{reference});
 }
 
 TEST(HistoryStorageTest,

@@ -1,12 +1,13 @@
 #include "core/history.hpp"
+#include "kasumi/test/history_timestamp_fixture.hpp"
 
 #include <algorithm>
-#include <chrono>
+#include <array>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
 #include <gtest/gtest.h>
 #include <initializer_list>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -16,17 +17,6 @@ using namespace kasumi::history;
 
 namespace {
 
-std::filesystem::file_time_type canonical_time(std::int64_t nanos) {
-    using FileDuration = std::filesystem::file_time_type::duration;
-    const auto delta = std::chrono::duration_cast<FileDuration>(
-        std::chrono::nanoseconds{nanos});
-    const auto origin = std::chrono::clock_cast<std::chrono::file_clock>(
-                            std::chrono::system_clock::time_point{})
-                            .time_since_epoch();
-    return std::filesystem::file_time_type{
-        FileDuration{origin.count() + delta.count()}};
-}
-
 kasumi::Snapshot make_custom_snapshot(int i) {
     kasumi::Snapshot tree{
         .rows =
@@ -35,8 +25,7 @@ kasumi::Snapshot make_custom_snapshot(int i) {
                     .path = "",
                     .hash = {},
                     .size = 0,
-                    .mtime = canonical_time(static_cast<std::int64_t>(i) *
-                                            1'000'000),
+                    .mtime = static_cast<std::int64_t>(i) * 1'000'000,
                     .is_directory = true,
                 },
             },
@@ -60,7 +49,7 @@ make_file(std::string path, std::string content, std::int64_t mtime = 0) {
         .path = std::move(path),
         .hash = kasumi::hasher::hash_string(content),
         .size = content.size(),
-        .mtime = canonical_time(mtime),
+        .mtime = mtime,
         .is_directory = false,
     };
 }
@@ -232,36 +221,6 @@ TEST(HistoryTest, CommitCodecGoldenVectors) {
            "9bcb25c9adc112b7cc9a93cae41f326200000000000000000000000000000000"
            "0100000000",
            "37969995ac87eae8c95862a4a8a4a94f00dd5092bf7be19df594af07bcff4ca1");
-#if defined(_MSC_VER)
-    expect(*with_file,
-           "4b434f4d02000000000000000000000000000000000000000087000000000000004"
-           "b41535500000000000000000000000035e462ba5dde50"
-           "0fdaa4273bd553d2a3eb89984e51e322fdcb2465247449f69705000000000000000"
-           "000000000000000010100000009000000616c7068612e"
-           "747874644a9bc57c6063e2ba4028fa73ed585170ae7db8ac7723d32be49c021a022"
-           "5f50500000000000000bccc5b07000000000000000000",
-           "cad3bfbbd81e9c37b388b3258417d41a002f8d14d8f743156f47e7f7cd88c410");
-    expect(*one_parent,
-           "4b434f4d02010000000000000000000000000000000100000037969995ac87eae8c"
-           "95862a4a8a4a94f00dd5092bf7be19df594af07bcff4c"
-           "a186000000000000004b4153550100000000000000000000004bc2873777530dc75"
-           "56a9788d558d522e1e15ff905766a1fc3d9e95775d2b7"
-           "5104000000000000000000000000000000010100000008000000626574612e74787"
-           "4c607f0e66519ff41d34c1c8e2e312228c3cc358c0a5b"
-           "75cef4b22cf8ed3875db0400000000000000bcad510d000000000000000000",
-           "9fd9dac7ae04588e0dbee71f78e426b88d44562e68d0f030d21290bb304fb2a1");
-    expect(*multiple_parent,
-           "4b434f4d02090000000000000000000000000000000200000000000000000000000"
-           "000000000000000000000000000000000000000000000"
-           "0011111111111111111111111111111111111111111111111111111111111111118"
-           "7000000000000004b4153550900000000000000000000"
-           "00b76e453e2e95d7e770a5760e46ef965d3373132bd225aa93c5dce717219ad4000"
-           "500000000000000000000000000000001010000000900"
-           "000067616d6d612e747874039b3fa6c7a5987c410ffe6d58ab194dfc98840263841"
-           "bc7c949bdd4497fd5760500000000000000bc8e471300"
-           "0000000000000000",
-           "4dc7b87fb49ec1f1420b31d0ae8036cb9bb797ee1c160c13d4d5dd89abe6c662");
-#else
     expect(*with_file,
            "4b434f4d02000000000000000000000000000000000000000087000000000000004"
            "b41535500000000000000000000000035e462ba5dde50"
@@ -290,7 +249,6 @@ TEST(HistoryTest, CommitCodecGoldenVectors) {
            "bc7c949bdd4497fd5760500000000000000158f471300"
            "0000000000000000",
            "16baad7c4a64234d153659f4357ec1c8d5472c54a5d6f92773c1a1aff7226db8");
-#endif
 }
 
 TEST(HistoryTest, MakeCommit) {
@@ -361,6 +319,64 @@ TEST(HistoryTest, CanonicalTimestampRoundTripsWithoutChangingBytes) {
     EXPECT_EQ(decoded->created_at, 42);
     ASSERT_EQ(decoded->tree.rows.size(), commit->tree.rows.size());
     EXPECT_EQ(decoded->tree.rows.back().mtime, commit->tree.rows.back().mtime);
+}
+
+TEST(HistoryTest, LinuxNanosecondGoldenBytesRoundTripExactly) {
+    constexpr auto timestamp_offset = 154U;
+    constexpr std::array<std::uint8_t, 8> expected_timestamp{
+        0x15, 0xcd, 0x5b, 0x07, 0x00, 0x00, 0x00, 0x00};
+    const auto& golden = kasumi::test::fixtures::linux_nanosecond_commit;
+
+    const auto decoded = deserialize(golden);
+    ASSERT_TRUE(decoded.has_value())
+        << (decoded.has_value() ? "" : decoded.error().detail);
+    ASSERT_EQ(decoded->tree.rows.size(), 2U);
+    EXPECT_EQ(decoded->tree.rows.back().mtime, 123456789);
+    const auto reencoded = serialize(*decoded);
+    ASSERT_TRUE(reencoded.has_value());
+    ASSERT_EQ(reencoded->size(), golden.size());
+
+    std::uint64_t actual_timestamp = 0;
+    for (std::size_t index = 0; index < expected_timestamp.size(); ++index) {
+        actual_timestamp |=
+            static_cast<std::uint64_t>(
+                (*reencoded)[timestamp_offset + index])
+            << (index * 8U);
+    }
+    EXPECT_EQ(actual_timestamp, 123456789U);
+    EXPECT_TRUE(std::equal(expected_timestamp.begin(),
+                           expected_timestamp.end(),
+                           reencoded->begin() + timestamp_offset));
+    EXPECT_TRUE(std::equal(reencoded->begin(),
+                           reencoded->end(),
+                           golden.begin(),
+                           golden.end()));
+    const auto golden_id = compute_id(golden);
+    const auto decoded_id = compute_id(*decoded);
+    ASSERT_TRUE(golden_id.has_value());
+    ASSERT_TRUE(decoded_id.has_value());
+    EXPECT_EQ(*decoded_id, *golden_id);
+}
+
+TEST(HistoryTest, PreservesFullSignedTimestampRange) {
+    for (const auto timestamp : {std::int64_t{0},
+                                 std::int64_t{-123456789},
+                                 std::numeric_limits<std::int64_t>::lowest(),
+                                 std::numeric_limits<std::int64_t>::max()}) {
+        auto snapshot = make_valid_snapshot();
+        snapshot.rows.front().mtime = timestamp;
+        auto commit = make_commit(0, {}, snapshot);
+        ASSERT_TRUE(commit.has_value());
+        auto encoded = serialize(*commit);
+        ASSERT_TRUE(encoded.has_value());
+        auto decoded = deserialize(*encoded);
+        ASSERT_TRUE(decoded.has_value());
+        ASSERT_EQ(decoded->tree.rows.size(), 1U);
+        EXPECT_EQ(decoded->tree.rows.front().mtime, timestamp);
+        auto reencoded = serialize(*decoded);
+        ASSERT_TRUE(reencoded.has_value());
+        EXPECT_EQ(*reencoded, *encoded);
+    }
 }
 
 TEST(HistoryTest, CodecErrors) {
@@ -644,7 +660,7 @@ TEST(HistoryTest, MergeConflict_FileFile) {
         .path = "file.txt",
         .hash = kasumi::hasher::hash_string("A"),
         .size = 1,
-        .mtime = canonical_time(0),
+        .mtime = 0,
         .is_directory = false,
     });
     kasumi::finalize_snapshot(s2);
@@ -657,7 +673,7 @@ TEST(HistoryTest, MergeConflict_FileFile) {
         .path = "file.txt",
         .hash = kasumi::hasher::hash_string("B"),
         .size = 1,
-        .mtime = canonical_time(0),
+        .mtime = 0,
         .is_directory = false,
     });
     kasumi::finalize_snapshot(s3);
@@ -698,7 +714,7 @@ TEST(HistoryTest, MergeConflict_DeleteModify) {
         .path = "file.txt",
         .hash = kasumi::hasher::hash_string("A"),
         .size = 1,
-        .mtime = canonical_time(0),
+        .mtime = 0,
         .is_directory = false,
     });
     kasumi::finalize_snapshot(s1);
@@ -711,7 +727,7 @@ TEST(HistoryTest, MergeConflict_DeleteModify) {
         .path = "file.txt",
         .hash = kasumi::hasher::hash_string("B"),
         .size = 1,
-        .mtime = canonical_time(0),
+        .mtime = 0,
         .is_directory = false,
     });
     kasumi::finalize_snapshot(s2);
@@ -767,7 +783,7 @@ TEST(HistoryTest, MergeConflict_FileDirectory) {
         .path = "shared",
         .hash = kasumi::hasher::hash_string("A"),
         .size = 1,
-        .mtime = canonical_time(0),
+        .mtime = 0,
         .is_directory = false,
     });
     kasumi::finalize_snapshot(s3);
@@ -807,7 +823,7 @@ TEST(HistoryTest, Merge_SameState_DifferentMtime) {
         .path = "file.txt",
         .hash = kasumi::hasher::hash_string("A"),
         .size = 1,
-        .mtime = canonical_time(100),
+        .mtime = 100,
         .is_directory = false,
     });
     kasumi::finalize_snapshot(s2);
@@ -820,7 +836,7 @@ TEST(HistoryTest, Merge_SameState_DifferentMtime) {
         .path = "file.txt",
         .hash = kasumi::hasher::hash_string("A"),
         .size = 1,
-        .mtime = canonical_time(200),
+        .mtime = 200,
         .is_directory = false,
     });
     kasumi::finalize_snapshot(s3);
@@ -837,7 +853,7 @@ TEST(HistoryTest, Merge_SameState_DifferentMtime) {
     for (const auto& row : res->tree.rows) {
         if (row.path == "file.txt") {
             found_file = true;
-            EXPECT_EQ(row.mtime, canonical_time(200));
+            EXPECT_EQ(row.mtime, 200);
         }
     }
     EXPECT_TRUE(found_file);
@@ -1297,12 +1313,18 @@ namespace {
 std::vector<std::uint8_t>
 forge_commit_with_component(std::string_view component_name) {
     std::vector<std::uint8_t> tree;
+    const auto append_zero_bytes = [](std::vector<std::uint8_t>& bytes,
+                                      std::size_t count) {
+        for (std::size_t i = 0; i < count; ++i) {
+            bytes.push_back(0);
+        }
+    };
     tree.insert(tree.end(), {'K', 'A', 'S', 'U'});
-    tree.resize(tree.size() + 8, 0);  // height: 0
-    tree.resize(tree.size() + 4, 0);  // root name len: 0
-    tree.resize(tree.size() + 32, 0); // root hash
-    tree.resize(tree.size() + 8, 0);  // root size
-    tree.resize(tree.size() + 8, 0);  // root nanos
+    append_zero_bytes(tree, 8);  // height: 0
+    append_zero_bytes(tree, 4);  // root name len: 0
+    append_zero_bytes(tree, 32); // root hash
+    append_zero_bytes(tree, 8);  // root size
+    append_zero_bytes(tree, 8);  // root nanos
     tree.push_back(1);                // root is_directory
     tree.push_back(1);                // root children count = 1
     tree.push_back(0);
@@ -1315,18 +1337,18 @@ forge_commit_with_component(std::string_view component_name) {
     tree.push_back(static_cast<std::uint8_t>((name_len >> 16) & 0xFF));
     tree.push_back(static_cast<std::uint8_t>((name_len >> 24) & 0xFF));
     tree.insert(tree.end(), component_name.begin(), component_name.end());
-    tree.resize(tree.size() + 32, 0); // child hash
-    tree.resize(tree.size() + 8, 0);  // child size
-    tree.resize(tree.size() + 8, 0);  // child nanos
+    append_zero_bytes(tree, 32); // child hash
+    append_zero_bytes(tree, 8);  // child size
+    append_zero_bytes(tree, 8);  // child nanos
     tree.push_back(0);                // child is_directory = 0
-    tree.resize(tree.size() + 4, 0);  // child children count = 0
+    append_zero_bytes(tree, 4);      // child children count = 0
 
     std::vector<std::uint8_t> commit;
     commit.insert(commit.end(), {'K', 'C', 'O', 'M'});
     commit.push_back(2);                 // version = 2
-    commit.resize(commit.size() + 8, 0); // height: 0
-    commit.resize(commit.size() + 8, 0); // created_at: 0
-    commit.resize(commit.size() + 4, 0); // parent_count: 0
+    append_zero_bytes(commit, 8); // height: 0
+    append_zero_bytes(commit, 8); // created_at: 0
+    append_zero_bytes(commit, 4); // parent_count: 0
     const auto tree_size = static_cast<std::uint64_t>(tree.size());
     for (std::size_t i = 0; i < 8; ++i) {
         commit.push_back(

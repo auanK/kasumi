@@ -179,6 +179,55 @@ bool strict_missing_directory(const RcDiagnostic& diagnostic) noexcept {
            diagnostic.error_message.ends_with(missing_directory_signature);
 }
 
+EmptyDirectoryCapabilityObservation observe_empty_directory_capability(
+    rclone_detail::State& state,
+    std::chrono::milliseconds diagnostic_deadline) {
+    EmptyDirectoryCapabilityObservation observation{
+        .request_fs = state.configuration.remote_name + ":" +
+                      state.configuration.remote_root,
+    };
+    const nlohmann::json request{{"fs", observation.request_fs}};
+    const auto response = rclone_detail::post_rc_read_only(
+        state,
+        observation.endpoint,
+        request.dump(),
+        1024U * 1024U,
+        diagnostic_deadline);
+    if (!response) {
+        observation.error_category = response.error().code;
+        if (response.error().code == transport::ErrorCode::ProtocolFailure ||
+            response.error().code == transport::ErrorCode::PermissionDenied) {
+            observation.native_status = response.error().native_code;
+        }
+        observation.error_message = remote_copy_smoke::sanitize_rc_message(
+            response.error().message, state.username, state.password);
+        return observation;
+    }
+
+    try {
+        const auto result = nlohmann::json::parse(*response);
+        if (!result.is_object() || !result.contains("Features") ||
+            !result.at("Features").is_object() ||
+            !result.at("Features").contains("CanHaveEmptyDirectories") ||
+            !result.at("Features").at("CanHaveEmptyDirectories")
+                 .is_boolean()) {
+            throw nlohmann::json::type_error::create(
+                302, "missing boolean Features.CanHaveEmptyDirectories", nullptr);
+        }
+        observation.result = "SUCCESS";
+        observation.capability =
+            result.at("Features").at("CanHaveEmptyDirectories").get<bool>()
+                ? EmptyDirectoryCapability::CanHave
+                : EmptyDirectoryCapability::CannotHave;
+    } catch (const nlohmann::json::exception&) {
+        observation.error_category = transport::ErrorCode::ProtocolFailure;
+        observation.error_message =
+            "Rclone operations/fsinfo omitted boolean "
+            "Features.CanHaveEmptyDirectories";
+    }
+    return observation;
+}
+
 } // namespace
 
 std::expected<std::string, std::string>
@@ -250,11 +299,13 @@ PreInitializeObservation observe_pre_initialize(
     RcDiagnostic raw{
         .request_fs = fs,
         .request_remote = remote,
+        .recurse = true,
+        .files_only = true,
     };
     const nlohmann::json request{
         {"fs", fs},
         {"remote", remote},
-        {"opt", {{"recurse", false},
+        {"opt", {{"recurse", true},
                  {"filesOnly", true},
                  {"noModTime", true},
                  {"noMimeType", true}}},
@@ -285,9 +336,12 @@ PreInitializeObservation observe_pre_initialize(
         }
     }
 
+    auto backend = observe_empty_directory_capability(*state,
+                                                      diagnostic_deadline);
     auto transport_listing = transport::list(parent_storage, child);
     return {.transport = observe_listing(std::move(transport_listing), state),
-            .raw_rc = std::move(raw)};
+            .raw_rc = std::move(raw),
+            .backend = std::move(backend)};
 }
 
 Classification classify_pre_initialize(
@@ -312,25 +366,48 @@ Classification classify_pre_initialize(
                 .reason = "pre-initialize listing found child objects"};
     }
     if (observation.raw_rc.result == "SUCCESS" &&
-        observation.raw_rc.entry_count.value_or(0) > 0) {
+        observation.raw_rc.entry_count &&
+        *observation.raw_rc.entry_count > 0) {
         return {.disposition = ChildDisposition::Existing,
                 .reason = "raw RC listing found child objects"};
     }
-    if (observation.transport.result == "SUCCESS") {
-        return {.disposition = ChildDisposition::Refused,
-                .reason = "empty pre-initialize listing cannot prove namespace absence"};
-    }
-    if (observation.transport.error_category !=
-        transport::ErrorCode::StorageNotFound) {
-        return {.disposition = ChildDisposition::Refused,
-                .reason = "Transport did not report the child prefix as absent"};
-    }
-    if (strict_missing_directory(observation.raw_rc)) {
+    if (observation.transport.result == "FAILED" &&
+        observation.transport.error_category ==
+            transport::ErrorCode::StorageNotFound &&
+        !observation.raw_rc.entry_count &&
+        strict_missing_directory(observation.raw_rc)) {
         return {.disposition = ChildDisposition::Unused,
                 .reason = "Transport and strict operations/list missing-directory response agree"};
     }
+
+    const auto expected_backend_fs = parent.location;
+    const bool complete_empty_listing =
+        observation.raw_rc.result == "SUCCESS" &&
+        observation.raw_rc.entry_count == 0 &&
+        !observation.raw_rc.native_status &&
+        !observation.raw_rc.error_category &&
+        observation.raw_rc.error_message.empty() &&
+        observation.transport.result == "SUCCESS" &&
+        observation.transport.entry_count == 0 &&
+        !observation.transport.native_code &&
+        !observation.transport.error_category &&
+        observation.transport.error_message.empty() &&
+        observation.raw_rc.recurse && observation.raw_rc.files_only;
+    const bool complete_backend_capability =
+        observation.backend.endpoint == "operations/fsinfo" &&
+        observation.backend.request_fs == expected_backend_fs &&
+        observation.backend.result == "SUCCESS" &&
+        !observation.backend.native_status &&
+        !observation.backend.error_category &&
+        observation.backend.error_message.empty() &&
+        observation.backend.capability ==
+            EmptyDirectoryCapability::CannotHave;
+    if (complete_empty_listing && complete_backend_capability) {
+        return {.disposition = ChildDisposition::Unused,
+                .reason = "exact recursive empty listing and backend capability prove namespace absence"};
+    }
     return {.disposition = ChildDisposition::Refused,
-            .reason = "normalized StorageNotFound lacks strict RC absence evidence"};
+            .reason = "empty pre-initialize listing cannot prove namespace absence"};
 }
 
 std::expected<ChildStorage, transport::Error> open_child_storage(
@@ -447,7 +524,8 @@ CleanupResult cleanup_owned_child(
     ChildStorage& child,
     std::string_view owner_token,
     const std::vector<std::string>& object_identifiers,
-    const std::filesystem::path& local_scratch) {
+    const std::filesystem::path& local_scratch,
+    const EmptyDirectoryCleanup& cleanup_empty_directories) {
     std::error_code fs_error;
     const auto scratch_status =
         std::filesystem::symlink_status(local_scratch, fs_error);
@@ -512,6 +590,55 @@ CleanupResult cleanup_owned_child(
         result.removed_objects +=
             *removed == transport::Removal::Removed ? 1U : 0U;
     }
+    auto remaining = transport::list(child.storage);
+    if (!remaining ||
+        *remaining != std::vector<std::string>{std::string{owner_identifier}}) {
+        return CleanupResult{
+            .result = "refused",
+            .detail = "unexpected child residue retains owner marker",
+            .removed_objects = result.removed_objects,
+            .error_category = remaining
+                                 ? std::nullopt
+                                 : std::optional{remaining.error().code},
+        };
+    }
+    if (cleanup_empty_directories) {
+        const auto directories_removed = cleanup_empty_directories();
+        if (!directories_removed) {
+            return CleanupResult{
+                .result = "failed",
+                .detail = "could not safely remove owned empty directories: " +
+                          directories_removed.error(),
+                .removed_objects = result.removed_objects,
+            };
+        }
+        remaining = transport::list(child.storage);
+        if (!remaining ||
+            *remaining !=
+                std::vector<std::string>{std::string{owner_identifier}}) {
+            return CleanupResult{
+                .result = "refused",
+                .detail = "child changed during owned directory cleanup",
+                .removed_objects = result.removed_objects,
+                .error_category = remaining
+                                     ? std::nullopt
+                                     : std::optional{remaining.error().code},
+            };
+        }
+    }
+    auto marker_rechecked = transport::get(child.storage,
+                                           owner_identifier,
+                                           marker_path);
+    const auto rechecked_bytes = marker_rechecked
+                                     ? read_text(marker_path)
+                                     : std::nullopt;
+    fs_error.clear();
+    const bool check_file_removed =
+        std::filesystem::remove(marker_path, fs_error);
+    if (fs_error || !check_file_removed || !rechecked_bytes ||
+        *rechecked_bytes != owner_token) {
+        return refused("ownership marker changed during owned cleanup");
+    }
     const auto marker_removed = transport::remove(child.storage, owner_identifier);
     if (!marker_removed) {
         return CleanupResult{
@@ -541,6 +668,21 @@ nlohmann::json to_json(const PreInitializeObservation& observation,
                                        ? nlohmann::json(nullptr)
                                        : nlohmann::json(
                                              observation.raw_rc.error_message);
+    const auto backend_error_message =
+        observation.backend.error_message.empty()
+            ? nlohmann::json(nullptr)
+            : nlohmann::json(observation.backend.error_message);
+    const auto capability_name = [&] {
+        switch (observation.backend.capability) {
+        case EmptyDirectoryCapability::CanHave:
+            return "CAN_HAVE";
+        case EmptyDirectoryCapability::CannotHave:
+            return "CANNOT_HAVE";
+        case EmptyDirectoryCapability::Unknown:
+            return "UNKNOWN";
+        }
+        return "UNKNOWN";
+    }();
     return nlohmann::json{
         {"phase", "PRE_INITIALIZE"},
         {"transport_result", observation.transport.result},
@@ -561,6 +703,8 @@ nlohmann::json to_json(const PreInitializeObservation& observation,
         {"raw_rc_endpoint", observation.raw_rc.endpoint},
         {"raw_rc_request_fs", observation.raw_rc.request_fs},
         {"raw_rc_request_remote", observation.raw_rc.request_remote},
+        {"raw_rc_recurse", observation.raw_rc.recurse},
+        {"raw_rc_files_only", observation.raw_rc.files_only},
         {"raw_rc_probe_result", observation.raw_rc.result},
         {"raw_rc_entry_count",
          observation.raw_rc.entry_count
@@ -573,6 +717,18 @@ nlohmann::json to_json(const PreInitializeObservation& observation,
         {"raw_rc_error_category",
          error_json(observation.raw_rc.error_category)},
         {"raw_rc_error_message_sanitized", raw_error_message},
+        {"backend_capability_endpoint", observation.backend.endpoint},
+        {"backend_capability_request_fs", observation.backend.request_fs},
+        {"backend_capability_result", observation.backend.result},
+        {"backend_can_have_empty_directories", capability_name},
+        {"backend_capability_native_status",
+         observation.backend.native_status
+             ? nlohmann::json(*observation.backend.native_status)
+             : nlohmann::json(nullptr)},
+        {"backend_capability_error_category",
+         error_json(observation.backend.error_category)},
+        {"backend_capability_error_message_sanitized",
+         backend_error_message},
         {"classification", classification.disposition == ChildDisposition::Unused
                                ? "UNUSED"
                                : classification.disposition == ChildDisposition::Existing

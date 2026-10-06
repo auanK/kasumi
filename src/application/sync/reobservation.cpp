@@ -301,7 +301,9 @@ stabilize(const runtime::RuntimeData& runtime_data,
                 ErrorCode::ObservationFailure, observed.error().detail));
         }
         auto local_after_storage =
-            observation::collect_local_tree(runtime_data.local_dir, session);
+            observation::collect_local_tree(runtime_data.local_dir,
+                                            session,
+                                            observed->ignore_list);
         if (!local_after_storage) {
             auto removed = detail::remove_transaction_workspace(workspace);
             if (!removed) {

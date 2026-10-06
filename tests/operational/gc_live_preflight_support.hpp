@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
@@ -17,6 +18,7 @@ namespace kasumi::operational::gc_live_preflight {
 
 enum class ChildDisposition { Unused, Existing, Refused };
 enum class PostInitializeDisposition { Empty, Refused };
+enum class EmptyDirectoryCapability { Unknown, CanHave, CannotHave };
 
 struct ListingObservation {
     std::string result = "FAILED";
@@ -30,8 +32,20 @@ struct RcDiagnostic {
     std::string endpoint = "operations/list";
     std::string request_fs;
     std::string request_remote;
+    bool recurse = false;
+    bool files_only = false;
     std::string result = "FAILED";
     std::optional<std::size_t> entry_count;
+    std::optional<int> native_status;
+    std::optional<transport::ErrorCode> error_category;
+    std::string error_message;
+};
+
+struct EmptyDirectoryCapabilityObservation {
+    std::string endpoint = "operations/fsinfo";
+    std::string request_fs;
+    std::string result = "FAILED";
+    EmptyDirectoryCapability capability = EmptyDirectoryCapability::Unknown;
     std::optional<int> native_status;
     std::optional<transport::ErrorCode> error_category;
     std::string error_message;
@@ -40,6 +54,7 @@ struct RcDiagnostic {
 struct PreInitializeObservation {
     ListingObservation transport;
     RcDiagnostic raw_rc;
+    EmptyDirectoryCapabilityObservation backend;
 };
 
 struct PostInitializeObservation {
@@ -63,6 +78,8 @@ struct ChildStorage {
     std::string child;
     transport::Transport storage;
 };
+
+using EmptyDirectoryCleanup = std::function<std::expected<void, std::string>()>;
 
 std::expected<std::string, std::string>
 child_namespace(std::string_view random_hex);
@@ -100,7 +117,8 @@ CleanupResult cleanup_owned_child(
     ChildStorage& child,
     std::string_view owner_token,
     const std::vector<std::string>& object_identifiers,
-    const std::filesystem::path& local_scratch);
+    const std::filesystem::path& local_scratch,
+    const EmptyDirectoryCleanup& cleanup_empty_directories = {});
 
 std::string sanitize_rc_message(std::string message,
                                 std::string_view username,

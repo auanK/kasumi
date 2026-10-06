@@ -523,8 +523,7 @@ TEST(RcloneStorageTest, OmitsJobBatchRemoteErrorText) {
     const auto result =
         kasumi::transport::rclone_detail::parse_control_read_batch_response(
             R"({"results":[{"status":500,"error":"remote-secret-marker"},{"item":null}]})",
-            request,
-            "root");
+            request);
 
     ASSERT_FALSE(result.has_value());
     const auto diagnostic = kasumi::transport::describe(result.error());
@@ -610,7 +609,7 @@ TEST(RcloneStorageTest, PreservesUnicodeLocalPathsInCopyRequests) {
         [&](const httplib::Request& input, httplib::Response& response) {
             const auto request = nlohmann::json::parse(input.body);
             requests.push_back(request);
-            if (request.at("srcFs") == "test:") {
+            if (request.at("srcFs") == "test:root") {
                 kasumi::test::write_text(
                     kasumi::platform::path::from_utf8(
                         request.at("dstFs").get<std::string>()) /
@@ -636,11 +635,153 @@ TEST(RcloneStorageTest, PreservesUnicodeLocalPathsInCopyRequests) {
     EXPECT_EQ(requests[0].at("srcFs"),
               kasumi::platform::path::to_utf8(source.parent_path()));
     EXPECT_EQ(requests[0].at("srcRemote"), "カード💝.png");
-    EXPECT_EQ(requests[0].at("dstRemote"), "root/object");
+    EXPECT_EQ(requests[0].at("dstFs"), "test:root");
+    EXPECT_EQ(requests[0].at("dstRemote"), "object");
+    EXPECT_EQ(requests[1].at("srcFs"), "test:root");
+    EXPECT_EQ(requests[1].at("srcRemote"), "object");
     EXPECT_EQ(requests[1].at("dstFs"),
               kasumi::platform::path::to_utf8(destination.parent_path()));
     EXPECT_EQ(requests[1].at("dstRemote"), "𝑬𝒎𝒊𝒍𝒊𝒂-𓆩🌸𓆪.txt");
     EXPECT_EQ(kasumi::test::read_text(destination), "unicode payload");
+}
+
+TEST(RcloneStorageTest, StorageRequestsAreScopedToConfiguredRemoteRoot) {
+    struct RecordedRequest {
+        std::string endpoint;
+        nlohmann::json body;
+    };
+
+    RcServerState remote;
+    std::vector<RecordedRequest> requests;
+    for (const auto endpoint : {"operations/mkdir",
+                                "operations/copyfile",
+                                "operations/deletefile",
+                                "operations/stat",
+                                "operations/list"}) {
+        remote.server.Post(
+            "/rc/" + std::string{endpoint},
+            [&, endpoint = std::string{endpoint}](
+                const httplib::Request& input, httplib::Response& response) {
+                requests.push_back(
+                    {endpoint, nlohmann::json::parse(input.body)});
+                if (endpoint == "operations/stat") {
+                    response.set_content(R"({"item":{"IsDir":false}})",
+                                         "application/json");
+                } else if (endpoint == "operations/list") {
+                    response.set_content(R"({"list":[]})",
+                                         "application/json");
+                } else {
+                    response.set_content("{}", "application/json");
+                }
+                if (endpoint == "operations/copyfile") {
+                    const auto request = nlohmann::json::parse(input.body);
+                    const auto destination_fs =
+                        request.at("dstFs").get<std::string>();
+                    if (!destination_fs.starts_with("test:")) {
+                        kasumi::test::write_text(
+                            kasumi::platform::path::from_utf8(destination_fs) /
+                                kasumi::platform::path::from_utf8(
+                                    request.at("dstRemote")
+                                        .get<std::string>()),
+                            "downloaded payload");
+                    }
+                }
+            });
+    }
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    state.configuration.remote_root = "bucket/parent/objects";
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    auto workspace = kasumi::test::make_temp_workspace("rclone-root-contract");
+    const auto source = kasumi::test::workspace_path(workspace, "source.bin");
+    const auto destination =
+        kasumi::test::workspace_path(workspace, "downloaded/result.bin");
+    kasumi::test::write_text(source, "upload payload");
+
+    const auto initialized = operations.initialize(&state);
+    const auto uploaded = operations.put(&state, source, "uploads/object");
+    const auto downloaded =
+        operations.get(&state, "downloads/object", destination);
+    const auto copied = operations.copy(
+        &state, "source/nested", "history/quarantine/copy");
+    const auto removed =
+        operations.remove(&state, "history/quarantine/remove");
+    const auto presence = operations.presence(&state, "history/head");
+    const auto listed = operations.list(&state);
+    const auto listed_prefix = operations.list_prefix(&state, "history/heads");
+
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(initialized.has_value());
+    ASSERT_TRUE(uploaded.has_value());
+    ASSERT_TRUE(downloaded.has_value());
+    ASSERT_TRUE(copied.has_value());
+    ASSERT_TRUE(removed.has_value());
+    EXPECT_EQ(*removed, kasumi::transport::Removal::Removed);
+    ASSERT_TRUE(presence.has_value());
+    EXPECT_EQ(*presence, kasumi::transport::Presence::Present);
+    ASSERT_TRUE(listed.has_value());
+    ASSERT_TRUE(listed_prefix.has_value());
+    EXPECT_TRUE(listed->empty());
+    EXPECT_TRUE(listed_prefix->empty());
+    EXPECT_EQ(kasumi::test::read_text(destination), "downloaded payload");
+
+    const auto root = std::string{"test:bucket/parent/objects"};
+    const auto source_parent =
+        kasumi::platform::path::to_utf8(source.parent_path());
+    const auto destination_parent =
+        kasumi::platform::path::to_utf8(destination.parent_path());
+    const std::vector<RecordedRequest> expected{
+        {"operations/mkdir", {{"fs", root}, {"remote", ""}}},
+        {"operations/copyfile",
+         {{"srcFs", source_parent},
+          {"srcRemote", "source.bin"},
+          {"dstFs", root},
+          {"dstRemote", "uploads/object"}}},
+        {"operations/copyfile",
+         {{"srcFs", root},
+          {"srcRemote", "downloads/object"},
+          {"dstFs", destination_parent},
+          {"dstRemote", "result.bin"}}},
+        {"operations/copyfile",
+         {{"srcFs", root},
+          {"srcRemote", "source/nested"},
+          {"dstFs", root},
+          {"dstRemote", "history/quarantine/copy"}}},
+        {"operations/deletefile",
+         {{"fs", root}, {"remote", "history/quarantine/remove"}}},
+        {"operations/stat",
+         {{"fs", root},
+          {"remote", "history/head"},
+          {"opt",
+           {{"filesOnly", true}, {"noModTime", true}, {"noMimeType", true}}}}},
+        {"operations/list",
+         {{"fs", root},
+          {"remote", ""},
+          {"opt",
+           {{"recurse", true},
+            {"filesOnly", true},
+            {"noModTime", true},
+            {"noMimeType", true}}}}},
+        {"operations/list",
+         {{"fs", root},
+          {"remote", "history/heads"},
+          {"opt",
+           {{"recurse", false},
+            {"filesOnly", true},
+            {"noModTime", true},
+            {"noMimeType", true}}}}},
+    };
+    ASSERT_EQ(requests.size(), expected.size());
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        SCOPED_TRACE(expected[index].endpoint);
+        EXPECT_EQ(requests[index].endpoint, expected[index].endpoint);
+        EXPECT_EQ(requests[index].body.dump(), expected[index].body.dump());
+    }
 }
 
 TEST(RcloneStorageTest, CopiesBetweenPathsOnTheConfiguredRemote) {
@@ -666,11 +807,11 @@ TEST(RcloneStorageTest, CopiesBetweenPathsOnTheConfiguredRemote) {
 
     ASSERT_TRUE(copied) << kasumi::transport::describe(copied.error());
     ASSERT_EQ(requests.size(), 1U);
-    EXPECT_EQ(requests.front().at("srcFs"), "test:");
-    EXPECT_EQ(requests.front().at("srcRemote"), "root/objects/source");
-    EXPECT_EQ(requests.front().at("dstFs"), "test:");
+    EXPECT_EQ(requests.front().at("srcFs"), "test:root");
+    EXPECT_EQ(requests.front().at("srcRemote"), "objects/source");
+    EXPECT_EQ(requests.front().at("dstFs"), "test:root");
     EXPECT_EQ(requests.front().at("dstRemote"),
-              "root/history/gc/v1/quarantine/nested/destination");
+              "history/gc/v1/quarantine/nested/destination");
 }
 
 TEST(RcloneStorageTest, PropagatesRemoteCopyFailure) {
@@ -755,6 +896,43 @@ TEST(RcloneStorageTest, MissingHashsumfileMethodIsNotMissingObject) {
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, kasumi::transport::ErrorCode::Unsupported);
+}
+
+TEST(RcloneStorageTest, UnsupportedPhysicalHashTypeIsCachedAsUnsupported) {
+    RcServerState remote;
+    std::atomic_int calls = 0;
+    nlohmann::json request;
+    remote.server.Post(
+        "/rc/operations/hashsumfile",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            ++calls;
+            request = nlohmann::json::parse(input.body);
+            response.status = 500;
+            response.set_content(R"({"error":"hash type not supported"})",
+                                 "application/json");
+        });
+    start_rc_server(remote);
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    const auto first =
+        operations.physical_hash(&state, "nested/object", "sha256");
+    const auto calls_after_first = calls.load();
+    const auto second =
+        operations.physical_hash(&state, "nested/object", "sha256");
+    stop_rc_server(remote);
+
+    ASSERT_FALSE(first.has_value());
+    EXPECT_EQ(first.error().code, kasumi::transport::ErrorCode::Unsupported);
+    ASSERT_FALSE(second.has_value());
+    EXPECT_EQ(second.error().code, kasumi::transport::ErrorCode::Unsupported);
+    EXPECT_TRUE(state.sha256_unsupported.load());
+    EXPECT_GT(calls_after_first, 0);
+    EXPECT_EQ(calls.load(), calls_after_first);
+    EXPECT_EQ(request.at("fs"), "test:root");
+    EXPECT_EQ(request.at("remote"), "nested/object");
 }
 
 TEST(RcloneStorageTest, MissingPhysicalHashObjectRemainsObjectNotFound) {
@@ -927,7 +1105,7 @@ kasumi::transport::ControlReadBatchRequest control_batch_request() {
 
 auto parse_control_batch(std::string_view response) {
     return kasumi::transport::rclone_detail::parse_control_read_batch_response(
-        response, control_batch_request(), "bench");
+        response, control_batch_request());
 }
 
 TEST(RcloneStorageTest, BulkCheckAcceptsCompleteAllMatchResponse) {
@@ -1277,13 +1455,78 @@ TEST(RcloneStorageTest, BulkCheckRejectsFalseSuccessWithoutFailureReason) {
 
 TEST(RcloneStorageTest, ControlBatchParsesPositionalSuccessAndNotFound) {
     const auto result = parse_control_batch(
-        R"({"results":[{"list":[{"Path":"bench/history/writers/self"}],"status":200},{"error":"object not found","status":404}]})");
+        R"({"results":[{"list":[{"Path":"history/writers/self"}],"status":200},{"error":"object not found","status":404}]})");
     ASSERT_TRUE(result.has_value());
     ASSERT_EQ(result->listings.size(), 1);
     EXPECT_EQ(result->listings.front(), (std::vector<std::string>{"self"}));
     EXPECT_EQ(result->presences,
               (std::vector<kasumi::transport::Presence>{
                   kasumi::transport::Presence::Absent}));
+}
+
+TEST(RcloneStorageTest, ControlReadBatchIsScopedToConfiguredRemoteRoot) {
+    RcServerState remote;
+    nlohmann::json request_body;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            request_body = nlohmann::json::parse(input.body);
+            const auto& list_input = request_body.at("inputs").at(0);
+            const auto list_path =
+                list_input.at("fs") == "test:bucket/parent/objects"
+                    ? "history/writers/self"
+                    : "bucket/parent/objects/history/writers/self";
+            response.set_content(
+                nlohmann::json{
+                    {"results",
+                     {{{"list", {{{"Path", list_path}}}}, {"status", 200}},
+                      {{"item", {{"IsDir", false}}}, {"status", 200}}}}}
+                    .dump(),
+                "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    state.configuration.remote_root = "bucket/parent/objects";
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+    const kasumi::transport::ControlReadBatchRequest batch{
+        .list_prefixes = {"history/writers"},
+        .presence_identifiers = {"history/gc/barrier"},
+    };
+
+    const auto result = operations.control_read_batch(&state, batch);
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(result.has_value())
+        << kasumi::transport::describe(result.error());
+    ASSERT_EQ(result->listings.size(), 1U);
+    EXPECT_EQ(result->listings.front(), (std::vector<std::string>{"self"}));
+    EXPECT_EQ(result->presences,
+              (std::vector<kasumi::transport::Presence>{
+                  kasumi::transport::Presence::Present}));
+
+    const auto root = std::string{"test:bucket/parent/objects"};
+    const nlohmann::json expected{
+        {"concurrency", 1},
+        {"inputs",
+         {{{"_path", "operations/list"},
+           {"fs", root},
+           {"remote", "history/writers"},
+           {"opt",
+            {{"recurse", false},
+             {"filesOnly", true},
+             {"noModTime", true},
+             {"noMimeType", true}}}},
+          {{"_path", "operations/stat"},
+           {"fs", root},
+           {"remote", "history/gc/barrier"},
+           {"opt",
+            {{"filesOnly", true},
+             {"noModTime", true},
+             {"noMimeType", true}}}}}}};
+    EXPECT_EQ(request_body.dump(), expected.dump());
 }
 
 TEST(RcloneStorageTest, ControlBatchRejectsMalformedEnvelope) {
@@ -1366,6 +1609,7 @@ TEST(GcLivePreflightRcTest,
     RcServerState remote;
     std::atomic_int calls = 0;
     std::vector<nlohmann::json> requests;
+    std::vector<nlohmann::json> fsinfo_requests;
     remote.server.Post(
         "/rc/operations/list",
         [&](const httplib::Request& request, httplib::Response& response) {
@@ -1376,13 +1620,21 @@ TEST(GcLivePreflightRcTest,
             response.status = scenario.status;
             response.set_content(scenario.body, "application/json");
         });
+    remote.server.Post(
+        "/rc/operations/fsinfo",
+        [&](const httplib::Request& request, httplib::Response& response) {
+            fsinfo_requests.push_back(nlohmann::json::parse(request.body));
+            response.set_content(
+                R"({"Features":{"CanHaveEmptyDirectories":true}})",
+                "application/json");
+        });
     start_rc_server(remote);
     transport::rclone_detail::State state;
     configure_preflight_state(state, remote.port, *parent);
     auto storage = make_preflight_transport(state);
 
     std::vector<gc_live::PreInitializeObservation> observations;
-    for (const auto& scenario : scenarios) {
+    for (std::size_t index = 0; index < scenarios.size(); ++index) {
         observations.push_back(gc_live::observe_pre_initialize(
             storage, *parent, child, std::chrono::seconds{1}));
     }
@@ -1402,8 +1654,14 @@ TEST(GcLivePreflightRcTest,
         EXPECT_EQ(requests[index * 2]["fs"], "archive:");
         EXPECT_EQ(requests[index * 2]["remote"],
                   "dedicated-test-parent/" + std::string{child});
-        EXPECT_EQ(requests[index * 2]["opt"]["recurse"], false);
+        EXPECT_EQ(requests[index * 2]["opt"]["recurse"], true);
         EXPECT_EQ(requests[index * 2]["opt"]["filesOnly"], true);
+    }
+    ASSERT_EQ(fsinfo_requests.size(), scenarios.size());
+    const nlohmann::json expected_fsinfo_request{
+        {"fs", parent->location}};
+    for (const auto& request : fsinfo_requests) {
+        EXPECT_EQ(request.dump(), expected_fsinfo_request.dump());
     }
     const auto generic_report = gc_live::to_json(
         observations[1],
@@ -1416,6 +1674,66 @@ TEST(GcLivePreflightRcTest,
     EXPECT_EQ(generic_report["raw_rc_probe_result"], "FAILED");
     EXPECT_EQ(report_text.find("rc-user-secret"), std::string::npos);
     EXPECT_EQ(report_text.find("rc-password-secret"), std::string::npos);
+}
+
+TEST(GcLivePreflightRcTest, RawPreflightListingFindsNestedObjects) {
+    namespace gc_live = kasumi::operational::gc_live_preflight;
+    namespace smoke = kasumi::operational::remote_copy_smoke;
+    namespace transport = kasumi::transport;
+    constexpr std::string_view child =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-parent");
+    ASSERT_TRUE(parent);
+
+    RcServerState remote;
+    std::vector<nlohmann::json> list_requests;
+    std::atomic_size_t fsinfo_calls = 0;
+    remote.server.Post(
+        "/rc/operations/list",
+        [&](const httplib::Request& request, httplib::Response& response) {
+            list_requests.push_back(nlohmann::json::parse(request.body));
+            response.set_content(
+                R"({"list":[{"Path":"nested/object.bin"}]})",
+                "application/json");
+        });
+    remote.server.Post(
+        "/rc/operations/fsinfo",
+        [&](const httplib::Request&, httplib::Response& response) {
+            ++fsinfo_calls;
+            response.set_content(
+                R"({"Features":{"CanHaveEmptyDirectories":false}})",
+                "application/json");
+        });
+    start_rc_server(remote);
+
+    transport::rclone_detail::State state;
+    configure_preflight_state(state, remote.port, *parent);
+    auto storage = make_preflight_transport(state);
+    const auto observation =
+        gc_live::observe_pre_initialize(storage, *parent, child);
+    stop_rc_server(remote);
+
+    ASSERT_EQ(list_requests.size(), 2U);
+    const auto& raw_request = list_requests.front();
+    EXPECT_EQ(raw_request.at("fs").get<std::string>(),
+              parent->remote_name + ":");
+    EXPECT_EQ(raw_request.at("remote").get<std::string>(),
+              parent->directory + "/" + std::string{child});
+    EXPECT_TRUE(raw_request.at("opt").at("recurse").get<bool>());
+    EXPECT_TRUE(raw_request.at("opt").at("filesOnly").get<bool>());
+    EXPECT_EQ(fsinfo_calls.load(), 1U);
+
+    EXPECT_EQ(observation.raw_rc.result, "SUCCESS");
+    EXPECT_TRUE(observation.raw_rc.recurse);
+    EXPECT_TRUE(observation.raw_rc.files_only);
+    EXPECT_EQ(observation.raw_rc.entry_count, 1U)
+        << "the recursive files-only probe must see nested/object.bin";
+    EXPECT_EQ(observation.transport.entry_count, 1U);
+    EXPECT_EQ(observation.backend.capability,
+              gc_live::EmptyDirectoryCapability::CannotHave);
+    EXPECT_EQ(gc_live::classify_pre_initialize(observation, *parent, child)
+                  .disposition,
+              gc_live::ChildDisposition::Existing);
 }
 
 TEST(GcLivePreflightRcTest, ReadOnlyDiagnosticTimeoutFailsClosed) {
@@ -1450,6 +1768,92 @@ TEST(GcLivePreflightRcTest, ReadOnlyDiagnosticTimeoutFailsClosed) {
     EXPECT_EQ(gc_live::classify_pre_initialize(observation, *parent, child)
                   .disposition,
               gc_live::ChildDisposition::Refused);
+}
+
+TEST(GcLivePreflightRcTest,
+     FsinfoFailureMalformedAndTimeoutFailClosed) {
+    namespace gc_live = kasumi::operational::gc_live_preflight;
+    namespace smoke = kasumi::operational::remote_copy_smoke;
+    namespace transport = kasumi::transport;
+    constexpr std::string_view child =
+        "kasumi-gc-live-0123456789abcdef0123456789abcdef";
+    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    ASSERT_TRUE(parent);
+
+    struct Scenario {
+        std::string_view name;
+        int status;
+        std::string body;
+        std::chrono::milliseconds delay{};
+        gc_live::EmptyDirectoryCapability expected_capability;
+        gc_live::ChildDisposition expected_disposition;
+        std::optional<transport::ErrorCode> expected_error;
+    };
+    const std::vector<Scenario> scenarios{
+        {"valid false feature", 200,
+         R"({"Features":{"CanHaveEmptyDirectories":false}})", {},
+         gc_live::EmptyDirectoryCapability::CannotHave,
+         gc_live::ChildDisposition::Unused, std::nullopt},
+        {"missing feature", 200, R"({"Features":{}})", {},
+         gc_live::EmptyDirectoryCapability::Unknown,
+         gc_live::ChildDisposition::Refused,
+         transport::ErrorCode::ProtocolFailure},
+        {"wrong feature type", 200,
+         R"({"Features":{"CanHaveEmptyDirectories":"false"}})",
+         {}, gc_live::EmptyDirectoryCapability::Unknown,
+         gc_live::ChildDisposition::Refused,
+         transport::ErrorCode::ProtocolFailure},
+        {"permission failure", 403, R"({"error":"permission denied"})",
+         {}, gc_live::EmptyDirectoryCapability::Unknown,
+         gc_live::ChildDisposition::Refused,
+         transport::ErrorCode::PermissionDenied},
+        {"timeout", 200,
+         R"({"Features":{"CanHaveEmptyDirectories":false}})",
+         std::chrono::milliseconds{80},
+         gc_live::EmptyDirectoryCapability::Unknown,
+         gc_live::ChildDisposition::Refused, transport::ErrorCode::Timeout},
+    };
+
+    for (const auto& scenario : scenarios) {
+        SCOPED_TRACE(scenario.name);
+        RcServerState remote;
+        remote.server.Post(
+            "/rc/operations/list",
+            [](const httplib::Request&, httplib::Response& response) {
+                response.set_content(R"({"list":[]})", "application/json");
+            });
+        remote.server.Post(
+            "/rc/operations/fsinfo",
+            [&scenario](const httplib::Request&,
+                        httplib::Response& response) {
+                if (scenario.delay > std::chrono::milliseconds::zero()) {
+                    std::this_thread::sleep_for(scenario.delay);
+                }
+                response.status = scenario.status;
+                response.set_content(scenario.body, "application/json");
+            });
+        start_rc_server(remote);
+        transport::rclone_detail::State state;
+        configure_preflight_state(state, remote.port, *parent);
+        auto storage = make_preflight_transport(state);
+        const auto deadline = scenario.name == "timeout"
+                                  ? std::chrono::milliseconds{20}
+                                  : std::chrono::seconds{1};
+        const auto observation = gc_live::observe_pre_initialize(
+            storage, *parent, child, deadline);
+        stop_rc_server(remote);
+
+        EXPECT_EQ(observation.backend.result,
+                  scenario.expected_capability ==
+                          gc_live::EmptyDirectoryCapability::CannotHave
+                      ? "SUCCESS"
+                      : "FAILED");
+        EXPECT_EQ(observation.backend.capability, scenario.expected_capability);
+        EXPECT_EQ(observation.backend.error_category, scenario.expected_error);
+        EXPECT_EQ(gc_live::classify_pre_initialize(observation, *parent, child)
+                      .disposition,
+                  scenario.expected_disposition);
+    }
 }
 
 
@@ -1645,11 +2049,12 @@ TEST(RcloneStorageTest, CopyBatchUsesOneJobBatchWithExplicitCopyfileInputs) {
     for (std::size_t index = 0; index < pairs.size(); ++index) {
         const auto& input = requests[0].at("inputs").at(index);
         EXPECT_EQ(input.at("_path"), "operations/copyfile");
-        EXPECT_EQ(input.at("srcFs"), "test:");
-        EXPECT_EQ(input.at("srcRemote"), "root/" + std::string{pairs[index].first});
-        EXPECT_EQ(input.at("dstFs"), "test:");
-        EXPECT_EQ(input.at("dstRemote"),
-                  "root/" + std::string{pairs[index].second});
+        EXPECT_EQ(input.at("srcFs"), "test:root");
+        EXPECT_EQ(input.at("srcRemote").get<std::string>(),
+                  std::string{pairs[index].first});
+        EXPECT_EQ(input.at("dstFs"), "test:root");
+        EXPECT_EQ(input.at("dstRemote").get<std::string>(),
+                  std::string{pairs[index].second});
         EXPECT_EQ(input.size(), 5U);
     }
 }
@@ -1698,9 +2103,8 @@ TEST(RcloneStorageTest, PutFilesBatchUsesOneJobBatchWithExplicitLocalSources) {
                   kasumi::platform::path::to_utf8(items[index].source.parent_path()));
         EXPECT_EQ(input.at("srcRemote"),
                   kasumi::platform::path::to_utf8(items[index].source.filename()));
-        EXPECT_EQ(input.at("dstFs"), "test:");
-        EXPECT_EQ(input.at("dstRemote"),
-                  "root/" + items[index].destination_identifier);
+        EXPECT_EQ(input.at("dstFs"), "test:root");
+        EXPECT_EQ(input.at("dstRemote"), items[index].destination_identifier);
         EXPECT_EQ(input.size(), 5U);
     }
 }
@@ -2066,8 +2470,8 @@ TEST(RcloneStorageTest, RemoveBatchSubmitsBoundedConcurrentJobBatch) {
     for (std::size_t index = 0; index < items.size(); ++index) {
         const auto& input = request.at("inputs").at(index);
         EXPECT_EQ(input.at("_path"), "operations/deletefile");
-        EXPECT_EQ(input.at("fs"), "test:");
-        EXPECT_EQ(input.at("remote"), "root/" + items[index].identifier);
+        EXPECT_EQ(input.at("fs"), "test:root");
+        EXPECT_EQ(input.at("remote"), items[index].identifier);
         EXPECT_EQ(input.size(), 3U);
     }
     ASSERT_EQ(removed->items.size(), 8U);

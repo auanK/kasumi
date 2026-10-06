@@ -856,13 +856,7 @@ bool valid_logical_path(std::string_view path) {
 }
 
 std::int64_t unix_nanoseconds(const NodeRow& row) {
-    if (row.is_directory && row.mtime == std::filesystem::file_time_type{}) {
-        return 0;
-    }
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::clock_cast<std::chrono::system_clock>(row.mtime)
-                   .time_since_epoch())
-        .count();
+    return row.mtime;
 }
 
 std::expected<RemoteStatReport, InspectionError>

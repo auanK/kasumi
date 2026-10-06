@@ -1,10 +1,13 @@
 #include "application/observation/state.hpp"
 
+#include "application/history_storage/detail.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
 #include "application/observation/patch.hpp"
 #include "application/observation/scanner.hpp"
 #include "core/ignore.hpp"
+#include "crypto/content.hpp"
+#include "crypto/file_crypto.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "state_storage/database.hpp"
@@ -12,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <optional>
 #include <thread>
 
 namespace kasumi::application::observation {
@@ -34,6 +38,133 @@ scan_local_tree(const std::filesystem::path& local_root) {
         return std::unexpected("local snapshot has no valid root");
     }
     return std::move(current->snapshot);
+}
+
+struct IgnoreIdentity {
+    bool present = false;
+    bool directory = false;
+    bool regular_file = false;
+    Hash hash{};
+    std::uint64_t size = 0;
+};
+
+IgnoreIdentity ignore_identity(const Snapshot& tree) {
+    const auto* row = find_row(tree, ".kasumiignore");
+    if (row == nullptr) {
+        return {};
+    }
+    return IgnoreIdentity{.present = true,
+                          .directory = row->is_directory,
+                          .regular_file = !row->is_directory,
+                          .hash = row->hash,
+                          .size = row->size};
+}
+
+std::expected<IgnoreIdentity, std::string>
+local_ignore_identity(const std::filesystem::path& local_root) {
+    const auto path = local_root / ".kasumiignore";
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    if (error == std::errc::no_such_file_or_directory ||
+        (!error && !std::filesystem::exists(status))) {
+        return IgnoreIdentity{};
+    }
+    if (error) {
+        return std::unexpected("could not inspect local .kasumiignore: " +
+                               error.message());
+    }
+    IgnoreIdentity identity{.present = true,
+                            .directory = std::filesystem::is_directory(status),
+                            .regular_file =
+                                std::filesystem::is_regular_file(status)};
+    if (!identity.regular_file) {
+        return identity;
+    }
+    auto hash = crypto::content::hash_file(path);
+    if (!hash) {
+        return std::unexpected("could not hash local .kasumiignore: " +
+                               hash.error());
+    }
+    identity.hash = *hash;
+    identity.size = std::filesystem::file_size(path, error);
+    if (error) {
+        return std::unexpected("could not read local .kasumiignore size: " +
+                               error.message());
+    }
+    return identity;
+}
+
+bool same_ignore_identity(const IgnoreIdentity& left,
+                          const IgnoreIdentity& right) noexcept {
+    return left.present == right.present && left.directory == right.directory &&
+           left.regular_file == right.regular_file &&
+           (!left.regular_file ||
+            (left.hash == right.hash && left.size == right.size));
+}
+
+std::expected<kasumi::ignore::IgnoreList, std::string>
+load_remote_ignore_list(transport::Transport& storage,
+                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                        const NodeRow& row,
+                        const std::filesystem::path& workspace_root) {
+    auto temporary = history_storage::detail::make_workspace(workspace_root);
+    if (!temporary) {
+        return std::unexpected(temporary.error().detail);
+    }
+    const auto encrypted = temporary->get()->root / "ignore.enc";
+    const auto plaintext = temporary->get()->root / "ignore.txt";
+    const auto identifier = crypto::content_identifier(key, row.hash);
+    const auto downloaded = transport::get(storage, identifier, encrypted);
+    if (!downloaded) {
+        return std::unexpected("could not read authenticated remote "
+                               ".kasumiignore: " +
+                               downloaded.error().message);
+    }
+    if (!crypto::decrypt_file(encrypted, plaintext, key) ||
+        !crypto::content::verify_file(
+            plaintext, hash_hex(row.hash), row.size)) {
+        return std::unexpected(
+            "authenticated remote .kasumiignore failed content verification");
+    }
+    return kasumi::ignore::load_ignore_list(plaintext);
+}
+
+std::expected<kasumi::ignore::IgnoreList, std::string>
+effective_ignore_list(const std::filesystem::path& local_root,
+                      const IgnoreIdentity& base_version,
+                      const Snapshot& remote_tree,
+                      transport::Transport& storage,
+                      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                      const std::filesystem::path& workspace_root,
+                      const kasumi::ignore::IgnoreList& local_rules) {
+    auto local_version = local_ignore_identity(local_root);
+    if (!local_version) {
+        return std::unexpected(local_version.error());
+    }
+    const auto remote_version = ignore_identity(remote_tree);
+    const bool local_changed =
+        !same_ignore_identity(*local_version, base_version);
+    const bool remote_changed =
+        !same_ignore_identity(remote_version, base_version);
+
+    // Preserve local-wins behavior for local edits and simultaneous changes.
+    if (local_changed) {
+        return local_rules;
+    }
+    if (remote_version.regular_file &&
+        (remote_changed || !local_version->regular_file)) {
+        const auto* row = find_row(remote_tree, ".kasumiignore");
+        auto rules =
+            load_remote_ignore_list(storage, key, *row, workspace_root);
+        if (!rules) {
+            return std::unexpected(rules.error());
+        }
+        return *rules;
+    }
+    if (remote_changed) {
+        return kasumi::ignore::IgnoreList{};
+    }
+    return local_rules;
 }
 
 reconciliation::Error state_error(reconciliation::ErrorCode code,
@@ -256,6 +387,40 @@ collect_local_tree(const std::filesystem::path& local_root) {
 
 std::expected<Snapshot, std::string>
 collect_local_tree(const std::filesystem::path& local_root,
+                   const kasumi::ignore::IgnoreList& ignore_list) {
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(local_root, error);
+    if (error || std::filesystem::is_symlink(status) ||
+        !std::filesystem::is_directory(status)) {
+        return std::unexpected("missing or invalid local directory");
+    }
+    auto current = scanner::scan_result(local_root,
+                                        {},
+                                        scanner::ScanPolicy::FullHash,
+                                        platform::regular_file_fingerprint,
+                                        ignore_list);
+    if (!current) {
+        return std::unexpected(scanner::describe(current.error()));
+    }
+    if (!valid_snapshot(current->snapshot, false)) {
+        return std::unexpected("local snapshot has no valid root");
+    }
+    return std::move(current->snapshot);
+}
+
+std::expected<Snapshot, std::string>
+collect_local_tree(const std::filesystem::path& local_root,
+                   LocalObservationSession* session,
+                   const kasumi::ignore::IgnoreList& ignore_list) {
+    if (ignore_list ==
+        kasumi::ignore::load_ignore_list(local_root / ".kasumiignore")) {
+        return collect_local_tree(local_root, session);
+    }
+    return collect_local_tree(local_root, ignore_list);
+}
+
+std::expected<Snapshot, std::string>
+collect_local_tree(const std::filesystem::path& local_root,
                    LocalObservationSession* session) {
     try {
         if (session == nullptr)
@@ -464,8 +629,10 @@ collect_reconciliation_input(
         input.base_ciphertext_id = std::move((*persisted)->ciphertext_id);
         input.base_state_present = true;
     }
-    input.ignore_list = kasumi::ignore::load_ignore_list(
+    const auto accepted_ignore_version = ignore_identity(input.base_tree);
+    const auto local_ignore_list = kasumi::ignore::load_ignore_list(
         runtime_data.local_dir / ".kasumiignore");
+    input.ignore_list = local_ignore_list;
 
     std::jthread local_scan([&] {
         const auto scan_trace = platform::perf_trace::begin();
@@ -611,6 +778,29 @@ collect_reconciliation_input(
                 reconciliation::ErrorCode::InvalidLocalBaseState,
                 "persisted local base identity does not match its commit"));
         }
+    }
+    auto effective_rules = effective_ignore_list(runtime_data.local_dir,
+                                                 accepted_ignore_version,
+                                                 input.storage.tree,
+                                                 storage,
+                                                 key,
+                                                 history_workspace,
+                                                 local_ignore_list);
+    if (!effective_rules) {
+        return std::unexpected(
+            state_error(reconciliation::ErrorCode::InvalidStorageTree,
+                        effective_rules.error()));
+    }
+    input.ignore_list = std::move(*effective_rules);
+    if (input.ignore_list != local_ignore_list) {
+        auto projected = collect_local_tree(
+            runtime_data.local_dir, session, input.ignore_list);
+        if (!projected) {
+            return std::unexpected(
+                state_error(reconciliation::ErrorCode::InvalidLocalTree,
+                            projected.error()));
+        }
+        input.local_tree = std::move(*projected);
     }
     input.audit_storage_objects = audit_storage_objects;
     return input;

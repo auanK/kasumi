@@ -102,6 +102,24 @@ void expect_same_snapshot(const kasumi::Snapshot& left,
     }
 }
 
+TEST(ScannerTest, StoresCanonicalUnixNanosecondsAtNativeResolution) {
+    auto workspace = kasumi::test::make_temp_workspace("scanner-canonical-mtime");
+    const auto root = kasumi::test::workspace_path(workspace, "local");
+    const auto file = root / "file.txt";
+    kasumi::test::write_text(file, "content");
+
+    const auto scanned =
+        kasumi::application::observation::scanner::scan_result(root);
+    ASSERT_TRUE(scanned.has_value());
+    const auto native = std::filesystem::last_write_time(file);
+    const auto expected =
+        kasumi::platform::metadata::unix_nanoseconds(native);
+    ASSERT_TRUE(expected.has_value());
+    const auto* row = kasumi::find_row(scanned->snapshot, "file.txt");
+    ASSERT_NE(row, nullptr);
+    EXPECT_EQ(row->mtime, *expected);
+}
+
 TEST(ScannerTest, IncrementalScanEqualsFullHashScan) {
     auto workspace = kasumi::test::make_temp_workspace("scanner-equivalence");
     const auto root = kasumi::test::workspace_path(workspace, "local");
@@ -753,10 +771,13 @@ TEST(ScannerTest, UnavailableFingerprintRejectsSameSizeOverwrite) {
             const auto& row = result->snapshot.rows.front();
             EXPECT_TRUE(result->cache.empty());
             EXPECT_EQ(row.size, initial_size);
-            EXPECT_EQ(row.mtime, initial_time);
+            const auto initial_time_ns =
+                kasumi::platform::metadata::unix_nanoseconds(initial_time);
+            ASSERT_TRUE(initial_time_ns.has_value());
+            EXPECT_EQ(row.mtime, *initial_time_ns);
             EXPECT_EQ(row.hash, mutation.hashes[0]);
             std::cout << "scanner=success row_size=" << row.size
-                      << " row_mtime=" << row.mtime.time_since_epoch().count()
+                      << " row_mtime=" << row.mtime
                       << " row_hash=" << kasumi::hash_hex(row.hash) << '\n';
         }
         EXPECT_FALSE(result)
@@ -832,8 +853,15 @@ TEST(ScannerTest, RealMutationsDuringHashNeverReturnHybridRows) {
                 ASSERT_TRUE(result) << describe(result.error());
                 const auto& row = result->snapshot.rows.front();
                 EXPECT_EQ(row.size, std::filesystem::file_size(file));
-                EXPECT_EQ(row.mtime, std::filesystem::last_write_time(file));
-                EXPECT_NE(row.mtime, initial_time);
+                const auto actual_time =
+                    kasumi::platform::metadata::unix_nanoseconds(
+                        std::filesystem::last_write_time(file));
+                const auto initial_time_ns =
+                    kasumi::platform::metadata::unix_nanoseconds(initial_time);
+                ASSERT_TRUE(actual_time.has_value());
+                ASSERT_TRUE(initial_time_ns.has_value());
+                EXPECT_EQ(row.mtime, *actual_time);
+                EXPECT_NE(row.mtime, *initial_time_ns);
                 EXPECT_EQ(row.hash, mutation.hashes.back());
                 EXPECT_EQ(row.hash, final_hash);
                 if (mode != FileMutation::Overwrite) {
@@ -841,7 +869,7 @@ TEST(ScannerTest, RealMutationsDuringHashNeverReturnHybridRows) {
                 }
                 std::cout << "scanner=success row_size=" << row.size
                           << " row_mtime="
-                          << row.mtime.time_since_epoch().count()
+                          << row.mtime
                           << " row_hash=" << kasumi::hash_hex(row.hash) << '\n';
             }
             EXPECT_EQ(changed, 1U);

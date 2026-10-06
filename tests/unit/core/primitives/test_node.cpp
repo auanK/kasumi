@@ -2,10 +2,8 @@
 #include "core/node.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
@@ -21,7 +19,7 @@ using kasumi::Snapshot;
 NodeRow make_file(std::string path,
                   std::string_view contents,
                   std::uint64_t size,
-                  std::filesystem::file_time_type modified = {}) {
+                  kasumi::TimestampNs modified = 0) {
     return {
         .path = std::move(path),
         .hash = kasumi::hasher::hash_string(contents),
@@ -32,7 +30,7 @@ NodeRow make_file(std::string path,
 }
 
 NodeRow make_directory(std::string path,
-                       std::filesystem::file_time_type modified = {}) {
+                       kasumi::TimestampNs modified = 0) {
     return {
         .path = std::move(path),
         .mtime = modified,
@@ -214,12 +212,9 @@ TEST(SnapshotTest, ChangingADeepChildChangesEveryAncestorHash) {
 }
 
 TEST(SnapshotTest, EquivalentInsertionOrdersProduceTheSameCanonicalSnapshot) {
-    const auto root_time =
-        std::filesystem::file_time_type{} + std::chrono::seconds{10};
-    const auto directory_time =
-        std::filesystem::file_time_type{} + std::chrono::seconds{20};
-    const auto file_time =
-        std::filesystem::file_time_type{} + std::chrono::seconds{30};
+    constexpr kasumi::TimestampNs root_time = 10'000'000'000LL;
+    constexpr kasumi::TimestampNs directory_time = 20'000'000'000LL;
+    constexpr kasumi::TimestampNs file_time = 30'000'000'000LL;
 
     std::vector<NodeRow> rows{
         make_directory("", root_time),
@@ -277,14 +272,10 @@ TEST(SnapshotTest, FinalizesRootOnlyAndEmptyDirectoriesDeterministically) {
 }
 
 TEST(SnapshotTest, PreservesFileMetadataAndDerivesDirectoryMetadata) {
-    const auto root_time =
-        std::filesystem::file_time_type{} + std::chrono::seconds{101};
-    const auto assets_time =
-        std::filesystem::file_time_type{} + std::chrono::seconds{202};
-    const auto images_time =
-        std::filesystem::file_time_type{} + std::chrono::seconds{303};
-    const auto file_time =
-        std::filesystem::file_time_type{} + std::chrono::seconds{404};
+    constexpr kasumi::TimestampNs root_time = 101'000'000'000LL;
+    constexpr kasumi::TimestampNs assets_time = 202'000'000'000LL;
+    constexpr kasumi::TimestampNs images_time = 303'000'000'000LL;
+    constexpr kasumi::TimestampNs file_time = 404'000'000'000LL;
     const Hash placeholder_hash =
         kasumi::hasher::hash_string("directory placeholder");
     const Hash logo_hash = kasumi::hasher::hash_string("logo contents");

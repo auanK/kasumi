@@ -9,6 +9,7 @@
 #include <fstream>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace kasumi::application::integrity {
@@ -18,6 +19,19 @@ std::array<std::uint8_t, crypto::KEY_SIZE> make_test_key(std::uint8_t seed) {
     std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     key.fill(seed);
     return key;
+}
+
+CheckpointHeader make_checkpoint_header(
+    std::string_view vault_id,
+    std::uint64_t entry_count,
+    std::uint32_t format_version = checkpoint_format_version_1,
+    std::uint32_t audit_semantics_version = checkpoint_audit_semantics_version_1) {
+    CheckpointHeader header{};
+    header.format_version = format_version;
+    header.audit_semantics_version = audit_semantics_version;
+    header.vault_id.assign(vault_id);
+    header.entry_count = entry_count;
+    return header;
 }
 
 class FsckCheckpointTest : public ::testing::Test {
@@ -40,12 +54,7 @@ protected:
 TEST_F(FsckCheckpointTest, RoundTripValidCheckpoint) {
     const auto key = make_test_key(0x42);
     FsckCheckpoint original{
-        .header = {
-            .format_version = checkpoint_format_version_1,
-            .audit_semantics_version = checkpoint_audit_semantics_version_1,
-            .vault_id = std::string(64, 'v'),
-            .entry_count = 2,
-        },
+        .header = make_checkpoint_header(std::string(64, 'v'), 2),
         .entries = {
             {
                 .logical_content_hash = std::string(64, 'a'),
@@ -80,12 +89,7 @@ TEST_F(FsckCheckpointTest, RejectsWrongKey) {
     const auto key_b = make_test_key(0x02);
 
     FsckCheckpoint checkpoint{
-        .header = {
-            .format_version = checkpoint_format_version_1,
-            .audit_semantics_version = checkpoint_audit_semantics_version_1,
-            .vault_id = "test-vault-id",
-            .entry_count = 1,
-        },
+        .header = make_checkpoint_header("test-vault-id", 1),
         .entries = {
             {
                 .logical_content_hash = std::string(64, 'f'),
@@ -107,12 +111,7 @@ TEST_F(FsckCheckpointTest, RejectsWrongKey) {
 TEST_F(FsckCheckpointTest, RejectsBitFlipInHeaderOrCiphertext) {
     const auto key = make_test_key(0x55);
     FsckCheckpoint checkpoint{
-        .header = {
-            .format_version = checkpoint_format_version_1,
-            .audit_semantics_version = checkpoint_audit_semantics_version_1,
-            .vault_id = "test-vault-id-flip",
-            .entry_count = 1,
-        },
+        .header = make_checkpoint_header("test-vault-id-flip", 1),
         .entries = {
             {
                 .logical_content_hash = std::string(64, 'c'),
@@ -139,12 +138,7 @@ TEST_F(FsckCheckpointTest, RejectsBitFlipInHeaderOrCiphertext) {
 TEST_F(FsckCheckpointTest, RejectsTruncatedEnvelope) {
     const auto key = make_test_key(0x77);
     FsckCheckpoint checkpoint{
-        .header = {
-            .format_version = checkpoint_format_version_1,
-            .audit_semantics_version = checkpoint_audit_semantics_version_1,
-            .vault_id = "vault-truncation",
-            .entry_count = 1,
-        },
+        .header = make_checkpoint_header("vault-truncation", 1),
         .entries = {
             {
                 .logical_content_hash = std::string(64, 'd'),
@@ -170,12 +164,7 @@ TEST_F(FsckCheckpointTest, RejectsTruncatedEnvelope) {
 TEST_F(FsckCheckpointTest, RejectsUnknownFormatVersion) {
     const auto key = make_test_key(0x88);
     FsckCheckpoint checkpoint{
-        .header = {
-            .format_version = 999, // Unknown format version
-            .audit_semantics_version = checkpoint_audit_semantics_version_1,
-            .vault_id = "vault-version",
-            .entry_count = 0,
-        },
+        .header = make_checkpoint_header("vault-version", 0, 999),
         .entries = {},
     };
 
@@ -187,12 +176,8 @@ TEST_F(FsckCheckpointTest, RejectsUnknownFormatVersion) {
 TEST_F(FsckCheckpointTest, RejectsUnknownAuditSemanticsVersion) {
     const auto key = make_test_key(0x89);
     FsckCheckpoint checkpoint{
-        .header = {
-            .format_version = checkpoint_format_version_1,
-            .audit_semantics_version = 999, // Unknown audit semantics version
-            .vault_id = "vault-semantics",
-            .entry_count = 0,
-        },
+        .header = make_checkpoint_header(
+            "vault-semantics", 0, checkpoint_format_version_1, 999),
         .entries = {},
     };
 
@@ -203,12 +188,7 @@ TEST_F(FsckCheckpointTest, RejectsUnknownAuditSemanticsVersion) {
 
 TEST_F(FsckCheckpointTest, RejectsDuplicateEntries) {
     FsckCheckpoint checkpoint{
-        .header = {
-            .format_version = checkpoint_format_version_1,
-            .audit_semantics_version = checkpoint_audit_semantics_version_1,
-            .vault_id = "vault-dup",
-            .entry_count = 2,
-        },
+        .header = make_checkpoint_header("vault-dup", 2),
         .entries = {
             {
                 .logical_content_hash = std::string(64, 'a'),
@@ -288,12 +268,7 @@ TEST_F(FsckCheckpointTest, RejectsTrailingGarbage) {
 TEST_F(FsckCheckpointTest, AtomicDurableSaveAndLoad) {
     const auto key = make_test_key(0x33);
     FsckCheckpoint checkpoint{
-        .header = {
-            .format_version = checkpoint_format_version_1,
-            .audit_semantics_version = checkpoint_audit_semantics_version_1,
-            .vault_id = "vault-durable",
-            .entry_count = 1,
-        },
+        .header = make_checkpoint_header("vault-durable", 1),
         .entries = {
             {
                 .logical_content_hash = std::string(64, '7'),

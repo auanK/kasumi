@@ -6,7 +6,10 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <ratio>
 #include <system_error>
+#include <type_traits>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -17,6 +20,50 @@
 
 namespace kasumi::platform::metadata {
 namespace {
+
+template <typename Duration>
+std::optional<std::int64_t>
+duration_to_nanoseconds(Duration duration) noexcept {
+    using Rep = typename Duration::rep;
+    using Factor = std::ratio_divide<typename Duration::period, std::nano>;
+    static_assert(std::is_integral_v<Rep> && std::is_signed_v<Rep>);
+    static_assert(Factor::num > 0 && Factor::den > 0);
+
+    const auto value = static_cast<std::intmax_t>(duration.count());
+    const bool negative = value < 0;
+    const auto magnitude = negative
+                               ? static_cast<std::uintmax_t>(-(value + 1)) + 1U
+                               : static_cast<std::uintmax_t>(value);
+    const auto numerator = static_cast<std::uintmax_t>(Factor::num);
+    const auto denominator = static_cast<std::uintmax_t>(Factor::den);
+    const auto whole = magnitude / denominator;
+    const auto remainder = magnitude % denominator;
+    if (whole > std::numeric_limits<std::uintmax_t>::max() / numerator ||
+        remainder > std::numeric_limits<std::uintmax_t>::max() / numerator) {
+        return std::nullopt;
+    }
+    const auto whole_nanos = whole * numerator;
+    const auto fractional_nanos = (remainder * numerator) / denominator;
+    if (whole_nanos >
+        std::numeric_limits<std::uintmax_t>::max() - fractional_nanos) {
+        return std::nullopt;
+    }
+    const auto nanos = whole_nanos + fractional_nanos;
+    constexpr auto positive_limit =
+        static_cast<std::uintmax_t>(std::numeric_limits<std::int64_t>::max());
+    constexpr auto negative_limit = positive_limit + 1U;
+    if ((!negative && nanos > positive_limit) ||
+        (negative && nanos > negative_limit)) {
+        return std::nullopt;
+    }
+    if (negative) {
+        if (nanos == negative_limit) {
+            return std::numeric_limits<std::int64_t>::lowest();
+        }
+        return -static_cast<std::int64_t>(nanos);
+    }
+    return static_cast<std::int64_t>(nanos);
+}
 
 std::expected<std::filesystem::file_status, std::string>
 read_status(const std::filesystem::path& path) {
@@ -163,6 +210,69 @@ equivalent_file_time(std::filesystem::file_time_type requested,
 #endif
 
 } // namespace
+
+std::optional<std::int64_t>
+unix_nanoseconds(std::filesystem::file_time_type value) noexcept {
+    if (value == std::filesystem::file_time_type{}) {
+        return std::int64_t{0};
+    }
+
+    using Duration = std::filesystem::file_time_type::duration;
+    const auto origin = std::chrono::clock_cast<std::chrono::file_clock>(
+                            std::chrono::system_clock::time_point{})
+                            .time_since_epoch();
+    const auto current_count = value.time_since_epoch().count();
+    const auto origin_count = origin.count();
+    if ((origin_count > 0 &&
+         current_count <
+             std::numeric_limits<typename Duration::rep>::lowest() +
+                 origin_count) ||
+        (origin_count < 0 &&
+         current_count >
+             std::numeric_limits<typename Duration::rep>::max() +
+                 origin_count)) {
+        return std::nullopt;
+    }
+    return duration_to_nanoseconds(Duration{current_count - origin_count});
+}
+
+std::optional<std::filesystem::file_time_type>
+file_time_from_unix_nanoseconds(std::int64_t value) noexcept {
+    if (value == 0) {
+        return std::filesystem::file_time_type{};
+    }
+
+    using Duration = std::filesystem::file_time_type::duration;
+    using Rep = Duration::rep;
+    static_assert(std::is_integral_v<Rep> && std::is_signed_v<Rep>);
+    static_assert(std::ratio_greater_equal_v<typename Duration::period,
+                                             std::nano>);
+
+    const auto delta = std::chrono::duration_cast<Duration>(
+        std::chrono::nanoseconds{value});
+    const auto origin = std::chrono::clock_cast<std::chrono::file_clock>(
+                            std::chrono::system_clock::time_point{})
+                            .time_since_epoch();
+    if ((delta.count() > 0 &&
+         origin.count() > std::numeric_limits<Rep>::max() - delta.count()) ||
+        (delta.count() < 0 &&
+         origin.count() <
+             std::numeric_limits<Rep>::lowest() - delta.count())) {
+        return std::nullopt;
+    }
+    return std::filesystem::file_time_type{
+        Duration{origin.count() + delta.count()}};
+}
+
+bool filesystem_equivalent(std::int64_t left_ns,
+                           std::int64_t right_ns) noexcept {
+    if (left_ns == right_ns) {
+        return true;
+    }
+    const auto left = file_time_from_unix_nanoseconds(left_ns);
+    const auto right = file_time_from_unix_nanoseconds(right_ns);
+    return left && right && *left == *right;
+}
 
 std::expected<void, std::string>
 set_last_write_time(const std::filesystem::path& path,

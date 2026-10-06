@@ -4,6 +4,7 @@
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 
+#include <fstream>
 #include <gtest/gtest.h>
 
 namespace {
@@ -13,6 +14,7 @@ namespace preflight = kasumi::operational::gc_live_preflight;
 namespace smoke = kasumi::operational::remote_copy_smoke;
 namespace transport = kasumi::transport;
 namespace integrity = kasumi::application::integrity;
+namespace target_config = kasumi::operational::provider_target_config;
 
 struct FakeHarness {
     kasumi::test::TempWorkspace workspace;
@@ -51,7 +53,7 @@ struct FakeHarness {
 
     preflight::ChildStorage make_child_storage() {
         return preflight::ChildStorage{
-            .parent = *smoke::parse_remote_parent("kasumi:integration-tests"),
+            .parent = *smoke::parse_remote_parent("remote-a:integration-tests"),
             .child = child_name,
             .storage = make_child_transport(),
         };
@@ -59,7 +61,9 @@ struct FakeHarness {
 
     runner::RunnerOptions make_options() const {
         return runner::RunnerOptions{
-            .remote_parent = "kasumi:integration-tests",
+            .remote_parent = "remote-a:integration-tests",
+            .authorization = {
+                .authorized_parent = "remote-a:integration-tests"},
             .output_path = output_path,
             .local_scratch = scratch_path,
             .execute_live_gc = true,
@@ -71,13 +75,53 @@ struct FakeHarness {
     }
 };
 
+std::filesystem::path write_test_target_config(
+    const kasumi::test::TempWorkspace& workspace,
+    std::string_view id = "gc-test",
+    std::string_view remote = "remote-a",
+    std::string_view parent = "remote-a:integration-tests") {
+    const auto path = kasumi::test::workspace_path(workspace, "targets.toml");
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output << "[[targets]]\nid = \"" << id << "\"\nprovider_id = \"test-provider\"\n"
+           << "remote = \"" << remote << "\"\nauthorized_parent = \""
+           << parent << "\"\n";
+    return path;
+}
+
 // Gate: Parent validation
 TEST(GcLiveRunnerGateTest, RejectsUnauthorizedParentsBeforeRemote) {
-    EXPECT_TRUE(runner::is_authorized_live_parent("kasumi:integration-tests"));
-    for (const auto parent : {"kasumi:", "kasumi:anything-else", "other:integration-tests",
-                              "/tmp/local", "C:/Windows", "archive:test-parent"}) {
-        EXPECT_FALSE(runner::is_authorized_live_parent(parent)) << parent;
+    const target_config::LiveTargetAuthorization authorization{
+        .authorized_parent = "remote-a:integration-tests"};
+    EXPECT_TRUE(target_config::authorized_live_parent(
+        authorization, "remote-a:integration-tests"));
+    for (const auto parent : {"remote-a:integration-tests/child", "remote-a:",
+                              "remote-a:other", "remote-b:integration-tests",
+                              "remote-a:../escape"}) {
+        EXPECT_FALSE(target_config::authorized_live_parent(authorization, parent))
+            << parent;
     }
+}
+
+TEST(GcLiveRunnerGateTest, RefusesUnauthorizedParentBeforeMutation) {
+    FakeHarness harness{"unauthorized-parent"};
+    auto options = harness.make_options();
+    options.remote_parent = "remote-a:other-parent";
+    auto parent = harness.make_parent_transport();
+    auto child = harness.make_child_transport();
+    bool gc_called = false;
+
+    const auto report = runner::run(
+        options, &parent, &child,
+        [&gc_called](const auto&, auto&, auto) -> std::expected<integrity::GarbageCollectResult,
+                                                              integrity::Error> {
+            gc_called = true;
+            return integrity::GarbageCollectResult{};
+        });
+
+    EXPECT_EQ(report.status, "REFUSED");
+    EXPECT_EQ(report.stage_reached, runner::LiveGcStage::Start);
+    EXPECT_FALSE(gc_called);
+    EXPECT_EQ(report.gc.call_count, 0U);
 }
 
 // Dry safety: execute_live_gc flag required
@@ -269,15 +313,15 @@ TEST(GcLiveRunnerHappyPathTest, FullExecutionSucceedsWithRealGcAndPhase3Metrics)
 
     const auto report = runner::run(options, &parent, &child);
 
-    EXPECT_EQ(report.status, "PASS");
+    EXPECT_EQ(report.status, "PASS") << runner::to_json(report).dump(2);
     EXPECT_EQ(report.stage_reached, runner::LiveGcStage::CleanupCompleted);
     EXPECT_EQ(report.gc.called, true);
     EXPECT_EQ(report.gc.call_count, 1U);
     EXPECT_EQ(report.gc.result, "SUCCESS");
     EXPECT_EQ(report.gc.candidate_objects, 1U);
     EXPECT_EQ(report.gc.quarantined_objects, 1U);
-    EXPECT_EQ(report.gc.restored_objects, 0U);
-    EXPECT_EQ(report.gc.purged_objects, 0U);
+    EXPECT_EQ(report.gc.restored_objects, 1U);
+    EXPECT_EQ(report.gc.purged_objects, 1U);
 
     // Validation invariants
     EXPECT_TRUE(report.validation.reachable_preserved);
@@ -288,12 +332,12 @@ TEST(GcLiveRunnerHappyPathTest, FullExecutionSucceedsWithRealGcAndPhase3Metrics)
     EXPECT_EQ(report.validation.unexpected_removed, 0U);
     EXPECT_EQ(report.validation.unexpected_created, 0U);
 
-    // Metrics for 1 candidate
-    EXPECT_EQ(report.metrics.verified_copy_source_physical_hash, 1U);
-    EXPECT_EQ(report.metrics.verified_copy_native_copy, 1U);
-    EXPECT_EQ(report.metrics.verified_copy_native_copy_successes, 1U);
-    EXPECT_EQ(report.metrics.verified_copy_destination_physical_hash, 1U);
-    EXPECT_EQ(report.metrics.verified_copy_native_copy_verifications, 1U);
+    // One fixture restore and one orphan quarantine copy.
+    EXPECT_EQ(report.metrics.verified_copy_source_physical_hash, 2U);
+    EXPECT_EQ(report.metrics.verified_copy_native_copy, 2U);
+    EXPECT_EQ(report.metrics.verified_copy_native_copy_successes, 2U);
+    EXPECT_EQ(report.metrics.verified_copy_destination_physical_hash, 2U);
+    EXPECT_EQ(report.metrics.verified_copy_native_copy_verifications, 2U);
     EXPECT_EQ(report.metrics.gc_candidate_verified_copy, 1U);
     EXPECT_EQ(report.metrics.gc_candidate_metadata_publish, 1U);
     EXPECT_EQ(report.metrics.gc_candidate_pre_remove_barrier_verification, 1U);
@@ -408,9 +452,14 @@ TEST(GcLiveRunnerFailureTest, GcFailurePreservesEvidenceByDefault) {
     EXPECT_EQ(report.gc.called, true);
     EXPECT_EQ(report.gc.call_count, 1U);
     EXPECT_EQ(report.cleanup.result, "preserved");
-    // All objects including owner marker remain untouched
+    // The fixture deliberately hides reachable content before GC to exercise
+    // restore. A failed GC preserves that fixture and its ownership evidence.
     EXPECT_TRUE(harness.child_state->objects.contains("owner.marker"));
-    EXPECT_TRUE(harness.child_state->objects.contains(report.scenario.reachable_identifier));
+    EXPECT_FALSE(harness.child_state->objects.contains(report.scenario.reachable_identifier));
+    for (const auto& item : report.inventory_before.vault_objects) {
+        EXPECT_TRUE(harness.child_state->objects.contains(item.identifier))
+            << item.identifier;
+    }
     EXPECT_TRUE(harness.child_state->objects.contains(report.scenario.candidate_identifier));
 }
 
@@ -484,6 +533,14 @@ TEST(GcLiveRunnerCleanupTest, SuccessfulCleanupRemovesOwnerMarkerLast) {
     auto parent = harness.make_parent_transport();
     auto child = harness.make_child_transport();
 
+    bool empty_directory_cleanup_called = false;
+    options.cleanup_empty_directories = [&]() -> std::expected<void, std::string> {
+        empty_directory_cleanup_called = true;
+        EXPECT_TRUE(harness.child_state->objects.contains("owner.marker"));
+        EXPECT_EQ(harness.child_state->objects.size(), 1U);
+        return {};
+    };
+
     std::vector<std::string> removal_order;
     static std::vector<std::string>* s_order = nullptr;
     s_order = &removal_order;
@@ -499,6 +556,7 @@ TEST(GcLiveRunnerCleanupTest, SuccessfulCleanupRemovesOwnerMarkerLast) {
 
     EXPECT_EQ(report.status, "PASS");
     EXPECT_EQ(report.cleanup.result, "removed");
+    EXPECT_TRUE(empty_directory_cleanup_called);
     ASSERT_FALSE(removal_order.empty());
     // Invariant: owner.marker must be the LAST removed object
     EXPECT_EQ(removal_order.back(), "owner.marker");
@@ -1078,11 +1136,12 @@ TEST(GcLiveRunnerNativeTest, NativeCopyRemainsFunctional) {
     EXPECT_EQ(report.gc.call_count, 1U);
     EXPECT_EQ(report.gc.result, "SUCCESS");
 
-    // Proves native copy was attempted, succeeded, and verified:
-    EXPECT_EQ(report.metrics.verified_copy_native_copy, 1U);
-    EXPECT_EQ(report.metrics.verified_copy_native_copy_successes, 1U);
-    EXPECT_EQ(report.metrics.verified_copy_native_copy_verifications, 1U);
-    EXPECT_EQ(copy_call_count, 1U);
+    // The measured verified copies are fixture seeding and reachable restore;
+    // orphan quarantine uses the batch copy path.
+    EXPECT_EQ(report.metrics.verified_copy_native_copy, 2U);
+    EXPECT_EQ(report.metrics.verified_copy_native_copy_successes, 2U);
+    EXPECT_EQ(report.metrics.verified_copy_native_copy_verifications, 2U);
+    EXPECT_EQ(copy_call_count, 3U);
     EXPECT_EQ(report.cleanup.result, "removed");
 }
 
@@ -1161,9 +1220,12 @@ TEST(GcLiveRunnerPayloadTest, RejectsPayloadExceeding64MiB) {
 
 // CLI Tests
 TEST(GcLiveBenchmarkCliTest, ParsesValidArguments) {
+    auto workspace = kasumi::test::make_temp_workspace("benchmark-cli-valid");
+    const auto config_path = write_test_target_config(workspace);
+    const auto config_text = config_path.string();
     const std::vector<std::string_view> args = {
         "kasumi_gc_live_benchmark",
-        "--remote", "kasumi:integration-tests",
+        "--config", config_text, "--target-id", "gc-test",
         "--output", "test_report.json",
         "--mode", "fallback",
         "--payload-bytes", "8388608",
@@ -1171,7 +1233,8 @@ TEST(GcLiveBenchmarkCliTest, ParsesValidArguments) {
     };
     auto parsed = runner::parse_benchmark_arguments(args);
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(parsed->remote, "kasumi:integration-tests");
+    EXPECT_EQ(parsed->remote, "remote-a:integration-tests");
+    EXPECT_EQ(parsed->authorization.authorized_parent, parsed->remote);
     EXPECT_EQ(parsed->output, std::filesystem::path{"test_report.json"});
     EXPECT_EQ(parsed->mode, runner::CopyMode::ForceFallback);
     EXPECT_EQ(parsed->payload_bytes, 8388608U);
@@ -1179,9 +1242,11 @@ TEST(GcLiveBenchmarkCliTest, ParsesValidArguments) {
 }
 
 TEST(GcLiveBenchmarkCliTest, RejectsMissingExecuteGate) {
+    auto workspace = kasumi::test::make_temp_workspace("benchmark-cli-gate");
+    const auto config_text = write_test_target_config(workspace).string();
     const std::vector<std::string_view> args = {
         "kasumi_gc_live_benchmark",
-        "--remote", "kasumi:integration-tests",
+        "--config", config_text, "--target-id", "gc-test",
         "--output", "test_report.json",
         "--mode", "native",
         "--payload-bytes", "8388608",
@@ -1192,9 +1257,11 @@ TEST(GcLiveBenchmarkCliTest, RejectsMissingExecuteGate) {
 }
 
 TEST(GcLiveBenchmarkCliTest, RejectsZeroPayloadBytes) {
+    auto workspace = kasumi::test::make_temp_workspace("benchmark-cli-zero");
+    const auto config_text = write_test_target_config(workspace).string();
     const std::vector<std::string_view> args = {
         "kasumi_gc_live_benchmark",
-        "--remote", "kasumi:integration-tests",
+        "--config", config_text, "--target-id", "gc-test",
         "--output", "test_report.json",
         "--payload-bytes", "0",
         "--execute-live-benchmark",
@@ -1205,9 +1272,11 @@ TEST(GcLiveBenchmarkCliTest, RejectsZeroPayloadBytes) {
 }
 
 TEST(GcLiveBenchmarkCliTest, RejectsPayloadExceeding64MiB) {
+    auto workspace = kasumi::test::make_temp_workspace("benchmark-cli-limit");
+    const auto config_text = write_test_target_config(workspace).string();
     const std::vector<std::string_view> args = {
         "kasumi_gc_live_benchmark",
-        "--remote", "kasumi:integration-tests",
+        "--config", config_text, "--target-id", "gc-test",
         "--output", "test_report.json",
         "--payload-bytes", "67108865",
         "--execute-live-benchmark",
@@ -1217,38 +1286,43 @@ TEST(GcLiveBenchmarkCliTest, RejectsPayloadExceeding64MiB) {
     EXPECT_NE(parsed.error().find("payload-bytes must be between 1 and 67108864"), std::string::npos);
 }
 
-TEST(GcLiveBenchmarkCliTest, RejectsUnauthorizedRemoteParent) {
+TEST(GcLiveBenchmarkCliTest, RejectsRawRemoteOverride) {
     const std::vector<std::string_view> args = {
         "kasumi_gc_live_benchmark",
-        "--remote", "kasumi:unauthorized-folder",
+        "--remote", "remote-a:unauthorized-folder",
         "--output", "test_report.json",
         "--execute-live-benchmark",
     };
     auto parsed = runner::parse_benchmark_arguments(args);
-    ASSERT_TRUE(parsed.has_value());
-    EXPECT_FALSE(runner::is_authorized_live_parent(parsed->remote));
+    EXPECT_FALSE(parsed.has_value());
 }
 
 // Smoke CLI Tests
 TEST(GcLiveSmokeCliTest, ParsesValidArguments) {
+    auto workspace = kasumi::test::make_temp_workspace("smoke-cli-valid");
+    const auto config_path = write_test_target_config(workspace);
+    const auto config_text = config_path.string();
     const std::vector<std::string_view> args = {
         "kasumi_gc_live_smoke",
-        "--remote", "kasumi:integration-tests",
+        "--config", config_text, "--target-id", "gc-test",
         "--output", "test_report.json",
         "--execute-live-gc",
     };
     auto parsed = runner::parse_smoke_arguments(args);
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(parsed->remote, "kasumi:integration-tests");
+    EXPECT_EQ(parsed->remote, "remote-a:integration-tests");
+    EXPECT_EQ(parsed->authorization.authorized_parent, parsed->remote);
     EXPECT_EQ(parsed->output, std::filesystem::path{"test_report.json"});
     EXPECT_TRUE(parsed->execute_live_gc);
     EXPECT_TRUE(parsed->preserve_evidence_on_failure);
 }
 
 TEST(GcLiveSmokeCliTest, RejectsMissingExecuteGate) {
+    auto workspace = kasumi::test::make_temp_workspace("smoke-cli-gate");
+    const auto config_text = write_test_target_config(workspace).string();
     const std::vector<std::string_view> args = {
         "kasumi_gc_live_smoke",
-        "--remote", "kasumi:integration-tests",
+        "--config", config_text, "--target-id", "gc-test",
         "--output", "test_report.json",
     };
     auto parsed = runner::parse_smoke_arguments(args);
@@ -1256,7 +1330,7 @@ TEST(GcLiveSmokeCliTest, RejectsMissingExecuteGate) {
     EXPECT_NE(parsed.error().find("--execute-live-gc is required"), std::string::npos);
 }
 
-TEST(GcLiveSmokeCliTest, RejectsMissingRemoteOrOutput) {
+TEST(GcLiveSmokeCliTest, RequiresConfiguredTargetBeforeExecution) {
     const std::vector<std::string_view> args = {
         "kasumi_gc_live_smoke",
         "--output", "test_report.json",
@@ -1264,13 +1338,17 @@ TEST(GcLiveSmokeCliTest, RejectsMissingRemoteOrOutput) {
     };
     auto parsed = runner::parse_smoke_arguments(args);
     ASSERT_FALSE(parsed.has_value());
-    EXPECT_NE(parsed.error().find("--remote and --output are required"), std::string::npos);
+    EXPECT_NE(parsed.error().find("--config"), std::string::npos);
 }
 
-TEST(GcLiveCliPathTest, RejectsUnauthorizedRemote) {
-    auto res = runner::prepare_cli_paths("kasumi:unauthorized", "out.json", std::nullopt, "scratch");
+TEST(GcLiveCliPathTest, RejectsParentOutsideSelectedAuthorization) {
+    const target_config::LiveTargetAuthorization authorization{
+        .authorized_parent = "remote-a:integration-tests"};
+    auto res = runner::prepare_cli_paths(
+        authorization, "remote-a:unauthorized", "out.json", std::nullopt,
+        "scratch");
     ASSERT_FALSE(res.has_value());
-    EXPECT_NE(res.error().find("Remote parent must be exactly"), std::string::npos);
+    EXPECT_NE(res.error().find("does not match"), std::string::npos);
 }
 
 TEST(GcLiveCliPathTest, RejectsExistingOutputFile) {
@@ -1278,7 +1356,11 @@ TEST(GcLiveCliPathTest, RejectsExistingOutputFile) {
     auto out = kasumi::test::workspace_path(ws, "existing.json");
     std::ofstream(out) << "data";
 
-    auto res = runner::prepare_cli_paths("kasumi:integration-tests", out, std::nullopt, "scratch");
+    const target_config::LiveTargetAuthorization authorization{
+        .authorized_parent = "remote-a:integration-tests"};
+    auto res = runner::prepare_cli_paths(
+        authorization, authorization.authorized_parent, out, std::nullopt,
+        "scratch");
     ASSERT_FALSE(res.has_value());
     EXPECT_NE(res.error().find("Output must be a new local file"), std::string::npos);
 }
@@ -1287,7 +1369,11 @@ TEST(GcLiveCliPathTest, PreparesValidPathsAndCreatesScratch) {
     kasumi::test::TempWorkspace ws(kasumi::test::make_temp_workspace("cli-path-valid"));
     auto out = kasumi::test::workspace_path(ws, "new_report.json");
 
-    auto res = runner::prepare_cli_paths("kasumi:integration-tests", out, std::nullopt, "test-scratch");
+    const target_config::LiveTargetAuthorization authorization{
+        .authorized_parent = "remote-a:integration-tests"};
+    auto res = runner::prepare_cli_paths(
+        authorization, authorization.authorized_parent, out, std::nullopt,
+        "test-scratch");
     ASSERT_TRUE(res.has_value());
     EXPECT_EQ(res->output_path, std::filesystem::absolute(out));
     EXPECT_TRUE(std::filesystem::is_directory(res->scratch_root));

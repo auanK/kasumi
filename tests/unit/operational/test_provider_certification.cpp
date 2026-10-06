@@ -1,0 +1,417 @@
+#include "provider_certification_support.hpp"
+#include "kasumi/test/history_storage.hpp"
+
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <vector>
+#include <gtest/gtest.h>
+
+namespace {
+
+using namespace kasumi::operational::provider_certification;
+
+kasumi::transport::Result fake_get_wrong_readback(
+    void* context,
+    std::string_view identifier,
+    const std::filesystem::path& destination) {
+    auto result = fake_get(context, identifier, destination);
+    if (!result) {
+        return result;
+    }
+    const std::vector<std::uint8_t> wrong{'X'};
+    std::ofstream output(destination, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char*>(wrong.data()),
+                 static_cast<std::streamsize>(wrong.size()));
+    if (!output.good()) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Io,
+            .message = "injected readback write failure"});
+    }
+    return {};
+}
+
+kasumi::transport::Result ignore_existing_put(
+    void* context,
+    const std::filesystem::path& source,
+    std::string_view identifier) {
+    auto* state = fake_state(context);
+    if (state->objects.contains(std::string{identifier})) {
+        ++state->put_count;
+        return {};
+    }
+    return fake_put(context, source, identifier);
+}
+
+struct TempCertificationFiles {
+    std::filesystem::path source;
+    std::filesystem::path readback;
+
+    ~TempCertificationFiles() {
+        std::error_code error;
+        std::filesystem::remove(source, error);
+        std::filesystem::remove(readback, error);
+    }
+};
+
+TEST(ProviderCertificationEvidenceTest,
+     MissingLikeAuditCannotCertifyFsckCorruption) {
+    EXPECT_FALSE(fsck_corrupt_evidence_passes(FsckCorruptEvidence{
+        .corruption_installed = true,
+        .fsck_failed = true,
+        .error_code = kasumi::application::ErrorCode::FsckFailure,
+        .audit_get_calls = 9,
+        .audit_decrypt_calls = 8,
+    }));
+}
+
+TEST(ProviderCertificationEvidenceTest,
+     RequiresVerifiedInstallationFsckFailureAndCompleteCryptoEntry) {
+    const FsckCorruptEvidence audited{
+        .corruption_installed = true,
+        .fsck_failed = true,
+        .error_code = kasumi::application::ErrorCode::FsckFailure,
+        .audit_get_calls = 9,
+        .audit_decrypt_calls = 9,
+    };
+    EXPECT_TRUE(fsck_corrupt_evidence_passes(audited));
+    EXPECT_FALSE(fsck_corrupt_evidence_passes(FsckCorruptEvidence{
+        .corruption_installed = true,
+        .fsck_failed = true,
+        .error_code = kasumi::application::ErrorCode::FsckFailure,
+    }));
+    auto uninstalled = audited;
+    uninstalled.corruption_installed = false;
+    EXPECT_FALSE(fsck_corrupt_evidence_passes(uninstalled));
+    auto succeeded = audited;
+    succeeded.fsck_failed = false;
+    EXPECT_FALSE(fsck_corrupt_evidence_passes(succeeded));
+    auto wrong_error = audited;
+    wrong_error.error_code = kasumi::application::ErrorCode::RuntimeFailure;
+    EXPECT_FALSE(fsck_corrupt_evidence_passes(wrong_error));
+}
+
+TEST(ProviderCertificationMutationTest,
+     VerifiedUploadReplacesSameSizeObjectWhenBackendSkipsOverwrite) {
+    const auto suffix = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    TempCertificationFiles files{
+        .source = std::filesystem::temp_directory_path() /
+                  ("kasumi-cert-source-" + suffix),
+        .readback = std::filesystem::temp_directory_path() /
+                    ("kasumi-cert-readback-" + suffix),
+    };
+    const std::vector<std::uint8_t> original{'A', 'A', 'A', 'A', 'A'};
+    const std::vector<std::uint8_t> replacement{'B', 'B', 'B', 'B', 'B'};
+    {
+        std::ofstream output(files.source,
+                             std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(replacement.data()),
+                     static_cast<std::streamsize>(replacement.size()));
+        ASSERT_TRUE(output.good());
+    }
+
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    state->objects["object"] = original;
+    storage.storage.put = ignore_existing_put;
+
+    Report report;
+    const auto installed = install_verified_object(
+        report, storage, files.source, "object", files.readback);
+
+    ASSERT_TRUE(installed.has_value())
+        << (installed ? "" : installed.error());
+    EXPECT_EQ(state->objects.at("object"), replacement);
+    EXPECT_EQ(state->remove_count, 1U);
+    EXPECT_EQ(state->put_count, 1U);
+    EXPECT_EQ(state->get_count, 1U);
+    EXPECT_EQ(report.harness_requests.at("remove"), 1U);
+    EXPECT_EQ(report.harness_requests.at("put"), 1U);
+    EXPECT_EQ(report.harness_requests.at("get"), 1U);
+}
+
+TEST(ProviderCertificationMutationTest,
+     VerifiedUploadRejectsSuccessfulGetWithWrongBytes) {
+    const auto suffix = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    TempCertificationFiles files{
+        .source = std::filesystem::temp_directory_path() /
+                  ("kasumi-cert-source-" + suffix),
+        .readback = std::filesystem::temp_directory_path() /
+                    ("kasumi-cert-readback-" + suffix),
+    };
+    const std::vector<std::uint8_t> replacement{'B', 'B', 'B'};
+    {
+        std::ofstream output(files.source,
+                             std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(replacement.data()),
+                     static_cast<std::streamsize>(replacement.size()));
+        ASSERT_TRUE(output.good());
+    }
+
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    storage.storage.get = fake_get_wrong_readback;
+    Report report;
+    const auto installed = install_verified_object(
+        report, storage, files.source, "object", files.readback);
+
+    ASSERT_FALSE(installed.has_value());
+    EXPECT_EQ(installed.error(),
+              "remote replacement bytes do not match the source");
+    EXPECT_EQ(state->remove_count, 1U);
+    EXPECT_EQ(state->put_count, 1U);
+    EXPECT_EQ(state->get_count, 1U);
+}
+
+TEST(ProviderCertificationTargetTest, OwnsUniqueChildAndRejectsEscape) {
+    const auto parent = std::filesystem::temp_directory_path();
+    auto first = create_local_target(parent);
+    auto second = create_local_target(parent);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    EXPECT_NE(first->root, second->root);
+    EXPECT_EQ(first->root.parent_path(), first->authorized_parent);
+
+    EXPECT_FALSE(target_path(*first, "../escape").has_value());
+    EXPECT_FALSE(target_path(*first, first->root / "absolute").has_value());
+    EXPECT_TRUE(target_path(*first, "owned/file").has_value());
+
+    const auto clean_first = cleanup_local_target(*first);
+    ASSERT_TRUE(clean_first.has_value()) << clean_first.error();
+    const auto clean_second = cleanup_local_target(*second);
+    ASSERT_TRUE(clean_second.has_value()) << clean_second.error();
+    EXPECT_FALSE(std::filesystem::exists(first->root));
+}
+
+TEST(ProviderCertificationTargetTest, RefusesForeignOwnershipMarker) {
+    auto target = create_local_target(std::filesystem::temp_directory_path());
+    ASSERT_TRUE(target.has_value());
+    const auto marker = target->root / ".kasumi-certification-owner";
+    {
+        std::ofstream output(marker, std::ios::binary | std::ios::trunc);
+        output << "foreign";
+    }
+    const auto refused = cleanup_local_target(*target);
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_TRUE(std::filesystem::is_directory(target->root));
+    {
+        std::ofstream output(marker, std::ios::binary | std::ios::trunc);
+        output << target->ownership_token;
+    }
+    const auto cleanup = cleanup_local_target(*target);
+    ASSERT_TRUE(cleanup.has_value()) << cleanup.error();
+}
+
+TEST(ProviderCertificationTargetTest, RefusesReparseAndPathReplacement) {
+    auto target = create_local_target(std::filesystem::temp_directory_path());
+    auto outside = create_local_target(std::filesystem::temp_directory_path());
+    ASSERT_TRUE(target.has_value());
+    ASSERT_TRUE(outside.has_value());
+    const auto link = target->root / "outside-link";
+    std::error_code error;
+    std::filesystem::create_directory_symlink(outside->root, link, error);
+    if (error) {
+        const auto cleanup_a = cleanup_local_target(*target);
+        const auto cleanup_b = cleanup_local_target(*outside);
+        EXPECT_TRUE(cleanup_a.has_value());
+        EXPECT_TRUE(cleanup_b.has_value());
+    } else {
+        EXPECT_FALSE(target_path(*target, "outside-link/file").has_value());
+        const auto refused_link = cleanup_local_target(*target);
+        EXPECT_FALSE(refused_link.has_value());
+        std::filesystem::remove(link, error);
+        ASSERT_FALSE(error) << error.message();
+        ASSERT_TRUE(cleanup_local_target(*target).has_value());
+        ASSERT_TRUE(cleanup_local_target(*outside).has_value());
+    }
+
+    auto replaced = create_local_target(std::filesystem::temp_directory_path());
+    ASSERT_TRUE(replaced.has_value());
+    const auto original = replaced->root;
+    const auto parked =
+        original.parent_path() / (original.filename().string() + "-owned");
+    std::filesystem::rename(original, parked);
+    ASSERT_TRUE(std::filesystem::create_directory(original));
+    const auto refused_replacement = cleanup_local_target(*replaced);
+    EXPECT_FALSE(refused_replacement.has_value());
+    std::filesystem::remove(original);
+    std::filesystem::rename(parked, original);
+    ASSERT_TRUE(cleanup_local_target(*replaced).has_value());
+}
+
+TEST(ProviderCertificationReportTest, DerivesCorrectnessAndRetainsEvidence) {
+    Report report;
+    report.cleanup = "CLEANED";
+    report.capabilities.push_back(
+        {.name = "physical_hash", .status = CapabilityStatus::Unsupported});
+    report.scenarios = {
+        {.name = "first",
+         .status = ScenarioStatus::Pass,
+         .requests = {{"get", 2}}},
+        {.name = "gc-lifecycle", .status = ScenarioStatus::NotRun},
+    };
+    report.transport_requests.emplace("rc.http_requests_attempted", 4);
+    report.transport_requests.emplace("RC idempotent read retries", 0);
+    EXPECT_EQ(derive_status(report), "PASS");
+    const auto json = to_json(report);
+    EXPECT_EQ(json["scenarios"][0]["name"], "first");
+    EXPECT_EQ(json["scenarios"][0]["requests"]["get"], 2);
+    EXPECT_EQ(json["transport_requests"]["rc.http_requests_attempted"], 4);
+    EXPECT_EQ(json["transport_requests"]["RC idempotent read retries"], 0);
+
+    report.scenarios[0].status = ScenarioStatus::Fail;
+    EXPECT_EQ(derive_status(report), "FAIL");
+    report.scenarios[0].status = ScenarioStatus::Pass;
+    report.cleanup = "FAILED";
+    EXPECT_EQ(derive_status(report), "FAIL");
+}
+
+TEST(ProviderCertificationMatrixTest,
+     TargetConfigurationDoesNotSelectScenarioRegistry) {
+    const ProviderTarget local{.provider_id = "local-filesystem",
+                               .transport = "Local",
+                               .locator = "D:/fixtures/local-a",
+                               .workspace_root = "D:/fixtures/work-a"};
+    const ProviderTarget s3{.provider_id = "aws-s3",
+                            .transport = "Rclone",
+                            .locator = "s3test:bucket/child",
+                            .workspace_root = "D:/fixtures/work-b"};
+
+    EXPECT_EQ(scenario_registry(local), scenario_registry(s3));
+    EXPECT_EQ(scenario_registry(local).front(), "transport-round-trip");
+    EXPECT_EQ(scenario_registry(local).back(), "cleanup");
+}
+
+TEST(ProviderCertificationMatrixTest,
+     AggregatesCorrectnessAndCapabilitiesIndependently) {
+    Report local{.provider_id = "local-filesystem", .transport = "Local"};
+    local.cleanup = "CLEANED";
+    local.capabilities.push_back(
+        {.name = "physical_hash", .status = CapabilityStatus::Unsupported});
+    local.scenarios.push_back(
+        {.name = "bootstrap-publish", .status = ScenarioStatus::Pass});
+    local.status = derive_status(local);
+
+    Report drive{.provider_id = "google-drive", .transport = "Rclone"};
+    drive.cleanup = "CLEANED";
+    drive.capabilities.push_back(
+        {.name = "physical_hash", .status = CapabilityStatus::Supported});
+    drive.scenarios.push_back(
+        {.name = "bootstrap-publish", .status = ScenarioStatus::Pass});
+    drive.status = derive_status(drive);
+
+    const auto matrix = aggregate_reports({local, drive});
+    ASSERT_EQ(matrix["scenarios"].size(), 1U);
+    EXPECT_EQ(matrix["scenarios"][0]["name"], "bootstrap-publish");
+    EXPECT_EQ(matrix["scenarios"][0]["targets"]["local-filesystem"],
+              "Pass");
+    EXPECT_EQ(matrix["scenarios"][0]["targets"]["google-drive"], "Pass");
+    ASSERT_EQ(matrix["capabilities"].size(), 1U);
+    EXPECT_EQ(matrix["capabilities"][0]["targets"]["local-filesystem"],
+              "Unsupported");
+    EXPECT_EQ(matrix["capabilities"][0]["targets"]["google-drive"],
+              "Supported");
+    EXPECT_EQ(local.status, "PASS");
+    EXPECT_EQ(drive.status, "PASS");
+}
+
+TEST(ProviderCertificationMatrixTest,
+     Phase41ReportsRemainReadableWithNewRowsAbsent) {
+    Report phase41{.provider_id = "google-drive", .transport = "Rclone"};
+    phase41.cleanup = "CLEANED";
+    phase41.scenarios = {
+        {.name = "transport-round-trip", .status = ScenarioStatus::Pass},
+        {.name = "bootstrap-publish", .status = ScenarioStatus::Pass},
+        {.name = "gc-lifecycle", .status = ScenarioStatus::NotRun},
+        {.name = "cleanup", .status = ScenarioStatus::Pass},
+    };
+    phase41.status = derive_status(phase41);
+
+    Report expanded{.provider_id = "local-filesystem", .transport = "Local"};
+    expanded.cleanup = "CLEANED";
+    expanded.scenarios = {
+        {.name = "transport-round-trip", .status = ScenarioStatus::Pass},
+        {.name = "bidirectional-update", .status = ScenarioStatus::Pass},
+        {.name = "logical-delete", .status = ScenarioStatus::Pass},
+        {.name = "two-client-conflict", .status = ScenarioStatus::Pass},
+        {.name = "gc-lifecycle", .status = ScenarioStatus::Pass},
+        {.name = "cleanup", .status = ScenarioStatus::Pass},
+    };
+    expanded.status = derive_status(expanded);
+
+    const auto matrix = aggregate_reports({phase41, expanded});
+    ASSERT_EQ(matrix["status"].get<std::string>(), "PASS");
+    const auto find = [&](std::string_view name) {
+        return std::ranges::find_if(matrix["scenarios"], [&](const auto& row) {
+            return row.at("name").template get<std::string>() == name;
+        });
+    };
+    const auto update = find("bidirectional-update");
+    ASSERT_NE(update, matrix["scenarios"].end());
+    const auto drive_status =
+        update->at("targets").at("google-drive").template get<std::string>();
+    const auto local_status = update->at("targets")
+                                  .at("local-filesystem")
+                                  .template get<std::string>();
+    EXPECT_EQ(drive_status, "NotRun");
+    EXPECT_EQ(local_status, "Pass");
+}
+
+TEST(ProviderCertificationMatrixTest, RegistersCompleteProviderContract) {
+    const ProviderTarget local{.provider_id = "local-filesystem",
+                               .transport = "Local",
+                               .locator = "D:/fixtures/local-a",
+                               .workspace_root = "D:/fixtures/work-a"};
+    EXPECT_EQ(scenario_registry(local),
+              (std::vector<std::string>{
+                  "transport-round-trip",
+                  "bootstrap-publish",
+                  "bootstrap-second-client",
+                  "bidirectional-update",
+                  "no-op",
+                  "logical-delete",
+                  "two-client-conflict",
+                  "partial-missing",
+                  "publication-while-missing",
+                  "restore-pending",
+                  "local-source-repair",
+                  "fsck-healthy",
+                  "fsck-missing",
+                  "fsck-corrupt",
+                  "gc-lifecycle",
+                  "cleanup",
+              }));
+}
+
+TEST(ProviderCertificationTest, LocalReferenceScenariosPass) {
+    auto target = create_local_target(std::filesystem::temp_directory_path());
+    ASSERT_TRUE(target.has_value());
+    auto report = run_local_certification(target->root);
+    EXPECT_EQ(report.scenarios.size(), 16U) << to_json(report).dump(2);
+    for (const auto& scenario : report.scenarios) {
+        if (scenario.name == "cleanup") {
+            continue;
+        }
+        EXPECT_NE(scenario.status, ScenarioStatus::Fail)
+            << scenario.name << ": " << to_json(report).dump(2);
+        EXPECT_NE(scenario.status, ScenarioStatus::Blocked)
+            << scenario.name << ": " << to_json(report).dump(2);
+        EXPECT_NE(scenario.status, ScenarioStatus::NotRun)
+            << scenario.name << ": " << to_json(report).dump(2);
+    }
+    auto cleanup = cleanup_local_target(*target);
+    ASSERT_TRUE(cleanup.has_value()) << cleanup.error();
+    report.cleanup = "CLEANED";
+    auto cleanup_scenario = std::ranges::find(
+        report.scenarios, std::string{"cleanup"}, &Scenario::name);
+    ASSERT_NE(cleanup_scenario, report.scenarios.end());
+    cleanup_scenario->status = ScenarioStatus::Pass;
+    EXPECT_EQ(cleanup_scenario->status, ScenarioStatus::Pass);
+    report.status = derive_status(report);
+    EXPECT_EQ(report.status, "PASS") << to_json(report).dump(2);
+}
+
+} // namespace

@@ -67,10 +67,17 @@ std::expected<Response, Error> run_sync(OperationContext& context);
 
 namespace {
 
-std::filesystem::file_time_type make_file_time(std::chrono::nanoseconds ns) {
-    return std::filesystem::file_time_type{
-        std::chrono::duration_cast<std::filesystem::file_time_type::duration>(
-            ns)};
+kasumi::TimestampNs timestamp_ns(std::chrono::nanoseconds ns) {
+    return ns.count();
+}
+
+kasumi::TimestampNs canonical_mtime(kasumi::TimestampNs value) {
+    return value;
+}
+
+kasumi::TimestampNs
+canonical_mtime(std::filesystem::file_time_type value) {
+    return kasumi::platform::metadata::unix_nanoseconds(value).value();
 }
 
 kasumi::application::history_storage::epoch::SealedEpoch set_test_genesis_epoch(
@@ -1038,7 +1045,7 @@ PruningFixture make_pruning_fixture(
 
     fixture.input = empty_publication_input();
     fixture.input.local_tree.rows.front().mtime =
-        std::filesystem::last_write_time(fixture.local);
+        canonical_mtime(std::filesystem::last_write_time(fixture.local));
     kasumi::finalize_snapshot(fixture.input.local_tree);
     fixture.input.storage.tree = fixture.input.local_tree;
     fixture.input.storage.history_present = true;
@@ -1129,7 +1136,7 @@ PruningFixture make_pruning_fixture(
     fixture.previous_epoch = *previous;
     fixture.previous_policy = remote_policy;
     fixture.input.local_tree.rows.front().mtime =
-        std::filesystem::last_write_time(fixture.local);
+        canonical_mtime(std::filesystem::last_write_time(fixture.local));
     kasumi::finalize_snapshot(fixture.input.local_tree);
     fixture.input.storage.tree = fixture.input.local_tree;
     fixture.input.storage.generation = 5;
@@ -1290,8 +1297,8 @@ TEST(SyncCoordinatorTest,
     auto expected = observed;
     const auto remote_time =
         std::filesystem::file_time_type::clock::now() - std::chrono::hours{1};
-    kasumi::find_row(expected, "")->mtime = remote_time;
-    kasumi::find_row(expected, "empty")->mtime = remote_time;
+    kasumi::find_row(expected, "")->mtime = canonical_mtime(remote_time);
+    kasumi::find_row(expected, "empty")->mtime = canonical_mtime(remote_time);
 
     const auto paths = kasumi::application::sync::metadata_restore_paths(
         record, expected, &observed);
@@ -1776,12 +1783,12 @@ TEST(SyncCoordinatorTest,
     auto input = empty_publication_input();
     const auto hash = kasumi::hasher::hash_string("read-only");
     input.local_tree.rows.front().mtime =
-        std::filesystem::last_write_time(local);
+        canonical_mtime(std::filesystem::last_write_time(local));
     input.local_tree.rows.push_back(
         kasumi::NodeRow{.path = "read-only.txt",
                         .hash = hash,
                         .size = 9,
-                        .mtime = std::filesystem::last_write_time(source),
+                        .mtime = canonical_mtime(std::filesystem::last_write_time(source)),
                         .is_directory = false});
     kasumi::finalize_snapshot(input.local_tree);
     const auto result = kasumi::reconciliation::reconcile(input);
@@ -1893,7 +1900,7 @@ TEST(SyncCoordinatorTest, PruningEpochPersistsMatchingEpochSequence) {
 
     auto input = empty_publication_input();
     input.local_tree.rows.front().mtime =
-        std::filesystem::last_write_time(local);
+        canonical_mtime(std::filesystem::last_write_time(local));
     kasumi::finalize_snapshot(input.local_tree);
     input.storage.tree = input.local_tree;
     input.storage.history_present = true;
@@ -2982,7 +2989,7 @@ TEST(SyncCoordinatorTest, SyncWithoutNewEpochPreservesAcceptedEpochReference) {
     };
     auto input = empty_publication_input();
     input.local_tree.rows.front().mtime =
-        std::filesystem::last_write_time(local);
+        canonical_mtime(std::filesystem::last_write_time(local));
     kasumi::finalize_snapshot(input.local_tree);
     input.storage.tree = input.local_tree;
     input.storage.history_present = true;
@@ -3608,12 +3615,12 @@ TEST(SyncCoordinatorTest, DuplicateDownloadsFetchContentOnce) {
     input.storage.tree.rows.push_back(kasumi::NodeRow{.path = "alpha.txt",
                                                       .hash = content_hash,
                                                       .size = 9,
-                                                      .mtime = source_mtime,
+                                                      .mtime = canonical_mtime(source_mtime),
                                                       .is_directory = false});
     input.storage.tree.rows.push_back(kasumi::NodeRow{.path = "beta.txt",
                                                       .hash = content_hash,
                                                       .size = 9,
-                                                      .mtime = source_mtime,
+                                                      .mtime = canonical_mtime(source_mtime),
                                                       .is_directory = false});
     kasumi::finalize_snapshot(input.storage.tree);
     add_reachable_head(input);
@@ -3786,31 +3793,31 @@ TEST(SyncCoordinatorTest, ConcurrentUntouchedFileMtimeChangeIsNotMasked) {
     auto input = empty_publication_input();
     input.local_tree = kasumi::Snapshot{
         .rows = {kasumi::NodeRow{
-                     .path = "", .mtime = root_mtime, .is_directory = true},
+                     .path = "", .mtime = canonical_mtime(root_mtime), .is_directory = true},
                  kasumi::NodeRow{.path = "tracked.txt",
                                  .hash = old_hash,
                                  .size = 3,
-                                 .mtime = actual_tracked_mtime,
+                                 .mtime = canonical_mtime(actual_tracked_mtime),
                                  .is_directory = false},
                  kasumi::NodeRow{.path = "untouched.txt",
                                  .hash = same_hash,
                                  .size = 4,
-                                 .mtime = actual_untouched_mtime,
+                                 .mtime = canonical_mtime(actual_untouched_mtime),
                                  .is_directory = false}}};
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = input.local_tree;
     input.storage.tree = kasumi::Snapshot{
         .rows = {kasumi::NodeRow{
-                     .path = "", .mtime = root_mtime, .is_directory = true},
+                     .path = "", .mtime = canonical_mtime(root_mtime), .is_directory = true},
                  kasumi::NodeRow{.path = "tracked.txt",
                                  .hash = new_hash,
                                  .size = 3,
-                                 .mtime = actual_tracked_mtime,
+                                 .mtime = canonical_mtime(actual_tracked_mtime),
                                  .is_directory = false},
                  kasumi::NodeRow{.path = "untouched.txt",
                                  .hash = same_hash,
                                  .size = 4,
-                                 .mtime = actual_untouched_mtime,
+                                 .mtime = canonical_mtime(actual_untouched_mtime),
                                  .is_directory = false}}};
     kasumi::finalize_snapshot(input.storage.tree);
     input.storage.object_identifiers.insert(kasumi::hash_hex(new_hash));
@@ -3891,20 +3898,20 @@ TEST(SyncCoordinatorTest,
     auto input = empty_publication_input();
     input.local_tree = kasumi::Snapshot{
         .rows = {kasumi::NodeRow{
-                     .path = "", .mtime = root_mtime, .is_directory = true},
+                     .path = "", .mtime = canonical_mtime(root_mtime), .is_directory = true},
                  kasumi::NodeRow{.path = ".kasumiignore",
                                  .hash = ignore_hash,
                                  .size = 12,
-                                 .mtime = actual_local_mtime,
+                                 .mtime = canonical_mtime(actual_local_mtime),
                                  .is_directory = false}}};
     kasumi::finalize_snapshot(input.local_tree);
     input.storage.tree = kasumi::Snapshot{
         .rows = {kasumi::NodeRow{
-                     .path = "", .mtime = root_mtime, .is_directory = true},
+                     .path = "", .mtime = canonical_mtime(root_mtime), .is_directory = true},
                  kasumi::NodeRow{.path = ".kasumiignore",
                                  .hash = ignore_hash,
                                  .size = 12,
-                                 .mtime = remote_mtime,
+                                 .mtime = canonical_mtime(remote_mtime),
                                  .is_directory = false}}};
     kasumi::finalize_snapshot(input.storage.tree);
     input.base_tree = input.storage.tree;
@@ -3973,22 +3980,22 @@ TEST(SyncCoordinatorTest, ConcurrentUntouchedDirectoryMtimeChangeIsNotMasked) {
     auto input = empty_publication_input();
     input.local_tree = kasumi::Snapshot{
         .rows = {kasumi::NodeRow{
-                     .path = "", .mtime = root_mtime, .is_directory = true},
+                     .path = "", .mtime = canonical_mtime(root_mtime), .is_directory = true},
                  kasumi::NodeRow{.path = "modified",
-                                 .mtime = actual_modified_mtime,
+                                 .mtime = canonical_mtime(actual_modified_mtime),
                                  .is_directory = true},
                  kasumi::NodeRow{.path = "modified/tracked.txt",
                                  .hash = old_hash,
                                  .size = 3,
-                                 .mtime = actual_tracked_mtime,
+                                 .mtime = canonical_mtime(actual_tracked_mtime),
                                  .is_directory = false},
                  kasumi::NodeRow{.path = "untouched",
-                                 .mtime = actual_untouched_mtime,
+                                 .mtime = canonical_mtime(actual_untouched_mtime),
                                  .is_directory = true},
                  kasumi::NodeRow{.path = "untouched/other.txt",
                                  .hash = same_hash,
                                  .size = 4,
-                                 .mtime = actual_other_mtime,
+                                 .mtime = canonical_mtime(actual_other_mtime),
                                  .is_directory = false}}};
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = input.local_tree;
@@ -4059,24 +4066,24 @@ TEST(SyncCoordinatorTest, AffectedParentMetadataIsRestoredAfterDownload) {
     auto input = empty_publication_input();
     input.local_tree =
         kasumi::Snapshot{.rows = {kasumi::NodeRow{.path = "",
-                                                  .mtime = actual_root_mtime,
+                                                  .mtime = canonical_mtime(actual_root_mtime),
                                                   .is_directory = true},
                                   kasumi::NodeRow{.path = "docs",
-                                                  .mtime = actual_docs_mtime,
+                                                  .mtime = canonical_mtime(actual_docs_mtime),
                                                   .is_directory = true}}};
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = input.local_tree;
     input.storage.tree =
         kasumi::Snapshot{.rows = {kasumi::NodeRow{.path = "",
-                                                  .mtime = actual_root_mtime,
+                                                  .mtime = canonical_mtime(actual_root_mtime),
                                                   .is_directory = true},
                                   kasumi::NodeRow{.path = "docs",
-                                                  .mtime = actual_docs_mtime,
+                                                  .mtime = canonical_mtime(actual_docs_mtime),
                                                   .is_directory = true},
                                   kasumi::NodeRow{.path = "docs/alpha.txt",
                                                   .hash = hash,
                                                   .size = 5,
-                                                  .mtime = file_mtime,
+                                                  .mtime = canonical_mtime(file_mtime),
                                                   .is_directory = false}}};
     kasumi::finalize_snapshot(input.storage.tree);
     input.storage.object_identifiers.insert(kasumi::hash_hex(hash));
@@ -4246,14 +4253,17 @@ TEST(ReobservationTest, NormalizesLogicalHeadsAndReachableCommitIds) {
 TEST(ReobservationTest, IgnoresDirectoryMetadataButDetectsFileMetadata) {
     auto directory_left = empty_publication_input();
     auto directory_right = directory_left;
-    directory_right.local_tree.rows.front().mtime += std::chrono::seconds{1};
+    directory_right.local_tree.rows.front().mtime +=
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::seconds{1})
+            .count();
     EXPECT_TRUE(
         kasumi::application::sync::coordinator::reobservation::same_observation(
             directory_left, directory_right));
 
     directory_right.local_tree.rows.push_back(
         kasumi::NodeRow{.path = "file.txt",
-                        .mtime = std::filesystem::file_time_type::clock::now(),
+                        .mtime = canonical_mtime(std::filesystem::file_time_type::clock::now()),
                         .is_directory = false});
     kasumi::finalize_snapshot(directory_right.local_tree);
     EXPECT_FALSE(
@@ -4642,9 +4652,7 @@ TEST(ReobservationTest,
     const auto* prepared_missing =
         kasumi::find_row(prepared->commit.tree, "missing.txt");
     ASSERT_NE(prepared_missing, nullptr);
-    EXPECT_EQ(prepared_missing->mtime,
-              std::filesystem::file_time_type{});
-    EXPECT_EQ(prepared_missing->mtime.time_since_epoch().count(), 0);
+    EXPECT_EQ(prepared_missing->mtime, 0);
     auto base = kasumi::transport::open_transport(storage_path.string());
     ASSERT_TRUE(base.has_value());
     ASSERT_TRUE(kasumi::transport::initialize(*base));
@@ -5159,9 +5167,9 @@ TEST(SyncCoordinatorTest, StateOnlyPlanRestoresObservedRemoteRootMtime) {
             std::chrono::hours{1});
 
     auto input = empty_publication_input();
-    input.local_tree.rows.front().mtime = local_mtime;
+    input.local_tree.rows.front().mtime = canonical_mtime(local_mtime);
     input.storage.tree = input.local_tree;
-    input.storage.tree.rows.front().mtime = remote_mtime;
+    input.storage.tree.rows.front().mtime = canonical_mtime(remote_mtime);
     add_reachable_head(input);
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
@@ -5200,9 +5208,9 @@ TEST(SyncCoordinatorTest,
     ASSERT_FALSE(error);
 
     auto input = empty_publication_input();
-    input.local_tree.rows.front().mtime = local_mtime;
+    input.local_tree.rows.front().mtime = canonical_mtime(local_mtime);
     input.storage.tree = input.local_tree;
-    input.storage.tree.rows.front().mtime = local_mtime - std::chrono::hours{1};
+    input.storage.tree.rows.front().mtime = canonical_mtime(local_mtime - std::chrono::hours{1});
     add_reachable_head(input);
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
@@ -5255,12 +5263,12 @@ TEST(SyncCoordinatorTest, LocalOnlyDatabaseFailureRollsBackAppliedDownload) {
         std::chrono::time_point_cast<std::chrono::seconds>(
             std::filesystem::file_time_type::clock::now() -
             std::chrono::hours{1});
-    input.local_tree.rows.front().mtime = directory_mtime;
+    input.local_tree.rows.front().mtime = canonical_mtime(directory_mtime);
     input.storage.history_present = true;
     input.storage.logical_heads = {std::string(64, 'a')};
     input.storage.tree = input.local_tree;
     input.storage.tree.rows.push_back(kasumi::NodeRow{
-        .path = "remote-dir", .mtime = directory_mtime, .is_directory = true});
+        .path = "remote-dir", .mtime = canonical_mtime(directory_mtime), .is_directory = true});
     kasumi::finalize_snapshot(input.storage.tree);
     input.base_tree = input.local_tree;
     input.storage.reachable_commits = {kasumi::history::LoadedCommit{
@@ -5347,16 +5355,16 @@ TEST(SyncCoordinatorTest,
                 std::chrono::hours{3});
         kasumi::Snapshot local_tree{
             .rows = {kasumi::NodeRow{
-                .path = "", .mtime = directory_mtime, .is_directory = true}}};
+                .path = "", .mtime = canonical_mtime(directory_mtime), .is_directory = true}}};
         if (originally_exists) {
             local_tree.rows.push_back(kasumi::NodeRow{.path = "remote",
-                                                      .mtime = directory_mtime,
+                                                      .mtime = canonical_mtime(directory_mtime),
                                                       .is_directory = true});
             local_tree.rows.push_back(
                 kasumi::NodeRow{.path = "remote/alpha.txt",
                                 .hash = kasumi::hasher::hash_string("old"),
                                 .size = 3,
-                                .mtime = old_mtime,
+                                .mtime = canonical_mtime(old_mtime),
                                 .is_directory = false});
         }
         kasumi::finalize_snapshot(local_tree);
@@ -5364,14 +5372,14 @@ TEST(SyncCoordinatorTest,
         kasumi::Snapshot remote_tree{
             .rows = {
                 kasumi::NodeRow{
-                    .path = "", .mtime = directory_mtime, .is_directory = true},
+                    .path = "", .mtime = canonical_mtime(directory_mtime), .is_directory = true},
                 kasumi::NodeRow{.path = "remote",
-                                .mtime = directory_mtime,
+                                .mtime = canonical_mtime(directory_mtime),
                                 .is_directory = true},
                 kasumi::NodeRow{.path = "remote/alpha.txt",
                                 .hash = kasumi::hasher::hash_string("remote"),
                                 .size = 6,
-                                .mtime = remote_mtime,
+                                .mtime = canonical_mtime(remote_mtime),
                                 .is_directory = false}}};
         kasumi::finalize_snapshot(remote_tree);
 
@@ -5538,10 +5546,10 @@ TEST(SyncCoordinatorTest, AmbiguousContentPutRollsForwardFromVerifiedEffect) {
         .path = "alpha.txt",
         .hash = kasumi::hasher::hash_string("alpha"),
         .size = 5,
-        .mtime = std::filesystem::last_write_time(local / "alpha.txt"),
+        .mtime = canonical_mtime(std::filesystem::last_write_time(local / "alpha.txt")),
         .is_directory = false});
     input.local_tree.rows.front().mtime =
-        std::filesystem::last_write_time(local);
+        canonical_mtime(std::filesystem::last_write_time(local));
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = input.storage.tree;
     const auto result = kasumi::reconciliation::reconcile(input);
@@ -5579,10 +5587,10 @@ TEST(SyncCoordinatorTest, UnknownContentPutEffectPreservesJournalForRecovery) {
         .path = "alpha.txt",
         .hash = kasumi::hasher::hash_string("alpha"),
         .size = 5,
-        .mtime = std::filesystem::last_write_time(local / "alpha.txt"),
+        .mtime = canonical_mtime(std::filesystem::last_write_time(local / "alpha.txt")),
         .is_directory = false});
     input.local_tree.rows.front().mtime =
-        std::filesystem::last_write_time(local);
+        canonical_mtime(std::filesystem::last_write_time(local));
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = input.storage.tree;
     const auto result = kasumi::reconciliation::reconcile(input);
@@ -5802,9 +5810,9 @@ TEST(ReconciliationTest, LocalUploadChangesSharedTree) {
 TEST(ReconciliationTest,
      UnrelatedUploadCanonicalizesEquivalentFileToObservedLocalMtime) {
     const auto remote_mtime =
-        make_file_time(std::chrono::nanoseconds{1788563567000000000});
+        timestamp_ns(std::chrono::nanoseconds{1788563567000000000});
     const auto local_mtime =
-        make_file_time(std::chrono::nanoseconds{1788563567915178000});
+        timestamp_ns(std::chrono::nanoseconds{1788563567915178000});
     const auto same_hash = kasumi::hasher::hash_string("same");
 
     auto input = empty_publication_input();
@@ -5814,17 +5822,17 @@ TEST(ReconciliationTest,
     input.storage.tree.rows.push_back(kasumi::NodeRow{.path = "A.txt",
                                                       .hash = same_hash,
                                                       .size = 4,
-                                                      .mtime = remote_mtime,
+                                                      .mtime = canonical_mtime(remote_mtime),
                                                       .is_directory = false});
     kasumi::finalize_snapshot(input.storage.tree);
     input.base_tree = input.storage.tree;
     input.local_tree = input.storage.tree;
-    kasumi::find_row(input.local_tree, "A.txt")->mtime = local_mtime;
+    kasumi::find_row(input.local_tree, "A.txt")->mtime = canonical_mtime(local_mtime);
     input.local_tree.rows.push_back(
         kasumi::NodeRow{.path = "B.txt",
                         .hash = kasumi::hasher::hash_string("new"),
                         .size = 3,
-                        .mtime = local_mtime,
+                        .mtime = canonical_mtime(local_mtime),
                         .is_directory = false});
     kasumi::finalize_snapshot(input.local_tree);
 
@@ -5841,11 +5849,11 @@ TEST(ReconciliationTest,
     ASSERT_NE(candidate_a, nullptr);
     EXPECT_EQ(candidate_a->hash, same_hash);
     EXPECT_EQ(candidate_a->size, 4U);
-    EXPECT_EQ(candidate_a->mtime, local_mtime);
+    EXPECT_EQ(candidate_a->mtime, canonical_mtime(local_mtime));
 
     auto remote_metadata_change = input;
     kasumi::find_row(remote_metadata_change.base_tree, "A.txt")->mtime =
-        local_mtime;
+        canonical_mtime(local_mtime);
     const auto remote_result =
         kasumi::reconciliation::reconcile(remote_metadata_change);
     ASSERT_TRUE(remote_result.has_value()) << remote_result.error().detail;
@@ -6098,7 +6106,7 @@ TEST(ReconciliationTest, NewRemoteDirectoryPreservesLocalMtime) {
     input.storage.tree = input.local_tree;
     input.base_tree = input.local_tree;
     input.local_tree.rows.push_back(kasumi::NodeRow{
-        .path = "docs", .mtime = directory_mtime, .is_directory = true});
+        .path = "docs", .mtime = canonical_mtime(directory_mtime), .is_directory = true});
     kasumi::finalize_snapshot(input.local_tree);
 
     const auto result = kasumi::reconciliation::reconcile(input);
@@ -6107,30 +6115,30 @@ TEST(ReconciliationTest, NewRemoteDirectoryPreservesLocalMtime) {
         kasumi::find_row(result->candidate_shared_tree, "docs");
     ASSERT_NE(candidate, nullptr);
     EXPECT_TRUE(candidate->is_directory);
-    EXPECT_EQ(candidate->mtime, directory_mtime);
+    EXPECT_EQ(candidate->mtime, canonical_mtime(directory_mtime));
     EXPECT_TRUE(result->shared_tree_changed);
     EXPECT_TRUE(result->requires_publication);
 }
 
 TEST(ReconciliationTest, ExistingAncestorsUseLocalMetadata) {
     auto input = empty_publication_input();
-    const auto root_mtime = make_file_time(std::chrono::nanoseconds{101});
+    const auto root_mtime = timestamp_ns(std::chrono::nanoseconds{101});
     const auto storage_directory_mtime =
-        make_file_time(std::chrono::nanoseconds{102});
+        timestamp_ns(std::chrono::nanoseconds{102});
     const auto local_directory_mtime =
-        make_file_time(std::chrono::nanoseconds{202});
+        timestamp_ns(std::chrono::nanoseconds{202});
     input.storage.history_present = true;
     input.storage.logical_heads = {std::string(64, 'a')};
     input.storage.tree = input.local_tree;
     input.storage.tree.rows.push_back(
         kasumi::NodeRow{.path = "docs",
-                        .mtime = storage_directory_mtime,
+                        .mtime = canonical_mtime(storage_directory_mtime),
                         .is_directory = true});
     kasumi::finalize_snapshot(input.storage.tree);
     input.base_tree = input.storage.tree;
     input.local_tree = input.storage.tree;
-    input.local_tree.rows.front().mtime = root_mtime;
-    kasumi::find_row(input.local_tree, "docs")->mtime = local_directory_mtime;
+    input.local_tree.rows.front().mtime = canonical_mtime(root_mtime);
+    kasumi::find_row(input.local_tree, "docs")->mtime = canonical_mtime(local_directory_mtime);
     input.local_tree.rows.push_back(
         kasumi::NodeRow{.path = "docs/new.txt",
                         .hash = kasumi::hasher::hash_string("new"),
@@ -6152,8 +6160,8 @@ TEST(ReconciliationTest, ExistingAncestorsUseLocalMetadata) {
 
 TEST(ReconciliationTest, DeletedAncestorsUseSurvivingLocalMetadata) {
     auto input = empty_publication_input();
-    const auto root_mtime = make_file_time(std::chrono::nanoseconds{301});
-    const auto directory_mtime = make_file_time(std::chrono::nanoseconds{302});
+    const auto root_mtime = timestamp_ns(std::chrono::nanoseconds{301});
+    const auto directory_mtime = timestamp_ns(std::chrono::nanoseconds{302});
     input.storage.history_present = true;
     input.storage.logical_heads = {std::string(64, 'a')};
     input.storage.tree = input.local_tree;
@@ -6168,9 +6176,9 @@ TEST(ReconciliationTest, DeletedAncestorsUseSurvivingLocalMetadata) {
     input.base_tree = input.storage.tree;
     input.local_tree = kasumi::Snapshot{
         .rows = {kasumi::NodeRow{
-                     .path = "", .mtime = root_mtime, .is_directory = true},
+                     .path = "", .mtime = canonical_mtime(root_mtime), .is_directory = true},
                  kasumi::NodeRow{.path = "docs",
-                                 .mtime = directory_mtime,
+                                 .mtime = canonical_mtime(directory_mtime),
                                  .is_directory = true}}};
     kasumi::finalize_snapshot(input.local_tree);
 
@@ -6179,7 +6187,7 @@ TEST(ReconciliationTest, DeletedAncestorsUseSurvivingLocalMetadata) {
     EXPECT_EQ(kasumi::find_row(result->candidate_shared_tree, "")->mtime,
               root_mtime);
     EXPECT_EQ(kasumi::find_row(result->candidate_shared_tree, "docs")->mtime,
-              directory_mtime);
+              canonical_mtime(directory_mtime));
     EXPECT_EQ(kasumi::find_row(result->candidate_shared_tree, "docs/alpha.txt"),
               nullptr);
     EXPECT_TRUE(result->requires_publication);
@@ -6298,7 +6306,7 @@ TEST(ReconciliationTest, RepairDoesNotChangeDirectoryMetadata) {
     input.storage.logical_heads = {std::string(64, 'a')};
     input.storage.tree = input.local_tree;
     input.storage.tree.rows.push_back(kasumi::NodeRow{
-        .path = "docs", .mtime = directory_mtime, .is_directory = true});
+        .path = "docs", .mtime = canonical_mtime(directory_mtime), .is_directory = true});
     input.storage.tree.rows.push_back(
         kasumi::NodeRow{.path = "docs/alpha.txt",
                         .hash = kasumi::hasher::hash_string("alpha"),
@@ -6314,17 +6322,17 @@ TEST(ReconciliationTest, RepairDoesNotChangeDirectoryMetadata) {
     EXPECT_TRUE(result->requires_storage_repair);
     EXPECT_FALSE(result->shared_tree_changed);
     EXPECT_EQ(kasumi::find_row(result->candidate_shared_tree, "docs")->mtime,
-              directory_mtime);
+              canonical_mtime(directory_mtime));
 }
 
 TEST(ReconciliationTest, PendingReferencesUseTrustedAncestorMetadata) {
-    const auto root_mtime = make_file_time(std::chrono::nanoseconds{401});
-    const auto directory_mtime = make_file_time(std::chrono::nanoseconds{402});
+    const auto root_mtime = timestamp_ns(std::chrono::nanoseconds{401});
+    const auto directory_mtime = timestamp_ns(std::chrono::nanoseconds{402});
     kasumi::Snapshot local_tree{
         .rows = {kasumi::NodeRow{
-                     .path = "", .mtime = root_mtime, .is_directory = true},
+                     .path = "", .mtime = canonical_mtime(root_mtime), .is_directory = true},
                  kasumi::NodeRow{.path = "docs",
-                                 .mtime = directory_mtime,
+                                 .mtime = canonical_mtime(directory_mtime),
                                  .is_directory = true}}};
     kasumi::finalize_snapshot(local_tree);
     const auto candidate = local_tree;
@@ -6372,17 +6380,17 @@ TEST(ReconciliationTest,
                              kasumi::NodeRow{.path = "FooBar",
                                              .hash = base_foobar_hash,
                                              .size = 11,
-                                             .mtime = remote_time,
+                                             .mtime = canonical_mtime(remote_time),
                                              .is_directory = false},
                              kasumi::NodeRow{.path = "file.txt",
                                              .hash = base_file_hash,
                                              .size = 9,
-                                             .mtime = remote_time,
+                                             .mtime = canonical_mtime(remote_time),
                                              .is_directory = false},
                              kasumi::NodeRow{.path = "foo",
                                              .hash = base_foo_hash,
                                              .size = 8,
-                                             .mtime = remote_time,
+                                             .mtime = canonical_mtime(remote_time),
                                              .is_directory = false},
                          }};
     kasumi::finalize_snapshot(input.base_tree);
@@ -6393,17 +6401,17 @@ TEST(ReconciliationTest,
                              kasumi::NodeRow{.path = "FooBar",
                                              .hash = remote_foobar_hash,
                                              .size = 13,
-                                             .mtime = remote_time,
+                                             .mtime = canonical_mtime(remote_time),
                                              .is_directory = false},
                              kasumi::NodeRow{.path = "file.txt",
                                              .hash = remote_file_hash,
                                              .size = 11,
-                                             .mtime = remote_time,
+                                             .mtime = canonical_mtime(remote_time),
                                              .is_directory = false},
                              kasumi::NodeRow{.path = "foo",
                                              .hash = remote_foo_hash,
                                              .size = 10,
-                                             .mtime = remote_time,
+                                             .mtime = canonical_mtime(remote_time),
                                              .is_directory = false},
                          }};
     kasumi::finalize_snapshot(input.storage.tree);
@@ -6423,22 +6431,22 @@ TEST(ReconciliationTest,
             kasumi::NodeRow{.path = "FILE.txt.kasumiconflict_remote",
                             .hash = dummy_hash,
                             .size = 5,
-                            .mtime = now,
+                            .mtime = canonical_mtime(now),
                             .is_directory = false},
             kasumi::NodeRow{.path = "FooBar",
                             .hash = local_foobar_hash,
                             .size = 12,
-                            .mtime = local_time,
+                            .mtime = canonical_mtime(local_time),
                             .is_directory = false},
             kasumi::NodeRow{.path = "file.txt",
                             .hash = local_file_hash,
                             .size = 10,
-                            .mtime = local_time,
+                            .mtime = canonical_mtime(local_time),
                             .is_directory = false},
             kasumi::NodeRow{.path = "foo",
                             .hash = local_foo_hash,
                             .size = 9,
-                            .mtime = local_time,
+                            .mtime = canonical_mtime(local_time),
                             .is_directory = false},
         }};
     kasumi::finalize_snapshot(input.local_tree);
@@ -6516,7 +6524,7 @@ TEST(ReconciliationTest, ConflictReservationAvoidsUnicodeCaseCollisions) {
                              kasumi::NodeRow{.path = "ä.txt",
                                              .hash = base_hash,
                                              .size = 4,
-                                             .mtime = remote_time,
+                                             .mtime = canonical_mtime(remote_time),
                                              .is_directory = false},
                          }};
     kasumi::finalize_snapshot(input.base_tree);
@@ -6527,7 +6535,7 @@ TEST(ReconciliationTest, ConflictReservationAvoidsUnicodeCaseCollisions) {
                              kasumi::NodeRow{.path = "ä.txt",
                                              .hash = remote_hash,
                                              .size = 6,
-                                             .mtime = remote_time,
+                                             .mtime = canonical_mtime(remote_time),
                                              .is_directory = false},
                          }};
     kasumi::finalize_snapshot(input.storage.tree);
@@ -6538,12 +6546,12 @@ TEST(ReconciliationTest, ConflictReservationAvoidsUnicodeCaseCollisions) {
             kasumi::NodeRow{.path = "Ä.txt.kasumiconflict_remote",
                             .hash = dummy_hash,
                             .size = 5,
-                            .mtime = now,
+                            .mtime = canonical_mtime(now),
                             .is_directory = false},
             kasumi::NodeRow{.path = "ä.txt",
                             .hash = local_hash,
                             .size = 5,
-                            .mtime = local_time,
+                            .mtime = canonical_mtime(local_time),
                             .is_directory = false},
         }};
     kasumi::finalize_snapshot(input.local_tree);
@@ -6581,7 +6589,7 @@ TEST(ReconciliationTest, UnicodeLocalConflictReservationUpdatesRelatedUpload) {
     input.base_tree.rows.push_back({.path = logical_path,
                                     .hash = kasumi::hasher::hash_string("base"),
                                     .size = 4,
-                                    .mtime = now});
+                                    .mtime = canonical_mtime(now)});
     kasumi::finalize_snapshot(input.base_tree);
     input.local_tree = input.base_tree;
     input.local_tree.rows.back().hash = local_hash;
@@ -6590,12 +6598,12 @@ TEST(ReconciliationTest, UnicodeLocalConflictReservationUpdatesRelatedUpload) {
         {.path = reserved_path,
          .hash = kasumi::hasher::hash_string("reserved"),
          .size = 8,
-         .mtime = now});
+         .mtime = canonical_mtime(now)});
     kasumi::finalize_snapshot(input.local_tree);
     input.storage.tree = input.base_tree;
     input.storage.tree.rows.back().hash = kasumi::hasher::hash_string("remote");
     input.storage.tree.rows.back().size = 6;
-    input.storage.tree.rows.back().mtime = now + std::chrono::hours{1};
+    input.storage.tree.rows.back().mtime = canonical_mtime(now + std::chrono::hours{1});
     kasumi::finalize_snapshot(input.storage.tree);
 
     const auto result = kasumi::reconciliation::reconcile(input);
@@ -6781,7 +6789,7 @@ TEST(ReconciliationTest, LocalNewerModifyModifyPreservesRemoteInSharedTree) {
                      kasumi::NodeRow{.path = "file.txt",
                                      .hash = kasumi::hasher::hash_string(content),
                                      .size = content.size(),
-                                     .mtime = mtime,
+                                     .mtime = canonical_mtime(mtime),
                                      .is_directory = false}}};
         kasumi::finalize_snapshot(tree);
         return tree;
@@ -6893,7 +6901,7 @@ TEST(ReconciliationTest,
                  kasumi::NodeRow{.path = "file.txt",
                                  .hash = base_hash,
                                  .size = 4,
-                                 .mtime = t1,
+                                 .mtime = canonical_mtime(t1),
                                  .is_directory = false}}};
     kasumi::finalize_snapshot(base_tree);
 
@@ -6902,7 +6910,7 @@ TEST(ReconciliationTest,
                  kasumi::NodeRow{.path = "file.txt",
                                  .hash = remote_hash,
                                  .size = 6,
-                                 .mtime = t1,
+                                 .mtime = canonical_mtime(t1),
                                  .is_directory = false}}};
     kasumi::finalize_snapshot(storage_tree);
 
@@ -6911,12 +6919,12 @@ TEST(ReconciliationTest,
                  kasumi::NodeRow{.path = "file.txt",
                                  .hash = local_hash,
                                  .size = 5,
-                                 .mtime = t2,
+                                 .mtime = canonical_mtime(t2),
                                  .is_directory = false},
                  kasumi::NodeRow{.path = "file.txt.kasumiconflict_remote",
                                  .hash = existing_hash,
                                  .size = 12,
-                                 .mtime = t0,
+                                 .mtime = canonical_mtime(t0),
                                  .is_directory = false}}};
     kasumi::finalize_snapshot(local_tree);
 
@@ -6948,7 +6956,7 @@ TEST(ReconciliationTest,
     ASSERT_NE(numbered_row, nullptr);
     EXPECT_EQ(numbered_row->hash, remote_hash);
     EXPECT_EQ(numbered_row->size, 6U);
-    EXPECT_EQ(numbered_row->mtime, t1);
+    EXPECT_EQ(numbered_row->mtime, canonical_mtime(t1));
 }
 void verify_candidate_tree_preserves_file_and_directory(
     const kasumi::Snapshot& tree,
@@ -7030,11 +7038,11 @@ TEST(ReconciliationTest,
 
     const auto make_file_tree = [&](std::filesystem::file_time_type mtime) {
         kasumi::Snapshot tree{
-            .rows = {kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true},
+            .rows = {kasumi::NodeRow{.path = "", .mtime = canonical_mtime(t1), .is_directory = true},
                      kasumi::NodeRow{.path = "node",
                                      .hash = file_hash,
                                      .size = 12,
-                                     .mtime = mtime,
+                                     .mtime = canonical_mtime(mtime),
                                      .is_directory = false}}};
         kasumi::finalize_snapshot(tree);
         return tree;
@@ -7043,27 +7051,27 @@ TEST(ReconciliationTest,
     const auto make_dir_tree = [&](std::filesystem::file_time_type mtime) {
         kasumi::Snapshot tree{
             .rows = {
-                kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true},
-                kasumi::NodeRow{.path = "node", .mtime = mtime, .is_directory = true},
+                kasumi::NodeRow{.path = "", .mtime = canonical_mtime(t1), .is_directory = true},
+                kasumi::NodeRow{.path = "node", .mtime = canonical_mtime(mtime), .is_directory = true},
                 kasumi::NodeRow{.path = "node/child.txt",
                                 .hash = child_hash,
                                 .size = 13,
-                                .mtime = mtime,
+                                .mtime = canonical_mtime(mtime),
                                 .is_directory = false},
                 kasumi::NodeRow{.path = "node/nested",
-                                .mtime = mtime,
+                                .mtime = canonical_mtime(mtime),
                                 .is_directory = true},
                 kasumi::NodeRow{.path = "node/nested/deep.txt",
                                 .hash = deep_hash,
                                 .size = 12,
-                                .mtime = mtime,
+                                .mtime = canonical_mtime(mtime),
                                 .is_directory = false}}};
         kasumi::finalize_snapshot(tree);
         return tree;
     };
 
     auto base_tree = kasumi::Snapshot{
-        .rows = {kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true}}};
+        .rows = {kasumi::NodeRow{.path = "", .mtime = canonical_mtime(t1), .is_directory = true}}};
     kasumi::finalize_snapshot(base_tree);
 
     // Subcase A1: Local directory mtime <= Remote file mtime (Local T1, Remote T2)
@@ -7121,11 +7129,11 @@ TEST(ReconciliationTest,
 
     const auto make_file_tree = [&](std::filesystem::file_time_type mtime) {
         kasumi::Snapshot tree{
-            .rows = {kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true},
+            .rows = {kasumi::NodeRow{.path = "", .mtime = canonical_mtime(t1), .is_directory = true},
                      kasumi::NodeRow{.path = "node",
                                      .hash = file_hash,
                                      .size = 12,
-                                     .mtime = mtime,
+                                     .mtime = canonical_mtime(mtime),
                                      .is_directory = false}}};
         kasumi::finalize_snapshot(tree);
         return tree;
@@ -7134,27 +7142,27 @@ TEST(ReconciliationTest,
     const auto make_dir_tree = [&](std::filesystem::file_time_type mtime) {
         kasumi::Snapshot tree{
             .rows = {
-                kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true},
-                kasumi::NodeRow{.path = "node", .mtime = mtime, .is_directory = true},
+                kasumi::NodeRow{.path = "", .mtime = canonical_mtime(t1), .is_directory = true},
+                kasumi::NodeRow{.path = "node", .mtime = canonical_mtime(mtime), .is_directory = true},
                 kasumi::NodeRow{.path = "node/child.txt",
                                 .hash = child_hash,
                                 .size = 13,
-                                .mtime = mtime,
+                                .mtime = canonical_mtime(mtime),
                                 .is_directory = false},
                 kasumi::NodeRow{.path = "node/nested",
-                                .mtime = mtime,
+                                .mtime = canonical_mtime(mtime),
                                 .is_directory = true},
                 kasumi::NodeRow{.path = "node/nested/deep.txt",
                                 .hash = deep_hash,
                                 .size = 12,
-                                .mtime = mtime,
+                                .mtime = canonical_mtime(mtime),
                                 .is_directory = false}}};
         kasumi::finalize_snapshot(tree);
         return tree;
     };
 
     auto base_tree = kasumi::Snapshot{
-        .rows = {kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true}}};
+        .rows = {kasumi::NodeRow{.path = "", .mtime = canonical_mtime(t1), .is_directory = true}}};
     kasumi::finalize_snapshot(base_tree);
 
     // Subcase B1: Local file mtime <= Remote directory mtime (Local T1, Remote T2)
@@ -7214,39 +7222,39 @@ TEST(ReconciliationTest,
     // Local directory subtree + existing conflict file artifact
     kasumi::Snapshot local_tree{
         .rows = {
-            kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true},
-            kasumi::NodeRow{.path = "node", .mtime = t1, .is_directory = true},
+            kasumi::NodeRow{.path = "", .mtime = canonical_mtime(t1), .is_directory = true},
+            kasumi::NodeRow{.path = "node", .mtime = canonical_mtime(t1), .is_directory = true},
             kasumi::NodeRow{.path = "node/child.txt",
                             .hash = child_hash,
                             .size = 13,
-                            .mtime = t1,
+                            .mtime = canonical_mtime(t1),
                             .is_directory = false},
             kasumi::NodeRow{.path = "node/nested",
-                            .mtime = t1,
+                            .mtime = canonical_mtime(t1),
                             .is_directory = true},
             kasumi::NodeRow{.path = "node/nested/deep.txt",
                             .hash = deep_hash,
                             .size = 12,
-                            .mtime = t1,
+                            .mtime = canonical_mtime(t1),
                             .is_directory = false},
             kasumi::NodeRow{.path = "node.kasumiconflict_remote",
                             .hash = existing_hash,
                             .size = 12,
-                            .mtime = t1,
+                            .mtime = canonical_mtime(t1),
                             .is_directory = false}}};
     kasumi::finalize_snapshot(local_tree);
 
     kasumi::Snapshot storage_tree{
-        .rows = {kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true},
+        .rows = {kasumi::NodeRow{.path = "", .mtime = canonical_mtime(t1), .is_directory = true},
                  kasumi::NodeRow{.path = "node",
                                  .hash = file_hash,
                                  .size = 12,
-                                 .mtime = t2,
+                                 .mtime = canonical_mtime(t2),
                                  .is_directory = false}}};
     kasumi::finalize_snapshot(storage_tree);
 
     auto base_tree = kasumi::Snapshot{
-        .rows = {kasumi::NodeRow{.path = "", .mtime = t1, .is_directory = true}}};
+        .rows = {kasumi::NodeRow{.path = "", .mtime = canonical_mtime(t1), .is_directory = true}}};
     kasumi::finalize_snapshot(base_tree);
 
     auto input = empty_publication_input();
@@ -7307,10 +7315,10 @@ TEST(SyncCoordinatorTest, EmptyPlanPublishesAndPersistsConvergenceCommit) {
     kasumi::test::write_text(local / "first.txt", "first");
     kasumi::test::write_text(local / "second.txt", "second");
     const auto local_root_mtime = std::filesystem::last_write_time(local);
-    effective_tree.rows.front().mtime = local_root_mtime;
+    effective_tree.rows.front().mtime = canonical_mtime(local_root_mtime);
     for (auto& row : effective_tree.rows) {
         if (!row.is_directory) {
-            row.mtime = std::filesystem::last_write_time(local / row.path);
+            row.mtime = canonical_mtime(std::filesystem::last_write_time(local / row.path));
         }
     }
     for (const auto& path : {local / "first.txt", local / "second.txt"}) {
@@ -7463,14 +7471,14 @@ TEST(SyncCoordinatorTest, PublishedCommitMatchesCandidateTreeMetadata) {
 
     kasumi::Snapshot local_tree{
         .rows = {kasumi::NodeRow{
-                     .path = "", .mtime = root_mtime, .is_directory = true},
+                     .path = "", .mtime = canonical_mtime(root_mtime), .is_directory = true},
                  kasumi::NodeRow{.path = "docs",
-                                 .mtime = directory_mtime,
+                                 .mtime = canonical_mtime(directory_mtime),
                                  .is_directory = true},
                  kasumi::NodeRow{.path = "docs/alpha.txt",
                                  .hash = kasumi::hasher::hash_string("alpha"),
                                  .size = 5,
-                                 .mtime = file_mtime,
+                                 .mtime = canonical_mtime(file_mtime),
                                  .is_directory = false}}};
     kasumi::finalize_snapshot(local_tree);
     kasumi::Snapshot storage_tree{
@@ -7637,7 +7645,9 @@ TEST(SyncCoordinatorTest, CompositionMismatchMatrixHasNoSideEffects) {
         {"candidate tree",
          [](auto& value) {
              value.candidate_shared_tree.rows.front().mtime +=
-                 std::chrono::seconds{1};
+                 std::chrono::duration_cast<std::chrono::nanoseconds>(
+                     std::chrono::seconds{1})
+                     .count();
          }},
         {"missing objects",
          [](auto& value) {
@@ -7722,7 +7732,7 @@ TEST(SyncCoordinatorTest, ConcurrentAddedFileDoesNotAbortSyncAndIsPreserved) {
         .path = "file.txt",
         .hash = kasumi::hasher::hash_string("file"),
         .size = 4,
-        .mtime = std::filesystem::last_write_time(local / "file.txt"),
+        .mtime = canonical_mtime(std::filesystem::last_write_time(local / "file.txt")),
         .is_directory = false});
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = kasumi::Snapshot{
@@ -7762,7 +7772,7 @@ TEST(SyncCoordinatorTest, ConcurrentModifiedFileFailsSync) {
         .path = "file.txt",
         .hash = kasumi::hasher::hash_string("file"),
         .size = 4,
-        .mtime = std::filesystem::last_write_time(local / "file.txt"),
+        .mtime = canonical_mtime(std::filesystem::last_write_time(local / "file.txt")),
         .is_directory = false});
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = kasumi::Snapshot{
@@ -7801,7 +7811,7 @@ TEST(SyncCoordinatorTest, AmbiguousPublicationWithReachableCommitRollsForward) {
     state->persist_marker_on_failure = true;
     auto input = empty_publication_input();
     input.local_tree.rows.front().mtime =
-        std::filesystem::last_write_time(local);
+        canonical_mtime(std::filesystem::last_write_time(local));
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value());
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
@@ -7838,7 +7848,7 @@ TEST(SyncCoordinatorTest,
     state->fail_marker_get = true;
     auto input = empty_publication_input();
     input.local_tree.rows.front().mtime =
-        std::filesystem::last_write_time(local);
+        canonical_mtime(std::filesystem::last_write_time(local));
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value());
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
@@ -7905,7 +7915,7 @@ TEST(SyncCoordinatorTest, AmbiguousPublicationWithoutCommitRollsBack) {
     state->fail_marker_put = true;
     auto input = empty_publication_input();
     input.local_tree.rows.front().mtime =
-        std::filesystem::last_write_time(local);
+        canonical_mtime(std::filesystem::last_write_time(local));
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value());
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
@@ -7937,7 +7947,7 @@ TEST(SyncCoordinatorTest, AmbiguousPublicationPreservesRecoveryTransaction) {
     state->fail_list_after_marker = true;
     auto input = empty_publication_input();
     input.local_tree.rows.front().mtime =
-        std::filesystem::last_write_time(local);
+        canonical_mtime(std::filesystem::last_write_time(local));
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value());
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
@@ -10758,11 +10768,11 @@ TEST(SyncCoordinatorTest, UploadSubBatchChunkingAndSafeResumption) {
             .path = filename,
             .hash = kasumi::hasher::hash_string(content),
             .size = content.size(),
-            .mtime = std::filesystem::last_write_time(local / filename),
+            .mtime = canonical_mtime(std::filesystem::last_write_time(local / filename)),
             .is_directory = false});
     }
     input.local_tree.rows.front().mtime =
-        std::filesystem::last_write_time(local);
+        canonical_mtime(std::filesystem::last_write_time(local));
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = input.storage.tree;
 

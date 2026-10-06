@@ -4,7 +4,6 @@
 #include "platform/path.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <gtest/gtest.h>
@@ -20,6 +19,12 @@ using kasumi::HashSet;
 using kasumi::NodeRow;
 using kasumi::Snapshot;
 
+constexpr kasumi::TimestampNs test_mtime = 1'700'000'000'000'000'000LL;
+
+constexpr kasumi::TimestampNs hours_ns(std::int64_t hours) noexcept {
+    return hours * 3'600'000'000'000LL;
+}
+
 Snapshot tree(std::initializer_list<NodeRow> rows = {}) {
     Snapshot snapshot{{{.path = "", .is_directory = true}}};
     snapshot.rows.insert(snapshot.rows.end(), rows.begin(), rows.end());
@@ -29,7 +34,7 @@ Snapshot tree(std::initializer_list<NodeRow> rows = {}) {
 
 NodeRow file(std::string path,
              std::string_view contents,
-             std::filesystem::file_time_type mtime = {},
+             kasumi::TimestampNs mtime = 0,
              std::uint64_t size = 0) {
     if (size == 0)
         size = contents.size();
@@ -168,8 +173,7 @@ TEST(DiffThreeWayTest, CoversCanonicalCreationChangeDeletionAndNoOpStates) {
     {
         auto local = file("same.txt", "same");
         auto cloud = local;
-        cloud.mtime = std::filesystem::file_time_type::clock::now() +
-                      std::chrono::hours{24};
+        cloud.mtime = test_mtime + hours_ns(24);
         const auto operations = kasumi::diff::compare_trees(
             tree({local}), tree({file("same.txt", "base")}), tree({cloud}));
         EXPECT_TRUE(operations.empty());
@@ -217,11 +221,11 @@ TEST(DiffThreeWayTest, CoversDirectorySubtreesAndTypeChanges) {
                 kasumi::hash_hex(kasumi::find_row(base, "docs")->hash))});
     }
 
-    const auto now = std::filesystem::file_time_type::clock::now();
+    constexpr auto now = test_mtime;
     auto local_directory = directory("same-path");
     local_directory.mtime = now;
     auto cloud_file =
-        file("same-path", "remote-file", now + std::chrono::hours{1});
+        file("same-path", "remote-file", now + hours_ns(1));
     const auto operations = kasumi::diff::compare_trees(
         tree({local_directory}), tree(), tree({cloud_file}));
     EXPECT_FALSE(std::ranges::any_of(operations, [](const auto& operation) {
@@ -310,9 +314,9 @@ TEST(DiffThreeWayTest, MissingPhysicalBlocksRequestRepairOrRemainPending) {
 
 TEST(DiffThreeWayTest,
      PreservesIndependentFileChangesWithConflictDestinations) {
-    const auto now = std::filesystem::file_time_type::clock::now();
+    constexpr auto now = test_mtime;
     const auto base = file("notes.txt", "base", now);
-    const auto local = file("notes.txt", "local", now + std::chrono::hours{2});
+    const auto local = file("notes.txt", "local", now + hours_ns(2));
     const auto cloud = file("notes.txt", "cloud", now);
 
     const auto local_newer =
@@ -331,7 +335,7 @@ TEST(DiffThreeWayTest,
                                  true)});
 
     const auto local_older =
-        file("notes.txt", "local", now - std::chrono::hours{2});
+        file("notes.txt", "local", now - hours_ns(2));
     const auto older = kasumi::diff::compare_trees(
         tree({local_older}), tree({base}), tree({cloud}));
     expect_operations(older,
@@ -353,15 +357,62 @@ TEST(DiffThreeWayTest,
                                  local_older.size)});
 }
 
+TEST(DiffThreeWayTest, ConflictOrderingUsesCanonicalNanoseconds) {
+    constexpr kasumi::TimestampNs older_ns = 123456700;
+    constexpr kasumi::TimestampNs newer_ns = 123456789;
+    const auto base = file("notes.txt", "base", older_ns);
+    const auto local_older = file("notes.txt", "local", older_ns);
+    const auto remote_newer = file("notes.txt", "remote", newer_ns);
+
+    expect_operations(
+        kasumi::diff::compare_trees(tree({local_older}),
+                                    tree({base}),
+                                    tree({remote_newer})),
+        {signature(Action::RenameLocal,
+                   "notes.txt",
+                   {},
+                   "notes.txt.kasumiconflict_local",
+                   0,
+                   true),
+         signature(Action::Download,
+                   "notes.txt",
+                   kasumi::hash_hex(remote_newer.hash),
+                   {},
+                   remote_newer.size),
+         signature(Action::Upload,
+                   "notes.txt.kasumiconflict_local",
+                   kasumi::hash_hex(local_older.hash),
+                   {},
+                   local_older.size)});
+
+    const auto local_newer = file("notes.txt", "local", newer_ns);
+    const auto remote_older = file("notes.txt", "remote", older_ns);
+    expect_operations(
+        kasumi::diff::compare_trees(tree({local_newer}),
+                                    tree({base}),
+                                    tree({remote_older})),
+        {signature(Action::Upload,
+                   "notes.txt",
+                   kasumi::hash_hex(local_newer.hash),
+                   {},
+                   local_newer.size),
+         signature(Action::Download,
+                   "notes.txt.kasumiconflict_remote",
+                   kasumi::hash_hex(remote_older.hash),
+                   "notes.txt",
+                   remote_older.size,
+                   true)});
+}
+
 TEST(DiffThreeWayTest, UnicodeConflictPathsPreserveAllConflictBranches) {
     const std::string logical_path = "高松灯/カード💝.png";
-    const auto now = std::filesystem::file_time_type::clock::now();
+    constexpr auto now = test_mtime;
     const auto base =
         tree({directory("高松灯"), file(logical_path, "base", now)});
     const auto cloud_file = file(logical_path, "cloud", now);
     const auto cloud = tree({directory("高松灯"), cloud_file});
     const auto local_file =
-        file(logical_path, "local", now + std::chrono::hours{1});
+        file(logical_path, "local", now + hours_ns(1));
     const auto local = tree({directory("高松灯"), local_file});
 
     expect_operations(kasumi::diff::compare_trees(local, base, cloud),
@@ -378,7 +429,7 @@ TEST(DiffThreeWayTest, UnicodeConflictPathsPreserveAllConflictBranches) {
                                  true)});
 
     const auto older_file =
-        file(logical_path, "local", now - std::chrono::hours{1});
+        file(logical_path, "local", now - hours_ns(1));
     const auto older = tree({directory("高松灯"), older_file});
     expect_operations(kasumi::diff::compare_trees(older, base, cloud),
                       {signature(Action::RenameLocal,
@@ -399,7 +450,7 @@ TEST(DiffThreeWayTest, UnicodeConflictPathsPreserveAllConflictBranches) {
                                  older_file.size)});
 
     auto local_directory = directory(logical_path);
-    local_directory.mtime = now - std::chrono::hours{1};
+    local_directory.mtime = now - hours_ns(1);
     expect_operations(
         kasumi::diff::compare_trees(
             tree({directory("高松灯"), local_directory}), base, cloud),
@@ -412,11 +463,11 @@ TEST(DiffThreeWayTest, UnicodeConflictPathsPreserveAllConflictBranches) {
 }
 
 TEST(DiffThreeWayTest, FileAndDirectoryStatesDoNotBecomeAccidentalDeletes) {
-    const auto now = std::filesystem::file_time_type::clock::now();
+    constexpr auto now = test_mtime;
     auto local_directory = directory("shared");
     local_directory.mtime = now;
     const auto cloud_file =
-        file("shared", "cloud", now + std::chrono::hours{1});
+        file("shared", "cloud", now + hours_ns(1));
     const auto operations = kasumi::diff::compare_trees(
         tree({local_directory}), tree(), tree({cloud_file}));
     EXPECT_FALSE(std::ranges::any_of(operations, [](const auto& operation) {
@@ -426,7 +477,7 @@ TEST(DiffThreeWayTest, FileAndDirectoryStatesDoNotBecomeAccidentalDeletes) {
 
     auto local_file = file("reverse", "local", now);
     auto cloud_directory = directory("reverse");
-    cloud_directory.mtime = now + std::chrono::hours{1};
+    cloud_directory.mtime = now + hours_ns(1);
     const auto reverse = kasumi::diff::compare_trees(
         tree({local_file}), tree(), tree({cloud_directory}));
     expect_operations(
@@ -446,13 +497,13 @@ TEST(DiffThreeWayTest, FileAndDirectoryStatesDoNotBecomeAccidentalDeletes) {
 }
 
 TEST(DiffThreeWayTest, IgnoredFilesOnRemoteArePurgedAndNotDownloaded) {
-    const auto now = std::filesystem::file_time_type::clock::now();
+    constexpr auto now = test_mtime;
     const auto ignore_list =
         kasumi::ignore::parse_ignore_rules("desktop.ini\n");
 
     const auto normal = file("normal.txt", "content", now);
     const auto base_desktop =
-        file("desktop.ini", "base_ini", now - std::chrono::hours{1});
+        file("desktop.ini", "base_ini", now - hours_ns(1));
     const auto cloud_desktop = file("desktop.ini", "modified_remote_ini", now);
 
     const auto local_tree = tree({normal});
@@ -469,7 +520,7 @@ TEST(DiffThreeWayTest, IgnoredFilesOnRemoteArePurgedAndNotDownloaded) {
 }
 
 TEST(DiffThreeWayTest, IgnoredWildcardPatternPurgesRemoteMatches) {
-    const auto now = std::filesystem::file_time_type::clock::now();
+    constexpr auto now = test_mtime;
     const auto ignore_list = kasumi::ignore::parse_ignore_rules("*.log\n");
 
     const auto doc = file("docs/readme.md", "read", now);
@@ -499,7 +550,7 @@ TEST(DiffThreeWayTest, IgnoredWildcardPatternPurgesRemoteMatches) {
 }
 
 TEST(DiffThreeWayTest, IgnoredDirectoryPurgesRemoteSubtreeWithoutRecursing) {
-    const auto now = std::filesystem::file_time_type::clock::now();
+    constexpr auto now = test_mtime;
     const auto ignore_list =
         kasumi::ignore::parse_ignore_rules("node_modules/\n");
 
@@ -522,7 +573,7 @@ TEST(DiffThreeWayTest, IgnoredDirectoryPurgesRemoteSubtreeWithoutRecursing) {
 }
 
 TEST(DiffThreeWayTest, NegatedIgnoreRuleReincludesRemoteFile) {
-    const auto now = std::filesystem::file_time_type::clock::now();
+    constexpr auto now = test_mtime;
     const auto ignore_list =
         kasumi::ignore::parse_ignore_rules("*.txt\n!important.txt\n");
 

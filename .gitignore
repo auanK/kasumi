@@ -39,6 +39,7 @@ benchmark_workspace/
 benchmark_results*.jsonl
 retained-staging/
 benchmark-results/
+/provider-certification.local.toml
 scratch/
 __pycache__/
 

@@ -159,6 +159,84 @@ void remove_temporary(const std::filesystem::path& path) noexcept {
     std::filesystem::remove(path, ignored);
 }
 
+#if defined(_WIN32)
+std::expected<void, std::string>
+protect_windows_tree(const std::filesystem::path& root) {
+    auto protected_root = protect_directory(root);
+    if (!protected_root) {
+        return protected_root;
+    }
+
+    std::vector<std::filesystem::path> directories{root};
+    while (!directories.empty()) {
+        auto directory = std::move(directories.back());
+        directories.pop_back();
+        WIN32_FIND_DATAW entry{};
+        auto pattern = directory.native();
+        pattern.append(L"\\*");
+        const auto search = FindFirstFileW(pattern.c_str(), &entry);
+        if (search == INVALID_HANDLE_VALUE) {
+            const auto code = GetLastError();
+            if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
+                continue;
+            }
+            return std::unexpected(windows_error(
+                "FindFirstFileW failed for '" +
+                    platform::path::to_utf8(directory) + "'",
+                code));
+        }
+
+        std::string failure;
+        do {
+            const std::wstring_view name{entry.cFileName};
+            if (name == L"." || name == L"..") {
+                continue;
+            }
+            auto native_path = directory.native();
+            native_path.push_back(L'\\');
+            native_path.append(entry.cFileName);
+            const std::filesystem::path path{std::move(native_path)};
+            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                failure = "reparse point is not allowed in '" +
+                          platform::path::to_utf8(path) + "'";
+                break;
+            }
+
+            std::expected<void, std::string> secured;
+            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                secured = protect_directory(path);
+                directories.push_back(path);
+            } else if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DEVICE) == 0) {
+                secured = protect_file(path);
+            } else {
+                failure = "invalid internal object in '" +
+                          platform::path::to_utf8(path) + "'";
+                break;
+            }
+            if (!secured) {
+                failure = secured.error();
+                break;
+            }
+        } while (FindNextFileW(search, &entry));
+
+        const auto enumeration_error = GetLastError();
+        FindClose(search);
+        if (!failure.empty()) {
+            return std::unexpected(std::move(failure));
+        }
+        if (enumeration_error != ERROR_NO_MORE_FILES &&
+            enumeration_error != ERROR_FILE_NOT_FOUND &&
+            enumeration_error != ERROR_PATH_NOT_FOUND) {
+            return std::unexpected(windows_error(
+                "FindNextFileW failed for '" +
+                    platform::path::to_utf8(directory) + "'",
+                enumeration_error));
+        }
+    }
+    return {};
+}
+#endif
+
 } // namespace
 
 std::expected<void, std::string>
@@ -243,6 +321,9 @@ ensure_directory(const std::filesystem::path& path) {
 
 std::expected<void, std::string>
 protect_tree(const std::filesystem::path& root) {
+#if defined(_WIN32)
+    return protect_windows_tree(root);
+#else
     auto protected_root = protect_directory(root);
     if (!protected_root) {
         return protected_root;
@@ -298,6 +379,7 @@ protect_tree(const std::filesystem::path& root) {
         }
     }
     return {};
+#endif
 }
 
 std::expected<void, std::string>

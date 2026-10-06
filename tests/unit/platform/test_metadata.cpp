@@ -3,6 +3,7 @@
 #include "platform/metadata.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <vector>
@@ -100,6 +101,79 @@ TEST(PlatformMetadataTest, ConfirmsSubsecondFiletimeRoundTrip) {
     const auto file = kasumi::test::workspace_path(workspace, "file.txt");
     kasumi::test::write_text(file, "content");
     expect_written(file, subsecond_timestamp(), false);
+}
+
+TEST(PlatformMetadataTest, ConvertsCanonicalNanosecondsAtFilesystemBoundary) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("platform-metadata-canonical-ns");
+    const auto file = kasumi::test::workspace_path(workspace, "file.txt");
+    kasumi::test::write_text(file, "content");
+
+    constexpr std::int64_t canonical = 123456789;
+    const auto native =
+        kasumi::platform::metadata::file_time_from_unix_nanoseconds(canonical);
+    ASSERT_TRUE(native.has_value());
+    const auto observed =
+        kasumi::platform::metadata::unix_nanoseconds(*native);
+    ASSERT_TRUE(observed.has_value());
+    using FileDuration = std::filesystem::file_time_type::duration;
+    const auto expected = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::duration_cast<FileDuration>(
+                                  std::chrono::nanoseconds{canonical}))
+                              .count();
+    EXPECT_EQ(*observed, expected);
+    EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(
+        canonical, *observed));
+
+    ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(file, *native));
+    EXPECT_EQ(canonical, 123456789);
+}
+
+TEST(PlatformMetadataTest, ConvertsTheSameNativeTimestampDeterministically) {
+    const auto native = std::filesystem::file_time_type::clock::now();
+    const auto expected =
+        kasumi::platform::metadata::unix_nanoseconds(native);
+    ASSERT_TRUE(expected.has_value());
+    for (int attempt = 0; attempt < 256; ++attempt) {
+        EXPECT_EQ(kasumi::platform::metadata::unix_nanoseconds(native),
+                  expected)
+            << "attempt=" << attempt;
+    }
+}
+
+TEST(PlatformMetadataTest, PreservesUnspecifiedNegativeAndChecksNativeRange) {
+    const auto unspecified =
+        kasumi::platform::metadata::file_time_from_unix_nanoseconds(0);
+    ASSERT_TRUE(unspecified.has_value());
+    EXPECT_EQ(*unspecified, std::filesystem::file_time_type{});
+    EXPECT_EQ(kasumi::platform::metadata::unix_nanoseconds(*unspecified), 0);
+
+    const auto negative =
+        kasumi::platform::metadata::file_time_from_unix_nanoseconds(-123456789);
+    ASSERT_TRUE(negative.has_value());
+    EXPECT_EQ(kasumi::platform::metadata::unix_nanoseconds(*negative),
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  std::chrono::duration_cast<
+                      std::filesystem::file_time_type::duration>(
+                      std::chrono::nanoseconds{-123456789}))
+                  .count());
+    for (const auto native : {
+             std::filesystem::file_time_type{
+                 std::filesystem::file_time_type::duration::min()},
+             std::filesystem::file_time_type{
+                 std::filesystem::file_time_type::duration::max()}}) {
+        const auto canonical =
+            kasumi::platform::metadata::unix_nanoseconds(native);
+        if (!canonical) {
+            continue;
+        }
+        const auto restored =
+            kasumi::platform::metadata::file_time_from_unix_nanoseconds(
+                *canonical);
+        ASSERT_TRUE(restored.has_value());
+        EXPECT_EQ(kasumi::platform::metadata::unix_nanoseconds(*restored),
+                  canonical);
+    }
 }
 
 #if defined(_WIN32)
