@@ -41,6 +41,22 @@ fake_get_batch(void* context, const kasumi::transport::GetBatch& batch) {
     return {};
 }
 
+std::mutex test_fake_state_mutex;
+
+kasumi::transport::Result
+safe_fake_get_batch(void* context, const kasumi::transport::GetBatch& batch) {
+    std::scoped_lock lock(test_fake_state_mutex);
+    return fake_get_batch(context, batch);
+}
+
+kasumi::transport::Result
+safe_fake_get(void* context,
+              std::string_view identifier,
+              const std::filesystem::path& destination) {
+    std::scoped_lock lock(test_fake_state_mutex);
+    return fake_get(context, identifier, destination);
+}
+
 struct HistoryReadGates {
     std::atomic_bool batch_entered{false};
     std::atomic_bool epoch_entered{false};
@@ -189,7 +205,8 @@ TEST(HistoryStorageTest, CompleteLoadConsumesOneNativeCommitBatch) {
         make_commit(1, {published_parent.commit_id}, "file.txt", "one").value();
     seed_fake_commit(*state, root, child, "child");
 
-    storage.storage.get_batch = fake_get_batch;
+    storage.storage.get = safe_fake_get;
+    storage.storage.get_batch = safe_fake_get_batch;
     reset_remote_counts(*state);
     state->get_batch_count = 0;
     const auto loaded = kasumi::application::history_storage::load_history(
