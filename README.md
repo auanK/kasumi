@@ -26,9 +26,109 @@ Kasumi records synchronization states as immutable commits in a shared history D
 - **Remote Inspection**: Read logical history and physical storage diagnostics without running synchronization.
 - **Linux and Windows**: Native builds for Linux and Windows.
 
+## Quick Start
+
+This guide demonstrates setting up a shared encrypted vault between two machines using shared storage (such as a local directory, network share, or rclone remote).
+
+```text
+Machine A ───┐
+             ├──> Shared Storage (e.g., drive:kasumi/vault)
+Machine B ───┘
+```
+
+### 1. Obtain or Build Kasumi
+
+Download the Kasumi binary for your platform, or build it from source using CMake and a C++23 compiler:
+
+```bash
+cmake --preset default
+cmake --build --preset default
+```
+
+The release preset places the binary at `build/kasumi.exe` on Windows or `build/kasumi` on Linux. The examples below assume `kasumi` is on `PATH`; otherwise run the binary from `build/`.
+
+For platform prerequisites and build options, see [Build and Test](docs/build-and-test.md).
+
+### 2. Configure Shared Storage
+
+Kasumi synchronizes over passive shared storage. Ensure your backend is accessible:
+* **Local path or network share**: e.g., `/mnt/share/kasumi/vault` or `D:/backup/vault`.
+* **Rclone remote**: e.g., `drive:kasumi/vault` or `s3:my-bucket/vault`. (Ensure `rclone` is installed in `PATH` and configured.)
+
+### 3. Set Up Machine A
+
+Launch the interactive configuration wizard on the first machine:
+
+```bash
+kasumi config
+```
+
+Select **New (`n`)** and enter:
+1. **Profile name**: A local profile name (letters, digits, `_`, or `-`, e.g., `work`).
+2. **Local directory**: Absolute path to the folder you want to synchronize (e.g., `/home/user/documents` or `D:/Documents`).
+3. **Remote directory**: Destination path on the shared storage (e.g., `drive:kasumi/vault` or `/mnt/share/kasumi/vault`).
+4. **Password**: Master passphrase (minimum 12 characters).
+5. **Password Salt**: Cryptographic salt passphrase (minimum 16 characters).
+
+> [!IMPORTANT]
+> **Password Salt is user-provided and reproducible**: Kasumi uses Argon2id to derive the 32-byte master key from your **Password** and **Password Salt**. The salt is **not** an automatically generated random value stored on the remote. To connect another machine to the same vault, you must provide the exact same Password and Password Salt. Keep a secure record of both.
+
+### 4. Preview and Run Initial Sync on Machine A
+
+Before applying mutations, preview the planned synchronization:
+
+```bash
+kasumi status work
+```
+
+Alternatively, run a dry-run:
+
+```bash
+kasumi sync work --dry-run
+```
+
+When you are ready to upload files and initialize the vault:
+
+```bash
+kasumi sync work
+```
+
+Kasumi creates the genesis commit in the remote history DAG, encrypts file payloads with client-side XChaCha20-Poly1305, and publishes them to shared storage.
+
+### 5. Set Up Machine B
+
+On the second machine, launch the configuration wizard:
+
+```bash
+kasumi config
+```
+
+Select **New (`n`)** and provide:
+1. **Profile name**: Profile name on Machine B (e.g., `work`).
+2. **Local directory**: Absolute path to the synchronized folder on Machine B.
+3. **Remote directory**: The **exact same** remote destination used on Machine A (e.g., `drive:kasumi/vault`).
+4. **Password**: The **exact same** Password entered on Machine A.
+5. **Password Salt**: The **exact same** Password Salt entered on Machine A.
+
+### 6. Synchronize Machine B
+
+Run synchronization on Machine B:
+
+```bash
+kasumi sync work
+```
+
+Kasumi discovers the remote history, authenticates and decrypts the files, and materializes them in the local directory. Both machines can now synchronize independently at any time.
+
+---
+
+For detailed CLI options, portable path rules, and `.kasumiignore` syntax, see [Configuration and Usage](docs/configuration-and-usage.md). For operational habits, see [Best Practices](docs/best-practices.md). If you encounter errors, see [Troubleshooting](docs/troubleshooting.md).
+
 ## Documentation
 
 - [Configuration and Usage](docs/configuration-and-usage.md)
+- [Best Practices](docs/best-practices.md)
+- [Troubleshooting](docs/troubleshooting.md)
 - [Architecture](docs/architecture.md)
 - [Remote Inspection](docs/architecture/remote-inspection.md)
 - [Security](docs/security.md)
