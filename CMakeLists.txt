@@ -215,7 +215,6 @@ endif()
 
 set(KASUMI_EXTRA_SOURCES)
 if(WIN32)
-    set(CMAKE_RC_FLAGS "${CMAKE_RC_FLAGS} -c 65001")
     list(APPEND KASUMI_EXTRA_SOURCES src/platform/windows/kasumi.rc)
 endif()
 
