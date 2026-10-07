@@ -623,7 +623,7 @@ bool quarantine_is_reachable(
                                       entry.original_identifier);
 }
 
-std::expected<void, Error> initialize_quarantine_metadata(
+std::expected<std::size_t, Error> initialize_quarantine_metadata(
     transport::Transport& storage,
     KeySpan key,
     const std::filesystem::path& workspace_root,
@@ -631,6 +631,7 @@ std::expected<void, Error> initialize_quarantine_metadata(
     history_storage::maintenance_protocol::RegistrationState& barrier,
     std::vector<history_storage::maintenance_protocol::QuarantineEntry>&
         entries) {
+    std::size_t initialized = 0;
     for (auto& entry : entries) {
         if (entry.quarantined_at) {
             continue;
@@ -647,8 +648,37 @@ std::expected<void, Error> initialize_quarantine_metadata(
             return std::unexpected(protocol_error(recorded.error()));
         }
         entry = std::move(*recorded);
+        ++initialized;
     }
-    return {};
+    return initialized;
+}
+
+bool quarantine_may_require_purge(
+    const history_storage::RemoteLayout& layout,
+    std::int64_t now,
+    const GarbageCollectionSnapshot& snapshot,
+    const std::vector<history_storage::maintenance_protocol::QuarantineEntry>&
+        entries) {
+    for (const auto& entry : entries) {
+        if (history_storage::maintenance_protocol::is_epoch_object(
+                layout, entry.original_identifier)) {
+            continue;
+        }
+        if (!entry.quarantined_at) {
+            return true;
+        }
+        if (now < *entry.quarantined_at ||
+            now - *entry.quarantined_at <
+                history_storage::maintenance_protocol::
+                    quarantine_retention_seconds) {
+            continue;
+        }
+        if (quarantine_is_reachable(layout, entry, snapshot)) {
+            continue;
+        }
+        return true;
+    }
+    return false;
 }
 
 std::expected<std::size_t, Error> purge_expired_quarantine(
@@ -1659,6 +1689,20 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                 if (!first) {
                     return std::unexpected(first.error());
                 }
+
+                if (!quarantine->empty() && first->candidates.empty() &&
+                    *restored == 0 && *metadata == 0 &&
+                    !quarantine_may_require_purge(
+                        layout, *now, *first, *quarantine)) {
+                    return GarbageCollectResult{
+                        .candidate_objects = 0,
+                        .quarantined_objects = 0,
+                        .restored_objects = 0,
+                        .purged_objects = 0,
+                        .analysis_only = false,
+                    };
+                }
+
                 const auto second_observation_trace =
                     platform::perf_trace::begin();
                 auto confirmed = collect_garbage_collection_snapshot(

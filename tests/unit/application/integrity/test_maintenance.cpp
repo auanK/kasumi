@@ -5,6 +5,7 @@
 #include "application/integrity/maintenance.hpp"
 #include "application/integrity/maintenance_test.hpp"
 #include "core/maintenance.hpp"
+#include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
 #include "platform/cancellation.hpp"
 #include "platform/clock.hpp"
@@ -2147,16 +2148,15 @@ TEST(IntegrityMaintenanceTest,
     ASSERT_TRUE(kasumi::transport::put(
         transport, marker_file, marker_path(orphan_published.head)));
 
+    reset_fake_traffic(*state);
     state->disappear_on_get = orphan_content;
     state->observed_payload_identifier = orphan_content_quarantine;
-    state->orphan_payload_get_count = 0;
-    state->quarantine_payload_put_count = 0;
-    state->copy_count = 0;
 
     const auto restored = kasumi::application::integrity::garbage_collect(
         runtime, transport, test_key());
     ASSERT_TRUE(restored.has_value()) << restored.error().detail;
     EXPECT_EQ(restored->restored_objects, 2U);
+    EXPECT_GE(state->full_list_count, 5U);
     EXPECT_EQ(state->disappear_on_get, orphan_content);
     expect_presence(transport, orphan_content, Presence::Present);
     expect_presence(
@@ -2402,6 +2402,218 @@ fake_reachability_get_batch(void* context,
         fake_state(context)->remote_events.pop_back();
     }
     return {};
+}
+
+kasumi::transport::Result
+fake_quarantine_metadata_get_batch(void* context,
+                                   const kasumi::transport::GetBatch& batch) {
+    auto* state = fake_state(context);
+    ++state->get_batch_count;
+    for (const auto& identifier : batch.identifiers) {
+        const auto source = batch.source_prefix.empty()
+                                ? identifier
+                                : batch.source_prefix + "/" + identifier;
+        state->remote_events.emplace_back("BatchGet:" + source);
+        if (auto result =
+                fake_get(context, source, batch.destination_root / identifier);
+            !result) {
+            return result;
+        }
+    }
+    return {};
+}
+
+kasumi::transport::Result
+fake_partial_quarantine_metadata_get_batch(void* context,
+                                           const kasumi::transport::GetBatch& batch) {
+    auto first = batch;
+    first.identifiers.resize(1);
+    if (auto copied = fake_quarantine_metadata_get_batch(context, first);
+        !copied) {
+        return copied;
+    }
+    return std::unexpected(kasumi::transport::Error{
+        .code = kasumi::transport::ErrorCode::Io,
+        .message = "injected partial batch failure",
+    });
+}
+
+kasumi::transport::Result
+fake_incomplete_quarantine_metadata_get_batch(
+    void* context, const kasumi::transport::GetBatch& batch) {
+    auto first = batch;
+    first.identifiers.resize(1);
+    return fake_quarantine_metadata_get_batch(context, first);
+}
+
+TEST(IntegrityMaintenanceTest,
+     GarbageCollectionYoungQuarantineNoOpSkipsSecondObservationAndFinalListing) {
+    IntegratedGcFixture fixture{"young-quarantine-no-op", 2};
+    const auto first = kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key());
+    ASSERT_TRUE(first.has_value()) << first.error().detail;
+    ASSERT_EQ(first->quarantined_objects, fixture.candidates.size());
+    for (std::size_t index = 0; index < fixture.candidates.size(); ++index) {
+        EXPECT_FALSE(fixture.state->objects.contains(fixture.candidates[index]));
+        EXPECT_TRUE(fixture.state->objects.contains(fixture.quarantines[index]));
+        EXPECT_TRUE(fixture.state->objects.contains(fixture.quarantines[index] + ".meta"));
+    }
+    const auto inventory = protocol::inventory_quarantine(
+        fixture.storage, test_key(), kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_TRUE(inventory.has_value()) << inventory.error().detail;
+    ASSERT_EQ(inventory->size(), fixture.candidates.size());
+    for (const auto& entry : *inventory) {
+        ASSERT_TRUE(entry.quarantined_at.has_value());
+        EXPECT_EQ(entry.physical_sha256,
+                  fixture.expected_hashes.at(entry.original_identifier));
+    }
+    const auto before = fixture.state->objects;
+
+    reset_fake_traffic(*fixture.state);
+    const auto second = kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key());
+    ASSERT_TRUE(second.has_value()) << second.error().detail;
+    EXPECT_EQ(second->candidate_objects, 0U);
+    EXPECT_EQ(second->quarantined_objects, 0U);
+    EXPECT_EQ(second->restored_objects, 0U);
+    EXPECT_EQ(second->purged_objects, 0U);
+    EXPECT_FALSE(second->analysis_only);
+    EXPECT_EQ(fixture.state->objects, before);
+    // Inventory, restoration and observation 1 each need one full list.
+    // Observation 2 and final namespace verification are unnecessary here.
+    EXPECT_EQ(fixture.state->full_list_count, 3U);
+}
+
+TEST(IntegrityMaintenanceTest, QuarantineInventoryBatchesMetadataDownloads) {
+    IntegratedGcFixture fixture{"inventory-batch", 3};
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    ASSERT_EQ(collected->quarantined_objects, fixture.candidates.size());
+    for (std::size_t index = 0; index < fixture.quarantines.size(); ++index) {
+        const auto recorded = protocol::record_quarantine(
+            fixture.storage, fixture.quarantines[index],
+            static_cast<std::int64_t>(1000 + index), test_key(),
+            kasumi::test::workspace_root(fixture.workspace));
+        ASSERT_TRUE(recorded.has_value()) << recorded.error().detail;
+    }
+    fixture.storage.storage.get_batch = fake_quarantine_metadata_get_batch;
+    reset_fake_traffic(*fixture.state);
+
+    const auto inventory = protocol::inventory_quarantine(
+        fixture.storage, test_key(), kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_TRUE(inventory.has_value()) << inventory.error().detail;
+    ASSERT_EQ(inventory->size(), fixture.candidates.size());
+    for (const auto& entry : *inventory) {
+        ASSERT_TRUE(entry.quarantined_at.has_value());
+        const auto index = std::ranges::find(fixture.candidates,
+                                             entry.original_identifier) -
+                           fixture.candidates.begin();
+        ASSERT_LT(index, fixture.candidates.size());
+        EXPECT_EQ(*entry.quarantined_at,
+                  static_cast<std::int64_t>(1000 + index));
+        EXPECT_EQ(entry.physical_sha256,
+                  fixture.expected_hashes.at(entry.original_identifier));
+    }
+    EXPECT_GT(fixture.state->get_batch_count, 0U);
+    EXPECT_GT(std::ranges::count_if(
+                  fixture.state->remote_events,
+                  [](const std::string& event) {
+                      return event.starts_with("BatchGet:");
+                  }),
+              1);
+}
+
+TEST(IntegrityMaintenanceTest, ExpiredQuarantineKeepsFullGcProofs) {
+    IntegratedGcFixture fixture{"expired-quarantine", 1};
+    ASSERT_TRUE(kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key()));
+    const auto aged = protocol::record_quarantine(
+        fixture.storage, fixture.quarantines.front(), 0, test_key(),
+        kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_TRUE(aged.has_value()) << aged.error().detail;
+    reset_fake_traffic(*fixture.state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->purged_objects, 1U);
+    EXPECT_GE(fixture.state->full_list_count, 5U);
+}
+
+TEST(IntegrityMaintenanceTest, MissingQuarantineMetadataKeepsFullGcProofs) {
+    IntegratedGcFixture fixture{"missing-quarantine-metadata", 1};
+    ASSERT_TRUE(kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key()));
+    const auto metadata = fixture.quarantines.front() + ".meta";
+    ASSERT_EQ(kasumi::transport::remove(fixture.storage, metadata).value(),
+              kasumi::transport::Removal::Removed);
+    reset_fake_traffic(*fixture.state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->purged_objects, 0U);
+    EXPECT_GE(fixture.state->full_list_count, 5U);
+    EXPECT_TRUE(fixture.state->objects.contains(metadata));
+    const auto inventory = protocol::inventory_quarantine(
+        fixture.storage, test_key(), kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_TRUE(inventory.has_value()) << inventory.error().detail;
+    ASSERT_EQ(inventory->size(), 1U);
+    EXPECT_TRUE(inventory->front().quarantined_at.has_value());
+}
+
+TEST(IntegrityMaintenanceTest, QuarantineInventoryRejectsOneInvalidMetadata) {
+    IntegratedGcFixture fixture{"inventory-invalid-metadata", 3};
+    ASSERT_TRUE(kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key()));
+    fixture.storage.storage.get_batch = fake_quarantine_metadata_get_batch;
+    fixture.state->objects.at(fixture.quarantines.back() + ".meta").front() ^= 1U;
+    reset_fake_traffic(*fixture.state);
+
+    const auto inventory = protocol::inventory_quarantine(
+        fixture.storage, test_key(), kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_FALSE(inventory.has_value());
+    EXPECT_EQ(inventory.error().code, protocol::ErrorCode::VerificationFailure);
+    EXPECT_GT(fixture.state->get_batch_count, 0U);
+}
+
+TEST(IntegrityMaintenanceTest, QuarantineInventoryWorksWithoutNativeGetBatch) {
+    IntegratedGcFixture fixture{"inventory-no-native-batch", 2};
+    ASSERT_TRUE(kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key()));
+    ASSERT_EQ(fixture.storage.storage.get_batch, nullptr);
+    reset_fake_traffic(*fixture.state);
+
+    const auto inventory = protocol::inventory_quarantine(
+        fixture.storage, test_key(), kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_TRUE(inventory.has_value()) << inventory.error().detail;
+    ASSERT_EQ(inventory->size(), fixture.candidates.size());
+    EXPECT_EQ(fixture.state->get_batch_count, 0U);
+    EXPECT_EQ(fixture.state->get_count, fixture.candidates.size());
+    for (const auto& entry : *inventory) {
+        ASSERT_TRUE(entry.quarantined_at.has_value());
+        EXPECT_EQ(entry.physical_sha256,
+                  fixture.expected_hashes.at(entry.original_identifier));
+    }
+}
+
+TEST(IntegrityMaintenanceTest, QuarantineInventoryRejectsIncompleteNativeBatch) {
+    IntegratedGcFixture fixture{"inventory-incomplete-batch", 3};
+    ASSERT_TRUE(kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key()));
+    const auto workspace_root = kasumi::test::workspace_root(fixture.workspace);
+
+    for (const auto callback : {fake_partial_quarantine_metadata_get_batch,
+                                fake_incomplete_quarantine_metadata_get_batch}) {
+        fixture.storage.storage.get_batch = callback;
+        reset_fake_traffic(*fixture.state);
+        const auto inventory = protocol::inventory_quarantine(
+            fixture.storage, test_key(), workspace_root);
+        EXPECT_FALSE(inventory.has_value());
+        EXPECT_EQ(fixture.state->get_batch_count, 1U);
+        EXPECT_FALSE(kasumi::test::has_temporary_history_workspace(workspace_root));
+    }
 }
 
 // ============================================================================

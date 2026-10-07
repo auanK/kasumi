@@ -354,6 +354,7 @@ struct GcLiveOptions {
     std::size_t copy_concurrency = 8;
     std::size_t metadata_concurrency = 8;
     std::size_t remove_concurrency = 8;
+    std::size_t young_quarantine_noop_runs = 0;
     bool preflight_only = false;
     bool execute_live = false;
     bool self_test = false;
@@ -373,6 +374,7 @@ void print_help() {
               << "  --copy-concurrency <N>      Batch copy concurrency (default: 8)\n"
               << "  --metadata-concurrency <N>  Batch metadata concurrency (default: 8)\n"
               << "  --remove-concurrency <N>    Batch remove concurrency (default: 8)\n"
+              << "  --young-quarantine-noop-runs <N>  Repeat GC on unchanged young quarantine (default: 0)\n"
               << "  --preflight-only            Verify remote connectivity and exit\n"
               << "  --execute-live              Required to confirm execution of live remote mutations\n";
 }
@@ -408,6 +410,8 @@ std::optional<GcLiveOptions> parse_arguments(int argc, char** argv) {
             options.metadata_concurrency = std::stoull(argv[++i]);
         } else if (arg == "--remove-concurrency" && i + 1 < argc) {
             options.remove_concurrency = std::stoull(argv[++i]);
+        } else if (arg == "--young-quarantine-noop-runs" && i + 1 < argc) {
+            options.young_quarantine_noop_runs = std::stoull(argv[++i]);
         } else {
             std::cerr << "Unknown or incomplete argument: " << arg << "\n";
             return std::nullopt;
@@ -496,6 +500,7 @@ bool run_live_gc(const GcLiveOptions& options) {
               << "       copy_concurrency:     " << options.copy_concurrency << "\n"
               << "       metadata_concurrency: " << options.metadata_concurrency << "\n"
               << "       remove_concurrency:   " << options.remove_concurrency << "\n"
+              << "       no-op repetitions:    " << options.young_quarantine_noop_runs << "\n"
               << "       execute_live:         " << (options.execute_live ? "YES" : "NO (dry)") << "\n";
 
     if (options.preflight_only) {
@@ -667,6 +672,14 @@ bool run_live_gc(const GcLiveOptions& options) {
     }
     std::cout << "[INFO] GC completed in " << (static_cast<double>(gc_wall_us) / 1'000'000.0) << " seconds.\n"
               << "       Candidates quarantined: " << collected->quarantined_objects << "\n";
+    if (options.young_quarantine_noop_runs > 0 &&
+        (collected->candidate_objects != options.candidates ||
+         collected->quarantined_objects != options.candidates ||
+         collected->restored_objects != 0 || collected->purged_objects != 0 ||
+         collected->analysis_only)) {
+        std::cerr << "[ERROR] First GC did not create the expected online quarantine.\n";
+        return false;
+    }
 
     // 8. Post-GC validation
     std::cout << "[INFO] Validating post-GC inventory & quarantine...\n";
@@ -725,6 +738,98 @@ bool run_live_gc(const GcLiveOptions& options) {
     }
     std::cout << "[INFO] Post-GC validation PASSED: " << samples_verified << " samples verified intact.\n";
 
+    Json noop_runs = Json::array();
+    bool baseline_valid = true;
+    if (options.young_quarantine_noop_runs > 0) {
+        std::map<std::string, std::pair<std::int64_t, std::string>> expected_quarantine;
+        const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        for (const auto& entry : *quarantine) {
+            if (!entry.quarantined_at || *entry.quarantined_at > now ||
+                now - *entry.quarantined_at >=
+                    history_storage::maintenance_protocol::quarantine_retention_seconds) {
+                std::cerr << "[ERROR] Quarantine metadata is missing or not young.\n";
+                return false;
+            }
+            expected_quarantine.emplace(entry.original_identifier,
+                                        std::pair{*entry.quarantined_at, entry.physical_sha256});
+        }
+        for (std::size_t run = 0; run < options.young_quarantine_noop_runs; ++run) {
+            kasumi::platform::perf_trace::force_enable(true);
+            kasumi::platform::perf_trace::reset();
+            const auto start = Clock::now();
+            auto repeated = kasumi::application::integrity::garbage_collect(
+                runtime, storage, key, options.copy_concurrency,
+                options.metadata_concurrency, options.remove_concurrency);
+            const auto end = Clock::now();
+            const auto wall_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                end - start).count();
+            Json measured{
+                {"run", run + 1},
+                {"wall_us", wall_us},
+                {"phase_times", phase_times_json()},
+                {"counters", gc_counters_json()},
+            };
+            kasumi::platform::perf_trace::force_enable(false);
+            if (!repeated) {
+                measured["error"] = kasumi::application::integrity::describe(repeated.error());
+                baseline_valid = false;
+            } else {
+                measured["result"] = {
+                    {"candidate_objects", repeated->candidate_objects},
+                    {"quarantined_objects", repeated->quarantined_objects},
+                    {"restored_objects", repeated->restored_objects},
+                    {"purged_objects", repeated->purged_objects},
+                    {"analysis_only", repeated->analysis_only},
+                };
+                baseline_valid = repeated->candidate_objects == 0 &&
+                                 repeated->quarantined_objects == 0 &&
+                                 repeated->restored_objects == 0 &&
+                                 repeated->purged_objects == 0 &&
+                                 !repeated->analysis_only;
+                if (repeated->analysis_only) {
+                    std::cerr << "[ERROR] Backend returned analysis_only; online-GC baseline unavailable.\n";
+                }
+            }
+            noop_runs.push_back(std::move(measured));
+            if (!baseline_valid) break;
+        }
+
+        auto repeated_list = kasumi::transport::list(storage);
+        if (!repeated_list || sorted(*repeated_list) != sorted(expected_post)) {
+            baseline_valid = false;
+        } else {
+            auto repeated_quarantine =
+                history_storage::maintenance_protocol::inventory_quarantine(
+                    storage, key, *repeated_list, local_root);
+            if (!repeated_quarantine ||
+                repeated_quarantine->size() != options.candidates) {
+                baseline_valid = false;
+            } else {
+                for (const auto& entry : *repeated_quarantine) {
+                    const auto expected = expected_quarantine.find(entry.original_identifier);
+                    auto verified = history_storage::maintenance_protocol::verify_quarantine(
+                        storage, entry, local_root);
+                    if (expected == expected_quarantine.end() || !entry.quarantined_at ||
+                        std::pair{*entry.quarantined_at, entry.physical_sha256} != expected->second ||
+                        !verified || !*verified) {
+                        baseline_valid = false;
+                        break;
+                    }
+                }
+            }
+        }
+        std::size_t repeated_samples_verified = 0;
+        if (!verify_content_samples(storage, key, local_root, sample_ids, live_info,
+                                    repeated_samples_verified) ||
+            repeated_samples_verified != sample_target) {
+            baseline_valid = false;
+        }
+        if (!baseline_valid) {
+            std::cerr << "[ERROR] Repeated GC or post-run fixture validation failed.\n";
+        }
+    }
+
     // 9. Cleanup fixture
     std::cout << "[INFO] Cleaning up remote fixture...\n";
     std::vector<std::string> cleanup_ids = expected_post;
@@ -738,11 +843,14 @@ bool run_live_gc(const GcLiveOptions& options) {
     }
     auto final_list = kasumi::transport::list(storage);
     const bool cleaned = (!final_list || final_list->empty());
+    const bool baseline_cleaned = final_list && final_list->empty();
     std::cout << "[INFO] Fixture cleanup: " << (cleaned ? "CLEAN" : "REMAINS DETECTED") << "\n";
 
     // 10. Write report
     Json result{
-        {"status", cleaned ? "PASS_CLEANED" : "PASS_WITH_REMAINS"},
+        {"status", options.young_quarantine_noop_runs > 0 &&
+                        (!baseline_valid || !baseline_cleaned) ? "BASELINE_INVALID" :
+                    (cleaned ? "PASS_CLEANED" : "PASS_WITH_REMAINS")},
         {"run_id", run_id},
         {"remote_fixture", remote_fixture},
         {"files", options.files},
@@ -757,10 +865,20 @@ bool run_live_gc(const GcLiveOptions& options) {
         {"phase_times", gc_times},
         {"counters", gc_counters},
     };
+    if (options.young_quarantine_noop_runs > 0) {
+        result["benchmark_kind"] = "young-quarantine-noop-baseline";
+        result["build_commit"] = KASUMI_PHASE18_BUILD_COMMIT;
+        result["target_id"] = options.target_id.value_or("");
+        result["transport_kind"] = "rclone";
+        result["young_quarantine_noop_runs_requested"] = options.young_quarantine_noop_runs;
+        result["young_quarantine_noop_runs"] = std::move(noop_runs);
+        result["post_repetition_validation"] = baseline_valid;
+    }
     if (write_json(output, result)) {
         std::cout << "[INFO] Result written to " << output.string() << "\n";
     }
-    return true;
+    return options.young_quarantine_noop_runs == 0 ||
+           (baseline_valid && baseline_cleaned);
 }
 
 } // namespace

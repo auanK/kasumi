@@ -3,6 +3,7 @@
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "crypto/physical_hash.hpp"
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/random.hpp"
 
@@ -29,6 +30,7 @@ constexpr std::string_view metadata_suffix = ".meta";
 constexpr std::string_view metadata_magic = "KGQ1\n";
 constexpr std::size_t maximum_marker_size = 512;
 constexpr std::size_t maximum_metadata_plaintext_size = 96;
+constexpr std::size_t metadata_download_batch_size = 8;
 
 Error error(ErrorCode code, std::string detail) {
     return Error{.code = code, .detail = std::move(detail)};
@@ -347,20 +349,9 @@ decode_metadata(std::span<const std::uint8_t> bytes) {
 }
 
 std::expected<std::pair<std::int64_t, std::string>, Error>
-load_metadata(transport::Transport& storage,
-              std::string_view identifier,
-              std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-              const std::filesystem::path& workspace_root) {
-    auto temporary = detail::make_workspace(workspace_root);
-    if (!temporary) {
-        return std::unexpected(history_error(temporary.error()));
-    }
-    const auto encrypted = (*temporary)->root / "metadata.enc";
-    const auto plaintext = (*temporary)->root / "metadata.plain";
-    if (auto downloaded = detail::download(storage, identifier, encrypted);
-        !downloaded) {
-        return std::unexpected(history_error(downloaded.error()));
-    }
+load_metadata_ciphertext(const std::filesystem::path& encrypted,
+                         const std::filesystem::path& plaintext,
+                         std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
     std::error_code file_error;
     if (std::filesystem::file_size(encrypted, file_error) >
             maximum_marker_size ||
@@ -834,6 +825,8 @@ std::expected<std::vector<QuarantineEntry>, Error> inventory_quarantine_impl(
                         });
     }
 
+    std::vector<QuarantineEntry*> pending;
+    pending.reserve(metadata.size());
     for (const auto& [quarantine_identifier, metadata_identifier] : metadata) {
         const auto entry = entries.find(quarantine_identifier);
         if (entry == entries.end()) {
@@ -841,13 +834,53 @@ std::expected<std::vector<QuarantineEntry>, Error> inventory_quarantine_impl(
                 ErrorCode::InvalidControlObject,
                 "metadata without quarantine object: " + metadata_identifier));
         }
-        auto loaded =
-            load_metadata(storage, metadata_identifier, key, workspace_root);
-        if (!loaded) {
-            return std::unexpected(loaded.error());
+        if (!metadata_identifier.starts_with(layout.quarantine_content_prefix) &&
+            !metadata_identifier.starts_with(layout.quarantine_commits_prefix)) {
+            return std::unexpected(error(ErrorCode::InvalidControlObject,
+                                         "invalid quarantine metadata path"));
         }
-        entry->second.quarantined_at = loaded->first;
-        entry->second.physical_sha256 = std::move(loaded->second);
+        pending.push_back(&entry->second);
+    }
+
+    for (std::size_t start = 0; start < pending.size();) {
+        auto temporary = detail::make_workspace(workspace_root);
+        if (!temporary) {
+            return std::unexpected(history_error(temporary.error()));
+        }
+        const auto& first = pending[start]->metadata_identifier;
+        const auto& prefix = first.starts_with(layout.quarantine_content_prefix)
+                                 ? layout.quarantine_content_prefix
+                                 : layout.quarantine_commits_prefix;
+        transport::GetBatch batch{
+            .source_prefix = prefix.substr(0, prefix.size() - 1),
+            .destination_root = (*temporary)->root,
+            .max_parallel_transfers = metadata_download_batch_size,
+        };
+        auto end = start;
+        while (end < pending.size() &&
+               end - start < metadata_download_batch_size &&
+               pending[end]->metadata_identifier.starts_with(prefix)) {
+            ++end;
+        }
+        for (std::size_t index = start; index < end; ++index) {
+            batch.identifiers.push_back(pending[index]->metadata_identifier.substr(
+                prefix.size()));
+        }
+        if (auto downloaded = transport::get_batch(storage, batch); !downloaded) {
+            return std::unexpected(transport_error(downloaded.error()));
+        }
+        for (std::size_t index = start; index < end; ++index) {
+            const auto encrypted = (*temporary)->root /
+                platform::path::from_utf8(batch.identifiers[index - start]);
+            auto loaded = load_metadata_ciphertext(
+                encrypted, (*temporary)->root / "metadata.plain", key);
+            if (!loaded) {
+                return std::unexpected(loaded.error());
+            }
+            pending[index]->quarantined_at = loaded->first;
+            pending[index]->physical_sha256 = std::move(loaded->second);
+        }
+        start = end;
     }
 
     std::vector<QuarantineEntry> result;
