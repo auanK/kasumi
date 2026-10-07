@@ -17,3 +17,5 @@ Kasumi's provider-neutral certification suite was successfully completed against
 | S3-compatible (MinIO) | Unsupported |
 
 `physical_hash` is an optional transport optimization. Providers without remote SHA-256 support remain certified through Kasumi's verified fallback path.
+
+See [Transport](architecture/transport.md) for the capability boundary and [Garbage Collection](architecture/garbage-collection.md) for runtime visibility checks.

@@ -1,6 +1,6 @@
 # Kasumi
 
-Kasumi - Multi-client bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.
+Kasumi is multi-client bidirectional file synchronization with client-side encryption over local or rclone-compatible shared storage, without a dedicated server.
 
 Kasumi is written in C++23 for Linux and Windows. It synchronizes directories through shared storage, including local filesystems, network shares, and rclone-compatible remotes. Clients synchronize independently and do not need to be online at the same time.
 
@@ -22,14 +22,18 @@ Kasumi records synchronization states as immutable commits in a shared history D
 - **Shared Storage Backends**: Supports local filesystems, network shares, and rclone-compatible remotes.
 - **Conflict Reconciliation**: Concurrent divergent branches are reconciled deterministically.
 - **Transaction Recovery**: Interrupted operations are tracked in a transaction journal.
+- **Integrity and Maintenance**: `fsck` audits authenticated remote content; `gc` collects unreachable objects through quarantine.
+- **Remote Inspection**: Read logical history and physical storage diagnostics without running synchronization.
 - **Linux and Windows**: Native builds for Linux and Windows.
 
 ## Documentation
 
 - [Configuration and Usage](docs/configuration-and-usage.md)
 - [Architecture](docs/architecture.md)
+- [Remote Inspection](docs/architecture/remote-inspection.md)
 - [Security](docs/security.md)
 - [Build and Test](docs/build-and-test.md)
+- [Provider Certification](docs/provider-certification.md)
 
 ## License
 

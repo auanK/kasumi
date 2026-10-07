@@ -15,8 +15,8 @@ The genesis commit, `C0`, has zero parents and height 0. Subsequent commits refe
 
 ## Physical HEAD Markers vs. Logical Heads
 
-* A **Physical HEAD** is a remote protocol marker under `history/heads/` binding a commit ID to a specific ciphertext ID. It signals that this encrypted commit variant has been published.
-* A **Logical Head** is a marked commit in the DAG that is not an ancestor of any other marked commit.
+* A **Physical HEAD marker** is a remote protocol object in the key-derived heads namespace binding a Commit ID to a specific Ciphertext ID. It signals that this encrypted Commit variant has been published.
+* A **Logical head** is a marked Commit in the DAG that is not an ancestor of any other marked Commit.
 
 Ancestral physical markers may temporarily linger during pruning windows. For example, markers for `C0`, `CA`, and `CB` might coexist physically even though `C0` is already an ancestor of the other two. In this scenario, `C0` is an ancestral physical marker, while the active logical heads are `{CA, CB}`.
 
@@ -118,4 +118,4 @@ min_history_depth = 5 commits
 min_history_age_hours = 6 hours
 ```
 
-A commit reaches the pruning boundary only when both depth and age criteria are satisfied. Boundary anchor commits are preserved, while historical objects prior to the anchors become eligible for garbage-collection processing according to the reachability, retention, barrier, and quarantine rules described in [Remote Storage, Integrity & Maintenance](remote-storage-and-maintenance.md).
+A Commit reaches the pruning boundary only when both the minimum shortest depth from a head and age relative to the newest authenticated head timestamp are satisfied. An authenticated Epoch records boundary anchors and links to its predecessor; the genesis Epoch establishes `vault_id`. The local accepted Epoch ID and sequence act as a continuity checkpoint. Clients reject sequence regression, same-sequence replacement, or ancestry that does not reach their trusted checkpoint. A newly enrolled client can authenticate the presented chain to genesis but cannot detect a newer valid Epoch it has never observed. Anchors retain the validation frontier; older history may become eligible for [GC](garbage-collection.md) only after its reachability and quarantine checks. [Remote Layout](remote-layout.md) owns physical Epoch paths and [Security](../security.md) owns the trust boundary.

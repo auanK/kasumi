@@ -1,55 +1,44 @@
-# Architecture Overview
+# Architecture Map
 
-## High-Level Design
-
-Kasumi synchronizes local directories using shared remote storage. Each client observes its local directory and remote protocol state, determining which mutations to publish or materialize. Remote storage serves as a passive repository for Kasumi data and protocol objects; synchronization and reconciliation logic execute on clients. Kasumi does not require a dedicated Kasumi coordination server.
+Kasumi is a C++23 client that synchronizes local directories through a passive shared object store. Clients authenticate and reconcile history locally; the provider stores encrypted payloads and protocol objects. Each machine has its own profile and accepted SQLite state. The shared vault is identified by its key and authenticated genesis Epoch. Concurrent clients can publish immutable Commit branches without a global sync lock. A later client resolves the branches and may publish a merge Commit.
 
 ```text
-Machine A ── publish ──> Shared Storage ── consume ──> Machine B
+CLI/profile → local observation + authenticated remote history + StoredState
+             → remote DAG resolution → reconciliation → SyncPlan
+             → reobservation → staged execution → Commit/HEAD/Epoch publication
+             → SQLite accepted state and cleanup
 ```
 
-File payloads, commit payloads, and Epoch records are encrypted and authenticated before being stored remotely. Clients synchronize asynchronously: Machine A can publish changes while Machine B is offline, and Machine B observes and incorporates those changes during a subsequent synchronization.
+## Follow an Operation
 
-All reconciliation, cryptographic validation, three-way reconciliation, and recovery operations execute locally on client machines. Clients can publish concurrently without an exclusive global synchronization lock between machines. Concurrent publications form immutable branches in the history DAG; subsequent synchronization reconciles the observed branches and can publish a merge commit with multiple parents.
+| Question | Owner |
+|---|---|
+| What does `config` do to profiles, keys, and private paths? | [Profile Management](architecture/profile-management.md), [Configuration and Usage](configuration-and-usage.md) |
+| How does an operation resolve runtime, lock, credentials, and transport? | [Application and Runtime](architecture/application-and-runtime.md) |
+| What is a Snapshot, NodeRow, or Merkle hash? | [Data Model](architecture/data-model.md) |
+| What do SQLite, StoredState, caches, checkpoints, keys, and locks own? | [Local Persistent State](architecture/local-state.md) |
+| How is disk observed, and when are hashes or journal checkpoints reused? | [Local Observation](architecture/local-observation.md) |
+| How do local/base/remote form a candidate tree and SyncPlan? | [Reconciliation](architecture/reconciliation.md) |
+| What does `sync --dry-run`/Preview or `status` observe and report? | [Preview and Status](architecture/planning-and-status.md) |
+| How does `sync` stabilize, execute, and publish? | [Synchronization](architecture/synchronization.md) |
+| What do transaction phases mean, and how does interruption recovery decide? | [Transactions and Recovery](architecture/transactions-and-recovery.md) |
+| How does `fsck` audit structure and every referenced payload? | [Fsck](architecture/fsck.md) |
+| When can `gc` quarantine, restore, or purge safely? | [Garbage Collection](architecture/garbage-collection.md) |
+| How are Commit DAGs, logical heads, merge bases, Epochs, and retention resolved? | [History and Concurrency](architecture/history-and-concurrency.md) |
+| What is the actual remote namespace and publication order? | [Remote Layout and Publication](architecture/remote-layout.md) |
+| What must a backend implement, and how are optional capabilities verified? | [Transport](architecture/transport.md) |
+| What does each `remote ...` family inspect? | [Remote Inspection](architecture/remote-inspection.md) → [History/Epoch](architecture/remote-history-inspection.md), [Content](architecture/remote-content-inspection.md), [Physical/Maintenance](architecture/remote-maintenance-inspection.md) |
+| What can the provider see, and what does `key.bin` protect? | [Security](security.md) |
 
-## Profiles vs. Vaults
+## Effects at a Glance
 
-* A **Profile** is the local configuration and state associated with a synchronized directory on one machine, including its local directory path, remote storage endpoint, retention policy, local database, and local key material. Operations on the same profile are serialized locally by a profile lock.
-* A **Vault** is the shared logical identity of the remote history. Its identifier, `vault_id`, is established in the genesis Epoch and validated by clients using the shared master key.
+| Request | Local effects | Remote effects |
+|---|---|---|
+| `config` list/create/edit/rename/delete | Reads or changes `config.toml` and private profile paths; delete preserves the synchronized directory | None |
+| Preview (`sync --dry-run`), Status | Reads local/SQLite state; profile lock and permission normalization are possible | Observation only; no recovery or publication |
+| Sync | May change synchronized files, cache/checkpoint, transaction journal, and accepted `StoredState` | May upload content and publish/prune history; registers a writer for active work |
+| Fsck | Checkpoint/workspace; preceding recovery can change local state | Audit reads only, **except** effects of preceding transaction recovery |
+| GC | Workspace; preceding recovery can change local state | Barrier/probe even in analysis-only mode; online restore, quarantine, source removal, and purge when safe |
+| `remote ...` | Temporary workspace and possible private history cache; `remote get` writes its chosen destination | Inspection reads only; no normal transaction recovery |
 
-Different machines configure independent profile names and local directory paths while interacting with the same shared vault. Clients participate in that vault when they connect to the same remote storage namespace, use the matching master key, and observe the same authenticated genesis Epoch defining the shared `vault_id`.
-
-## A Simple Sync Walkthrough
-
-In a basic scenario with a single initial commit, Machine A creates a file:
-
-```text
-Documents/
-└── work.txt
-```
-
-Upon executing `kasumi sync`, Machine A:
-1. Scans the local directory and computes the Merkle tree snapshot;
-2. Encrypts and uploads the content payload;
-3. Encrypts and publishes the commit, `C0`, followed by a HEAD marker pointing to `C0`.
-
-```text
-Machine A                         Shared Remote
-Documents/work.txt  ──────> Encrypted Content Object
-                            Encrypted Commit C0
-                            HEAD marker -> C0
-```
-
-When Machine B subsequently synchronizes against the same vault:
-1. Downloads and validates the HEAD marker, then fetches, authenticates, and decrypts commit `C0`;
-2. Fetches the required encrypted content objects;
-3. Decrypts and materializes `Documents/work.txt` into its local folder;
-4. Persists `C0` into its local SQLite database as the accepted state for future reconciliations.
-
-## Architecture Deep Dives
-
-* [Data Model & Merkle Trees](architecture/data-model.md)
-* [Synchronization & Reconciliation](architecture/synchronization.md)
-* [History DAG, Concurrency & Retention](architecture/history-and-concurrency.md)
-* [Remote Storage, Integrity & Maintenance](architecture/remote-storage-and-maintenance.md)
-* [Security Specification](security.md)
+Read the linked owners for exact invariants. The [README](../README.md) is a short entry point, and [Provider Certification](provider-certification.md) records externally established backend certification results.

@@ -84,7 +84,7 @@ The logical hash of a file is computed using plain BLAKE3:
 BLAKE3(plaintext bytes)
 ```
 
-File size and `mtime` are tracked alongside the hash in `NodeRow`. Encryption nonces and remote blinded identifiers are decoupled layers, detailed in [Security Specification](../security.md) and [Remote Storage & Maintenance](remote-storage-and-maintenance.md).
+File size and `mtime` are tracked alongside the hash in `NodeRow`; neither is fed into the directory-composition hash. Encryption nonces and keyed remote identifiers are separate layers, detailed in [Security](../security.md) and [Remote Layout](remote-layout.md).
 
 ## Directory Hashes
 
@@ -130,23 +130,6 @@ Snapshot (Merkle Tree)
 
 A Commit contains a canonical Snapshot together with its parent commit IDs, height, and authenticated timestamp metadata. Parent commit IDs connect the commit into the history DAG. Multi-parent merge resolution is detailed in [History DAG, Concurrency & Retention](history-and-concurrency.md).
 
-## Local State Artifacts
+## Accepted State and Observation
 
-Each local profile maintains isolated state files:
-
-| Artifact | Location | Purpose |
-|---|---|---|
-| `config.toml` | Data Root | Profiles, paths, endpoints, and retention limits |
-| `profiles/<profile>/key.bin` | Profile Dir | Masked master encryption key |
-| `profiles/<profile>/db.sqlite` | Profile Dir | Accepted snapshot state, caches, and checkpoints |
-| `profiles/<profile>/inspection-history-v1.cache` | Profile Dir | Non-authoritative cache used by CLI inspection operations |
-| `profiles/<profile>/transaction.bin.enc` | Profile Dir | Authenticated and encrypted mutation journal |
-| `profiles/<profile>/.transactions/<id>` | Profile Dir | Temporary staging and rollback workspaces |
-| `profile-<profile>.lock` | Data Root | Inter-process mutual exclusion lock |
-
-In `db.sqlite`, `StoredState` persists the locally accepted snapshot (`tree`), tree `height`, `commit_id`, `ciphertext_id`, and accepted Epoch certificate reference (`epoch_id` and `epoch_sequence`). This state serves as the locally accepted reconciliation base for the next synchronization cycle.
-
-## Change Detection & Checkpoints
-
-* **File Cache**: Persists the content hash, size, and platform-specific file identity fingerprint. When the stored size and strong fingerprint match the current file, Kasumi can reuse the cached content hash without reading the file contents again.
-* **NTFS Change Journal**: On Windows/NTFS, an `ObservationCheckpoint` records the USN Change Journal position and binds it to the previously observed snapshot. When the checkpoint is valid and journal evidence reports no relevant changes, Kasumi can reuse the previous snapshot without invoking the filesystem scanner. Patchable journal deltas can be applied selectively; otherwise Kasumi falls back to the normal scanner.
+SQLite `StoredState` persists an accepted Snapshot and its history reference, making it the [reconciliation base](local-state.md#sqlites-three-distinct-responsibilities) for the next run. The [Local Observation](local-observation.md) page owns scanning, file-hash reuse, Windows change-journal checkpoints, selective patching, and conservative fallback.

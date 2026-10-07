@@ -11,10 +11,10 @@ The threat model distinguishes three threat scenarios:
 * **Mitigations & Observable Data**:
   * File content payloads, commit payloads, Epoch records, and quarantine metadata are encrypted and authenticated client-side using **XChaCha20-Poly1305** before remote storage.
   * The local transaction journal is also encrypted and authenticated, but resides exclusively on local client storage and is not uploaded to remote storage.
-  * Keyed BLAKE2b derivations generate opaque identifiers for content, commits, and Epochs. Canonical file paths, directory structure, and file modification timestamps are contained within encrypted commit payloads when represented in remote history and are not used directly as remote object identifiers. The local transaction journal may also contain synchronization paths and logical hashes inside its encrypted journal record.
+  * Domain-separated keyed BLAKE2b derivations generate Content, Commit, Epoch, and namespace identifiers. Canonical file paths, directory structure, and file modification timestamps are contained within encrypted Commit payloads when represented in remote history and are not used directly as remote object identifiers. The local transaction journal may also contain synchronization paths and logical hashes inside its encrypted record.
   * Protected payloads that fail AEAD authentication or identifier/structural validation are rejected.
   * History continuity checks compare the observed remote history with locally persisted state when such state exists.
-  * **Observable Metadata**: Remote storage providers cannot observe plaintext file contents or directory hierarchies, but can observe fixed protocol prefixes (`history/`, `commits/`, `heads/`, `epochs/v1/`, `gc/v1/`), opaque object identifiers, ciphertext IDs, Epoch sequence numbers encoded in Epoch paths, physical HEAD-marker presence, control objects (writer registrations, barriers, probes), object count and size distributions, deduplication patterns within the vault, and access/operation timestamps.
+  * **Observable Metadata**: Remote storage providers cannot read authenticated plaintext file contents or the encrypted Commit tree without the key. They can observe the key-derived namespace structure, opaque identifiers, Commit ID/Ciphertext ID pairs in object names, clear Epoch sequence numbers, physical HEAD-marker presence, writer/barrier/probe and quarantine objects, object count and size distributions, deduplication within a vault, and access/operation timing. See [Remote Layout](architecture/remote-layout.md).
 
 ### Threat B: Stolen or Offline Physical Disk
 * **Threat Profile**: A physical device is lost or stolen, and an adversary gains offline read access to the local storage drive.
@@ -57,7 +57,7 @@ Password + Password Salt
 
 ### Local Key Storage & Masking
 
-Upon derivation or manual entry (`KASUMI_MASTER_KEY`), the 32-byte master key is written to:
+The profile-management API can create a profile from a directly supplied master key; the CLI `kasumi config` wizard derives it from Password and Password Salt. On creation, the 32-byte key is written to:
 
 ```text
 profiles/<profile>/key.bin
@@ -67,7 +67,7 @@ profiles/<profile>/key.bin
 * **Access Control at Rest**: Operating system file permissions restrict read and write access:
   * **Windows**: Explicit, protected DACLs (`D:P(A;FA;;;SY)(A;FA;;;<user-sid>)`) disable inheritance and restrict access to the owner user and `SYSTEM`. Symlinks and reparse points are rejected.
   * **POSIX**: Mode `0600` for files and `0700` for private directories (`O_NOFOLLOW` and `lstat` checks reject symlinks).
-* **Sensitive File Writes**: Writing `key.bin` and sensitive profile state uses temporary same-directory files, filesystem flushing (`FlushFileBuffers` / `fsync`), and atomic replacement/rename (`MoveFileExW` on Windows, POSIX rename).
+* **Sensitive File Writes**: Private-file writes such as `key.bin` and the transaction journal use temporary same-directory files, filesystem flushing (`FlushFileBuffers` / `fsync`), and atomic replacement/rename (`MoveFileExW` on Windows, POSIX rename). SQLite `StoredState` instead uses database transactions; see [Local Persistent State](architecture/local-state.md).
 
 ### Domain-Separated Subkeys
 
@@ -78,8 +78,9 @@ Keyed BLAKE2b derives distinct 32-byte subkeys across isolated domains:
 * `Epoch`: Epoch lifecycle envelope encryption
 * `Journal`: local transaction journal encryption
 * `RemoteIdentifier`: keyed identifier derivation
+* `FsckCheckpoint`: local authenticated fsck checkpoint
 
-Content, commit, and Epoch identifiers also use disjoint cryptographic domain tags. Ephemeral subkey buffers in memory are wiped using `crypto_wipe` when no longer needed.
+Content, Commit, Epoch, and namespace identifiers also use disjoint cryptographic domain tags. Derived namespace components are truncated to eight hex characters (the version component to four), so namespace derivation is not a confidentiality guarantee for protocol structure. Ephemeral subkey buffers in memory are wiped at defined cleanup points using `crypto_wipe`; Kasumi does not claim to prevent all copies or swap exposure of secrets.
 
 ## Encryption Standards
 
@@ -99,8 +100,9 @@ An authentication failure causes the protected object or journal record to be re
 | Content ID | Keyed BLAKE2b of logical hash | Opaque remote storage object name |
 | Commit ID | Keyed BLAKE2b of canonical commit | Parent references, commit object path, and HEAD-marker binding |
 | Epoch ID | Keyed BLAKE2b of canonical Epoch | Lifecycle chain sequencing and Epoch object path |
-| Ciphertext ID | BLAKE3 of encrypted commit payload | Physical commit variant tracking |
+| Ciphertext ID | BLAKE3 of encrypted Commit payload | Physical Commit variant tracking |
 | Physical Hash | SHA-256 of stored bytes | Remote transport and transfer integrity verification |
+| Namespace component | Truncated keyed BLAKE2b derivation | Remote protocol path components |
 
 Under different master keys, the keyed Content, Commit, and Epoch identifier derivations produce different identifiers for the same logical input. Plaintext BLAKE3 logical hashes are not used directly as remote content object identifiers. They may appear in encrypted commit or transaction journal records and in protected local database state.
 
@@ -130,13 +132,13 @@ Epochs define authenticated retention horizons and boundary anchors. The writer/
 
 Internal routines reject symlinks and Windows reparse points inside private state directories. Writing configuration, master key, and journal files employs temporary files, filesystem flush (`fsync` / `FlushFileBuffers`), and atomic rename replacement.
 
-`db.sqlite` persists accepted history trees, commit references, height metadata, and Epoch references. `transaction.bin.enc` records authenticated multi-step mutation phases used by interruption recovery, detailed in [Synchronization and Reconciliation](architecture/synchronization.md).
+`db.sqlite` persists accepted history trees, Commit references, height metadata, and Epoch references. The local `inspection-history-v1.cache` can also contain decoded Commit trees and is authenticated but not encrypted. These local files rely on filesystem permissions and disk encryption for at-rest privacy. `transaction.bin.enc` records encrypted, authenticated mutation phases used by [interruption recovery](architecture/transactions-and-recovery.md). [Local Persistent State](architecture/local-state.md) distinguishes these authorities from caches and checkpoints.
 
 ## Remote Metadata Privacy
 
-Remote storage providers can observe fixed protocol namespace prefixes, keyed or otherwise opaque object identifiers, ciphertext IDs, Epoch sequence numbers encoded in Epoch paths, HEAD-marker and maintenance control-object presence, object counts and sizes, deduplication/reuse patterns within a vault, quarantine state, and operation timing. Canonical file paths, directory hierarchy, file modification timestamps, commit parent IDs, and Snapshot rows are contained within protected commit payloads and are not used directly as remote object names.
+Remote storage providers observe key-derived protocol namespace components and their hierarchy, keyed or otherwise opaque object identifiers, Commit ID/Ciphertext ID relationships, clear Epoch sequence numbers, HEAD-marker and maintenance control-object presence, object counts and sizes, deduplication/reuse patterns within a vault, quarantine state, and operation timing. Canonical file paths, directory hierarchy, file modification timestamps, Commit parent IDs, and Snapshot rows are inside protected Commit payloads and are not directly remote object names. Provider-specific metadata may reveal further operational information outside Kasumi's payload encryption boundary.
 
-Directory listings are treated as untrusted observations. Transport operations (`PUT`, `GET`, `PRESENCE`, `LIST`, `REMOVE`) verify objects via readback or physical hash when required.
+Directory listings are treated as untrusted observations. Where publication or maintenance requires byte confirmation, Kasumi compares a remote physical SHA-256 when supported or uses a verified readback fallback; downloaded protected payloads still require cryptographic authentication. A provider-reported hash alone is not a substitute for fsck's payload audit. See [Transport](architecture/transport.md).
 
 ## Rollback Protection & History Continuity
 

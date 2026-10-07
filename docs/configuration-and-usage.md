@@ -8,7 +8,7 @@ Launch the interactive configuration wizard:
 kasumi config
 ```
 
-The wizard allows creating, editing, renaming, and deleting profiles. During creation, it prompts for the profile name, local synchronized path, remote destination, Password, and Password Salt.
+The wizard lists profiles and allows creating, editing, renaming, and deleting them. During creation, it prompts for the profile name, local synchronized path, remote destination, Password, and Password Salt. Profile names contain only letters, digits, `_`, or `-`; the local path must be absolute. Editing changes the configured local and remote paths, not the key. Renaming moves private profile state. Deleting removes local configuration, key, and state, while leaving the synchronized folder and remote objects intact. See [Profile Management](architecture/profile-management.md) for the lifecycle and rollback boundaries.
 
 * **Password**: Minimum 12 characters.
 * **Password Salt**: Minimum 16 characters. A reproducible, user-provided passphrase used as the cryptographic salt for Argon2id key derivation (not an automatically generated or stored random salt). When configuring another machine for the same vault through the interactive wizard, use the same Password and Password Salt so that it derives the same vault master key.
@@ -24,7 +24,7 @@ drive:kasumi/my-profile
 s3:my-bucket/kasumi-vault
 ```
 
-`drive:` and `s3:` represent configured remote names in an external rclone configuration, not storage protocols natively implemented by Kasumi.
+`drive:` and `s3:` represent configured remote names in an external rclone configuration, not storage protocols natively implemented by Kasumi. The part after `:` must be a nonempty relative root without `..` components or a trailing slash. Local transport destinations must be absolute.
 
 ## Configuration File
 
@@ -53,23 +53,23 @@ New profiles default to a minimum retention depth of 5 commits and a minimum ret
 | `kasumi fsck <profile>` | Validates observed remote history and audits content objects referenced by the effective remote state |
 | `kasumi gc <profile>` | Runs garbage-collection analysis and, when online collection conditions are met, quarantine and removal processing |
 
-* `status` and `sync --dry-run` do not execute the computed synchronization plan or apply synchronization mutations to the synchronized tree or remote history. They read local profile configuration and private state, acquire the local profile lock, and perform observations.
+* `status` and `sync --dry-run` are separate user-facing operations, but production dispatch runs both through the same planner and returns a `PlanReport`. Neither executes the plan, recovers an interrupted transaction, advances accepted state, or publishes remote history. They read local profile configuration and private state, acquire the local profile lock, and perform observations. Their result can become stale before a later sync. See [Preview and Status](architecture/planning-and-status.md).
 * **Plan Truncation & `--full`**: When a synchronization plan contains more than 10 items, Kasumi truncates output to display the first 5 and last 5 items, separated by an ellipsis line (`... (N more items) ...` / `... (mais N itens) ...`) to maintain clean terminal output. Pass `--full` to list all items without truncation (useful for inspection scripts, complete audits, or piping to log files).
-* `sync` applies local tree modifications, transfers content payloads, and publishes commit and HEAD records.
-* `gc` coordinates through a distributed barrier protocol, checks backend consistency visibility with probe objects, and stages candidate objects through a 10-day quarantine retention period prior to permanent removal. See [Remote Storage, Integrity, and Maintenance](architecture/remote-storage-and-maintenance.md) for details.
-* `fsck` validates the observed remote history DAG, inspects physical namespace identifiers, audits referenced content payloads, checks AEAD authentication tags, sizes, and logical hashes, and reports missing or corrupted objects.
+* `sync` applies local tree modifications, transfers content payloads, and publishes Commit and HEAD records. See [Synchronization](architecture/synchronization.md).
+* `gc` coordinates through a distributed barrier protocol, checks backend consistency visibility with probe objects, and stages candidates through a 10-day quarantine before permanent removal. It can return analysis-only results. See [Garbage Collection](architecture/garbage-collection.md).
+* `fsck` validates observed remote history and physical identifiers, downloads referenced content, checks authentication, size, and logical hashes, and reports missing or corrupted objects. It may update a private checkpoint but does not use that checkpoint to skip payload audits. See [Fsck](architecture/fsck.md).
 
 ### Interruption and Recovery
 
 Synchronization records transaction phase and operation progress in an encrypted and authenticated local transaction journal (`transaction.bin.enc` and `.transactions/<id>`).
 
 If synchronization is interrupted:
-* At the start of a subsequent synchronization or maintenance operation, Kasumi inspects the existing local transaction journal.
+* At the start of a subsequent synchronization or maintenance operation, Kasumi inspects the existing local transaction journal. Preview, Status, and remote inspection do not run this recovery path.
 * Depending on the persisted phase and observed state, recovery may resume, rollback, or roll forward the transaction.
 * Conflicting or indeterminate publication states are reported as recovery errors rather than assumed successful.
 * Already present content objects may be reused when their identifiers and verification checks match the required content.
 
-For the recovery state transitions, see [Synchronization and Reconciliation](architecture/synchronization.md).
+For the recovery state transitions, see [Transactions and Recovery](architecture/transactions-and-recovery.md).
 
 ### Concurrency & Multiple Profiles
 
@@ -78,7 +78,7 @@ For the recovery state transitions, see [Synchronization and Reconciliation](arc
 
 ## Remote Inspection
 
-These commands do not publish synchronization changes or run garbage collection. Some inspection operations maintain the local private `inspection-history-v1.cache` in the profile directory.
+These commands do not publish synchronization changes or run garbage collection. Complete-history inspection may maintain the local private `inspection-history-v1.cache`; `remote get` writes the requested destination after authenticating the payload. See [Remote Inspection](architecture/remote-inspection.md) for each family's data flow and failure behavior.
 
 | Command | Description |
 |---|---|
@@ -87,13 +87,13 @@ These commands do not publish synchronization changes or run garbage collection.
 | `kasumi remote tree <profile> --head <id>` | Displays the tree for a specified current logical head |
 | `kasumi remote commits <profile>` | Lists reachable commits in the history DAG |
 | `kasumi remote summary <profile>` | Summarizes vault history, conflicts, contents, and active writers |
-| `kasumi remote stat <profile> <path>` | Displays properties and metadata of a specific logical path |
+| `kasumi remote stat <profile> <path>` | Displays properties of a path in the resolved effective remote tree; `/` selects its root |
 | `kasumi remote commit <profile> <id>` | Shows parents, metadata, and physical variants of a commit |
-| `kasumi remote get <profile> <path> <dst>` | Authenticates and decrypts the selected remote content and writes it to the requested destination without running synchronization |
+| `kasumi remote get <profile> <path> <dst>` | Authenticates and decrypts a file in the resolved effective remote tree, then atomically installs it at `<dst>` without running synchronization; its parent directory must exist |
 | `kasumi remote epochs <profile>` | Lists the authenticated Epoch chain |
-| `kasumi remote epoch <profile> <id>` | Displays details for a specific Epoch |
+| `kasumi remote epoch <profile> <id-or-sequence>` | Displays details for a specific Epoch by 64-hex ID or canonical decimal sequence |
 | `kasumi remote contents <profile>` | Lists structural content inventory by metadata |
-| `kasumi remote contents --audit <profile>` | Builds the content inventory and downloads physically present content objects for validation |
+| `kasumi remote contents --audit <profile>` | Builds the inventory and downloads physically present content objects for authentication and validation; `--audit` precedes the profile |
 | `kasumi remote content <profile> <id>` | Displays details of a specific content ID |
 | `kasumi remote markers <profile>` | Validates and classifies physical HEAD markers |
 | `kasumi remote objects <profile>` | Lists and categorizes objects in the raw physical namespace |
@@ -102,6 +102,8 @@ These commands do not publish synchronization changes or run garbage collection.
 | `kasumi remote writers <profile>` | Shows active writer markers and barrier registration state |
 | `kasumi remote health <profile>` | Runs remote health inspection checks |
 
+Commit IDs and Content IDs supplied as selectors are 64 lowercase hex characters. `remote tree --head` selects only a current logical head; without it, multiple heads require an explicit choice. `remote stat` and `remote get` use the resolved effective tree, which can combine heads. `remote health` is a diagnostic summary, not a replacement for `fsck`'s payload audit.
+
 ## General Options
 
 | Option | Description |
@@ -109,7 +111,7 @@ These commands do not publish synchronization changes or run garbage collection.
 | `-h`, `--help`, `help` | Displays help message and command syntax |
 | `-v`, `--version`, `version` | Displays Kasumi version |
 | `--lang <en\|pt-BR>` | Sets CLI language (defaults to English; see below) |
-| `--full` | Displays all items in the synchronization plan without truncation |
+| `--full` | Displays all items in a Preview or Status plan without truncation; it is a presentation switch stripped before command parsing |
 
 ## Language Selection (i18n)
 
@@ -126,11 +128,12 @@ To add a custom community language catalog, place `<lang>.json` in `%APPDATA%/ka
 | Variable | Description |
 |---|---|
 | `KASUMI_LANG` | Sets CLI language (`en`, `pt-BR`, `pt`, etc.) |
-| `KASUMI_MASTER_KEY` | Provides a 64-hex-digit master key as explicit credentials. For an existing profile with `key.bin`, the supplied key must match the persisted profile key |
+| `KASUMI_MASTER_KEY` | Provides a 64-hex-digit master key to application/inspection operations. It does not replace the wizard's Password/Password Salt creation prompts. For an existing profile with `key.bin`, the supplied key must match the persisted key |
 | `KASUMI_PASSWORD` | Provides the Password to the profile creation credential flow (minimum 12 characters) |
 | `KASUMI_PASSWORD2` | Provides the Password Salt to the profile creation credential flow (minimum 16 characters) |
 | `KASUMI_CONTENT_CONCURRENCY` | Sets content-transfer concurrency. Default: 8. Positive values above 16 are capped at 16; invalid or zero values use the default |
 | `KASUMI_PERF_TRACE=1` | Writes operational trace metrics to `stderr` |
+| `KASUMI_PERF_TRACE_LIVE=1` | Emits live performance trace progress when tracing is enabled |
 
 > [!NOTE]
 > Once a profile is created, the derived 32-byte master key is persisted locally in `profiles/<profile>/key.bin` using a reversible XOR mask and operating system filesystem permissions. For existing profiles, routine operations use the persisted `key.bin` when no explicit `KASUMI_MASTER_KEY` credential is supplied. `KASUMI_PASSWORD` and `KASUMI_PASSWORD2` are used by the profile-creation credential flow and are not re-verified during routine synchronization operations. For details on the security boundaries and key storage, see [Security Specification](security.md).
@@ -155,6 +158,7 @@ cache/
 * Lines starting with `#` are comments.
 
 Symlinks inside the synchronization root are not traversed.
+The legacy internal names `kasumi.db`, `kasumi.db-shm`, `kasumi.db-wal`, `kasumi.lock`, and `.kasumi_sync_buffer` are always ignored. The `.kasumiignore` file itself can be synchronized; changes to its local or authenticated remote version can change the effective projection used for a run. See [Local Observation](architecture/local-observation.md).
 
 ## Synchronized Path Rules
 
