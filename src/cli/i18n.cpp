@@ -356,7 +356,14 @@ parse_catalog(std::string_view json_str) {
 }
 
 const std::unordered_map<std::string, std::string>& get_default_en_map() {
-    static const auto s_map = parse_catalog(embedded::EN_JSON);
+    static const auto s_map =
+        parse_catalog(embedded::reconstructed_en_json());
+    return s_map;
+}
+
+const std::unordered_map<std::string, std::string>& get_default_pt_br_map() {
+    static const auto s_map =
+        parse_catalog(embedded::reconstructed_pt_br_json());
     return s_map;
 }
 
@@ -434,7 +441,7 @@ void set_language(Language language) {
     switch (language) {
         case Language::Portuguese:
             g_current_language_code = "pt-BR";
-            populate_strings_from_map(parse_catalog(embedded::PT_BR_JSON));
+            populate_strings_from_map(get_default_pt_br_map());
             break;
         case Language::English:
         case Language::Custom:
@@ -474,7 +481,7 @@ void set_language(std::string_view code) {
     if (lower_code == "pt" || lower_code == "pt-br" || lower_code == "pt_br" ||
         lower_code == "portuguese") {
         g_current_language = Language::Portuguese;
-        populate_strings_from_map(parse_catalog(embedded::PT_BR_JSON));
+        populate_strings_from_map(get_default_pt_br_map());
     } else {
         g_current_language = Language::English;
         populate_strings_from_map(get_default_en_map());

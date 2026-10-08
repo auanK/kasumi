@@ -151,6 +151,33 @@ kasumi_add_test_suite(
     LIBRARIES
         kasumi_cli
 )
+target_compile_definitions(kasumi_test_unit_cli PRIVATE
+    "KASUMI_I18N_SOURCE_DIR=\"${PROJECT_SOURCE_DIR}\""
+    "KASUMI_I18N_EMBEDDED_HEADER=\"${I18N_EMBEDDED_HEADER}\""
+)
+
+add_executable(
+    kasumi_test_i18n_generator_collision
+    unit/cli/test_i18n_generator_collision.cpp
+)
+target_link_libraries(kasumi_test_i18n_generator_collision
+    PRIVATE GTest::gtest_main kasumi_warnings
+)
+target_include_directories(kasumi_test_i18n_generator_collision
+    PRIVATE "${PROJECT_BINARY_DIR}/generated"
+)
+target_compile_definitions(kasumi_test_i18n_generator_collision PRIVATE
+    "KASUMI_I18N_COLLISION_FIXTURE_PATH=\"${I18N_COLLISION_FIXTURE}\""
+)
+add_dependencies(kasumi_test_i18n_generator_collision
+    kasumi_i18n_collision_header
+)
+gtest_discover_tests(
+    kasumi_test_i18n_generator_collision
+    DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES LABELS "unit.cli"
+)
 
 kasumi_add_test_suite(
     kasumi_test_unit_core_diff

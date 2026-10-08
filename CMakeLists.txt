@@ -539,6 +539,60 @@ target_link_libraries(
     PRIVATE tomlplusplus::tomlplusplus kasumi_warnings
 )
 
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(NOT Python3_Interpreter_FOUND)
+    find_program(Python3_EXECUTABLE NAMES python3 python py REQUIRED)
+endif()
+
+set(I18N_GENERATOR "${PROJECT_SOURCE_DIR}/scripts/generate_i18n_embedded.py")
+set(I18N_EMBEDDED_HEADER "${PROJECT_BINARY_DIR}/generated/cli/i18n_embedded.hpp")
+set(I18N_COLLISION_FIXTURE "${PROJECT_SOURCE_DIR}/tests/unit/cli/data/i18n_delimiter_collision.json")
+set(I18N_COLLISION_HEADER "${PROJECT_BINARY_DIR}/generated/cli/i18n_collision.hpp")
+
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${PROJECT_SOURCE_DIR}/locales/en.json"
+    "${PROJECT_SOURCE_DIR}/locales/pt-BR.json"
+    "${I18N_GENERATOR}"
+    "${I18N_COLLISION_FIXTURE}"
+)
+
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" "${I18N_GENERATOR}"
+            "--en" "${PROJECT_SOURCE_DIR}/locales/en.json"
+            "--pt" "${PROJECT_SOURCE_DIR}/locales/pt-BR.json"
+            "--output" "${I18N_EMBEDDED_HEADER}"
+    RESULT_VARIABLE I18N_GEN_RESULT
+)
+if(NOT I18N_GEN_RESULT EQUAL 0)
+    message(FATAL_ERROR "Failed to generate ${I18N_EMBEDDED_HEADER}")
+endif()
+
+add_custom_command(
+    OUTPUT "${I18N_EMBEDDED_HEADER}"
+    COMMAND "${Python3_EXECUTABLE}" "${I18N_GENERATOR}"
+            "--en" "${PROJECT_SOURCE_DIR}/locales/en.json"
+            "--pt" "${PROJECT_SOURCE_DIR}/locales/pt-BR.json"
+            "--output" "${I18N_EMBEDDED_HEADER}"
+    DEPENDS
+        "${I18N_GENERATOR}"
+        "${PROJECT_SOURCE_DIR}/locales/en.json"
+        "${PROJECT_SOURCE_DIR}/locales/pt-BR.json"
+    COMMENT "Generating embedded locale header"
+    VERBATIM
+)
+
+add_custom_command(
+    OUTPUT "${I18N_COLLISION_HEADER}"
+    COMMAND "${Python3_EXECUTABLE}" "${I18N_GENERATOR}"
+            "--en" "${I18N_COLLISION_FIXTURE}"
+            "--pt" "${I18N_COLLISION_FIXTURE}"
+            "--output" "${I18N_COLLISION_HEADER}"
+    DEPENDS "${I18N_GENERATOR}" "${I18N_COLLISION_FIXTURE}"
+    COMMENT "Generating i18n delimiter-collision regression header"
+    VERBATIM
+)
+add_custom_target(kasumi_i18n_collision_header DEPENDS "${I18N_COLLISION_HEADER}")
+
 add_library(kasumi_cli STATIC
     src/cli/app.cpp
     src/cli/credentials.cpp
@@ -546,19 +600,7 @@ add_library(kasumi_cli STATIC
     src/cli/parser.cpp
     src/cli/presenter.cpp
     src/cli/wizard.cpp
-)
-
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${PROJECT_SOURCE_DIR}/locales/en.json"
-    "${PROJECT_SOURCE_DIR}/locales/pt-BR.json"
-)
-
-file(READ "${PROJECT_SOURCE_DIR}/locales/en.json" KASUMI_I18N_EN_JSON)
-file(READ "${PROJECT_SOURCE_DIR}/locales/pt-BR.json" KASUMI_I18N_PT_BR_JSON)
-configure_file(
-    "${PROJECT_SOURCE_DIR}/src/cli/i18n_embedded.hpp.in"
-    "${PROJECT_BINARY_DIR}/generated/cli/i18n_embedded.hpp"
-    @ONLY
+    "${I18N_EMBEDDED_HEADER}"
 )
 
 target_include_directories(

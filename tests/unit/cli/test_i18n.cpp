@@ -1,10 +1,11 @@
 #include "cli/i18n.hpp"
+#include "cli/i18n_embedded.hpp"
 
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <string>
-#include <vector>
 
 #if defined(_WIN32)
 #include "kasumi/test/scoped_environment.hpp"
@@ -181,3 +182,48 @@ TEST(CliI18nTest, ExternalLocaleDiscoveryUnderUnicodeAppData) {
     std::filesystem::remove_all(temp_root, ec);
 }
 #endif
+
+namespace {
+
+std::string read_binary_file(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        return "";
+    }
+    return {std::istreambuf_iterator<char>{file},
+            std::istreambuf_iterator<char>{}};
+}
+
+} // namespace
+
+TEST(CliI18nTest, EmbeddedLocalesRespectLiteralLimitAndPreserveSourceBytes) {
+    const std::filesystem::path source_dir{KASUMI_I18N_SOURCE_DIR};
+    const std::filesystem::path header_path{KASUMI_I18N_EMBEDDED_HEADER};
+    const auto en_path = source_dir / "locales" / "en.json";
+    const auto pt_path = source_dir / "locales" / "pt-BR.json";
+    ASSERT_TRUE(std::filesystem::exists(en_path));
+    ASSERT_TRUE(std::filesystem::exists(pt_path));
+    ASSERT_TRUE(std::filesystem::exists(header_path)) << header_path.string();
+
+    const auto expected_en = read_binary_file(en_path);
+    const auto expected_pt = read_binary_file(pt_path);
+    ASSERT_FALSE(expected_en.empty());
+    ASSERT_FALSE(expected_pt.empty());
+
+    const auto header_content = read_binary_file(header_path);
+    ASSERT_FALSE(header_content.empty());
+    EXPECT_NE(header_content.find("EN_JSON_FRAGMENTS"), std::string::npos);
+    EXPECT_NE(header_content.find("PT_BR_JSON_FRAGMENTS"), std::string::npos);
+
+    // Keep each fragment well below MSVC C2026's 16,380-character limit.
+    constexpr std::size_t MAX_SAFE_LITERAL_BYTES = 2048;
+    EXPECT_EQ(embedded::reconstructed_en_json(), expected_en);
+    EXPECT_EQ(embedded::reconstructed_pt_br_json(), expected_pt);
+
+    for (const auto& frag : embedded::EN_JSON_FRAGMENTS) {
+        EXPECT_LE(frag.size(), MAX_SAFE_LITERAL_BYTES);
+    }
+    for (const auto& frag : embedded::PT_BR_JSON_FRAGMENTS) {
+        EXPECT_LE(frag.size(), MAX_SAFE_LITERAL_BYTES);
+    }
+}
