@@ -1,11 +1,14 @@
 #include "../../operational/gc_live_runner_support.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "kasumi/test/history_storage.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <set>
 
 namespace {
 
@@ -953,15 +956,13 @@ TEST(GcLiveRunnerIntegratedTest, FullExecutionWithNativeBatchStorage) {
     auto parent = harness.make_parent_transport();
     auto child = harness.make_child_transport();
 
-    std::size_t native_get_batch_count = 0;
-    static std::size_t* s_batch_count = nullptr;
-    s_batch_count = &native_get_batch_count;
+    std::vector<transport::GetBatch> observed_batches;
+    static std::vector<transport::GetBatch>* s_batches = nullptr;
+    s_batches = &observed_batches;
 
     child.storage.get_batch = [](void* ctx, const transport::GetBatch& batch) -> transport::Result {
         auto* state = static_cast<FakeState*>(ctx);
-        if (s_batch_count) {
-            (*s_batch_count)++;
-        }
+        s_batches->push_back(batch);
         for (const auto& id : batch.identifiers) {
             const auto source = batch.source_prefix.empty() ? id : batch.source_prefix + "/" + id;
             auto it = state->objects.find(source);
@@ -980,7 +981,7 @@ TEST(GcLiveRunnerIntegratedTest, FullExecutionWithNativeBatchStorage) {
     };
 
     const auto report = runner::run(options, &parent, &child);
-    s_batch_count = nullptr;
+    s_batches = nullptr;
 
     EXPECT_EQ(report.status, "PASS");
     EXPECT_EQ(report.stage_reached, runner::LiveGcStage::CleanupCompleted);
@@ -990,7 +991,40 @@ TEST(GcLiveRunnerIntegratedTest, FullExecutionWithNativeBatchStorage) {
     EXPECT_EQ(report.gc.candidate_objects, 1U);
     EXPECT_EQ(report.gc.quarantined_objects, 1U);
     EXPECT_EQ(report.cleanup.result, "removed");
-    EXPECT_EQ(native_get_batch_count, 0U);
+
+    const auto layout = kasumi::application::history_storage::derive_remote_layout(
+        *options.explicit_key);
+    const auto content_prefix = layout.quarantine_content_prefix.substr(
+        0, layout.quarantine_content_prefix.size() - 1);
+    const auto commits_prefix = layout.quarantine_commits_prefix.substr(
+        0, layout.quarantine_commits_prefix.size() - 1);
+    std::set<std::string> expected_metadata;
+    for (const auto* inventory : {&report.inventory_before, &report.inventory_after}) {
+        for (const auto& object : inventory->vault_objects) {
+            if (object.identifier.ends_with(".meta") &&
+                (object.identifier.starts_with(layout.quarantine_content_prefix) ||
+                 object.identifier.starts_with(layout.quarantine_commits_prefix))) {
+                expected_metadata.insert(object.identifier);
+            }
+        }
+    }
+    ASSERT_FALSE(expected_metadata.empty());
+    ASSERT_FALSE(observed_batches.empty());
+    EXPECT_TRUE(std::ranges::any_of(observed_batches, [](const auto& batch) {
+        return batch.identifiers.size() > 1;
+    }));
+    std::set<std::string> requested_metadata;
+    for (const auto& batch : observed_batches) {
+        EXPECT_TRUE(batch.source_prefix == content_prefix ||
+                    batch.source_prefix == commits_prefix);
+        EXPECT_FALSE(batch.identifiers.empty());
+        EXPECT_GT(batch.max_parallel_transfers, 0U);
+        EXPECT_LE(batch.identifiers.size(), batch.max_parallel_transfers);
+        for (const auto& id : batch.identifiers) {
+            requested_metadata.insert(batch.source_prefix + "/" + id);
+        }
+    }
+    EXPECT_EQ(requested_metadata, expected_metadata);
 }
 
 // RED 1: Real Fallback Executes When Forced
