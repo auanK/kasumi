@@ -73,7 +73,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                         std::string_view current_path,
                         const HashSet& missing_blocks,
                         std::vector<SyncOperation>& ops,
-                        const ignore::IgnoreList* ignore_list) {
+                        const ignore::IgnoreList* ignore_list,
+                        const std::unordered_set<std::string>* authorized_deletions) {
     if (!local && !base && !cloud)
         return;
     if (same_hash(local, cloud) && missing_blocks.empty())
@@ -133,10 +134,15 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
         }
 
         if (c && !c->is_directory && missing_blocks.contains(c->hash)) {
-            if (l && !l->is_directory)
-                ops.push_back(
-                    {Action::Upload, target, hash_hex(l->hash), {}, l->size});
-            continue;
+            if (authorized_deletions != nullptr &&
+                authorized_deletions->contains(std::string(path))) {
+                // Authorized for deletion: allow 3-way merge to emit DeleteRemote
+            } else {
+                if (authorized_deletions == nullptr && l && !l->is_directory)
+                    ops.push_back(
+                        {Action::Upload, target, hash_hex(l->hash), {}, l->size});
+                continue;
+            }
         }
         if (same_hash(l, c)) {
             if (l && c && l->is_directory && c->is_directory)
@@ -149,7 +155,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                                    path,
                                    missing_blocks,
                                    ops,
-                                   ignore_list);
+                                   ignore_list,
+                                   authorized_deletions);
             continue;
         }
         if (same_hash(l, b)) {
@@ -164,7 +171,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                                        path,
                                        missing_blocks,
                                        ops,
-                                       ignore_list);
+                                       ignore_list,
+                                       authorized_deletions);
                 }
                 ops.push_back({l && l->is_directory
                                    ? Action::DeleteLocalDirectory
@@ -213,7 +221,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                                        path,
                                        missing_blocks,
                                        ops,
-                                       ignore_list);
+                                       ignore_list,
+                                       authorized_deletions);
             }
         } else if (same_hash(c, b)) {
             if (!l) {
@@ -245,7 +254,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                                        path,
                                        missing_blocks,
                                        ops,
-                                       ignore_list);
+                                       ignore_list,
+                                       authorized_deletions);
             }
         } else if (!l && c) {
             const bool already_relocated = std::ranges::any_of(
@@ -271,7 +281,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                                path,
                                missing_blocks,
                                ops,
-                               ignore_list);
+                               ignore_list,
+                               authorized_deletions);
         } else if (l && !c) {
             ops.push_back({l->is_directory ? Action::CreateRemoteDirectory
                                            : Action::Upload,
@@ -288,7 +299,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                                path,
                                missing_blocks,
                                ops,
-                               ignore_list);
+                               ignore_list,
+                               authorized_deletions);
         } else if (l && c && l->is_directory != c->is_directory) {
             if (!b) {
                 if (l->is_directory) {
@@ -310,7 +322,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                                        path,
                                        missing_blocks,
                                        ops,
-                                       ignore_list);
+                                       ignore_list,
+                                       authorized_deletions);
                 } else {
                     const auto conflict = platform::path::from_utf8(
                         make_conflict_path(path, ".kasumiconflict_local"));
@@ -329,7 +342,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                                        path,
                                        missing_blocks,
                                        ops,
-                                       ignore_list);
+                                       ignore_list,
+                                       authorized_deletions);
                 }
             } else {
                 if (l->mtime > c->mtime) {
@@ -344,7 +358,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                                        path,
                                        missing_blocks,
                                        ops,
-                                       ignore_list);
+                                       ignore_list,
+                                       authorized_deletions);
                 } else if (l->is_directory) {
                     ops.push_back({Action::Download,
                                    platform::path::from_utf8(make_conflict_path(
@@ -362,7 +377,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                                        path,
                                        missing_blocks,
                                        ops,
-                                       ignore_list);
+                                       ignore_list,
+                                       authorized_deletions);
                 } else {
                     if (c->is_directory)
                         ops.push_back(
@@ -370,10 +386,10 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                     else {
                         ops.push_back({Action::DeleteLocal, target, "", {}});
                         ops.push_back({Action::Download,
-                                       target,
-                                       hash_hex(c->hash),
-                                       {},
-                                       c->size});
+                                        target,
+                                        hash_hex(c->hash),
+                                        {},
+                                        c->size});
                     }
                     compare_nodes_3way(local_snapshot,
                                        base_snapshot,
@@ -384,7 +400,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                                        path,
                                        missing_blocks,
                                        ops,
-                                       ignore_list);
+                                       ignore_list,
+                                       authorized_deletions);
                 }
             }
         } else if (l && c && !l->is_directory) {
@@ -418,7 +435,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                                path,
                                missing_blocks,
                                ops,
-                               ignore_list);
+                               ignore_list,
+                               authorized_deletions);
         }
     }
 }
@@ -430,7 +448,8 @@ compare_trees(const Snapshot& local,
               const Snapshot& base,
               const Snapshot& cloud,
               const HashSet& missing_blocks,
-              const ignore::IgnoreList* ignore_list) {
+              const ignore::IgnoreList* ignore_list,
+              const std::unordered_set<std::string>* authorized_deletions) {
     std::vector<SyncOperation> operations;
     detail::compare_nodes_3way(&local,
                                &base,
@@ -441,7 +460,8 @@ compare_trees(const Snapshot& local,
                                "",
                                missing_blocks,
                                operations,
-                               ignore_list);
+                               ignore_list,
+                               authorized_deletions);
     return operations;
 }
 

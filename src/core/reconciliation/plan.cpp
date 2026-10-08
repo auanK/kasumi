@@ -47,11 +47,48 @@ bool valid_pending_rows(const Input& input) {
     return true;
 }
 
-Snapshot logical_local_view(const Input& input) {
+bool is_eligible_for_deletion(const Input& input,
+                              const NodeRow& pending,
+                              const HashSet& missing_objects,
+                              const LocalSources& local_sources) {
+    if (input.pending_deletion_authority.empty()) {
+        return false;
+    }
+    const auto it = std::ranges::find_if(
+        input.pending_deletion_authority, [&](const NodeRow& auth) {
+            return auth == pending;
+        });
+    if (it == input.pending_deletion_authority.end()) {
+        return false;
+    }
+    const auto* remote = find_row(input.storage.tree, pending.path);
+    if (remote == nullptr || remote->is_directory ||
+        remote->hash != pending.hash || remote->size != pending.size) {
+        return false;
+    }
+    if (find_row(input.local_tree, pending.path) != nullptr) {
+        return false;
+    }
+    if (local_sources.contains(pending.hash)) {
+        return false;
+    }
+    if (!missing_objects.contains(pending.hash)) {
+        return false;
+    }
+    return true;
+}
+
+Snapshot logical_local_view(const Input& input,
+                            const HashSet& missing_objects,
+                            const LocalSources& local_sources) {
     Snapshot result = input.local_tree;
     std::unordered_set<std::string> additions;
     for (const auto& pending : input.pending_materializations) {
         if (find_row(input.local_tree, pending.path) != nullptr) {
+            continue;
+        }
+        if (is_eligible_for_deletion(
+                input, pending, missing_objects, local_sources)) {
             continue;
         }
         bool safe = true;
@@ -774,13 +811,41 @@ ReconcileResult reconcile(const Input& input) {
                          local_sources,
                          pending_storage_rows,
                          pending_without_local_source);
+    if (!input.pending_deletion_authority.empty()) {
+        for (const auto& pending : input.pending_materializations) {
+            const auto* remote = find_row(effective_storage_tree, pending.path);
+            if (remote != nullptr && !remote->is_directory &&
+                remote->hash == pending.hash && remote->size == pending.size &&
+                find_row(input.local_tree, pending.path) == nullptr &&
+                !local_sources.contains(pending.hash) &&
+                std::ranges::none_of(pending_storage_rows, [&](const NodeRow& row) {
+                    return row.path == pending.path;
+                })) {
+                pending_storage_rows.push_back(*remote);
+            }
+        }
+        std::ranges::sort(pending_storage_rows, path_less, &NodeRow::path);
+    }
 
-    auto logical_local = logical_local_view(input);
+    auto logical_local =
+        logical_local_view(input, missing_objects, local_sources);
+    const std::unordered_set<std::string>* authorized_deletions_ptr = nullptr;
+    std::unordered_set<std::string> authorized_deletion_paths;
+    if (!input.pending_deletion_authority.empty()) {
+        for (const auto& pending : input.pending_materializations) {
+            if (is_eligible_for_deletion(
+                    input, pending, missing_objects, local_sources)) {
+                authorized_deletion_paths.insert(pending.path);
+            }
+        }
+        authorized_deletions_ptr = &authorized_deletion_paths;
+    }
     auto operations = diff::compare_trees(logical_local,
                                           input.base_tree,
                                           effective_storage_tree,
                                           missing_objects,
-                                          &input.ignore_list);
+                                          &input.ignore_list,
+                                          authorized_deletions_ptr);
 
     std::erase_if(operations, [&](const Operation& operation) {
         if (operation.action != Action::Upload ||
@@ -795,15 +860,19 @@ ReconcileResult reconcile(const Input& input) {
                        platform::path::to_logical_utf8(operation.path);
             });
     });
-    append_pending_materialization_downloads(
-        input, missing_objects, operations);
+    if (input.pending_deletion_authority.empty()) {
+        append_pending_materialization_downloads(
+            input, missing_objects, operations);
+    }
 
     reserve_conflict_destinations(
         input.local_tree, effective_storage_tree, operations);
 
     std::vector<std::string> repair_upload_paths;
-    append_recovery_uploads(
-        missing_objects, local_sources, operations, repair_upload_paths);
+    if (input.pending_deletion_authority.empty()) {
+        append_recovery_uploads(
+            missing_objects, local_sources, operations, repair_upload_paths);
+    }
 
     for (const auto& operation : operations) {
         if (is_repair_upload(
@@ -854,6 +923,12 @@ ReconcileResult reconcile(const Input& input) {
             pending_materializations.push_back(row);
         }
     }
+    std::erase_if(pending_without_local_source, [&](const auto& path) {
+        const auto utf8 = platform::path::to_logical_utf8(path);
+        return std::ranges::none_of(pending_storage_rows, [&](const auto& r) {
+            return r.path == utf8;
+        });
+    });
     const bool shared_tree_changed = candidate->changed;
     const bool requires_storage_repair = !repair_upload_paths.empty();
     const bool requires_publication = !input.storage.history_present ||

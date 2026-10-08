@@ -58,7 +58,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                         std::string_view current_path,
                         const HashSet& missing_blocks,
                         std::vector<SyncOperation>& operations,
-                        const ignore::IgnoreList* ignore_list = nullptr);
+                        const ignore::IgnoreList* ignore_list = nullptr,
+                        const std::unordered_set<std::string>* authorized_deletions = nullptr);
 
 } // namespace detail
 
@@ -68,7 +69,8 @@ compare_trees(const Snapshot& local,
               const Snapshot& base,
               const Snapshot& cloud,
               const HashSet& missing_blocks,
-              const ignore::IgnoreList* ignore_list = nullptr);
+              const ignore::IgnoreList* ignore_list = nullptr,
+              const std::unordered_set<std::string>* authorized_deletions = nullptr);
 
 // Compares local, base, and remote assuming referenced objects are available.
 std::vector<SyncOperation>

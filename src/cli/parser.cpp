@@ -7,7 +7,7 @@ namespace {
 
 std::expected<Invocation, ParseError>
 request(application::Operation operation, int argc, char* argv[]) {
-    if (argc != 3 || argv[2] == nullptr) {
+    if (argc != 3 || argv[2] == nullptr || argv[2][0] == '\0') {
         return std::unexpected(ParseError{});
     }
     return application::Request{.operation = operation,
@@ -59,6 +59,9 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
     }
     if (command == "gc") {
         return request(application::Operation::GarbageCollect, argc, argv);
+    }
+    if (command == "resolve-missing") {
+        return request(application::Operation::ResolveMissing, argc, argv);
     }
     if (command == "remote") {
         if (argc < 4 || argv[2] == nullptr || argv[3] == nullptr ||

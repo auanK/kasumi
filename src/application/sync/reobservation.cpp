@@ -88,13 +88,17 @@ observe_content_availability(reconciliation::Input& input,
         for (const auto& row : rows) {
             if (const auto* remote = find_row(input.storage.tree, row.path);
                 remote != nullptr && !remote->is_directory &&
-                remote->hash == row.hash && remote->size == row.size &&
-                find_row(input.local_tree, row.path) == nullptr) {
-                add_hash(remote->hash);
+                remote->hash == row.hash && remote->size == row.size) {
+                const auto* local = find_row(input.local_tree, row.path);
+                if (local == nullptr ||
+                    (!local->is_directory && local->hash == row.hash)) {
+                    add_hash(remote->hash);
+                }
             }
         }
     };
     add_relevant_pending(input.pending_materializations);
+    add_relevant_pending(input.pending_deletion_authority);
     add_relevant_pending(result.pending_materializations);
     add_relevant_pending(result.pending_storage_rows);
 
@@ -213,6 +217,8 @@ bool same_observation(const reconciliation::Input& left,
     return same_snapshot(left.local_tree, right.local_tree) &&
            same_rows(left.pending_materializations,
                      right.pending_materializations) &&
+           same_rows(left.pending_deletion_authority,
+                     right.pending_deletion_authority) &&
            left.known_missing_content_objects ==
                right.known_missing_content_objects &&
            same_snapshot(left.base_tree, right.base_tree) &&
@@ -300,6 +306,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
             return std::unexpected(detail::make_error(
                 ErrorCode::ObservationFailure, observed.error().detail));
         }
+        observed->pending_deletion_authority = input.pending_deletion_authority;
         auto local_after_storage =
             observation::collect_local_tree(runtime_data.local_dir,
                                             session,

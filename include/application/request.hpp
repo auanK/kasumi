@@ -18,7 +18,9 @@ enum class Operation {
     // blocks.
     Fsck,
     // Quarantines objects unreachable from any logical head.
-    GarbageCollect
+    GarbageCollect,
+    // Resolves unavailable pending materializations as logical deletions.
+    ResolveMissing
 };
 
 // Request structure defining action to perform and target profile.

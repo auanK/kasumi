@@ -105,9 +105,19 @@ struct GarbageCollectCompleted {
     bool analysis_only = false;
 };
 
+// Result of resolving unavailable pending materializations as logical deletions.
+struct ResolveMissingCompleted {
+    std::size_t resolved_count = 0;
+    std::vector<std::string> resolved_paths;
+    bool published = false;
+};
+
 // Possible payload variants for a successful response.
-using ResponseData = std::
-    variant<SyncCompleted, PlanReport, FsckCompleted, GarbageCollectCompleted>;
+using ResponseData = std::variant<SyncCompleted,
+                                  PlanReport,
+                                  FsckCompleted,
+                                  GarbageCollectCompleted,
+                                  ResolveMissingCompleted>;
 
 // Successful operation response.
 struct Response {
@@ -128,7 +138,8 @@ enum class ErrorCode {
     PlanFailure,
     FsckFailure,
     GarbageCollectionFailure,
-    SynchronizationFailure
+    SynchronizationFailure,
+    RecoveryFailure
 };
 
 // Error returned by the application.

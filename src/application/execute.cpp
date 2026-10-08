@@ -15,6 +15,7 @@ std::expected<Response, Error> run_sync(OperationContext& context);
 std::expected<Response, Error> run_plan(OperationContext& context);
 std::expected<Response, Error> run_fsck(OperationContext& context);
 std::expected<Response, Error> run_garbage_collect(OperationContext& context);
+std::expected<Response, Error> run_resolve_missing(OperationContext& context);
 
 std::expected<Response, Error> dispatch(OperationContext& context) {
     switch (context.operation) {
@@ -27,6 +28,8 @@ std::expected<Response, Error> dispatch(OperationContext& context) {
             return run_fsck(context);
         case Operation::GarbageCollect:
             return run_garbage_collect(context);
+        case Operation::ResolveMissing:
+            return run_resolve_missing(context);
     }
     std::unreachable();
 }

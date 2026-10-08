@@ -18,7 +18,8 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     const auto operation = input.request.operation;
     output.operation = operation;
     output.on_progress = input.on_progress;
-    const auto access_mode = operation == Operation::Sync
+    const auto access_mode = (operation == Operation::Sync ||
+                              operation == Operation::ResolveMissing)
                                  ? runtime::AccessMode::ReadWrite
                                  : runtime::AccessMode::ReadOnly;
     const auto resolve_trace = platform::perf_trace::begin();

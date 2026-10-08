@@ -481,6 +481,7 @@ add_library(kasumi_application STATIC
     src/application/use_cases/maintenance.cpp
     src/application/use_cases/plan.cpp
     src/application/use_cases/sync.cpp
+    src/application/use_cases/resolve_missing.cpp
 )
 
 target_include_directories(

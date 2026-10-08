@@ -204,6 +204,10 @@ TEST(CliParserTest,
     check_error({"kasumi", "status"});
     check_error({"kasumi", "fsck"});
     check_error({"kasumi", "gc"});
+    check_error({"kasumi", "resolve-missing"});
+    check_error({"kasumi", "resolve-missing", ""});
+    check_error({"kasumi", "resolve-missing", "demo", "extra"});
+    check_error({"kasumi", "resolve-missing", "demo", "--unknown"});
     check_error({"kasumi", "sync", "demo", "--unknown"});
     check_error({"kasumi", "sync", "demo", "--dry-run", "extra"});
     check_error({"kasumi", "status", "demo", "extra"});
@@ -282,6 +286,24 @@ TEST(CliParserTest, ParserAcceptsNamesWhoseRuntimeValidityIsSeparate) {
         std::holds_alternative<kasumi::application::Request>(invocation));
     EXPECT_EQ(std::get<kasumi::application::Request>(invocation).profile_name,
               "name with space");
+}
+
+TEST(CliParserTest, ParsesResolveMissingRequest) {
+    std::vector<std::string> values = {"kasumi", "resolve-missing", "demo"};
+    std::vector<char*> argv;
+    argv.reserve(values.size());
+    for (auto& value : values)
+        argv.push_back(value.data());
+    const auto result =
+        kasumi::cli::parse(static_cast<int>(argv.size()), argv.data());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(
+        std::holds_alternative<kasumi::application::Request>(*result));
+    if (result && std::holds_alternative<kasumi::application::Request>(*result)) {
+        EXPECT_EQ(
+            std::get<kasumi::application::Request>(*result).profile_name,
+            "demo");
+    }
 }
 
 } // namespace

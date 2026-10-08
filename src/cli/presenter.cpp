@@ -1001,6 +1001,19 @@ int present(const application::Response& response, bool full) {
                                   ptr->purged_objects));
         return 0;
     }
+    if (const auto* ptr =
+            std::get_if<application::ResolveMissingCompleted>(&response.data)) {
+        if (ptr->resolved_count > 0) {
+            std::println("{}{}{} resolved {} missing paths",
+                         style::green,
+                         i18n::tr(i18n::Key::LabelOk),
+                         style::reset,
+                         ptr->resolved_count);
+        } else {
+            std::println("no unresolved missing paths to resolve");
+        }
+        return 0;
+    }
     return 0;
 }
 
@@ -1225,6 +1238,7 @@ int present(const application::Error& error) {
                 i18n::format(i18n::Key::ErrorGcCancelled, error.detail));
             break;
         case application::ErrorCode::SynchronizationFailure:
+        case application::ErrorCode::RecoveryFailure:
             std::println(
                 "{}{}{} {}",
                 style::red,
