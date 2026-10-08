@@ -20,7 +20,11 @@ enum class Operation {
     // Quarantines objects unreachable from any logical head.
     GarbageCollect,
     // Resolves unavailable pending materializations as logical deletions.
-    ResolveMissing
+    ResolveMissing,
+    // Explicit manual purge of quarantine entries bypassing retention.
+    PurgeQuarantine,
+    // Explicit manual repair of incomplete quarantine pairs.
+    RepairQuarantine
 };
 
 // Request structure defining action to perform and target profile.

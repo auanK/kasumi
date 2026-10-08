@@ -178,6 +178,35 @@ copy_verified(transport::Transport& storage,
               std::string_view destination_identifier,
               const std::filesystem::path& workspace_root);
 
+struct QuarantineRepairClassification {
+    std::vector<QuarantineEntry> healthy_pairs;
+    std::vector<QuarantineEntry> metadata_only_candidates;
+    std::vector<std::string> payload_only_identifiers;
+    std::vector<std::string> invalid_identifiers;
+};
+
+// Classifies quarantine objects into healthy pairs, metadata-only repair
+// candidates, payload-only objects, and invalid/ambiguous entries.
+std::expected<QuarantineRepairClassification, Error>
+classify_quarantine_for_repair(
+    transport::Transport& storage,
+    const RemoteLayout& layout);
+
+struct AuthenticatedQuarantineMetadata {
+    std::int64_t quarantined_at = 0;
+    std::string payload_sha256;
+    std::string ciphertext_sha256;
+};
+
+// Authenticates a single quarantine metadata object and extracts its timestamp,
+// recorded physical payload SHA-256, and ciphertext physical SHA-256.
+std::expected<AuthenticatedQuarantineMetadata, Error>
+authenticate_quarantine_metadata(
+    transport::Transport& storage,
+    std::string_view metadata_identifier,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const std::filesystem::path& workspace_root);
+
 } // namespace kasumi::application::history_storage::maintenance_protocol
 
 #endif

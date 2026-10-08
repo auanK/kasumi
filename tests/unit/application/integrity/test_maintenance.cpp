@@ -17,6 +17,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -178,6 +179,1311 @@ struct IntegratedGcFixture {
         }
     }
 };
+
+struct ManualPurgeFixture : IntegratedGcFixture {
+    std::vector<protocol::QuarantineEntry> entries;
+
+    ManualPurgeFixture(std::string_view name, std::size_t count)
+        : IntegratedGcFixture(name, count) {}
+
+    void prepare() {
+        auto collected = kasumi::application::integrity::garbage_collect(
+            runtime, storage, test_key());
+        ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+        ASSERT_EQ(collected->quarantined_objects, quarantines.size());
+        auto inventory = protocol::inventory_quarantine(
+            storage, test_key(), kasumi::test::workspace_root(workspace));
+        ASSERT_TRUE(inventory.has_value()) << inventory.error().detail;
+        ASSERT_EQ(inventory->size(), quarantines.size());
+        entries = std::move(*inventory);
+        for (const auto& entry : entries) {
+            ASSERT_TRUE(entry.quarantined_at.has_value());
+            const auto verified = protocol::verify_quarantine(
+                storage, entry, kasumi::test::workspace_root(workspace));
+            ASSERT_TRUE(verified.has_value()) << verified.error().detail;
+            ASSERT_TRUE(*verified);
+            expect_presence(storage, entry.original_identifier, Presence::Absent);
+            expect_presence(storage, entry.quarantine_identifier, Presence::Present);
+            expect_presence(storage, entry.metadata_identifier, Presence::Present);
+        }
+        reset_fake_traffic(*state);
+    }
+
+    auto purge() {
+        return kasumi::application::integrity::purge_quarantine(
+            runtime, storage, test_key());
+    }
+
+    std::size_t selected_removals() const {
+        return static_cast<std::size_t>(std::ranges::count_if(
+            state->gc_events, [this](const std::string& event) {
+                if (!event.starts_with("remove:")) return false;
+                return std::ranges::any_of(entries, [&](const auto& entry) {
+                    return event == "remove:" + entry.quarantine_identifier ||
+                           event == "remove:" + entry.metadata_identifier;
+                });
+            }));
+    }
+};
+
+void replace_fake_object(FakeState& state, const std::string& identifier) {
+    auto& bytes = state.objects.at(identifier);
+    bytes.front() ^= 1U;
+    auto hash = kasumi::crypto::physical::sha256_init();
+    kasumi::crypto::physical::sha256_update(hash, bytes);
+    state.physical_hashes[identifier] =
+        kasumi::crypto::physical::sha256_finish(hash);
+}
+
+TEST(ManualPurgeBoundaryRed, BarrierReplacementBeforeFirstDeletionStopsPurge) {
+    ManualPurgeFixture fixture{"manual-barrier-before", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    const auto before = fixture.state->objects;
+    bool injected = false;
+    fixture.state->on_operation = [&](FakeState& state,
+                                      std::string_view event,
+                                      std::string_view identifier) {
+        if (!injected && event == "after_hash" &&
+            identifier == fixture.entries.front().quarantine_identifier) {
+            injected = true;
+            replace_barrier_contents(&state, test_layout().barrier_identifier);
+        }
+    };
+
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::ConcurrentChange);
+    EXPECT_TRUE(injected);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+    for (const auto& entry : fixture.entries) {
+        EXPECT_EQ(fixture.state->objects.at(entry.quarantine_identifier),
+                  before.at(entry.quarantine_identifier));
+        EXPECT_EQ(fixture.state->objects.at(entry.metadata_identifier),
+                  before.at(entry.metadata_identifier));
+    }
+    if (injected) {
+        EXPECT_EQ(fixture.state->objects.at(test_layout().barrier_identifier),
+                  std::vector<std::uint8_t>({'r', 'e', 'p', 'l', 'a', 'c', 'e', 'd'}));
+    }
+}
+
+TEST(ManualPurgeBoundaryRed, BarrierReplacementBetweenEntriesStopsPurge) {
+    ManualPurgeFixture fixture{"manual-barrier-between", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    bool injected = false;
+    std::optional<protocol::QuarantineEntry> completed;
+    fixture.state->on_operation = [&](FakeState& state,
+                                      std::string_view event,
+                                      std::string_view identifier) {
+        if (injected || event != "after_remove") return;
+        for (const auto& entry : fixture.entries) {
+            if ((identifier == entry.quarantine_identifier ||
+                 identifier == entry.metadata_identifier) &&
+                !state.objects.contains(entry.quarantine_identifier) &&
+                !state.objects.contains(entry.metadata_identifier)) {
+                completed = entry;
+                injected = true;
+                replace_barrier_contents(&state, test_layout().barrier_identifier);
+                return;
+            }
+        }
+    };
+
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::ConcurrentChange);
+    EXPECT_TRUE(injected);
+    EXPECT_EQ(fixture.selected_removals(), 2U);
+    if (completed) {
+        for (const auto& entry : fixture.entries) {
+            if (entry.quarantine_identifier == completed->quarantine_identifier)
+                continue;
+            EXPECT_TRUE(fixture.state->objects.contains(entry.quarantine_identifier));
+            EXPECT_TRUE(fixture.state->objects.contains(entry.metadata_identifier));
+        }
+    }
+    EXPECT_TRUE(fixture.state->objects.contains(test_layout().barrier_identifier));
+    if (injected) {
+        EXPECT_EQ(fixture.state->objects.at(test_layout().barrier_identifier),
+                  std::vector<std::uint8_t>({'r', 'e', 'p', 'l', 'a', 'c', 'e', 'd'}));
+    }
+}
+
+TEST(ManualPurgeBoundaryRed, BackendWithoutOnlineConsistencyBlocksDeletion) {
+    ManualPurgeFixture fixture{"manual-probe-false", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    const auto before = fixture.state->objects;
+    fixture.state->hide_probe_listing = true;
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_GT(fixture.state->probe_list_count, 0U);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+    EXPECT_EQ(fixture.state->objects, before);
+}
+
+TEST(ManualPurgeBoundaryRed, BackendProbeTransportErrorBlocksDeletion) {
+    ManualPurgeFixture fixture{"manual-probe-error", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    const auto before = fixture.state->objects;
+    fixture.state->fail_probe_listing = true;
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::TransportFailure);
+    EXPECT_GT(fixture.state->probe_list_count, 0U);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+    EXPECT_EQ(fixture.state->objects, before);
+}
+
+TEST(ManualPurgeBoundaryRed, NewlyAppearingEntryDoesNotExpandSelection) {
+    ManualPurgeFixture fixture{"manual-new-entry", 3};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 3U);
+    const auto late = fixture.entries.back();
+    fixture.state->hidden_objects.insert(
+        fixture.state->objects.extract(late.quarantine_identifier));
+    fixture.state->hidden_objects.insert(
+        fixture.state->objects.extract(late.metadata_identifier));
+    ASSERT_FALSE(fixture.state->objects.contains(late.quarantine_identifier));
+    bool injected = false;
+    fixture.state->on_operation = [&](FakeState& state,
+                                      std::string_view event,
+                                      std::string_view identifier) {
+        if (!injected && event == "after_hash" &&
+            identifier == fixture.entries.front().quarantine_identifier) {
+            injected = true;
+            state.objects.merge(state.hidden_objects);
+        }
+    };
+    const auto result = fixture.purge();
+    EXPECT_TRUE(result.has_value() ||
+                result.error().code == IntegrityErrorCode::ConcurrentChange);
+    if (result) {
+        EXPECT_EQ(*result, 2U);
+        EXPECT_EQ(fixture.selected_removals(), 4U);
+    }
+    EXPECT_TRUE(injected);
+    EXPECT_TRUE(fixture.state->objects.contains(late.quarantine_identifier));
+    EXPECT_TRUE(fixture.state->objects.contains(late.metadata_identifier));
+}
+
+TEST(ManualPurgeBoundaryRed, ReplacedMetadataAfterSelectionFailsClosed) {
+    ManualPurgeFixture fixture{"manual-replace-metadata", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    bool injected = false;
+    fixture.state->on_operation = [&](FakeState& state,
+                                      std::string_view event,
+                                      std::string_view identifier) {
+        if (!injected && event == "after_hash" &&
+            identifier == fixture.entries.front().quarantine_identifier) {
+            injected = true;
+            replace_fake_object(
+                state, fixture.entries.front().metadata_identifier);
+        }
+    };
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::ConcurrentChange);
+    EXPECT_TRUE(injected);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+}
+
+TEST(ManualPurgeBoundaryRed, ReplacedPayloadAfterVerificationFailsClosed) {
+    ManualPurgeFixture fixture{"manual-replace-payload", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    bool injected = false;
+    std::size_t hash_observations = 0;
+    fixture.state->on_operation = [&](FakeState& state,
+                                      std::string_view event,
+                                      std::string_view identifier) {
+        if (event == "after_hash" &&
+            identifier == fixture.entries.front().quarantine_identifier) {
+            ++hash_observations;
+            if (!injected) {
+                injected = true;
+                replace_fake_object(
+                    state, fixture.entries.front().quarantine_identifier);
+            }
+        }
+    };
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::ConcurrentChange);
+    EXPECT_TRUE(injected);
+    EXPECT_GE(hash_observations, 2U);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+}
+
+TEST(ManualPurgeBoundaryRed, OriginalReappearanceBeforeDeletionFailsClosed) {
+    ManualPurgeFixture fixture{"manual-original-reappears", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    bool injected = false;
+    fixture.state->on_operation = [&](FakeState& state,
+                                      std::string_view event,
+                                      std::string_view identifier) {
+        const auto& first = fixture.entries.front();
+        if (!injected && event == "after_hash" &&
+            identifier == first.quarantine_identifier) {
+            injected = true;
+            state.objects[first.original_identifier] =
+                state.objects.at(first.quarantine_identifier);
+            state.physical_hashes[first.original_identifier] =
+                state.physical_hashes.at(first.quarantine_identifier);
+        }
+    };
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::ConcurrentChange);
+    EXPECT_TRUE(injected);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+}
+
+TEST(ManualPurgeBoundaryRed, LateInvalidEntryBlocksEveryDeletion) {
+    ManualPurgeFixture fixture{"manual-invalid-late", 3};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 3U);
+    replace_fake_object(
+        *fixture.state, fixture.entries.back().metadata_identifier);
+    const auto before = fixture.state->objects;
+    const auto invalid = protocol::inventory_quarantine(
+        fixture.storage, test_key(),
+        kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_FALSE(invalid.has_value());
+    reset_fake_traffic(*fixture.state);
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+    EXPECT_EQ(fixture.state->objects, before);
+}
+
+TEST(ManualPurgeBoundaryRed, ValidInventoryPurgesOnlyCapturedEntries) {
+    ManualPurgeFixture fixture{"manual-valid-three", 3};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 3U);
+    auto expected = fixture.state->objects;
+    for (const auto& entry : fixture.entries) {
+        expected.erase(entry.quarantine_identifier);
+        expected.erase(entry.metadata_identifier);
+    }
+    const auto result = fixture.purge();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(*result, fixture.entries.size());
+    EXPECT_EQ(fixture.state->objects, expected);
+    EXPECT_EQ(fixture.selected_removals(), fixture.entries.size() * 2);
+}
+
+TEST(ManualPurgeBoundaryRed, EmptyQuarantineReturnsZero) {
+    ManualPurgeFixture fixture{"manual-empty-noop", 0};
+    fixture.prepare();
+    const auto before = fixture.state->objects;
+    const auto result = fixture.purge();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(*result, 0U);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+    EXPECT_EQ(fixture.state->objects, before);
+}
+
+bool selected_purge_identifier(const ManualPurgeFixture& fixture,
+                               std::string_view identifier) {
+    return std::ranges::any_of(fixture.entries, [&](const auto& entry) {
+        return identifier == entry.quarantine_identifier ||
+               identifier == entry.metadata_identifier;
+    });
+}
+
+struct ResetManualPurgeCancellation {
+    ~ResetManualPurgeCancellation() {
+        kasumi::platform::cancellation::reset();
+    }
+};
+
+TEST(ManualPurgeBoundaryRed, FirstRemovalFailureKeepsAuthenticatedPairForRetry) {
+    ManualPurgeFixture fixture{"manual-first-remove-fails", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    const auto before = fixture.state->objects;
+    std::string attempted;
+    fixture.state->on_operation = [&](FakeState& state,
+                                      std::string_view event,
+                                      std::string_view identifier) {
+        if (event == "before_remove" && attempted.empty() &&
+            selected_purge_identifier(fixture, identifier)) {
+            attempted = identifier;
+            state.fail_remove_identifier = attempted;
+        }
+    };
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::TransportFailure);
+    EXPECT_EQ(attempted, fixture.entries.front().quarantine_identifier);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+    EXPECT_EQ(fixture.state->objects, before);
+
+    fixture.state->on_operation = {};
+    fixture.state->fail_remove_identifier.clear();
+    const auto retry = fixture.purge();
+    ASSERT_TRUE(retry.has_value()) << retry.error().detail;
+    EXPECT_EQ(*retry, fixture.entries.size());
+}
+
+TEST(ManualPurgeBoundaryRed, AmbiguousFirstRemovalRetainsMetadataAndBlocksBlindRetry) {
+    ManualPurgeFixture fixture{"manual-ambiguous-first", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    std::string attempted;
+    fixture.state->on_operation = [&](FakeState& state,
+                                      std::string_view event,
+                                      std::string_view identifier) {
+        if (event == "before_remove" && attempted.empty() &&
+            selected_purge_identifier(fixture, identifier)) {
+            attempted = identifier;
+            state.remove_then_fail_identifier = attempted;
+        }
+    };
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::TransportFailure);
+    EXPECT_EQ(attempted, fixture.entries.front().quarantine_identifier);
+    EXPECT_FALSE(fixture.state->objects.contains(attempted));
+    EXPECT_TRUE(fixture.state->objects.contains(
+        fixture.entries.front().metadata_identifier));
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+    const auto partial = fixture.state->objects;
+
+    fixture.state->on_operation = {};
+    const auto retry = fixture.purge();
+    ASSERT_FALSE(retry.has_value());
+    EXPECT_EQ(retry.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_EQ(fixture.state->objects, partial);
+}
+
+TEST(ManualPurgeBoundaryRed, SecondRemovalFailureLeavesClassifiableMetadata) {
+    ManualPurgeFixture fixture{"manual-second-remove-fails", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    std::size_t attempted = 0;
+    fixture.state->on_operation = [&](FakeState& state,
+                                      std::string_view event,
+                                      std::string_view identifier) {
+        if (event == "before_remove" &&
+            selected_purge_identifier(fixture, identifier) &&
+            ++attempted == 2) {
+            state.fail_remove_identifier = std::string{identifier};
+        }
+    };
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::TransportFailure);
+    EXPECT_EQ(attempted, 2U);
+    EXPECT_FALSE(fixture.state->objects.contains(
+        fixture.entries.front().quarantine_identifier));
+    EXPECT_TRUE(fixture.state->objects.contains(
+        fixture.entries.front().metadata_identifier));
+    EXPECT_EQ(fixture.selected_removals(), 1U);
+    const auto partial = fixture.state->objects;
+
+    fixture.state->on_operation = {};
+    fixture.state->fail_remove_identifier.clear();
+    const auto retry = fixture.purge();
+    ASSERT_FALSE(retry.has_value());
+    EXPECT_EQ(retry.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_EQ(fixture.state->objects, partial);
+}
+
+TEST(ManualPurgeBoundaryRed, CancellationBetweenPayloadAndMetadataKeepsEvidence) {
+    ResetManualPurgeCancellation guard;
+    kasumi::platform::cancellation::reset();
+    ManualPurgeFixture fixture{"manual-cancel-between-pair", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    bool interrupted = false;
+    fixture.state->on_operation = [&](FakeState&,
+                                      std::string_view event,
+                                      std::string_view identifier) {
+        if (!interrupted && event == "after_remove" &&
+            identifier == fixture.entries.front().quarantine_identifier) {
+            interrupted = true;
+            kasumi::platform::cancellation::request();
+        }
+    };
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_TRUE(interrupted);
+    EXPECT_NE(result.error().detail.find("cancel"), std::string::npos);
+    EXPECT_FALSE(fixture.state->objects.contains(
+        fixture.entries.front().quarantine_identifier));
+    EXPECT_TRUE(fixture.state->objects.contains(
+        fixture.entries.front().metadata_identifier));
+    EXPECT_EQ(fixture.selected_removals(), 1U);
+    const auto partial = fixture.state->objects;
+
+    fixture.state->on_operation = {};
+    kasumi::platform::cancellation::reset();
+    const auto retry = fixture.purge();
+    ASSERT_FALSE(retry.has_value());
+    EXPECT_EQ(retry.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_EQ(fixture.state->objects, partial);
+}
+
+TEST(ManualPurgeBoundaryRed, CancellationBetweenEntriesAllowsScopedRetry) {
+    ResetManualPurgeCancellation guard;
+    kasumi::platform::cancellation::reset();
+    ManualPurgeFixture fixture{"manual-cancel-between-entries", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    const auto first = fixture.entries.front();
+    const auto second = fixture.entries.back();
+    bool interrupted = false;
+    fixture.state->on_operation = [&](FakeState& state,
+                                      std::string_view event,
+                                      std::string_view identifier) {
+        if (interrupted || event != "after_remove" ||
+            (identifier != first.quarantine_identifier &&
+             identifier != first.metadata_identifier)) return;
+        if (!state.objects.contains(first.quarantine_identifier) &&
+            !state.objects.contains(first.metadata_identifier)) {
+            interrupted = true;
+            kasumi::platform::cancellation::request();
+        }
+    };
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_TRUE(interrupted);
+    EXPECT_NE(result.error().detail.find("cancel"), std::string::npos);
+    EXPECT_TRUE(fixture.state->objects.contains(second.quarantine_identifier));
+    EXPECT_TRUE(fixture.state->objects.contains(second.metadata_identifier));
+    EXPECT_EQ(fixture.selected_removals(), 2U);
+
+    fixture.state->on_operation = {};
+    kasumi::platform::cancellation::reset();
+    const auto retry = fixture.purge();
+    ASSERT_TRUE(retry.has_value()) << retry.error().detail;
+    EXPECT_EQ(*retry, 1U);
+    EXPECT_FALSE(fixture.state->objects.contains(second.quarantine_identifier));
+    EXPECT_FALSE(fixture.state->objects.contains(second.metadata_identifier));
+}
+
+TEST(ManualPurgeFakeTransportTest, InjectionHooksAndProbeFailuresAreReachable) {
+    ManualPurgeFixture fixture{"manual-fake-hooks", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    std::size_t hash_events = 0;
+    std::size_t list_events = 0;
+    std::size_t before_remove = 0;
+    std::size_t after_remove = 0;
+    fixture.state->on_operation = [&](FakeState&, std::string_view event,
+                                      std::string_view) {
+        if (event == "after_hash") ++hash_events;
+        if (event == "after_list") ++list_events;
+        if (event == "before_remove") ++before_remove;
+        if (event == "after_remove") ++after_remove;
+    };
+    ASSERT_TRUE(kasumi::transport::physical_hash(
+        fixture.storage, fixture.entries.front().quarantine_identifier,
+        "sha256"));
+    ASSERT_TRUE(kasumi::transport::list(fixture.storage));
+    const auto scratch = put_content(
+        fixture.storage, fixture.workspace, "scratch", "manual-hook-scratch");
+    ASSERT_EQ(kasumi::transport::remove(fixture.storage, scratch).value(),
+              kasumi::transport::Removal::Removed);
+    EXPECT_GT(hash_events, 0U);
+    EXPECT_GT(list_events, 0U);
+    EXPECT_EQ(before_remove, 1U);
+    EXPECT_EQ(after_remove, 1U);
+
+    fixture.state->on_operation = {};
+    fixture.state->hide_probe_listing = true;
+    auto inconsistent = protocol::supports_online_collection(
+        fixture.storage, test_layout(),
+        kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_TRUE(inconsistent.has_value()) << inconsistent.error().detail;
+    EXPECT_FALSE(*inconsistent);
+    EXPECT_GT(fixture.state->probe_list_count, 0U);
+
+    fixture.state->hide_probe_listing = false;
+    fixture.state->fail_probe_listing = true;
+    auto failed = protocol::supports_online_collection(
+        fixture.storage, test_layout(),
+        kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(failed.error().code, protocol::ErrorCode::TransportFailure);
+}
+
+TEST(ManualPurgeBoundaryRed, ActiveWriterBlocksManualDeletion) {
+    ManualPurgeFixture fixture{"manual-active-writer", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    auto writer = protocol::register_writer(
+        fixture.storage, test_layout(),
+        kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_TRUE(writer.has_value()) << writer.error().detail;
+    const auto before = fixture.state->objects;
+    reset_fake_traffic(*fixture.state);
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::ConcurrentChange);
+    EXPECT_GT(fixture.state->prefix_list_count, 0U);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+    EXPECT_EQ(fixture.state->objects, before);
+    ASSERT_TRUE(protocol::release_registration(*writer));
+}
+
+TEST(ManualPurgeBoundaryRed, AbandonedWriterBlocksManualDeletion) {
+    ManualPurgeFixture fixture{"manual-abandoned-writer", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    const auto writer = test_layout().writers_prefix + std::string(32, 'a');
+    fixture.state->objects[writer] = {'o', 'r', 'p', 'h', 'a', 'n'};
+    const auto before = fixture.state->objects;
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::ConcurrentChange);
+    EXPECT_GT(fixture.state->prefix_list_count, 0U);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+    EXPECT_EQ(fixture.state->objects, before);
+}
+
+TEST(ManualPurgeBoundaryRed, ExistingBarrierIsNeverOverwritten) {
+    ManualPurgeFixture fixture{"manual-existing-barrier", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    auto barrier = protocol::establish_barrier(
+        fixture.storage, test_layout(),
+        kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_TRUE(barrier.has_value()) << barrier.error().detail;
+    const auto before = fixture.state->objects;
+    reset_fake_traffic(*fixture.state);
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::ConcurrentChange);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+    EXPECT_EQ(fixture.state->objects, before);
+    ASSERT_TRUE(protocol::release_registration(*barrier));
+}
+
+TEST(ManualPurgeBoundaryRed, MalformedQuarantineNameNeverBecomesTarget) {
+    ManualPurgeFixture fixture{"manual-malformed-name", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    const auto malformed = test_layout().quarantine_prefix + "malformed";
+    fixture.state->objects[malformed] = {'x'};
+    const auto inventory = protocol::inventory_quarantine(
+        fixture.storage, test_key(),
+        kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_FALSE(inventory.has_value());
+    const auto before = fixture.state->objects;
+    reset_fake_traffic(*fixture.state);
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+    EXPECT_EQ(fixture.state->objects, before);
+}
+
+TEST(ManualPurgeBoundaryRed, RetryWithMetadataOnlyPairFailsClosed) {
+    ManualPurgeFixture fixture{"manual-metadata-only-retry", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    ASSERT_EQ(kasumi::transport::remove(
+                  fixture.storage,
+                  fixture.entries.front().quarantine_identifier).value(),
+              kasumi::transport::Removal::Removed);
+    const auto inventory = protocol::inventory_quarantine(
+        fixture.storage, test_key(),
+        kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_FALSE(inventory.has_value());
+    const auto before = fixture.state->objects;
+    reset_fake_traffic(*fixture.state);
+    const auto retry = fixture.purge();
+    ASSERT_FALSE(retry.has_value());
+    EXPECT_EQ(retry.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+    EXPECT_EQ(fixture.state->objects, before);
+}
+
+TEST(ManualPurgeBoundaryRed, RetryWithPayloadOnlyPairFailsClosed) {
+    ManualPurgeFixture fixture{"manual-payload-only-retry", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    ASSERT_EQ(kasumi::transport::remove(
+                  fixture.storage,
+                  fixture.entries.front().metadata_identifier).value(),
+              kasumi::transport::Removal::Removed);
+    const auto inventory = protocol::inventory_quarantine(
+        fixture.storage, test_key(),
+        kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_TRUE(inventory.has_value()) << inventory.error().detail;
+    ASSERT_EQ(inventory->size(), 2U);
+    EXPECT_FALSE(inventory->front().quarantined_at.has_value());
+    const auto before = fixture.state->objects;
+    reset_fake_traffic(*fixture.state);
+    const auto retry = fixture.purge();
+    ASSERT_FALSE(retry.has_value());
+    EXPECT_EQ(retry.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+    EXPECT_EQ(fixture.state->objects, before);
+}
+
+TEST(ManualPurgeBoundaryRed, BarrierReleaseFailurePropagatesErrorAndDoesNotReportSuccess) {
+    ManualPurgeFixture fixture{"manual-barrier-release-fail", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+
+    fixture.state->fail_remove_identifier = test_layout().barrier_identifier;
+
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::TransportFailure);
+    EXPECT_NE(result.error().detail.find("barrier"), std::string::npos);
+    EXPECT_NE(result.error().detail.find("completed entries: 2"), std::string::npos);
+
+    for (const auto& entry : fixture.entries) {
+        expect_presence(fixture.storage, entry.quarantine_identifier, Presence::Absent);
+        expect_presence(fixture.storage, entry.metadata_identifier, Presence::Absent);
+    }
+    expect_presence(fixture.storage, test_layout().barrier_identifier, Presence::Present);
+}
+
+TEST(ManualPurgeBoundaryRed, SuccessfulPurgeCleansUpOwnedBarrier) {
+    ManualPurgeFixture fixture{"manual-barrier-cleanup-success", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+
+    const auto result = fixture.purge();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, 2U);
+    expect_presence(fixture.storage, test_layout().barrier_identifier, Presence::Absent);
+}
+
+TEST(ManualPurgeBoundaryRed, FailedPurgeCleansUpOwnedBarrier) {
+    ManualPurgeFixture fixture{"manual-barrier-cleanup-failed-purge", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+
+    replace_fake_object(*fixture.state, fixture.entries.front().quarantine_identifier);
+
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    expect_presence(fixture.storage, test_layout().barrier_identifier, Presence::Absent);
+}
+
+TEST(ManualPurgeBoundaryRed, AmbiguousPayloadRemovalReportsCompletedCountAndUncertainMutation) {
+    ManualPurgeFixture fixture{"manual-ambiguous-report", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    fixture.state->remove_then_fail_identifier =
+        fixture.entries.front().quarantine_identifier;
+
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::TransportFailure);
+    EXPECT_NE(result.error().detail.find("completed entries: 0"), std::string::npos);
+    EXPECT_NE(result.error().detail.find("uncertain"), std::string::npos);
+    EXPECT_NE(result.error().detail.find(fixture.entries.front().quarantine_identifier),
+              std::string::npos);
+}
+
+TEST(ManualPurgeBoundaryRed, MetadataRemovalFailureReportsIncompletePairAndAccurateCount) {
+    ManualPurgeFixture fixture{"manual-metadata-fail-count", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    fixture.state->fail_remove_identifier =
+        fixture.entries.back().metadata_identifier;
+
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::TransportFailure);
+    EXPECT_NE(result.error().detail.find("completed entries: 1"), std::string::npos);
+    EXPECT_NE(result.error().detail.find("incomplete quarantine pair"), std::string::npos);
+    EXPECT_NE(result.error().detail.find(fixture.entries.back().metadata_identifier),
+              std::string::npos);
+}
+
+TEST(ManualPurgeBoundaryRed,
+     PurgeFailureWithBarrierReleaseFailureReportsOriginalErrorAndIdentifiesBarrierCleanupFailure) {
+    ManualPurgeFixture fixture{"manual-purge-dual-fail", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+
+    replace_fake_object(*fixture.state, fixture.entries.front().quarantine_identifier);
+    fixture.state->fail_remove_identifier = test_layout().barrier_identifier;
+
+    const auto result = fixture.purge();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_NE(result.error().detail.find("failed to release maintenance barrier"), std::string::npos);
+    EXPECT_NE(result.error().detail.find(test_layout().barrier_identifier), std::string::npos);
+    expect_presence(fixture.storage, test_layout().barrier_identifier, Presence::Present);
+}
+
+struct ManualRepairFixture : ManualPurgeFixture {
+    ManualRepairFixture(std::string_view name, std::size_t count)
+        : ManualPurgeFixture(name, count) {}
+
+    auto repair() {
+        return kasumi::application::integrity::repair_quarantine(
+            runtime, storage, test_key());
+    }
+
+    void make_metadata_only(std::size_t index) {
+        ASSERT_LT(index, entries.size());
+        const auto& entry = entries[index];
+        state->objects.erase(entry.quarantine_identifier);
+        state->physical_hashes.erase(entry.quarantine_identifier);
+    }
+
+    void make_payload_only(std::size_t index) {
+        ASSERT_LT(index, entries.size());
+        const auto& entry = entries[index];
+        state->objects.erase(entry.metadata_identifier);
+        state->physical_hashes.erase(entry.metadata_identifier);
+    }
+};
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     InterruptedPurgeRecoveryRemovesAuthenticatedMetadataRemnant) {
+    ManualRepairFixture fixture{"repair-interrupted-purge", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    fixture.make_metadata_only(0);
+    const auto& entry = fixture.entries[0];
+
+    const auto result = fixture.repair();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(*result, 1U);
+    expect_presence(fixture.storage, entry.metadata_identifier, Presence::Absent);
+    expect_presence(fixture.storage, entry.quarantine_identifier, Presence::Absent);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     RecoveredInventoryUnblocksNormalGarbageCollection) {
+    ManualRepairFixture fixture{"repair-unblocks-gc", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    fixture.make_metadata_only(0);
+
+    auto pre_inv = protocol::inventory_quarantine(
+        fixture.storage, test_key(), kasumi::test::workspace_root(fixture.workspace));
+    EXPECT_FALSE(pre_inv.has_value());
+
+    const auto result = fixture.repair();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(*result, 1U);
+
+    auto post_inv = protocol::inventory_quarantine(
+        fixture.storage, test_key(), kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_TRUE(post_inv.has_value()) << post_inv.error().detail;
+    EXPECT_TRUE(post_inv->empty());
+
+    auto collected = kasumi::application::integrity::garbage_collect(
+        fixture.runtime, fixture.storage, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     RepairIsIdempotentAndSecondRunReportsZero) {
+    ManualRepairFixture fixture{"repair-idempotent", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    fixture.make_metadata_only(0);
+
+    const auto first = fixture.repair();
+    ASSERT_TRUE(first.has_value()) << first.error().detail;
+    EXPECT_EQ(*first, 1U);
+
+    const auto second = fixture.repair();
+    ASSERT_TRUE(second.has_value()) << second.error().detail;
+    EXPECT_EQ(*second, 0U);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     HealthyPairsPreservedByteForByte) {
+    ManualRepairFixture fixture{"repair-healthy-preserved", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    fixture.make_metadata_only(0);
+    const auto healthy_payload =
+        fixture.state->objects.at(fixture.entries[1].quarantine_identifier);
+    const auto healthy_metadata =
+        fixture.state->objects.at(fixture.entries[1].metadata_identifier);
+
+    const auto result = fixture.repair();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(*result, 1U);
+
+    expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Absent);
+    EXPECT_EQ(fixture.state->objects.at(fixture.entries[1].quarantine_identifier), healthy_payload);
+    EXPECT_EQ(fixture.state->objects.at(fixture.entries[1].metadata_identifier), healthy_metadata);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     PayloadOnlyObjectPreservedAndNeverTreatedAsRepairCandidate) {
+    ManualRepairFixture fixture{"repair-payload-only", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    fixture.make_metadata_only(0);
+    fixture.make_payload_only(1);
+    const auto payload_bytes =
+        fixture.state->objects.at(fixture.entries[1].quarantine_identifier);
+
+    const auto result = fixture.repair();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_EQ(fixture.state->objects.at(fixture.entries[1].quarantine_identifier), payload_bytes);
+    expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Present);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     TamperedMetadataFailsAuthenticationWithZeroDeletions) {
+    ManualRepairFixture fixture{"repair-tampered-meta", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    fixture.make_metadata_only(0);
+    replace_fake_object(*fixture.state, fixture.entries[0].metadata_identifier);
+
+    const auto result = fixture.repair();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_TRUE(result.error().code == IntegrityErrorCode::IntegrityFailure ||
+                result.error().code == IntegrityErrorCode::CryptoFailure);
+    expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Present);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     WrongVaultKeyFailsAuthenticationWithZeroDeletions) {
+    ManualRepairFixture fixture{"repair-wrong-key", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    fixture.make_metadata_only(0);
+
+    auto wrong_key = test_key();
+    wrong_key.front() ^= 1;
+    const auto wrong_layout =
+        kasumi::application::history_storage::derive_remote_layout(wrong_key);
+
+    // 1. Observing an empty namespace derived from another key must not delete
+    // any objects belonging to the original vault.
+    const auto empty_result = kasumi::application::integrity::repair_quarantine(
+        fixture.runtime, fixture.storage, wrong_key);
+    if (empty_result.has_value()) {
+        EXPECT_EQ(*empty_result, 0U);
+    }
+    expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Present);
+
+    // 2. Authenticating existing metadata with the wrong key fails authentication
+    // and causes preflight rejection with zero deletions.
+    const auto foreign_metadata_id =
+        wrong_layout.quarantine_content_prefix + "intruder.meta";
+    fixture.state->objects[foreign_metadata_id] =
+        fixture.state->objects.at(fixture.entries[0].metadata_identifier);
+    fixture.state->physical_hashes[foreign_metadata_id] =
+        fixture.state->physical_hashes.at(fixture.entries[0].metadata_identifier);
+
+    const auto auth_fail_result = kasumi::application::integrity::repair_quarantine(
+        fixture.runtime, fixture.storage, wrong_key);
+    ASSERT_FALSE(auth_fail_result.has_value());
+    EXPECT_TRUE(auth_fail_result.error().code == IntegrityErrorCode::IntegrityFailure ||
+                auth_fail_result.error().code == IntegrityErrorCode::CryptoFailure);
+    expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Present);
+    expect_presence(fixture.storage, foreign_metadata_id, Presence::Present);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     MalformedOrForeignPathsNeverDeletedOutsideNamespace) {
+    ManualRepairFixture fixture{"repair-foreign-paths", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    fixture.make_metadata_only(0);
+
+    const std::string foreign_obj = "foreign/object.dat";
+    const std::string malformed_quarantine = test_layout().quarantine_prefix + "malformed";
+    fixture.state->objects[foreign_obj] = {42};
+    fixture.state->objects[malformed_quarantine] = {43};
+    const auto before = fixture.state->objects;
+
+    const auto result = fixture.repair();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_EQ(fixture.state->objects, before);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     EpochAndHistoryObjectsRemainUnchanged) {
+    ManualRepairFixture fixture{"repair-history-preserved", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    fixture.make_metadata_only(0);
+
+    auto non_quarantine_before = fixture.state->objects;
+    non_quarantine_before.erase(fixture.entries[0].metadata_identifier);
+
+    const auto result = fixture.repair();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(*result, 1U);
+
+    for (const auto& [id, bytes] : non_quarantine_before) {
+        ASSERT_TRUE(fixture.state->objects.contains(id)) << "missing object: " << id;
+        EXPECT_EQ(fixture.state->objects.at(id), bytes) << "modified object: " << id;
+    }
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     MixedInventoryValidatesAllBeforeFirstDeletion) {
+    ManualRepairFixture fixture{"repair-mixed-inventory", 4};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 4U);
+    fixture.make_metadata_only(0);
+    fixture.make_metadata_only(2);
+
+    const auto result = fixture.repair();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(*result, 2U);
+
+    expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Absent);
+    expect_presence(fixture.storage, fixture.entries[2].metadata_identifier, Presence::Absent);
+    expect_presence(fixture.storage, fixture.entries[1].quarantine_identifier, Presence::Present);
+    expect_presence(fixture.storage, fixture.entries[1].metadata_identifier, Presence::Present);
+    expect_presence(fixture.storage, fixture.entries[3].quarantine_identifier, Presence::Present);
+    expect_presence(fixture.storage, fixture.entries[3].metadata_identifier, Presence::Present);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     LateInvalidEntryBlocksEveryDeletion) {
+    ManualRepairFixture fixture{"repair-late-invalid", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    fixture.make_metadata_only(0);
+    fixture.make_metadata_only(1);
+    replace_fake_object(*fixture.state, fixture.entries[1].metadata_identifier);
+
+    const auto result = fixture.repair();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_TRUE(result.error().code == IntegrityErrorCode::IntegrityFailure ||
+                result.error().code == IntegrityErrorCode::CryptoFailure);
+
+    expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Present);
+    expect_presence(fixture.storage, fixture.entries[1].metadata_identifier, Presence::Present);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     NewMetadataAppearingAfterCaptureCannotExpandAuthority) {
+    ManualRepairFixture fixture{"repair-new-meta-after-capture", 3};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 3U);
+    fixture.make_metadata_only(0);
+    fixture.make_metadata_only(1);
+    fixture.make_metadata_only(2);
+
+    const auto late = fixture.entries.back();
+    fixture.state->hidden_objects.insert(
+        fixture.state->objects.extract(late.metadata_identifier));
+    ASSERT_FALSE(fixture.state->objects.contains(late.metadata_identifier));
+
+    bool injected = false;
+    fixture.state->on_operation = [&](FakeState& state,
+                                      std::string_view event,
+                                      std::string_view identifier) {
+        if (!injected && event == "after_hash" &&
+            identifier == test_layout().barrier_identifier &&
+            state.barrier_verification_count >= 5) {
+            injected = true;
+            state.objects.merge(state.hidden_objects);
+        }
+    };
+
+    const auto result = fixture.repair();
+    EXPECT_TRUE(injected);
+    EXPECT_TRUE(result.has_value() ||
+                result.error().code == IntegrityErrorCode::ConcurrentChange);
+    if (result) {
+        EXPECT_EQ(*result, 2U);
+    }
+    EXPECT_TRUE(fixture.state->objects.contains(late.metadata_identifier));
+    expect_presence(fixture.storage, late.metadata_identifier, Presence::Present);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     PayloadReappearingBeforeDeletionAbortsOperation) {
+    ManualRepairFixture fixture{"repair-payload-reappears", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    fixture.make_metadata_only(0);
+
+    bool injected = false;
+    fixture.state->on_operation = [&](FakeState& state,
+                                      std::string_view event,
+                                      std::string_view identifier) {
+        if (!injected && event == "presence" &&
+            identifier == fixture.entries[0].quarantine_identifier) {
+            injected = true;
+            state.objects[fixture.entries[0].quarantine_identifier] = {1};
+        }
+    };
+
+    const auto result = fixture.repair();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::ConcurrentChange);
+    expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Present);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     OriginalObjectReappearingAbortsUnderConservativePolicy) {
+    ManualRepairFixture fixture{"repair-original-reappears", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    fixture.make_metadata_only(0);
+
+    fixture.state->objects[fixture.entries[0].original_identifier] = {1};
+
+    const auto result = fixture.repair();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::ConcurrentChange);
+    expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Present);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     MetadataReplacedAfterAuthenticationAbortsDeletion) {
+    ManualRepairFixture fixture{"repair-metadata-replaced", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    fixture.make_metadata_only(0);
+
+    bool injected = false;
+    fixture.state->on_operation = [&](FakeState& state,
+                                      std::string_view event,
+                                      std::string_view identifier) {
+        if (!injected && event == "after_hash" &&
+            identifier == test_layout().barrier_identifier &&
+            state.barrier_verification_count >= 5) {
+            injected = true;
+            replace_fake_object(state, fixture.entries[0].metadata_identifier);
+        }
+    };
+
+    const auto result = fixture.repair();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_TRUE(injected);
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::ConcurrentChange);
+    expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Present);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     MetadataReplacedWithEquivalentCiphertextAbortsDeletion) {
+    ManualRepairFixture fixture{"repair-meta-equiv-replaced", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    fixture.make_metadata_only(0);
+    const auto& entry = fixture.entries[0];
+
+    const auto second_meta_path =
+        kasumi::test::workspace_path(fixture.workspace, "second_meta.enc");
+    auto prepared = protocol::prepare_quarantine_metadata(
+        entry.quarantine_identifier,
+        *entry.quarantined_at,
+        test_key(),
+        second_meta_path,
+        entry.physical_sha256);
+    ASSERT_TRUE(prepared.has_value()) << prepared.error().detail;
+
+    std::ifstream stream(second_meta_path, std::ios::binary);
+    std::vector<std::uint8_t> second_bytes(
+        (std::istreambuf_iterator<char>(stream)),
+        std::istreambuf_iterator<char>());
+    const auto second_hash = prepared->expected_physical_sha256;
+
+    const auto original_bytes =
+        fixture.state->objects.at(entry.metadata_identifier);
+    const auto original_hash =
+        fixture.state->physical_hashes.at(entry.metadata_identifier);
+
+    ASSERT_FALSE(second_bytes.empty());
+    ASSERT_NE(second_bytes, original_bytes);
+    ASSERT_NE(second_hash, original_hash);
+
+    bool injected = false;
+    fixture.state->on_operation = [&](FakeState& state,
+                                      std::string_view event,
+                                      std::string_view identifier) {
+        if (!injected && event == "after_hash" &&
+            identifier == test_layout().barrier_identifier &&
+            state.barrier_verification_count >= 5) {
+            injected = true;
+            state.objects[entry.metadata_identifier] = second_bytes;
+            state.physical_hashes[entry.metadata_identifier] = second_hash;
+        }
+    };
+
+    const auto result = fixture.repair();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_TRUE(injected);
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::ConcurrentChange);
+    expect_presence(fixture.storage, entry.metadata_identifier, Presence::Present);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     CryptographicallyInvalidHealthyPairBlocksRepairAsIntegrityFailure) {
+    ManualRepairFixture fixture{"repair-invalid-healthy", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    fixture.make_metadata_only(0);
+    replace_fake_object(*fixture.state, fixture.entries[1].metadata_identifier);
+
+    const auto result = fixture.repair();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::IntegrityFailure);
+    expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Present);
+    expect_presence(fixture.storage, fixture.entries[1].quarantine_identifier, Presence::Present);
+    expect_presence(fixture.storage, fixture.entries[1].metadata_identifier, Presence::Present);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     CryptographicallyInvalidHealthyPairWithoutRepairCandidatesFailsClosed) {
+    ManualRepairFixture fixture{"repair-invalid-healthy-no-candidates", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    replace_fake_object(*fixture.state, fixture.entries[0].metadata_identifier);
+    const auto before = fixture.state->objects;
+
+    const auto result = fixture.repair();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::IntegrityFailure);
+    EXPECT_EQ(fixture.selected_removals(), 0U);
+    EXPECT_EQ(fixture.state->objects, before);
+    expect_presence(fixture.storage, fixture.entries[0].quarantine_identifier, Presence::Present);
+    expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Present);
+    expect_presence(fixture.storage, test_layout().barrier_identifier, Presence::Absent);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     BarrierReplacedStopsWithoutDeletingReplacementBarrier) {
+    ManualRepairFixture fixture{"repair-barrier-replaced", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    fixture.make_metadata_only(0);
+
+    bool injected = false;
+    fixture.state->on_operation = [&](FakeState& state,
+                                      std::string_view event,
+                                      [[maybe_unused]] std::string_view identifier) {
+        if (!injected && event == "presence") {
+            injected = true;
+            replace_barrier_contents(&state, test_layout().barrier_identifier);
+        }
+    };
+
+    const auto result = fixture.repair();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::ConcurrentChange);
+    expect_presence(fixture.storage, test_layout().barrier_identifier, Presence::Present);
+    expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Present);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     WriterPresentOrBackendProbeFailureProducesZeroDeletions) {
+    {
+        ManualRepairFixture fixture{"repair-writer-present", 1};
+        fixture.prepare();
+        ASSERT_EQ(fixture.entries.size(), 1U);
+        fixture.make_metadata_only(0);
+
+        auto writer = protocol::register_writer(
+            fixture.storage, test_layout(), kasumi::test::workspace_root(fixture.workspace));
+        ASSERT_TRUE(writer.has_value());
+
+        const auto result = fixture.repair();
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, IntegrityErrorCode::ConcurrentChange);
+        expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Present);
+    }
+    {
+        ManualRepairFixture fixture{"repair-probe-unsupported", 1};
+        fixture.prepare();
+        ASSERT_EQ(fixture.entries.size(), 1U);
+        fixture.make_metadata_only(0);
+
+        fixture.state->hide_probe_listing = true;
+
+        const auto result = fixture.repair();
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, IntegrityErrorCode::IntegrityFailure);
+        expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Present);
+    }
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     DefiniteRemovalFailureReportsExplicitErrorAndLeavesRemainingState) {
+    ManualRepairFixture fixture{"repair-remove-fail", 1};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 1U);
+    fixture.make_metadata_only(0);
+
+    fixture.state->fail_remove_identifier = fixture.entries[0].metadata_identifier;
+
+    const auto result = fixture.repair();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::TransportFailure);
+    EXPECT_NE(result.error().detail.find(fixture.entries[0].metadata_identifier), std::string::npos);
+    expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Present);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     AmbiguousRemovalResultStopsAndBlocksBlindRetry) {
+    ManualRepairFixture fixture{"repair-ambiguous-stop", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    fixture.make_metadata_only(0);
+    fixture.make_metadata_only(1);
+
+    fixture.state->remove_then_fail_identifier = fixture.entries[0].metadata_identifier;
+
+    const auto result = fixture.repair();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::TransportFailure);
+    EXPECT_NE(result.error().detail.find("uncertain"), std::string::npos);
+    expect_presence(fixture.storage, fixture.entries[1].metadata_identifier, Presence::Present);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     CancellationBetweenEntriesPreservesCompletedAndUntouched) {
+    ResetManualPurgeCancellation reset_cancel;
+    ManualRepairFixture fixture{"repair-cancel-between", 2};
+    fixture.prepare();
+    ASSERT_EQ(fixture.entries.size(), 2U);
+    fixture.make_metadata_only(0);
+    fixture.make_metadata_only(1);
+
+    fixture.state->on_operation = [&](FakeState&, std::string_view event, std::string_view identifier) {
+        if ((event == "remove" || event == "after_remove") && identifier == fixture.entries[0].metadata_identifier) {
+            kasumi::platform::cancellation::request();
+        }
+    };
+
+    const auto result = fixture.repair();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IntegrityErrorCode::StateFailure);
+    EXPECT_NE(result.error().detail.find("cancel"), std::string::npos);
+    expect_presence(fixture.storage, fixture.entries[0].metadata_identifier, Presence::Absent);
+    expect_presence(fixture.storage, fixture.entries[1].metadata_identifier, Presence::Present);
+}
+
+TEST(ManualQuarantineRepairBoundaryRed,
+     EmptyHealthyQuarantineReturnsSuccessWithZeroRepairs) {
+    ManualRepairFixture fixture{"repair-empty-zero", 0};
+    fixture.prepare();
+    const auto before = fixture.state->objects;
+
+    const auto result = fixture.repair();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(*result, 0U);
+    EXPECT_EQ(fixture.state->objects, before);
+}
 
 void expect_integrated_copy_case(IntegratedCopyPath path,
                                  std::string_view name,

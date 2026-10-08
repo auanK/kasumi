@@ -1724,4 +1724,64 @@ TEST(CliPresenterTest, PresentsGarbageCollectBoundedOutputLines) {
     EXPECT_LE(line_count, 12);
 }
 
+TEST(CliPresenterTest, ManualPurgeHasSpecificResultAndDoesNotPresentAsNormalGc) {
+    kasumi::application::GarbageCollectCompleted summary{
+        .purged_objects = 5,
+    };
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(
+                  response(summary, kasumi::application::Operation::PurgeQuarantine)),
+              0);
+    const auto output = testing::internal::GetCapturedStdout();
+    EXPECT_NE(output.find("Manual quarantine purge completed"), std::string::npos);
+    EXPECT_NE(output.find("Purged quarantine entries: 5"), std::string::npos);
+    EXPECT_EQ(output.find("Garbage collection completed"), std::string::npos);
+    EXPECT_EQ(output.find("candidates"), std::string::npos);
+}
+
+TEST(CliPresenterTest, ManualPurgePresentsInPortuguese) {
+    kasumi::application::GarbageCollectCompleted summary{
+        .purged_objects = 3,
+    };
+    const ScopedLanguage portuguese{kasumi::cli::i18n::Language::Portuguese};
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(
+                  response(summary, kasumi::application::Operation::PurgeQuarantine)),
+              0);
+    const auto output = testing::internal::GetCapturedStdout();
+    EXPECT_NE(output.find("Purga manual da quarentena concluída"), std::string::npos);
+    EXPECT_NE(output.find("Entradas de quarentena purgadas: 3"), std::string::npos);
+    EXPECT_EQ(output.find("Coleta de lixo concluída"), std::string::npos);
+}
+
+TEST(CliPresenterTest, ManualRepairHasSpecificResultAndDoesNotPresentAsNormalGc) {
+    kasumi::application::RepairQuarantineCompleted summary{
+        .repaired_metadata_count = 5,
+    };
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(
+                  response(summary, kasumi::application::Operation::RepairQuarantine)),
+              0);
+    const auto output = testing::internal::GetCapturedStdout();
+    EXPECT_NE(output.find("Quarantine metadata repair completed"), std::string::npos);
+    EXPECT_NE(output.find("Repaired metadata entries: 5"), std::string::npos);
+    EXPECT_EQ(output.find("Garbage collection completed"), std::string::npos);
+    EXPECT_EQ(output.find("candidates"), std::string::npos);
+}
+
+TEST(CliPresenterTest, ManualRepairPresentsInPortuguese) {
+    kasumi::application::RepairQuarantineCompleted summary{
+        .repaired_metadata_count = 3,
+    };
+    const ScopedLanguage portuguese{kasumi::cli::i18n::Language::Portuguese};
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(
+                  response(summary, kasumi::application::Operation::RepairQuarantine)),
+              0);
+    const auto output = testing::internal::GetCapturedStdout();
+    EXPECT_NE(output.find("Reparo de metadados da quarentena concluído"), std::string::npos);
+    EXPECT_NE(output.find("Entradas de metadados reparadas: 3"), std::string::npos);
+    EXPECT_EQ(output.find("Coleta de lixo concluída"), std::string::npos);
+}
+
 } // namespace

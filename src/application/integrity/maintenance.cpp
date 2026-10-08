@@ -2538,4 +2538,667 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
     }
 }
 
+namespace {
+
+transport::RemovalResult raw_remove(transport::Transport& transport,
+                                   std::string_view identifier) {
+    if (!transport::valid(transport) || transport.storage.remove == nullptr) {
+        return std::unexpected(transport::Error{
+            .code = transport::ErrorCode::InvalidContext,
+            .message = "invalid transport"});
+    }
+    return transport.storage.remove(transport.state.get(), identifier);
+}
+
+} // namespace
+
+std::expected<std::size_t, Error>
+purge_quarantine(const runtime::RuntimeData& runtime_data,
+                 transport::Transport& storage,
+                 std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+    if (!transport::valid(storage)) {
+        return std::unexpected(
+            make_error(ErrorCode::InvalidInput, "invalid transport for quarantine purge"));
+    }
+
+    if (platform::cancellation::requested()) {
+        return std::unexpected(
+            make_error(ErrorCode::StateFailure, "operation cancelled by user"));
+    }
+
+    const auto layout = history_storage::derive_remote_layout(key);
+    const auto workspace_root = maintenance_workspace_root(runtime_data);
+
+    // 1. Acquire barrier (checking for existing barrier first)
+    auto existing_barrier = transport::presence(storage, layout.barrier_identifier);
+    if (!existing_barrier) {
+        return std::unexpected(
+            transport_error(existing_barrier.error(), layout.barrier_identifier));
+    }
+    if (*existing_barrier == transport::Presence::Present) {
+        return std::unexpected(make_error(
+            ErrorCode::ConcurrentChange,
+            "existing maintenance barrier present",
+            layout.barrier_identifier));
+    }
+
+    auto barrier = history_storage::maintenance_protocol::establish_barrier(
+        storage, layout, workspace_root);
+    if (!barrier) {
+        return std::unexpected(protocol_error(barrier.error()));
+    }
+
+    auto outcome = [&]() -> std::expected<std::size_t, Error> {
+
+    auto check_barrier = [&]() -> std::expected<void, Error> {
+        auto owned = history_storage::maintenance_protocol::verify_registration(*barrier);
+        if (!owned) {
+            return std::unexpected(protocol_error(owned.error()));
+        }
+        return {};
+    };
+
+    // 2. Verify writers (2 observations)
+    for (int observation = 0; observation < 2; ++observation) {
+        auto writers = history_storage::maintenance_protocol::active_writers(
+            storage, layout);
+        if (!writers) {
+            return std::unexpected(protocol_error(writers.error()));
+        }
+        if (!writers->empty()) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                list_detail("active or abandoned writers: ", *writers)));
+        }
+        auto owned = check_barrier();
+        if (!owned) {
+            return std::unexpected(owned.error());
+        }
+    }
+
+    // 3. Verify backend online consistency support
+    auto online = history_storage::maintenance_protocol::supports_online_collection(
+        storage, layout, workspace_root);
+    if (!online) {
+        return std::unexpected(protocol_error(online.error()));
+    }
+    if (!*online) {
+        return std::unexpected(make_error(
+            ErrorCode::IntegrityFailure,
+            "backend lacks required online-consistency guarantees for quarantine purge"));
+    }
+
+    auto owned_after_probe = check_barrier();
+    if (!owned_after_probe) {
+        return std::unexpected(owned_after_probe.error());
+    }
+
+    // 4. Capture inventory once
+    auto inventory = history_storage::maintenance_protocol::inventory_quarantine(
+        storage, key, workspace_root);
+    if (!inventory) {
+        return std::unexpected(protocol_error(inventory.error()));
+    }
+
+    if (inventory->empty()) {
+        return 0;
+    }
+
+    // 5. Complete preflight validation before any mutation
+    for (const auto& entry : *inventory) {
+        if (platform::cancellation::requested()) {
+            return std::unexpected(
+                make_error(ErrorCode::StateFailure, "operation cancelled by user"));
+        }
+
+        // Validate metadata presence
+        if (!entry.quarantined_at.has_value() || entry.physical_sha256.empty()) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "quarantine entry missing authenticated metadata",
+                entry.quarantine_identifier));
+        }
+
+        // Reject epoch-derived targets
+        if (history_storage::maintenance_protocol::is_epoch_object(
+                layout, entry.original_identifier)) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "epoch object blocked from quarantine purge",
+                entry.quarantine_identifier));
+        }
+
+        // Check required original-object absence
+        auto original = transport::presence(storage, entry.original_identifier);
+        if (!original) {
+            return std::unexpected(
+                transport_error(original.error(), entry.original_identifier));
+        }
+        if (*original == transport::Presence::Present) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                "original object reappeared for quarantine entry",
+                entry.original_identifier));
+        }
+
+        // Verify physical payload against metadata
+        auto verified = history_storage::maintenance_protocol::verify_quarantine(
+            storage, entry, workspace_root);
+        if (!verified) {
+            return std::unexpected(protocol_error(verified.error()));
+        }
+        if (!*verified) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "quarantine payload physical hash mismatch",
+                entry.quarantine_identifier));
+        }
+
+        auto barrier_ok = check_barrier();
+        if (!barrier_ok) {
+            return std::unexpected(barrier_ok.error());
+        }
+    }
+
+    // 6. Execute captured purge entry by entry
+    std::size_t completed_count = 0;
+    for (const auto& entry : *inventory) {
+        // Step 1: Check cancellation
+        if (platform::cancellation::requested()) {
+            return std::unexpected(make_error(
+                ErrorCode::StateFailure,
+                "operation cancelled by user; completed entries: " +
+                    std::to_string(completed_count)));
+        }
+
+        // Step 2: Verify barrier ownership
+        auto barrier_ok1 = check_barrier();
+        if (!barrier_ok1) {
+            auto err = barrier_ok1.error();
+            err.detail += "; completed entries: " + std::to_string(completed_count);
+            return std::unexpected(err);
+        }
+
+        // Step 3: Revalidate the selected entry's current identity, metadata and physical content
+        std::array<std::string, 2> entry_identifiers{
+            entry.quarantine_identifier, entry.metadata_identifier};
+        auto reloaded_inventory =
+            history_storage::maintenance_protocol::inventory_quarantine(
+                storage, key, entry_identifiers, workspace_root);
+        if (!reloaded_inventory || reloaded_inventory->empty()) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                "quarantine metadata changed or disappeared concurrently; completed entries: " +
+                    std::to_string(completed_count),
+                entry.metadata_identifier));
+        }
+        const auto& reloaded = reloaded_inventory->front();
+        if (reloaded.quarantine_identifier != entry.quarantine_identifier ||
+            reloaded.metadata_identifier != entry.metadata_identifier ||
+            reloaded.quarantined_at != entry.quarantined_at ||
+            reloaded.physical_sha256 != entry.physical_sha256) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                "quarantine metadata modified concurrently; completed entries: " +
+                    std::to_string(completed_count),
+                entry.metadata_identifier));
+        }
+
+        auto reloaded_hash =
+            history_storage::maintenance_protocol::verify_quarantine(
+                storage, reloaded, workspace_root);
+        if (!reloaded_hash) {
+            auto err = protocol_error(reloaded_hash.error());
+            err.detail += "; completed entries: " + std::to_string(completed_count);
+            return std::unexpected(err);
+        }
+        if (!*reloaded_hash) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                "quarantine payload modified concurrently; completed entries: " +
+                    std::to_string(completed_count),
+                entry.quarantine_identifier));
+        }
+
+        // Step 4: Confirm required original-object absence
+        auto recheck_original =
+            transport::presence(storage, entry.original_identifier);
+        if (!recheck_original) {
+            auto err = transport_error(recheck_original.error(), entry.original_identifier);
+            err.detail += "; completed entries: " + std::to_string(completed_count);
+            return std::unexpected(err);
+        }
+        if (*recheck_original == transport::Presence::Present) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                "original object reappeared for quarantine entry; completed entries: " +
+                    std::to_string(completed_count),
+                entry.original_identifier));
+        }
+
+        // Step 5: Verify barrier ownership immediately before deletion
+        auto barrier_ok2 = check_barrier();
+        if (!barrier_ok2) {
+            auto err = barrier_ok2.error();
+            err.detail += "; completed entries: " + std::to_string(completed_count);
+            return std::unexpected(err);
+        }
+
+        // Step 6: Remove the quarantine PAYLOAD
+        auto payload_removed = raw_remove(storage, entry.quarantine_identifier);
+        if (!payload_removed) {
+            auto err = transport_error(payload_removed.error(), entry.quarantine_identifier);
+            err.detail = "transport failure removing quarantine payload (mutation uncertain): " +
+                         err.detail +
+                         "; completed entries: " + std::to_string(completed_count) +
+                         "; affected object: " + entry.quarantine_identifier;
+            return std::unexpected(err);
+        }
+        if (*payload_removed != transport::Removal::Removed) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                "quarantine payload already removed or missing; completed entries: " +
+                    std::to_string(completed_count),
+                entry.quarantine_identifier));
+        }
+
+        // Step 7: If successful, check cancellation and barrier ownership
+        if (platform::cancellation::requested()) {
+            return std::unexpected(make_error(
+                ErrorCode::StateFailure,
+                "operation cancelled by user after payload removal (incomplete quarantine pair); completed entries: " +
+                    std::to_string(completed_count) +
+                    "; affected object: " + entry.metadata_identifier,
+                entry.metadata_identifier));
+        }
+        auto barrier_ok3 = check_barrier();
+        if (!barrier_ok3) {
+            auto err = barrier_ok3.error();
+            err.detail = "lost barrier ownership after payload removal (incomplete quarantine pair): " +
+                         err.detail +
+                         "; completed entries: " + std::to_string(completed_count) +
+                         "; affected object: " + entry.metadata_identifier;
+            return std::unexpected(err);
+        }
+
+        // Step 8: Remove the associated authenticated METADATA
+        auto metadata_removed = raw_remove(storage, entry.metadata_identifier);
+        if (!metadata_removed) {
+            auto err = transport_error(metadata_removed.error(), entry.metadata_identifier);
+            err.detail = "transport failure removing quarantine metadata after payload removed (incomplete quarantine pair): " +
+                         err.detail +
+                         "; completed entries: " + std::to_string(completed_count) +
+                         "; affected object: " + entry.metadata_identifier;
+            return std::unexpected(err);
+        }
+        if (*metadata_removed != transport::Removal::Removed) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                "quarantine metadata already removed or missing after payload removed (incomplete quarantine pair); completed entries: " +
+                    std::to_string(completed_count) +
+                    "; affected object: " + entry.metadata_identifier,
+                entry.metadata_identifier));
+        }
+
+        // Step 9: Count the entry completed only after both removals are confirmed
+        ++completed_count;
+    }
+
+    return completed_count;
+    }();
+
+    auto released =
+        history_storage::maintenance_protocol::release_registration(*barrier);
+    if (!outcome) {
+        if (!released) {
+            auto err = outcome.error();
+            err.detail += "; failed to release maintenance barrier: " + released.error().detail +
+                          "; barrier: " + layout.barrier_identifier;
+            return std::unexpected(err);
+        }
+        return outcome;
+    }
+    if (!released) {
+        auto err = protocol_error(released.error());
+        err.detail = "failed to release maintenance barrier: " + err.detail +
+                     "; completed entries: " + std::to_string(*outcome) +
+                     "; barrier: " + layout.barrier_identifier;
+        return std::unexpected(err);
+    }
+    return outcome;
+}
+
+std::expected<std::size_t, Error>
+repair_quarantine(const runtime::RuntimeData& runtime_data,
+                  transport::Transport& storage,
+                  std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+    if (!transport::valid(storage)) {
+        return std::unexpected(
+            make_error(ErrorCode::InvalidInput, "invalid transport for quarantine repair"));
+    }
+
+    if (platform::cancellation::requested()) {
+        return std::unexpected(
+            make_error(ErrorCode::StateFailure, "operation cancelled by user"));
+    }
+
+    const auto layout = history_storage::derive_remote_layout(key);
+    const auto workspace_root = maintenance_workspace_root(runtime_data);
+
+    // 1. Acquire barrier (checking for existing barrier first)
+    auto existing_barrier = transport::presence(storage, layout.barrier_identifier);
+    if (!existing_barrier) {
+        return std::unexpected(
+            transport_error(existing_barrier.error(), layout.barrier_identifier));
+    }
+    if (*existing_barrier == transport::Presence::Present) {
+        return std::unexpected(make_error(
+            ErrorCode::ConcurrentChange,
+            "existing maintenance barrier present",
+            layout.barrier_identifier));
+    }
+
+    auto barrier = history_storage::maintenance_protocol::establish_barrier(
+        storage, layout, workspace_root);
+    if (!barrier) {
+        return std::unexpected(protocol_error(barrier.error()));
+    }
+
+    auto outcome = [&]() -> std::expected<std::size_t, Error> {
+
+    auto check_barrier = [&]() -> std::expected<void, Error> {
+        auto owned = history_storage::maintenance_protocol::verify_registration(*barrier);
+        if (!owned) {
+            return std::unexpected(protocol_error(owned.error()));
+        }
+        return {};
+    };
+
+    // 2. Verify writers (2 observations)
+    for (int observation = 0; observation < 2; ++observation) {
+        auto writers = history_storage::maintenance_protocol::active_writers(
+            storage, layout);
+        if (!writers) {
+            return std::unexpected(protocol_error(writers.error()));
+        }
+        if (!writers->empty()) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                list_detail("active or abandoned writers: ", *writers)));
+        }
+        auto owned = check_barrier();
+        if (!owned) {
+            return std::unexpected(owned.error());
+        }
+    }
+
+    // 3. Verify backend online consistency support
+    auto online = history_storage::maintenance_protocol::supports_online_collection(
+        storage, layout, workspace_root);
+    if (!online) {
+        return std::unexpected(protocol_error(online.error()));
+    }
+    if (!*online) {
+        return std::unexpected(make_error(
+            ErrorCode::IntegrityFailure,
+            "backend lacks required online-consistency guarantees for quarantine repair"));
+    }
+
+    auto owned_after_probe = check_barrier();
+    if (!owned_after_probe) {
+        return std::unexpected(owned_after_probe.error());
+    }
+
+    // 4. Classify quarantine inventory once
+    auto classified = history_storage::maintenance_protocol::classify_quarantine_for_repair(
+        storage, layout);
+    if (!classified) {
+        return std::unexpected(protocol_error(classified.error()));
+    }
+
+    // Fail closed on any invalid or ambiguous objects in quarantine namespace
+    if (!classified->invalid_identifiers.empty()) {
+        return std::unexpected(make_error(
+            ErrorCode::IntegrityFailure,
+            "malformed or invalid quarantine object: " +
+                classified->invalid_identifiers.front(),
+            classified->invalid_identifiers.front()));
+    }
+
+    // Fail closed on any payload-only objects
+    if (!classified->payload_only_identifiers.empty()) {
+        return std::unexpected(make_error(
+            ErrorCode::IntegrityFailure,
+            "unsupported payload-only quarantine object: " +
+                classified->payload_only_identifiers.front(),
+            classified->payload_only_identifiers.front()));
+    }
+
+    struct RepairCandidate {
+        std::string original_identifier;
+        std::string quarantine_identifier;
+        std::string metadata_identifier;
+        std::int64_t quarantined_at = 0;
+        std::string payload_sha256;
+        std::string ciphertext_sha256;
+    };
+
+    // 5. Complete preflight validation for healthy pairs and all metadata-only candidates before any mutation
+    for (const auto& healthy : classified->healthy_pairs) {
+        if (platform::cancellation::requested()) {
+            return std::unexpected(
+                make_error(ErrorCode::StateFailure, "operation cancelled by user"));
+        }
+        auto authenticated =
+            history_storage::maintenance_protocol::authenticate_quarantine_metadata(
+                storage, healthy.metadata_identifier, key, workspace_root);
+        if (!authenticated) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "cryptographically invalid quarantine metadata in healthy pair: " +
+                    authenticated.error().detail,
+                healthy.metadata_identifier));
+        }
+        auto barrier_ok = check_barrier();
+        if (!barrier_ok) {
+            return std::unexpected(barrier_ok.error());
+        }
+    }
+
+    if (classified->metadata_only_candidates.empty()) {
+        return 0;
+    }
+
+    std::vector<RepairCandidate> candidates;
+    candidates.reserve(classified->metadata_only_candidates.size());
+    for (const auto& candidate_entry : classified->metadata_only_candidates) {
+        if (platform::cancellation::requested()) {
+            return std::unexpected(
+                make_error(ErrorCode::StateFailure, "operation cancelled by user"));
+        }
+
+        // Reject epoch-derived targets
+        if (history_storage::maintenance_protocol::is_epoch_object(
+                layout, candidate_entry.original_identifier)) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "epoch object blocked from quarantine repair",
+                candidate_entry.quarantine_identifier));
+        }
+
+        // Check required original-object absence
+        auto original = transport::presence(storage, candidate_entry.original_identifier);
+        if (!original) {
+            return std::unexpected(
+                transport_error(original.error(), candidate_entry.original_identifier));
+        }
+        if (*original == transport::Presence::Present) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                "original object reappeared for quarantine entry",
+                candidate_entry.original_identifier));
+        }
+
+        // Confirm payload absence
+        auto payload_presence = transport::presence(storage, candidate_entry.quarantine_identifier);
+        if (!payload_presence) {
+            return std::unexpected(
+                transport_error(payload_presence.error(), candidate_entry.quarantine_identifier));
+        }
+        if (*payload_presence == transport::Presence::Present) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                "quarantine payload present for metadata-only candidate",
+                candidate_entry.quarantine_identifier));
+        }
+
+        // Authenticate candidate metadata and capture ciphertext identity
+        auto authenticated =
+            history_storage::maintenance_protocol::authenticate_quarantine_metadata(
+                storage, candidate_entry.metadata_identifier, key, workspace_root);
+        if (!authenticated) {
+            return std::unexpected(protocol_error(authenticated.error()));
+        }
+        candidates.push_back(RepairCandidate{
+            .original_identifier = candidate_entry.original_identifier,
+            .quarantine_identifier = candidate_entry.quarantine_identifier,
+            .metadata_identifier = candidate_entry.metadata_identifier,
+            .quarantined_at = authenticated->quarantined_at,
+            .payload_sha256 = std::move(authenticated->payload_sha256),
+            .ciphertext_sha256 = std::move(authenticated->ciphertext_sha256),
+        });
+
+        auto barrier_ok = check_barrier();
+        if (!barrier_ok) {
+            return std::unexpected(barrier_ok.error());
+        }
+    }
+
+    // 6. Execute captured repair candidate by candidate
+    std::size_t completed_count = 0;
+    for (const auto& candidate : candidates) {
+        // Step 1: Check cancellation
+        if (platform::cancellation::requested()) {
+            return std::unexpected(make_error(
+                ErrorCode::StateFailure,
+                "operation cancelled by user; completed entries: " +
+                    std::to_string(completed_count)));
+        }
+
+        // Step 2: Verify barrier ownership
+        auto barrier_ok1 = check_barrier();
+        if (!barrier_ok1) {
+            auto err = barrier_ok1.error();
+            err.detail += "; completed entries: " + std::to_string(completed_count);
+            return std::unexpected(err);
+        }
+
+        // Step 3: Reconfirm required payload absence
+        auto recheck_payload =
+            transport::presence(storage, candidate.quarantine_identifier);
+        if (!recheck_payload) {
+            auto err = transport_error(recheck_payload.error(), candidate.quarantine_identifier);
+            err.detail += "; completed entries: " + std::to_string(completed_count);
+            return std::unexpected(err);
+        }
+        if (*recheck_payload == transport::Presence::Present) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                "quarantine payload reappeared for quarantine entry; completed entries: " +
+                    std::to_string(completed_count),
+                candidate.quarantine_identifier));
+        }
+
+        // Step 4: Reconfirm required original-object absence
+        auto recheck_original =
+            transport::presence(storage, candidate.original_identifier);
+        if (!recheck_original) {
+            auto err = transport_error(recheck_original.error(), candidate.original_identifier);
+            err.detail += "; completed entries: " + std::to_string(completed_count);
+            return std::unexpected(err);
+        }
+        if (*recheck_original == transport::Presence::Present) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                "original object reappeared for quarantine entry; completed entries: " +
+                    std::to_string(completed_count),
+                candidate.original_identifier));
+        }
+
+        // Step 5: Re-authenticate candidate metadata and verify ciphertext identity
+        auto re_auth =
+            history_storage::maintenance_protocol::authenticate_quarantine_metadata(
+                storage, candidate.metadata_identifier, key, workspace_root);
+        if (!re_auth) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                "quarantine metadata modified or corrupted concurrently; completed entries: " +
+                    std::to_string(completed_count),
+                candidate.metadata_identifier));
+        }
+        if (re_auth->quarantined_at != candidate.quarantined_at ||
+            re_auth->payload_sha256 != candidate.payload_sha256 ||
+            re_auth->ciphertext_sha256 != candidate.ciphertext_sha256) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                "quarantine metadata content or identity modified concurrently; completed entries: " +
+                    std::to_string(completed_count),
+                candidate.metadata_identifier));
+        }
+
+        // Step 6: Verify barrier ownership immediately before deletion
+        auto barrier_ok2 = check_barrier();
+        if (!barrier_ok2) {
+            auto err = barrier_ok2.error();
+            err.detail += "; completed entries: " + std::to_string(completed_count);
+            return std::unexpected(err);
+        }
+
+        // Step 7: Remove the quarantine METADATA only
+        auto metadata_removed = raw_remove(storage, candidate.metadata_identifier);
+        if (!metadata_removed) {
+            auto err = transport_error(metadata_removed.error(), candidate.metadata_identifier);
+            err.detail = "transport failure removing quarantine metadata (mutation uncertain): " +
+                         err.detail +
+                         "; completed entries: " + std::to_string(completed_count) +
+                         "; affected object: " + candidate.metadata_identifier;
+            return std::unexpected(err);
+        }
+        if (*metadata_removed != transport::Removal::Removed) {
+            return std::unexpected(make_error(
+                ErrorCode::ConcurrentChange,
+                "quarantine metadata already removed or missing; completed entries: " +
+                    std::to_string(completed_count) +
+                    "; affected object: " + candidate.metadata_identifier,
+                candidate.metadata_identifier));
+        }
+
+        // Step 8: Count the candidate completed
+        ++completed_count;
+    }
+
+    return completed_count;
+    }();
+
+    auto released =
+        history_storage::maintenance_protocol::release_registration(*barrier);
+    if (!outcome) {
+        if (!released) {
+            auto err = outcome.error();
+            err.detail += "; failed to release maintenance barrier: " + released.error().detail +
+                          "; barrier: " + layout.barrier_identifier;
+            return std::unexpected(err);
+        }
+        return outcome;
+    }
+    if (!released) {
+        auto err = protocol_error(released.error());
+        err.detail = "failed to release maintenance barrier: " + err.detail +
+                     "; completed entries: " + std::to_string(*outcome) +
+                     "; barrier: " + layout.barrier_identifier;
+        return std::unexpected(err);
+    }
+    return outcome;
+}
+
 } // namespace kasumi::application::integrity

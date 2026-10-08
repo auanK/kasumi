@@ -286,6 +286,7 @@ kasumi_add_test_suite(
     SOURCES
         integration/contracts/test_application_contracts.cpp
         integration/contracts/test_remote_heads.cpp
+        integration/contracts/test_manual_gc_purge.cpp
         integration/contracts/test_sync_maintenance.cpp
         support/src/provider_scenarios.cpp
     LIBRARIES

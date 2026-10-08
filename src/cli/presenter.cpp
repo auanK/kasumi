@@ -970,6 +970,36 @@ int present(const application::Response& response, bool full) {
         }
         return 0;
     }
+    if (response.operation == application::Operation::PurgeQuarantine) {
+        std::size_t purged = 0;
+        if (const auto* ptr =
+                std::get_if<application::GarbageCollectCompleted>(&response.data)) {
+            purged = ptr->purged_objects;
+        }
+        std::println("{}{}{} {}",
+                     style::green,
+                     i18n::tr(i18n::Key::LabelOk),
+                     style::reset,
+                     i18n::tr(i18n::Key::ManualPurgeCompleted));
+        std::println("     {}",
+                     i18n::format(i18n::Key::ManualPurgeSummary, purged));
+        return 0;
+    }
+    if (response.operation == application::Operation::RepairQuarantine) {
+        std::size_t repaired = 0;
+        if (const auto* ptr =
+                std::get_if<application::RepairQuarantineCompleted>(&response.data)) {
+            repaired = ptr->repaired_metadata_count;
+        }
+        std::println("{}{}{} {}",
+                     style::green,
+                     i18n::tr(i18n::Key::LabelOk),
+                     style::reset,
+                     i18n::tr(i18n::Key::ManualRepairCompleted));
+        std::println("     {}",
+                     i18n::format(i18n::Key::ManualRepairSummary, repaired));
+        return 0;
+    }
     if (const auto* ptr =
             std::get_if<application::GarbageCollectCompleted>(&response.data)) {
         if (ptr->analysis_only) {

@@ -79,6 +79,18 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                 std::size_t source_removal_concurrency = 8,
                 GarbageCollectProgressCallback on_progress = {});
 
+// Explicit quarantine-only purge boundary. The command is not wired yet.
+std::expected<std::size_t, Error>
+purge_quarantine(const runtime::RuntimeData& runtime_data,
+                 transport::Transport& storage,
+                 std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+
+// Explicit quarantine-only repair boundary for incomplete quarantine pairs.
+std::expected<std::size_t, Error>
+repair_quarantine(const runtime::RuntimeData& runtime_data,
+                  transport::Transport& storage,
+                  std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+
 } // namespace kasumi::application::integrity
 
 #endif

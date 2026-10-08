@@ -85,4 +85,30 @@ std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
     return run_maintenance(context, false);
 }
 
+std::expected<Response, Error> run_purge_quarantine(OperationContext& context) {
+    auto purged = integrity::purge_quarantine(
+        context.runtime, context.storage, context.key);
+    if (!purged) {
+        return std::unexpected(maintenance_error(
+            context.operation, purged.error(), context.summary));
+    }
+    return Response{
+        .operation = context.operation,
+        .runtime = context.summary,
+        .data = GarbageCollectCompleted{.purged_objects = *purged}};
+}
+
+std::expected<Response, Error> run_repair_quarantine(OperationContext& context) {
+    auto repaired = integrity::repair_quarantine(
+        context.runtime, context.storage, context.key);
+    if (!repaired) {
+        return std::unexpected(maintenance_error(
+            context.operation, repaired.error(), context.summary));
+    }
+    return Response{
+        .operation = context.operation,
+        .runtime = context.summary,
+        .data = RepairQuarantineCompleted{.repaired_metadata_count = *repaired}};
+}
+
 } // namespace kasumi::application::detail

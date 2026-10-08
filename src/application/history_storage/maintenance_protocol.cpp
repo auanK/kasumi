@@ -11,6 +11,7 @@
 #include <charconv>
 #include <map>
 #include <ranges>
+#include <set>
 #include <span>
 #include <utility>
 
@@ -1144,6 +1145,151 @@ copy_verified(transport::Transport& storage,
 
     return copy_verified_via_workspace(
         storage, source_identifier, destination_identifier, workspace_root);
+}
+
+std::expected<QuarantineRepairClassification, Error>
+classify_quarantine_for_repair(
+    transport::Transport& storage,
+    const RemoteLayout& layout) {
+    auto listed = transport::list(storage);
+    if (!listed) {
+        return std::unexpected(transport_error(listed.error()));
+    }
+
+    QuarantineRepairClassification classification;
+    std::map<std::string, std::string> metadata_map;
+    std::set<std::string> payload_set;
+    std::map<std::string, std::string> original_map;
+
+    for (const auto& identifier : *listed) {
+        if (!history_storage::is_control_object(layout, identifier) ||
+            identifier == layout.barrier_identifier ||
+            identifier == "history/gc/v1/barrier" ||
+            identifier == "history/gc/barrier" ||
+            identifier.starts_with(layout.writers_prefix) ||
+            identifier.starts_with("history/gc/v1/writers/") ||
+            identifier.starts_with("history/gc/writers/") ||
+            identifier.starts_with(layout.probes_prefix) ||
+            identifier.starts_with("history/gc/v1/probes/") ||
+            identifier.starts_with("history/gc/probes/")) {
+            continue;
+        }
+
+        const bool is_quarantine =
+            identifier.starts_with(layout.quarantine_prefix) ||
+            identifier.starts_with("history/gc/v1/quarantine/") ||
+            identifier.starts_with("history/gc/quarantine/");
+        if (!is_quarantine) {
+            classification.invalid_identifiers.push_back(identifier);
+            continue;
+        }
+
+        if (identifier.ends_with(metadata_suffix)) {
+            auto quarantine = quarantine_from_metadata(layout, identifier);
+            if (!quarantine) {
+                classification.invalid_identifiers.push_back(identifier);
+                continue;
+            }
+            if (!identifier.starts_with(layout.quarantine_content_prefix) &&
+                !identifier.starts_with(layout.quarantine_commits_prefix)) {
+                classification.invalid_identifiers.push_back(identifier);
+                continue;
+            }
+            auto original = restore_destination(layout, *quarantine);
+            if (!original) {
+                classification.invalid_identifiers.push_back(identifier);
+                continue;
+            }
+            metadata_map[*quarantine] = identifier;
+            original_map[*quarantine] = *original;
+            continue;
+        }
+
+        auto original = restore_destination(layout, identifier);
+        if (!original) {
+            classification.invalid_identifiers.push_back(identifier);
+            continue;
+        }
+        if (!identifier.starts_with(layout.quarantine_content_prefix) &&
+            !identifier.starts_with(layout.quarantine_commits_prefix)) {
+            classification.invalid_identifiers.push_back(identifier);
+            continue;
+        }
+        payload_set.insert(identifier);
+        original_map[identifier] = *original;
+    }
+
+    std::set<std::string> all_quarantine_ids;
+    for (const auto& [qid, mid] : metadata_map) {
+        all_quarantine_ids.insert(qid);
+    }
+    for (const auto& qid : payload_set) {
+        all_quarantine_ids.insert(qid);
+    }
+
+    for (const auto& qid : all_quarantine_ids) {
+        const bool has_payload = payload_set.contains(qid);
+        const auto meta_it = metadata_map.find(qid);
+        const bool has_metadata = (meta_it != metadata_map.end());
+
+        if (has_payload && has_metadata) {
+            classification.healthy_pairs.push_back(QuarantineEntry{
+                .original_identifier = original_map[qid],
+                .quarantine_identifier = qid,
+                .metadata_identifier = meta_it->second,
+                .quarantined_at = std::nullopt,
+                .physical_sha256 = {},
+            });
+        } else if (!has_payload && has_metadata) {
+            classification.metadata_only_candidates.push_back(QuarantineEntry{
+                .original_identifier = original_map[qid],
+                .quarantine_identifier = qid,
+                .metadata_identifier = meta_it->second,
+                .quarantined_at = std::nullopt,
+                .physical_sha256 = {},
+            });
+        } else if (has_payload && !has_metadata) {
+            classification.payload_only_identifiers.push_back(qid);
+        }
+    }
+
+    std::ranges::sort(classification.healthy_pairs, {}, &QuarantineEntry::original_identifier);
+    std::ranges::sort(classification.metadata_only_candidates, {}, &QuarantineEntry::original_identifier);
+    std::ranges::sort(classification.payload_only_identifiers);
+    std::ranges::sort(classification.invalid_identifiers);
+
+    return classification;
+}
+
+std::expected<AuthenticatedQuarantineMetadata, Error>
+authenticate_quarantine_metadata(
+    transport::Transport& storage,
+    std::string_view metadata_identifier,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const std::filesystem::path& workspace_root) {
+    auto temporary = detail::make_workspace(workspace_root);
+    if (!temporary) {
+        return std::unexpected(history_error(temporary.error()));
+    }
+    const auto encrypted = (*temporary)->root / "metadata.enc";
+    if (auto downloaded = detail::download(storage, metadata_identifier, encrypted);
+        !downloaded) {
+        return std::unexpected(history_error(downloaded.error()));
+    }
+    auto ciphertext_hash = crypto::physical::hash_file(encrypted, "sha256");
+    if (!ciphertext_hash) {
+        return std::unexpected(error(ErrorCode::WorkspaceFailure, ciphertext_hash.error()));
+    }
+    const auto plaintext = (*temporary)->root / "metadata.plain";
+    auto loaded = load_metadata_ciphertext(encrypted, plaintext, key);
+    if (!loaded) {
+        return std::unexpected(loaded.error());
+    }
+    return AuthenticatedQuarantineMetadata{
+        .quarantined_at = loaded->first,
+        .payload_sha256 = std::move(loaded->second),
+        .ciphertext_sha256 = std::move(*ciphertext_hash),
+    };
 }
 
 } // namespace kasumi::application::history_storage::maintenance_protocol

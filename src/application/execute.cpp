@@ -16,6 +16,8 @@ std::expected<Response, Error> run_plan(OperationContext& context);
 std::expected<Response, Error> run_fsck(OperationContext& context);
 std::expected<Response, Error> run_garbage_collect(OperationContext& context);
 std::expected<Response, Error> run_resolve_missing(OperationContext& context);
+std::expected<Response, Error> run_purge_quarantine(OperationContext& context);
+std::expected<Response, Error> run_repair_quarantine(OperationContext& context);
 
 std::expected<Response, Error> dispatch(OperationContext& context) {
     switch (context.operation) {
@@ -30,6 +32,10 @@ std::expected<Response, Error> dispatch(OperationContext& context) {
             return run_garbage_collect(context);
         case Operation::ResolveMissing:
             return run_resolve_missing(context);
+        case Operation::PurgeQuarantine:
+            return run_purge_quarantine(context);
+        case Operation::RepairQuarantine:
+            return run_repair_quarantine(context);
     }
     std::unreachable();
 }

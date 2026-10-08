@@ -112,12 +112,18 @@ struct ResolveMissingCompleted {
     bool published = false;
 };
 
+// Result of completed quarantine repair.
+struct RepairQuarantineCompleted {
+    std::size_t repaired_metadata_count = 0;
+};
+
 // Possible payload variants for a successful response.
 using ResponseData = std::variant<SyncCompleted,
                                   PlanReport,
                                   FsckCompleted,
                                   GarbageCollectCompleted,
-                                  ResolveMissingCompleted>;
+                                  ResolveMissingCompleted,
+                                  RepairQuarantineCompleted>;
 
 // Successful operation response.
 struct Response {

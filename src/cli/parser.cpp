@@ -58,6 +58,28 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         return request(application::Operation::Fsck, argc, argv);
     }
     if (command == "gc") {
+        if (argc >= 3 && argv[2] != nullptr &&
+            std::string_view{argv[2]} == "purge-quarantine") {
+            if (argc != 5 || argv[3] == nullptr || argv[3][0] == '\0' ||
+                argv[4] == nullptr ||
+                std::string_view{argv[4]} != "--confirm-permanent-loss") {
+                return std::unexpected(ParseError{});
+            }
+            return application::Request{
+                .operation = application::Operation::PurgeQuarantine,
+                .profile_name = argv[3]};
+        }
+        if (argc >= 3 && argv[2] != nullptr &&
+            std::string_view{argv[2]} == "repair-quarantine") {
+            if (argc != 5 || argv[3] == nullptr || argv[3][0] == '\0' ||
+                argv[4] == nullptr ||
+                std::string_view{argv[4]} != "--confirm-permanent-loss") {
+                return std::unexpected(ParseError{});
+            }
+            return application::Request{
+                .operation = application::Operation::RepairQuarantine,
+                .profile_name = argv[3]};
+        }
         return request(application::Operation::GarbageCollect, argc, argv);
     }
     if (command == "resolve-missing") {

@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
@@ -172,6 +173,8 @@ publish(LocalStorage& storage, const Commit& commit) {
 }
 
 struct FakeState {
+    // Test-only fault hook at transport boundaries used by manual purge REDs.
+    std::function<void(FakeState&, std::string_view, std::string_view)> on_operation;
     std::map<std::string, std::vector<std::uint8_t>> objects;
     std::map<std::string, std::vector<std::uint8_t>> hidden_objects;
     std::size_t list_count = 0;
@@ -257,6 +260,8 @@ struct FakeState {
     bool directory_destination = false;
     bool reverse_listing = false;
     bool hide_probe_listing = false;
+    bool fail_probe_listing = false;
+    std::size_t probe_list_count = 0;
     bool replace_barrier_after_quarantine_put = false;
     bool replace_barrier_after_writer_list = false;
     std::string disappear_on_get;
@@ -310,6 +315,7 @@ FakeState* fake_state(void* context) {
     state.physical_hash_count = state.physical_hash_batch_count = 0;
     state.barrier_verification_count = 0;
     state.control_read_batch_count = 0;
+    state.probe_list_count = 0;
     state.fail_list.reset();
     state.fail_list_at = 0;
     state.remote_events.clear();
@@ -677,6 +683,9 @@ kasumi::transport::PresenceResult fake_presence(void* context,
                                                 std::string_view identifier) {
     auto* state = fake_state(context);
     ++state->presence_count;
+    if (state->on_operation) {
+        state->on_operation(*state, "presence", identifier);
+    }
     if (state->fail_barrier_presence && identifier == "history/gc/v1/barrier") {
         return std::unexpected(kasumi::transport::Error{
             .code = kasumi::transport::ErrorCode::Io,
@@ -709,6 +718,9 @@ kasumi::transport::ListingResult fake_list(void* context) {
         std::ranges::reverse(result);
     }
     state->full_list_identifier_count += result.size();
+    if (state->on_operation) {
+        state->on_operation(*state, "after_list", {});
+    }
     return result;
 }
 
@@ -739,6 +751,15 @@ kasumi::transport::ListingResult fake_list_prefix(void* context,
     const bool is_probes = prefix.ends_with("/probes") || prefix == probes_dir;
     const bool is_writers =
         prefix.ends_with("/writers") || prefix == writers_dir;
+
+    if (is_probes) {
+        ++state->probe_list_count;
+        if (state->fail_probe_listing) {
+            return std::unexpected(kasumi::transport::Error{
+                .code = kasumi::transport::ErrorCode::Io,
+                .message = "injected probe listing failure"});
+        }
+    }
 
     if (state->hide_probe_listing && is_probes) {
         return std::vector<std::string>{};
@@ -774,6 +795,9 @@ kasumi::transport::ListingResult fake_list_prefix(void* context,
         state->replace_barrier_after_writer_list = false;
         replace_barrier_contents(state, test_layout.barrier_identifier);
     }
+    if (state->on_operation) {
+        state->on_operation(*state, "after_prefix_list", prefix);
+    }
     return result;
 }
 
@@ -781,6 +805,9 @@ kasumi::transport::RemovalResult fake_remove(void* context,
                                              std::string_view identifier) {
     auto* state = fake_state(context);
     ++state->remove_count;
+    if (state->on_operation) {
+        state->on_operation(*state, "before_remove", identifier);
+    }
     if (identifier == state->remove_then_fail_identifier) {
         state->remove_then_fail_identifier.clear();
         state->physical_hashes.erase(std::string{identifier});
@@ -817,6 +844,9 @@ kasumi::transport::RemovalResult fake_remove(void* context,
                 state,
                 kasumi::application::history_storage::derive_remote_layout(
                     test_key()).barrier_identifier);
+        }
+        if (state->on_operation) {
+            state->on_operation(*state, "after_remove", identifier);
         }
     }
     return removed ? kasumi::transport::Removal::Removed
@@ -907,9 +937,11 @@ std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
     if (identifier.starts_with(layout.quarantine_prefix)) {
         state->gc_events.emplace_back("verify:" + std::string{identifier});
     }
-    return mismatched
-               ? std::string(64, '0')
-               : found->second;
+    auto response = mismatched ? std::string(64, '0') : found->second;
+    if (state->on_operation) {
+        state->on_operation(*state, "after_hash", identifier);
+    }
+    return response;
 }
 
 kasumi::transport::PhysicalHashBatchResult fake_physical_hash_batch(
