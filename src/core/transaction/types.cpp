@@ -28,8 +28,8 @@ bool valid_pending_paths(const std::vector<std::string>& paths) noexcept {
         while (start < path.size()) {
             const auto end = path.find('/', start);
             const auto component = std::string_view{path}.substr(
-                start, end == std::string::npos ? path.size() - start
-                                                : end - start);
+                start,
+                end == std::string::npos ? path.size() - start : end - start);
             if (!valid_logical_path_component(component)) {
                 return false;
             }

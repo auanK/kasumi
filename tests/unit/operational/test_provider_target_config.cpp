@@ -52,40 +52,62 @@ TEST(ProviderTargetConfigTest, ParsesMultipleTargetsAndSelectsExactId) {
 }
 
 TEST(ProviderTargetConfigTest, RejectsMissingFileAndMalformedToml) {
-    auto workspace = kasumi::test::make_temp_workspace("provider-config-malformed");
-    const auto missing = kasumi::test::workspace_path(workspace, "missing.toml");
+    auto workspace =
+        kasumi::test::make_temp_workspace("provider-config-malformed");
+    const auto missing =
+        kasumi::test::workspace_path(workspace, "missing.toml");
     EXPECT_FALSE(config::load_config(missing).has_value());
 
-    const auto malformed = kasumi::test::workspace_path(workspace, "broken.toml");
+    const auto malformed =
+        kasumi::test::workspace_path(workspace, "broken.toml");
     write_config(malformed, "[[targets]\nid = [\n");
     EXPECT_FALSE(config::load_config(malformed).has_value());
 }
 
-TEST(ProviderTargetConfigTest, RejectsDuplicateIdsMissingFieldsAndUnsafeTargets) {
+TEST(ProviderTargetConfigTest,
+     RejectsDuplicateIdsMissingFieldsAndUnsafeTargets) {
     const std::vector<std::string> invalid_configs = {
         "",
         "targets = []\n",
         "unexpected = true\n",
-        "[[targets]]\nid=\"same\"\nprovider_id=\"p\"\nremote=\"remote-a\"\nauthorized_parent=\"remote-a:one\"\n"
-        "[[targets]]\nid=\"same\"\nprovider_id=\"p\"\nremote=\"remote-b\"\nauthorized_parent=\"remote-b:two\"\n",
-        "[[targets]]\nid=\"one\"\nremote=\"remote-a\"\nauthorized_parent=\"remote-a:one\"\n",
-        "[[targets]]\nid=\"\"\nprovider_id=\"p\"\nremote=\"remote-a\"\nauthorized_parent=\"remote-a:one\"\n",
-        "[[targets]]\nid=\"one\"\nprovider_id=\"\"\nremote=\"remote-a\"\nauthorized_parent=\"remote-a:one\"\n",
-        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"\"\nauthorized_parent=\"remote-a:one\"\n",
-        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-a\"\nauthorized_parent=\"\"\n",
-        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-a\"\nauthorized_parent=\"remote-b:one\"\n",
-        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-a\"\nauthorized_parent=\"remote-a:\"\n",
-        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-a\"\nauthorized_parent=\"remote-a:one/\"\n",
-        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-a\"\nauthorized_parent=\"remote-a:.\"\n",
-        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-a\"\nauthorized_parent=\"remote-a:../escape\"\n",
-        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-a\"\nauthorized_parent=\"remote-a:one//two\"\n",
-        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-a\"\nauthorized_parent=\"remote-a:\\one\"\n",
-        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-a\"\nauthorized_parent=\"remote-a:/home/test/parent\"\n",
-        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote/a\"\nauthorized_parent=\"remote/a:one\"\n",
-        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-a\"\nauthorized_parent=\"remote-a:one\"\nextra=\"value\"\n",
+        "[[targets]]\nid=\"same\"\nprovider_id=\"p\"\nremote=\"remote-"
+        "a\"\nauthorized_parent=\"remote-a:one\"\n"
+        "[[targets]]\nid=\"same\"\nprovider_id=\"p\"\nremote=\"remote-"
+        "b\"\nauthorized_parent=\"remote-b:two\"\n",
+        "[[targets]]\nid=\"one\"\nremote=\"remote-a\"\nauthorized_parent="
+        "\"remote-a:one\"\n",
+        "[[targets]]\nid=\"\"\nprovider_id=\"p\"\nremote=\"remote-"
+        "a\"\nauthorized_parent=\"remote-a:one\"\n",
+        "[[targets]]\nid=\"one\"\nprovider_id=\"\"\nremote=\"remote-"
+        "a\"\nauthorized_parent=\"remote-a:one\"\n",
+        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"\"\nauthorized_"
+        "parent=\"remote-a:one\"\n",
+        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-"
+        "a\"\nauthorized_parent=\"\"\n",
+        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-"
+        "a\"\nauthorized_parent=\"remote-b:one\"\n",
+        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-"
+        "a\"\nauthorized_parent=\"remote-a:\"\n",
+        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-"
+        "a\"\nauthorized_parent=\"remote-a:one/\"\n",
+        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-"
+        "a\"\nauthorized_parent=\"remote-a:.\"\n",
+        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-"
+        "a\"\nauthorized_parent=\"remote-a:../escape\"\n",
+        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-"
+        "a\"\nauthorized_parent=\"remote-a:one//two\"\n",
+        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-"
+        "a\"\nauthorized_parent=\"remote-a:\\one\"\n",
+        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-"
+        "a\"\nauthorized_parent=\"remote-a:/home/test/parent\"\n",
+        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote/"
+        "a\"\nauthorized_parent=\"remote/a:one\"\n",
+        "[[targets]]\nid=\"one\"\nprovider_id=\"p\"\nremote=\"remote-"
+        "a\"\nauthorized_parent=\"remote-a:one\"\nextra=\"value\"\n",
     };
 
-    auto workspace = kasumi::test::make_temp_workspace("provider-config-invalid");
+    auto workspace =
+        kasumi::test::make_temp_workspace("provider-config-invalid");
     const auto path = kasumi::test::workspace_path(workspace, "targets.toml");
     for (const auto& contents : invalid_configs) {
         write_config(path, contents);
@@ -97,8 +119,8 @@ TEST(ProviderTargetConfigTest, AuthorizationUsesExactConfiguredParent) {
     const config::LiveTargetAuthorization authorization{
         .authorized_parent = "remote-a:integration-tests",
     };
-    EXPECT_TRUE(config::authorized_live_parent(
-        authorization, "remote-a:integration-tests"));
+    EXPECT_TRUE(config::authorized_live_parent(authorization,
+                                               "remote-a:integration-tests"));
     for (const auto requested : {
              "remote-a:integration-tests/child",
              "remote-a:",
@@ -123,16 +145,22 @@ TEST(ProviderTargetConfigCliTest, LocalTargetDoesNotNeedLiveConfig) {
 
 TEST(ProviderTargetConfigCliTest, RcloneTargetRequiresConfigAndTargetId) {
     const std::vector<std::string_view> no_config = {
-        "kasumi_provider_certification", "--target", "rclone",
-        "--target-id", "sftp-test"};
+        "kasumi_provider_certification",
+        "--target",
+        "rclone",
+        "--target-id",
+        "sftp-test"};
     const auto parsed_no_config =
         config::parse_target_selection_arguments(no_config);
     ASSERT_TRUE(parsed_no_config.has_value());
     EXPECT_FALSE(config::resolve_target(*parsed_no_config).has_value());
 
     const std::vector<std::string_view> no_id = {
-        "kasumi_provider_certification", "--target", "rclone",
-        "--config", "targets.toml"};
+        "kasumi_provider_certification",
+        "--target",
+        "rclone",
+        "--config",
+        "targets.toml"};
     const auto parsed_no_id = config::parse_target_selection_arguments(no_id);
     ASSERT_TRUE(parsed_no_id.has_value());
     EXPECT_FALSE(config::resolve_target(*parsed_no_id).has_value());
@@ -143,9 +171,13 @@ TEST(ProviderTargetConfigCliTest, ResolvesOnlyExactConfiguredTarget) {
     const auto path = kasumi::test::workspace_path(workspace, "targets.toml");
     write_config(path, two_targets);
     const auto path_text = path.string();
-    const std::vector<std::string_view> args = {
-        "kasumi_provider_certification", "--target", "rclone",
-        "--config", path_text, "--target-id", "sftp-test"};
+    const std::vector<std::string_view> args = {"kasumi_provider_certification",
+                                                "--target",
+                                                "rclone",
+                                                "--config",
+                                                path_text,
+                                                "--target-id",
+                                                "sftp-test"};
     const auto parsed = config::parse_target_selection_arguments(args);
     ASSERT_TRUE(parsed.has_value()) << parsed.error();
     const auto selected = config::resolve_target(*parsed);
@@ -153,8 +185,7 @@ TEST(ProviderTargetConfigCliTest, ResolvesOnlyExactConfiguredTarget) {
     ASSERT_TRUE(selected->has_value());
     EXPECT_EQ((*selected)->provider_id, "sftp-test");
     EXPECT_EQ((*selected)->remote, "remote-b");
-    EXPECT_EQ((*selected)->authorized_parent,
-              "remote-b:certification-parent");
+    EXPECT_EQ((*selected)->authorized_parent, "remote-b:certification-parent");
 
     auto unknown = *parsed;
     unknown.target_id = "sftp";
@@ -169,12 +200,20 @@ TEST(ProviderTargetConfigCliTest, MissingFileAndRawOverridesFailClosed) {
     };
     EXPECT_FALSE(config::resolve_target(missing_file).has_value());
 
-    for (const auto raw_option : {"--provider-id", "--remote",
-                                  "--remote-parent", "--authorized-parent"}) {
+    for (const auto raw_option : {"--provider-id",
+                                  "--remote",
+                                  "--remote-parent",
+                                  "--authorized-parent"}) {
         const std::vector<std::string_view> args = {
-            "kasumi_provider_certification", "--target", "rclone",
-            "--config", "targets.toml", "--target-id", "sftp-test",
-            raw_option, "raw-value"};
+            "kasumi_provider_certification",
+            "--target",
+            "rclone",
+            "--config",
+            "targets.toml",
+            "--target-id",
+            "sftp-test",
+            raw_option,
+            "raw-value"};
         EXPECT_FALSE(config::parse_target_selection_arguments(args).has_value())
             << raw_option;
     }

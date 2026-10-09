@@ -93,14 +93,13 @@ void expect_same_snapshot(const kasumi::Snapshot& left,
                           const kasumi::Snapshot& right) {
     ASSERT_EQ(left.rows.size(), right.rows.size());
     for (std::size_t index = 0; index < left.rows.size(); ++index) {
-        SCOPED_TRACE(::testing::Message()
-                     << "snapshot row " << index << ": left "
-                     << (left.rows[index].is_directory ? "directory '"
-                                                        : "file '")
-                     << left.rows[index].path << "', right "
-                     << (right.rows[index].is_directory ? "directory '"
-                                                        : "file '")
-                     << right.rows[index].path << '\'');
+        SCOPED_TRACE(
+            ::testing::Message()
+            << "snapshot row " << index << ": left "
+            << (left.rows[index].is_directory ? "directory '" : "file '")
+            << left.rows[index].path << "', right "
+            << (right.rows[index].is_directory ? "directory '" : "file '")
+            << right.rows[index].path << '\'');
         EXPECT_EQ(left.rows[index].path, right.rows[index].path);
         EXPECT_EQ(left.rows[index].hash, right.rows[index].hash);
         EXPECT_EQ(left.rows[index].size, right.rows[index].size);
@@ -111,7 +110,8 @@ void expect_same_snapshot(const kasumi::Snapshot& left,
 }
 
 TEST(ScannerTest, StoresCanonicalUnixNanosecondsAtNativeResolution) {
-    auto workspace = kasumi::test::make_temp_workspace("scanner-canonical-mtime");
+    auto workspace =
+        kasumi::test::make_temp_workspace("scanner-canonical-mtime");
     const auto root = kasumi::test::workspace_path(workspace, "local");
     const auto file = root / "file.txt";
     kasumi::test::write_text(file, "content");
@@ -120,8 +120,7 @@ TEST(ScannerTest, StoresCanonicalUnixNanosecondsAtNativeResolution) {
         kasumi::application::observation::scanner::scan_result(root);
     ASSERT_TRUE(scanned.has_value());
     const auto native = std::filesystem::last_write_time(file);
-    const auto expected =
-        kasumi::platform::metadata::unix_nanoseconds(native);
+    const auto expected = kasumi::platform::metadata::unix_nanoseconds(native);
     ASSERT_TRUE(expected.has_value());
     const auto* row = kasumi::find_row(scanned->snapshot, "file.txt");
     ASSERT_NE(row, nullptr);
@@ -135,10 +134,10 @@ TEST(ScannerTest, IncrementalScanEqualsFullHashScan) {
     kasumi::test::write_text(root / "a.txt", "alpha");
     kasumi::test::write_text(root / "nested" / "b.txt", "bravo");
     const auto fixture_mtime = std::filesystem::file_time_type::clock::now();
-    ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(
-        root / "nested", fixture_mtime));
-    ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(
-        root, fixture_mtime));
+    ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(root / "nested",
+                                                                fixture_mtime));
+    ASSERT_TRUE(
+        kasumi::platform::metadata::set_last_write_time(root, fixture_mtime));
     set_fingerprint_fake(FingerprintFakeMode::Supported);
 
     const auto full = kasumi::application::observation::scanner::scan_result(
@@ -881,8 +880,7 @@ TEST(ScannerTest, RealMutationsDuringHashNeverReturnHybridRows) {
                     EXPECT_NE(row.size, initial_size);
                 }
                 std::cout << "scanner=success row_size=" << row.size
-                          << " row_mtime="
-                          << row.mtime
+                          << " row_mtime=" << row.mtime
                           << " row_hash=" << kasumi::hash_hex(row.hash) << '\n';
             }
             EXPECT_EQ(changed, 1U);

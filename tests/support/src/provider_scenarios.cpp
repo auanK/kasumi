@@ -5,8 +5,8 @@
 #include "application/request.hpp"
 #include "core/node.hpp"
 #include "kasumi/test/filesystem.hpp"
-#include "platform/path.hpp"
 #include "platform/metadata.hpp"
+#include "platform/path.hpp"
 #include "runtime/resolver.hpp"
 #include "state_storage/database.hpp"
 
@@ -47,8 +47,7 @@ load_state(const SyncScenarioClient& client) {
 }
 
 std::expected<application::observation::history::StorageView, std::string>
-observe_remote(const TwoClientSyncScenario& scenario,
-               std::string_view label) {
+observe_remote(const TwoClientSyncScenario& scenario, std::string_view label) {
     auto storage = transport::open_transport(scenario.remote_locator);
     if (!storage) {
         return std::unexpected(storage.error().message);
@@ -68,8 +67,7 @@ observe_remote(const TwoClientSyncScenario& scenario,
     return std::move(*observed);
 }
 
-std::expected<void, std::string>
-sync_client(const SyncScenarioClient& client) {
+std::expected<void, std::string> sync_client(const SyncScenarioClient& client) {
     auto result = sync(client.environment, client.profile);
     if (!result) {
         return std::unexpected(client.profile + ": " + result.error());
@@ -77,10 +75,9 @@ sync_client(const SyncScenarioClient& client) {
     return {};
 }
 
-std::expected<void, std::string>
-write_local(const SyncScenarioClient& client,
-            std::string_view relative,
-            std::string_view contents) {
+std::expected<void, std::string> write_local(const SyncScenarioClient& client,
+                                             std::string_view relative,
+                                             std::string_view contents) {
     const auto path = client.local_root / platform::path::from_utf8(relative);
     if (auto created = ensure_directory(path.parent_path()); !created) {
         return created;
@@ -89,10 +86,9 @@ write_local(const SyncScenarioClient& client,
     return {};
 }
 
-std::expected<void, std::string>
-expect_file(const SyncScenarioClient& client,
-            std::string_view relative,
-            std::string_view contents) {
+std::expected<void, std::string> expect_file(const SyncScenarioClient& client,
+                                             std::string_view relative,
+                                             std::string_view contents) {
     const auto path = client.local_root / platform::path::from_utf8(relative);
     std::error_code error;
     if (!std::filesystem::is_regular_file(path, error) || error) {
@@ -106,8 +102,8 @@ expect_file(const SyncScenarioClient& client,
     return {};
 }
 
-std::expected<void, std::string>
-expect_absent(const SyncScenarioClient& client, std::string_view relative) {
+std::expected<void, std::string> expect_absent(const SyncScenarioClient& client,
+                                               std::string_view relative) {
     std::error_code error;
     const auto path = client.local_root / platform::path::from_utf8(relative);
     const bool exists = std::filesystem::exists(path, error);
@@ -137,8 +133,8 @@ expect_converged(const TwoClientSyncScenario& scenario,
         if (state->commit_id != observed->logical_heads.front() ||
             state->tree != observed->effective_tree ||
             !state->pending_materializations.empty()) {
-            return std::unexpected(
-                "client accepted state or pending materializations did not converge");
+            return std::unexpected("client accepted state or pending "
+                                   "materializations did not converge");
         }
     }
     if (snapshot_tree(scenario.a.local_root) !=
@@ -153,8 +149,8 @@ expect_converged(const TwoClientSyncScenario& scenario,
     return {};
 }
 
-std::expected<void, std::string>
-remove_local(const SyncScenarioClient& client, std::string_view relative) {
+std::expected<void, std::string> remove_local(const SyncScenarioClient& client,
+                                              std::string_view relative) {
     std::error_code error;
     const auto path = client.local_root / platform::path::from_utf8(relative);
     if (!std::filesystem::remove(path, error) || error) {
@@ -243,10 +239,9 @@ no_op_sync(const application::ExecutionEnvironment& environment,
 
 std::expected<void, std::string>
 bidirectional_update(const TwoClientSyncScenario& scenario) {
-    for (const auto& [path, contents] :
-         {SeedFile{"update-x.txt", "X1"},
-          SeedFile{"update-y.txt", "Y1"},
-          SeedFile{"update-keep.txt", "KEEP"}}) {
+    for (const auto& [path, contents] : {SeedFile{"update-x.txt", "X1"},
+                                         SeedFile{"update-y.txt", "Y1"},
+                                         SeedFile{"update-keep.txt", "KEEP"}}) {
         if (auto written = write_local(scenario.a, path, contents); !written) {
             return written;
         }
@@ -396,10 +391,10 @@ two_client_conflict(const TwoClientSyncScenario& scenario) {
     for (const auto& [client, offset] :
          {std::pair{&scenario.a, std::chrono::hours{2}},
           std::pair{&scenario.b, std::chrono::hours{1}}}) {
-        const auto path = client->local_root /
-                          platform::path::from_utf8("conflict-file.txt");
-        auto set = platform::metadata::set_last_write_time(path,
-                                                           timestamp + offset);
+        const auto path =
+            client->local_root / platform::path::from_utf8("conflict-file.txt");
+        auto set =
+            platform::metadata::set_last_write_time(path, timestamp + offset);
         if (!set) {
             return std::unexpected(set.error());
         }
@@ -418,9 +413,8 @@ two_client_conflict(const TwoClientSyncScenario& scenario) {
             !valid) {
             return valid;
         }
-        if (auto valid = expect_file(*client,
-                                     "conflict-file.txt.kasumiconflict_local",
-                                     "B-V2");
+        if (auto valid = expect_file(
+                *client, "conflict-file.txt.kasumiconflict_local", "B-V2");
             !valid) {
             return valid;
         }

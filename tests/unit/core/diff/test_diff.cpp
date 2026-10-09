@@ -224,8 +224,7 @@ TEST(DiffThreeWayTest, CoversDirectorySubtreesAndTypeChanges) {
     constexpr auto now = test_mtime;
     auto local_directory = directory("same-path");
     local_directory.mtime = now;
-    auto cloud_file =
-        file("same-path", "remote-file", now + hours_ns(1));
+    auto cloud_file = file("same-path", "remote-file", now + hours_ns(1));
     const auto operations = kasumi::diff::compare_trees(
         tree({local_directory}), tree(), tree({cloud_file}));
     EXPECT_FALSE(std::ranges::any_of(operations, [](const auto& operation) {
@@ -334,8 +333,7 @@ TEST(DiffThreeWayTest,
                                  cloud.size,
                                  true)});
 
-    const auto local_older =
-        file("notes.txt", "local", now - hours_ns(2));
+    const auto local_older = file("notes.txt", "local", now - hours_ns(2));
     const auto older = kasumi::diff::compare_trees(
         tree({local_older}), tree({base}), tree({cloud}));
     expect_operations(older,
@@ -364,44 +362,42 @@ TEST(DiffThreeWayTest, ConflictOrderingUsesCanonicalNanoseconds) {
     const auto local_older = file("notes.txt", "local", older_ns);
     const auto remote_newer = file("notes.txt", "remote", newer_ns);
 
-    expect_operations(
-        kasumi::diff::compare_trees(tree({local_older}),
-                                    tree({base}),
-                                    tree({remote_newer})),
-        {signature(Action::RenameLocal,
-                   "notes.txt",
-                   {},
-                   "notes.txt.kasumiconflict_local",
-                   0,
-                   true),
-         signature(Action::Download,
-                   "notes.txt",
-                   kasumi::hash_hex(remote_newer.hash),
-                   {},
-                   remote_newer.size),
-         signature(Action::Upload,
-                   "notes.txt.kasumiconflict_local",
-                   kasumi::hash_hex(local_older.hash),
-                   {},
-                   local_older.size)});
+    expect_operations(kasumi::diff::compare_trees(tree({local_older}),
+                                                  tree({base}),
+                                                  tree({remote_newer})),
+                      {signature(Action::RenameLocal,
+                                 "notes.txt",
+                                 {},
+                                 "notes.txt.kasumiconflict_local",
+                                 0,
+                                 true),
+                       signature(Action::Download,
+                                 "notes.txt",
+                                 kasumi::hash_hex(remote_newer.hash),
+                                 {},
+                                 remote_newer.size),
+                       signature(Action::Upload,
+                                 "notes.txt.kasumiconflict_local",
+                                 kasumi::hash_hex(local_older.hash),
+                                 {},
+                                 local_older.size)});
 
     const auto local_newer = file("notes.txt", "local", newer_ns);
     const auto remote_older = file("notes.txt", "remote", older_ns);
-    expect_operations(
-        kasumi::diff::compare_trees(tree({local_newer}),
-                                    tree({base}),
-                                    tree({remote_older})),
-        {signature(Action::Upload,
-                   "notes.txt",
-                   kasumi::hash_hex(local_newer.hash),
-                   {},
-                   local_newer.size),
-         signature(Action::Download,
-                   "notes.txt.kasumiconflict_remote",
-                   kasumi::hash_hex(remote_older.hash),
-                   "notes.txt",
-                   remote_older.size,
-                   true)});
+    expect_operations(kasumi::diff::compare_trees(tree({local_newer}),
+                                                  tree({base}),
+                                                  tree({remote_older})),
+                      {signature(Action::Upload,
+                                 "notes.txt",
+                                 kasumi::hash_hex(local_newer.hash),
+                                 {},
+                                 local_newer.size),
+                       signature(Action::Download,
+                                 "notes.txt.kasumiconflict_remote",
+                                 kasumi::hash_hex(remote_older.hash),
+                                 "notes.txt",
+                                 remote_older.size,
+                                 true)});
 }
 
 TEST(DiffThreeWayTest, UnicodeConflictPathsPreserveAllConflictBranches) {
@@ -411,8 +407,7 @@ TEST(DiffThreeWayTest, UnicodeConflictPathsPreserveAllConflictBranches) {
         tree({directory("高松灯"), file(logical_path, "base", now)});
     const auto cloud_file = file(logical_path, "cloud", now);
     const auto cloud = tree({directory("高松灯"), cloud_file});
-    const auto local_file =
-        file(logical_path, "local", now + hours_ns(1));
+    const auto local_file = file(logical_path, "local", now + hours_ns(1));
     const auto local = tree({directory("高松灯"), local_file});
 
     expect_operations(kasumi::diff::compare_trees(local, base, cloud),
@@ -428,8 +423,7 @@ TEST(DiffThreeWayTest, UnicodeConflictPathsPreserveAllConflictBranches) {
                                  cloud_file.size,
                                  true)});
 
-    const auto older_file =
-        file(logical_path, "local", now - hours_ns(1));
+    const auto older_file = file(logical_path, "local", now - hours_ns(1));
     const auto older = tree({directory("高松灯"), older_file});
     expect_operations(kasumi::diff::compare_trees(older, base, cloud),
                       {signature(Action::RenameLocal,
@@ -466,8 +460,7 @@ TEST(DiffThreeWayTest, FileAndDirectoryStatesDoNotBecomeAccidentalDeletes) {
     constexpr auto now = test_mtime;
     auto local_directory = directory("shared");
     local_directory.mtime = now;
-    const auto cloud_file =
-        file("shared", "cloud", now + hours_ns(1));
+    const auto cloud_file = file("shared", "cloud", now + hours_ns(1));
     const auto operations = kasumi::diff::compare_trees(
         tree({local_directory}), tree(), tree({cloud_file}));
     EXPECT_FALSE(std::ranges::any_of(operations, [](const auto& operation) {
@@ -480,20 +473,19 @@ TEST(DiffThreeWayTest, FileAndDirectoryStatesDoNotBecomeAccidentalDeletes) {
     cloud_directory.mtime = now + hours_ns(1);
     const auto reverse = kasumi::diff::compare_trees(
         tree({local_file}), tree(), tree({cloud_directory}));
-    expect_operations(
-        reverse,
-        {signature(Action::CreateLocalDirectory, "reverse"),
-         signature(Action::RenameLocal,
-                   "reverse",
-                   {},
-                   "reverse.kasumiconflict_local",
-                   0,
-                   true),
-         signature(Action::Upload,
-                   "reverse.kasumiconflict_local",
-                   kasumi::hash_hex(local_file.hash),
-                   {},
-                   local_file.size)});
+    expect_operations(reverse,
+                      {signature(Action::CreateLocalDirectory, "reverse"),
+                       signature(Action::RenameLocal,
+                                 "reverse",
+                                 {},
+                                 "reverse.kasumiconflict_local",
+                                 0,
+                                 true),
+                       signature(Action::Upload,
+                                 "reverse.kasumiconflict_local",
+                                 kasumi::hash_hex(local_file.hash),
+                                 {},
+                                 local_file.size)});
 }
 
 TEST(DiffThreeWayTest, IgnoredFilesOnRemoteArePurgedAndNotDownloaded) {

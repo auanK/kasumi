@@ -38,9 +38,9 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
     }
     const std::string_view command{argv[1]};
     if (command == "update") {
-        return argc == 2 ? std::expected<Invocation, ParseError>{
-                               UpdateInvocation{}}
-                         : std::unexpected(ParseError{});
+        return argc == 2
+                   ? std::expected<Invocation, ParseError>{UpdateInvocation{}}
+                   : std::unexpected(ParseError{});
     }
     if (command == "config") {
         return argc == 2 ? std::expected<Invocation,

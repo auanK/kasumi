@@ -105,7 +105,8 @@ struct GarbageCollectCompleted {
     bool analysis_only = false;
 };
 
-// Result of resolving unavailable pending materializations as logical deletions.
+// Result of resolving unavailable pending materializations as logical
+// deletions.
 struct ResolveMissingCompleted {
     std::size_t resolved_count = 0;
     std::vector<std::string> resolved_paths;

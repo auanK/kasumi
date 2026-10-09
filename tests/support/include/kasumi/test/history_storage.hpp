@@ -117,8 +117,9 @@ struct LocalStorage {
     return storage;
 }
 
-[[maybe_unused]] HeadReference add_variant_bytes(
-    LocalStorage& storage, std::span<const std::uint8_t> canonical) {
+[[maybe_unused]] HeadReference
+add_variant_bytes(LocalStorage& storage,
+                  std::span<const std::uint8_t> canonical) {
     const auto key = test_key();
     const auto plaintext =
         kasumi::test::workspace_path(storage.workspace, "variant.canonical");
@@ -130,7 +131,7 @@ struct LocalStorage {
     const auto hash = kasumi::crypto::content::hash_file(ciphertext).value();
     HeadReference reference{
         .commit_id = kasumi::crypto::commit_identifier(key, canonical),
-                            .ciphertext_id = kasumi::hash_hex(hash)};
+        .ciphertext_id = kasumi::hash_hex(hash)};
     EXPECT_TRUE(kasumi::transport::put(
         storage.transport, ciphertext, object_path(reference)));
     const auto marker =
@@ -174,7 +175,8 @@ publish(LocalStorage& storage, const Commit& commit) {
 
 struct FakeState {
     // Test-only fault hook at transport boundaries used by manual purge REDs.
-    std::function<void(FakeState&, std::string_view, std::string_view)> on_operation;
+    std::function<void(FakeState&, std::string_view, std::string_view)>
+        on_operation;
     std::map<std::string, std::vector<std::uint8_t>> objects;
     std::map<std::string, std::vector<std::uint8_t>> hidden_objects;
     std::size_t list_count = 0;
@@ -275,7 +277,8 @@ struct FakeState {
     std::set<std::string> physical_hash_batch_mismatches;
     std::set<std::string> physical_hash_batch_missing;
     std::set<std::string> physical_hash_batch_errors;
-    std::optional<kasumi::transport::PhysicalHashBatchReport> physical_hash_batch_override_report;
+    std::optional<kasumi::transport::PhysicalHashBatchReport>
+        physical_hash_batch_override_report;
     std::set<std::string> physical_hash_batch_omitted;
     bool metadata_physical_hash_batch_unsupported = false;
     bool replace_barrier_after_metadata_verification = false;
@@ -344,10 +347,9 @@ bool is_epoch(std::string_view identifier) {
            identifier.starts_with(layout.epochs_prefix);
 }
 
-void replace_barrier_contents(
-    FakeState* state,
-    std::string_view identifier) {
-    std::vector<std::uint8_t> replacement{'r', 'e', 'p', 'l', 'a', 'c', 'e', 'd'};
+void replace_barrier_contents(FakeState* state, std::string_view identifier) {
+    std::vector<std::uint8_t> replacement{
+        'r', 'e', 'p', 'l', 'a', 'c', 'e', 'd'};
     auto hash = kasumi::crypto::physical::sha256_init();
     kasumi::crypto::physical::sha256_update(hash, replacement);
     state->objects[std::string{identifier}] = replacement;
@@ -370,7 +372,8 @@ void maybe_replace_barrier_after_quarantine_put(
         static_cast<void>(object_identifier);
         if (object.size() >= barrier_payload.size() &&
             std::ranges::equal(
-                barrier_payload, std::span{object}.first(barrier_payload.size()))) {
+                barrier_payload,
+                std::span{object}.first(barrier_payload.size()))) {
             replace_barrier_contents(state, object_identifier);
             return;
         }
@@ -455,10 +458,9 @@ kasumi::transport::Result fake_put(void* context,
     return {};
 }
 
-kasumi::transport::Result fake_copy(
-    void* context,
-    std::string_view source_identifier,
-    std::string_view destination_identifier) {
+kasumi::transport::Result fake_copy(void* context,
+                                    std::string_view source_identifier,
+                                    std::string_view destination_identifier) {
     auto* state = fake_state(context);
     ++state->copy_count;
     if (!state->copy_supported) {
@@ -468,8 +470,7 @@ kasumi::transport::Result fake_copy(
     }
     if (state->copy_failure) {
         return std::unexpected(kasumi::transport::Error{
-            .code = *state->copy_failure,
-            .message = "injected copy failure"});
+            .code = *state->copy_failure, .message = "injected copy failure"});
     }
     const auto found = state->objects.find(std::string{source_identifier});
     if (found == state->objects.end()) {
@@ -479,7 +480,8 @@ kasumi::transport::Result fake_copy(
     }
     state->objects[std::string{destination_identifier}] = found->second;
     state->native_copy_bytes += found->second.size();
-    const auto hash = state->physical_hashes.find(std::string{source_identifier});
+    const auto hash =
+        state->physical_hashes.find(std::string{source_identifier});
     if (hash == state->physical_hashes.end()) {
         state->physical_hashes.erase(std::string{destination_identifier});
     } else {
@@ -506,8 +508,8 @@ kasumi::transport::Result fake_copy(
     return {};
 }
 
-kasumi::transport::Result fake_copy_batch(
-    void* context, const kasumi::transport::CopyBatch& batch) {
+kasumi::transport::Result
+fake_copy_batch(void* context, const kasumi::transport::CopyBatch& batch) {
     auto* state = fake_state(context);
     ++state->copy_batch_count;
     state->copy_batch_item_count += batch.items.size();
@@ -521,8 +523,8 @@ kasumi::transport::Result fake_copy_batch(
     }
     for (std::size_t index = 0; index < batch.items.size(); ++index) {
         const auto& item = batch.items[index];
-        auto copied = fake_copy(context, item.source_identifier,
-                                item.destination_identifier);
+        auto copied = fake_copy(
+            context, item.source_identifier, item.destination_identifier);
         if (!copied) {
             return copied;
         }
@@ -535,9 +537,9 @@ kasumi::transport::Result fake_copy_batch(
         }
     }
     if (state->copy_batch_failure) {
-        return std::unexpected(kasumi::transport::Error{
-            .code = *state->copy_batch_failure,
-            .message = "injected copy batch failure"});
+        return std::unexpected(
+            kasumi::transport::Error{.code = *state->copy_batch_failure,
+                                     .message = "injected copy batch failure"});
     }
     return {};
 }
@@ -556,8 +558,9 @@ fake_put_batch(void* context, const kasumi::transport::PutBatch& batch) {
     return {};
 }
 
-inline kasumi::transport::Result fake_put_files_batch(
-    void* context, const kasumi::transport::PutFilesBatch& batch) {
+inline kasumi::transport::Result
+fake_put_files_batch(void* context,
+                     const kasumi::transport::PutFilesBatch& batch) {
     auto* state = fake_state(context);
     ++state->put_files_batch_count;
     state->put_files_batch_item_count += batch.items.size();
@@ -570,7 +573,8 @@ inline kasumi::transport::Result fake_put_files_batch(
             .message = "explicit put files batch unavailable"});
     }
     for (std::size_t index = 0; index < batch.items.size(); ++index) {
-        auto result = fake_put(context, batch.items[index].source,
+        auto result = fake_put(context,
+                               batch.items[index].source,
                                batch.items[index].destination_identifier);
         if (!result) {
             return result;
@@ -580,7 +584,8 @@ inline kasumi::transport::Result fake_put_files_batch(
             index + 1 == state->put_files_batch_fail_after_items) {
             return std::unexpected(kasumi::transport::Error{
                 .code = *state->put_files_batch_failure,
-                .message = "injected put files batch failure after remote effect"});
+                .message =
+                    "injected put files batch failure after remote effect"});
         }
     }
     if (state->put_files_batch_failure) {
@@ -670,9 +675,9 @@ kasumi::transport::Result fake_get(void* context,
                  static_cast<std::streamsize>(bytes.size()));
     output.flush();
     if (!output) {
-        return std::unexpected(kasumi::transport::Error{
-            .code = kasumi::transport::ErrorCode::Io,
-            .message = "write failed"});
+        return std::unexpected(
+            kasumi::transport::Error{.code = kasumi::transport::ErrorCode::Io,
+                                     .message = "write failed"});
     }
     if (observed_payload) {
         state->orphan_payload_get_bytes += found->second.size();
@@ -709,10 +714,11 @@ kasumi::transport::ListingResult fake_list(void* context) {
     auto* state = fake_state(context);
     ++state->list_count;
     ++state->full_list_count;
-    if (state->fail_list && (state->fail_list_at == 0 || state->fail_list_at == state->list_count)) {
-        return std::unexpected(kasumi::transport::Error{
-            .code = *state->fail_list,
-            .message = "injected full list failure"});
+    if (state->fail_list && (state->fail_list_at == 0 ||
+                             state->fail_list_at == state->list_count)) {
+        return std::unexpected(
+            kasumi::transport::Error{.code = *state->fail_list,
+                                     .message = "injected full list failure"});
     }
     if (state->reveal_on_list_count == state->list_count) {
         state->objects.merge(state->hidden_objects);
@@ -738,7 +744,8 @@ kasumi::transport::ListingResult fake_list_prefix(void* context,
     auto* state = fake_state(context);
     ++state->list_count;
     ++state->prefix_list_count;
-    if (state->fail_list && (state->fail_list_at == 0 || state->fail_list_at == state->list_count)) {
+    if (state->fail_list && (state->fail_list_at == 0 ||
+                             state->fail_list_at == state->list_count)) {
         return std::unexpected(kasumi::transport::Error{
             .code = *state->fail_list,
             .message = "injected prefix list failure"});
@@ -841,7 +848,8 @@ kasumi::transport::RemovalResult fake_remove(void* context,
     const bool removed = state->objects.erase(std::string{identifier}) != 0;
     if (removed) {
         state->gc_events.emplace_back("remove:" + std::string{identifier});
-        const bool content_identifier = identifier.size() == 64 &&
+        const bool content_identifier =
+            identifier.size() == 64 &&
             std::ranges::all_of(identifier, [](unsigned char c) {
                 return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
             });
@@ -852,7 +860,8 @@ kasumi::transport::RemovalResult fake_remove(void* context,
             replace_barrier_contents(
                 state,
                 kasumi::application::history_storage::derive_remote_layout(
-                    test_key()).barrier_identifier);
+                    test_key())
+                    .barrier_identifier);
         }
         if (state->on_operation) {
             state->on_operation(*state, "after_remove", identifier);
@@ -862,8 +871,8 @@ kasumi::transport::RemovalResult fake_remove(void* context,
                    : kasumi::transport::Removal::AlreadyAbsent;
 }
 
-inline kasumi::transport::RemoveBatchResult fake_remove_batch(
-    void* context, const kasumi::transport::RemoveBatch& batch) {
+inline kasumi::transport::RemoveBatchResult
+fake_remove_batch(void* context, const kasumi::transport::RemoveBatch& batch) {
     auto* state = fake_state(context);
     ++state->remove_batch_count;
     state->remove_batch_item_count += batch.items.size();
@@ -895,7 +904,8 @@ inline kasumi::transport::RemoveBatchResult fake_remove_batch(
             .result = result,
         });
     }
-    if (state->remove_batch_failure && state->remove_batch_fail_after_items == 0) {
+    if (state->remove_batch_failure &&
+        state->remove_batch_fail_after_items == 0) {
         return std::unexpected(kasumi::transport::Error{
             .code = *state->remove_batch_failure,
             .message = "injected remove batch failure"});
@@ -935,7 +945,8 @@ std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
             .code = kasumi::transport::ErrorCode::ObjectNotFound,
             .message = "object missing"});
     }
-    const bool mismatched = state->physical_hash_mismatch ||
+    const bool mismatched =
+        state->physical_hash_mismatch ||
         identifier == state->physical_hash_mismatch_identifier;
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(test_key());
@@ -954,8 +965,7 @@ std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
 }
 
 kasumi::transport::PhysicalHashBatchResult fake_physical_hash_batch(
-    void* context,
-    const kasumi::transport::PhysicalHashBatchRequest& request) {
+    void* context, const kasumi::transport::PhysicalHashBatchRequest& request) {
     auto* state = fake_state(context);
     ++state->physical_hash_batch_count;
     if (state->physical_hash_batch_failure) {
@@ -968,7 +978,8 @@ kasumi::transport::PhysicalHashBatchResult fake_physical_hash_batch(
             .code = kasumi::transport::ErrorCode::Unsupported,
             .message = "physical hash batch unavailable"});
     }
-    const bool metadata_batch = !request.objects.empty() &&
+    const bool metadata_batch =
+        !request.objects.empty() &&
         std::ranges::all_of(request.objects, [](const auto& object) {
             return object.identifier.ends_with(".meta");
         });
@@ -1016,10 +1027,12 @@ kasumi::transport::PhysicalHashBatchResult fake_physical_hash_batch(
     if (metadata_batch && state->replace_barrier_after_metadata_verification) {
         state->replace_barrier_after_metadata_verification = false;
         for (auto& [identifier, bytes] : state->objects) {
-            constexpr std::string_view barrier_payload = "kasumi-gc-v1:barrier:";
+            constexpr std::string_view barrier_payload =
+                "kasumi-gc-v1:barrier:";
             if (bytes.size() >= barrier_payload.size() &&
-                std::ranges::equal(barrier_payload,
-                                   std::span{bytes}.first(barrier_payload.size()))) {
+                std::ranges::equal(
+                    barrier_payload,
+                    std::span{bytes}.first(barrier_payload.size()))) {
                 replace_barrier_contents(state, identifier);
                 break;
             }
@@ -1060,17 +1073,17 @@ kasumi::transport::ControlReadBatchResponse fake_control_read_batch(
     return result;
 }
 
-[[maybe_unused]] inline void enable_fake_remove_batch(
-    kasumi::transport::Transport& transport,
-    FakeState& state) {
+[[maybe_unused]] inline void
+enable_fake_remove_batch(kasumi::transport::Transport& transport,
+                         FakeState& state) {
     state.remove_batch_supported = true;
     transport.storage.remove_batch = fake_remove_batch;
 }
 
-[[maybe_unused]] inline void enable_fake_physical_hash_batch(
-    kasumi::transport::Transport& transport,
-    FakeState& state,
-    std::size_t min_objects = 2) {
+[[maybe_unused]] inline void
+enable_fake_physical_hash_batch(kasumi::transport::Transport& transport,
+                                FakeState& state,
+                                std::size_t min_objects = 2) {
     state.physical_hash_batch_supported = true;
     state.physical_hash_batch_min_objects = min_objects;
     transport.storage.physical_hash_batch_min_objects = min_objects;

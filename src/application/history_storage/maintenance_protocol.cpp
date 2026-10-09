@@ -213,16 +213,14 @@ registration_matches(transport::Transport& storage,
             if (!valid_sha256(*remote_hash)) {
                 platform::perf_trace::count(
                     "gc.barrier_physical_hash_malformed");
-                return std::unexpected(error(
-                    ErrorCode::VerificationFailure,
-                    "invalid remote barrier SHA-256"));
+                return std::unexpected(error(ErrorCode::VerificationFailure,
+                                             "invalid remote barrier SHA-256"));
             }
-            platform::perf_trace::count(
-                "gc.barrier_physical_hash_successes");
+            platform::perf_trace::count("gc.barrier_physical_hash_successes");
             if (!valid_sha256(registration.expected_physical_sha256)) {
-                return std::unexpected(error(
-                    ErrorCode::VerificationFailure,
-                    "invalid expected barrier SHA-256"));
+                return std::unexpected(
+                    error(ErrorCode::VerificationFailure,
+                          "invalid expected barrier SHA-256"));
             }
             if (*remote_hash != registration.expected_physical_sha256) {
                 platform::perf_trace::count(
@@ -232,8 +230,7 @@ registration_matches(transport::Transport& storage,
             return true;
         }
         if (remote_hash.error().code == transport::ErrorCode::ObjectNotFound) {
-            platform::perf_trace::count(
-                "gc.barrier_physical_hash_not_found");
+            platform::perf_trace::count("gc.barrier_physical_hash_not_found");
             return false;
         }
         if (remote_hash.error().code != transport::ErrorCode::Unsupported) {
@@ -241,11 +238,11 @@ registration_matches(transport::Transport& storage,
             return std::unexpected(transport_error(remote_hash.error()));
         }
 
-        platform::perf_trace::count(
-            "gc.barrier_physical_hash_unsupported");
+        platform::perf_trace::count("gc.barrier_physical_hash_unsupported");
         platform::perf_trace::count("gc.barrier_get_fallbacks");
         const auto fallback_trace = platform::perf_trace::begin();
-        auto matches = marker_matches(storage, registration.identifier,
+        auto matches = marker_matches(storage,
+                                      registration.identifier,
                                       registration.payload,
                                       registration.workspace_root);
         platform::perf_trace::finish("gc barrier GET fallback verification",
@@ -418,8 +415,8 @@ publish_metadata(transport::Transport& storage,
     if (!ciphertext) {
         return std::unexpected(history_error(ciphertext.error()));
     }
-    auto published = put_verified(storage, identifier, *ciphertext,
-                                  workspace_root);
+    auto published =
+        put_verified(storage, identifier, *ciphertext, workspace_root);
     if (!published) {
         return std::unexpected(published.error());
     }
@@ -429,12 +426,11 @@ publish_metadata(transport::Transport& storage,
 } // namespace
 
 std::expected<PreparedQuarantineMetadata, Error>
-prepare_quarantine_metadata(
-    std::string_view quarantine_identifier,
-    std::int64_t quarantined_at,
-    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-    const std::filesystem::path& ciphertext_path,
-    std::string_view verified_sha256) {
+prepare_quarantine_metadata(std::string_view quarantine_identifier,
+                            std::int64_t quarantined_at,
+                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                            const std::filesystem::path& ciphertext_path,
+                            std::string_view verified_sha256) {
     const auto layout = derive_remote_layout(key);
     auto original = restore_destination(layout, quarantine_identifier);
     if (!original || quarantined_at < 0 || ciphertext_path.empty() ||
@@ -622,8 +618,8 @@ establish_barrier(transport::Transport& storage,
             error(ErrorCode::WorkspaceFailure, token.error()));
     }
     auto bytes = payload("barrier", *token);
-    auto published = put_verified(
-            storage, layout.barrier_identifier, bytes, workspace_root);
+    auto published =
+        put_verified(storage, layout.barrier_identifier, bytes, workspace_root);
     if (!published) {
         return std::unexpected(published.error());
     }
@@ -668,10 +664,9 @@ active_writers(transport::Transport& storage) {
     return active_writers(storage, default_remote_layout());
 }
 
-std::expected<void, Error>
-remove_writer(transport::Transport& storage,
-              const RemoteLayout& layout,
-              std::string_view identifier) {
+std::expected<void, Error> remove_writer(transport::Transport& storage,
+                                         const RemoteLayout& layout,
+                                         std::string_view identifier) {
     if (!transport::valid(storage) ||
         !valid_writer_identifier(layout, identifier)) {
         return std::unexpected(
@@ -693,10 +688,10 @@ remove_writer(transport::Transport& storage,
     }
     const auto matches = std::ranges::count(*writers, identifier);
     if (matches != 1) {
-        return std::unexpected(error(
-            ErrorCode::InvalidControlObject,
-            matches == 0 ? "writer marker is not listed"
-                         : "writer marker listing is ambiguous"));
+        return std::unexpected(
+            error(ErrorCode::InvalidControlObject,
+                  matches == 0 ? "writer marker is not listed"
+                               : "writer marker listing is ambiguous"));
     }
 
     auto barrier = transport::presence(storage, layout.barrier_identifier);
@@ -704,9 +699,9 @@ remove_writer(transport::Transport& storage,
         return std::unexpected(transport_error(barrier.error()));
     }
     if (*barrier == transport::Presence::Present) {
-        return std::unexpected(error(
-            ErrorCode::Blocked,
-            "maintenance barrier is present; writer removal is blocked"));
+        return std::unexpected(
+            error(ErrorCode::Blocked,
+                  "maintenance barrier is present; writer removal is blocked"));
     }
 
     auto removed = transport::remove(storage, identifier);
@@ -714,9 +709,9 @@ remove_writer(transport::Transport& storage,
         return std::unexpected(transport_error(removed.error()));
     }
     if (*removed != transport::Removal::Removed) {
-        return std::unexpected(error(
-            ErrorCode::VerificationFailure,
-            "writer marker disappeared before it could be removed"));
+        return std::unexpected(
+            error(ErrorCode::VerificationFailure,
+                  "writer marker disappeared before it could be removed"));
     }
 
     present = transport::presence(storage, identifier);
@@ -905,8 +900,10 @@ std::expected<std::vector<QuarantineEntry>, Error> inventory_quarantine_impl(
                 ErrorCode::InvalidControlObject,
                 "metadata without quarantine object: " + metadata_identifier));
         }
-        if (!metadata_identifier.starts_with(layout.quarantine_content_prefix) &&
-            !metadata_identifier.starts_with(layout.quarantine_commits_prefix)) {
+        if (!metadata_identifier.starts_with(
+                layout.quarantine_content_prefix) &&
+            !metadata_identifier.starts_with(
+                layout.quarantine_commits_prefix)) {
             return std::unexpected(error(ErrorCode::InvalidControlObject,
                                          "invalid quarantine metadata path"));
         }
@@ -934,14 +931,16 @@ std::expected<std::vector<QuarantineEntry>, Error> inventory_quarantine_impl(
             ++end;
         }
         for (std::size_t index = start; index < end; ++index) {
-            batch.identifiers.push_back(pending[index]->metadata_identifier.substr(
-                prefix.size()));
+            batch.identifiers.push_back(
+                pending[index]->metadata_identifier.substr(prefix.size()));
         }
-        if (auto downloaded = transport::get_batch(storage, batch); !downloaded) {
+        if (auto downloaded = transport::get_batch(storage, batch);
+            !downloaded) {
             return std::unexpected(transport_error(downloaded.error()));
         }
         for (std::size_t index = start; index < end; ++index) {
-            const auto encrypted = (*temporary)->root /
+            const auto encrypted =
+                (*temporary)->root /
                 platform::path::from_utf8(batch.identifiers[index - start]);
             auto loaded = load_metadata_ciphertext(
                 encrypted, (*temporary)->root / "metadata.plain", key);
@@ -1045,11 +1044,10 @@ verify_quarantine(transport::Transport& storage,
 }
 
 std::expected<void, Error>
-verify_destination_via_workspace(
-    transport::Transport& storage,
-    std::string_view destination_identifier,
-    std::string_view expected_sha256,
-    const std::filesystem::path& workspace_root) {
+verify_destination_via_workspace(transport::Transport& storage,
+                                 std::string_view destination_identifier,
+                                 std::string_view expected_sha256,
+                                 const std::filesystem::path& workspace_root) {
     auto temporary = detail::make_workspace(workspace_root);
     if (!temporary) {
         return std::unexpected(history_error(temporary.error()));
@@ -1074,11 +1072,10 @@ verify_destination_via_workspace(
 }
 
 std::expected<std::string, Error>
-copy_verified_via_workspace(
-    transport::Transport& storage,
-    std::string_view source_identifier,
-    std::string_view destination_identifier,
-    const std::filesystem::path& workspace_root) {
+copy_verified_via_workspace(transport::Transport& storage,
+                            std::string_view source_identifier,
+                            std::string_view destination_identifier,
+                            const std::filesystem::path& workspace_root) {
     if (is_epoch_object(source_identifier) ||
         is_epoch_object(destination_identifier)) {
         return std::unexpected(
@@ -1155,24 +1152,19 @@ copy_verified(transport::Transport& storage,
                                  source_hash_trace);
     if (source_hash) {
         if (!valid_sha256(*source_hash)) {
-            return std::unexpected(
-                error(ErrorCode::VerificationFailure,
-                      "invalid source physical SHA-256"));
+            return std::unexpected(error(ErrorCode::VerificationFailure,
+                                         "invalid source physical SHA-256"));
         }
         const auto native_copy_trace = platform::perf_trace::begin();
-        auto copied = transport::copy(
-            storage, source_identifier, destination_identifier);
+        auto copied =
+            transport::copy(storage, source_identifier, destination_identifier);
         platform::perf_trace::finish("verified copy native copy",
                                      native_copy_trace);
         if (copied) {
-            platform::perf_trace::count(
-                "verified copy native copy successes");
-            const auto destination_hash_trace =
-                platform::perf_trace::begin();
-            auto destination_hash =
-                transport::physical_hash(storage,
-                                         destination_identifier,
-                                         "sha256");
+            platform::perf_trace::count("verified copy native copy successes");
+            const auto destination_hash_trace = platform::perf_trace::begin();
+            auto destination_hash = transport::physical_hash(
+                storage, destination_identifier, "sha256");
             platform::perf_trace::finish(
                 "verified copy destination physical hash",
                 destination_hash_trace);
@@ -1208,8 +1200,7 @@ copy_verified(transport::Transport& storage,
         if (copied.error().code != transport::ErrorCode::Unsupported) {
             return std::unexpected(transport_error(copied.error()));
         }
-    } else if (source_hash.error().code !=
-               transport::ErrorCode::Unsupported) {
+    } else if (source_hash.error().code != transport::ErrorCode::Unsupported) {
         return std::unexpected(transport_error(source_hash.error()));
     }
 
@@ -1218,9 +1209,8 @@ copy_verified(transport::Transport& storage,
 }
 
 std::expected<QuarantineRepairClassification, Error>
-classify_quarantine_for_repair(
-    transport::Transport& storage,
-    const RemoteLayout& layout) {
+classify_quarantine_for_repair(transport::Transport& storage,
+                               const RemoteLayout& layout) {
     auto listed = transport::list(storage);
     if (!listed) {
         return std::unexpected(transport_error(listed.error()));
@@ -1323,8 +1313,12 @@ classify_quarantine_for_repair(
         }
     }
 
-    std::ranges::sort(classification.healthy_pairs, {}, &QuarantineEntry::original_identifier);
-    std::ranges::sort(classification.metadata_only_candidates, {}, &QuarantineEntry::original_identifier);
+    std::ranges::sort(classification.healthy_pairs,
+                      {},
+                      &QuarantineEntry::original_identifier);
+    std::ranges::sort(classification.metadata_only_candidates,
+                      {},
+                      &QuarantineEntry::original_identifier);
     std::ranges::sort(classification.payload_only_identifiers);
     std::ranges::sort(classification.invalid_identifiers);
 
@@ -1342,13 +1336,15 @@ authenticate_quarantine_metadata(
         return std::unexpected(history_error(temporary.error()));
     }
     const auto encrypted = (*temporary)->root / "metadata.enc";
-    if (auto downloaded = detail::download(storage, metadata_identifier, encrypted);
+    if (auto downloaded =
+            detail::download(storage, metadata_identifier, encrypted);
         !downloaded) {
         return std::unexpected(history_error(downloaded.error()));
     }
     auto ciphertext_hash = crypto::physical::hash_file(encrypted, "sha256");
     if (!ciphertext_hash) {
-        return std::unexpected(error(ErrorCode::WorkspaceFailure, ciphertext_hash.error()));
+        return std::unexpected(
+            error(ErrorCode::WorkspaceFailure, ciphertext_hash.error()));
     }
     const auto plaintext = (*temporary)->root / "metadata.plain";
     auto loaded = load_metadata_ciphertext(encrypted, plaintext, key);

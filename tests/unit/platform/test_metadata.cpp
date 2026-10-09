@@ -113,8 +113,7 @@ TEST(PlatformMetadataTest, ConvertsCanonicalNanosecondsAtFilesystemBoundary) {
     const auto native =
         kasumi::platform::metadata::file_time_from_unix_nanoseconds(canonical);
     ASSERT_TRUE(native.has_value());
-    const auto observed =
-        kasumi::platform::metadata::unix_nanoseconds(*native);
+    const auto observed = kasumi::platform::metadata::unix_nanoseconds(*native);
     ASSERT_TRUE(observed.has_value());
     using FileDuration = std::filesystem::file_time_type::duration;
     const auto expected = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -122,8 +121,8 @@ TEST(PlatformMetadataTest, ConvertsCanonicalNanosecondsAtFilesystemBoundary) {
                                   std::chrono::nanoseconds{canonical}))
                               .count();
     EXPECT_EQ(*observed, expected);
-    EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(
-        canonical, *observed));
+    EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(canonical,
+                                                                  *observed));
 
     ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(file, *native));
     EXPECT_EQ(canonical, 123456789);
@@ -131,8 +130,7 @@ TEST(PlatformMetadataTest, ConvertsCanonicalNanosecondsAtFilesystemBoundary) {
 
 TEST(PlatformMetadataTest, ConvertsTheSameNativeTimestampDeterministically) {
     const auto native = std::filesystem::file_time_type::clock::now();
-    const auto expected =
-        kasumi::platform::metadata::unix_nanoseconds(native);
+    const auto expected = kasumi::platform::metadata::unix_nanoseconds(native);
     ASSERT_TRUE(expected.has_value());
     for (int attempt = 0; attempt < 256; ++attempt) {
         EXPECT_EQ(kasumi::platform::metadata::unix_nanoseconds(native),
@@ -157,11 +155,11 @@ TEST(PlatformMetadataTest, PreservesUnspecifiedNegativeAndChecksNativeRange) {
                       std::filesystem::file_time_type::duration>(
                       std::chrono::nanoseconds{-123456789}))
                   .count());
-    for (const auto native : {
-             std::filesystem::file_time_type{
-                 std::filesystem::file_time_type::duration::min()},
-             std::filesystem::file_time_type{
-                 std::filesystem::file_time_type::duration::max()}}) {
+    for (const auto native :
+         {std::filesystem::file_time_type{
+              std::filesystem::file_time_type::duration::min()},
+          std::filesystem::file_time_type{
+              std::filesystem::file_time_type::duration::max()}}) {
         const auto canonical =
             kasumi::platform::metadata::unix_nanoseconds(native);
         if (!canonical) {

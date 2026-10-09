@@ -218,9 +218,7 @@ bool has_expected_schema(sqlite3* database) {
                ObjectKind::Table &&
            object_kind(database, "metadata") == ObjectKind::Table &&
            has_columns(database, "nodes", node_columns) &&
-           has_columns(database,
-                       "pending_materializations",
-                       pending_columns) &&
+           has_columns(database, "pending_materializations", pending_columns) &&
            has_columns(database, "metadata", metadata_columns) &&
            object_kind(database, "file_cache") == ObjectKind::Table &&
            has_columns(database, "file_cache", file_cache_columns) &&
@@ -331,8 +329,7 @@ bool same_node(const NodeRow& left, const NodeRow& right) {
 }
 
 bool valid_pending_materializations(
-    const Snapshot& tree,
-    std::span<const NodeRow> pending_materializations) {
+    const Snapshot& tree, std::span<const NodeRow> pending_materializations) {
     constexpr std::size_t maximum_pending_materializations = 1'000'000;
     if (pending_materializations.size() > maximum_pending_materializations) {
         return false;
@@ -340,8 +337,8 @@ bool valid_pending_materializations(
     const NodeRow* previous = nullptr;
     for (const auto& row : pending_materializations) {
         const auto* accepted = find_row(tree, row.path);
-        if (row.is_directory || accepted == nullptr ||
-            accepted->is_directory || !same_node(*accepted, row) ||
+        if (row.is_directory || accepted == nullptr || accepted->is_directory ||
+            !same_node(*accepted, row) ||
             row.size > static_cast<std::uint64_t>(
                            std::numeric_limits<std::int64_t>::max()) ||
             (previous != nullptr && !path_less(previous->path, row.path))) {
@@ -385,8 +382,7 @@ std::vector<NodeRow> load_pending_materializations(sqlite3* database,
 }
 
 void write_pending_materializations(
-    sqlite3* database,
-    std::span<const NodeRow> pending_materializations) {
+    sqlite3* database, std::span<const NodeRow> pending_materializations) {
     require(sqlite::execute(database, "DELETE FROM pending_materializations"));
     auto insert = require_statement(sqlite::prepare(
         database,

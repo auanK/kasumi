@@ -63,8 +63,8 @@ SyncCompleted compute_sync_summary(const reconciliation::Result& result) {
     SyncCompleted summary;
     summary.total = static_cast<std::uint32_t>(sync_plan_size(result.plan));
     summary.published = result.requires_publication;
-    summary.pending = static_cast<std::uint32_t>(
-        result.pending_materializations.size());
+    summary.pending =
+        static_cast<std::uint32_t>(result.pending_materializations.size());
     summary.partial = !result.pending_materializations.empty();
     for (const auto& row : result.pending_materializations) {
         summary.pending_paths.push_back(platform::path::from_utf8(row.path));
@@ -294,13 +294,12 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             std::vector<Hash> confirmed_missing;
             std::expected<void, sync::coordinator::Error> synchronized;
             for (std::size_t attempt = 0; attempt < 3; ++attempt) {
-                synchronized = sync::coordinator::execute(
-                    context.runtime,
-                    context.storage,
-                    context.key,
-                    stable->input,
-                    stable->result,
-                    &observation_session);
+                synchronized = sync::coordinator::execute(context.runtime,
+                                                          context.storage,
+                                                          context.key,
+                                                          stable->input,
+                                                          stable->result,
+                                                          &observation_session);
                 if (synchronized ||
                     synchronized.error().code !=
                         sync::coordinator::ErrorCode::RemoteContentMissing) {
@@ -329,8 +328,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
 
                 current_stage = SyncStage::Calculating;
                 if (context.on_progress) {
-                    context.on_progress(SyncProgress{
-                        .stage = SyncStage::Calculating});
+                    context.on_progress(
+                        SyncProgress{.stage = SyncStage::Calculating});
                 }
                 auto refreshed = observation::collect_reconciliation_input(
                     context.runtime,
@@ -357,19 +356,18 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     err.stage = SyncStage::Calculating;
                     return std::unexpected(err);
                 }
-                auto restabilized =
-                    sync::coordinator::reobservation::stabilize(
-                        context.runtime,
-                        context.storage,
-                        context.key,
-                        std::move(*refreshed),
-                        std::move(*replanned),
-                        &observation_session,
-                        confirmed_missing);
+                auto restabilized = sync::coordinator::reobservation::stabilize(
+                    context.runtime,
+                    context.storage,
+                    context.key,
+                    std::move(*refreshed),
+                    std::move(*replanned),
+                    &observation_session,
+                    confirmed_missing);
                 if (!restabilized) {
-                    auto err = transaction_error(
-                        context.operation, restabilized.error(),
-                        context.summary);
+                    auto err = transaction_error(context.operation,
+                                                 restabilized.error(),
+                                                 context.summary);
                     err.stage = SyncStage::Calculating;
                     return std::unexpected(err);
                 }

@@ -6,26 +6,25 @@
 #include "platform/random.hpp"
 #include "platform/workspace.hpp"
 
-#include <nlohmann/json.hpp>
-#include <reproc++/run.hpp>
-
 #include <algorithm>
 #include <array>
-#include <charconv>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
-#include <cstring>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <nlohmann/json.hpp>
 #include <print>
+#include <reproc++/run.hpp>
 #include <set>
 #include <sstream>
-#include <string_view>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -33,12 +32,12 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <windows.h>
 #include <aclapi.h>
+#include <bcrypt.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
+#include <windows.h>
 #include <winhttp.h>
-#include <bcrypt.h>
 #include <winver.h>
 #else
 #include <cerrno>
@@ -46,8 +45,8 @@
 #include <grp.h>
 #include <pwd.h>
 #include <signal.h>
-#include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -65,11 +64,14 @@ constexpr std::size_t PROCESS_OUTPUT_LIMIT = 64U * 1024U;
 
 #if defined(__linux__)
 constexpr std::array<std::string_view, 8> LINUX_SYSTEM_TOOLS{
-    "curl", "sha256sum", "tar", "dpkg-query", "rpm", "pacman", "apk",
-    "pkexec"};
+    "curl", "sha256sum", "tar", "dpkg-query", "rpm", "pacman", "apk", "pkexec"};
 constexpr std::array<std::string_view, 1> LINUX_ELEVATION_TOOLS{"sudo"};
 constexpr std::array<std::string_view, 6> LINUX_TOOL_DIRECTORIES{
-    "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin",
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
     "/bin"};
 
 bool trusted_root_stat(const struct stat& status, bool directory) {
@@ -83,7 +85,7 @@ bool trusted_canonical_path(const std::filesystem::path& path,
     if (!path.is_absolute() || path.lexically_normal() != path) {
         return false;
     }
-    struct stat status {};
+    struct stat status{};
     if (::lstat("/", &status) != 0 || !trusted_root_stat(status, true)) {
         return false;
     }
@@ -96,9 +98,9 @@ bool trusted_canonical_path(const std::filesystem::path& path,
         }
         current /= *iterator;
         if (::lstat(current.c_str(), &status) != 0 ||
-            !trusted_root_stat(
-                status, std::next(iterator) != components.end() ||
-                            final_directory)) {
+            !trusted_root_stat(status,
+                               std::next(iterator) != components.end() ||
+                                   final_directory)) {
             return false;
         }
     }
@@ -108,7 +110,7 @@ bool trusted_canonical_path(const std::filesystem::path& path,
 bool trusted_system_directory(const std::filesystem::path& path,
                               std::filesystem::path* canonical = nullptr) {
     std::error_code error;
-    struct stat status {};
+    struct stat status{};
     if (!path.is_absolute() || path.lexically_normal() != path ||
         ::lstat(path.c_str(), &status) != 0 || status.st_uid != 0 ||
         (!S_ISDIR(status.st_mode) && !S_ISLNK(status.st_mode)) ||
@@ -165,9 +167,14 @@ LinuxEnvironment linux_base_environment(bool include_proxy = false) {
     LinuxEnvironment environment{
         {"PATH", linux_trusted_path_value()}, {"LANG", "C"}, {"LC_ALL", "C"}};
     if (include_proxy && ::geteuid() != 0) {
-        for (const auto* name : {"http_proxy", "https_proxy", "HTTP_PROXY",
-                                 "HTTPS_PROXY", "all_proxy", "ALL_PROXY",
-                                 "no_proxy", "NO_PROXY"}) {
+        for (const auto* name : {"http_proxy",
+                                 "https_proxy",
+                                 "HTTP_PROXY",
+                                 "HTTPS_PROXY",
+                                 "all_proxy",
+                                 "ALL_PROXY",
+                                 "no_proxy",
+                                 "NO_PROXY"}) {
             const char* value = std::getenv(name);
             if (safe_environment_value(value, 4096)) {
                 environment.emplace_back(name, value);
@@ -179,8 +186,11 @@ LinuxEnvironment linux_base_environment(bool include_proxy = false) {
 
 LinuxEnvironment linux_pkexec_environment() {
     auto environment = linux_base_environment();
-    for (const auto* name : {"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY",
-                             "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"}) {
+    for (const auto* name : {"DISPLAY",
+                             "WAYLAND_DISPLAY",
+                             "XAUTHORITY",
+                             "DBUS_SESSION_BUS_ADDRESS",
+                             "XDG_RUNTIME_DIR"}) {
         const char* value = std::getenv(name);
         if (safe_environment_value(value, 4096)) {
             environment.emplace_back(name, value);
@@ -188,13 +198,14 @@ LinuxEnvironment linux_pkexec_environment() {
     }
     if (const char* term = std::getenv("TERM");
         safe_environment_value(term, 64) &&
-        std::ranges::all_of(std::string_view{term}, [](unsigned char character) {
-            return (character >= 'a' && character <= 'z') ||
-                   (character >= 'A' && character <= 'Z') ||
-                   (character >= '0' && character <= '9') ||
-                   character == '_' || character == '-' || character == '.' ||
-                   character == '+';
-        })) {
+        std::ranges::all_of(std::string_view{term},
+                            [](unsigned char character) {
+                                return (character >= 'a' && character <= 'z') ||
+                                       (character >= 'A' && character <= 'Z') ||
+                                       (character >= '0' && character <= '9') ||
+                                       character == '_' || character == '-' ||
+                                       character == '.' || character == '+';
+                            })) {
         environment.emplace_back("TERM", term);
     }
     return environment;
@@ -214,8 +225,8 @@ bool valid_identifier(std::string_view value, bool allow_leading_zero) {
     const bool numeric = std::ranges::all_of(value, [](char character) {
         return character >= '0' && character <= '9';
     });
-    if (!allow_leading_zero && numeric &&
-        value.size() > 1 && value.front() == '0') {
+    if (!allow_leading_zero && numeric && value.size() > 1 &&
+        value.front() == '0') {
         return false;
     }
     return std::ranges::all_of(value, [](char character) {
@@ -240,8 +251,8 @@ std::vector<std::string_view> split(std::string_view value, char separator) {
 
 bool is_numeric_identifier(std::string_view value) noexcept {
     return !value.empty() && std::ranges::all_of(value, [](char character) {
-               return character >= '0' && character <= '9';
-           });
+        return character >= '0' && character <= '9';
+    });
 }
 
 std::strong_ordering compare_identifier(std::string_view left,
@@ -276,8 +287,7 @@ std::string lower_ascii(std::string_view value) {
 }
 
 bool valid_sha256(std::string_view value) noexcept {
-    return value.size() == 64 &&
-           std::ranges::all_of(value, [](char character) {
+    return value.size() == 64 && std::ranges::all_of(value, [](char character) {
                return (character >= '0' && character <= '9') ||
                       (character >= 'a' && character <= 'f') ||
                       (character >= 'A' && character <= 'F');
@@ -294,9 +304,8 @@ struct CappedSink {
     std::string value;
     std::size_t limit = 0;
 
-    std::error_code operator()(reproc::stream,
-                               const std::uint8_t* bytes,
-                               std::size_t size) {
+    std::error_code
+    operator()(reproc::stream, const std::uint8_t* bytes, std::size_t size) {
         if (size > limit - std::min(limit, value.size())) {
             return std::make_error_code(std::errc::file_too_large);
         }
@@ -366,8 +375,8 @@ run_inherited(const std::vector<std::string>& arguments) {
     options.env.extra = environment;
     options.working_directory = "/";
 #endif
-    const auto [exit_code, error] = reproc::run(
-        reproc::arguments{child_arguments}, options);
+    const auto [exit_code, error] =
+        reproc::run(reproc::arguments{child_arguments}, options);
     if (error) {
         return std::unexpected("could not start elevated installer: " +
                                error.message());
@@ -408,8 +417,8 @@ struct UrlParts {
 
 std::optional<UrlParts> parse_https_url(std::string_view url) {
     constexpr std::string_view prefix = "https://";
-    if (!url.starts_with(prefix) || url.find_first_of("\r\n\t ") !=
-                                       std::string_view::npos) {
+    if (!url.starts_with(prefix) ||
+        url.find_first_of("\r\n\t ") != std::string_view::npos) {
         return std::nullopt;
     }
     const auto authority_begin = prefix.size();
@@ -417,8 +426,8 @@ std::optional<UrlParts> parse_https_url(std::string_view url) {
     if (authority_end == std::string_view::npos) {
         authority_end = url.size();
     }
-    const auto authority = url.substr(authority_begin,
-                                      authority_end - authority_begin);
+    const auto authority =
+        url.substr(authority_begin, authority_end - authority_begin);
     if (authority.empty() || authority.find('@') != std::string_view::npos ||
         authority.find(':') != std::string_view::npos) {
         return std::nullopt;
@@ -459,7 +468,8 @@ std::optional<std::string> header_location(const std::filesystem::path& path) {
                 prefix) {
             std::string_view value{line};
             value.remove_prefix(prefix.size());
-            while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
+            while (!value.empty() &&
+                   (value.front() == ' ' || value.front() == '\t')) {
                 value.remove_prefix(1);
             }
             location = std::string{value};
@@ -534,8 +544,10 @@ std::optional<std::string> narrow_utf8(std::wstring_view value) {
 }
 
 std::expected<std::string, std::string>
-winhttp_location(std::string_view url, std::size_t maximum_bytes,
-                 const std::filesystem::path& destination, int& status) {
+winhttp_location(std::string_view url,
+                 std::size_t maximum_bytes,
+                 const std::filesystem::path& destination,
+                 int& status) {
     const auto wide_url = widen_ascii(url);
     if (!wide_url) {
         return std::unexpected("invalid HTTPS URL");
@@ -556,8 +568,7 @@ winhttp_location(std::string_view url, std::size_t maximum_bytes,
                             components.dwHostNameLength};
     std::wstring target{components.lpszUrlPath, components.dwUrlPathLength};
     if (components.dwExtraInfoLength != 0) {
-        target.append(components.lpszExtraInfo,
-                      components.dwExtraInfoLength);
+        target.append(components.lpszExtraInfo, components.dwExtraInfoLength);
     }
     InternetHandle session{WinHttpOpen(L"Kasumi updater/1.0",
                                        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -574,12 +585,12 @@ winhttp_location(std::string_view url, std::size_t maximum_bytes,
         return std::unexpected("could not connect to GitHub");
     }
     InternetHandle request{WinHttpOpenRequest(connection.value,
-                                               L"GET",
-                                               target.c_str(),
-                                               nullptr,
-                                               WINHTTP_NO_REFERER,
-                                               WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                               WINHTTP_FLAG_SECURE)};
+                                              L"GET",
+                                              target.c_str(),
+                                              nullptr,
+                                              WINHTTP_NO_REFERER,
+                                              WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                              WINHTTP_FLAG_SECURE)};
     if (!request.value) {
         return std::unexpected("could not create HTTPS request");
     }
@@ -602,7 +613,8 @@ winhttp_location(std::string_view url, std::size_t maximum_bytes,
     }
     DWORD status_size = sizeof(status);
     if (!WinHttpQueryHeaders(request.value,
-                             WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                             WINHTTP_QUERY_STATUS_CODE |
+                                 WINHTTP_QUERY_FLAG_NUMBER,
                              WINHTTP_HEADER_NAME_BY_INDEX,
                              &status,
                              &status_size,
@@ -617,8 +629,8 @@ winhttp_location(std::string_view url, std::size_t maximum_bytes,
                             nullptr,
                             &location_size,
                             WINHTTP_NO_HEADER_INDEX);
-        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER ||
-            location_size == 0 || location_size > 64U * 1024U) {
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || location_size == 0 ||
+            location_size > 64U * 1024U) {
             return std::unexpected("HTTPS redirect has no valid Location");
         }
         std::wstring location(location_size / sizeof(wchar_t), L'\0');
@@ -655,8 +667,8 @@ winhttp_location(std::string_view url, std::size_t maximum_bytes,
         if (available == 0) {
             break;
         }
-        const DWORD to_read = std::min<DWORD>(available,
-                                              static_cast<DWORD>(buffer.size()));
+        const DWORD to_read =
+            std::min<DWORD>(available, static_cast<DWORD>(buffer.size()));
         DWORD read = 0;
         if (!WinHttpReadData(request.value, buffer.data(), to_read, &read)) {
             return std::unexpected("HTTPS download was interrupted");
@@ -689,7 +701,8 @@ download_url(std::string url,
         const auto parts = parse_https_url(url);
         if (!parts || !(api_request ? allowed_api_host(parts->host)
                                     : allowed_download_host(parts->host))) {
-            return std::unexpected("download URL is outside the GitHub allowlist");
+            return std::unexpected(
+                "download URL is outside the GitHub allowlist");
         }
         int status = 0;
         auto result = winhttp_location(url, maximum_bytes, destination, status);
@@ -720,7 +733,8 @@ download_url(std::string url,
              std::size_t maximum_bytes,
              bool api_request,
              const platform::Workspace& workspace) {
-    const auto header_path = platform::workspace_file(workspace, "http-headers");
+    const auto header_path =
+        platform::workspace_file(workspace, "http-headers");
     if (header_path.empty()) {
         return std::unexpected("could not allocate HTTP header file");
     }
@@ -728,7 +742,8 @@ download_url(std::string url,
         const auto parts = parse_https_url(url);
         if (!parts || !(api_request ? allowed_api_host(parts->host)
                                     : allowed_download_host(parts->host))) {
-            return std::unexpected("download URL is outside the GitHub allowlist");
+            return std::unexpected(
+                "download URL is outside the GitHub allowlist");
         }
         std::error_code ignored;
         std::filesystem::remove(destination, ignored);
@@ -755,23 +770,23 @@ download_url(std::string url,
                                      url});
         if (!response || response->exit_code != 0) {
             std::filesystem::remove(destination, ignored);
-            return std::unexpected(response ?
-                (response->error_output.empty() ? "HTTPS download failed"
-                                                : response->error_output)
-                                             : response.error());
+            return std::unexpected(response ? (response->error_output.empty()
+                                                   ? "HTTPS download failed"
+                                                   : response->error_output)
+                                            : response.error());
         }
         int status = 0;
-        const auto [end, parse_error] = std::from_chars(
-            response->output.data(),
-            response->output.data() + response->output.size(),
-            status);
+        const auto [end, parse_error] =
+            std::from_chars(response->output.data(),
+                            response->output.data() + response->output.size(),
+                            status);
         if (parse_error != std::errc{} || end == response->output.data()) {
             return std::unexpected("could not read HTTP response status");
         }
         if (status >= 300 && status < 400) {
             const auto location = header_location(header_path);
-            const auto next = location ? parse_https_url(*location)
-                                       : std::nullopt;
+            const auto next =
+                location ? parse_https_url(*location) : std::nullopt;
             if (api_request || !location || !next ||
                 !allowed_download_host(next->host) || redirect == 5) {
                 return std::unexpected("GitHub redirect was rejected");
@@ -807,8 +822,8 @@ get_text(std::string url,
 #if defined(_WIN32)
     auto downloaded = download_url(std::move(url), path, maximum_bytes, true);
 #else
-    auto downloaded = download_url(std::move(url), path, maximum_bytes, true,
-                                   workspace);
+    auto downloaded =
+        download_url(std::move(url), path, maximum_bytes, true, workspace);
 #endif
     if (!downloaded) {
         return std::unexpected(downloaded.error());
@@ -826,8 +841,8 @@ std::expected<std::string, std::string>
 sha256_file_impl(const std::filesystem::path& path) {
 #if defined(_WIN32)
     BCRYPT_ALG_HANDLE algorithm = nullptr;
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM,
-                                    nullptr, 0) < 0) {
+    if (BCryptOpenAlgorithmProvider(
+            &algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0) {
         return std::unexpected("could not initialize SHA-256");
     }
     DWORD object_size = 0;
@@ -837,14 +852,15 @@ sha256_file_impl(const std::filesystem::path& path) {
                           reinterpret_cast<PUCHAR>(&object_size),
                           sizeof(object_size),
                           &result_size,
-                          0) < 0 || object_size == 0) {
+                          0) < 0 ||
+        object_size == 0) {
         BCryptCloseAlgorithmProvider(algorithm, 0);
         return std::unexpected("could not initialize SHA-256 hash state");
     }
     std::vector<UCHAR> object(object_size);
     BCRYPT_HASH_HANDLE hash = nullptr;
-    if (BCryptCreateHash(algorithm, &hash, object.data(), object_size,
-                         nullptr, 0, 0) < 0) {
+    if (BCryptCreateHash(
+            algorithm, &hash, object.data(), object_size, nullptr, 0, 0) < 0) {
         BCryptCloseAlgorithmProvider(algorithm, 0);
         return std::unexpected("could not create SHA-256 hash state");
     }
@@ -855,14 +871,16 @@ sha256_file_impl(const std::filesystem::path& path) {
         input.read(reinterpret_cast<char*>(buffer.data()),
                    static_cast<std::streamsize>(buffer.size()));
         const auto read = input.gcount();
-        if (read > 0 && BCryptHashData(hash, buffer.data(),
-                                      static_cast<ULONG>(read), 0) < 0) {
+        if (read > 0 &&
+            BCryptHashData(hash, buffer.data(), static_cast<ULONG>(read), 0) <
+                0) {
             failed = true;
         }
     }
     std::array<UCHAR, 32> digest{};
-    if (failed || BCryptFinishHash(hash, digest.data(),
-                                   static_cast<ULONG>(digest.size()), 0) < 0) {
+    if (failed ||
+        BCryptFinishHash(
+            hash, digest.data(), static_cast<ULONG>(digest.size()), 0) < 0) {
         BCryptDestroyHash(hash);
         BCryptCloseAlgorithmProvider(algorithm, 0);
         return std::unexpected("could not hash downloaded package");
@@ -878,7 +896,8 @@ sha256_file_impl(const std::filesystem::path& path) {
     }
     return result;
 #else
-    auto result = run_capture({"sha256sum", "--", platform::path::to_utf8(path)});
+    auto result =
+        run_capture({"sha256sum", "--", platform::path::to_utf8(path)});
     if (!result || result->exit_code != 0 || result->output.size() < 64) {
         return std::unexpected("could not hash downloaded package");
     }
@@ -899,8 +918,8 @@ download_asset(std::string url,
     (void)workspace;
     return download_url(std::move(url), destination, maximum_bytes, false);
 #else
-    return download_url(std::move(url), destination, maximum_bytes, false,
-                        workspace);
+    return download_url(
+        std::move(url), destination, maximum_bytes, false, workspace);
 #endif
 }
 
@@ -910,8 +929,8 @@ std::optional<std::filesystem::path> current_executable_path() {
 #if defined(_WIN32)
     std::vector<wchar_t> buffer(1024);
     for (;;) {
-        const DWORD length = GetModuleFileNameW(nullptr, buffer.data(),
-                                                static_cast<DWORD>(buffer.size()));
+        const DWORD length = GetModuleFileNameW(
+            nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
         if (length == 0) {
             return std::nullopt;
         }
@@ -934,16 +953,16 @@ std::optional<std::filesystem::path> current_executable_path() {
 #else
     std::vector<char> buffer(1024);
     for (;;) {
-        const auto length = ::readlink("/proc/self/exe", buffer.data(),
-                                       buffer.size());
+        const auto length =
+            ::readlink("/proc/self/exe", buffer.data(), buffer.size());
         if (length < 0) {
             return std::nullopt;
         }
         if (static_cast<std::size_t>(length) < buffer.size()) {
             std::error_code error;
             auto resolved = std::filesystem::canonical(
-                std::filesystem::path{std::string_view{buffer.data(),
-                                                        static_cast<std::size_t>(length)}},
+                std::filesystem::path{std::string_view{
+                    buffer.data(), static_cast<std::size_t>(length)}},
                 error);
             if (error || !std::filesystem::is_regular_file(resolved, error) ||
                 error) {
@@ -965,18 +984,19 @@ bool package_managed_installation(const std::filesystem::path& executable,
                                   std::string& manager) {
 #if defined(_WIN32)
     auto path = lower_ascii(platform::path::to_utf8(executable));
-    for (const auto marker : {"\\windowsapps\\", "\\scoop\\apps\\",
+    for (const auto marker : {"\\windowsapps\\",
+                              "\\scoop\\apps\\",
                               "\\chocolatey\\lib\\",
                               "\\winget\\packages\\"}) {
         if (path.find(marker) != std::string::npos) {
             const auto value = std::string_view{marker};
-            manager = value == "\\windowsapps\\"
-                          ? "Microsoft Store"
-                          : (value == "\\scoop\\apps\\"
-                                 ? "Scoop"
-                                 : (value == "\\winget\\packages\\"
-                                        ? "WinGet"
-                                        : "Chocolatey"));
+            manager =
+                value == "\\windowsapps\\"
+                    ? "Microsoft Store"
+                    : (value == "\\scoop\\apps\\"
+                           ? "Scoop"
+                           : (value == "\\winget\\packages\\" ? "WinGet"
+                                                              : "Chocolatey"));
             return true;
         }
     }
@@ -994,13 +1014,12 @@ bool package_managed_installation(const std::filesystem::path& executable,
         }
     }
     for (const auto* command : {"dpkg-query", "rpm"}) {
-        const auto result = run_capture({command,
-                                         command == std::string_view{"rpm"}
-                                             ? "-qf"
-                                             : "-S",
-                                         platform::path::to_utf8(executable)},
-                                        4096,
-                                        4096);
+        const auto result =
+            run_capture({command,
+                         command == std::string_view{"rpm"} ? "-qf" : "-S",
+                         platform::path::to_utf8(executable)},
+                        4096,
+                        4096);
         if (result && result->exit_code == 0) {
             manager = command == std::string_view{"rpm"} ? "RPM" : "dpkg";
             return true;
@@ -1026,9 +1045,11 @@ extract_and_validate(const std::filesystem::path& archive,
                      const PackageNames& package,
                      const std::filesystem::path& destination) {
 #if defined(_WIN32)
-    const auto listing = run_capture({"tar", "-tvf", platform::path::to_utf8(archive)});
+    const auto listing =
+        run_capture({"tar", "-tvf", platform::path::to_utf8(archive)});
 #else
-    const auto listing = run_capture({"tar", "-tvzf", platform::path::to_utf8(archive)});
+    const auto listing =
+        run_capture({"tar", "-tvzf", platform::path::to_utf8(archive)});
 #endif
     if (!listing || listing->exit_code != 0) {
         return std::unexpected(listing ? "package archive is invalid"
@@ -1042,15 +1063,26 @@ extract_and_validate(const std::filesystem::path& archive,
         return std::unexpected("could not create package extraction directory");
     }
 #if defined(_WIN32)
-    const auto extracted = run_capture({"tar", "-xf", platform::path::to_utf8(archive),
-                                        "-C", platform::path::to_utf8(destination),
-                                        "--", package.executable, "LICENSE",
+    const auto extracted = run_capture({"tar",
+                                        "-xf",
+                                        platform::path::to_utf8(archive),
+                                        "-C",
+                                        platform::path::to_utf8(destination),
+                                        "--",
+                                        package.executable,
+                                        "LICENSE",
                                         "THIRD_PARTY_NOTICES.md"});
 #else
-    const auto extracted = run_capture({"tar", "-xzf", platform::path::to_utf8(archive),
-                                        "-C", platform::path::to_utf8(destination),
-                                        "--no-same-owner", "--no-same-permissions",
-                                        "--", package.executable, "LICENSE",
+    const auto extracted = run_capture({"tar",
+                                        "-xzf",
+                                        platform::path::to_utf8(archive),
+                                        "-C",
+                                        platform::path::to_utf8(destination),
+                                        "--no-same-owner",
+                                        "--no-same-permissions",
+                                        "--",
+                                        package.executable,
+                                        "LICENSE",
                                         "THIRD_PARTY_NOTICES.md"});
 #endif
     if (!extracted || extracted->exit_code != 0) {
@@ -1068,13 +1100,13 @@ extract_and_validate(const std::filesystem::path& archive,
         }
         const auto size = std::filesystem::file_size(file, error);
         const auto limit = name == package.executable ? EXECUTABLE_LIMIT
-                                                       : PACKAGE_DOCUMENT_LIMIT;
+                                                      : PACKAGE_DOCUMENT_LIMIT;
         if (error || size == 0 || size > limit) {
             return std::unexpected("package entry has an invalid size");
         }
     }
-    return platform::path::to_utf8(destination /
-                                   platform::path::from_utf8(package.executable));
+    return platform::path::to_utf8(
+        destination / platform::path::from_utf8(package.executable));
 }
 
 std::expected<void, std::string>
@@ -1089,14 +1121,15 @@ validate_executable_format(const std::filesystem::path& executable) {
     }
     std::uint32_t pe_offset = 0;
     std::memcpy(&pe_offset, bytes->data() + 0x3c, sizeof(pe_offset));
-    if (pe_offset > bytes->size() - 6 || bytes->compare(pe_offset, 4, "PE\0\0", 4) != 0 ||
+    if (pe_offset > bytes->size() - 6 ||
+        bytes->compare(pe_offset, 4, "PE\0\0", 4) != 0 ||
         static_cast<unsigned char>((*bytes)[pe_offset + 4]) != 0x64 ||
         static_cast<unsigned char>((*bytes)[pe_offset + 5]) != 0x86) {
         return std::unexpected("package executable is not x86_64 Windows");
     }
 #else
-    if (static_cast<unsigned char>((*bytes)[0]) != 0x7f ||
-        (*bytes)[1] != 'E' || (*bytes)[2] != 'L' || (*bytes)[3] != 'F' ||
+    if (static_cast<unsigned char>((*bytes)[0]) != 0x7f || (*bytes)[1] != 'E' ||
+        (*bytes)[2] != 'L' || (*bytes)[3] != 'F' ||
         static_cast<unsigned char>((*bytes)[4]) != 2 ||
         static_cast<unsigned char>((*bytes)[5]) != 1 ||
         static_cast<unsigned char>((*bytes)[18]) != 62) {
@@ -1112,7 +1145,8 @@ prepare_verified_package(const std::filesystem::path& archive,
                          const PackageNames& package,
                          const platform::Workspace& workspace) {
     const auto actual_hash = sha256_file(archive);
-    if (!actual_hash || lower_ascii(*actual_hash) != lower_ascii(expected_hash)) {
+    if (!actual_hash ||
+        lower_ascii(*actual_hash) != lower_ascii(expected_hash)) {
         return std::unexpected(actual_hash ? "package SHA-256 does not match"
                                            : actual_hash.error());
     }
@@ -1124,8 +1158,8 @@ prepare_verified_package(const std::filesystem::path& archive,
     if (!executable) {
         return std::unexpected(executable.error());
     }
-    auto format = validate_executable_format(
-        platform::path::from_utf8(*executable));
+    auto format =
+        validate_executable_format(platform::path::from_utf8(*executable));
     if (!format) {
         return std::unexpected(format.error());
     }
@@ -1177,8 +1211,8 @@ std::optional<Version> parse_version(std::string_view text) {
             })) {
             return false;
         }
-        const auto [end, error] = std::from_chars(
-            input.data(), input.data() + input.size(), value);
+        const auto [end, error] =
+            std::from_chars(input.data(), input.data() + input.size(), value);
         return error == std::errc{} && end == input.data() + input.size();
     };
     if (!parse_number(core_parts[0], result.major) ||
@@ -1187,7 +1221,8 @@ std::optional<Version> parse_version(std::string_view text) {
         return std::nullopt;
     }
     if (dash != std::string_view::npos) {
-        for (const auto identifier : split(core_and_pre.substr(dash + 1), '.')) {
+        for (const auto identifier :
+             split(core_and_pre.substr(dash + 1), '.')) {
             if (!valid_identifier(identifier, false)) {
                 return std::nullopt;
             }
@@ -1218,8 +1253,8 @@ std::strong_ordering compare_versions(const Version& left,
     for (std::size_t index = 0;
          index < std::min(left.prerelease.size(), right.prerelease.size());
          ++index) {
-        const auto compared = compare_identifier(left.prerelease[index],
-                                                 right.prerelease[index]);
+        const auto compared =
+            compare_identifier(left.prerelease[index], right.prerelease[index]);
         if (compared != 0) {
             return compared;
         }
@@ -1233,14 +1268,14 @@ std::strong_ordering compare_versions(const Version& left,
     return std::strong_ordering::equal;
 }
 
-std::optional<std::size_t> select_release_index(std::span<const Release> releases) {
+std::optional<std::size_t>
+select_release_index(std::span<const Release> releases) {
     std::vector<std::optional<Version>> versions;
     versions.reserve(releases.size());
     bool stable_channel_exists = false;
     for (const auto& release : releases) {
-        auto version = release.tag.starts_with('v')
-                           ? parse_version(release.tag)
-                           : std::nullopt;
+        auto version = release.tag.starts_with('v') ? parse_version(release.tag)
+                                                    : std::nullopt;
         if (version && !release.draft && !release.prerelease &&
             version->prerelease.empty() && version->major >= 1) {
             stable_channel_exists = true;
@@ -1295,7 +1330,8 @@ parse_releases_json(std::string_view body) {
             !entry["draft"].is_boolean() || !entry.contains("prerelease") ||
             !entry["prerelease"].is_boolean() || !entry.contains("assets") ||
             !entry["assets"].is_array()) {
-            return std::unexpected("GitHub release response has an invalid shape");
+            return std::unexpected(
+                "GitHub release response has an invalid shape");
         }
         Release release{.tag = entry["tag_name"].get<std::string>(),
                         .draft = entry["draft"].get<bool>(),
@@ -1305,11 +1341,12 @@ parse_releases_json(std::string_view body) {
                 !asset["name"].is_string() ||
                 !asset.contains("browser_download_url") ||
                 !asset["browser_download_url"].is_string()) {
-                return std::unexpected("GitHub asset response has an invalid shape");
+                return std::unexpected(
+                    "GitHub asset response has an invalid shape");
             }
-            release.assets.push_back(Asset{
-                .name = asset["name"].get<std::string>(),
-                .url = asset["browser_download_url"].get<std::string>()});
+            release.assets.push_back(
+                Asset{.name = asset["name"].get<std::string>(),
+                      .url = asset["browser_download_url"].get<std::string>()});
         }
         releases.push_back(std::move(release));
     }
@@ -1327,13 +1364,13 @@ fetch_releases(const ApiGet& get) {
     for (std::size_t page = 1; page <= maximum_pages; ++page) {
         const auto url = "https://api.github.com/repos/" +
                          std::string{GITHUB_REPOSITORY} +
-                         "/releases?per_page=100&page=" +
-                         std::to_string(page);
+                         "/releases?per_page=100&page=" + std::to_string(page);
         auto response = get(url, API_RESPONSE_LIMIT);
         if (!response) {
             return std::unexpected(response.error());
         }
-        if (response->status != 200 || response->body.size() > API_RESPONSE_LIMIT) {
+        if (response->status != 200 ||
+            response->body.size() > API_RESPONSE_LIMIT) {
             return std::unexpected("GitHub releases request failed with HTTP " +
                                    std::to_string(response->status));
         }
@@ -1349,7 +1386,8 @@ fetch_releases(const ApiGet& get) {
             return releases;
         }
     }
-    return std::unexpected("GitHub has more releases than the updater will scan");
+    return std::unexpected(
+        "GitHub has more releases than the updater will scan");
 }
 
 std::optional<PackageNames> package_names_for_this_platform() {
@@ -1401,9 +1439,8 @@ std::optional<std::string> parse_checksum(std::string_view body,
 
 bool valid_archive_listing(std::string_view listing,
                            const PackageNames& package) {
-    const std::set<std::string_view> required{package.executable,
-                                              "LICENSE",
-                                              "THIRD_PARTY_NOTICES.md"};
+    const std::set<std::string_view> required{
+        package.executable, "LICENSE", "THIRD_PARTY_NOTICES.md"};
     const std::set<std::string_view> optional{"CHANGELOG.md", "README.md"};
     std::set<std::string_view> found;
     std::size_t begin = 0;
@@ -1433,9 +1470,8 @@ bool valid_archive_listing(std::string_view listing,
 
 bool valid_verbose_archive_listing(std::string_view listing,
                                    const PackageNames& package) {
-    const std::set<std::string_view> required{package.executable,
-                                              "LICENSE",
-                                              "THIRD_PARTY_NOTICES.md"};
+    const std::set<std::string_view> required{
+        package.executable, "LICENSE", "THIRD_PARTY_NOTICES.md"};
     const std::set<std::string_view> optional{"CHANGELOG.md", "README.md"};
     std::set<std::string_view> found;
     std::size_t begin = 0;
@@ -1474,8 +1510,7 @@ bool valid_verbose_archive_listing(std::string_view listing,
             tokens.size() >= 5 && tokens[1] == "0" && tokens[2] == "0" &&
                     tokens[3] == "0"
                 ? 4U
-                : (tokens.size() >= 4 && tokens[1] == "0" &&
-                           tokens[2] == "0"
+                : (tokens.size() >= 4 && tokens[1] == "0" && tokens[2] == "0"
                        ? 3U
                        : 2U);
         if (size_index >= tokens.size()) {
@@ -1487,7 +1522,7 @@ bool valid_verbose_archive_listing(std::string_view listing,
             tokens[size_index].data() + tokens[size_index].size(),
             size);
         const auto limit = name == package.executable ? EXECUTABLE_LIMIT
-                                                       : PACKAGE_DOCUMENT_LIMIT;
+                                                      : PACKAGE_DOCUMENT_LIMIT;
         if (size_error != std::errc{} ||
             size_end != tokens[size_index].data() + tokens[size_index].size() ||
             size == 0 || size > limit) {
@@ -1532,9 +1567,9 @@ bool is_regular_file_without_redirect(const std::filesystem::path& path) {
            !std::filesystem::is_symlink(status);
 }
 
-InstallFailure install_failure(std::string detail,
-                               InstallFailure::Kind kind =
-                                   InstallFailure::Kind::Other) {
+InstallFailure
+install_failure(std::string detail,
+                InstallFailure::Kind kind = InstallFailure::Kind::Other) {
     return InstallFailure{.kind = kind, .detail = std::move(detail)};
 }
 
@@ -1544,7 +1579,8 @@ InstallFailure filesystem_failure(std::string_view operation,
                               error == std::errc::operation_not_permitted
                           ? InstallFailure::Kind::PermissionDenied
                           : InstallFailure::Kind::Other;
-    return install_failure(std::string{operation} + ": " + error.message(), kind);
+    return install_failure(std::string{operation} + ": " + error.message(),
+                           kind);
 }
 
 InstallFailure replacement_failure(std::string detail) {
@@ -1557,7 +1593,8 @@ InstallFailure replacement_failure(std::string detail) {
         const auto [parsed, error] = std::from_chars(begin, end, code);
         if (error == std::errc{} && parsed != begin) {
 #if defined(_WIN32)
-            if (code == ERROR_ACCESS_DENIED || code == ERROR_PRIVILEGE_NOT_HELD) {
+            if (code == ERROR_ACCESS_DENIED ||
+                code == ERROR_PRIVILEGE_NOT_HELD) {
                 return install_failure(std::move(detail),
                                        InstallFailure::Kind::PermissionDenied);
             }
@@ -1574,22 +1611,22 @@ InstallFailure replacement_failure(std::string detail) {
 
 } // namespace
 
-InstallResult
-install_prepared_executable(const std::filesystem::path& prepared,
-                            const std::filesystem::path& target,
-                            std::string_view expected_sha256,
-                            const InstallHooks* hooks) {
+InstallResult install_prepared_executable(const std::filesystem::path& prepared,
+                                          const std::filesystem::path& target,
+                                          std::string_view expected_sha256,
+                                          const InstallHooks* hooks) {
     const auto validate_target = hooks != nullptr && hooks->validate_target
                                      ? hooks->validate_target
                                      : [](const std::filesystem::path&)
-                                           -> std::expected<void, std::string> {
-                                           return {};
-                                       };
+        -> std::expected<void, std::string> {
+        return {};
+    };
     if (const auto valid = validate_target(target); !valid) {
         return std::unexpected(install_failure(valid.error()));
     }
     if (!valid_sha256(expected_sha256)) {
-        return std::unexpected(install_failure("expected executable digest is invalid"));
+        return std::unexpected(
+            install_failure("expected executable digest is invalid"));
     }
     if (!is_regular_file_without_redirect(prepared) ||
         !is_regular_file_without_redirect(target)) {
@@ -1614,13 +1651,14 @@ install_prepared_executable(const std::filesystem::path& prepared,
                                : [](const std::filesystem::path& path) {
                                      return sha256_file(path);
                                  };
-    const auto replace = hooks != nullptr && hooks->replace_atomically
-                             ? hooks->replace_atomically
-                             : [](const std::filesystem::path& source,
-                                  const std::filesystem::path& destination) {
-                                   return platform::durability::replace_atomically(
-                                       source, destination);
-                               };
+    const auto replace =
+        hooks != nullptr && hooks->replace_atomically
+            ? hooks->replace_atomically
+            : [](const std::filesystem::path& source,
+                 const std::filesystem::path& destination) {
+                  return platform::durability::replace_atomically(source,
+                                                                  destination);
+              };
     const auto prepared_hash = hash_file(prepared);
     if (!prepared_hash) {
         return std::unexpected(install_failure(prepared_hash.error()));
@@ -1653,15 +1691,15 @@ install_prepared_executable(const std::filesystem::path& prepared,
             }
         }
     } files{.staged = staged, .backup = backup};
-    if (!std::filesystem::copy_file(prepared, staged,
-                                    std::filesystem::copy_options::none,
-                                    error) || error) {
+    if (!std::filesystem::copy_file(
+            prepared, staged, std::filesystem::copy_options::none, error) ||
+        error) {
         return std::unexpected(filesystem_failure(
             "could not prepare executable beside installation", error));
     }
 #if !defined(_WIN32)
-    struct stat original_stat {};
-    struct stat staged_stat {};
+    struct stat original_stat{};
+    struct stat staged_stat{};
     if (::stat(target.c_str(), &original_stat) != 0 ||
         ::stat(staged.c_str(), &staged_stat) != 0) {
         const std::error_code status_error{errno, std::generic_category()};
@@ -1691,7 +1729,8 @@ install_prepared_executable(const std::filesystem::path& prepared,
     }
 #endif
     const auto staged_hash = hash_file(staged);
-    if (!staged_hash || lower_ascii(*staged_hash) != lower_ascii(expected_sha256)) {
+    if (!staged_hash ||
+        lower_ascii(*staged_hash) != lower_ascii(expected_sha256)) {
         return std::unexpected(install_failure(
             staged_hash ? "staged executable changed before replacement"
                         : staged_hash.error()));
@@ -1700,14 +1739,15 @@ install_prepared_executable(const std::filesystem::path& prepared,
     if (!synced) {
         return std::unexpected(install_failure(synced.error()));
     }
-    if (!std::filesystem::copy_file(target, backup,
-                                    std::filesystem::copy_options::none,
-                                    error) || error) {
+    if (!std::filesystem::copy_file(
+            target, backup, std::filesystem::copy_options::none, error) ||
+        error) {
         return std::unexpected(filesystem_failure(
-            "could not keep a recovery copy of the installed executable", error));
+            "could not keep a recovery copy of the installed executable",
+            error));
     }
 #if !defined(_WIN32)
-    struct stat backup_stat {};
+    struct stat backup_stat{};
     if (::stat(backup.c_str(), &backup_stat) != 0) {
         const std::error_code status_error{errno, std::generic_category()};
         return std::unexpected(filesystem_failure(
@@ -1753,31 +1793,35 @@ install_prepared_executable(const std::filesystem::path& prepared,
         return std::unexpected(replacement_failure(replaced.error()));
     }
     const auto new_status = std::filesystem::symlink_status(target, error);
-    const auto installed_hash = error
-                                    ? std::expected<std::string, std::string>{
-                                          std::unexpected("target query failed")}
-                                    : hash_file(target);
+    const auto installed_hash =
+        error ? std::expected<std::string, std::string>{std::unexpected(
+                    "target query failed")}
+              : hash_file(target);
     if (error || std::filesystem::is_symlink(new_status) ||
         !std::filesystem::is_regular_file(new_status) || !installed_hash ||
         lower_ascii(*installed_hash) != lower_ascii(expected_sha256)) {
         const auto rollback = replace(backup, target);
         if (rollback) {
             files.preserve_backup = false;
-            static_cast<void>(platform::durability::sync_parent_directory(target));
-            return std::unexpected(install_failure(
-                "installed executable failed verification; previous version restored"));
+            static_cast<void>(
+                platform::durability::sync_parent_directory(target));
+            return std::unexpected(
+                install_failure("installed executable failed verification; "
+                                "previous version restored"));
         }
         files.preserve_backup = true;
         return std::unexpected(install_failure(
-            "installed executable failed verification; rollback failed, recovery copy remains at " +
+            "installed executable failed verification; rollback failed, "
+            "recovery copy remains at " +
             platform::path::to_utf8(backup) + ": " + rollback.error()));
     }
     synced = platform::durability::sync_parent_directory(target);
     if (!synced) {
         files.preserve_backup = true;
-        return std::unexpected(install_failure(
-            "executable was replaced but directory sync failed; recovery copy remains at " +
-            platform::path::to_utf8(backup)));
+        return std::unexpected(
+            install_failure("executable was replaced but directory sync "
+                            "failed; recovery copy remains at " +
+                            platform::path::to_utf8(backup)));
     }
     files.preserve_backup = true;
     return {};
@@ -1786,10 +1830,12 @@ install_prepared_executable(const std::filesystem::path& prepared,
 InstallResult install_once_then_elevate(const InstallAction& install,
                                         const InstallAction& elevate) {
     if (!install) {
-        return std::unexpected(install_failure("installer action is unavailable"));
+        return std::unexpected(
+            install_failure("installer action is unavailable"));
     }
     auto result = install();
-    if (result || result.error().kind != InstallFailure::Kind::PermissionDenied) {
+    if (result ||
+        result.error().kind != InstallFailure::Kind::PermissionDenied) {
         return result;
     }
     if (!elevate) {
@@ -1807,10 +1853,15 @@ validate_windows_workspace_acl_impl(const std::filesystem::path& root) {
     PACL dacl = nullptr;
     PSID security_owner = nullptr;
     PSECURITY_DESCRIPTOR descriptor = nullptr;
-    const auto query = GetNamedSecurityInfoW(
-        path.data(), SE_FILE_OBJECT,
-        DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION,
-        &security_owner, nullptr, &dacl, nullptr, &descriptor);
+    const auto query = GetNamedSecurityInfoW(path.data(),
+                                             SE_FILE_OBJECT,
+                                             DACL_SECURITY_INFORMATION |
+                                                 OWNER_SECURITY_INFORMATION,
+                                             &security_owner,
+                                             nullptr,
+                                             &dacl,
+                                             nullptr,
+                                             &descriptor);
     if (query != ERROR_SUCCESS || descriptor == nullptr || dacl == nullptr) {
         if (descriptor != nullptr) {
             LocalFree(descriptor);
@@ -1825,19 +1876,24 @@ validate_windows_workspace_acl_impl(const std::filesystem::path& root) {
 
     bool valid = protected_dacl;
     valid = valid && security_owner != nullptr;
-    alignas(DWORD) std::array<std::byte, SECURITY_MAX_SID_SIZE> system_sid_storage{};
+    alignas(DWORD) std::array<std::byte, SECURITY_MAX_SID_SIZE>
+        system_sid_storage{};
     DWORD system_sid_size = static_cast<DWORD>(system_sid_storage.size());
-    valid = valid && CreateWellKnownSid(WinLocalSystemSid, nullptr,
+    valid = valid && CreateWellKnownSid(WinLocalSystemSid,
+                                        nullptr,
                                         system_sid_storage.data(),
                                         &system_sid_size) != 0;
-    alignas(DWORD) std::array<std::byte, SECURITY_MAX_SID_SIZE> admin_sid_storage{};
+    alignas(DWORD) std::array<std::byte, SECURITY_MAX_SID_SIZE>
+        admin_sid_storage{};
     DWORD admin_sid_size = static_cast<DWORD>(admin_sid_storage.size());
-    valid = valid && CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr,
+    valid = valid && CreateWellKnownSid(WinBuiltinAdministratorsSid,
+                                        nullptr,
                                         admin_sid_storage.data(),
                                         &admin_sid_size) != 0;
     ACL_SIZE_INFORMATION acl_info{};
-    valid = valid && GetAclInformation(dacl, &acl_info, sizeof(acl_info),
-                                       AclSizeInformation) != 0 &&
+    valid = valid &&
+            GetAclInformation(
+                dacl, &acl_info, sizeof(acl_info), AclSizeInformation) != 0 &&
             acl_info.AceCount == 3;
     bool has_workspace_user = false;
     bool has_system = false;
@@ -1858,9 +1914,10 @@ validate_windows_workspace_acl_impl(const std::filesystem::path& root) {
         if (EqualSid(sid, system_sid_storage.data())) {
             has_system = ace->Mask == FILE_ALL_ACCESS;
         } else if (EqualSid(sid, admin_sid_storage.data())) {
-            has_admin_read = ace->Mask == (FILE_GENERIC_READ | FILE_GENERIC_EXECUTE) &&
-                             ace->Header.AceFlags ==
-                                 (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
+            has_admin_read =
+                ace->Mask == (FILE_GENERIC_READ | FILE_GENERIC_EXECUTE) &&
+                ace->Header.AceFlags ==
+                    (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
         } else if (ace->Mask == FILE_ALL_ACCESS && !has_workspace_user) {
             has_workspace_user = true;
             workspace_user = sid;
@@ -1869,40 +1926,44 @@ validate_windows_workspace_acl_impl(const std::filesystem::path& root) {
         }
     }
     HANDLE token = nullptr;
-    valid = valid && OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) != 0;
+    valid = valid &&
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) != 0;
     std::vector<std::byte> token_data;
     if (valid) {
         DWORD required = 0;
         GetTokenInformation(token, TokenUser, nullptr, 0, &required);
         token_data.resize(required);
-        valid = required != 0 && GetTokenInformation(token, TokenUser,
-                                                       token_data.data(), required,
-                                                       &required) != 0;
+        valid =
+            required != 0 &&
+            GetTokenInformation(
+                token, TokenUser, token_data.data(), required, &required) != 0;
     }
     if (token != nullptr) {
         CloseHandle(token);
     }
-    const auto* current_user = valid
-                                   ? reinterpret_cast<const TOKEN_USER*>(token_data.data())
-                                   : nullptr;
-    const bool current_is_owner = current_user != nullptr &&
-                                  workspace_user != nullptr &&
-                                  EqualSid(current_user->User.Sid, workspace_user);
+    const auto* current_user =
+        valid ? reinterpret_cast<const TOKEN_USER*>(token_data.data())
+              : nullptr;
+    const bool current_is_owner =
+        current_user != nullptr && workspace_user != nullptr &&
+        EqualSid(current_user->User.Sid, workspace_user);
     BOOL current_is_admin = FALSE;
     if (valid && !current_is_owner) {
         BOOL is_member = FALSE;
         current_is_admin = CheckTokenMembership(nullptr,
                                                 admin_sid_storage.data(),
-                                                &is_member) != 0 && is_member;
+                                                &is_member) != 0 &&
+                           is_member;
     }
-    const bool owner_is_expected = security_owner != nullptr && workspace_user != nullptr &&
+    const bool owner_is_expected =
+        security_owner != nullptr && workspace_user != nullptr &&
         (EqualSid(security_owner, workspace_user) ||
          EqualSid(security_owner, admin_sid_storage.data()));
     LocalFree(descriptor);
     if (!valid || !owner_is_expected || !has_workspace_user || !has_system ||
-        !has_admin_read ||
-        (!current_is_owner && !current_is_admin)) {
-        return std::unexpected("update workspace ACL does not preserve owner privacy and administrator read access");
+        !has_admin_read || (!current_is_owner && !current_is_admin)) {
+        return std::unexpected("update workspace ACL does not preserve owner "
+                               "privacy and administrator read access");
     }
     return {};
 }
@@ -1911,25 +1972,33 @@ std::expected<void, std::string>
 grant_windows_admin_process_query_access(HANDLE process) {
     PACL old_acl = nullptr;
     PSECURITY_DESCRIPTOR descriptor = nullptr;
-    const auto query = GetSecurityInfo(process, SE_KERNEL_OBJECT,
+    const auto query = GetSecurityInfo(process,
+                                       SE_KERNEL_OBJECT,
                                        DACL_SECURITY_INFORMATION,
-                                       nullptr, nullptr, &old_acl, nullptr,
+                                       nullptr,
+                                       nullptr,
+                                       &old_acl,
+                                       nullptr,
                                        &descriptor);
     if (query != ERROR_SUCCESS || descriptor == nullptr || old_acl == nullptr) {
         if (descriptor != nullptr) {
             LocalFree(descriptor);
         }
-        return std::unexpected("could not inspect installer process permissions");
+        return std::unexpected(
+            "could not inspect installer process permissions");
     }
     alignas(DWORD) std::array<std::byte, SECURITY_MAX_SID_SIZE> admin_sid{};
     DWORD sid_size = static_cast<DWORD>(admin_sid.size());
-    if (!CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr,
-                            admin_sid.data(), &sid_size)) {
+    if (!CreateWellKnownSid(WinBuiltinAdministratorsSid,
+                            nullptr,
+                            admin_sid.data(),
+                            &sid_size)) {
         LocalFree(descriptor);
         return std::unexpected("could not identify Windows administrators");
     }
     EXPLICIT_ACCESSW access{};
-    access.grfAccessPermissions = PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
+    access.grfAccessPermissions =
+        PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
     access.grfAccessMode = GRANT_ACCESS;
     access.grfInheritance = NO_INHERITANCE;
     access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
@@ -1942,11 +2011,16 @@ grant_windows_admin_process_query_access(HANDLE process) {
         if (new_acl != nullptr) {
             LocalFree(new_acl);
         }
-        return std::unexpected("could not grant administrator query access to installer process");
+        return std::unexpected(
+            "could not grant administrator query access to installer process");
     }
-    const auto updated = SetSecurityInfo(process, SE_KERNEL_OBJECT,
+    const auto updated = SetSecurityInfo(process,
+                                         SE_KERNEL_OBJECT,
                                          DACL_SECURITY_INFORMATION,
-                                         nullptr, nullptr, new_acl, nullptr);
+                                         nullptr,
+                                         nullptr,
+                                         new_acl,
+                                         nullptr);
     LocalFree(new_acl);
     if (updated != ERROR_SUCCESS) {
         return std::unexpected("could not secure installer process handoff");
@@ -1957,22 +2031,23 @@ grant_windows_admin_process_query_access(HANDLE process) {
 
 #if defined(_WIN32)
 bool windows_entry_is_not_reparse_point(const std::filesystem::path& path) {
-    HANDLE handle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE |
-                                    FILE_SHARE_DELETE,
-                                nullptr, OPEN_EXISTING,
-                                FILE_FLAG_OPEN_REPARSE_POINT |
-                                    FILE_FLAG_BACKUP_SEMANTICS,
-                                nullptr);
+    HANDLE handle =
+        CreateFileW(path.c_str(),
+                    FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                    nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         return false;
     }
     FILE_ATTRIBUTE_TAG_INFO attributes{};
-    const bool valid = GetFileInformationByHandleEx(
-                           handle, FileAttributeTagInfo, &attributes,
-                           sizeof(attributes)) != 0 &&
-                       (attributes.FileAttributes &
-                        FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+    const bool valid =
+        GetFileInformationByHandleEx(
+            handle, FileAttributeTagInfo, &attributes, sizeof(attributes)) !=
+            0 &&
+        (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
     CloseHandle(handle);
     return valid;
 }
@@ -1990,7 +2065,8 @@ validate_staging_root(const std::filesystem::path& root) {
     }
 #if defined(_WIN32)
     if (!root.is_absolute() || !windows_entry_is_not_reparse_point(root)) {
-        return std::unexpected("update staging directory cannot be resolved safely");
+        return std::unexpected(
+            "update staging directory cannot be resolved safely");
     }
     auto secure = validate_windows_workspace_acl_impl(root);
     if (!secure) {
@@ -1999,16 +2075,18 @@ validate_staging_root(const std::filesystem::path& root) {
 #else
     const auto canonical_root = std::filesystem::canonical(root, error);
     if (error || canonical_root != root) {
-        return std::unexpected("update staging directory cannot be resolved safely");
+        return std::unexpected(
+            "update staging directory cannot be resolved safely");
     }
-    struct stat workspace_stat {};
+    struct stat workspace_stat{};
     if (::stat(root.c_str(), &workspace_stat) != 0 ||
         (workspace_stat.st_mode & 0077) != 0) {
         return std::unexpected("update staging directory is not private");
     }
     if (workspace_stat.st_uid != ::getuid()) {
         if (::geteuid() != 0) {
-            return std::unexpected("update staging directory has an unexpected owner");
+            return std::unexpected(
+                "update staging directory has an unexpected owner");
         }
         const char* original_uid = std::getenv("PKEXEC_UID");
         if (original_uid == nullptr) {
@@ -2024,7 +2102,8 @@ validate_staging_root(const std::filesystem::path& root) {
             expected_uid);
         if (uid_error != std::errc{} || *uid_end != '\0' ||
             workspace_stat.st_uid != expected_uid) {
-            return std::unexpected("update staging directory has an unexpected owner");
+            return std::unexpected(
+                "update staging directory has an unexpected owner");
         }
     }
 #endif
@@ -2041,7 +2120,8 @@ prepare_archive_for_install(const std::filesystem::path& archive,
     if (!valid_root ||
         archive.filename() != platform::path::from_utf8(package.archive) ||
         !is_regular_file_without_redirect(archive)) {
-        return std::unexpected("update package is outside its private staging directory");
+        return std::unexpected(
+            "update package is outside its private staging directory");
     }
     std::error_code error;
     const auto size = std::filesystem::file_size(archive, error);
@@ -2051,7 +2131,8 @@ prepare_archive_for_install(const std::filesystem::path& archive,
     platform::Workspace workspace{
         .root = root / platform::path::from_utf8(extraction_name)};
     if (!std::filesystem::create_directory(workspace.root, error) || error) {
-        return std::unexpected("could not create package verification directory");
+        return std::unexpected(
+            "could not create package verification directory");
     }
 #if !defined(_WIN32)
     std::filesystem::permissions(workspace.root,
@@ -2060,10 +2141,12 @@ prepare_archive_for_install(const std::filesystem::path& archive,
                                  error);
     if (error) {
         platform::cleanup_workspace(workspace);
-        return std::unexpected("could not secure package verification directory");
+        return std::unexpected(
+            "could not secure package verification directory");
     }
 #endif
-    auto prepared = prepare_verified_package(archive, checksum, package, workspace);
+    auto prepared =
+        prepare_verified_package(archive, checksum, package, workspace);
     if (!prepared) {
         platform::cleanup_workspace(workspace);
         return std::unexpected(prepared.error());
@@ -2084,12 +2167,13 @@ refetch_official_digest(const std::filesystem::path& archive,
         return std::unexpected("installed version metadata is invalid");
     }
     const auto requested = parse_version(requested_tag);
-    if (!requested || installed_version_is_current_or_newer(current->text,
-                                                            *requested)) {
+    if (!requested ||
+        installed_version_is_current_or_newer(current->text, *requested)) {
         return std::unexpected("installer handoff release is invalid or older");
     }
-    const ApiGet get = [&](std::string_view url, std::size_t limit)
-        -> std::expected<HttpResponse, std::string> {
+    const ApiGet get =
+        [&](std::string_view url,
+            std::size_t limit) -> std::expected<HttpResponse, std::string> {
         auto body = get_text(std::string{url}, limit, workspace);
         if (!body) {
             return std::unexpected(body.error());
@@ -2102,21 +2186,22 @@ refetch_official_digest(const std::filesystem::path& archive,
     }
     const auto selected = select_release_index(*releases);
     if (!selected || (*releases)[*selected].tag != requested_tag) {
-        return std::unexpected("official update release changed during handoff");
+        return std::unexpected(
+            "official update release changed during handoff");
     }
-    const auto checksum_url = release_asset_url((*releases)[*selected],
-                                                package.checksum);
-    if (!checksum_url || archive.filename() !=
-                             platform::path::from_utf8(package.archive)) {
+    const auto checksum_url =
+        release_asset_url((*releases)[*selected], package.checksum);
+    if (!checksum_url ||
+        archive.filename() != platform::path::from_utf8(package.archive)) {
         return std::unexpected("official release checksum is unavailable");
     }
-    const auto checksum_file = platform::workspace_file(
-        workspace, "privileged-package.sha256");
+    const auto checksum_file =
+        platform::workspace_file(workspace, "privileged-package.sha256");
     if (checksum_file.empty()) {
         return std::unexpected("could not allocate privileged checksum path");
     }
-    auto downloaded = download_asset(*checksum_url, checksum_file, 4096,
-                                     workspace);
+    auto downloaded =
+        download_asset(*checksum_url, checksum_file, 4096, workspace);
     if (!downloaded) {
         return std::unexpected(downloaded.error());
     }
@@ -2137,8 +2222,8 @@ std::optional<std::filesystem::path> find_program(std::string_view name) {
         return std::nullopt;
     }
     for (const auto directory : split(path_value, ':')) {
-        const auto candidate = std::filesystem::path{directory} /
-                              platform::path::from_utf8(name);
+        const auto candidate =
+            std::filesystem::path{directory} / platform::path::from_utf8(name);
         if (::access(candidate.c_str(), X_OK) == 0) {
             return candidate;
         }
@@ -2165,12 +2250,14 @@ curl_checksum_as_user(std::string_view url, uid_t uid) {
     std::vector<gid_t> groups(static_cast<std::size_t>(group_count));
     for (;;) {
         int required = group_count;
-        if (::getgrouplist(username.c_str(), gid, groups.data(), &required) >= 0) {
+        if (::getgrouplist(username.c_str(), gid, groups.data(), &required) >=
+            0) {
             groups.resize(static_cast<std::size_t>(required));
             break;
         }
         if (required <= group_count || required > 256) {
-            return std::unexpected("could not read original updater user groups");
+            return std::unexpected(
+                "could not read original updater user groups");
         }
         group_count = required;
         groups.resize(static_cast<std::size_t>(group_count));
@@ -2178,22 +2265,31 @@ curl_checksum_as_user(std::string_view url, uid_t uid) {
     const std::string address{url};
     const std::string max_size = "4096";
     std::vector<std::string> argument_values{
-        curl->string(), "--disable", "--fail", "--location", "--silent",
-        "--show-error", "--proto", "=https", "--proto-redir", "=https",
-        "--max-redirs", "5", "--max-time", "30", "--max-filesize",
-        max_size, "--write-out", "\n%{url_effective}", "--url", address};
+        curl->string(), "--disable",    "--fail",
+        "--location",   "--silent",     "--show-error",
+        "--proto",      "=https",       "--proto-redir",
+        "=https",       "--max-redirs", "5",
+        "--max-time",   "30",           "--max-filesize",
+        max_size,       "--write-out",  "\n%{url_effective}",
+        "--url",        address};
     std::vector<char*> arguments;
     arguments.reserve(argument_values.size() + 1);
     for (auto& argument : argument_values) {
         arguments.push_back(argument.data());
     }
     arguments.push_back(nullptr);
-    std::vector<std::string> environment{
-        "PATH=" + linux_trusted_path_value(), "HOME=" + home, "LANG=C",
-        "LC_ALL=C"};
-    for (const auto* name : {"http_proxy", "https_proxy", "HTTP_PROXY",
-                             "HTTPS_PROXY", "all_proxy", "ALL_PROXY",
-                             "no_proxy", "NO_PROXY"}) {
+    std::vector<std::string> environment{"PATH=" + linux_trusted_path_value(),
+                                         "HOME=" + home,
+                                         "LANG=C",
+                                         "LC_ALL=C"};
+    for (const auto* name : {"http_proxy",
+                             "https_proxy",
+                             "HTTP_PROXY",
+                             "HTTPS_PROXY",
+                             "all_proxy",
+                             "ALL_PROXY",
+                             "no_proxy",
+                             "NO_PROXY"}) {
         if (const char* value = std::getenv(name); value != nullptr) {
             environment.push_back(std::string{name} + "=" + value);
         }
@@ -2244,9 +2340,8 @@ curl_checksum_as_user(std::string_view url, uid_t uid) {
             oversized = true;
             break;
         }
-        if (static_cast<std::size_t>(count) > 8192U -
-                                                    std::min<std::size_t>(8192U,
-                                                                          output.size())) {
+        if (static_cast<std::size_t>(count) >
+            8192U - std::min<std::size_t>(8192U, output.size())) {
             oversized = true;
             break;
         }
@@ -2263,8 +2358,9 @@ curl_checksum_as_user(std::string_view url, uid_t uid) {
     } while (waited < 0 && errno == EINTR);
     if (oversized || waited != child || !WIFEXITED(status) ||
         WEXITSTATUS(status) != 0) {
-        return std::unexpected(oversized ? "checksum response exceeds the permitted size"
-                                         : "unprivileged checksum request failed");
+        return std::unexpected(
+            oversized ? "checksum response exceeds the permitted size"
+                      : "unprivileged checksum request failed");
     }
     const auto separator = output.rfind('\n');
     if (separator == std::string::npos) {
@@ -2297,12 +2393,13 @@ std::optional<uid_t> invoking_user_id() {
 #endif
 
 std::string language_code() {
-    return i18n::current_language() == i18n::Language::Portuguese ? "pt-BR" : "en";
+    return i18n::current_language() == i18n::Language::Portuguese ? "pt-BR"
+                                                                  : "en";
 }
 
 void select_helper_language(std::string_view language) {
     i18n::set_language(language == "pt-BR" ? i18n::Language::Portuguese
-                                            : i18n::Language::English);
+                                           : i18n::Language::English);
 }
 
 int report_failure(std::string_view detail) {
@@ -2321,7 +2418,8 @@ std::optional<std::string> release_asset_url(const Release& release,
             found = &asset;
         }
     }
-    if (found == nullptr || !official_asset_url(release.tag, name, found->url)) {
+    if (found == nullptr ||
+        !official_asset_url(release.tag, name, found->url)) {
         return std::nullopt;
     }
     return found->url;
@@ -2339,14 +2437,16 @@ verify_package_checksum(const std::filesystem::path& archive,
     }
     auto expected = parse_checksum(*body, archive_name);
     if (!expected) {
-        return std::unexpected("official SHA-256 checksum has an invalid format");
+        return std::unexpected(
+            "official SHA-256 checksum has an invalid format");
     }
     const auto actual = sha256_file(archive);
     if (!actual) {
         return std::unexpected(actual.error());
     }
     if (lower_ascii(*actual) != *expected) {
-        return std::unexpected("downloaded package SHA-256 does not match GitHub");
+        return std::unexpected(
+            "downloaded package SHA-256 does not match GitHub");
     }
     return std::move(*expected);
 }
@@ -2375,19 +2475,22 @@ install_with_elevation(const std::filesystem::path& executable,
     }
     const bool interactive = ::isatty(STDIN_FILENO) != 0;
     if (!pkexec && !interactive) {
-        return std::unexpected(i18n::format(
-            i18n::Key::UpdateElevationUnavailable,
-            "interactive sudo is unavailable"));
+        return std::unexpected(
+            i18n::format(i18n::Key::UpdateElevationUnavailable,
+                         "interactive sudo is unavailable"));
     }
     std::println("{}", i18n::tr(i18n::Key::UpdateAdminRequired));
     std::println("{}", i18n::tr(i18n::Key::UpdateRequestPermission));
     const auto result = attempt_linux_elevation(
         interactive,
         pkexec ? LinuxElevationAttempt{[&] {
-            auto command = std::vector<std::string>{
-                platform::path::to_utf8(*pkexec), self,
-                "--kasumi-update-install", platform::path::to_utf8(archive),
-                std::string{tag}, std::string{language}};
+            auto command =
+                std::vector<std::string>{platform::path::to_utf8(*pkexec),
+                                         self,
+                                         "--kasumi-update-install",
+                                         platform::path::to_utf8(archive),
+                                         std::string{tag},
+                                         std::string{language}};
             const auto tool = resolve_linux_system_tool("pkexec");
             if (!tool) {
                 return LinuxElevationResult{LinuxElevationState::Failed,
@@ -2408,37 +2511,45 @@ install_with_elevation(const std::filesystem::path& executable,
                 {reproc::stop::kill, reproc::milliseconds{1000}},
             };
             CappedSink error_output{.limit = 8192};
-            const auto [exit_code, error] = reproc::run(
-                reproc::arguments{command}, options, reproc::sink::null,
-                error_output);
+            const auto [exit_code, error] =
+                reproc::run(reproc::arguments{command},
+                            options,
+                            reproc::sink::null,
+                            error_output);
             if (error) {
-                return LinuxElevationResult{
-                    LinuxElevationState::Failed,
-                    "could not run pkexec: " + error.message()};
+                return LinuxElevationResult{LinuxElevationState::Failed,
+                                            "could not run pkexec: " +
+                                                error.message()};
             }
-            return classify_linux_pkexec_result(exit_code,
-                                                error_output.value);
-        }} : LinuxElevationAttempt{},
+            return classify_linux_pkexec_result(exit_code, error_output.value);
+        }}
+               : LinuxElevationAttempt{},
         sudo ? LinuxElevationAttempt{[&] {
             const auto tool = resolve_linux_system_tool("sudo");
             if (!tool) {
                 return LinuxElevationResult{LinuxElevationState::Failed,
                                             tool.error()};
             }
-            const auto elevated = run_inherited(
-                {platform::path::to_utf8(*tool), "--", self,
-                 "--kasumi-update-install", platform::path::to_utf8(archive),
-                 std::string{tag}, std::string{language}});
+            const auto elevated =
+                run_inherited({platform::path::to_utf8(*tool),
+                               "--",
+                               self,
+                               "--kasumi-update-install",
+                               platform::path::to_utf8(archive),
+                               std::string{tag},
+                               std::string{language}});
             return elevated
-                       ? LinuxElevationResult{LinuxElevationState::Succeeded, {}}
+                       ? LinuxElevationResult{LinuxElevationState::Succeeded,
+                                              {}}
                        : LinuxElevationResult{LinuxElevationState::Failed,
                                               elevated.error()};
-        }} : LinuxElevationAttempt{});
+        }}
+             : LinuxElevationAttempt{});
     if (result.state != LinuxElevationState::Succeeded) {
         if (result.detail.empty()) {
-            return std::unexpected(i18n::format(
-                i18n::Key::UpdateElevationUnavailable,
-                "pkexec or sudo could not authorize the update"));
+            return std::unexpected(
+                i18n::format(i18n::Key::UpdateElevationUnavailable,
+                             "pkexec or sudo could not authorize the update"));
         }
         return std::unexpected(result.detail);
     }
@@ -2446,14 +2557,17 @@ install_with_elevation(const std::filesystem::path& executable,
 #else
     const auto sudo = find_program("sudo");
     if (!sudo || ::isatty(STDIN_FILENO) == 0) {
-        return std::unexpected(i18n::format(
-            i18n::Key::UpdateElevationUnavailable,
-            "interactive sudo is unavailable"));
+        return std::unexpected(
+            i18n::format(i18n::Key::UpdateElevationUnavailable,
+                         "interactive sudo is unavailable"));
     }
     const auto self = platform::path::to_utf8(executable);
-    return run_inherited({platform::path::to_utf8(*sudo), "--", self,
+    return run_inherited({platform::path::to_utf8(*sudo),
+                          "--",
+                          self,
                           "--kasumi-update-install",
-                          platform::path::to_utf8(archive), std::string{tag},
+                          platform::path::to_utf8(archive),
+                          std::string{tag},
                           std::string{language}});
 #endif
 }
@@ -2483,7 +2597,8 @@ std::wstring quote_windows_argument(std::wstring_view value) {
     return result;
 }
 
-std::wstring join_windows_arguments(const std::vector<std::wstring>& arguments) {
+std::wstring
+join_windows_arguments(const std::vector<std::wstring>& arguments) {
     std::wstring result;
     for (const auto& argument : arguments) {
         if (!result.empty()) {
@@ -2496,9 +2611,8 @@ std::wstring join_windows_arguments(const std::vector<std::wstring>& arguments) 
 
 std::optional<std::filesystem::path> windows_process_path(DWORD process_id,
                                                           HANDLE& handle) {
-    handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
-                         FALSE,
-                         process_id);
+    handle = OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, process_id);
     if (handle == nullptr) {
         return std::nullopt;
     }
@@ -2551,21 +2665,22 @@ std::optional<DWORD> windows_parent_process_id(DWORD process_id) {
 
 bool windows_path_has_no_reparse_points(const std::filesystem::path& path) {
     const auto check = [](const std::filesystem::path& item) {
-        HANDLE handle = CreateFileW(item.c_str(), FILE_READ_ATTRIBUTES,
-                                    FILE_SHARE_READ | FILE_SHARE_WRITE |
-                                        FILE_SHARE_DELETE,
-                                    nullptr, OPEN_EXISTING,
-                                    FILE_FLAG_OPEN_REPARSE_POINT |
-                                        FILE_FLAG_BACKUP_SEMANTICS,
-                                    nullptr);
+        HANDLE handle = CreateFileW(
+            item.c_str(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            nullptr);
         if (handle == INVALID_HANDLE_VALUE) {
             return false;
         }
         FILE_ATTRIBUTE_TAG_INFO info{};
-        const bool valid = GetFileInformationByHandleEx(
-                               handle, FileAttributeTagInfo, &info,
-                               sizeof(info)) != 0 &&
-                           (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+        const bool valid =
+            GetFileInformationByHandleEx(
+                handle, FileAttributeTagInfo, &info, sizeof(info)) != 0 &&
+            (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
         CloseHandle(handle);
         return valid;
     };
@@ -2608,8 +2723,7 @@ std::string windows_identity_text(const WindowsFileIdentity& identity) {
 
 std::optional<WindowsFileIdentity>
 parse_windows_identity(std::string_view value) {
-    if (value.size() != 48 ||
-        !std::ranges::all_of(value, [](char character) {
+    if (value.size() != 48 || !std::ranges::all_of(value, [](char character) {
             return (character >= '0' && character <= '9') ||
                    (character >= 'a' && character <= 'f') ||
                    (character >= 'A' && character <= 'F');
@@ -2632,9 +2746,9 @@ parse_windows_identity(std::string_view value) {
         return static_cast<std::uint8_t>(character - 'A' + 10);
     };
     for (std::size_t index = 0; index < result.file_id.size(); ++index) {
-        result.file_id[index] = static_cast<std::uint8_t>(
-            (nibble(value[16 + index * 2]) << 4U) |
-            nibble(value[17 + index * 2]));
+        result.file_id[index] =
+            static_cast<std::uint8_t>((nibble(value[16 + index * 2]) << 4U) |
+                                      nibble(value[17 + index * 2]));
     }
     return result;
 }
@@ -2651,8 +2765,10 @@ bool is_kasumi_executable(const std::filesystem::path& path) {
     }
     VS_FIXEDFILEINFO* fixed = nullptr;
     UINT fixed_size = 0;
-    if (!VerQueryValueW(data.data(), L"\\",
-                        reinterpret_cast<void**>(&fixed), &fixed_size) ||
+    if (!VerQueryValueW(data.data(),
+                        L"\\",
+                        reinterpret_cast<void**>(&fixed),
+                        &fixed_size) ||
         fixed == nullptr || fixed_size < sizeof(VS_FIXEDFILEINFO) ||
         fixed->dwFileType != VFT_APP) {
         return false;
@@ -2708,17 +2824,18 @@ launch_elevated_windows(const std::filesystem::path& helper,
     if (!version_w || !language_w || !identity_w) {
         return std::unexpected("invalid installer handoff arguments");
     }
-    const auto parameters = join_windows_arguments(
-        {L"--kasumi-update-elevated",
-         archive.wstring(),
-         *version_w,
-         *language_w,
-         std::to_wstring(GetCurrentProcessId()),
-         std::to_wstring(original_process_id),
-         *identity_w});
+    const auto parameters =
+        join_windows_arguments({L"--kasumi-update-elevated",
+                                archive.wstring(),
+                                *version_w,
+                                *language_w,
+                                std::to_wstring(GetCurrentProcessId()),
+                                std::to_wstring(original_process_id),
+                                *identity_w});
     SHELLEXECUTEINFOW info{};
     info.cbSize = sizeof(info);
-    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_NO_CONSOLE;
+    info.fMask =
+        SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_NO_CONSOLE;
     info.lpVerb = L"runas";
     info.lpFile = helper.c_str();
     info.lpParameters = parameters.c_str();
@@ -2728,10 +2845,12 @@ launch_elevated_windows(const std::filesystem::path& helper,
         if (error == ERROR_CANCELLED) {
             return std::unexpected("administrator authorization was cancelled");
         }
-        return std::unexpected("could not request Windows administrator privileges");
+        return std::unexpected(
+            "could not request Windows administrator privileges");
     }
     if (info.hProcess == nullptr) {
-        return std::unexpected("elevated installer did not return a process handle");
+        return std::unexpected(
+            "elevated installer did not return a process handle");
     }
     const DWORD wait = WaitForSingleObject(info.hProcess, INFINITE);
     DWORD exit_code = 1;
@@ -2754,19 +2873,20 @@ start_windows_helper(const std::filesystem::path& executable,
     if (!id) {
         return std::unexpected(id.error());
     }
-    auto process_acl = grant_windows_admin_process_query_access(
-        GetCurrentProcess());
+    auto process_acl =
+        grant_windows_admin_process_query_access(GetCurrentProcess());
     if (!process_acl) {
         return std::unexpected(process_acl.error());
     }
     std::error_code error;
-    const auto helper = workspace.root /
-                        platform::path::from_utf8("kasumi-update-helper-" + *id +
-                                                  ".exe");
-    if (!std::filesystem::copy_file(executable, helper,
-                                    std::filesystem::copy_options::none,
-                                    error) || error) {
-        return std::unexpected("could not prepare the Windows replacement helper");
+    const auto helper =
+        workspace.root /
+        platform::path::from_utf8("kasumi-update-helper-" + *id + ".exe");
+    if (!std::filesystem::copy_file(
+            executable, helper, std::filesystem::copy_options::none, error) ||
+        error) {
+        return std::unexpected(
+            "could not prepare the Windows replacement helper");
     }
     const auto self_process = GetCurrentProcessId();
     const auto version_w = widen_ascii(version);
@@ -2778,15 +2898,16 @@ start_windows_helper(const std::filesystem::path& executable,
         std::filesystem::remove(helper, error);
         return std::unexpected("invalid installer handoff arguments");
     }
-    const auto command_line = join_windows_arguments(
-        {helper.wstring(),
-         L"--kasumi-update-helper",
-         archive.wstring(),
-         *version_w,
-         *language_w,
-         std::to_wstring(self_process),
-         *identity_w});
-    std::vector<wchar_t> mutable_command(command_line.begin(), command_line.end());
+    const auto command_line =
+        join_windows_arguments({helper.wstring(),
+                                L"--kasumi-update-helper",
+                                archive.wstring(),
+                                *version_w,
+                                *language_w,
+                                std::to_wstring(self_process),
+                                *identity_w});
+    std::vector<wchar_t> mutable_command(command_line.begin(),
+                                         command_line.end());
     mutable_command.push_back(L'\0');
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
@@ -2806,14 +2927,15 @@ start_windows_helper(const std::filesystem::path& executable,
                         &startup,
                         &process)) {
         std::filesystem::remove(helper, error);
-        return std::unexpected("could not start the Windows replacement helper");
+        return std::unexpected(
+            "could not start the Windows replacement helper");
     }
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
-    const auto ready_path = workspace.root /
-                            platform::path::from_utf8("helper-ready");
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::seconds{10};
+    const auto ready_path =
+        workspace.root / platform::path::from_utf8("helper-ready");
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{10};
     while (std::chrono::steady_clock::now() < deadline) {
         if (std::filesystem::exists(ready_path, error) && !error) {
             return {};
@@ -2835,8 +2957,10 @@ int run_windows_elevated_helper(int argc, char* argv[]) {
     DWORD original_id = 0;
     const auto [helper_end, helper_error] = std::from_chars(
         argv[5], argv[5] + std::char_traits<char>::length(argv[5]), helper_id);
-    const auto [original_end, original_error] = std::from_chars(
-        argv[6], argv[6] + std::char_traits<char>::length(argv[6]), original_id);
+    const auto [original_end, original_error] =
+        std::from_chars(argv[6],
+                        argv[6] + std::char_traits<char>::length(argv[6]),
+                        original_id);
     const auto expected_identity = parse_windows_identity(argv[7]);
     if (helper_error != std::errc{} || *helper_end != '\0' ||
         original_error != std::errc{} || *original_end != '\0' ||
@@ -2849,7 +2973,8 @@ int run_windows_elevated_helper(int argc, char* argv[]) {
     ScopedWindowsHandle keep_helper{helper_handle};
     const auto helper_path = current_executable_path();
     std::error_code parent_error;
-    const bool trusted_parent = parent_path && helper_path &&
+    const bool trusted_parent =
+        parent_path && helper_path &&
         std::filesystem::equivalent(*parent_path, *helper_path, parent_error) &&
         !parent_error && windows_entry_is_not_reparse_point(*helper_path) &&
         is_kasumi_executable(*helper_path);
@@ -2857,12 +2982,14 @@ int run_windows_elevated_helper(int argc, char* argv[]) {
         return report_failure("elevated installer was not started by Kasumi");
     }
     HANDLE original_handle = nullptr;
-    const auto target_value = windows_process_path(original_id, original_handle);
+    const auto target_value =
+        windows_process_path(original_id, original_handle);
     ScopedWindowsHandle keep_original{original_handle};
     if (!target_value || !windows_path_has_no_reparse_points(*target_value) ||
         !windows_file_identity_matches(*target_value, *expected_identity) ||
         target_value->filename() != platform::path::from_utf8("kasumi.exe")) {
-        return report_failure("original installation identity changed during update handoff");
+        return report_failure(
+            "original installation identity changed during update handoff");
     }
     const auto target = *target_value;
     const auto archive = platform::path::from_utf8(argv[2]);
@@ -2872,24 +2999,26 @@ int run_windows_elevated_helper(int argc, char* argv[]) {
     }
     const auto package = package_names_for_this_platform();
     if (!package) {
-        return report_failure("this operating system or architecture is unsupported");
+        return report_failure(
+            "this operating system or architecture is unsupported");
     }
     const auto root = archive.parent_path();
     auto valid_root = validate_staging_root(root);
     std::error_code error;
     const auto archive_size = std::filesystem::file_size(archive, error);
-    if (!valid_root || archive.filename() !=
-                           platform::path::from_utf8(package->archive) ||
+    if (!valid_root ||
+        archive.filename() != platform::path::from_utf8(package->archive) ||
         !is_regular_file_without_redirect(archive) || error ||
         archive_size == 0 || archive_size > PACKAGE_LIMIT ||
         !windows_entry_is_not_reparse_point(root) ||
         !windows_file_identity(archive)) {
-        return report_failure("update package is outside its protected staging directory");
+        return report_failure(
+            "update package is outside its protected staging directory");
     }
     std::string manager;
     if (package_managed_installation(target, manager)) {
-        return report_failure(i18n::format(i18n::Key::UpdateManagedInstallation,
-                                           manager));
+        return report_failure(
+            i18n::format(i18n::Key::UpdateManagedInstallation, manager));
     }
     const auto target_version = kasumi_product_version(target);
     std::optional<std::wstring> helper_version;
@@ -2905,43 +3034,49 @@ int run_windows_elevated_helper(int argc, char* argv[]) {
     }
     struct WorkspaceCleanup {
         platform::Workspace value;
-        ~WorkspaceCleanup() { platform::cleanup_workspace(value); }
+        ~WorkspaceCleanup() {
+            platform::cleanup_workspace(value);
+        }
     } cleanup{.value = *workspace};
-    auto digest = refetch_official_digest(
-        archive, version, *package, *workspace);
+    auto digest =
+        refetch_official_digest(archive, version, *package, *workspace);
     if (!digest) {
         return report_failure(digest.error());
     }
-    const auto trusted_archive = platform::workspace_file(*workspace,
-                                                          package->archive);
+    const auto trusted_archive =
+        platform::workspace_file(*workspace, package->archive);
     if (trusted_archive.empty() ||
-        !std::filesystem::copy_file(archive, trusted_archive,
-                                    std::filesystem::copy_options::none, error) ||
+        !std::filesystem::copy_file(archive,
+                                    trusted_archive,
+                                    std::filesystem::copy_options::none,
+                                    error) ||
         error) {
-        return report_failure("could not copy update package into a private administrator workspace");
+        return report_failure("could not copy update package into a private "
+                              "administrator workspace");
     }
-    const auto prepared = prepare_verified_package(trusted_archive, *digest,
-                                                   *package, *workspace);
+    const auto prepared = prepare_verified_package(
+        trusted_archive, *digest, *package, *workspace);
     if (!prepared) {
         return report_failure(prepared.error());
     }
     if (!windows_path_has_no_reparse_points(target) ||
         !windows_file_identity_matches(target, *expected_identity)) {
-        return report_failure("installation destination changed before replacement");
+        return report_failure(
+            "installation destination changed before replacement");
     }
     InstallHooks target_identity_hook;
-    target_identity_hook.validate_target = [expected = *expected_identity](
-        const std::filesystem::path& candidate)
+    target_identity_hook.validate_target =
+        [expected = *expected_identity](const std::filesystem::path& candidate)
         -> std::expected<void, std::string> {
         if (!windows_path_has_no_reparse_points(candidate) ||
             !windows_file_identity_matches(candidate, expected)) {
-            return std::unexpected("installation destination changed before replacement");
+            return std::unexpected(
+                "installation destination changed before replacement");
         }
         return {};
     };
-    const auto installed = install_prepared_executable(prepared->path, target,
-                                                       prepared->sha256,
-                                                       &target_identity_hook);
+    const auto installed = install_prepared_executable(
+        prepared->path, target, prepared->sha256, &target_identity_hook);
     if (!installed) {
         return report_failure(installed.error().detail);
     }
@@ -2959,7 +3094,8 @@ int run_windows_wait_helper(int argc, char* argv[]) {
     const auto helper = current_executable_path();
     const auto package = package_names_for_this_platform();
     if (!helper || !package) {
-        return report_failure("could not identify the Windows installer helper");
+        return report_failure(
+            "could not identify the Windows installer helper");
     }
     DWORD parent_id = 0;
     const auto [end, parse_error] = std::from_chars(
@@ -2968,9 +3104,10 @@ int run_windows_wait_helper(int argc, char* argv[]) {
         return report_failure("invalid installer parent process");
     }
     const auto expected_identity = parse_windows_identity(argv[6]);
-    if (!expected_identity || windows_parent_process_id(GetCurrentProcessId()) !=
-                                  parent_id) {
-        return report_failure("installer was not started by the original Kasumi process");
+    if (!expected_identity ||
+        windows_parent_process_id(GetCurrentProcessId()) != parent_id) {
+        return report_failure(
+            "installer was not started by the original Kasumi process");
     }
     HANDLE parent = nullptr;
     const auto parent_path = windows_process_path(parent_id, parent);
@@ -2989,15 +3126,15 @@ int run_windows_wait_helper(int argc, char* argv[]) {
     std::error_code error;
     const auto root = archive.parent_path();
     auto valid_root = validate_staging_root(root);
-    if (!valid_root || archive.filename() !=
-                           platform::path::from_utf8(package->archive) ||
+    if (!valid_root ||
+        archive.filename() != platform::path::from_utf8(package->archive) ||
         !is_regular_file_without_redirect(archive) ||
         !windows_entry_is_not_reparse_point(root) ||
         !windows_file_identity(archive)) {
         return report_failure("update staging directory is invalid");
     }
-    auto process_acl = grant_windows_admin_process_query_access(
-        GetCurrentProcess());
+    auto process_acl =
+        grant_windows_admin_process_query_access(GetCurrentProcess());
     if (!process_acl) {
         return report_failure(process_acl.error());
     }
@@ -3014,8 +3151,8 @@ int run_windows_wait_helper(int argc, char* argv[]) {
         std::filesystem::path helper;
         ~HandoffCleanup() {
             platform::cleanup_workspace(platform::Workspace{.root = root});
-            static_cast<void>(MoveFileExW(helper.c_str(), nullptr,
-                                          MOVEFILE_DELAY_UNTIL_REBOOT));
+            static_cast<void>(MoveFileExW(
+                helper.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT));
         }
     } cleanup{.root = root, .helper = *helper};
     const DWORD parent_wait = WaitForSingleObject(parent, INFINITE);
@@ -3024,53 +3161,60 @@ int run_windows_wait_helper(int argc, char* argv[]) {
     }
     std::string manager;
     if (package_managed_installation(target, manager)) {
-        return report_failure(i18n::format(i18n::Key::UpdateManagedInstallation,
-                                           manager));
+        return report_failure(
+            i18n::format(i18n::Key::UpdateManagedInstallation, manager));
     }
     auto digest = refetch_official_digest(
         archive, version, *package, platform::Workspace{.root = root});
     if (!digest) {
         return report_failure(digest.error());
     }
-    const auto prepared = prepare_archive_for_install(archive, *digest,
-                                                      *package, "helper-verify");
+    const auto prepared = prepare_archive_for_install(
+        archive, *digest, *package, "helper-verify");
     if (!prepared) {
         return report_failure(prepared.error());
     }
     if (!windows_path_has_no_reparse_points(target) ||
         !windows_file_identity_matches(target, *expected_identity)) {
-        return report_failure("installation destination changed before replacement");
+        return report_failure(
+            "installation destination changed before replacement");
     }
     InstallHooks target_identity_hook;
-    target_identity_hook.validate_target = [expected = *expected_identity](
-        const std::filesystem::path& candidate)
+    target_identity_hook.validate_target =
+        [expected = *expected_identity](const std::filesystem::path& candidate)
         -> std::expected<void, std::string> {
         if (!windows_path_has_no_reparse_points(candidate) ||
             !windows_file_identity_matches(candidate, expected)) {
-            return std::unexpected("installation destination changed before replacement");
+            return std::unexpected(
+                "installation destination changed before replacement");
         }
         return {};
     };
-    auto installed = install_prepared_executable(prepared->path, target,
-                                                 prepared->sha256,
-                                                 &target_identity_hook);
+    auto installed = install_prepared_executable(
+        prepared->path, target, prepared->sha256, &target_identity_hook);
     platform::cleanup_workspace(
         platform::Workspace{.root = prepared->path.parent_path()});
     const InstallAction elevate = [&]() -> InstallResult {
         std::println("{}", i18n::tr(i18n::Key::UpdateAdminRequired));
         std::println("{}", i18n::tr(i18n::Key::UpdateRequestPermission));
-        auto elevated = launch_elevated_windows(*helper, archive,
-                                                version, language_code(),
-                                                parent_id, *expected_identity);
+        auto elevated = launch_elevated_windows(*helper,
+                                                archive,
+                                                version,
+                                                language_code(),
+                                                parent_id,
+                                                *expected_identity);
         if (!elevated) {
-            return std::unexpected(InstallFailure{
-                .kind = InstallFailure::Kind::Other,
-                .detail = elevated.error()});
+            return std::unexpected(
+                InstallFailure{.kind = InstallFailure::Kind::Other,
+                               .detail = elevated.error()});
         }
         return {};
     };
     auto result = install_once_then_elevate(
-        [&]() -> InstallResult { return std::move(installed); }, elevate);
+        [&]() -> InstallResult {
+            return std::move(installed);
+        },
+        elevate);
     if (!result) {
         return report_failure(result.error().detail);
     }
@@ -3078,8 +3222,9 @@ int run_windows_wait_helper(int argc, char* argv[]) {
     if (!installed_version) {
         return report_failure("installed release version is invalid");
     }
-    std::println("{}", i18n::format(i18n::Key::UpdateCompleted,
-                                   installed_version->text));
+    std::println(
+        "{}",
+        i18n::format(i18n::Key::UpdateCompleted, installed_version->text));
     return 0;
 }
 
@@ -3097,7 +3242,8 @@ resolve_linux_system_tool(std::string_view name) {
                          std::ranges::find(LINUX_ELEVATION_TOOLS, name) !=
                              LINUX_ELEVATION_TOOLS.end();
     if (!allowed) {
-        return std::unexpected("tool is not on the updater system-tool allowlist");
+        return std::unexpected(
+            "tool is not on the updater system-tool allowlist");
     }
     for (const auto& directory : linux_tool_directories()) {
         const auto candidate = directory / platform::path::from_utf8(name);
@@ -3113,8 +3259,8 @@ resolve_linux_system_tool(std::string_view name) {
         }
         auto valid = validate_linux_system_tool(candidate);
         if (!valid) {
-            return std::unexpected("unsafe system tool " +
-                                   std::string{name} + ": " + valid.error());
+            return std::unexpected("unsafe system tool " + std::string{name} +
+                                   ": " + valid.error());
         }
         const auto resolved = std::filesystem::canonical(candidate, error);
         if (error) {
@@ -3123,32 +3269,38 @@ resolve_linux_system_tool(std::string_view name) {
         }
         return resolved;
     }
-    return std::unexpected("trusted system tool not found: " + std::string{name});
+    return std::unexpected("trusted system tool not found: " +
+                           std::string{name});
 }
 
 std::expected<void, std::string>
 validate_linux_system_tool(const std::filesystem::path& path) {
     if (!path.is_absolute() || path.lexically_normal() != path) {
-        return std::unexpected("system tool path is not an absolute normalized path");
+        return std::unexpected(
+            "system tool path is not an absolute normalized path");
     }
-    struct stat status {};
+    struct stat status{};
     auto current = path.root_path();
     const auto components = path.relative_path();
     for (auto iterator = components.begin(); iterator != components.end();
          ++iterator) {
         if (*iterator == "." || *iterator == ".." || iterator->empty()) {
-            return std::unexpected("system tool path contains an unsafe component");
+            return std::unexpected(
+                "system tool path contains an unsafe component");
         }
         current /= *iterator;
         if (::lstat(current.c_str(), &status) != 0) {
-            return std::unexpected("system tool path cannot be inspected safely");
+            return std::unexpected(
+                "system tool path cannot be inspected safely");
         }
         if (S_ISLNK(status.st_mode)) {
             if (status.st_uid != 0) {
-                return std::unexpected("system tool path contains a non-root symlink");
+                return std::unexpected(
+                    "system tool path contains a non-root symlink");
             }
         } else {
-            const bool final_component = std::next(iterator) == components.end();
+            const bool final_component =
+                std::next(iterator) == components.end();
             if (!trusted_root_stat(status, !final_component)) {
                 return std::unexpected(
                     "system tool path contains an untrusted or writable entry");
@@ -3157,7 +3309,7 @@ validate_linux_system_tool(const std::filesystem::path& path) {
     }
     std::error_code error;
     const auto canonical = std::filesystem::canonical(path, error);
-    struct stat file_status {};
+    struct stat file_status{};
     if (error || ::stat(canonical.c_str(), &file_status) != 0 ||
         !trusted_root_stat(file_status, false) ||
         (file_status.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0 ||
@@ -3168,21 +3320,19 @@ validate_linux_system_tool(const std::filesystem::path& path) {
     return {};
 }
 
-LinuxElevationResult classify_linux_pkexec_result(
-    int exit_code, std::string_view error_output) {
+LinuxElevationResult
+classify_linux_pkexec_result(int exit_code, std::string_view error_output) {
     if (exit_code == 0) {
         return {LinuxElevationState::Succeeded, {}};
     }
     if (exit_code == 126) {
         return {LinuxElevationState::Cancelled, std::string{error_output}};
     }
-    for (const auto marker : {
-             std::string_view{
-                 "Error executing command as another user: No authentication agent found."},
-             std::string_view{
-                 "Error creating textual authentication agent:"},
-             std::string_view{
-                 "Error registering local authentication agent:"}}) {
+    for (const auto marker :
+         {std::string_view{"Error executing command as another user: No "
+                           "authentication agent found."},
+          std::string_view{"Error creating textual authentication agent:"},
+          std::string_view{"Error registering local authentication agent:"}}) {
         if (error_output.find(marker) != std::string_view::npos) {
             return {LinuxElevationState::AuthenticationUnavailable,
                     std::string{error_output}};
@@ -3192,9 +3342,10 @@ LinuxElevationResult classify_linux_pkexec_result(
             error_output.empty() ? "pkexec failed" : std::string{error_output}};
 }
 
-LinuxElevationResult attempt_linux_elevation(
-    bool interactive, const LinuxElevationAttempt& pkexec,
-    const LinuxElevationAttempt& sudo) {
+LinuxElevationResult
+attempt_linux_elevation(bool interactive,
+                        const LinuxElevationAttempt& pkexec,
+                        const LinuxElevationAttempt& sudo) {
     if (pkexec) {
         const auto result = pkexec();
         if (result.state != LinuxElevationState::AuthenticationUnavailable ||
@@ -3215,18 +3366,19 @@ InstallResult install_linux_handoff(const std::filesystem::path& archive,
                                     const std::filesystem::path& target,
                                     const LinuxHandoffHooks& hooks) {
     const auto package = package_names_for_this_platform();
-    if (!package || archive.filename() !=
-                        platform::path::from_utf8(package->archive) ||
+    if (!package ||
+        archive.filename() != platform::path::from_utf8(package->archive) ||
         !is_regular_file_without_redirect(archive) || !parse_version(tag) ||
         !hooks.fetch_checksum || !hooks.prepare || !hooks.install) {
-        return std::unexpected(install_failure("invalid privileged update handoff"));
+        return std::unexpected(
+            install_failure("invalid privileged update handoff"));
     }
-    const auto checksum_url = "https://github.com/" +
-                              std::string{GITHUB_REPOSITORY} +
-                              "/releases/download/" + std::string{tag} + "/" +
-                              package->checksum;
+    const auto checksum_url =
+        "https://github.com/" + std::string{GITHUB_REPOSITORY} +
+        "/releases/download/" + std::string{tag} + "/" + package->checksum;
     if (!official_asset_url(tag, package->checksum, checksum_url)) {
-        return std::unexpected(install_failure("official checksum URL is invalid"));
+        return std::unexpected(
+            install_failure("official checksum URL is invalid"));
     }
     auto checksum_body = hooks.fetch_checksum(checksum_url);
     if (!checksum_body) {
@@ -3234,7 +3386,8 @@ InstallResult install_linux_handoff(const std::filesystem::path& archive,
     }
     const auto expected = parse_checksum(*checksum_body, package->archive);
     if (!expected) {
-        return std::unexpected(install_failure("official checksum has an invalid format"));
+        return std::unexpected(
+            install_failure("official checksum has an invalid format"));
     }
     const auto actual = sha256_file(archive);
     if (!actual || lower_ascii(*actual) != *expected) {
@@ -3247,7 +3400,8 @@ InstallResult install_linux_handoff(const std::filesystem::path& archive,
         return std::unexpected(install_failure(prepared.error()));
     }
     if (!valid_sha256(prepared->sha256)) {
-        return std::unexpected(install_failure("prepared executable digest is invalid"));
+        return std::unexpected(
+            install_failure("prepared executable digest is invalid"));
     }
     return hooks.install(*prepared, target);
 }
@@ -3272,29 +3426,30 @@ int run_linux_install_helper(int argc, char* argv[]) {
     const auto target = current_executable_path();
     if (!uid || !package || !target ||
         target->filename() != platform::path::from_utf8("kasumi")) {
-        return report_failure("could not validate the privileged update handoff");
+        return report_failure(
+            "could not validate the privileged update handoff");
     }
     const auto archive = platform::path::from_utf8(argv[2]);
     const std::string_view tag{argv[3]};
     const auto current = parse_version(KASUMI_VERSION);
     const auto requested = parse_version(tag);
-    if (!current || !requested ||
-        compare_versions(*requested, *current) <= 0) {
+    if (!current || !requested || compare_versions(*requested, *current) <= 0) {
         return report_failure("installer handoff release is invalid or older");
     }
     auto stage_valid = validate_staging_root(archive.parent_path());
     std::error_code error;
     const auto archive_size = std::filesystem::file_size(archive, error);
-    if (!stage_valid || archive.filename() !=
-                            platform::path::from_utf8(package->archive) ||
+    if (!stage_valid ||
+        archive.filename() != platform::path::from_utf8(package->archive) ||
         !is_regular_file_without_redirect(archive) || error ||
         archive_size == 0 || archive_size > PACKAGE_LIMIT) {
-        return report_failure("update package is outside the original private staging directory");
+        return report_failure(
+            "update package is outside the original private staging directory");
     }
     std::string manager;
     if (package_managed_installation(*target, manager)) {
-        return report_failure(i18n::format(i18n::Key::UpdateManagedInstallation,
-                                           manager));
+        return report_failure(
+            i18n::format(i18n::Key::UpdateManagedInstallation, manager));
     }
     auto workspace = platform::create_workspace("update-elevated");
     if (!workspace) {
@@ -3302,15 +3457,20 @@ int run_linux_install_helper(int argc, char* argv[]) {
     }
     struct Cleanup {
         platform::Workspace value;
-        ~Cleanup() { platform::cleanup_workspace(value); }
+        ~Cleanup() {
+            platform::cleanup_workspace(value);
+        }
     } cleanup{.value = *workspace};
-    const auto trusted_archive = platform::workspace_file(*workspace,
-                                                          package->archive);
+    const auto trusted_archive =
+        platform::workspace_file(*workspace, package->archive);
     if (trusted_archive.empty() ||
-        !std::filesystem::copy_file(archive, trusted_archive,
-                                    std::filesystem::copy_options::none, error) ||
+        !std::filesystem::copy_file(archive,
+                                    trusted_archive,
+                                    std::filesystem::copy_options::none,
+                                    error) ||
         error) {
-        return report_failure("could not copy update package into a private workspace");
+        return report_failure(
+            "could not copy update package into a private workspace");
     }
     LinuxHandoffHooks hooks;
     hooks.fetch_checksum = [uid = *uid](std::string_view url) {
@@ -3323,11 +3483,11 @@ int run_linux_install_helper(int argc, char* argv[]) {
     };
     hooks.install = [](const PreparedExecutable& prepared,
                        const std::filesystem::path& destination) {
-        return install_prepared_executable(prepared.path, destination,
-                                           prepared.sha256);
+        return install_prepared_executable(
+            prepared.path, destination, prepared.sha256);
     };
-    const auto installed = install_linux_handoff(trusted_archive, tag, *target,
-                                                 hooks);
+    const auto installed =
+        install_linux_handoff(trusted_archive, tag, *target, hooks);
     if (!installed) {
         return report_failure(installed.error().detail);
     }
@@ -3342,11 +3502,13 @@ int run_public_update(bool allow_elevation = true) {
     std::println("{}", i18n::tr(i18n::Key::UpdateChecking));
     const auto package = package_names_for_this_platform();
     if (!package) {
-        return report_failure("this operating system or architecture is unsupported");
+        return report_failure(
+            "this operating system or architecture is unsupported");
     }
     const auto executable = current_executable_path();
     if (!executable) {
-        return report_failure("could not identify the running executable safely");
+        return report_failure(
+            "could not identify the running executable safely");
     }
 #if defined(_WIN32)
     if (executable->filename() != platform::path::from_utf8("kasumi.exe")) {
@@ -3357,7 +3519,8 @@ int run_public_update(bool allow_elevation = true) {
     }
     const auto target_identity = windows_file_identity(*executable);
     if (!target_identity) {
-        return report_failure("could not identify the running installation file");
+        return report_failure(
+            "could not identify the running installation file");
     }
 #else
     if (executable->filename() != platform::path::from_utf8("kasumi")) {
@@ -3366,15 +3529,15 @@ int run_public_update(bool allow_elevation = true) {
 #endif
     std::string manager;
     if (package_managed_installation(*executable, manager)) {
-        return report_failure(i18n::format(i18n::Key::UpdateManagedInstallation,
-                                           manager));
+        return report_failure(
+            i18n::format(i18n::Key::UpdateManagedInstallation, manager));
     }
     const auto current = parse_version(KASUMI_VERSION);
     if (!current) {
         return report_failure("installed version metadata is invalid");
     }
-    std::println("{}", i18n::format(i18n::Key::UpdateCurrentVersion,
-                                   current->text));
+    std::println("{}",
+                 i18n::format(i18n::Key::UpdateCurrentVersion, current->text));
     auto workspace = platform::create_workspace("update");
     if (!workspace) {
         return report_failure(workspace.error());
@@ -3395,9 +3558,9 @@ int run_public_update(bool allow_elevation = true) {
             }
         }
     } cleanup{.value = *workspace};
-    const ApiGet get = [&](std::string_view url,
-                           std::size_t limit)
-        -> std::expected<HttpResponse, std::string> {
+    const ApiGet get =
+        [&](std::string_view url,
+            std::size_t limit) -> std::expected<HttpResponse, std::string> {
         auto body = get_text(std::string{url}, limit, *workspace);
         if (!body) {
             return std::unexpected(body.error());
@@ -3410,33 +3573,36 @@ int run_public_update(bool allow_elevation = true) {
     }
     const auto selected = select_release_index(*releases);
     if (!selected) {
-        return report_failure("no release is available for this update channel");
+        return report_failure(
+            "no release is available for this update channel");
     }
     const auto version = parse_version((*releases)[*selected].tag);
     if (!version) {
         return report_failure("selected release version is invalid");
     }
-    std::println("{}", i18n::format(i18n::Key::UpdateLatestVersion,
-                                   version->text));
+    std::println("{}",
+                 i18n::format(i18n::Key::UpdateLatestVersion, version->text));
     if (installed_version_is_current_or_newer(current->text, *version)) {
         std::println("{}", i18n::tr(i18n::Key::UpdateAlreadyCurrent));
         return 0;
     }
-    const auto archive_url = release_asset_url((*releases)[*selected],
-                                               package->archive);
-    const auto checksum_url = release_asset_url((*releases)[*selected],
-                                                package->checksum);
+    const auto archive_url =
+        release_asset_url((*releases)[*selected], package->archive);
+    const auto checksum_url =
+        release_asset_url((*releases)[*selected], package->checksum);
     if (!archive_url || !checksum_url) {
-        return report_failure("selected release is missing official package assets");
+        return report_failure(
+            "selected release is missing official package assets");
     }
     const auto archive = platform::workspace_file(*workspace, package->archive);
-    const auto checksum_file = platform::workspace_file(*workspace,
-                                                        "package.sha256");
+    const auto checksum_file =
+        platform::workspace_file(*workspace, "package.sha256");
     if (archive.empty() || checksum_file.empty()) {
         return report_failure("could not allocate download paths");
     }
     std::println("{}", i18n::tr(i18n::Key::UpdateDownloading));
-    auto downloaded = download_asset(*archive_url, archive, PACKAGE_LIMIT, *workspace);
+    auto downloaded =
+        download_asset(*archive_url, archive, PACKAGE_LIMIT, *workspace);
     if (!downloaded) {
         return report_failure(downloaded.error());
     }
@@ -3445,15 +3611,14 @@ int run_public_update(bool allow_elevation = true) {
         return report_failure(downloaded.error());
     }
     std::println("{}", i18n::tr(i18n::Key::UpdateVerifying));
-    auto verified = verify_package_checksum(archive,
-                                            checksum_file,
-                                            package->archive);
+    auto verified =
+        verify_package_checksum(archive, checksum_file, package->archive);
     if (!verified) {
         return report_failure(verified.error());
     }
     const std::string digest = std::move(*verified);
-    const auto prepared = prepare_verified_package(archive, digest, *package,
-                                                  *workspace);
+    const auto prepared =
+        prepare_verified_package(archive, digest, *package, *workspace);
     if (!prepared) {
         return report_failure(prepared.error());
     }
@@ -3472,22 +3637,22 @@ int run_public_update(bool allow_elevation = true) {
     return 0;
 #else
     const InstallAction direct = [&]() -> InstallResult {
-        return install_prepared_executable(prepared->path, *executable,
-                                           prepared->sha256);
+        return install_prepared_executable(
+            prepared->path, *executable, prepared->sha256);
     };
     const InstallAction elevate = [&]() -> InstallResult {
         if (!allow_elevation) {
             return std::unexpected(InstallFailure{
                 .kind = InstallFailure::Kind::Other,
-                .detail = "privileged installer could not replace the executable"});
+                .detail =
+                    "privileged installer could not replace the executable"});
         }
-        auto elevated = install_with_elevation(*executable, archive,
-                                              (*releases)[*selected].tag,
-                                              language_code());
+        auto elevated = install_with_elevation(
+            *executable, archive, (*releases)[*selected].tag, language_code());
         if (!elevated) {
-            return std::unexpected(InstallFailure{
-                .kind = InstallFailure::Kind::Other,
-                .detail = elevated.error()});
+            return std::unexpected(
+                InstallFailure{.kind = InstallFailure::Kind::Other,
+                               .detail = elevated.error()});
         }
         return {};
     };
@@ -3509,51 +3674,63 @@ grant_windows_admin_read_access(const std::filesystem::path& root) {
     PSID owner = nullptr;
     PSECURITY_DESCRIPTOR descriptor = nullptr;
     auto writable = root.wstring();
-    const auto query = GetNamedSecurityInfoW(
-        writable.data(), SE_FILE_OBJECT,
-        DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION,
-        &owner, nullptr, &dacl, nullptr, &descriptor);
+    const auto query = GetNamedSecurityInfoW(writable.data(),
+                                             SE_FILE_OBJECT,
+                                             DACL_SECURITY_INFORMATION |
+                                                 OWNER_SECURITY_INFORMATION,
+                                             &owner,
+                                             nullptr,
+                                             &dacl,
+                                             nullptr,
+                                             &descriptor);
     if (query != ERROR_SUCCESS || descriptor == nullptr || dacl == nullptr) {
         if (descriptor != nullptr) {
             LocalFree(descriptor);
         }
-        return std::unexpected("could not inspect update workspace permissions");
+        return std::unexpected(
+            "could not inspect update workspace permissions");
     }
     SECURITY_DESCRIPTOR_CONTROL control = 0;
     DWORD revision = 0;
-    const bool control_valid = GetSecurityDescriptorControl(
-                                   descriptor, &control, &revision) != 0 &&
-                               (control & SE_DACL_PROTECTED) != 0;
+    const bool control_valid =
+        GetSecurityDescriptorControl(descriptor, &control, &revision) != 0 &&
+        (control & SE_DACL_PROTECTED) != 0;
     const bool owner_valid = owner != nullptr;
     bool valid = control_valid && owner_valid;
     alignas(DWORD) std::array<std::byte, SECURITY_MAX_SID_SIZE> system_sid{};
     DWORD system_size = static_cast<DWORD>(system_sid.size());
     alignas(DWORD) std::array<std::byte, SECURITY_MAX_SID_SIZE> admin_sid{};
     DWORD admin_size = static_cast<DWORD>(admin_sid.size());
-    valid = valid && CreateWellKnownSid(WinLocalSystemSid, nullptr,
-                                        system_sid.data(), &system_size) != 0 &&
-            CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr,
-                               admin_sid.data(), &admin_size) != 0;
+    valid =
+        valid &&
+        CreateWellKnownSid(
+            WinLocalSystemSid, nullptr, system_sid.data(), &system_size) != 0 &&
+        CreateWellKnownSid(WinBuiltinAdministratorsSid,
+                           nullptr,
+                           admin_sid.data(),
+                           &admin_size) != 0;
     HANDLE token = nullptr;
-    valid = valid && OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) != 0;
+    valid = valid &&
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) != 0;
     std::vector<std::byte> token_data;
     if (valid) {
         DWORD required = 0;
         GetTokenInformation(token, TokenUser, nullptr, 0, &required);
         token_data.resize(required);
-        valid = required != 0 && GetTokenInformation(token, TokenUser,
-                                                       token_data.data(), required,
-                                                       &required) != 0;
+        valid =
+            required != 0 &&
+            GetTokenInformation(
+                token, TokenUser, token_data.data(), required, &required) != 0;
     }
     if (token != nullptr) {
         CloseHandle(token);
     }
-    const auto* current_user = valid
-                                   ? reinterpret_cast<const TOKEN_USER*>(token_data.data())
-                                   : nullptr;
+    const auto* current_user =
+        valid ? reinterpret_cast<const TOKEN_USER*>(token_data.data())
+              : nullptr;
     ACL_SIZE_INFORMATION info{};
-    const bool acl_readable = GetAclInformation(dacl, &info, sizeof(info),
-                                                AclSizeInformation) != 0;
+    const bool acl_readable =
+        GetAclInformation(dacl, &info, sizeof(info), AclSizeInformation) != 0;
     valid = valid && acl_readable && info.AceCount == 2;
     bool has_workspace_user = false;
     bool has_system = false;
@@ -3579,12 +3756,14 @@ grant_windows_admin_read_access(const std::filesystem::path& root) {
             valid = false;
         }
     }
-    const bool owner_is_expected = owner != nullptr &&
+    const bool owner_is_expected =
+        owner != nullptr &&
         ((workspace_user != nullptr && EqualSid(owner, workspace_user)) ||
          EqualSid(owner, admin_sid.data()));
     if (!valid || !has_workspace_user || !has_system || !owner_is_expected) {
         LocalFree(descriptor);
-        return std::unexpected("update workspace ACL is not the expected private ACL");
+        return std::unexpected(
+            "update workspace ACL is not the expected private ACL");
     }
     EXPLICIT_ACCESSW access{};
     access.grfAccessPermissions = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
@@ -3600,15 +3779,21 @@ grant_windows_admin_read_access(const std::filesystem::path& root) {
         if (updated_acl != nullptr) {
             LocalFree(updated_acl);
         }
-        return std::unexpected("could not grant read-only administrator access to update workspace");
+        return std::unexpected("could not grant read-only administrator access "
+                               "to update workspace");
     }
     const auto set = SetNamedSecurityInfoW(
-        writable.data(), SE_FILE_OBJECT,
+        writable.data(),
+        SE_FILE_OBJECT,
         DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-        nullptr, nullptr, updated_acl, nullptr);
+        nullptr,
+        nullptr,
+        updated_acl,
+        nullptr);
     LocalFree(updated_acl);
     if (set != ERROR_SUCCESS) {
-        return std::unexpected("could not secure update workspace for UAC handoff");
+        return std::unexpected(
+            "could not secure update workspace for UAC handoff");
     }
     return validate_windows_workspace_acl(root);
 }
@@ -3620,30 +3805,34 @@ validate_windows_workspace_acl(const std::filesystem::path& root) {
 
 std::optional<WindowsFileIdentity>
 windows_file_identity(const std::filesystem::path& path) {
-    HANDLE file = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                              nullptr, OPEN_EXISTING,
-                              FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    HANDLE file =
+        CreateFileW(path.c_str(),
+                    FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT,
+                    nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         return std::nullopt;
     }
     FILE_ATTRIBUTE_TAG_INFO attributes{};
     FILE_ID_INFO info{};
-    const bool valid = GetFileInformationByHandleEx(
-                           file, FileAttributeTagInfo, &attributes,
-                           sizeof(attributes)) != 0 &&
-                       (attributes.FileAttributes &
-                        (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0 &&
-                       GetFileInformationByHandleEx(file, FileIdInfo, &info,
-                                                    sizeof(info)) != 0;
+    const bool valid =
+        GetFileInformationByHandleEx(
+            file, FileAttributeTagInfo, &attributes, sizeof(attributes)) != 0 &&
+        (attributes.FileAttributes &
+         (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0 &&
+        GetFileInformationByHandleEx(file, FileIdInfo, &info, sizeof(info)) !=
+            0;
     CloseHandle(file);
     if (!valid) {
         return std::nullopt;
     }
     WindowsFileIdentity result;
     result.volume_serial = info.VolumeSerialNumber;
-    std::memcpy(result.file_id.data(), info.FileId.Identifier,
-                result.file_id.size());
+    std::memcpy(
+        result.file_id.data(), info.FileId.Identifier, result.file_id.size());
     return result;
 }
 
@@ -3653,7 +3842,8 @@ bool windows_file_identity_matches(const std::filesystem::path& path,
     return actual && *actual == expected;
 }
 
-std::wstring windows_join_arguments(const std::vector<std::wstring>& arguments) {
+std::wstring
+windows_join_arguments(const std::vector<std::wstring>& arguments) {
     return join_windows_arguments(arguments);
 }
 
@@ -3691,7 +3881,8 @@ int run(int argc, char* argv[]) {
         int wide_argc = 0;
         LPWSTR* wide_argv = CommandLineToArgvW(GetCommandLineW(), &wide_argc);
         if (wide_argv == nullptr || wide_argc <= 0) {
-            return report_failure("could not decode Unicode installer arguments");
+            return report_failure(
+                "could not decode Unicode installer arguments");
         }
         std::vector<std::string> utf8_arguments;
         utf8_arguments.reserve(static_cast<std::size_t>(wide_argc));
@@ -3699,7 +3890,8 @@ int run(int argc, char* argv[]) {
             auto utf8 = narrow_utf8(wide_argv[index]);
             if (!utf8) {
                 LocalFree(wide_argv);
-                return report_failure("installer argument is not valid Unicode");
+                return report_failure(
+                    "installer argument is not valid Unicode");
             }
             utf8_arguments.push_back(std::move(*utf8));
         }
@@ -3718,8 +3910,8 @@ int run(int argc, char* argv[]) {
                                            utf8_argv.data());
         }
         if (internal_mode == "--kasumi-update-elevated") {
-            return run_windows_elevated_helper(static_cast<int>(utf8_argv.size()),
-                                               utf8_argv.data());
+            return run_windows_elevated_helper(
+                static_cast<int>(utf8_argv.size()), utf8_argv.data());
         }
         return report_failure("unknown internal update mode");
     }

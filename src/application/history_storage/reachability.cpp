@@ -28,7 +28,8 @@ ReachabilityVariant* find_variant(ReachabilityCommit& commit,
     return found == commit.variants.end() ? nullptr : &*found;
 }
 
-ReachabilityCommit* find_commit(CommitList& commits, std::string_view commit_id) {
+ReachabilityCommit* find_commit(CommitList& commits,
+                                std::string_view commit_id) {
     const auto it = std::ranges::lower_bound(
         commits, commit_id, {}, &ReachabilityCommit::commit_id);
     if (it != commits.end() && it->commit_id == commit_id) {
@@ -99,7 +100,9 @@ struct TraceGuard {
             active = false;
         }
     }
-    ~TraceGuard() noexcept { stop(); }
+    ~TraceGuard() noexcept {
+        stop();
+    }
 };
 
 ReachabilityResult inventory_impl(
@@ -180,7 +183,8 @@ ReachabilityResult inventory_impl(
     TraceGuard load_commits_guard{load_commits_name,
                                   platform::perf_trace::begin()};
     CommitList commits;
-    commits.reserve(listed->commit_variants.size() + listed->marker_variants.size());
+    commits.reserve(listed->commit_variants.size() +
+                    listed->marker_variants.size());
     std::size_t sequence = 0;
     for (const auto& [commit_id, references] : listed->commit_variants) {
         commits.push_back(ReachabilityCommit{.commit_id = commit_id});
@@ -327,8 +331,9 @@ ReachabilityResult inventory_impl(
             continue;
         }
         auto* commit = find_commit(commits, marker.reference->commit_id);
-        const auto* variant =
-            commit == nullptr ? nullptr : find_variant(*commit, *marker.reference);
+        const auto* variant = commit == nullptr
+                                  ? nullptr
+                                  : find_variant(*commit, *marker.reference);
         marker.state = variant == nullptr
                            ? ReachabilityMarkerState::MissingCommit
                            : marker_state(variant->state);
@@ -394,9 +399,10 @@ ReachabilityResult inventory_impl(
         const auto* anchor = find_commit(commits, anchor_id);
         if (anchor == nullptr || !anchor->valid || !anchor->reachable ||
             !anchor->tree || anchor->tree->height != height) {
-            return std::unexpected(detail::error(
-                ErrorCode::InvalidCommit,
-                "Epoch anchor is missing, invalid, unreachable, or has a mismatched height"));
+            return std::unexpected(
+                detail::error(ErrorCode::InvalidCommit,
+                              "Epoch anchor is missing, invalid, unreachable, "
+                              "or has a mismatched height"));
         }
     }
 
@@ -437,9 +443,12 @@ inventory_reachability(transport::Transport& storage,
                        const std::filesystem::path& workspace_root,
                        std::string_view trace_scope) {
     try {
-        return inventory_impl(
-            storage, key, workspace_root, identifiers, std::nullopt,
-            trace_scope);
+        return inventory_impl(storage,
+                              key,
+                              workspace_root,
+                              identifiers,
+                              std::nullopt,
+                              trace_scope);
     } catch (const std::bad_alloc&) {
         return std::unexpected(
             detail::error(ErrorCode::LimitExceeded, "allocation failed"));

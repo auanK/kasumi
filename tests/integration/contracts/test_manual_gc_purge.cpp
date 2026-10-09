@@ -44,7 +44,8 @@ CliResult run_cli(std::vector<std::string> arguments) {
         argv.push_back(argument.data());
     }
     testing::internal::CaptureStdout();
-    const auto code = kasumi::cli::run(static_cast<int>(argv.size()), argv.data());
+    const auto code =
+        kasumi::cli::run(static_cast<int>(argv.size()), argv.data());
     return {code, testing::internal::GetCapturedStdout()};
 }
 
@@ -57,7 +58,8 @@ protected:
     kasumi::application::ExecutionEnvironment environment{
         kasumi::test::workspace_path(workspace, "kasumi")};
     kasumi::application::Profile profile{
-        "demo", kasumi::test::workspace_path(workspace, "local"),
+        "demo",
+        kasumi::test::workspace_path(workspace, "local"),
         remote_dir.string()};
     std::string master_hex = std::string(64, '9');
 #if defined(_WIN32)
@@ -86,7 +88,9 @@ protected:
         master_key_environment = kasumi::test::scoped_environment_variable(
             "KASUMI_MASTER_KEY", master_hex);
         ASSERT_TRUE(kasumi::application::create_profile(
-            environment, profile, kasumi::application::MasterKeyHex{master_hex}));
+            environment,
+            profile,
+            kasumi::application::MasterKeyHex{master_hex}));
         ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
         auto decoded = kasumi::runtime::vault::decode_hex(master_hex);
         ASSERT_TRUE(decoded.has_value());
@@ -111,12 +115,12 @@ protected:
 
     void seed_history() {
         kasumi::test::write_text(profile.local_dir / "live.txt", "live");
-        const auto synced = kasumi::application::execute({
-            kasumi::application::Request{kasumi::application::Operation::Sync,
-                                         "demo"},
-            kasumi::application::Credentials{
-                kasumi::application::NoCredentials{}},
-            environment});
+        const auto synced = kasumi::application::execute(
+            {kasumi::application::Request{kasumi::application::Operation::Sync,
+                                          "demo"},
+             kasumi::application::Credentials{
+                 kasumi::application::NoCredentials{}},
+             environment});
         ASSERT_TRUE(synced.has_value()) << synced.error().detail;
     }
 
@@ -127,23 +131,25 @@ protected:
 
     std::filesystem::path encrypted_file(std::string_view plaintext) {
         const auto name = std::to_string(next_file++);
-        const auto plain = kasumi::test::workspace_path(
-            workspace, name + ".plain");
-        const auto encrypted = kasumi::test::workspace_path(
-            workspace, name + ".encrypted");
+        const auto plain =
+            kasumi::test::workspace_path(workspace, name + ".plain");
+        const auto encrypted =
+            kasumi::test::workspace_path(workspace, name + ".encrypted");
         kasumi::test::write_text(plain, plaintext);
         EXPECT_TRUE(kasumi::crypto::encrypt_file(plain, encrypted, key));
         return encrypted;
     }
 
     void put_object(std::string_view identifier, std::string_view plaintext) {
-        EXPECT_TRUE(transport::put(*storage, encrypted_file(plaintext), identifier));
+        EXPECT_TRUE(
+            transport::put(*storage, encrypted_file(plaintext), identifier));
     }
 
     std::optional<protocol::QuarantineEntry>
     add_quarantine(std::string_view plaintext) {
         const auto original = content_id(plaintext);
-        const auto quarantine = protocol::quarantine_identifier(layout, original);
+        const auto quarantine =
+            protocol::quarantine_identifier(layout, original);
         if (!quarantine) {
             ADD_FAILURE() << "invalid fixture quarantine identifier";
             return std::nullopt;
@@ -155,7 +161,10 @@ protected:
             return std::nullopt;
         }
         auto recorded = protocol::record_quarantine(
-            *storage, *quarantine, *now, key,
+            *storage,
+            *quarantine,
+            *now,
+            key,
             kasumi::test::workspace_root(workspace));
         if (!recorded) {
             ADD_FAILURE() << recorded.error().detail;
@@ -202,7 +211,8 @@ protected:
         for (const auto& identifier : *listed) {
             const auto downloaded = kasumi::test::workspace_path(
                 workspace, "snapshot-" + std::to_string(next_file++));
-            const auto fetched = transport::get(*storage, identifier, downloaded);
+            const auto fetched =
+                transport::get(*storage, identifier, downloaded);
             if (!fetched) {
                 ADD_FAILURE() << identifier << ": " << fetched.error().message;
                 continue;
@@ -219,13 +229,15 @@ protected:
     }
 };
 
-TEST_F(ManualQuarantinePurgeContract,
-       ManualQuarantinePurgeRemovesAuthenticatedYoungEntriesWithExplicitAuthority) {
+TEST_F(
+    ManualQuarantinePurgeContract,
+    ManualQuarantinePurgeRemovesAuthenticatedYoungEntriesWithExplicitAuthority) {
     seed_history();
     const auto first = add_quarantine("young-one");
     const auto second = add_quarantine("young-two");
     ASSERT_TRUE(first && second);
-    prove_quarantine({first->quarantine_identifier, second->quarantine_identifier});
+    prove_quarantine(
+        {first->quarantine_identifier, second->quarantine_identifier});
     const auto unrelated = content_id("unrelated-orphan");
     put_object(unrelated, "unrelated-orphan");
     const auto unsynced = profile.local_dir / "unsynced.txt";
@@ -244,7 +256,8 @@ TEST_F(ManualQuarantinePurgeContract,
     EXPECT_EQ(kasumi::test::read_text(unsynced), "local-only");
 }
 
-TEST_F(ManualQuarantinePurgeContract, MissingConfirmationAndMalformedArgumentsPreserveObjects) {
+TEST_F(ManualQuarantinePurgeContract,
+       MissingConfirmationAndMalformedArgumentsPreserveObjects) {
     const auto entry = add_quarantine("young-one");
     ASSERT_TRUE(entry);
     prove_quarantine({entry->quarantine_identifier});
@@ -252,10 +265,13 @@ TEST_F(ManualQuarantinePurgeContract, MissingConfirmationAndMalformedArgumentsPr
     const std::vector<std::vector<std::string>> rejected{
         {"kasumi", "gc", "purge-quarantine", "demo"},
         {"kasumi", "gc", "purge-quarantine", "demo", "--unknown"},
-        {"kasumi", "gc", "purge-quarantine", "demo",
-         "--confirm-permanent-loss", "extra"},
-        {"kasumi", "gc", "purge-quarantine", "",
-         "--confirm-permanent-loss"},
+        {"kasumi",
+         "gc",
+         "purge-quarantine",
+         "demo",
+         "--confirm-permanent-loss",
+         "extra"},
+        {"kasumi", "gc", "purge-quarantine", "", "--confirm-permanent-loss"},
     };
     for (const auto& args : rejected) {
         SCOPED_TRACE(args.back());
@@ -290,7 +306,8 @@ TEST_F(ManualQuarantinePurgeContract, OrdinaryGcKeepsYoungQuarantine) {
     EXPECT_EQ(remote_snapshot(), before);
 }
 
-TEST_F(ManualQuarantinePurgeContract, ExplicitPurgeCanRemoveReachableQuarantineWithoutEditingHistory) {
+TEST_F(ManualQuarantinePurgeContract,
+       ExplicitPurgeCanRemoveReachableQuarantineWithoutEditingHistory) {
     seed_history();
     const auto original = content_id("live");
     const auto quarantine = protocol::quarantine_identifier(layout, original);
@@ -302,9 +319,12 @@ TEST_F(ManualQuarantinePurgeContract, ExplicitPurgeCanRemoveReachableQuarantineW
               transport::Removal::Removed);
     const auto now = kasumi::platform::clock::unix_seconds();
     ASSERT_TRUE(now.has_value());
-    const auto recorded = protocol::record_quarantine(
-        *storage, *quarantine, *now, key,
-        kasumi::test::workspace_root(workspace));
+    const auto recorded =
+        protocol::record_quarantine(*storage,
+                                    *quarantine,
+                                    *now,
+                                    key,
+                                    kasumi::test::workspace_root(workspace));
     ASSERT_TRUE(recorded.has_value()) << recorded.error().detail;
     prove_quarantine({*quarantine});
     const auto before = remote_snapshot();
@@ -330,9 +350,12 @@ TEST_F(ManualQuarantinePurgeContract, OrdinaryGcRestoresReachableQuarantine) {
               transport::Removal::Removed);
     const auto now = kasumi::platform::clock::unix_seconds();
     ASSERT_TRUE(now.has_value());
-    ASSERT_TRUE(protocol::record_quarantine(
-        *storage, *quarantine, *now, key,
-        kasumi::test::workspace_root(workspace)));
+    ASSERT_TRUE(
+        protocol::record_quarantine(*storage,
+                                    *quarantine,
+                                    *now,
+                                    key,
+                                    kasumi::test::workspace_root(workspace)));
     prove_quarantine({*quarantine});
 
     const auto result = run_cli({"kasumi", "gc", "demo"});
@@ -347,17 +370,18 @@ TEST_F(ManualQuarantinePurgeContract, InvalidQuarantineInventoryFailsClosed) {
     const auto entry = add_quarantine("young-one");
     const auto other = add_quarantine("young-two");
     ASSERT_TRUE(entry && other);
-    prove_quarantine({entry->quarantine_identifier,
-                      other->quarantine_identifier});
-    const auto metadata_copy = kasumi::test::workspace_path(workspace, "metadata.copy");
-    ASSERT_TRUE(transport::get(*storage, entry->metadata_identifier,
-                               metadata_copy));
+    prove_quarantine(
+        {entry->quarantine_identifier, other->quarantine_identifier});
+    const auto metadata_copy =
+        kasumi::test::workspace_path(workspace, "metadata.copy");
+    ASSERT_TRUE(
+        transport::get(*storage, entry->metadata_identifier, metadata_copy));
     auto bytes = kasumi::test::read_binary(metadata_copy);
     ASSERT_FALSE(bytes.empty());
     bytes.front() ^= std::byte{1};
     kasumi::test::write_binary(metadata_copy, bytes);
-    ASSERT_TRUE(transport::put(*storage, metadata_copy,
-                               entry->metadata_identifier));
+    ASSERT_TRUE(
+        transport::put(*storage, metadata_copy, entry->metadata_identifier));
     EXPECT_FALSE(protocol::inventory_quarantine(
         *storage, key, kasumi::test::workspace_root(workspace)));
     const auto before = remote_snapshot();
@@ -370,16 +394,17 @@ TEST_F(ManualQuarantinePurgeContract, MissingMetadataFailsClosed) {
     const auto entry = add_quarantine("young-one");
     const auto other = add_quarantine("young-two");
     ASSERT_TRUE(entry && other);
-    prove_quarantine({entry->quarantine_identifier,
-                      other->quarantine_identifier});
+    prove_quarantine(
+        {entry->quarantine_identifier, other->quarantine_identifier});
     ASSERT_EQ(transport::remove(*storage, entry->metadata_identifier).value(),
               transport::Removal::Removed);
     const auto incomplete = protocol::inventory_quarantine(
         *storage, key, kasumi::test::workspace_root(workspace));
     ASSERT_TRUE(incomplete.has_value()) << incomplete.error().detail;
-    const auto missing = std::ranges::find_if(*incomplete, [&](const auto& value) {
-        return value.quarantine_identifier == entry->quarantine_identifier;
-    });
+    const auto missing =
+        std::ranges::find_if(*incomplete, [&](const auto& value) {
+            return value.quarantine_identifier == entry->quarantine_identifier;
+        });
     ASSERT_NE(missing, incomplete->end());
     EXPECT_FALSE(missing->quarantined_at.has_value());
     const auto before = remote_snapshot();
@@ -405,17 +430,18 @@ TEST_F(ManualQuarantinePurgeContract,
     const auto first = add_quarantine("young-one");
     const auto second = add_quarantine("young-two");
     ASSERT_TRUE(first && second);
-    prove_quarantine({first->quarantine_identifier,
-                      second->quarantine_identifier});
+    prove_quarantine(
+        {first->quarantine_identifier, second->quarantine_identifier});
     const auto copy = kasumi::test::workspace_path(workspace, "wrong.meta");
     ASSERT_TRUE(transport::get(*storage, first->metadata_identifier, copy));
     ASSERT_TRUE(transport::put(*storage, copy, second->metadata_identifier));
     const auto mismatched = protocol::inventory_quarantine(
         *storage, key, kasumi::test::workspace_root(workspace));
     ASSERT_TRUE(mismatched.has_value()) << mismatched.error().detail;
-    const auto target = std::ranges::find_if(*mismatched, [&](const auto& value) {
-        return value.quarantine_identifier == second->quarantine_identifier;
-    });
+    const auto target =
+        std::ranges::find_if(*mismatched, [&](const auto& value) {
+            return value.quarantine_identifier == second->quarantine_identifier;
+        });
     ASSERT_NE(target, mismatched->end());
     const auto verified = protocol::verify_quarantine(
         *storage, *target, kasumi::test::workspace_root(workspace));
@@ -444,7 +470,8 @@ TEST_F(ManualQuarantinePurgeContract, PhysicalHashMismatchFailsClosed) {
     EXPECT_EQ(remote_snapshot(), before);
 }
 
-TEST_F(ManualQuarantinePurgeContract, MalformedQuarantineIdentifierFailsClosed) {
+TEST_F(ManualQuarantinePurgeContract,
+       MalformedQuarantineIdentifierFailsClosed) {
     const auto entry = add_quarantine("young-one");
     ASSERT_TRUE(entry);
     prove_quarantine({entry->quarantine_identifier});
@@ -456,14 +483,15 @@ TEST_F(ManualQuarantinePurgeContract, MalformedQuarantineIdentifierFailsClosed) 
     EXPECT_EQ(remote_snapshot(), before);
 }
 
-TEST_F(ManualQuarantinePurgeContract, InconsistentDuplicateMetadataFailsClosed) {
+TEST_F(ManualQuarantinePurgeContract,
+       InconsistentDuplicateMetadataFailsClosed) {
     const auto entry = add_quarantine("young-one");
     ASSERT_TRUE(entry);
     prove_quarantine({entry->quarantine_identifier});
     const auto copy = kasumi::test::workspace_path(workspace, "duplicate.meta");
     ASSERT_TRUE(transport::get(*storage, entry->metadata_identifier, copy));
-    ASSERT_TRUE(transport::put(*storage, copy,
-                               entry->metadata_identifier + ".meta"));
+    ASSERT_TRUE(
+        transport::put(*storage, copy, entry->metadata_identifier + ".meta"));
     EXPECT_FALSE(protocol::inventory_quarantine(
         *storage, key, kasumi::test::workspace_root(workspace)));
     const auto before = remote_snapshot();
@@ -484,8 +512,8 @@ TEST_F(ManualQuarantinePurgeContract, ValidEpochObjectsSurvive) {
         *storage, key, kasumi::test::workspace_root(workspace));
     ASSERT_TRUE(chain.has_value()) << chain.error().detail;
     ASSERT_FALSE(chain->empty());
-    const auto epoch_id = history::epoch::object_identifier(
-        layout, chain->back().reference);
+    const auto epoch_id =
+        history::epoch::object_identifier(layout, chain->back().reference);
     ASSERT_TRUE(epoch_id.has_value());
     EXPECT_NE(std::ranges::find(reachability->valid_epochs, *epoch_id),
               reachability->valid_epochs.end());
@@ -547,7 +575,8 @@ TEST_F(ManualQuarantinePurgeContract, ActiveAndAbandonedWritersBlockPurge) {
     const auto abandoned = layout.writers_prefix + std::string(32, 'a');
     put_object(abandoned, "abandoned-writer");
     const auto abandoned_writers = protocol::active_writers(*storage, layout);
-    ASSERT_TRUE(abandoned_writers.has_value()) << abandoned_writers.error().detail;
+    ASSERT_TRUE(abandoned_writers.has_value())
+        << abandoned_writers.error().detail;
     EXPECT_EQ(abandoned_writers->size(), 1U);
     const auto abandoned_before = remote_snapshot();
     const auto result = confirmed_purge();
@@ -570,7 +599,8 @@ TEST_F(ManualQuarantinePurgeContract, ExistingBarrierBlocksPurge) {
     ASSERT_TRUE(protocol::release_registration(*barrier));
 }
 
-TEST_F(ManualQuarantinePurgeContract, EmptyQuarantineSucceedsWithoutDeletingObjects) {
+TEST_F(ManualQuarantinePurgeContract,
+       EmptyQuarantineSucceedsWithoutDeletingObjects) {
     seed_history();
     const auto before = remote_snapshot();
     const auto result = confirmed_purge();
@@ -597,8 +627,13 @@ class ManualWriterRemovalContract : public ManualQuarantinePurgeContract {
 protected:
     CliResult remove_writer(std::string identifier,
                             std::string language = "en") {
-        return run_cli({"kasumi", "--lang", std::move(language), "gc",
-                        "remove-writer", "demo", std::move(identifier)});
+        return run_cli({"kasumi",
+                        "--lang",
+                        std::move(language),
+                        "gc",
+                        "remove-writer",
+                        "demo",
+                        std::move(identifier)});
     }
 };
 
@@ -614,8 +649,9 @@ TEST_F(ManualWriterRemovalContract,
 
     const auto result = remove_writer(selected);
     ASSERT_EQ(result.code, 0) << result.output;
-    EXPECT_NE(result.output.find("cannot determine whether this writer's process"),
-              std::string::npos);
+    EXPECT_NE(
+        result.output.find("cannot determine whether this writer's process"),
+        std::string::npos);
     EXPECT_NE(result.output.find(
                   "Verify that no Sync or maintenance operation is active"),
               std::string::npos);
@@ -634,8 +670,9 @@ TEST_F(ManualWriterRemovalContract,
     const auto foreign_key =
         kasumi::runtime::vault::decode_hex(std::string(64, 'a'));
     ASSERT_TRUE(foreign_key.has_value());
-    const auto foreign = history::derive_remote_layout(*foreign_key)
-                             .writers_prefix + std::string(32, 'b');
+    const auto foreign =
+        history::derive_remote_layout(*foreign_key).writers_prefix +
+        std::string(32, 'b');
     const auto before = remote_snapshot();
 
     EXPECT_NE(remove_writer("../unrelated/object").code, 0);
@@ -653,7 +690,8 @@ TEST_F(ManualWriterRemovalContract, NeverRemovesAnExistingGcBarrier) {
     const auto result = remove_writer(selected);
     EXPECT_NE(result.code, 0) << result.output;
     EXPECT_NE(result.output.find("maintenance barrier is present"),
-              std::string::npos) << result.output;
+              std::string::npos)
+        << result.output;
     EXPECT_EQ(remote_snapshot(), before);
 }
 
@@ -720,7 +758,8 @@ TEST_F(ManualWriterRemovalContract, WarningAndSuccessAreLocalized) {
               std::string::npos);
 }
 
-TEST_F(ManualQuarantineRepairContract, MissingConfirmationAndMalformedArgumentsPreserveObjects) {
+TEST_F(ManualQuarantineRepairContract,
+       MissingConfirmationAndMalformedArgumentsPreserveObjects) {
     const auto entry = add_quarantine("young-one");
     ASSERT_TRUE(entry);
     prove_quarantine({entry->quarantine_identifier});
@@ -728,10 +767,13 @@ TEST_F(ManualQuarantineRepairContract, MissingConfirmationAndMalformedArgumentsP
     const std::vector<std::vector<std::string>> rejected{
         {"kasumi", "gc", "repair-quarantine", "demo"},
         {"kasumi", "gc", "repair-quarantine", "demo", "--unknown"},
-        {"kasumi", "gc", "repair-quarantine", "demo",
-         "--confirm-permanent-loss", "extra"},
-        {"kasumi", "gc", "repair-quarantine", "",
-         "--confirm-permanent-loss"},
+        {"kasumi",
+         "gc",
+         "repair-quarantine",
+         "demo",
+         "--confirm-permanent-loss",
+         "extra"},
+        {"kasumi", "gc", "repair-quarantine", "", "--confirm-permanent-loss"},
     };
     for (const auto& args : rejected) {
         SCOPED_TRACE(args.back());
@@ -740,7 +782,8 @@ TEST_F(ManualQuarantineRepairContract, MissingConfirmationAndMalformedArgumentsP
     }
 }
 
-TEST_F(ManualQuarantineRepairContract, RepairRemovesAuthenticatedMetadataWhenPayloadAbsent) {
+TEST_F(ManualQuarantineRepairContract,
+       RepairRemovesAuthenticatedMetadataWhenPayloadAbsent) {
     seed_history();
     const auto entry = add_quarantine("young-one");
     ASSERT_TRUE(entry);

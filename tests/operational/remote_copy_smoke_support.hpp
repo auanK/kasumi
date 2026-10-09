@@ -38,8 +38,18 @@ struct CleanupResult {
     std::optional<transport::ErrorCode> error_category;
 };
 
-enum class ReadinessPresence { Present, Absent, Failed };
-enum class ReadinessHash { Valid, ObjectNotFound, Unsupported, Failed, Invalid };
+enum class ReadinessPresence {
+    Present,
+    Absent,
+    Failed
+};
+enum class ReadinessHash {
+    Valid,
+    ObjectNotFound,
+    Unsupported,
+    Failed,
+    Invalid
+};
 enum class ReadinessClassification {
     Ready,
     ReadyAfterDelay,
@@ -60,7 +70,11 @@ struct ReadinessAttempt {
     std::string sha256;
 };
 
-enum class SmokeStatus { Pass, Unsupported, Failed };
+enum class SmokeStatus {
+    Pass,
+    Unsupported,
+    Failed
+};
 
 struct CopySmokeOutcome {
     bool required_operation_failed = false;
@@ -80,11 +94,11 @@ struct CopySmokeOutcome {
 SmokeStatus classify(const CopySmokeOutcome& outcome) noexcept;
 std::string_view status_name(SmokeStatus status) noexcept;
 std::array<std::chrono::milliseconds, 6> readiness_schedule() noexcept;
-ReadinessClassification classify_readiness(
-    std::span<const ReadinessAttempt> attempts,
-    std::chrono::milliseconds maximum_elapsed);
-std::string_view readiness_classification_name(
-    ReadinessClassification classification) noexcept;
+ReadinessClassification
+classify_readiness(std::span<const ReadinessAttempt> attempts,
+                   std::chrono::milliseconds maximum_elapsed);
+std::string_view
+readiness_classification_name(ReadinessClassification classification) noexcept;
 
 std::expected<RemoteParent, std::string>
 parse_remote_parent(std::string_view location);
@@ -105,12 +119,12 @@ require_unused_child(transport::Transport& storage, std::string_view child);
 bool identifier_in_child(std::string_view child,
                          std::string_view identifier) noexcept;
 
-CleanupResult cleanup_owned_child(
-    transport::Transport& storage,
-    std::string_view child,
-    std::string_view owner_token,
-    const std::vector<std::string>& object_identifiers,
-    const std::filesystem::path& local_scratch);
+CleanupResult
+cleanup_owned_child(transport::Transport& storage,
+                    std::string_view child,
+                    std::string_view owner_token,
+                    const std::vector<std::string>& object_identifiers,
+                    const std::filesystem::path& local_scratch);
 
 nlohmann::json to_json(const OperationRecord& operation);
 nlohmann::json to_json(const CleanupResult& cleanup);

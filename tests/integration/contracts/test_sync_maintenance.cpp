@@ -509,8 +509,8 @@ TEST(ApplicationMaintenanceContract,
         environment, profile, MasterKeyHex{std::string(64, '8')}));
     ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
     kasumi::test::write_text(profile.local_dir / "pending.txt", "payload");
-    ASSERT_TRUE(kasumi::application::execute(
-        request(Operation::Sync, environment)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, environment)));
 
     const auto paths = kasumi::runtime::resolve_profile_paths(
         environment.app_data_dir, "demo");
@@ -520,8 +520,8 @@ TEST(ApplicationMaintenanceContract,
     const auto* row = kasumi::find_row((*state)->tree, "pending.txt");
     ASSERT_NE(row, nullptr);
     (*state)->pending_materializations = {*row};
-    ASSERT_TRUE(kasumi::state_storage::save_state(paths->database_path,
-                                                  **state));
+    ASSERT_TRUE(
+        kasumi::state_storage::save_state(paths->database_path, **state));
     ASSERT_TRUE(std::filesystem::remove(profile.local_dir / "pending.txt"));
 
     for (const auto operation : {Operation::Preview, Operation::Status}) {
@@ -534,10 +534,11 @@ TEST(ApplicationMaintenanceContract,
         EXPECT_EQ(plan->pending_paths.front(), "pending.txt");
         EXPECT_TRUE(std::ranges::none_of(
             plan->items, [](const kasumi::application::PlanItem& item) {
-                return item.action == kasumi::application::PlanAction::
-                           DeleteRemote;
+                return item.action ==
+                       kasumi::application::PlanAction::DeleteRemote;
             }));
-        EXPECT_FALSE(std::filesystem::exists(profile.local_dir / "pending.txt"));
+        EXPECT_FALSE(
+            std::filesystem::exists(profile.local_dir / "pending.txt"));
     }
 }
 
@@ -588,8 +589,8 @@ TEST(ApplicationMaintenanceContract,
     const auto required = kasumi::application::execute(
         request(Operation::Sync, environment, receiver.name));
     ASSERT_TRUE(required.has_value()) << required.error().detail;
-    const auto* partial = std::get_if<kasumi::application::SyncCompleted>(
-        &required->data);
+    const auto* partial =
+        std::get_if<kasumi::application::SyncCompleted>(&required->data);
     ASSERT_NE(partial, nullptr);
     EXPECT_TRUE(partial->partial);
     ASSERT_EQ(partial->pending_paths.size(), 1U);
@@ -613,14 +614,15 @@ TEST(ApplicationMaintenanceContract,
         kasumi::test::workspace_path(workspace, "remote").string()};
     ASSERT_TRUE(kasumi::application::create_profile(
         environment, corrupt_receiver, key));
-    ASSERT_TRUE(std::filesystem::create_directories(
-        corrupt_receiver.local_dir));
+    ASSERT_TRUE(
+        std::filesystem::create_directories(corrupt_receiver.local_dir));
     const auto corrupt_download = kasumi::application::execute(
         request(Operation::Sync, environment, corrupt_receiver.name));
     ASSERT_FALSE(corrupt_download.has_value());
     EXPECT_EQ(corrupt_download.error().code,
               kasumi::application::ErrorCode::SynchronizationFailure);
-    EXPECT_FALSE(std::filesystem::exists(corrupt_receiver.local_dir / "file.txt"));
+    EXPECT_FALSE(
+        std::filesystem::exists(corrupt_receiver.local_dir / "file.txt"));
 }
 
 TEST(ApplicationMaintenanceContract,
@@ -834,7 +836,8 @@ TEST(ApplicationMaintenanceContract,
         kasumi::transport::Presence::Present);
 }
 
-TEST(SyncMaintenanceTest, EmitsGarbageCollectProgressStagesInDeterministicOrder) {
+TEST(SyncMaintenanceTest,
+     EmitsGarbageCollectProgressStagesInDeterministicOrder) {
     auto workspace = kasumi::test::make_temp_workspace("gc-progress-order");
     const ExecutionEnvironment environment{
         kasumi::test::workspace_path(workspace, "app")};
@@ -863,7 +866,8 @@ TEST(SyncMaintenanceTest, EmitsGarbageCollectProgressStagesInDeterministicOrder)
     std::vector<kasumi::application::GarbageCollectProgress> progress_events;
     auto req = request(Operation::GarbageCollect, environment);
     req.on_progress = [&](const kasumi::application::ExecutionProgress& p) {
-        if (const auto* gc = std::get_if<kasumi::application::GarbageCollectProgress>(&p)) {
+        if (const auto* gc =
+                std::get_if<kasumi::application::GarbageCollectProgress>(&p)) {
             progress_events.push_back(*gc);
         }
     };
@@ -871,18 +875,25 @@ TEST(SyncMaintenanceTest, EmitsGarbageCollectProgressStagesInDeterministicOrder)
     ASSERT_TRUE(gc.has_value()) << gc.error().detail;
 
     ASSERT_GE(progress_events.size(), 5U);
-    EXPECT_EQ(progress_events[0].stage, kasumi::application::GarbageCollectStage::Preparing);
-    EXPECT_EQ(progress_events[1].stage, kasumi::application::GarbageCollectStage::CheckingQuarantine);
-    EXPECT_EQ(progress_events[2].stage, kasumi::application::GarbageCollectStage::Analyzing);
+    EXPECT_EQ(progress_events[0].stage,
+              kasumi::application::GarbageCollectStage::Preparing);
+    EXPECT_EQ(progress_events[1].stage,
+              kasumi::application::GarbageCollectStage::CheckingQuarantine);
+    EXPECT_EQ(progress_events[2].stage,
+              kasumi::application::GarbageCollectStage::Analyzing);
     EXPECT_FALSE(progress_events[2].candidate_count.has_value());
-    EXPECT_EQ(progress_events[3].stage, kasumi::application::GarbageCollectStage::Analyzing);
+    EXPECT_EQ(progress_events[3].stage,
+              kasumi::application::GarbageCollectStage::Analyzing);
     ASSERT_TRUE(progress_events[3].candidate_count.has_value());
     EXPECT_EQ(*progress_events[3].candidate_count, 1U);
-    EXPECT_EQ(progress_events[4].stage, kasumi::application::GarbageCollectStage::Applying);
-    EXPECT_EQ(progress_events.back().stage, kasumi::application::GarbageCollectStage::Finalizing);
+    EXPECT_EQ(progress_events[4].stage,
+              kasumi::application::GarbageCollectStage::Applying);
+    EXPECT_EQ(progress_events.back().stage,
+              kasumi::application::GarbageCollectStage::Finalizing);
 }
 
-TEST(SyncMaintenanceTest, EmitsGarbageCollectProgressOmittingApplyingWhenNoCandidates) {
+TEST(SyncMaintenanceTest,
+     EmitsGarbageCollectProgressOmittingApplyingWhenNoCandidates) {
     auto workspace = kasumi::test::make_temp_workspace("gc-progress-no-cand");
     const ExecutionEnvironment environment{
         kasumi::test::workspace_path(workspace, "app")};
@@ -905,7 +916,8 @@ TEST(SyncMaintenanceTest, EmitsGarbageCollectProgressOmittingApplyingWhenNoCandi
     std::vector<kasumi::application::GarbageCollectProgress> progress_events;
     auto req = request(Operation::GarbageCollect, environment);
     req.on_progress = [&](const kasumi::application::ExecutionProgress& p) {
-        if (const auto* gc = std::get_if<kasumi::application::GarbageCollectProgress>(&p)) {
+        if (const auto* gc =
+                std::get_if<kasumi::application::GarbageCollectProgress>(&p)) {
             progress_events.push_back(*gc);
         }
     };
@@ -913,21 +925,28 @@ TEST(SyncMaintenanceTest, EmitsGarbageCollectProgressOmittingApplyingWhenNoCandi
     ASSERT_TRUE(gc.has_value()) << gc.error().detail;
 
     ASSERT_GE(progress_events.size(), 4U);
-    EXPECT_EQ(progress_events[0].stage, kasumi::application::GarbageCollectStage::Preparing);
-    EXPECT_EQ(progress_events[1].stage, kasumi::application::GarbageCollectStage::CheckingQuarantine);
-    EXPECT_EQ(progress_events[2].stage, kasumi::application::GarbageCollectStage::Analyzing);
-    EXPECT_EQ(progress_events[3].stage, kasumi::application::GarbageCollectStage::Analyzing);
+    EXPECT_EQ(progress_events[0].stage,
+              kasumi::application::GarbageCollectStage::Preparing);
+    EXPECT_EQ(progress_events[1].stage,
+              kasumi::application::GarbageCollectStage::CheckingQuarantine);
+    EXPECT_EQ(progress_events[2].stage,
+              kasumi::application::GarbageCollectStage::Analyzing);
+    EXPECT_EQ(progress_events[3].stage,
+              kasumi::application::GarbageCollectStage::Analyzing);
     ASSERT_TRUE(progress_events[3].candidate_count.has_value());
     EXPECT_EQ(*progress_events[3].candidate_count, 0U);
-    EXPECT_EQ(progress_events.back().stage, kasumi::application::GarbageCollectStage::Finalizing);
+    EXPECT_EQ(progress_events.back().stage,
+              kasumi::application::GarbageCollectStage::Finalizing);
 
     for (const auto& event : progress_events) {
-        EXPECT_NE(event.stage, kasumi::application::GarbageCollectStage::Applying);
+        EXPECT_NE(event.stage,
+                  kasumi::application::GarbageCollectStage::Applying);
     }
 }
 
 TEST(SyncMaintenanceTest, GarbageCollectProgressDoesNotAlterResultOrState) {
-    auto workspace = kasumi::test::make_temp_workspace("gc-progress-invariance");
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-progress-invariance");
     const ExecutionEnvironment environment{
         kasumi::test::workspace_path(workspace, "app")};
     const Profile profile{
@@ -956,7 +975,8 @@ TEST(SyncMaintenanceTest, GarbageCollectProgressDoesNotAlterResultOrState) {
     auto req_plain = request(Operation::GarbageCollect, environment);
     const auto gc_plain = kasumi::application::execute(req_plain);
     ASSERT_TRUE(gc_plain.has_value());
-    const auto data_plain = std::get<kasumi::application::GarbageCollectCompleted>(gc_plain->data);
+    const auto data_plain =
+        std::get<kasumi::application::GarbageCollectCompleted>(gc_plain->data);
 
     // Verify 1 quarantined
     EXPECT_EQ(data_plain.candidate_objects, 1U);
@@ -979,15 +999,18 @@ TEST(SyncMaintenanceTest, FsckPublishesOrderedStagesAndAuthenticatedTotals) {
         kasumi::test::workspace_path(workspace, "remote").string());
     ASSERT_TRUE(opened.has_value());
     ASSERT_TRUE(kasumi::transport::initialize(*opened));
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, environment)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, environment)));
 
     std::vector<kasumi::application::FsckProgress> events;
     auto req = request(Operation::Fsck, environment);
-    req.on_progress = [&](const kasumi::application::ExecutionProgress& progress) {
-        if (const auto* fsck = std::get_if<kasumi::application::FsckProgress>(&progress)) {
-            events.push_back(*fsck);
-        }
-    };
+    req.on_progress =
+        [&](const kasumi::application::ExecutionProgress& progress) {
+            if (const auto* fsck =
+                    std::get_if<kasumi::application::FsckProgress>(&progress)) {
+                events.push_back(*fsck);
+            }
+        };
     const auto result = kasumi::application::execute(std::move(req));
     ASSERT_TRUE(result.has_value()) << (result ? "" : result.error().detail);
 
@@ -1030,7 +1053,8 @@ int run_resolve_missing_cli(std::string profile = "demo") {
     const auto exit_code = kasumi::cli::run(3, argv);
     const auto output = testing::internal::GetCapturedStdout();
     if (exit_code != 0) {
-        std::cerr << "CLI output (code " << exit_code << "): " << output << "\n";
+        std::cerr << "CLI output (code " << exit_code << "): " << output
+                  << "\n";
     }
     return exit_code;
 }
@@ -1057,8 +1081,7 @@ RecoveryFixture make_recovery_fixture(const std::string& test_name) {
     auto ws = kasumi::test::make_temp_workspace(test_name);
     const auto remote = kasumi::test::workspace_path(ws, "remote");
     const std::string hex_key(64, '9');
-    const ExecutionEnvironment a_env{
-        kasumi::test::workspace_path(ws, "a_app")};
+    const ExecutionEnvironment a_env{kasumi::test::workspace_path(ws, "a_app")};
     const auto a_local = kasumi::test::workspace_path(ws, "a_local");
     const Profile a_prof{"demo", a_local, remote.string()};
 
@@ -1072,8 +1095,8 @@ RecoveryFixture make_recovery_fixture(const std::string& test_name) {
         "XDG_CONFIG_HOME",
         kasumi::test::workspace_path(ws, "b_config").string());
 #endif
-    auto mkey = kasumi::test::scoped_environment_variable("KASUMI_MASTER_KEY",
-                                                          hex_key);
+    auto mkey =
+        kasumi::test::scoped_environment_variable("KASUMI_MASTER_KEY", hex_key);
     const auto b_env = kasumi::application::default_execution_environment();
     const auto b_local = kasumi::test::workspace_path(ws, "b_local");
     const Profile b_prof{"demo", b_local, remote.string()};
@@ -1113,7 +1136,8 @@ TEST(ApplicationRecoveryContract,
 
     kasumi::test::write_text(f.local_a / "lost.txt", "lost-payload");
     kasumi::test::write_text(f.local_a / "retained.txt", "retained-payload");
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_a)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_a)));
 
     const auto lost_cid = content_id_for(f.master_hex, "lost-payload");
     const auto retained_cid = content_id_for(f.master_hex, "retained-payload");
@@ -1182,7 +1206,8 @@ TEST(ApplicationRecoveryContract,
     EXPECT_FALSE(std::filesystem::exists(f.local_b / "lost.txt"));
     EXPECT_TRUE(std::filesystem::exists(f.local_b / "retained.txt"));
 
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_a)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_a)));
     EXPECT_FALSE(std::filesystem::exists(f.local_a / "lost.txt"));
     EXPECT_TRUE(std::filesystem::exists(f.local_a / "retained.txt"));
 }
@@ -1201,7 +1226,8 @@ TEST(ApplicationRecoveryContract,
     ASSERT_TRUE(kasumi::transport::initialize(storage));
 
     kasumi::test::write_text(f.local_a / "lost.txt", "lost-payload");
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_a)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_a)));
 
     const auto lost_cid = content_id_for(f.master_hex, "lost-payload");
     ASSERT_TRUE(kasumi::transport::remove(storage, lost_cid));
@@ -1239,7 +1265,8 @@ TEST(ApplicationRecoveryContract,
     ASSERT_EQ((*state_b)->pending_materializations.size(), 1U);
     EXPECT_EQ((*state_b)->pending_materializations.front().path, "lost.txt");
 
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_a)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_a)));
     EXPECT_TRUE(std::filesystem::exists(f.local_a / "lost.txt"));
 }
 
@@ -1257,7 +1284,8 @@ TEST(ApplicationRecoveryContract,
     ASSERT_TRUE(kasumi::transport::initialize(storage));
 
     kasumi::test::write_text(f.local_a / "lost.txt", "lost-payload");
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_a)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_a)));
 
     const auto lost_cid = content_id_for(f.master_hex, "lost-payload");
     const auto saved_ciphertext =
@@ -1294,7 +1322,8 @@ TEST(ApplicationRecoveryContract,
     ASSERT_TRUE(post_state.has_value() && *post_state);
     EXPECT_NE(kasumi::find_row((*post_state)->tree, "lost.txt"), nullptr);
 
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_b)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_b)));
     EXPECT_TRUE(std::filesystem::exists(f.local_b / "lost.txt"));
 }
 
@@ -1312,7 +1341,8 @@ TEST(ApplicationRecoveryContract,
     ASSERT_TRUE(kasumi::transport::initialize(storage));
 
     kasumi::test::write_text(f.local_a / "lost.txt", "lost-payload");
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_a)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_a)));
 
     const auto lost_cid = content_id_for(f.master_hex, "lost-payload");
     ASSERT_TRUE(kasumi::transport::remove(storage, lost_cid));
@@ -1339,7 +1369,8 @@ TEST(ApplicationRecoveryContract,
     ASSERT_TRUE(post_state.has_value() && *post_state);
     EXPECT_NE(kasumi::find_row((*post_state)->tree, "lost.txt"), nullptr);
 
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_b)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_b)));
     EXPECT_EQ(kasumi::transport::presence(storage, lost_cid).value(),
               kasumi::transport::Presence::Present);
 }
@@ -1360,7 +1391,8 @@ TEST(ApplicationRecoveryContract,
     kasumi::test::write_text(f.local_a / "lost1.txt", "payload-1");
     kasumi::test::write_text(f.local_a / "lost2.txt", "payload-2");
     kasumi::test::write_text(f.local_a / "retained.txt", "payload-retained");
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_a)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_a)));
 
     const auto cid1 = content_id_for(f.master_hex, "payload-1");
     const auto cid2 = content_id_for(f.master_hex, "payload-2");
@@ -1414,7 +1446,8 @@ TEST(ApplicationRecoveryContract,
 
     kasumi::test::write_text(f.local_a / "lost_unrecov.txt", "unrecov-payload");
     kasumi::test::write_text(f.local_a / "lost_recov.txt", "recov-payload");
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_a)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_a)));
 
     const auto cid_unrecov = content_id_for(f.master_hex, "unrecov-payload");
     const auto cid_recov = content_id_for(f.master_hex, "recov-payload");
@@ -1446,11 +1479,13 @@ TEST(ApplicationRecoveryContract,
     ASSERT_TRUE(paths_b.has_value());
     auto post_state = kasumi::state_storage::load_state(paths_b->database_path);
     ASSERT_TRUE(post_state.has_value() && *post_state);
-    EXPECT_EQ(kasumi::find_row((*post_state)->tree, "lost_unrecov.txt"), nullptr);
+    EXPECT_EQ(kasumi::find_row((*post_state)->tree, "lost_unrecov.txt"),
+              nullptr);
     EXPECT_NE(kasumi::find_row((*post_state)->tree, "lost_recov.txt"), nullptr);
-    EXPECT_TRUE(std::ranges::none_of(
-        (*post_state)->pending_materializations,
-        [](const auto& r) { return r.path == "lost_unrecov.txt"; }));
+    EXPECT_TRUE(std::ranges::none_of((*post_state)->pending_materializations,
+                                     [](const auto& r) {
+                                         return r.path == "lost_unrecov.txt";
+                                     }));
 }
 
 TEST(ApplicationRecoveryContract,
@@ -1468,7 +1503,8 @@ TEST(ApplicationRecoveryContract,
 
     kasumi::test::write_text(f.local_a / "a.txt", "unrecoverable-payload");
     kasumi::test::write_text(f.local_a / "b.txt", "recoverable-payload");
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_a)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_a)));
 
     const auto cid_a = content_id_for(f.master_hex, "unrecoverable-payload");
     const auto cid_b = content_id_for(f.master_hex, "recoverable-payload");
@@ -1497,7 +1533,8 @@ TEST(ApplicationRecoveryContract,
     const auto paths_b =
         kasumi::runtime::resolve_profile_paths(f.env_b.app_data_dir, "demo");
     ASSERT_TRUE(paths_b.has_value());
-    const auto state = kasumi::state_storage::load_state(paths_b->database_path);
+    const auto state =
+        kasumi::state_storage::load_state(paths_b->database_path);
     ASSERT_TRUE(state.has_value() && *state);
     EXPECT_EQ(kasumi::find_row((*state)->tree, "a.txt"), nullptr);
     EXPECT_NE(kasumi::find_row((*state)->tree, "b.txt"), nullptr);
@@ -1518,7 +1555,8 @@ TEST(ApplicationRecoveryContract,
               "recoverable-payload");
     EXPECT_FALSE(std::filesystem::exists(f.local_b / "a.txt"));
 
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_a)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_a)));
     EXPECT_FALSE(std::filesystem::exists(f.local_a / "a.txt"));
 }
 
@@ -1537,7 +1575,8 @@ TEST(ApplicationRecoveryContract,
 
     kasumi::test::write_text(f.local_a / "lost.txt", "lost-payload");
     kasumi::test::write_text(f.local_a / "retained.txt", "retained-payload");
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_a)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_a)));
 
     const auto lost_cid = content_id_for(f.master_hex, "lost-payload");
     const auto retained_cid = content_id_for(f.master_hex, "retained-payload");
@@ -1576,7 +1615,8 @@ TEST(ApplicationRecoveryContract,
 
     kasumi::test::write_text(f.local_a / "lost.txt", "lost-payload");
     kasumi::test::write_text(f.local_a / "unrelated.txt", "unrelated-payload");
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_a)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_a)));
 
     const auto lost_cid = content_id_for(f.master_hex, "lost-payload");
     ASSERT_TRUE(kasumi::transport::remove(storage, lost_cid));
@@ -1623,7 +1663,8 @@ TEST(ApplicationRecoveryContract,
 
     kasumi::test::write_text(f.local_a / "lost.txt", "lost-payload");
     kasumi::test::write_text(f.local_a / "edited.txt", "original-content");
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_a)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_a)));
 
     const auto lost_cid = content_id_for(f.master_hex, "lost-payload");
     ASSERT_TRUE(kasumi::transport::remove(storage, lost_cid));
@@ -1639,19 +1680,23 @@ TEST(ApplicationRecoveryContract,
     // Client B modifies edited.txt locally
     kasumi::test::write_text(f.local_b / "edited.txt", "modified-content");
 
-    // Running resolve-missing must fail closed: no uploads or unrelated operations!
+    // Running resolve-missing must fail closed: no uploads or unrelated
+    // operations!
     const auto exit_code = run_resolve_missing_cli("demo");
     EXPECT_NE(exit_code, 0);
 
-    // Verify state was not modified / new commit with modified content was not published
+    // Verify state was not modified / new commit with modified content was not
+    // published
     const auto paths_b =
         kasumi::runtime::resolve_profile_paths(f.env_b.app_data_dir, "demo");
     ASSERT_TRUE(paths_b.has_value());
     auto post_state = kasumi::state_storage::load_state(paths_b->database_path);
     ASSERT_TRUE(post_state.has_value() && *post_state);
-    const auto* edited_row = kasumi::find_row((*post_state)->tree, "edited.txt");
+    const auto* edited_row =
+        kasumi::find_row((*post_state)->tree, "edited.txt");
     ASSERT_NE(edited_row, nullptr);
-    EXPECT_EQ(edited_row->hash, kasumi::hasher::hash_string("original-content"));
+    EXPECT_EQ(edited_row->hash,
+              kasumi::hasher::hash_string("original-content"));
 }
 
 TEST(ApplicationRecoveryContract,
@@ -1668,7 +1713,8 @@ TEST(ApplicationRecoveryContract,
     ASSERT_TRUE(kasumi::transport::initialize(storage));
 
     kasumi::test::write_text(f.local_a / "lost.txt", "lost-payload");
-    ASSERT_TRUE(kasumi::application::execute(request(Operation::Sync, f.env_a)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_a)));
 
     const auto lost_cid = content_id_for(f.master_hex, "lost-payload");
     ASSERT_TRUE(kasumi::transport::remove(storage, lost_cid));
@@ -1688,7 +1734,8 @@ TEST(ApplicationRecoveryContract,
     const auto exit_code = run_resolve_missing_cli("demo");
     EXPECT_NE(exit_code, 0);
 
-    // Verify remote tree still has lost.txt as file, not converted to directory or deleted
+    // Verify remote tree still has lost.txt as file, not converted to directory
+    // or deleted
     const auto paths_b =
         kasumi::runtime::resolve_profile_paths(f.env_b.app_data_dir, "demo");
     ASSERT_TRUE(paths_b.has_value());

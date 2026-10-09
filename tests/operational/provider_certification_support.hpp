@@ -78,8 +78,7 @@ struct Report {
 struct FsckCorruptEvidence {
     bool corruption_installed = false;
     bool fsck_failed = false;
-    application::ErrorCode error_code =
-        application::ErrorCode::RuntimeFailure;
+    application::ErrorCode error_code = application::ErrorCode::RuntimeFailure;
     std::uint64_t audit_get_calls = 0;
     std::uint64_t audit_decrypt_calls = 0;
 };
@@ -91,21 +90,19 @@ std::expected<ProviderTarget, std::string>
 create_rclone_target(std::string provider_id,
                      std::string remote_name,
                      std::string authorized_parent);
-std::expected<void, std::string>
-cleanup_rclone_target(ProviderTarget& target);
+std::expected<void, std::string> cleanup_rclone_target(ProviderTarget& target);
 std::expected<std::filesystem::path, std::string>
 target_path(const LocalTarget& target, const std::filesystem::path& relative);
 
 Report run_certification(const ProviderTarget& target);
 Report run_local_certification(const std::filesystem::path& owned_root);
-bool fsck_corrupt_evidence_passes(
-    const FsckCorruptEvidence& evidence) noexcept;
-std::expected<void, std::string> install_verified_object(
-    Report& report,
-    transport::Transport& storage,
-    const std::filesystem::path& source,
-    std::string_view identifier,
-    const std::filesystem::path& readback);
+bool fsck_corrupt_evidence_passes(const FsckCorruptEvidence& evidence) noexcept;
+std::expected<void, std::string>
+install_verified_object(Report& report,
+                        transport::Transport& storage,
+                        const std::filesystem::path& source,
+                        std::string_view identifier,
+                        const std::filesystem::path& readback);
 std::vector<std::string> scenario_registry(const ProviderTarget& target);
 std::string derive_status(const Report& report);
 nlohmann::json to_json(const Report& report);

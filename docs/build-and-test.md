@@ -14,6 +14,17 @@ Repository CI exercises:
 * GCC 14 on Windows MSYS2 UCRT64;
 * GCC 14 on Linux.
 
+## C++ Formatting
+
+Use the `clang-format` version recorded in `.clang-format-version` and the rules in `.clang-format`. The project targets C++23; clang-format 22.1.8 has no `c++23` value for `Standard`, so the config keeps `Latest` with the tool version pinned. To verify all tracked C++ files in PowerShell:
+
+```powershell
+$expected = (Get-Content .clang-format-version -Raw).Trim()
+if ((clang-format --version) -notmatch [regex]::Escape($expected)) { throw "Expected clang-format $expected" }
+$files = @(git ls-files -- '*.cpp' '*.hpp')
+clang-format --dry-run --Werror @files
+```
+
 ## Embedded Locale Generation
 
 The build generates `generated/cli/i18n_embedded.hpp` from `locales/en.json` and `locales/pt-BR.json` using `scripts/generate_i18n_embedded.py`. The generated header is a build artifact, not a checked-in source file. The generator emits bounded raw C++ string fragments to remain compatible with MSVC limits while preserving source bytes, including line endings. Keep the generated file under the build tree; do not hand-edit it.

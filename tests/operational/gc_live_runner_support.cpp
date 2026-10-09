@@ -15,16 +15,19 @@ constexpr std::string_view default_owner_identifier = "owner.marker";
 
 std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary);
-    return std::vector<std::uint8_t>{std::istreambuf_iterator<char>{stream}, {}};
+    return std::vector<std::uint8_t>{std::istreambuf_iterator<char>{stream},
+                                     {}};
 }
 
-bool write_file_string(const std::filesystem::path& path, std::string_view text) {
+bool write_file_string(const std::filesystem::path& path,
+                       std::string_view text) {
     std::ofstream stream(path, std::ios::binary | std::ios::trunc);
     stream.write(text.data(), static_cast<std::streamsize>(text.size()));
     return static_cast<bool>(stream);
 }
 
-bool write_synthetic_payload(const std::filesystem::path& path, std::size_t total_bytes) {
+bool write_synthetic_payload(const std::filesystem::path& path,
+                             std::size_t total_bytes) {
     std::ofstream stream(path, std::ios::binary | std::ios::trunc);
     if (!stream) {
         return false;
@@ -37,7 +40,8 @@ bool write_synthetic_payload(const std::filesystem::path& path, std::size_t tota
     std::size_t remaining = total_bytes;
     while (remaining > 0) {
         const std::size_t to_write = std::min(remaining, chunk_size);
-        stream.write(reinterpret_cast<const char*>(chunk.data()), static_cast<std::streamsize>(to_write));
+        stream.write(reinterpret_cast<const char*>(chunk.data()),
+                     static_cast<std::streamsize>(to_write));
         if (!stream) {
             return false;
         }
@@ -76,7 +80,8 @@ transport::ListingResult vault_list(void* context) {
     return filtered;
 }
 
-transport::ListingResult vault_list_prefix(void* context, std::string_view prefix) {
+transport::ListingResult vault_list_prefix(void* context,
+                                           std::string_view prefix) {
     auto* ctx = static_cast<VaultTransportContext*>(context);
     auto raw = transport::list(*ctx->underlying, prefix);
     if (!raw) {
@@ -92,7 +97,8 @@ transport::ListingResult vault_list_prefix(void* context, std::string_view prefi
     return filtered;
 }
 
-transport::PresenceResult vault_presence(void* context, std::string_view identifier) {
+transport::PresenceResult vault_presence(void* context,
+                                         std::string_view identifier) {
     auto* ctx = static_cast<VaultTransportContext*>(context);
     if (identifier == ctx->hidden_marker) {
         return transport::Presence::Absent;
@@ -100,7 +106,8 @@ transport::PresenceResult vault_presence(void* context, std::string_view identif
     return transport::presence(*ctx->underlying, identifier);
 }
 
-transport::RemovalResult vault_remove(void* context, std::string_view identifier) {
+transport::RemovalResult vault_remove(void* context,
+                                      std::string_view identifier) {
     auto* ctx = static_cast<VaultTransportContext*>(context);
     if (identifier == ctx->hidden_marker) {
         return transport::Removal::AlreadyAbsent;
@@ -128,7 +135,8 @@ transport::Result vault_put(void* context,
     return {};
 }
 
-transport::Result vault_put_batch(void* context, const transport::PutBatch& batch) {
+transport::Result vault_put_batch(void* context,
+                                  const transport::PutBatch& batch) {
     auto* ctx = static_cast<VaultTransportContext*>(context);
     for (const auto& id : batch.identifiers) {
         if (id == ctx->hidden_marker) {
@@ -161,10 +169,12 @@ transport::Result vault_get(void* context,
     return {};
 }
 
-transport::Result vault_get_batch(void* context, const transport::GetBatch& batch) {
+transport::Result vault_get_batch(void* context,
+                                  const transport::GetBatch& batch) {
     auto* ctx = static_cast<VaultTransportContext*>(context);
     for (const auto& id : batch.identifiers) {
-        const auto full_id = batch.source_prefix.empty() ? id : batch.source_prefix + "/" + id;
+        const auto full_id =
+            batch.source_prefix.empty() ? id : batch.source_prefix + "/" + id;
         if (id == ctx->hidden_marker || full_id == ctx->hidden_marker) {
             return std::unexpected(transport::Error{
                 .code = transport::ErrorCode::ObjectNotFound,
@@ -186,15 +196,12 @@ transport::Result vault_copy(void* context,
             .message = "cannot copy to or from owner marker",
         });
     }
-    return transport::copy(*ctx->underlying,
-                           source_identifier,
-                           destination_identifier);
+    return transport::copy(
+        *ctx->underlying, source_identifier, destination_identifier);
 }
 
-std::expected<std::string, transport::Error>
-vault_physical_hash(void* context,
-                    std::string_view identifier,
-                    std::string_view algorithm) {
+std::expected<std::string, transport::Error> vault_physical_hash(
+    void* context, std::string_view identifier, std::string_view algorithm) {
     auto* ctx = static_cast<VaultTransportContext*>(context);
     if (identifier == ctx->hidden_marker) {
         return std::unexpected(transport::Error{
@@ -276,22 +283,34 @@ transport::Transport make_vault_transport(transport::Transport& underlying,
     transport::StorageOperations ops{
         .initialize = vault_initialize,
         .put = vault_put,
-        .put_batch = underlying.storage.put_batch != nullptr ? vault_put_batch : nullptr,
+        .put_batch =
+            underlying.storage.put_batch != nullptr ? vault_put_batch : nullptr,
         .get = vault_get,
-        .get_batch = underlying.storage.get_batch != nullptr ? vault_get_batch : nullptr,
-        .copy = (copy_mode == CopyMode::ForceFallback || underlying.storage.copy == nullptr)
+        .get_batch =
+            underlying.storage.get_batch != nullptr ? vault_get_batch : nullptr,
+        .copy = (copy_mode == CopyMode::ForceFallback ||
+                 underlying.storage.copy == nullptr)
                     ? nullptr
                     : vault_copy,
         .presence = vault_presence,
         .list = vault_list,
-        .list_prefix = underlying.storage.list_prefix != nullptr ? vault_list_prefix : nullptr,
-        .physical_hash = underlying.storage.physical_hash != nullptr ? vault_physical_hash : nullptr,
-        .physical_hash_batch = underlying.storage.physical_hash_batch != nullptr ? vault_physical_hash_batch : nullptr,
-        .control_read_batch = underlying.storage.control_read_batch != nullptr ? vault_control_read_batch : nullptr,
+        .list_prefix = underlying.storage.list_prefix != nullptr
+                           ? vault_list_prefix
+                           : nullptr,
+        .physical_hash = underlying.storage.physical_hash != nullptr
+                             ? vault_physical_hash
+                             : nullptr,
+        .physical_hash_batch = underlying.storage.physical_hash_batch != nullptr
+                                   ? vault_physical_hash_batch
+                                   : nullptr,
+        .control_read_batch = underlying.storage.control_read_batch != nullptr
+                                  ? vault_control_read_batch
+                                  : nullptr,
         .remove = vault_remove,
-        .physical_hash_batch_min_objects = underlying.storage.physical_hash_batch != nullptr
-                                               ? underlying.storage.physical_hash_batch_min_objects
-                                               : 0,
+        .physical_hash_batch_min_objects =
+            underlying.storage.physical_hash_batch != nullptr
+                ? underlying.storage.physical_hash_batch_min_objects
+                : 0,
     };
     return transport::Transport{
         .state = transport::TransportStateHandle{ctx, destroy_vault_context},
@@ -317,49 +336,79 @@ setup_scenario(transport::Transport& vault_storage,
         });
     }
 
-    const auto layout = kasumi::application::history_storage::derive_remote_layout(key);
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key);
 
     // 1. Reachable content
-    constexpr std::string_view reachable_text = "kasumi live gc reachable content v1";
+    constexpr std::string_view reachable_text =
+        "kasumi live gc reachable content v1";
     const auto reachable_plain = scenario_dir / "reachable.plain";
     const auto reachable_enc = scenario_dir / "reachable.enc";
     if (!write_file_string(reachable_plain, reachable_text)) {
-        return std::unexpected(transport::Error{.code = transport::ErrorCode::Io, .message = "failed to write reachable plain"});
+        return std::unexpected(
+            transport::Error{.code = transport::ErrorCode::Io,
+                             .message = "failed to write reachable plain"});
     }
-    if (!kasumi::crypto::encrypt_file(reachable_plain, reachable_enc, key, kasumi::crypto::FilePurpose::Content)) {
-        return std::unexpected(transport::Error{.code = transport::ErrorCode::Io, .message = "failed to encrypt reachable content"});
+    if (!kasumi::crypto::encrypt_file(reachable_plain,
+                                      reachable_enc,
+                                      key,
+                                      kasumi::crypto::FilePurpose::Content)) {
+        return std::unexpected(
+            transport::Error{.code = transport::ErrorCode::Io,
+                             .message = "failed to encrypt reachable content"});
     }
-    result.reachable_content_id = kasumi::crypto::content_identifier(key, kasumi::hasher::hash_string(reachable_text));
-    auto put_reachable = transport::put(vault_storage, reachable_enc, result.reachable_content_id);
+    result.reachable_content_id = kasumi::crypto::content_identifier(
+        key, kasumi::hasher::hash_string(reachable_text));
+    auto put_reachable = transport::put(
+        vault_storage, reachable_enc, result.reachable_content_id);
     if (!put_reachable) {
         auto failure = put_reachable.error();
-        failure.message = "failed to publish reachable content: " + failure.message;
+        failure.message =
+            "failed to publish reachable content: " + failure.message;
         return std::unexpected(std::move(failure));
     }
 
     // 2. Reachable commit referencing reachable content
     kasumi::Snapshot tree{
-        .rows = {
-            kasumi::NodeRow{.path = "", .hash = {}, .size = 0, .mtime = {}, .is_directory = true},
-            kasumi::NodeRow{.path = "live.txt", .hash = kasumi::hasher::hash_string(reachable_text), .size = reachable_text.size(), .mtime = {}, .is_directory = false},
-        },
+        .rows =
+            {
+                kasumi::NodeRow{.path = "",
+                                .hash = {},
+                                .size = 0,
+                                .mtime = {},
+                                .is_directory = true},
+                kasumi::NodeRow{.path = "live.txt",
+                                .hash =
+                                    kasumi::hasher::hash_string(reachable_text),
+                                .size = reachable_text.size(),
+                                .mtime = {},
+                                .is_directory = false},
+            },
     };
     kasumi::finalize_snapshot(tree);
     auto commit_res = kasumi::history::make_commit(0, {}, tree);
     if (!commit_res) {
-        return std::unexpected(transport::Error{.code = transport::ErrorCode::Io, .message = "failed to create commit"});
+        return std::unexpected(
+            transport::Error{.code = transport::ErrorCode::Io,
+                             .message = "failed to create commit"});
     }
-    auto published = kasumi::application::history_storage::publish_commit(vault_storage, key, *commit_res, scratch_root);
+    auto published = kasumi::application::history_storage::publish_commit(
+        vault_storage, key, *commit_res, scratch_root);
     if (!published) {
-        return std::unexpected(transport::Error{
-            .code = transport::ErrorCode::Io,
-            .message = "failed to publish reachable commit: " +
-                       published.error().detail});
+        return std::unexpected(
+            transport::Error{.code = transport::ErrorCode::Io,
+                             .message = "failed to publish reachable commit: " +
+                                        published.error().detail});
     }
-    result.reachable_commit_id = kasumi::application::history_storage::commit_object(layout, published->head);
-    result.reachable_marker_id = kasumi::application::history_storage::marker_object(layout, published->head);
+    result.reachable_commit_id =
+        kasumi::application::history_storage::commit_object(layout,
+                                                            published->head);
+    result.reachable_marker_id =
+        kasumi::application::history_storage::marker_object(layout,
+                                                            published->head);
 
-    // Exercise restoration of reachable content from its authenticated quarantine.
+    // Exercise restoration of reachable content from its authenticated
+    // quarantine.
     auto restore_q_id =
         kasumi::application::history_storage::maintenance_protocol::
             quarantine_identifier(layout, result.reachable_content_id);
@@ -369,26 +418,24 @@ setup_scenario(transport::Transport& vault_storage,
             .code = transport::ErrorCode::Io,
             .message = "failed to prepare reachable quarantine fixture"});
     }
-    auto restore_copy =
-        kasumi::application::history_storage::maintenance_protocol::
-            copy_verified(vault_storage,
-                          result.reachable_content_id,
-                          *restore_q_id,
-                          scratch_root);
+    auto restore_copy = kasumi::application::history_storage::
+        maintenance_protocol::copy_verified(vault_storage,
+                                            result.reachable_content_id,
+                                            *restore_q_id,
+                                            scratch_root);
     if (!restore_copy) {
         return std::unexpected(transport::Error{
             .code = transport::ErrorCode::Io,
             .message = "failed to stage reachable quarantine fixture: " +
                        restore_copy.error().detail});
     }
-    auto restore_metadata =
-        kasumi::application::history_storage::maintenance_protocol::
-            record_quarantine(vault_storage,
-                              *restore_q_id,
-                              *now,
-                              key,
-                              scratch_root,
-                              *restore_copy);
+    auto restore_metadata = kasumi::application::history_storage::
+        maintenance_protocol::record_quarantine(vault_storage,
+                                                *restore_q_id,
+                                                *now,
+                                                key,
+                                                scratch_root,
+                                                *restore_copy);
     if (!restore_metadata) {
         return std::unexpected(transport::Error{
             .code = transport::ErrorCode::Io,
@@ -415,13 +462,11 @@ setup_scenario(transport::Transport& vault_storage,
             .message = "failed to write expired quarantine fixture"});
     }
     auto expired_hash = kasumi::crypto::content::hash_file(expired_plain);
-    auto expired_encrypted =
-        kasumi::crypto::encrypt_file_with_hashes(
-            expired_plain, expired_enc, key,
-            kasumi::crypto::FilePurpose::Content);
+    auto expired_encrypted = kasumi::crypto::encrypt_file_with_hashes(
+        expired_plain, expired_enc, key, kasumi::crypto::FilePurpose::Content);
     if (!expired_hash || !expired_encrypted ||
-        *now <= kasumi::application::history_storage::
-                    maintenance_protocol::quarantine_retention_seconds) {
+        *now <= kasumi::application::history_storage::maintenance_protocol::
+                    quarantine_retention_seconds) {
         return std::unexpected(transport::Error{
             .code = transport::ErrorCode::Io,
             .message = "failed to encrypt expired quarantine fixture"});
@@ -441,17 +486,17 @@ setup_scenario(transport::Transport& vault_storage,
     if (!put_expired) {
         return std::unexpected(put_expired.error());
     }
-    auto expired_metadata =
-        kasumi::application::history_storage::maintenance_protocol::
-            record_quarantine(
-                vault_storage,
-                *expired_q_id,
-                *now - kasumi::application::history_storage::
-                           maintenance_protocol::quarantine_retention_seconds -
-                    1,
-                key,
-                scratch_root,
-                expired_encrypted->ciphertext_sha256);
+    auto expired_metadata = kasumi::application::history_storage::
+        maintenance_protocol::record_quarantine(
+            vault_storage,
+            *expired_q_id,
+            *now -
+                kasumi::application::history_storage::maintenance_protocol::
+                    quarantine_retention_seconds -
+                1,
+            key,
+            scratch_root,
+            expired_encrypted->ciphertext_sha256);
     if (!expired_metadata) {
         return std::unexpected(transport::Error{
             .code = transport::ErrorCode::Io,
@@ -464,47 +509,63 @@ setup_scenario(transport::Transport& vault_storage,
     const auto orphan_enc = scenario_dir / "orphan.enc";
     std::size_t plaintext_bytes = 0;
     if (candidate_payload_bytes == 0) {
-        constexpr std::string_view orphan_text = "kasumi live gc orphan candidate v1";
+        constexpr std::string_view orphan_text =
+            "kasumi live gc orphan candidate v1";
         plaintext_bytes = orphan_text.size();
         if (!write_file_string(orphan_plain, orphan_text)) {
-            return std::unexpected(transport::Error{.code = transport::ErrorCode::Io, .message = "failed to write orphan plain"});
+            return std::unexpected(
+                transport::Error{.code = transport::ErrorCode::Io,
+                                 .message = "failed to write orphan plain"});
         }
     } else {
         if (candidate_payload_bytes > 64 * 1024 * 1024) {
             return std::unexpected(transport::Error{
                 .code = transport::ErrorCode::InvalidIdentifier,
-                .message = "candidate_payload_bytes exceeds maximum allowed limit of 64 MiB",
+                .message = "candidate_payload_bytes exceeds maximum allowed "
+                           "limit of 64 MiB",
             });
         }
         plaintext_bytes = candidate_payload_bytes;
         if (!write_synthetic_payload(orphan_plain, candidate_payload_bytes)) {
-            return std::unexpected(transport::Error{.code = transport::ErrorCode::Io, .message = "failed to write synthetic candidate plain"});
+            return std::unexpected(transport::Error{
+                .code = transport::ErrorCode::Io,
+                .message = "failed to write synthetic candidate plain"});
         }
     }
 
     auto plain_hash = kasumi::crypto::content::hash_file(orphan_plain);
     if (!plain_hash) {
-        return std::unexpected(transport::Error{.code = transport::ErrorCode::Io, .message = "failed to hash orphan plain: " + plain_hash.error()});
+        return std::unexpected(transport::Error{
+            .code = transport::ErrorCode::Io,
+            .message = "failed to hash orphan plain: " + plain_hash.error()});
     }
-    auto enc_res = kasumi::crypto::encrypt_file_with_hashes(orphan_plain, orphan_enc, key, kasumi::crypto::FilePurpose::Content);
+    auto enc_res = kasumi::crypto::encrypt_file_with_hashes(
+        orphan_plain, orphan_enc, key, kasumi::crypto::FilePurpose::Content);
     if (!enc_res) {
-        return std::unexpected(transport::Error{.code = transport::ErrorCode::Io, .message = "failed to encrypt orphan candidate"});
+        return std::unexpected(
+            transport::Error{.code = transport::ErrorCode::Io,
+                             .message = "failed to encrypt orphan candidate"});
     }
     result.candidate_id = kasumi::crypto::content_identifier(key, *plain_hash);
     result.candidate_sha256 = enc_res->ciphertext_sha256;
     result.candidate_plaintext_bytes = plaintext_bytes;
 
-    auto put_orphan = transport::put(vault_storage, orphan_enc, result.candidate_id);
+    auto put_orphan =
+        transport::put(vault_storage, orphan_enc, result.candidate_id);
     if (!put_orphan) {
         auto failure = put_orphan.error();
-        failure.message = "failed to publish orphan candidate: " + failure.message;
+        failure.message =
+            "failed to publish orphan candidate: " + failure.message;
         return std::unexpected(std::move(failure));
     }
 
     // 4. Expected quarantine identifiers
-    auto q_id = kasumi::application::history_storage::maintenance_protocol::quarantine_identifier(layout, result.candidate_id);
+    auto q_id = kasumi::application::history_storage::maintenance_protocol::
+        quarantine_identifier(layout, result.candidate_id);
     if (!q_id) {
-        return std::unexpected(transport::Error{.code = transport::ErrorCode::InvalidIdentifier, .message = "failed to compute quarantine identifier"});
+        return std::unexpected(transport::Error{
+            .code = transport::ErrorCode::InvalidIdentifier,
+            .message = "failed to compute quarantine identifier"});
     }
     result.expected_quarantine_id = *q_id;
     result.expected_quarantine_meta_id = *q_id + ".meta";
@@ -563,7 +624,8 @@ capture_inventory(transport::Transport& child_storage,
         }
 
         if (capture_exact_bytes) {
-            const auto dl_path = dl_dir / ("obj-" + std::to_string(download_seq++));
+            const auto dl_path =
+                dl_dir / ("obj-" + std::to_string(download_seq++));
             auto dl = transport::get(child_storage, id, dl_path);
             if (dl) {
                 entry.exact_bytes = read_file_bytes(dl_path);
@@ -579,11 +641,10 @@ capture_inventory(transport::Transport& child_storage,
     return inventory;
 }
 
-RunnerReport run(
-    const RunnerOptions& options,
-    transport::Transport* parent_transport_override,
-    transport::Transport* child_transport_override,
-    GcInvocation gc_override) {
+RunnerReport run(const RunnerOptions& options,
+                 transport::Transport* parent_transport_override,
+                 transport::Transport* child_transport_override,
+                 GcInvocation gc_override) {
     RunnerReport report;
     report.remote_parent = options.remote_parent;
     report.stage_reached = LiveGcStage::Start;
@@ -603,7 +664,8 @@ RunnerReport run(
         return report;
     }
 
-    const auto parsed_parent = smoke::parse_remote_parent(options.remote_parent);
+    const auto parsed_parent =
+        smoke::parse_remote_parent(options.remote_parent);
     if (!parsed_parent) {
         report.status = "REFUSED";
         report.error_message = "invalid remote parent format";
@@ -613,7 +675,8 @@ RunnerReport run(
     // Gate 3: Check candidate payload limit
     if (options.candidate_payload_bytes > 64 * 1024 * 1024) {
         report.status = "REFUSED";
-        report.error_message = "candidate_payload_bytes exceeds maximum allowed limit (64 MiB)";
+        report.error_message =
+            "candidate_payload_bytes exceeds maximum allowed limit (64 MiB)";
         return report;
     }
 
@@ -652,7 +715,8 @@ RunnerReport run(
         auto opened = transport::open_transport(parsed_parent->location);
         if (!opened) {
             report.status = "REFUSED";
-            report.error_message = "could not open parent transport: " + transport::describe(opened.error());
+            report.error_message = "could not open parent transport: " +
+                                   transport::describe(opened.error());
             return report;
         }
         owned_parent_storage = std::move(*opened);
@@ -663,14 +727,17 @@ RunnerReport run(
     preflight::PreInitializeObservation pre_obs;
     if (!parent_transport_override) {
         // Real live preflight probe
-        pre_obs = preflight::observe_pre_initialize(
-            *parent_storage, *parsed_parent, child_name, options.preflight_timeout);
+        pre_obs = preflight::observe_pre_initialize(*parent_storage,
+                                                    *parsed_parent,
+                                                    child_name,
+                                                    options.preflight_timeout);
         auto classification = preflight::classify_pre_initialize(
             pre_obs, *parsed_parent, child_name);
         report.pre_initialize = preflight::to_json(pre_obs, classification);
 
         if (classification.disposition != preflight::ChildDisposition::Unused) {
-            report.status = classification.disposition == preflight::ChildDisposition::Existing
+            report.status = classification.disposition ==
+                                    preflight::ChildDisposition::Existing
                                 ? "EXISTING"
                                 : "REFUSED";
             report.error_message = classification.reason;
@@ -682,26 +749,33 @@ RunnerReport run(
             auto listing = transport::list(*child_transport_override);
             if (listing && !listing->empty()) {
                 report.status = "REFUSED";
-                report.error_message = "pre-existing child detected in test harness";
+                report.error_message =
+                    "pre-existing child detected in test harness";
                 return report;
             }
         }
         pre_obs = preflight::PreInitializeObservation{
-            .transport = {
-                .result = "FAILED",
-                .error_category = transport::ErrorCode::StorageNotFound,
-            },
-            .raw_rc = {
-                .endpoint = "operations/list",
-                .request_fs = parsed_parent->remote_name + ":",
-                .request_remote = parsed_parent->directory.empty() ? child_name : (parsed_parent->directory + "/" + child_name),
-                .result = "FAILED",
-                .native_status = 404,
-                .error_category = transport::ErrorCode::ProtocolFailure,
-                .error_message = "error in ListJSON: directory not found",
-            },
+            .transport =
+                {
+                    .result = "FAILED",
+                    .error_category = transport::ErrorCode::StorageNotFound,
+                },
+            .raw_rc =
+                {
+                    .endpoint = "operations/list",
+                    .request_fs = parsed_parent->remote_name + ":",
+                    .request_remote =
+                        parsed_parent->directory.empty()
+                            ? child_name
+                            : (parsed_parent->directory + "/" + child_name),
+                    .result = "FAILED",
+                    .native_status = 404,
+                    .error_category = transport::ErrorCode::ProtocolFailure,
+                    .error_message = "error in ListJSON: directory not found",
+                },
         };
-        auto classification = preflight::classify_pre_initialize(pre_obs, *parsed_parent, child_name);
+        auto classification = preflight::classify_pre_initialize(
+            pre_obs, *parsed_parent, child_name);
         report.pre_initialize = preflight::to_json(pre_obs, classification);
     }
     report.stage_reached = LiveGcStage::PreflightPassed;
@@ -744,7 +818,8 @@ RunnerReport run(
         auto opened = preflight::open_child_storage(*parsed_parent, child_name);
         if (!opened) {
             report.status = "FAILED";
-            report.error_message = "could not open child storage: " + transport::describe(opened.error());
+            report.error_message = "could not open child storage: " +
+                                   transport::describe(opened.error());
             return report;
         }
         owned_child_storage = std::move(*opened);
@@ -756,7 +831,8 @@ RunnerReport run(
     auto init_result = preflight::initialize_child(child_storage, pre_obs);
     if (!init_result) {
         report.status = "FAILED";
-        report.error_message = "child initialize failed: " + transport::describe(init_result.error());
+        report.error_message = "child initialize failed: " +
+                               transport::describe(init_result.error());
         return report;
     }
 
@@ -773,7 +849,8 @@ RunnerReport run(
     report.stage_reached = LiveGcStage::ChildInitialized;
 
     const auto marker_src = options.local_scratch / "owner_marker.src";
-    const auto marker_readback = options.local_scratch / "owner_marker.readback";
+    const auto marker_readback =
+        options.local_scratch / "owner_marker.readback";
     std::error_code ec;
     std::filesystem::remove(marker_src, ec);
     std::filesystem::remove(marker_readback, ec);
@@ -786,19 +863,18 @@ RunnerReport run(
 
     // Establish ownership marker using Phase 5B gate
     auto marker_res = preflight::establish_ownership_marker(
-        child_storage,
-        post_obs,
-        owner_token,
-        marker_src,
-        marker_readback);
+        child_storage, post_obs, owner_token, marker_src, marker_readback);
 
     if (!marker_res) {
         report.status = "FAILED";
         report.ownership.result = "FAILED";
-        auto pres = transport::presence(child_storage.storage, default_owner_identifier);
-        report.ownership.marker_written = (pres && *pres == transport::Presence::Present);
+        auto pres = transport::presence(child_storage.storage,
+                                        default_owner_identifier);
+        report.ownership.marker_written =
+            (pres && *pres == transport::Presence::Present);
         report.ownership.marker_readback_verified = false;
-        report.error_message = "failed to establish owner marker: " + transport::describe(marker_res.error());
+        report.error_message = "failed to establish owner marker: " +
+                               transport::describe(marker_res.error());
         return report;
     }
     report.ownership.result = "SUCCESS";
@@ -807,9 +883,10 @@ RunnerReport run(
     report.stage_reached = LiveGcStage::OwnershipEstablished;
 
     // Create vault transport view (filters out owner.marker)
-    auto vault_transport = make_vault_transport(child_storage.storage,
-                                                std::string{default_owner_identifier},
-                                                options.copy_mode);
+    auto vault_transport =
+        make_vault_transport(child_storage.storage,
+                             std::string{default_owner_identifier},
+                             options.copy_mode);
 
     // Synthetic key
     std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
@@ -828,7 +905,8 @@ RunnerReport run(
                                    options.candidate_payload_bytes);
     if (!scenario) {
         report.status = "FAILED";
-        report.error_message = "failed to publish scenario: " + scenario.error().message;
+        report.error_message =
+            "failed to publish scenario: " + scenario.error().message;
         if (options.preserve_evidence_on_failure) {
             report.cleanup.result = "preserved";
             report.cleanup.detail = "evidence preserved on scenario failure";
@@ -839,18 +917,23 @@ RunnerReport run(
     report.scenario.candidate_identifier = scenario->candidate_id;
     report.scenario.candidate_sha256 = scenario->candidate_sha256;
     report.scenario.quarantine_identifier = scenario->expected_quarantine_id;
-    report.benchmark.copy_mode = (options.copy_mode == CopyMode::Native) ? "native" : "fallback";
-    report.benchmark.candidate_plaintext_bytes = scenario->candidate_plaintext_bytes;
+    report.benchmark.copy_mode =
+        (options.copy_mode == CopyMode::Native) ? "native" : "fallback";
+    report.benchmark.candidate_plaintext_bytes =
+        scenario->candidate_plaintext_bytes;
     report.stage_reached = LiveGcStage::ScenarioPublished;
 
     // Capture pre-GC inventory
-    auto inv_before = capture_inventory(child_storage.storage, options.local_scratch, true);
+    auto inv_before =
+        capture_inventory(child_storage.storage, options.local_scratch, true);
     if (!inv_before) {
         report.status = "FAILED";
-        report.error_message = "failed to capture pre-GC inventory: " + transport::describe(inv_before.error());
+        report.error_message = "failed to capture pre-GC inventory: " +
+                               transport::describe(inv_before.error());
         if (options.preserve_evidence_on_failure) {
             report.cleanup.result = "preserved";
-            report.cleanup.detail = "evidence preserved on pre-GC inventory capture failure";
+            report.cleanup.detail =
+                "evidence preserved on pre-GC inventory capture failure";
         }
         return report;
     }
@@ -859,10 +942,13 @@ RunnerReport run(
     // Verify pre-GC inventory
     bool pre_inventory_matches =
         report.inventory_before.owner_marker.has_value() &&
-        report.inventory_before.vault_objects.size() == scenario->expected_pre_vault_objects.size();
+        report.inventory_before.vault_objects.size() ==
+            scenario->expected_pre_vault_objects.size();
     if (pre_inventory_matches) {
-        for (std::size_t i = 0; i < scenario->expected_pre_vault_objects.size(); ++i) {
-            if (report.inventory_before.vault_objects[i].identifier != scenario->expected_pre_vault_objects[i]) {
+        for (std::size_t i = 0; i < scenario->expected_pre_vault_objects.size();
+             ++i) {
+            if (report.inventory_before.vault_objects[i].identifier !=
+                scenario->expected_pre_vault_objects[i]) {
                 pre_inventory_matches = false;
                 break;
             }
@@ -870,10 +956,12 @@ RunnerReport run(
     }
     if (!pre_inventory_matches) {
         report.status = "FAILED";
-        report.error_message = "pre-GC inventory does not match expected scenario objects";
+        report.error_message =
+            "pre-GC inventory does not match expected scenario objects";
         if (options.preserve_evidence_on_failure) {
             report.cleanup.result = "preserved";
-            report.cleanup.detail = "evidence preserved on pre-GC inventory mismatch";
+            report.cleanup.detail =
+                "evidence preserved on pre-GC inventory mismatch";
         }
         return report;
     }
@@ -917,49 +1005,94 @@ RunnerReport run(
     if (gc_override) {
         gc_result = gc_override(runtime_data, vault_transport, key);
     } else {
-        gc_result = kasumi::application::integrity::garbage_collect(runtime_data, vault_transport, key);
+        gc_result = kasumi::application::integrity::garbage_collect(
+            runtime_data, vault_transport, key);
     }
     const auto gc_end = std::chrono::steady_clock::now();
     report.benchmark.gc_total_us = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(gc_end - gc_start).count());
+        std::chrono::duration_cast<std::chrono::microseconds>(gc_end - gc_start)
+            .count());
 
     // Capture metrics
-    report.metrics.verified_copy_source_physical_hash = kasumi::platform::perf_trace::get_count("verified copy source physical hash");
-    report.metrics.verified_copy_native_copy = kasumi::platform::perf_trace::get_count("verified copy native copy");
-    report.metrics.verified_copy_native_copy_successes = kasumi::platform::perf_trace::get_count("verified copy native copy successes");
-    report.metrics.verified_copy_destination_physical_hash = kasumi::platform::perf_trace::get_count("verified copy destination physical hash");
-    report.metrics.verified_copy_native_copy_verifications = kasumi::platform::perf_trace::get_count("verified copy native copy verifications");
-    report.metrics.gc_candidate_verified_copy = kasumi::platform::perf_trace::get_count("gc candidate verified copy");
-    report.metrics.gc_candidate_metadata_publish = kasumi::platform::perf_trace::get_count("gc candidate metadata publish");
-    report.metrics.gc_candidate_pre_remove_barrier_verification = kasumi::platform::perf_trace::get_count("gc candidate pre-remove barrier verification");
-    report.metrics.gc_candidate_remove = kasumi::platform::perf_trace::get_count("gc candidate remove");
+    report.metrics.verified_copy_source_physical_hash =
+        kasumi::platform::perf_trace::get_count(
+            "verified copy source physical hash");
+    report.metrics.verified_copy_native_copy =
+        kasumi::platform::perf_trace::get_count("verified copy native copy");
+    report.metrics.verified_copy_native_copy_successes =
+        kasumi::platform::perf_trace::get_count(
+            "verified copy native copy successes");
+    report.metrics.verified_copy_destination_physical_hash =
+        kasumi::platform::perf_trace::get_count(
+            "verified copy destination physical hash");
+    report.metrics.verified_copy_native_copy_verifications =
+        kasumi::platform::perf_trace::get_count(
+            "verified copy native copy verifications");
+    report.metrics.gc_candidate_verified_copy =
+        kasumi::platform::perf_trace::get_count("gc candidate verified copy");
+    report.metrics.gc_candidate_metadata_publish =
+        kasumi::platform::perf_trace::get_count(
+            "gc candidate metadata publish");
+    report.metrics.gc_candidate_pre_remove_barrier_verification =
+        kasumi::platform::perf_trace::get_count(
+            "gc candidate pre-remove barrier verification");
+    report.metrics.gc_candidate_remove =
+        kasumi::platform::perf_trace::get_count("gc candidate remove");
 
     // Capture benchmark timers
-    report.benchmark.gc_barrier_acquire_us = kasumi::platform::perf_trace::get_time("gc barrier acquire");
-    report.benchmark.gc_writer_consistency_checks_us = kasumi::platform::perf_trace::get_time("gc writer consistency checks");
-    report.benchmark.gc_backend_consistency_probe_us = kasumi::platform::perf_trace::get_time("gc backend consistency probe");
-    report.benchmark.gc_quarantine_inventory_us = kasumi::platform::perf_trace::get_time("gc quarantine inventory");
-    report.benchmark.gc_quarantine_restoration_us = kasumi::platform::perf_trace::get_time("gc quarantine restoration");
-    report.benchmark.gc_prior_metadata_initialization_us = kasumi::platform::perf_trace::get_time("gc prior metadata initialization");
-    report.benchmark.gc_reachability_observation_1_us = kasumi::platform::perf_trace::get_time("gc reachability observation 1");
-    report.benchmark.gc_reachability_observation_2_us = kasumi::platform::perf_trace::get_time("gc reachability observation 2");
-    report.benchmark.gc_stable_state_comparison_us = kasumi::platform::perf_trace::get_time("gc stable-state comparison");
-    report.benchmark.gc_final_namespace_verification_us = kasumi::platform::perf_trace::get_time("gc final namespace verification");
-    report.benchmark.gc_expired_quarantine_purge_us = kasumi::platform::perf_trace::get_time("gc expired quarantine purge");
+    report.benchmark.gc_barrier_acquire_us =
+        kasumi::platform::perf_trace::get_time("gc barrier acquire");
+    report.benchmark.gc_writer_consistency_checks_us =
+        kasumi::platform::perf_trace::get_time("gc writer consistency checks");
+    report.benchmark.gc_backend_consistency_probe_us =
+        kasumi::platform::perf_trace::get_time("gc backend consistency probe");
+    report.benchmark.gc_quarantine_inventory_us =
+        kasumi::platform::perf_trace::get_time("gc quarantine inventory");
+    report.benchmark.gc_quarantine_restoration_us =
+        kasumi::platform::perf_trace::get_time("gc quarantine restoration");
+    report.benchmark.gc_prior_metadata_initialization_us =
+        kasumi::platform::perf_trace::get_time(
+            "gc prior metadata initialization");
+    report.benchmark.gc_reachability_observation_1_us =
+        kasumi::platform::perf_trace::get_time("gc reachability observation 1");
+    report.benchmark.gc_reachability_observation_2_us =
+        kasumi::platform::perf_trace::get_time("gc reachability observation 2");
+    report.benchmark.gc_stable_state_comparison_us =
+        kasumi::platform::perf_trace::get_time("gc stable-state comparison");
+    report.benchmark.gc_final_namespace_verification_us =
+        kasumi::platform::perf_trace::get_time(
+            "gc final namespace verification");
+    report.benchmark.gc_expired_quarantine_purge_us =
+        kasumi::platform::perf_trace::get_time("gc expired quarantine purge");
 
-    report.benchmark.gc_candidate_pre_copy_barrier_verification_us = kasumi::platform::perf_trace::get_time("gc candidate pre-copy barrier verification");
-    report.benchmark.gc_candidate_verified_copy_us = kasumi::platform::perf_trace::get_time("gc candidate verified copy");
-    report.benchmark.verified_copy_source_physical_hash_us = kasumi::platform::perf_trace::get_time("verified copy source physical hash");
-    report.benchmark.verified_copy_native_copy_us = kasumi::platform::perf_trace::get_time("verified copy native copy");
-    report.benchmark.verified_copy_destination_physical_hash_us = kasumi::platform::perf_trace::get_time("verified copy destination physical hash");
-    report.benchmark.gc_candidate_metadata_publish_us = kasumi::platform::perf_trace::get_time("gc candidate metadata publish");
-    report.benchmark.gc_candidate_pre_remove_barrier_verification_us = kasumi::platform::perf_trace::get_time("gc candidate pre-remove barrier verification");
-    report.benchmark.gc_candidate_remove_us = kasumi::platform::perf_trace::get_time("gc candidate remove");
+    report.benchmark.gc_candidate_pre_copy_barrier_verification_us =
+        kasumi::platform::perf_trace::get_time(
+            "gc candidate pre-copy barrier verification");
+    report.benchmark.gc_candidate_verified_copy_us =
+        kasumi::platform::perf_trace::get_time("gc candidate verified copy");
+    report.benchmark.verified_copy_source_physical_hash_us =
+        kasumi::platform::perf_trace::get_time(
+            "verified copy source physical hash");
+    report.benchmark.verified_copy_native_copy_us =
+        kasumi::platform::perf_trace::get_time("verified copy native copy");
+    report.benchmark.verified_copy_destination_physical_hash_us =
+        kasumi::platform::perf_trace::get_time(
+            "verified copy destination physical hash");
+    report.benchmark.gc_candidate_metadata_publish_us =
+        kasumi::platform::perf_trace::get_time("gc candidate metadata publish");
+    report.benchmark.gc_candidate_pre_remove_barrier_verification_us =
+        kasumi::platform::perf_trace::get_time(
+            "gc candidate pre-remove barrier verification");
+    report.benchmark.gc_candidate_remove_us =
+        kasumi::platform::perf_trace::get_time("gc candidate remove");
 
-    report.benchmark.gc_barrier_release_us = kasumi::platform::perf_trace::get_time("gc barrier release");
+    report.benchmark.gc_barrier_release_us =
+        kasumi::platform::perf_trace::get_time("gc barrier release");
 
-    report.benchmark.rclone_download_us = kasumi::platform::perf_trace::get_time("rclone copyfile download");
-    report.benchmark.rclone_upload_us = kasumi::platform::perf_trace::get_time("rclone copyfile upload");
+    report.benchmark.rclone_download_us =
+        kasumi::platform::perf_trace::get_time("rclone copyfile download");
+    report.benchmark.rclone_upload_us =
+        kasumi::platform::perf_trace::get_time("rclone copyfile upload");
 
     if (!gc_result) {
         report.gc.result = "FAILED";
@@ -967,7 +1100,8 @@ RunnerReport run(
         report.gc.error_detail_sanitized = gc_result.error().detail;
         report.status = "FAILED";
 
-        auto inv_fail = capture_inventory(child_storage.storage, options.local_scratch, true);
+        auto inv_fail = capture_inventory(
+            child_storage.storage, options.local_scratch, true);
         if (inv_fail) {
             report.inventory_after = std::move(*inv_fail);
         }
@@ -979,12 +1113,12 @@ RunnerReport run(
         }
 
         // Attempt safe cleanup of owned objects if ownership still verifiable
-        report.cleanup = preflight::cleanup_owned_child(
-            child_storage,
-            owner_token,
-            scenario->expected_pre_vault_objects,
-            options.local_scratch,
-            options.cleanup_empty_directories);
+        report.cleanup =
+            preflight::cleanup_owned_child(child_storage,
+                                           owner_token,
+                                           scenario->expected_pre_vault_objects,
+                                           options.local_scratch,
+                                           options.cleanup_empty_directories);
         return report;
     }
 
@@ -995,7 +1129,8 @@ RunnerReport run(
     report.gc.purged_objects = gc_result->purged_objects;
 
     // Capture post-GC inventory
-    auto inv_after = capture_inventory(child_storage.storage, options.local_scratch, true);
+    auto inv_after =
+        capture_inventory(child_storage.storage, options.local_scratch, true);
     if (!inv_after) {
         report.status = "FAILED";
         report.error_message = "failed to capture post-GC inventory";
@@ -1014,14 +1149,17 @@ RunnerReport run(
         post_ids.contains(scenario->reachable_commit_id) &&
         post_ids.contains(scenario->reachable_marker_id);
 
-    report.validation.source_removed = !post_ids.contains(scenario->candidate_id);
-    report.validation.quarantine_present = post_ids.contains(scenario->expected_quarantine_id);
+    report.validation.source_removed =
+        !post_ids.contains(scenario->candidate_id);
+    report.validation.quarantine_present =
+        post_ids.contains(scenario->expected_quarantine_id);
 
     // Compare bytes so targets without physical_hash can certify the copy too.
     if (report.validation.quarantine_present) {
-        auto q_it = std::ranges::find_if(report.inventory_after.vault_objects, [&](const auto& item) {
-            return item.identifier == scenario->expected_quarantine_id;
-        });
+        auto q_it = std::ranges::find_if(
+            report.inventory_after.vault_objects, [&](const auto& item) {
+                return item.identifier == scenario->expected_quarantine_id;
+            });
         const auto source_it = std::ranges::find_if(
             report.inventory_before.vault_objects, [&](const auto& item) {
                 return item.identifier == scenario->candidate_id;
@@ -1030,7 +1168,8 @@ RunnerReport run(
             source_it != report.inventory_before.vault_objects.end() &&
             q_it->exact_bytes && source_it->exact_bytes) {
             auto source_hash = crypto::physical::sha256_init();
-            crypto::physical::sha256_update(source_hash, *source_it->exact_bytes);
+            crypto::physical::sha256_update(source_hash,
+                                            *source_it->exact_bytes);
             report.validation.quarantine_verified =
                 *q_it->exact_bytes == *source_it->exact_bytes &&
                 crypto::physical::sha256_finish(source_hash) ==
@@ -1039,13 +1178,14 @@ RunnerReport run(
     }
 
     // Verify quarantine metadata authentication
-    auto q_inventory = kasumi::application::history_storage::maintenance_protocol::inventory_quarantine(
-        vault_transport, key, options.local_scratch);
+    auto q_inventory =
+        kasumi::application::history_storage::maintenance_protocol::
+            inventory_quarantine(vault_transport, key, options.local_scratch);
     if (q_inventory && !q_inventory->empty()) {
-        report.validation.metadata_authenticated = std::ranges::all_of(
-            *q_inventory, [&](const auto& entry) {
-                auto verified_meta =
-                    kasumi::application::history_storage::maintenance_protocol::verify_quarantine(
+        report.validation.metadata_authenticated =
+            std::ranges::all_of(*q_inventory, [&](const auto& entry) {
+                auto verified_meta = kasumi::application::history_storage::
+                    maintenance_protocol::verify_quarantine(
                         vault_transport, entry, options.local_scratch);
                 return verified_meta.has_value() && *verified_meta;
             });
@@ -1057,19 +1197,19 @@ RunnerReport run(
         }
     }
     for (const auto& actual : post_ids) {
-        if (!std::ranges::binary_search(scenario->expected_post_vault_objects, actual)) {
+        if (!std::ranges::binary_search(scenario->expected_post_vault_objects,
+                                        actual)) {
             report.validation.unexpected_created++;
         }
     }
 
-    bool all_validations_pass =
-        report.validation.reachable_preserved &&
-        report.validation.source_removed &&
-        report.validation.quarantine_present &&
-        report.validation.quarantine_verified &&
-        report.validation.metadata_authenticated &&
-        report.validation.unexpected_removed == 0 &&
-        report.inventory_after.owner_marker.has_value();
+    bool all_validations_pass = report.validation.reachable_preserved &&
+                                report.validation.source_removed &&
+                                report.validation.quarantine_present &&
+                                report.validation.quarantine_verified &&
+                                report.validation.metadata_authenticated &&
+                                report.validation.unexpected_removed == 0 &&
+                                report.inventory_after.owner_marker.has_value();
 
     if (!all_validations_pass) {
         report.status = "FAILED";
@@ -1083,29 +1223,32 @@ RunnerReport run(
     report.stage_reached = LiveGcStage::PostInventoryVerified;
 
     // Pre-cleanup Audit (Passo 7 & 8):
-    // Invariant: While any un-enumerated object or residue exists in child storage,
-    // owner.marker MUST NOT be removed!
+    // Invariant: While any un-enumerated object or residue exists in child
+    // storage, owner.marker MUST NOT be removed!
     bool unallowed_residue_detected = false;
     for (const auto& item : report.inventory_after.vault_objects) {
-        if (!std::ranges::binary_search(scenario->expected_post_vault_objects, item.identifier)) {
+        if (!std::ranges::binary_search(scenario->expected_post_vault_objects,
+                                        item.identifier)) {
             unallowed_residue_detected = true;
             break;
         }
     }
     if (unallowed_residue_detected) {
         report.status = "FAILED";
-        report.error_message = "unexpected residue in child namespace prevents safe cleanup; owner marker retained";
+        report.error_message = "unexpected residue in child namespace prevents "
+                               "safe cleanup; owner marker retained";
         report.cleanup.result = "refused";
-        report.cleanup.detail = "unknown residue in child namespace retains owner marker";
+        report.cleanup.detail =
+            "unknown residue in child namespace retains owner marker";
         return report;
     }
 
-    report.cleanup = preflight::cleanup_owned_child(
-        child_storage,
-        owner_token,
-        scenario->expected_post_vault_objects,
-        options.local_scratch,
-        options.cleanup_empty_directories);
+    report.cleanup =
+        preflight::cleanup_owned_child(child_storage,
+                                       owner_token,
+                                       scenario->expected_post_vault_objects,
+                                       options.local_scratch,
+                                       options.cleanup_empty_directories);
     if (report.cleanup.result == "removed") {
         report.stage_reached = LiveGcStage::CleanupCompleted;
         report.status = "PASS";
@@ -1116,7 +1259,8 @@ RunnerReport run(
 
     if (!options.output_path.empty()) {
         auto json_report = to_json(report);
-        std::ofstream stream(options.output_path, std::ios::binary | std::ios::trunc);
+        std::ofstream stream(options.output_path,
+                             std::ios::binary | std::ios::trunc);
         if (stream) {
             stream << json_report.dump(2) << '\n';
         }
@@ -1131,111 +1275,165 @@ nlohmann::json to_json(const RunnerReport& report) {
         {"phase", report.phase},
         {"status", report.status},
         {"stage_reached", std::string{stage_name(report.stage_reached)}},
-        {"error_message", report.error_message.empty() ? nlohmann::json(nullptr) : nlohmann::json(report.error_message)},
+        {"error_message",
+         report.error_message.empty() ? nlohmann::json(nullptr)
+                                      : nlohmann::json(report.error_message)},
         {"remote_parent", report.remote_parent},
         {"effective_namespace", report.effective_namespace},
         {"pre_initialize", report.pre_initialize},
         {"post_initialize", report.post_initialize},
-        {"ownership", {
-            {"result", report.ownership.result},
-            {"marker_written", report.ownership.marker_written},
-            {"marker_readback_verified", report.ownership.marker_readback_verified},
-        }},
-        {"scenario", {
-            {"reachable_identifier", report.scenario.reachable_identifier},
-            {"candidate_identifier", report.scenario.candidate_identifier},
-            {"candidate_sha256", report.scenario.candidate_sha256},
-            {"quarantine_identifier", report.scenario.quarantine_identifier},
-        }},
-        {"benchmark", {
-            {"copy_mode", report.benchmark.copy_mode},
-            {"candidate_plaintext_bytes", report.benchmark.candidate_plaintext_bytes},
-            {"candidate_physical_bytes", report.benchmark.candidate_physical_bytes},
-            {"process_wall_ms", report.benchmark.process_wall_ms},
-            {"gc_total_us", report.benchmark.gc_total_us},
+        {"ownership",
+         {
+             {"result", report.ownership.result},
+             {"marker_written", report.ownership.marker_written},
+             {"marker_readback_verified",
+              report.ownership.marker_readback_verified},
+         }},
+        {"scenario",
+         {
+             {"reachable_identifier", report.scenario.reachable_identifier},
+             {"candidate_identifier", report.scenario.candidate_identifier},
+             {"candidate_sha256", report.scenario.candidate_sha256},
+             {"quarantine_identifier", report.scenario.quarantine_identifier},
+         }},
+        {"benchmark",
+         {
+             {"copy_mode", report.benchmark.copy_mode},
+             {"candidate_plaintext_bytes",
+              report.benchmark.candidate_plaintext_bytes},
+             {"candidate_physical_bytes",
+              report.benchmark.candidate_physical_bytes},
+             {"process_wall_ms", report.benchmark.process_wall_ms},
+             {"gc_total_us", report.benchmark.gc_total_us},
 
-            {"gc_barrier_acquire_us", report.benchmark.gc_barrier_acquire_us},
-            {"gc_writer_consistency_checks_us", report.benchmark.gc_writer_consistency_checks_us},
-            {"gc_backend_consistency_probe_us", report.benchmark.gc_backend_consistency_probe_us},
-            {"gc_quarantine_inventory_us", report.benchmark.gc_quarantine_inventory_us},
-            {"gc_quarantine_restoration_us", report.benchmark.gc_quarantine_restoration_us},
-            {"gc_prior_metadata_initialization_us", report.benchmark.gc_prior_metadata_initialization_us},
-            {"gc_reachability_observation_1_us", report.benchmark.gc_reachability_observation_1_us},
-            {"gc_reachability_observation_2_us", report.benchmark.gc_reachability_observation_2_us},
-            {"gc_stable_state_comparison_us", report.benchmark.gc_stable_state_comparison_us},
-            {"gc_final_namespace_verification_us", report.benchmark.gc_final_namespace_verification_us},
-            {"gc_expired_quarantine_purge_us", report.benchmark.gc_expired_quarantine_purge_us},
+             {"gc_barrier_acquire_us", report.benchmark.gc_barrier_acquire_us},
+             {"gc_writer_consistency_checks_us",
+              report.benchmark.gc_writer_consistency_checks_us},
+             {"gc_backend_consistency_probe_us",
+              report.benchmark.gc_backend_consistency_probe_us},
+             {"gc_quarantine_inventory_us",
+              report.benchmark.gc_quarantine_inventory_us},
+             {"gc_quarantine_restoration_us",
+              report.benchmark.gc_quarantine_restoration_us},
+             {"gc_prior_metadata_initialization_us",
+              report.benchmark.gc_prior_metadata_initialization_us},
+             {"gc_reachability_observation_1_us",
+              report.benchmark.gc_reachability_observation_1_us},
+             {"gc_reachability_observation_2_us",
+              report.benchmark.gc_reachability_observation_2_us},
+             {"gc_stable_state_comparison_us",
+              report.benchmark.gc_stable_state_comparison_us},
+             {"gc_final_namespace_verification_us",
+              report.benchmark.gc_final_namespace_verification_us},
+             {"gc_expired_quarantine_purge_us",
+              report.benchmark.gc_expired_quarantine_purge_us},
 
-            {"gc_candidate_pre_copy_barrier_verification_us", report.benchmark.gc_candidate_pre_copy_barrier_verification_us},
-            {"gc_candidate_verified_copy_us", report.benchmark.gc_candidate_verified_copy_us},
-            {"verified_copy_source_physical_hash_us", report.benchmark.verified_copy_source_physical_hash_us},
-            {"verified_copy_native_copy_us", report.benchmark.verified_copy_native_copy_us},
-            {"verified_copy_destination_physical_hash_us", report.benchmark.verified_copy_destination_physical_hash_us},
-            {"gc_candidate_metadata_publish_us", report.benchmark.gc_candidate_metadata_publish_us},
-            {"gc_candidate_pre_remove_barrier_verification_us", report.benchmark.gc_candidate_pre_remove_barrier_verification_us},
-            {"gc_candidate_remove_us", report.benchmark.gc_candidate_remove_us},
+             {"gc_candidate_pre_copy_barrier_verification_us",
+              report.benchmark.gc_candidate_pre_copy_barrier_verification_us},
+             {"gc_candidate_verified_copy_us",
+              report.benchmark.gc_candidate_verified_copy_us},
+             {"verified_copy_source_physical_hash_us",
+              report.benchmark.verified_copy_source_physical_hash_us},
+             {"verified_copy_native_copy_us",
+              report.benchmark.verified_copy_native_copy_us},
+             {"verified_copy_destination_physical_hash_us",
+              report.benchmark.verified_copy_destination_physical_hash_us},
+             {"gc_candidate_metadata_publish_us",
+              report.benchmark.gc_candidate_metadata_publish_us},
+             {"gc_candidate_pre_remove_barrier_verification_us",
+              report.benchmark.gc_candidate_pre_remove_barrier_verification_us},
+             {"gc_candidate_remove_us",
+              report.benchmark.gc_candidate_remove_us},
 
-            {"gc_barrier_release_us", report.benchmark.gc_barrier_release_us},
+             {"gc_barrier_release_us", report.benchmark.gc_barrier_release_us},
 
-            {"rclone_download_us", report.benchmark.rclone_download_us},
-            {"rclone_upload_us", report.benchmark.rclone_upload_us},
-        }},
-        {"gc", {
-            {"called", report.gc.called},
-            {"call_count", report.gc.call_count},
-            {"result", report.gc.result},
-            {"candidate_objects", report.gc.candidate_objects},
-            {"quarantined_objects", report.gc.quarantined_objects},
-            {"restored_objects", report.gc.restored_objects},
-            {"purged_objects", report.gc.purged_objects},
-            {"error_category", report.gc.error_category ? nlohmann::json(std::string{integrity_error_code_name(*report.gc.error_category)}) : nlohmann::json(nullptr)},
-            {"error_detail_sanitized", report.gc.error_detail_sanitized.empty() ? nlohmann::json(nullptr) : nlohmann::json(report.gc.error_detail_sanitized)},
-        }},
-        {"metrics", {
-            {"verified_copy_source_physical_hash", report.metrics.verified_copy_source_physical_hash},
-            {"verified_copy_native_copy", report.metrics.verified_copy_native_copy},
-            {"verified_copy_native_copy_successes", report.metrics.verified_copy_native_copy_successes},
-            {"verified_copy_destination_physical_hash", report.metrics.verified_copy_destination_physical_hash},
-            {"verified_copy_native_copy_verifications", report.metrics.verified_copy_native_copy_verifications},
-            {"gc_candidate_verified_copy", report.metrics.gc_candidate_verified_copy},
-            {"gc_candidate_metadata_publish", report.metrics.gc_candidate_metadata_publish},
-            {"gc_candidate_pre_remove_barrier_verification", report.metrics.gc_candidate_pre_remove_barrier_verification},
-            {"gc_candidate_remove", report.metrics.gc_candidate_remove},
-        }},
-        {"validation", {
-            {"reachable_preserved", report.validation.reachable_preserved},
-            {"quarantine_present", report.validation.quarantine_present},
-            {"quarantine_verified", report.validation.quarantine_verified},
-            {"metadata_authenticated", report.validation.metadata_authenticated},
-            {"source_removed", report.validation.source_removed},
-            {"unexpected_removed", report.validation.unexpected_removed},
-            {"unexpected_created", report.validation.unexpected_created},
-        }},
-        {"cleanup", {
-            {"result", report.cleanup.result},
-            {"detail", report.cleanup.detail},
-            {"removed_objects", report.cleanup.removed_objects},
-            {"error_category", report.cleanup.error_category ? nlohmann::json(std::string{transport::error_code_name(*report.cleanup.error_category)}) : nlohmann::json(nullptr)},
-        }},
-        {"not_measured", {
-            {"client_payload_network_bytes", "NOT_MEASURED"},
-            {"operations_copyfile_client_payload_bytes", "NOT_MEASURED"},
-            {"rclone_internal_http_request_count", "NOT_MEASURED"},
-            {"provider_internal_transfer_bytes", "NOT_MEASURED"},
-            {"provider_side_copy", "NOT_MEASURED"},
-        }},
+             {"rclone_download_us", report.benchmark.rclone_download_us},
+             {"rclone_upload_us", report.benchmark.rclone_upload_us},
+         }},
+        {"gc",
+         {
+             {"called", report.gc.called},
+             {"call_count", report.gc.call_count},
+             {"result", report.gc.result},
+             {"candidate_objects", report.gc.candidate_objects},
+             {"quarantined_objects", report.gc.quarantined_objects},
+             {"restored_objects", report.gc.restored_objects},
+             {"purged_objects", report.gc.purged_objects},
+             {"error_category",
+              report.gc.error_category
+                  ? nlohmann::json(std::string{
+                        integrity_error_code_name(*report.gc.error_category)})
+                  : nlohmann::json(nullptr)},
+             {"error_detail_sanitized",
+              report.gc.error_detail_sanitized.empty()
+                  ? nlohmann::json(nullptr)
+                  : nlohmann::json(report.gc.error_detail_sanitized)},
+         }},
+        {"metrics",
+         {
+             {"verified_copy_source_physical_hash",
+              report.metrics.verified_copy_source_physical_hash},
+             {"verified_copy_native_copy",
+              report.metrics.verified_copy_native_copy},
+             {"verified_copy_native_copy_successes",
+              report.metrics.verified_copy_native_copy_successes},
+             {"verified_copy_destination_physical_hash",
+              report.metrics.verified_copy_destination_physical_hash},
+             {"verified_copy_native_copy_verifications",
+              report.metrics.verified_copy_native_copy_verifications},
+             {"gc_candidate_verified_copy",
+              report.metrics.gc_candidate_verified_copy},
+             {"gc_candidate_metadata_publish",
+              report.metrics.gc_candidate_metadata_publish},
+             {"gc_candidate_pre_remove_barrier_verification",
+              report.metrics.gc_candidate_pre_remove_barrier_verification},
+             {"gc_candidate_remove", report.metrics.gc_candidate_remove},
+         }},
+        {"validation",
+         {
+             {"reachable_preserved", report.validation.reachable_preserved},
+             {"quarantine_present", report.validation.quarantine_present},
+             {"quarantine_verified", report.validation.quarantine_verified},
+             {"metadata_authenticated",
+              report.validation.metadata_authenticated},
+             {"source_removed", report.validation.source_removed},
+             {"unexpected_removed", report.validation.unexpected_removed},
+             {"unexpected_created", report.validation.unexpected_created},
+         }},
+        {"cleanup",
+         {
+             {"result", report.cleanup.result},
+             {"detail", report.cleanup.detail},
+             {"removed_objects", report.cleanup.removed_objects},
+             {"error_category",
+              report.cleanup.error_category
+                  ? nlohmann::json(std::string{transport::error_code_name(
+                        *report.cleanup.error_category)})
+                  : nlohmann::json(nullptr)},
+         }},
+        {"not_measured",
+         {
+             {"client_payload_network_bytes", "NOT_MEASURED"},
+             {"operations_copyfile_client_payload_bytes", "NOT_MEASURED"},
+             {"rclone_internal_http_request_count", "NOT_MEASURED"},
+             {"provider_internal_transfer_bytes", "NOT_MEASURED"},
+             {"provider_side_copy", "NOT_MEASURED"},
+         }},
     };
 
     auto inv_to_json = [](const StorageInventory& inv) {
         nlohmann::json arr = nlohmann::json::array();
         if (inv.owner_marker) {
-            arr.push_back({{"identifier", *inv.owner_marker}, {"type", "operational_marker"}});
+            arr.push_back({{"identifier", *inv.owner_marker},
+                           {"type", "operational_marker"}});
         }
         for (const auto& obj : inv.vault_objects) {
             arr.push_back({
                 {"identifier", obj.identifier},
                 {"size", obj.size},
-                {"physical_sha256", obj.physical_sha256 ? nlohmann::json(*obj.physical_sha256) : nlohmann::json(nullptr)},
+                {"physical_sha256",
+                 obj.physical_sha256 ? nlohmann::json(*obj.physical_sha256)
+                                     : nlohmann::json(nullptr)},
             });
         }
         return arr;
@@ -1283,20 +1481,24 @@ parse_benchmark_arguments(std::span<const std::string_view> args) {
             } else if (value == "fallback") {
                 result.mode = CopyMode::ForceFallback;
             } else {
-                return std::unexpected("unknown mode '" + std::string{value} + "': must be 'native' or 'fallback'");
+                return std::unexpected("unknown mode '" + std::string{value} +
+                                       "': must be 'native' or 'fallback'");
             }
         } else if (option == "--payload-bytes") {
             try {
                 const auto parsed = std::stoull(std::string{value});
                 if (parsed == 0 || parsed > 64ULL * 1024ULL * 1024ULL) {
-                    return std::unexpected("--payload-bytes must be between 1 and 67108864 (64 MiB)");
+                    return std::unexpected("--payload-bytes must be between 1 "
+                                           "and 67108864 (64 MiB)");
                 }
                 result.payload_bytes = static_cast<std::size_t>(parsed);
             } catch (...) {
-                return std::unexpected("invalid integer for --payload-bytes: " + std::string{value});
+                return std::unexpected("invalid integer for --payload-bytes: " +
+                                       std::string{value});
             }
         } else {
-            return std::unexpected("unknown or duplicate option: " + std::string{option});
+            return std::unexpected("unknown or duplicate option: " +
+                                   std::string{option});
         }
     }
 
@@ -1304,7 +1506,8 @@ parse_benchmark_arguments(std::span<const std::string_view> args) {
         return std::unexpected("--output is required");
     }
     if (!result.execute_live_benchmark) {
-        return std::unexpected("--execute-live-benchmark is required to execute live benchmark");
+        return std::unexpected(
+            "--execute-live-benchmark is required to execute live benchmark");
     }
     auto target = provider_target_config::resolve_target(
         provider_target_config::TargetSelectionArguments{
@@ -1340,16 +1543,17 @@ RcloneConfigEnvironment::~RcloneConfigEnvironment() {
 #endif
 }
 
-std::expected<PreparedCliPaths, std::string>
-prepare_cli_paths(
-                  const provider_target_config::LiveTargetAuthorization& authorization,
-                  std::string_view remote,
-                  const std::filesystem::path& raw_output,
-                  const std::optional<std::filesystem::path>& rclone_config,
-                  std::string_view scratch_dirname) {
-    if (!provider_target_config::authorized_live_parent(authorization, remote) ||
+std::expected<PreparedCliPaths, std::string> prepare_cli_paths(
+    const provider_target_config::LiveTargetAuthorization& authorization,
+    std::string_view remote,
+    const std::filesystem::path& raw_output,
+    const std::optional<std::filesystem::path>& rclone_config,
+    std::string_view scratch_dirname) {
+    if (!provider_target_config::authorized_live_parent(authorization,
+                                                        remote) ||
         !smoke::parse_remote_parent(remote)) {
-        return std::unexpected("Remote parent does not match the selected authorization; no remote request made.");
+        return std::unexpected("Remote parent does not match the selected "
+                               "authorization; no remote request made.");
     }
 
     std::error_code fs_error;
@@ -1367,9 +1571,12 @@ prepare_cli_paths(
 
     if (rclone_config) {
         fs_error.clear();
-        const auto status = std::filesystem::symlink_status(*rclone_config, fs_error);
-        if (fs_error || std::filesystem::is_symlink(status) || !std::filesystem::is_regular_file(status)) {
-            return std::unexpected("rclone config must be a regular local file.");
+        const auto status =
+            std::filesystem::symlink_status(*rclone_config, fs_error);
+        if (fs_error || std::filesystem::is_symlink(status) ||
+            !std::filesystem::is_regular_file(status)) {
+            return std::unexpected(
+                "rclone config must be a regular local file.");
         }
         const auto config = std::filesystem::absolute(*rclone_config, fs_error);
         if (fs_error) {
@@ -1380,7 +1587,8 @@ prepare_cli_paths(
 #else
         if (setenv("RCLONE_CONFIG", config.string().c_str(), 1) != 0) {
 #endif
-            return std::unexpected("could not set RCLONE_CONFIG environment variable.");
+            return std::unexpected(
+                "could not set RCLONE_CONFIG environment variable.");
         }
     }
 
@@ -1428,7 +1636,8 @@ parse_smoke_arguments(std::span<const std::string_view> args) {
         } else if (option == "--output" && result.output.empty()) {
             result.output = std::filesystem::path{value};
         } else {
-            return std::unexpected("unknown or duplicate option: " + std::string{option});
+            return std::unexpected("unknown or duplicate option: " +
+                                   std::string{option});
         }
     }
 
@@ -1436,7 +1645,8 @@ parse_smoke_arguments(std::span<const std::string_view> args) {
         return std::unexpected("--output is required");
     }
     if (!result.execute_live_gc) {
-        return std::unexpected("--execute-live-gc is required to execute live GC collection");
+        return std::unexpected(
+            "--execute-live-gc is required to execute live GC collection");
     }
     auto target = provider_target_config::resolve_target(
         provider_target_config::TargetSelectionArguments{

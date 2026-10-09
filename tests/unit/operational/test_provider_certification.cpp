@@ -1,21 +1,21 @@
-#include "provider_certification_support.hpp"
 #include "kasumi/test/history_storage.hpp"
+#include "provider_certification_support.hpp"
 
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <vector>
 #include <gtest/gtest.h>
+#include <vector>
 
 namespace {
 
 using namespace kasumi::operational::provider_certification;
 
-kasumi::transport::Result fake_get_wrong_readback(
-    void* context,
-    std::string_view identifier,
-    const std::filesystem::path& destination) {
+kasumi::transport::Result
+fake_get_wrong_readback(void* context,
+                        std::string_view identifier,
+                        const std::filesystem::path& destination) {
     auto result = fake_get(context, identifier, destination);
     if (!result) {
         return result;
@@ -32,10 +32,10 @@ kasumi::transport::Result fake_get_wrong_readback(
     return {};
 }
 
-kasumi::transport::Result ignore_existing_put(
-    void* context,
-    const std::filesystem::path& source,
-    std::string_view identifier) {
+kasumi::transport::Result
+ignore_existing_put(void* context,
+                    const std::filesystem::path& source,
+                    std::string_view identifier) {
     auto* state = fake_state(context);
     if (state->objects.contains(std::string{identifier})) {
         ++state->put_count;
@@ -105,8 +105,7 @@ TEST(ProviderCertificationMutationTest,
     const std::vector<std::uint8_t> original{'A', 'A', 'A', 'A', 'A'};
     const std::vector<std::uint8_t> replacement{'B', 'B', 'B', 'B', 'B'};
     {
-        std::ofstream output(files.source,
-                             std::ios::binary | std::ios::trunc);
+        std::ofstream output(files.source, std::ios::binary | std::ios::trunc);
         output.write(reinterpret_cast<const char*>(replacement.data()),
                      static_cast<std::streamsize>(replacement.size()));
         ASSERT_TRUE(output.good());
@@ -121,8 +120,7 @@ TEST(ProviderCertificationMutationTest,
     const auto installed = install_verified_object(
         report, storage, files.source, "object", files.readback);
 
-    ASSERT_TRUE(installed.has_value())
-        << (installed ? "" : installed.error());
+    ASSERT_TRUE(installed.has_value()) << (installed ? "" : installed.error());
     EXPECT_EQ(state->objects.at("object"), replacement);
     EXPECT_EQ(state->remove_count, 1U);
     EXPECT_EQ(state->put_count, 1U);
@@ -144,8 +142,7 @@ TEST(ProviderCertificationMutationTest,
     };
     const std::vector<std::uint8_t> replacement{'B', 'B', 'B'};
     {
-        std::ofstream output(files.source,
-                             std::ios::binary | std::ios::trunc);
+        std::ofstream output(files.source, std::ios::binary | std::ios::trunc);
         output.write(reinterpret_cast<const char*>(replacement.data()),
                      static_cast<std::streamsize>(replacement.size()));
         ASSERT_TRUE(output.good());
@@ -306,8 +303,7 @@ TEST(ProviderCertificationMatrixTest,
     const auto matrix = aggregate_reports({local, drive});
     ASSERT_EQ(matrix["scenarios"].size(), 1U);
     EXPECT_EQ(matrix["scenarios"][0]["name"], "bootstrap-publish");
-    EXPECT_EQ(matrix["scenarios"][0]["targets"]["local-filesystem"],
-              "Pass");
+    EXPECT_EQ(matrix["scenarios"][0]["targets"]["local-filesystem"], "Pass");
     EXPECT_EQ(matrix["scenarios"][0]["targets"]["google-drive"], "Pass");
     ASSERT_EQ(matrix["capabilities"].size(), 1U);
     EXPECT_EQ(matrix["capabilities"][0]["targets"]["local-filesystem"],

@@ -79,8 +79,8 @@ TEST(RemoteLayoutTest, WriterIdentifierRequiresProtocolShapeAndVaultPrefix) {
         layout.writers_prefix + "f51c45986e4bf1accbf45b9e2a14c8ab";
     EXPECT_TRUE(valid_writer_identifier(identifier));
     EXPECT_TRUE(valid_writer_identifier(layout, identifier));
-    EXPECT_FALSE(valid_writer_identifier(
-        "2796e9c1/99b74a57/8973/0e7f7095/not-hex"));
+    EXPECT_FALSE(
+        valid_writer_identifier("2796e9c1/99b74a57/8973/0e7f7095/not-hex"));
     EXPECT_FALSE(valid_writer_identifier(
         layout,
         derive_remote_layout(TEST_KEY_B).writers_prefix +

@@ -313,8 +313,7 @@ collect_ancestors(const Index& index, const std::string& head) {
     return result;
 }
 
-std::expected<std::vector<std::string>, Error>
-find_best_common_ancestors(
+std::expected<std::vector<std::string>, Error> find_best_common_ancestors(
     const Index& index,
     const std::unordered_set<std::string>& common_ancestors) {
     if (common_ancestors.empty()) {
@@ -1088,8 +1087,9 @@ resolve_impl(std::span<const LoadedCommit> commits,
             return std::unexpected(
                 Error{ErrorCode::NoCommonAncestor, "no common ancestor found"});
         if (best_bases->size() > 1)
-            return std::unexpected(Error{ErrorCode::AmbiguousMergeBase,
-                                         "ambiguous merge base (multiple best common ancestors)"});
+            return std::unexpected(
+                Error{ErrorCode::AmbiguousMergeBase,
+                      "ambiguous merge base (multiple best common ancestors)"});
 
         const auto& base = index.at(best_bases->front())->commit.tree;
         std::vector<HeadChanges> changes;

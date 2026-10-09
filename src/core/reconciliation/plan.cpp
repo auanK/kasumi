@@ -54,10 +54,10 @@ bool is_eligible_for_deletion(const Input& input,
     if (input.pending_deletion_authority.empty()) {
         return false;
     }
-    const auto it = std::ranges::find_if(
-        input.pending_deletion_authority, [&](const NodeRow& auth) {
-            return auth == pending;
-        });
+    const auto it = std::ranges::find_if(input.pending_deletion_authority,
+                                         [&](const NodeRow& auth) {
+                                             return auth == pending;
+                                         });
     if (it == input.pending_deletion_authority.end()) {
         return false;
     }
@@ -123,9 +123,10 @@ Snapshot logical_local_view(const Input& input,
     return result;
 }
 
-void append_pending_materialization_downloads(const Input& input,
-                                              const HashSet& missing_objects,
-                                              std::vector<Operation>& operations) {
+void append_pending_materialization_downloads(
+    const Input& input,
+    const HashSet& missing_objects,
+    std::vector<Operation>& operations) {
     for (const auto& pending : input.pending_materializations) {
         if (find_row(input.local_tree, pending.path) != nullptr) {
             continue;
@@ -136,8 +137,8 @@ void append_pending_materialization_downloads(const Input& input,
             missing_objects.contains(remote->hash)) {
             continue;
         }
-        const auto already_scheduled = std::ranges::any_of(
-            operations, [&](const Operation& operation) {
+        const auto already_scheduled =
+            std::ranges::any_of(operations, [&](const Operation& operation) {
                 return operation.action == Action::Download &&
                        operation.path ==
                            platform::path::from_utf8(remote->path) &&
@@ -326,12 +327,12 @@ void reserve_conflict_destinations(const Snapshot& local_tree,
     }
 }
 
-void collect_pending_rows(const Snapshot& storage_tree,
-                          const HashSet& missing_objects,
-                          const LocalSources& local_sources,
-                          std::vector<NodeRow>& pending,
-                          std::vector<std::filesystem::path>&
-                              pending_without_local_source) {
+void collect_pending_rows(
+    const Snapshot& storage_tree,
+    const HashSet& missing_objects,
+    const LocalSources& local_sources,
+    std::vector<NodeRow>& pending,
+    std::vector<std::filesystem::path>& pending_without_local_source) {
     for (const auto& row : storage_tree.rows) {
         if (row.is_directory) {
             continue;
@@ -515,23 +516,25 @@ candidate_shared_tree(const Input& input,
 
                 const auto source_path =
                     platform::path::to_logical_utf8(operation.alt_path);
-                const auto* source =
-                    find_row(input.storage.tree, source_path);
+                const auto* source = find_row(input.storage.tree, source_path);
                 if (source == nullptr || source->is_directory ||
                     source->hash != *expected_hash ||
                     source->size != operation.size) {
                     return std::unexpected(Error{
                         .code = ErrorCode::UnsafePlan,
-                        .detail =
-                            "conflict download does not match observed storage row",
+                        .detail = "conflict download does not match observed "
+                                  "storage row",
                         .paths = {operation.path},
                     });
                 }
 
                 auto row = *source;
                 row.path = platform::path::to_logical_utf8(operation.path);
-                auto parents = synchronize_ancestor_rows(
-                    result.tree, input.local_tree, row.path, false, &input.storage.tree);
+                auto parents = synchronize_ancestor_rows(result.tree,
+                                                         input.local_tree,
+                                                         row.path,
+                                                         false,
+                                                         &input.storage.tree);
                 if (!parents) {
                     return std::unexpected(std::move(parents.error()));
                 }
@@ -818,9 +821,10 @@ ReconcileResult reconcile(const Input& input) {
                 remote->hash == pending.hash && remote->size == pending.size &&
                 find_row(input.local_tree, pending.path) == nullptr &&
                 !local_sources.contains(pending.hash) &&
-                std::ranges::none_of(pending_storage_rows, [&](const NodeRow& row) {
-                    return row.path == pending.path;
-                })) {
+                std::ranges::none_of(pending_storage_rows,
+                                     [&](const NodeRow& row) {
+                                         return row.path == pending.path;
+                                     })) {
                 pending_storage_rows.push_back(*remote);
             }
         }
@@ -946,8 +950,7 @@ ReconcileResult reconcile(const Input& input) {
 
     const bool requires_state_commit =
         input.storage.history_present &&
-        (!input.base_state_present ||
-         input.storage.logical_heads.size() != 1 ||
+        (!input.base_state_present || input.storage.logical_heads.size() != 1 ||
          input.base_commit_id != input.storage.logical_heads.front() ||
          input.pending_materializations != pending_materializations);
 

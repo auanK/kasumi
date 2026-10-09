@@ -1,19 +1,18 @@
 #ifndef KASUMI_GC_LIVE_RUNNER_SUPPORT_HPP
 #define KASUMI_GC_LIVE_RUNNER_SUPPORT_HPP
 
-#include "gc_live_preflight_support.hpp"
-#include "provider_target_config.hpp"
-#include "remote_copy_smoke_support.hpp"
-
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/maintenance.hpp"
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
 #include "crypto/physical_hash.hpp"
+#include "gc_live_preflight_support.hpp"
 #include "platform/clock.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/random.hpp"
+#include "provider_target_config.hpp"
+#include "remote_copy_smoke_support.hpp"
 #include "runtime/resolver.hpp"
 #include "transport/transport.hpp"
 
@@ -78,7 +77,8 @@ struct ScenarioObjects {
     std::vector<std::string> expected_post_vault_objects;
 };
 
-constexpr std::string_view integrity_error_code_name(kasumi::application::integrity::ErrorCode code) noexcept {
+constexpr std::string_view integrity_error_code_name(
+    kasumi::application::integrity::ErrorCode code) noexcept {
     switch (code) {
         case kasumi::application::integrity::ErrorCode::InvalidInput:
             return "invalid_input";
@@ -150,7 +150,8 @@ struct RunnerOptions {
     CopyMode copy_mode = CopyMode::Native;
     std::size_t candidate_payload_bytes = 0;
     std::chrono::milliseconds preflight_timeout = std::chrono::minutes{2};
-    std::optional<std::array<std::uint8_t, kasumi::crypto::KEY_SIZE>> explicit_key = std::nullopt;
+    std::optional<std::array<std::uint8_t, kasumi::crypto::KEY_SIZE>>
+        explicit_key = std::nullopt;
     std::optional<std::string> explicit_child = std::nullopt;
     std::optional<std::string> explicit_owner_token = std::nullopt;
     preflight::EmptyDirectoryCleanup cleanup_empty_directories;
@@ -230,9 +231,10 @@ struct RunnerReport {
     preflight::CleanupResult cleanup;
 };
 
-transport::Transport make_vault_transport(transport::Transport& underlying,
-                                          std::string hidden_marker = "owner.marker",
-                                          CopyMode copy_mode = CopyMode::Native);
+transport::Transport
+make_vault_transport(transport::Transport& underlying,
+                     std::string hidden_marker = "owner.marker",
+                     CopyMode copy_mode = CopyMode::Native);
 
 std::expected<ScenarioObjects, transport::Error>
 setup_scenario(transport::Transport& vault_storage,
@@ -245,16 +247,16 @@ capture_inventory(transport::Transport& child_storage,
                   const std::filesystem::path& scratch_root,
                   bool capture_exact_bytes = false);
 
-using GcInvocation = std::function<std::expected<integrity::GarbageCollectResult, integrity::Error>(
-    const kasumi::runtime::RuntimeData& runtime_data,
-    transport::Transport& vault_storage,
-    std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key)>;
+using GcInvocation = std::function<
+    std::expected<integrity::GarbageCollectResult, integrity::Error>(
+        const kasumi::runtime::RuntimeData& runtime_data,
+        transport::Transport& vault_storage,
+        std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key)>;
 
-RunnerReport run(
-    const RunnerOptions& options,
-    transport::Transport* parent_transport_override = nullptr,
-    transport::Transport* child_transport_override = nullptr,
-    GcInvocation gc_override = nullptr);
+RunnerReport run(const RunnerOptions& options,
+                 transport::Transport* parent_transport_override = nullptr,
+                 transport::Transport* child_transport_override = nullptr,
+                 GcInvocation gc_override = nullptr);
 
 nlohmann::json to_json(const RunnerReport& report);
 
@@ -270,12 +272,12 @@ struct PreparedCliPaths {
     std::filesystem::path scratch_root;
 };
 
-std::expected<PreparedCliPaths, std::string>
-prepare_cli_paths(const provider_target_config::LiveTargetAuthorization& authorization,
-                  std::string_view remote,
-                  const std::filesystem::path& raw_output,
-                  const std::optional<std::filesystem::path>& rclone_config,
-                  std::string_view scratch_dirname);
+std::expected<PreparedCliPaths, std::string> prepare_cli_paths(
+    const provider_target_config::LiveTargetAuthorization& authorization,
+    std::string_view remote,
+    const std::filesystem::path& raw_output,
+    const std::optional<std::filesystem::path>& rclone_config,
+    std::string_view scratch_dirname);
 
 struct SmokeArguments {
     std::string remote;

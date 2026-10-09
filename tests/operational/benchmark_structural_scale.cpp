@@ -42,10 +42,8 @@ std::string file_name(std::size_t index, bool long_path) {
 Snapshot make_snapshot(std::size_t files, bool long_path) {
     Snapshot snapshot;
     snapshot.rows.reserve(files + 1);
-    snapshot.rows.push_back(NodeRow{
-        .path = "",
-        .mtime = 1,
-        .is_directory = true});
+    snapshot.rows.push_back(
+        NodeRow{.path = "", .mtime = 1, .is_directory = true});
     for (std::size_t index = 0; index < files; ++index) {
         const auto path = file_name(index, long_path);
         const auto content = std::string{"synthetic-content-"} + path;

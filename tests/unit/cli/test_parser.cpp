@@ -187,64 +187,62 @@ TEST(CliParserTest, ParsesEveryPublicRequestForm) {
 
 TEST(CliParserTest, ManualQuarantinePurgeHasDistinctExplicitAuthority) {
     std::vector<std::string> arguments{
-        "kasumi", "gc", "purge-quarantine", "demo",
-        "--confirm-permanent-loss"};
+        "kasumi", "gc", "purge-quarantine", "demo", "--confirm-permanent-loss"};
     std::vector<char*> argv;
     for (auto& argument : arguments) {
         argv.push_back(argument.data());
     }
-    const auto invocation = kasumi::cli::parse(
-        static_cast<int>(argv.size()), argv.data());
+    const auto invocation =
+        kasumi::cli::parse(static_cast<int>(argv.size()), argv.data());
     ASSERT_TRUE(invocation.has_value())
         << "explicit purge syntax is not supported yet";
-    ASSERT_TRUE(std::holds_alternative<kasumi::application::Request>(
-        *invocation));
-    const auto& request =
-        std::get<kasumi::application::Request>(*invocation);
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::application::Request>(*invocation));
+    const auto& request = std::get<kasumi::application::Request>(*invocation);
     EXPECT_EQ(request.profile_name, "demo");
     EXPECT_NE(request.operation,
               kasumi::application::Operation::GarbageCollect);
 }
 
 TEST(CliParserTest, ManualQuarantineRepairHasDistinctExplicitAuthority) {
-    std::vector<std::string> arguments{
-        "kasumi", "gc", "repair-quarantine", "demo",
-        "--confirm-permanent-loss"};
+    std::vector<std::string> arguments{"kasumi",
+                                       "gc",
+                                       "repair-quarantine",
+                                       "demo",
+                                       "--confirm-permanent-loss"};
     std::vector<char*> argv;
     for (auto& argument : arguments) {
         argv.push_back(argument.data());
     }
-    const auto invocation = kasumi::cli::parse(
-        static_cast<int>(argv.size()), argv.data());
+    const auto invocation =
+        kasumi::cli::parse(static_cast<int>(argv.size()), argv.data());
     ASSERT_TRUE(invocation.has_value())
         << "explicit repair syntax is not supported yet";
-    ASSERT_TRUE(std::holds_alternative<kasumi::application::Request>(
-        *invocation));
-    const auto& request =
-        std::get<kasumi::application::Request>(*invocation);
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::application::Request>(*invocation));
+    const auto& request = std::get<kasumi::application::Request>(*invocation);
     EXPECT_EQ(request.profile_name, "demo");
     EXPECT_EQ(request.operation,
               kasumi::application::Operation::RepairQuarantine);
 }
 
 TEST(CliParserTest, ManualWriterRemovalIsAnExplicitGcRequest) {
-    std::vector<std::string> arguments{
-        "kasumi",
-        "gc",
-        "remove-writer",
-        "Pictures",
-        "2796e9c1/99b74a57/8973/0e7f7095/"
-        "f51c45986e4bf1accbf45b9e2a14c8ab"};
+    std::vector<std::string> arguments{"kasumi",
+                                       "gc",
+                                       "remove-writer",
+                                       "Pictures",
+                                       "2796e9c1/99b74a57/8973/0e7f7095/"
+                                       "f51c45986e4bf1accbf45b9e2a14c8ab"};
     std::vector<char*> argv;
     for (auto& argument : arguments) {
         argv.push_back(argument.data());
     }
-    const auto invocation = kasumi::cli::parse(
-        static_cast<int>(argv.size()), argv.data());
+    const auto invocation =
+        kasumi::cli::parse(static_cast<int>(argv.size()), argv.data());
     ASSERT_TRUE(invocation.has_value())
         << "manual writer removal is not supported yet";
-    ASSERT_TRUE(std::holds_alternative<kasumi::application::Request>(
-        *invocation));
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::application::Request>(*invocation));
     const auto& request = std::get<kasumi::application::Request>(*invocation);
     EXPECT_EQ(request.operation, kasumi::application::Operation::RemoveWriter);
     EXPECT_EQ(request.profile_name, "Pictures");
@@ -254,7 +252,8 @@ TEST(CliParserTest, ManualWriterRemovalIsAnExplicitGcRequest) {
 }
 
 TEST(CliParserTest, RejectsMalformedWriterRemovalIdentifiers) {
-    for (const auto* identifier : {"../writer", "history/gc/v1/barrier",
+    for (const auto* identifier : {"../writer",
+                                   "history/gc/v1/barrier",
                                    "2796e9c1/99b74a57/8973/0e7f7095/not-hex"}) {
         std::vector<std::string> arguments{
             "kasumi", "gc", "remove-writer", "Pictures", identifier};
@@ -262,8 +261,9 @@ TEST(CliParserTest, RejectsMalformedWriterRemovalIdentifiers) {
         for (auto& argument : arguments) {
             argv.push_back(argument.data());
         }
-        EXPECT_FALSE(kasumi::cli::parse(static_cast<int>(argv.size()),
-                                        argv.data()).has_value())
+        EXPECT_FALSE(
+            kasumi::cli::parse(static_cast<int>(argv.size()), argv.data())
+                .has_value())
             << identifier;
     }
 }
@@ -289,17 +289,34 @@ TEST(CliParserTest,
     check_error({"kasumi", "gc"});
     check_error({"kasumi", "gc", "purge-quarantine"});
     check_error({"kasumi", "gc", "purge-quarantine", "demo"});
-    check_error({"kasumi", "gc", "purge-quarantine", "demo", "--confirm-permanent-loss", "extra"});
-    check_error({"kasumi", "gc", "purge-quarantine", "", "--confirm-permanent-loss"});
+    check_error({"kasumi",
+                 "gc",
+                 "purge-quarantine",
+                 "demo",
+                 "--confirm-permanent-loss",
+                 "extra"});
+    check_error(
+        {"kasumi", "gc", "purge-quarantine", "", "--confirm-permanent-loss"});
     check_error({"kasumi", "gc", "purge-quarantine", "demo", "--unknown"});
     check_error({"kasumi", "gc", "repair-quarantine"});
     check_error({"kasumi", "gc", "repair-quarantine", "demo"});
-    check_error({"kasumi", "gc", "repair-quarantine", "demo", "--confirm-permanent-loss", "extra"});
-    check_error({"kasumi", "gc", "repair-quarantine", "", "--confirm-permanent-loss"});
+    check_error({"kasumi",
+                 "gc",
+                 "repair-quarantine",
+                 "demo",
+                 "--confirm-permanent-loss",
+                 "extra"});
+    check_error(
+        {"kasumi", "gc", "repair-quarantine", "", "--confirm-permanent-loss"});
     check_error({"kasumi", "gc", "repair-quarantine", "demo", "--unknown"});
     check_error({"kasumi", "gc", "remove-writer"});
     check_error({"kasumi", "gc", "remove-writer", "demo"});
-    check_error({"kasumi", "gc", "remove-writer", "", "2796e9c1/99b74a57/8973/0e7f7095/f51c45986e4bf1accbf45b9e2a14c8ab"});
+    check_error(
+        {"kasumi",
+         "gc",
+         "remove-writer",
+         "",
+         "2796e9c1/99b74a57/8973/0e7f7095/f51c45986e4bf1accbf45b9e2a14c8ab"});
     check_error({"kasumi", "resolve-missing"});
     check_error({"kasumi", "resolve-missing", ""});
     check_error({"kasumi", "resolve-missing", "demo", "extra"});
@@ -393,12 +410,11 @@ TEST(CliParserTest, ParsesResolveMissingRequest) {
     const auto result =
         kasumi::cli::parse(static_cast<int>(argv.size()), argv.data());
     ASSERT_TRUE(result.has_value());
-    EXPECT_TRUE(
-        std::holds_alternative<kasumi::application::Request>(*result));
-    if (result && std::holds_alternative<kasumi::application::Request>(*result)) {
-        EXPECT_EQ(
-            std::get<kasumi::application::Request>(*result).profile_name,
-            "demo");
+    EXPECT_TRUE(std::holds_alternative<kasumi::application::Request>(*result));
+    if (result &&
+        std::holds_alternative<kasumi::application::Request>(*result)) {
+        EXPECT_EQ(std::get<kasumi::application::Request>(*result).profile_name,
+                  "demo");
     }
 }
 

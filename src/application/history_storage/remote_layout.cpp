@@ -195,7 +195,8 @@ bool valid_writer_identifier(std::string_view identifier) noexcept {
     constexpr std::array<std::size_t, 5> component_sizes{8, 8, 4, 8, 32};
     std::size_t offset = 0;
     for (std::size_t index = 0; index < component_sizes.size(); ++index) {
-        const auto component = identifier.substr(offset, component_sizes[index]);
+        const auto component =
+            identifier.substr(offset, component_sizes[index]);
         if (component.size() != component_sizes[index] ||
             !std::ranges::all_of(component, [](char character) {
                 return (character >= '0' && character <= '9') ||

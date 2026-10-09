@@ -46,8 +46,7 @@ EncodeResult encode(const Record& record) {
             !valid_string(record.epoch_vault_id) ||
             !valid_string(record.epoch_id) ||
             record.parent_ids.size() > history::maximum_parent_count ||
-            record.observed_pending_paths.size() >
-                maximum_pending_path_count ||
+            record.observed_pending_paths.size() > maximum_pending_path_count ||
             record.pending_paths.size() > maximum_pending_path_count) {
             return std::unexpected("transaction record exceeds codec limits");
         }
@@ -175,11 +174,11 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
         auto epoch_min_history_age_hours = wire::read<std::uint32_t>(reader);
         auto parent_count = wire::read<std::uint32_t>(reader);
         if (!id || !phase_raw || !publication_required || !observed_head_id ||
-            !observed_base_id || !local || !storage || !pending_fields_present ||
-            !target || !commit_id || !ciphertext_id ||
-            !marker_id || !epoch_vault_id || !epoch_id || !epoch_issued_at ||
-            !epoch_min_history_depth || !epoch_min_history_age_hours ||
-            !parent_count) {
+            !observed_base_id || !local || !storage ||
+            !pending_fields_present || !target || !commit_id ||
+            !ciphertext_id || !marker_id || !epoch_vault_id || !epoch_id ||
+            !epoch_issued_at || !epoch_min_history_depth ||
+            !epoch_min_history_age_hours || !parent_count) {
             return std::unexpected("missing fields");
         }
         if (*publication_required > 1) {

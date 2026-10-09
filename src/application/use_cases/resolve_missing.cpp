@@ -40,11 +40,12 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
         return Response{
             .operation = context.operation,
             .runtime = context.summary,
-            .data = ResolveMissingCompleted{
-                .resolved_count = 0,
-                .resolved_paths = {},
-                .published = false,
-            },
+            .data =
+                ResolveMissingCompleted{
+                    .resolved_count = 0,
+                    .resolved_paths = {},
+                    .published = false,
+                },
         };
     }
 
@@ -52,12 +53,7 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
 
     observation::LocalObservationSession session;
     auto collected = observation::collect_reconciliation_input(
-        context.runtime,
-        context.storage,
-        context.key,
-        false,
-        {},
-        &session);
+        context.runtime, context.storage, context.key, false, {}, &session);
     if (!collected) {
         return std::unexpected(plan_error(
             context.operation, collected.error().detail, context.summary));
@@ -67,20 +63,19 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
 
     auto reconciled = reconciliation::reconcile(*collected);
     if (!reconciled) {
-        return std::unexpected(plan_error(
-            context.operation,
-            describe_reconciliation_error(reconciled.error()),
-            context.summary));
+        return std::unexpected(
+            plan_error(context.operation,
+                       describe_reconciliation_error(reconciled.error()),
+                       context.summary));
     }
 
-
-    auto stable = sync::coordinator::reobservation::stabilize(
-        context.runtime,
-        context.storage,
-        context.key,
-        std::move(*collected),
-        std::move(*reconciled),
-        &session);
+    auto stable =
+        sync::coordinator::reobservation::stabilize(context.runtime,
+                                                    context.storage,
+                                                    context.key,
+                                                    std::move(*collected),
+                                                    std::move(*reconciled),
+                                                    &session);
     if (!stable) {
         return std::unexpected(transaction_error(
             context.operation, stable.error(), context.summary));
@@ -88,8 +83,8 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
 
     std::unordered_set<std::string> eligible_paths;
     for (const auto& auth_row : authority) {
-        const auto pending = std::ranges::find(
-            stable->input.pending_materializations, auth_row);
+        const auto pending =
+            std::ranges::find(stable->input.pending_materializations, auth_row);
         if (pending == stable->input.pending_materializations.end()) {
             continue;
         }
@@ -113,12 +108,16 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
         const auto op_path = platform::path::to_logical_utf8(op.path);
         if (op.action != Action::DeleteRemote ||
             !eligible_paths.contains(op_path) ||
-            std::ranges::find(resolved_paths, op_path) != resolved_paths.end()) {
+            std::ranges::find(resolved_paths, op_path) !=
+                resolved_paths.end()) {
             return std::unexpected(Error{
                 .operation = context.operation,
                 .code = ErrorCode::RecoveryFailure,
-                .detail = std::string("plan contains unauthorized sync operations: action=") +
-                          std::to_string(static_cast<int>(op.action)) + " path=" + op_path,
+                .detail =
+                    std::string(
+                        "plan contains unauthorized sync operations: action=") +
+                    std::to_string(static_cast<int>(op.action)) +
+                    " path=" + op_path,
                 .runtime = context.summary,
             });
         }
@@ -127,7 +126,8 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
 
     auto expected_tree = stable->input.storage.tree;
     std::erase_if(expected_tree.rows, [&](const NodeRow& row) {
-        return std::ranges::find(resolved_paths, row.path) != resolved_paths.end();
+        return std::ranges::find(resolved_paths, row.path) !=
+               resolved_paths.end();
     });
     finalize_snapshot(expected_tree);
     if (stable->result.requires_local_mutation ||
@@ -141,48 +141,44 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
         });
     }
 
-
     if (resolved_paths.empty()) {
         return Response{
             .operation = context.operation,
             .runtime = context.summary,
-            .data = ResolveMissingCompleted{
-                .resolved_count = 0,
-                .resolved_paths = {},
-                .published = false,
-            },
+            .data =
+                ResolveMissingCompleted{
+                    .resolved_count = 0,
+                    .resolved_paths = {},
+                    .published = false,
+                },
         };
     }
 
     history_storage::maintenance_protocol::RegistrationState writer;
     if (stable->result.requires_publication) {
         const auto layout = history_storage::derive_remote_layout(context.key);
-        auto registered = history_storage::maintenance_protocol::register_writer(
-            context.storage,
-            layout,
-            context.runtime.database_path.parent_path());
+        auto registered =
+            history_storage::maintenance_protocol::register_writer(
+                context.storage,
+                layout,
+                context.runtime.database_path.parent_path());
         if (!registered) {
             return std::unexpected(synchronization_error(
-                context.operation,
-                registered.error().detail,
-                context.summary));
+                context.operation, registered.error().detail, context.summary));
         }
         writer = std::move(*registered);
     }
 
     const auto execute_outcome = [&]() -> std::expected<void, Error> {
-        auto synchronized = sync::coordinator::execute(
-            context.runtime,
-            context.storage,
-            context.key,
-            stable->input,
-            stable->result,
-            &session);
+        auto synchronized = sync::coordinator::execute(context.runtime,
+                                                       context.storage,
+                                                       context.key,
+                                                       stable->input,
+                                                       stable->result,
+                                                       &session);
         if (!synchronized) {
             return std::unexpected(transaction_error(
-                context.operation,
-                synchronized.error(),
-                context.summary));
+                context.operation, synchronized.error(), context.summary));
         }
         return {};
     }();
@@ -192,9 +188,7 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
             history_storage::maintenance_protocol::release_registration(writer);
         if (execute_outcome && !released) {
             return std::unexpected(synchronization_error(
-                context.operation,
-                released.error().detail,
-                context.summary));
+                context.operation, released.error().detail, context.summary));
         }
     }
 
@@ -205,11 +199,12 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
     return Response{
         .operation = context.operation,
         .runtime = context.summary,
-        .data = ResolveMissingCompleted{
-            .resolved_count = resolved_paths.size(),
-            .resolved_paths = std::move(resolved_paths),
-            .published = stable->result.requires_publication,
-        },
+        .data =
+            ResolveMissingCompleted{
+                .resolved_count = resolved_paths.size(),
+                .resolved_paths = std::move(resolved_paths),
+                .published = stable->result.requires_publication,
+            },
     };
 }
 

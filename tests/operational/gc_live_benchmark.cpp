@@ -12,27 +12,38 @@ namespace {
 namespace runner = kasumi::operational::gc_live_runner;
 
 void print_usage(std::ostream& output) {
-    output << "Usage: kasumi_gc_live_benchmark --config <targets.toml> --target-id <id> \\\n"
+    output << "Usage: kasumi_gc_live_benchmark --config <targets.toml> "
+              "--target-id <id> \\\n"
               "         --output <new-local-json> --mode <native|fallback> \\\n"
               "         --payload-bytes <bytes> --execute-live-benchmark \\\n"
-              "         [--rclone-config <config-file>] [--preserve-evidence-on-failure]\n\n"
+              "         [--rclone-config <config-file>] "
+              "[--preserve-evidence-on-failure]\n\n"
               "Controlled live GC remote copy benchmark runner for Kasumi.\n"
-              "This operational tool executes exactly ONE complete garbage collection sequence\n"
-              "under a new owned child namespace and measures client-side latency metrics:\n"
-              "  --config and --target-id: select one explicitly authorized parent\n"
+              "This operational tool executes exactly ONE complete garbage "
+              "collection sequence\n"
+              "under a new owned child namespace and measures client-side "
+              "latency metrics:\n"
+              "  --config and --target-id: select one explicitly authorized "
+              "parent\n"
               "  --output: path for writing the benchmark JSON report\n"
-              "  --mode: copy mode ('native' for transport::copy or 'fallback' for GET/PUT)\n"
-              "  --payload-bytes: synthetic candidate size in bytes (1 to 67108864 [64 MiB], default 8 MiB)\n"
-              "  --execute-live-benchmark: required authorization gate to perform live operations\n"
-              "  --preserve-evidence-on-failure: retain child namespace if errors occur (default true)\n";
+              "  --mode: copy mode ('native' for transport::copy or 'fallback' "
+              "for GET/PUT)\n"
+              "  --payload-bytes: synthetic candidate size in bytes (1 to "
+              "67108864 [64 MiB], default 8 MiB)\n"
+              "  --execute-live-benchmark: required authorization gate to "
+              "perform live operations\n"
+              "  --preserve-evidence-on-failure: retain child namespace if "
+              "errors occur (default true)\n";
 }
 
 int execute(const runner::BenchmarkArguments& arguments) {
     runner::RcloneConfigEnvironment restore_environment;
 
-    auto prepared = runner::prepare_cli_paths(
-        arguments.authorization, arguments.remote, arguments.output,
-        arguments.rclone_config, "kasumi-gc-benchmark-scratch");
+    auto prepared = runner::prepare_cli_paths(arguments.authorization,
+                                              arguments.remote,
+                                              arguments.output,
+                                              arguments.rclone_config,
+                                              "kasumi-gc-benchmark-scratch");
     if (!prepared) {
         std::cerr << prepared.error() << '\n';
         return 2;
@@ -51,8 +62,10 @@ int execute(const runner::BenchmarkArguments& arguments) {
     };
 
     std::cout << "Starting live GC benchmark ["
-              << (arguments.mode == runner::CopyMode::Native ? "native" : "fallback")
-              << ", " << arguments.payload_bytes << " bytes] against: " << arguments.remote << '\n';
+              << (arguments.mode == runner::CopyMode::Native ? "native"
+                                                             : "fallback")
+              << ", " << arguments.payload_bytes
+              << " bytes] against: " << arguments.remote << '\n';
     std::cout.flush();
 
     const auto process_start = std::chrono::steady_clock::now();
@@ -61,20 +74,26 @@ int execute(const runner::BenchmarkArguments& arguments) {
 
     report.phase = "GC_LIVE_BENCHMARK";
     report.benchmark.process_wall_ms = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(process_end - process_start).count());
+        std::chrono::duration_cast<std::chrono::milliseconds>(process_end -
+                                                              process_start)
+            .count());
 
-    std::cout << "Stage reached: " << runner::stage_name(report.stage_reached) << '\n';
+    std::cout << "Stage reached: " << runner::stage_name(report.stage_reached)
+              << '\n';
     std::cout << "Status: " << report.status << '\n';
-    std::cout << "Process wall time: " << report.benchmark.process_wall_ms << " ms\n";
+    std::cout << "Process wall time: " << report.benchmark.process_wall_ms
+              << " ms\n";
     std::cout << "GC total time: " << report.benchmark.gc_total_us << " us\n";
-    std::cout << "Candidate verified copy time: " << report.benchmark.gc_candidate_verified_copy_us << " us\n";
+    std::cout << "Candidate verified copy time: "
+              << report.benchmark.gc_candidate_verified_copy_us << " us\n";
     if (!report.error_message.empty()) {
         std::cout << "Message: " << report.error_message << '\n';
     }
     std::cout.flush();
 
     auto report_json = runner::to_json(report);
-    std::ofstream stream(prepared->output_path, std::ios::binary | std::ios::trunc);
+    std::ofstream stream(prepared->output_path,
+                         std::ios::binary | std::ios::trunc);
     if (stream) {
         stream << report_json.dump(2) << '\n';
     }

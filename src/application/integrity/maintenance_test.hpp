@@ -5,7 +5,10 @@
 
 namespace kasumi::application::integrity::testing {
 
-enum class FsckWorkerEvent { BeforeAudit, WindowStopRequested };
+enum class FsckWorkerEvent {
+    BeforeAudit,
+    WindowStopRequested
+};
 using FsckWorkerEventCallback =
     std::function<void(FsckWorkerEvent, std::size_t)>;
 

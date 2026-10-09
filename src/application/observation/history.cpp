@@ -317,8 +317,9 @@ ObserveResult observe(transport::Transport& storage,
                     }));
             platform::perf_trace::finish("content inventory derivation",
                                          content_inv_trace);
-            platform::perf_trace::count("content.physical_objects",
-                                        result.content_object_identifiers.size());
+            platform::perf_trace::count(
+                "content.physical_objects",
+                result.content_object_identifiers.size());
             platform::perf_trace::count("content.referenced_ids",
                                         referenced_content_identifiers.size());
         }

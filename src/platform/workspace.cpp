@@ -55,8 +55,8 @@ std::filesystem::path extended_path(const std::filesystem::path& path,
     if (path.native().starts_with(L"\\\\?\\")) {
         return path;
     }
-    auto absolute = path.is_absolute() ? path
-                                      : std::filesystem::absolute(path, error);
+    auto absolute =
+        path.is_absolute() ? path : std::filesystem::absolute(path, error);
     if (error) {
         return {};
     }
@@ -76,13 +76,13 @@ clear_read_only(const std::filesystem::path& root) {
     const auto native_root = extended_path(root, error);
     if (error) {
         return std::unexpected("could not resolve workspace '" +
-                               platform::path::to_utf8(root) + "': " +
-                               error.message());
+                               platform::path::to_utf8(root) +
+                               "': " + error.message());
     }
 
-    const auto clear_attribute = [](const std::filesystem::path& path,
-                                    DWORD attributes)
-        -> std::expected<void, std::string> {
+    const auto clear_attribute =
+        [](const std::filesystem::path& path,
+           DWORD attributes) -> std::expected<void, std::string> {
         if ((attributes & FILE_ATTRIBUTE_READONLY) != 0 &&
             !SetFileAttributesW(
                 path.c_str(),
@@ -91,8 +91,8 @@ clear_read_only(const std::filesystem::path& root) {
             if (code != ERROR_FILE_NOT_FOUND && code != ERROR_PATH_NOT_FOUND) {
                 return std::unexpected(
                     "could not clear read-only attribute on '" +
-                    platform::path::to_utf8(path) + "': " +
-                    windows_error(code));
+                    platform::path::to_utf8(path) +
+                    "': " + windows_error(code));
             }
         }
         return {};
@@ -169,8 +169,7 @@ clear_read_only(const std::filesystem::path& root) {
 }
 
 std::error_code remove_tree_windows(const std::filesystem::path& root) {
-    std::vector<std::pair<std::filesystem::path, bool>> pending{
-        {root, false}};
+    std::vector<std::pair<std::filesystem::path, bool>> pending{{root, false}};
     while (!pending.empty()) {
         auto [path, postorder] = std::move(pending.back());
         pending.pop_back();
@@ -210,7 +209,8 @@ std::error_code remove_tree_windows(const std::filesystem::path& root) {
             native_child.append(entry.cFileName);
             std::filesystem::path child{std::move(native_child)};
             if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                failure = std::make_error_code(std::errc::operation_not_permitted);
+                failure =
+                    std::make_error_code(std::errc::operation_not_permitted);
                 break;
             }
             if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {

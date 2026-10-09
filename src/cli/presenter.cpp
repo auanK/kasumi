@@ -117,8 +117,7 @@ void render_bounded(const auto& items,
         print_item(items[index]);
     }
     print_omitted(items.size() - head_count - tail_count);
-    for (std::size_t index = items.size() - tail_count;
-         index < items.size();
+    for (std::size_t index = items.size() - tail_count; index < items.size();
          ++index) {
         print_item(items[index]);
     }
@@ -135,9 +134,8 @@ void render_pending_status(std::size_t count) {
                   count);
 }
 
-void render_pending_paths(
-    const std::vector<std::filesystem::path>& paths,
-    bool full) {
+void render_pending_paths(const std::vector<std::filesystem::path>& paths,
+                          bool full) {
     if (paths.empty()) {
         return;
     }
@@ -151,7 +149,7 @@ void render_pending_paths(
     };
     const auto print_omitted = [](std::size_t omitted) {
         i18n::println(omitted == 1 ? i18n::Key::SyncPendingOmittedSingular
-                                  : i18n::Key::SyncPendingOmittedPlural,
+                                   : i18n::Key::SyncPendingOmittedPlural,
                       omitted);
     };
     render_bounded(ordered, full, print_path, print_omitted);
@@ -751,10 +749,10 @@ void render_sync_summary(const application::SyncCompleted& summary) {
                                      summary.removed_dirs));
     }
     if (summary.partial) {
-        parts.push_back(i18n::format(
-            summary.pending == 1 ? i18n::Key::SyncPendingSingular
-                                 : i18n::Key::SyncPendingPlural,
-            summary.pending));
+        parts.push_back(i18n::format(summary.pending == 1
+                                         ? i18n::Key::SyncPendingSingular
+                                         : i18n::Key::SyncPendingPlural,
+                                     summary.pending));
     }
 
     std::string line = "      ";
@@ -881,30 +879,32 @@ void present(const application::FsckProgress& progress,
 
     const auto completed =
         std::min(progress.completed_objects, *progress.total_objects);
-    const auto percent = completed == *progress.total_objects
-                             ? 100u
-                             : static_cast<unsigned>(
-                                   static_cast<long double>(completed) * 100.0L /
-                                   *progress.total_objects);
+    const auto percent =
+        completed == *progress.total_objects
+            ? 100u
+            : static_cast<unsigned>(static_cast<long double>(completed) *
+                                    100.0L / *progress.total_objects);
     if (state.last_object_percent == percent) {
         return;
     }
     state.last_object_percent = percent;
 
-    std::string line = i18n::format(
-        *progress.total_objects == 1 ? i18n::Key::FsckProgressObject
-                                     : i18n::Key::FsckProgressObjects,
-        completed, *progress.total_objects, percent);
+    std::string line = i18n::format(*progress.total_objects == 1
+                                        ? i18n::Key::FsckProgressObject
+                                        : i18n::Key::FsckProgressObjects,
+                                    completed,
+                                    *progress.total_objects,
+                                    percent);
     if (progress.completed_plaintext_bytes.has_value() &&
         progress.total_plaintext_bytes.has_value()) {
-        const auto completed_bytes = std::min(
-            *progress.completed_plaintext_bytes,
-            *progress.total_plaintext_bytes);
+        const auto completed_bytes =
+            std::min(*progress.completed_plaintext_bytes,
+                     *progress.total_plaintext_bytes);
         const auto completed_size = format_size(completed_bytes);
         const auto total_size = format_size(*progress.total_plaintext_bytes);
         if (*progress.total_plaintext_bytes == 0) {
-            line += i18n::format(i18n::Key::FsckProgressBytes,
-                                 completed_size, total_size);
+            line += i18n::format(
+                i18n::Key::FsckProgressBytes, completed_size, total_size);
         } else {
             const auto byte_percent =
                 completed_bytes == *progress.total_plaintext_bytes
@@ -913,7 +913,9 @@ void present(const application::FsckProgress& progress,
                           static_cast<long double>(completed_bytes) * 100.0L /
                           *progress.total_plaintext_bytes);
             line += i18n::format(i18n::Key::FsckProgressBytesPercent,
-                                 completed_size, total_size, byte_percent);
+                                 completed_size,
+                                 total_size,
+                                 byte_percent);
         }
     }
     std::println("{}.", line);
@@ -960,20 +962,22 @@ int present(const application::Response& response, bool full) {
         if (fsck->checked_objects == 1) {
             std::println("{}", i18n::tr(i18n::Key::FsckSummarySingular));
         } else {
-            std::println("{}", i18n::format(i18n::Key::FsckSummaryPlural,
-                                             fsck->checked_objects));
+            std::println("{}",
+                         i18n::format(i18n::Key::FsckSummaryPlural,
+                                      fsck->checked_objects));
         }
         if (fsck->checked_plaintext_bytes.has_value()) {
-            std::println("{}", i18n::format(i18n::Key::FsckSummaryBytes,
-                                             format_size(
-                                                 *fsck->checked_plaintext_bytes)));
+            std::println(
+                "{}",
+                i18n::format(i18n::Key::FsckSummaryBytes,
+                             format_size(*fsck->checked_plaintext_bytes)));
         }
         return 0;
     }
     if (response.operation == application::Operation::PurgeQuarantine) {
         std::size_t purged = 0;
-        if (const auto* ptr =
-                std::get_if<application::GarbageCollectCompleted>(&response.data)) {
+        if (const auto* ptr = std::get_if<application::GarbageCollectCompleted>(
+                &response.data)) {
             purged = ptr->purged_objects;
         }
         std::println("{}{}{} {}",
@@ -988,7 +992,8 @@ int present(const application::Response& response, bool full) {
     if (response.operation == application::Operation::RepairQuarantine) {
         std::size_t repaired = 0;
         if (const auto* ptr =
-                std::get_if<application::RepairQuarantineCompleted>(&response.data)) {
+                std::get_if<application::RepairQuarantineCompleted>(
+                    &response.data)) {
             repaired = ptr->repaired_metadata_count;
         }
         std::println("{}{}{} {}",
@@ -1008,26 +1013,23 @@ int present(const application::Response& response, bool full) {
                          style::green,
                          i18n::tr(i18n::Key::LabelOk),
                          style::reset,
-                         i18n::format(
-                             i18n::Key::ManualWriterRemovalCompleted,
-                             ptr->identifier));
+                         i18n::format(i18n::Key::ManualWriterRemovalCompleted,
+                                      ptr->identifier));
             return 0;
         }
     }
     if (const auto* ptr =
             std::get_if<application::GarbageCollectCompleted>(&response.data)) {
         if (ptr->analysis_only) {
-            const auto header = (ptr->candidate_objects == 1)
-                                    ? i18n::tr(i18n::Key::GcWarningHeaderSingular)
-                                    : i18n::format(i18n::Key::GcWarningHeaderPlural,
-                                                 ptr->candidate_objects);
+            const auto header =
+                (ptr->candidate_objects == 1)
+                    ? i18n::tr(i18n::Key::GcWarningHeaderSingular)
+                    : i18n::format(i18n::Key::GcWarningHeaderPlural,
+                                   ptr->candidate_objects);
             const auto label = i18n::tr(i18n::Key::LabelWarning);
             const std::string indent(label.size() + 1, ' ');
-            std::println("{}{}{} {}",
-                         style::yellow,
-                         label,
-                         style::reset,
-                         header);
+            std::println(
+                "{}{}{} {}", style::yellow, label, style::reset, header);
             std::println("{}{}", indent, i18n::tr(i18n::Key::GcWarningDetail1));
             std::println("{}{}", indent, i18n::tr(i18n::Key::GcWarningDetail2));
             return 0;

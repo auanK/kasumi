@@ -4,12 +4,12 @@
 #include "platform/durability.hpp"
 #include "platform/workspace.hpp"
 
-#include <gtest/gtest.h>
 #include <array>
 #include <compare>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <gtest/gtest.h>
 #include <string>
 #include <vector>
 
@@ -72,8 +72,7 @@ TEST(CliUpdateTest, SelectsUnstableChannelUntilStableOnePointOhExists) {
         {"v9.0.0", true, false, {}},
         {"not-a-version", false, false, {}},
     };
-    const auto selected =
-        kasumi::cli::update::select_release_index(unstable);
+    const auto selected = kasumi::cli::update::select_release_index(unstable);
     ASSERT_TRUE(selected);
     EXPECT_EQ(unstable[*selected].tag, "v0.10.0-alpha.2");
 
@@ -125,8 +124,8 @@ TEST(CliUpdateTest, ParsesOnlyTheExpectedSha256AndArchiveEntries) {
         "-rwxr-xr-x user/group 1024 2026-10-09 12:00 kasumi\n"
         "-rw-r--r-- user/group 128 2026-10-09 12:00 LICENSE\n"
         "-rw-r--r-- user/group 256 2026-10-09 12:00 THIRD_PARTY_NOTICES.md\n";
-    EXPECT_TRUE(kasumi::cli::update::valid_verbose_archive_listing(verbose,
-                                                                    package));
+    EXPECT_TRUE(
+        kasumi::cli::update::valid_verbose_archive_listing(verbose, package));
     const std::string official_verbose =
         "-rw-rw-r-- 0 0 0 6468 set 19 22:23 CHANGELOG.md\n"
         "-rwxrwxr-x 0 0 0 4229632 set 19 22:30 kasumi.exe\n"
@@ -134,13 +133,12 @@ TEST(CliUpdateTest, ParsesOnlyTheExpectedSha256AndArchiveEntries) {
         "-rw-rw-r-- 0 0 0 1944 set 19 22:23 README.md\n"
         "-rw-rw-r-- 0 0 0 11264 set 19 22:23 THIRD_PARTY_NOTICES.md\n";
     const PackageNames windows_package{"kasumi-windows-x86_64.zip",
-                                      "kasumi-windows-x86_64.zip.sha256",
-                                      "kasumi.exe"};
+                                       "kasumi-windows-x86_64.zip.sha256",
+                                       "kasumi.exe"};
     EXPECT_TRUE(kasumi::cli::update::valid_verbose_archive_listing(
         official_verbose, windows_package));
     EXPECT_FALSE(kasumi::cli::update::valid_verbose_archive_listing(
-        official_verbose +
-            "-rw-rw-r-- 0 0 20 set 19 22:23 unexpected.txt\n",
+        official_verbose + "-rw-rw-r-- 0 0 20 set 19 22:23 unexpected.txt\n",
         windows_package));
     EXPECT_FALSE(kasumi::cli::update::valid_verbose_archive_listing(
         "lrwxrwxrwx user/group 0 2026-10-09 12:00 kasumi\n"
@@ -161,11 +159,13 @@ TEST(CliUpdateTest, ParsesOnlyTheExpectedSha256AndArchiveEntries) {
 
 TEST(CliUpdateTest, RejectsForeignAssetUrlsAndParsesGitHubReleaseResponses) {
     EXPECT_TRUE(kasumi::cli::update::official_asset_url(
-        "v0.7.0", "kasumi-windows-x86_64.zip",
+        "v0.7.0",
+        "kasumi-windows-x86_64.zip",
         "https://github.com/auanK/kasumi/releases/download/v0.7.0/"
         "kasumi-windows-x86_64.zip"));
     EXPECT_FALSE(kasumi::cli::update::official_asset_url(
-        "v0.7.0", "kasumi-windows-x86_64.zip",
+        "v0.7.0",
+        "kasumi-windows-x86_64.zip",
         "https://evil.example/kasumi-windows-x86_64.zip"));
     const auto parsed = kasumi::cli::update::parse_releases_json(R"json([
       {"tag_name":"v0.7.0","draft":false,"prerelease":true,
@@ -180,44 +180,48 @@ TEST(CliUpdateTest, RejectsForeignAssetUrlsAndParsesGitHubReleaseResponses) {
 
 TEST(CliUpdateTest, ReleaseListingFailsClosedOnHttpAndMalformedResponses) {
     using namespace kasumi::cli::update;
-    auto failed_http = fetch_releases([](std::string_view, std::size_t)
-        -> std::expected<HttpResponse, std::string> {
-        return HttpResponse{.status = 503};
-    });
+    auto failed_http = fetch_releases(
+        [](std::string_view,
+           std::size_t) -> std::expected<HttpResponse, std::string> {
+            return HttpResponse{.status = 503};
+        });
     EXPECT_FALSE(failed_http);
-    auto failed_network = fetch_releases([](std::string_view, std::size_t)
-        -> std::expected<HttpResponse, std::string> {
-        return std::unexpected("injected network failure");
-    });
+    auto failed_network = fetch_releases(
+        [](std::string_view,
+           std::size_t) -> std::expected<HttpResponse, std::string> {
+            return std::unexpected("injected network failure");
+        });
     EXPECT_FALSE(failed_network);
     EXPECT_FALSE(parse_releases_json("{broken"));
-    auto timeout = fetch_releases([](std::string_view, std::size_t)
-        -> std::expected<HttpResponse, std::string> {
-        return std::unexpected("request timed out");
-    });
+    auto timeout = fetch_releases(
+        [](std::string_view,
+           std::size_t) -> std::expected<HttpResponse, std::string> {
+            return std::unexpected("request timed out");
+        });
     EXPECT_FALSE(timeout);
 }
 
 TEST(CliUpdateTest, ReleaseListingReadsAllPages) {
     using namespace kasumi::cli::update;
     std::vector<std::string> urls;
-    const auto result = fetch_releases(
-        [&](std::string_view url, std::size_t)
-            -> std::expected<HttpResponse, std::string> {
-            urls.emplace_back(url);
-            if (url.ends_with("page=1")) {
-                std::string body = "[";
-                for (int index = 0; index < 100; ++index) {
-                    if (index != 0) {
-                        body += ',';
-                    }
-                    body += R"({"tag_name":"invalid","draft":false,"prerelease":false,"assets":[]})";
+    const auto result = fetch_releases([&](std::string_view url, std::size_t)
+                                           -> std::expected<HttpResponse,
+                                                            std::string> {
+        urls.emplace_back(url);
+        if (url.ends_with("page=1")) {
+            std::string body = "[";
+            for (int index = 0; index < 100; ++index) {
+                if (index != 0) {
+                    body += ',';
                 }
-                body += ']';
-                return HttpResponse{.status = 200, .body = std::move(body)};
+                body +=
+                    R"({"tag_name":"invalid","draft":false,"prerelease":false,"assets":[]})";
             }
-            return HttpResponse{.status = 200, .body = "[]"};
-        });
+            body += ']';
+            return HttpResponse{.status = 200, .body = std::move(body)};
+        }
+        return HttpResponse{.status = 200, .body = "[]"};
+    });
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 100);
     ASSERT_EQ(urls.size(), 2);
@@ -244,7 +248,8 @@ TEST(CliUpdateTest, IdentifiesRunningExecutableAndPlatformPackage) {
 TEST(CliUpdateTest, VerifiesChecksumAndRejectsMismatchInTemporaryFiles) {
     auto workspace = kasumi::test::make_temp_workspace("update-checksum");
     const auto archive = kasumi::test::workspace_path(workspace, "package.bin");
-    const auto checksum = kasumi::test::workspace_path(workspace, "package.sha256");
+    const auto checksum =
+        kasumi::test::workspace_path(workspace, "package.sha256");
     constexpr std::string_view digest =
         "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
     {
@@ -272,7 +277,8 @@ TEST(CliUpdateTest, InstallsOnlyIntoTemporaryTargetAndKeepsRecoveryCopy) {
     auto workspace = kasumi::test::make_temp_workspace("update-install");
     const auto target = kasumi::test::workspace_path(workspace, "kasumi");
     const auto prepared = kasumi::test::workspace_path(workspace, "prepared");
-    const auto unrelated = kasumi::test::workspace_path(workspace, "profile.bin");
+    const auto unrelated =
+        kasumi::test::workspace_path(workspace, "profile.bin");
     {
         std::ofstream output(target, std::ios::binary);
         output << "old executable";
@@ -352,9 +358,9 @@ TEST(CliUpdateTest, ElevatesOnlyAfterAnActualPermissionFailureAndOnlyOnce) {
     const auto result = install_once_then_elevate(
         [&]() -> InstallResult {
             ++direct_calls;
-            return std::unexpected(InstallFailure{
-                .kind = InstallFailure::Kind::Other,
-                .detail = "archive verification failed"});
+            return std::unexpected(
+                InstallFailure{.kind = InstallFailure::Kind::Other,
+                               .detail = "archive verification failed"});
         },
         [&]() -> InstallResult {
             ++elevated_calls;
@@ -373,9 +379,9 @@ TEST(CliUpdateTest, ElevationIsAttemptedOnceForPermissionFailure) {
     const auto result = install_once_then_elevate(
         [&]() -> InstallResult {
             ++direct_calls;
-            return std::unexpected(InstallFailure{
-                .kind = InstallFailure::Kind::PermissionDenied,
-                .detail = "replace denied"});
+            return std::unexpected(
+                InstallFailure{.kind = InstallFailure::Kind::PermissionDenied,
+                               .detail = "replace denied"});
         },
         [&]() -> InstallResult {
             ++elevated_calls;
@@ -408,16 +414,16 @@ TEST(CliUpdateTest, ReplacementPermissionFailureCanOccurInWritableDirectory) {
 #else
         "13";
 #endif
-    hooks.replace_atomically = [&](const auto&, const auto&)
-        -> std::expected<void, std::string> {
+    hooks.replace_atomically =
+        [&](const auto&, const auto&) -> std::expected<void, std::string> {
         return std::unexpected("replace_atomically failed (native_code=" +
                                permission_code + "): permission denied");
     };
     int elevation_calls = 0;
     const auto result = install_once_then_elevate(
         [&]() -> InstallResult {
-            return install_prepared_executable(prepared, target, *digest,
-                                               &hooks);
+            return install_prepared_executable(
+                prepared, target, *digest, &hooks);
         },
         [&]() -> InstallResult {
             ++elevation_calls;
@@ -439,15 +445,15 @@ TEST(CliUpdateTest, ElevationCancellationOrFailureIsNotRetried) {
     const auto result = install_once_then_elevate(
         [&]() -> InstallResult {
             ++direct_calls;
-            return std::unexpected(InstallFailure{
-                .kind = InstallFailure::Kind::PermissionDenied,
-                .detail = "replace denied"});
+            return std::unexpected(
+                InstallFailure{.kind = InstallFailure::Kind::PermissionDenied,
+                               .detail = "replace denied"});
         },
         [&]() -> InstallResult {
             ++elevated_calls;
-            return std::unexpected(InstallFailure{
-                .kind = InstallFailure::Kind::Other,
-                .detail = "authorization cancelled"});
+            return std::unexpected(
+                InstallFailure{.kind = InstallFailure::Kind::Other,
+                               .detail = "authorization cancelled"});
         });
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().detail, "authorization cancelled");
@@ -457,7 +463,8 @@ TEST(CliUpdateTest, ElevationCancellationOrFailureIsNotRetried) {
 
 TEST(CliUpdateTest, CancelledElevationPreservesTheInstalledExecutable) {
     using namespace kasumi::cli::update;
-    auto workspace = kasumi::test::make_temp_workspace("update-cancelled-elevation");
+    auto workspace =
+        kasumi::test::make_temp_workspace("update-cancelled-elevation");
     const auto target = kasumi::test::workspace_path(workspace, "kasumi");
     {
         std::ofstream output(target, std::ios::binary);
@@ -465,14 +472,14 @@ TEST(CliUpdateTest, CancelledElevationPreservesTheInstalledExecutable) {
     }
     const auto result = install_once_then_elevate(
         []() -> InstallResult {
-            return std::unexpected(InstallFailure{
-                .kind = InstallFailure::Kind::PermissionDenied,
-                .detail = "replace denied"});
+            return std::unexpected(
+                InstallFailure{.kind = InstallFailure::Kind::PermissionDenied,
+                               .detail = "replace denied"});
         },
         []() -> InstallResult {
-            return std::unexpected(InstallFailure{
-                .kind = InstallFailure::Kind::Other,
-                .detail = "authorization cancelled"});
+            return std::unexpected(
+                InstallFailure{.kind = InstallFailure::Kind::Other,
+                               .detail = "authorization cancelled"});
         });
     ASSERT_FALSE(result);
     std::ifstream input(target, std::ios::binary);
@@ -497,15 +504,15 @@ TEST(CliUpdateTest, FailedAtomicReplacementLeavesOriginalAndIsNotElevated) {
     const auto digest = sha256_file(prepared);
     ASSERT_TRUE(digest);
     InstallHooks hooks;
-    hooks.replace_atomically = [](const auto&, const auto&)
-        -> std::expected<void, std::string> {
+    hooks.replace_atomically =
+        [](const auto&, const auto&) -> std::expected<void, std::string> {
         return std::unexpected("injected non-permission replacement failure");
     };
     int elevated_calls = 0;
     const auto result = install_once_then_elevate(
         [&]() -> InstallResult {
-            return install_prepared_executable(prepared, target, *digest,
-                                               &hooks);
+            return install_prepared_executable(
+                prepared, target, *digest, &hooks);
         },
         [&]() -> InstallResult {
             ++elevated_calls;
@@ -520,9 +527,11 @@ TEST(CliUpdateTest, FailedAtomicReplacementLeavesOriginalAndIsNotElevated) {
     EXPECT_EQ(body, "original executable");
 }
 
-TEST(CliUpdateTest, FailedPostInstallVerificationKeepsRecoveryCopyOnRollbackFailure) {
+TEST(CliUpdateTest,
+     FailedPostInstallVerificationKeepsRecoveryCopyOnRollbackFailure) {
     using namespace kasumi::cli::update;
-    auto workspace = kasumi::test::make_temp_workspace("update-rollback-failure");
+    auto workspace =
+        kasumi::test::make_temp_workspace("update-rollback-failure");
     const auto target = kasumi::test::workspace_path(workspace, "kasumi");
     const auto prepared = kasumi::test::workspace_path(workspace, "prepared");
     {
@@ -548,18 +557,19 @@ TEST(CliUpdateTest, FailedPostInstallVerificationKeepsRecoveryCopyOnRollbackFail
         return sha256_file(path);
     };
     int replace_calls = 0;
-    hooks.replace_atomically = [&](const auto& source, const auto& destination)
-        -> std::expected<void, std::string> {
+    hooks.replace_atomically =
+        [&](const auto& source,
+            const auto& destination) -> std::expected<void, std::string> {
         ++replace_calls;
         if (replace_calls == 2) {
             return std::unexpected("injected rollback failure");
         }
         return kasumi::platform::durability::replace_atomically(source,
-                                                                 destination);
+                                                                destination);
     };
 
-    const auto result = install_prepared_executable(prepared, target, *digest,
-                                                    &hooks);
+    const auto result =
+        install_prepared_executable(prepared, target, *digest, &hooks);
 
     ASSERT_FALSE(result.has_value());
     EXPECT_NE(result.error().detail.find("rollback failed"), std::string::npos);
@@ -578,18 +588,22 @@ TEST(CliUpdateTest, FailedPostInstallVerificationKeepsRecoveryCopyOnRollbackFail
     EXPECT_TRUE(kept_recovery_copy);
 }
 
-TEST(CliUpdateTest, LinuxPrivilegedHandoffDoesNotAcceptArchiveOrDestinationArguments) {
+TEST(CliUpdateTest,
+     LinuxPrivilegedHandoffDoesNotAcceptArchiveOrDestinationArguments) {
 #if !defined(_WIN32)
-    std::vector<std::string> arguments{
-        "kasumi", "--kasumi-update-install", "arbitrary/archive.tar.gz",
-        "v999.0.0", "en", "arbitrary-destination"};
+    std::vector<std::string> arguments{"kasumi",
+                                       "--kasumi-update-install",
+                                       "arbitrary/archive.tar.gz",
+                                       "v999.0.0",
+                                       "en",
+                                       "arbitrary-destination"};
     std::vector<char*> argv;
     for (auto& argument : arguments) {
         argv.push_back(argument.data());
     }
-    EXPECT_NE(kasumi::cli::update::run(static_cast<int>(argv.size()),
-                                      argv.data()),
-              0);
+    EXPECT_NE(
+        kasumi::cli::update::run(static_cast<int>(argv.size()), argv.data()),
+        0);
 #endif
 }
 
@@ -607,10 +621,12 @@ TEST(CliUpdateTest, LinuxSystemToolResolutionUsesTrustedDirectories) {
     EXPECT_TRUE(validate_linux_system_tool(*resolved));
 }
 
-TEST(CliUpdateTest, LinuxSystemToolRejectsUserControlledExecutableAndDirectory) {
+TEST(CliUpdateTest,
+     LinuxSystemToolRejectsUserControlledExecutableAndDirectory) {
     using namespace kasumi::cli::update;
     if (::geteuid() == 0) {
-        GTEST_SKIP() << "this ownership regression needs an unprivileged test process";
+        GTEST_SKIP()
+            << "this ownership regression needs an unprivileged test process";
     }
     auto workspace = kasumi::test::make_temp_workspace("update-untrusted-tool");
     const auto tool = kasumi::test::workspace_path(workspace, "tar");
@@ -618,17 +634,17 @@ TEST(CliUpdateTest, LinuxSystemToolRejectsUserControlledExecutableAndDirectory) 
         std::ofstream output(tool, std::ios::binary);
         output << "#!/bin/sh\nexit 0\n";
     }
-    std::filesystem::permissions(
-        tool, std::filesystem::perms::owner_all |
-                  std::filesystem::perms::group_exec |
-                  std::filesystem::perms::others_exec,
+    std::filesystem::permissions(tool,
+                                 std::filesystem::perms::owner_all |
+                                     std::filesystem::perms::group_exec |
+                                     std::filesystem::perms::others_exec,
                                  std::filesystem::perm_options::replace);
-    struct stat status {};
+    struct stat status{};
     ASSERT_EQ(::stat(tool.c_str(), &status), 0);
     EXPECT_EQ(status.st_uid, ::getuid());
     EXPECT_FALSE(validate_linux_system_tool(tool));
-    EXPECT_FALSE(validate_linux_system_tool(
-        kasumi::test::workspace_root(workspace)));
+    EXPECT_FALSE(
+        validate_linux_system_tool(kasumi::test::workspace_root(workspace)));
 }
 
 TEST(CliUpdateTest, LinuxModifiedPathCannotSelectPrivilegedTool) {
@@ -641,15 +657,15 @@ TEST(CliUpdateTest, LinuxModifiedPathCannotSelectPrivilegedTool) {
         std::ofstream output(fake_tar, std::ios::binary);
         output << "#!/bin/sh\nexit 0\n";
     }
-    std::filesystem::permissions(
-        fake_tar, std::filesystem::perms::owner_all |
-                      std::filesystem::perms::group_exec |
-                      std::filesystem::perms::others_exec,
+    std::filesystem::permissions(fake_tar,
+                                 std::filesystem::perms::owner_all |
+                                     std::filesystem::perms::group_exec |
+                                     std::filesystem::perms::others_exec,
                                  std::filesystem::perm_options::replace);
     const char* old_path = std::getenv("PATH");
-    const std::optional<std::string> saved_path = old_path == nullptr
-                                                      ? std::nullopt
-                                                      : std::optional<std::string>{old_path};
+    const std::optional<std::string> saved_path =
+        old_path == nullptr ? std::nullopt
+                            : std::optional<std::string>{old_path};
     ASSERT_EQ(::setenv("PATH", fake_bin.c_str(), 1), 0);
     const auto resolved = resolve_linux_system_tool("tar");
     if (saved_path) {
@@ -663,8 +679,7 @@ TEST(CliUpdateTest, LinuxModifiedPathCannotSelectPrivilegedTool) {
 }
 
 TEST(CliUpdateTest, LinuxMissingTrustedToolReturnsAnExplicitError) {
-    const auto missing = kasumi::cli::update::resolve_linux_system_tool(
-        "apk");
+    const auto missing = kasumi::cli::update::resolve_linux_system_tool("apk");
     if (missing) {
         GTEST_SKIP() << "APK package manager is installed on this Linux image";
     }
@@ -672,12 +687,15 @@ TEST(CliUpdateTest, LinuxMissingTrustedToolReturnsAnExplicitError) {
     EXPECT_NE(missing.error().find("trusted system tool"), std::string::npos);
 }
 
-TEST(CliUpdateTest, LinuxToolValidationFailureCannotReachInstallOrChangeTarget) {
+TEST(CliUpdateTest,
+     LinuxToolValidationFailureCannotReachInstallOrChangeTarget) {
     using namespace kasumi::cli::update;
-    auto workspace = kasumi::test::make_temp_workspace("update-tool-validation-failure");
+    auto workspace =
+        kasumi::test::make_temp_workspace("update-tool-validation-failure");
     const auto package = package_names_for_this_platform();
     ASSERT_TRUE(package);
-    const auto archive = kasumi::test::workspace_path(workspace, package->archive);
+    const auto archive =
+        kasumi::test::workspace_path(workspace, package->archive);
     const auto target = kasumi::test::workspace_path(workspace, "kasumi");
     {
         std::ofstream output(archive, std::ios::binary);
@@ -691,14 +709,15 @@ TEST(CliUpdateTest, LinuxToolValidationFailureCannotReachInstallOrChangeTarget) 
     ASSERT_TRUE(digest);
     int install_calls = 0;
     LinuxHandoffHooks hooks;
-    hooks.fetch_checksum = [&](std::string_view)
-        -> std::expected<std::string, std::string> {
+    hooks.fetch_checksum =
+        [&](std::string_view) -> std::expected<std::string, std::string> {
         return *digest + "  " + package->archive + "\n";
     };
-    hooks.prepare = [](const std::filesystem::path&, std::string_view)
-        -> std::expected<PreparedExecutable, std::string> {
-        const auto tool = resolve_linux_system_tool(
-            "kasumi-test-tool-that-does-not-exist");
+    hooks.prepare =
+        [](const std::filesystem::path&,
+           std::string_view) -> std::expected<PreparedExecutable, std::string> {
+        const auto tool =
+            resolve_linux_system_tool("kasumi-test-tool-that-does-not-exist");
         if (!tool) {
             return std::unexpected(tool.error());
         }
@@ -709,7 +728,8 @@ TEST(CliUpdateTest, LinuxToolValidationFailureCannotReachInstallOrChangeTarget) 
         ++install_calls;
         return {};
     };
-    const auto result = install_linux_handoff(archive, "v0.99.0", target, hooks);
+    const auto result =
+        install_linux_handoff(archive, "v0.99.0", target, hooks);
     ASSERT_FALSE(result);
     EXPECT_EQ(install_calls, 0);
     std::ifstream input(target, std::ios::binary);
@@ -724,14 +744,17 @@ TEST(CliUpdateTest, LinuxPkexecResultsDistinguishUnavailableAgentFromDenial) {
               LinuxElevationState::Succeeded);
     EXPECT_EQ(classify_linux_pkexec_result(126, "Request dismissed").state,
               LinuxElevationState::Cancelled);
-    EXPECT_EQ(classify_linux_pkexec_result(
-                  127, "Error executing command as another user: No authentication agent found.\n")
-                  .state,
-              LinuxElevationState::AuthenticationUnavailable);
-    EXPECT_EQ(classify_linux_pkexec_result(
-                  127, "Error executing command as another user: Not authorized\n")
-                  .state,
-              LinuxElevationState::Failed);
+    EXPECT_EQ(
+        classify_linux_pkexec_result(127,
+                                     "Error executing command as another user: "
+                                     "No authentication agent found.\n")
+            .state,
+        LinuxElevationState::AuthenticationUnavailable);
+    EXPECT_EQ(
+        classify_linux_pkexec_result(
+            127, "Error executing command as another user: Not authorized\n")
+            .state,
+        LinuxElevationState::Failed);
     EXPECT_EQ(classify_linux_pkexec_result(127, "unknown failure").state,
               LinuxElevationState::Failed);
 }
@@ -789,8 +812,8 @@ TEST(CliUpdateTest, LinuxElevationFallsBackOnlyWhenPkexecAgentIsUnavailable) {
 
 TEST(CliUpdateTest, LinuxElevationNeverFallsBackAfterDenialOrUncertainFailure) {
     using namespace kasumi::cli::update;
-    for (const auto state : {LinuxElevationState::Cancelled,
-                             LinuxElevationState::Failed}) {
+    for (const auto state :
+         {LinuxElevationState::Cancelled, LinuxElevationState::Failed}) {
         int pkexec_calls = 0;
         int sudo_calls = 0;
         const auto result = attempt_linux_elevation(
@@ -825,7 +848,8 @@ TEST(CliUpdateTest, LinuxElevationRequiresATerminalForSudoAndFailsWhenMissing) {
 
 TEST(CliUpdateTest, LinuxElevationDoesNotRepeatAndCancellationPreservesTarget) {
     using namespace kasumi::cli::update;
-    auto workspace = kasumi::test::make_temp_workspace("update-elevation-cancel");
+    auto workspace =
+        kasumi::test::make_temp_workspace("update-elevation-cancel");
     const auto target = kasumi::test::workspace_path(workspace, "kasumi");
     const auto prepared = kasumi::test::workspace_path(workspace, "prepared");
     {
@@ -839,8 +863,8 @@ TEST(CliUpdateTest, LinuxElevationDoesNotRepeatAndCancellationPreservesTarget) {
     const auto digest = sha256_file(prepared);
     ASSERT_TRUE(digest);
     InstallHooks install_hooks;
-    install_hooks.replace_atomically = [](const auto&, const auto&)
-        -> std::expected<void, std::string> {
+    install_hooks.replace_atomically =
+        [](const auto&, const auto&) -> std::expected<void, std::string> {
         return std::unexpected(
             "replace_atomically failed (native_code=13): permission denied");
     };
@@ -848,8 +872,8 @@ TEST(CliUpdateTest, LinuxElevationDoesNotRepeatAndCancellationPreservesTarget) {
     int sudo_calls = 0;
     const auto result = install_once_then_elevate(
         [&] {
-            return install_prepared_executable(prepared, target, *digest,
-                                               &install_hooks);
+            return install_prepared_executable(
+                prepared, target, *digest, &install_hooks);
         },
         [&]() -> InstallResult {
             const auto denied = attempt_linux_elevation(
@@ -861,10 +885,11 @@ TEST(CliUpdateTest, LinuxElevationDoesNotRepeatAndCancellationPreservesTarget) {
                 },
                 [&] {
                     ++sudo_calls;
-                    return LinuxElevationResult{LinuxElevationState::Succeeded, {}};
+                    return LinuxElevationResult{LinuxElevationState::Succeeded,
+                                                {}};
                 });
-            return std::unexpected(InstallFailure{
-                InstallFailure::Kind::Other, denied.detail});
+            return std::unexpected(
+                InstallFailure{InstallFailure::Kind::Other, denied.detail});
         });
     ASSERT_FALSE(result);
     EXPECT_EQ(pkexec_calls, 1);
@@ -880,7 +905,8 @@ TEST(CliUpdateTest, LinuxPrivilegedHandoffOnlyFetchesOfficialChecksum) {
     auto workspace = kasumi::test::make_temp_workspace("update-linux-handoff");
     const auto package = package_names_for_this_platform();
     ASSERT_TRUE(package);
-    const auto archive = kasumi::test::workspace_path(workspace, package->archive);
+    const auto archive =
+        kasumi::test::workspace_path(workspace, package->archive);
     {
         std::ofstream output(archive, std::ios::binary);
         output << "verified package";
@@ -891,8 +917,8 @@ TEST(CliUpdateTest, LinuxPrivilegedHandoffOnlyFetchesOfficialChecksum) {
     int prepare_calls = 0;
     int install_calls = 0;
     LinuxHandoffHooks hooks;
-    hooks.fetch_checksum = [&](std::string_view url)
-        -> std::expected<std::string, std::string> {
+    hooks.fetch_checksum =
+        [&](std::string_view url) -> std::expected<std::string, std::string> {
         ++checksum_requests;
         EXPECT_EQ(url,
                   "https://github.com/auanK/kasumi/releases/download/v0.99.0/" +
@@ -915,9 +941,11 @@ TEST(CliUpdateTest, LinuxPrivilegedHandoffOnlyFetchesOfficialChecksum) {
         return {};
     };
 
-    const auto result = install_linux_handoff(
-        archive, "v0.99.0", kasumi::test::workspace_path(workspace, "kasumi"),
-        hooks);
+    const auto result =
+        install_linux_handoff(archive,
+                              "v0.99.0",
+                              kasumi::test::workspace_path(workspace, "kasumi"),
+                              hooks);
 
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(checksum_requests, 1);
@@ -925,20 +953,23 @@ TEST(CliUpdateTest, LinuxPrivilegedHandoffOnlyFetchesOfficialChecksum) {
     EXPECT_EQ(install_calls, 1);
 }
 
-TEST(CliUpdateTest, LinuxPrivilegedHandoffRejectsUnauthenticatedOrStalePackage) {
+TEST(CliUpdateTest,
+     LinuxPrivilegedHandoffRejectsUnauthenticatedOrStalePackage) {
     using namespace kasumi::cli::update;
-    auto workspace = kasumi::test::make_temp_workspace("update-linux-invalid-handoff");
+    auto workspace =
+        kasumi::test::make_temp_workspace("update-linux-invalid-handoff");
     const auto package = package_names_for_this_platform();
     ASSERT_TRUE(package);
-    const auto archive = kasumi::test::workspace_path(workspace, package->archive);
+    const auto archive =
+        kasumi::test::workspace_path(workspace, package->archive);
     {
         std::ofstream output(archive, std::ios::binary);
         output << "tampered package";
     }
     int prepare_calls = 0;
     LinuxHandoffHooks hooks;
-    hooks.fetch_checksum = [](std::string_view)
-        -> std::expected<std::string, std::string> {
+    hooks.fetch_checksum =
+        [](std::string_view) -> std::expected<std::string, std::string> {
         return std::string(64, 'a') + "  kasumi-linux-x86_64.tar.gz\n";
     };
     hooks.prepare = [&](const std::filesystem::path&, std::string_view)
@@ -946,15 +977,21 @@ TEST(CliUpdateTest, LinuxPrivilegedHandoffRejectsUnauthenticatedOrStalePackage) 
         ++prepare_calls;
         return std::unexpected("should not prepare an unauthenticated package");
     };
-    hooks.install = [](const PreparedExecutable&, const std::filesystem::path&)
-        -> InstallResult { return {}; };
+    hooks.install = [](const PreparedExecutable&,
+                       const std::filesystem::path&) -> InstallResult {
+        return {};
+    };
 
-    EXPECT_FALSE(install_linux_handoff(archive, "v0.99.0",
-                                       kasumi::test::workspace_path(workspace, "kasumi"),
-                                       hooks));
-    EXPECT_FALSE(install_linux_handoff(archive, "not-a-tag",
-                                       kasumi::test::workspace_path(workspace, "kasumi"),
-                                       hooks));
+    EXPECT_FALSE(
+        install_linux_handoff(archive,
+                              "v0.99.0",
+                              kasumi::test::workspace_path(workspace, "kasumi"),
+                              hooks));
+    EXPECT_FALSE(
+        install_linux_handoff(archive,
+                              "not-a-tag",
+                              kasumi::test::workspace_path(workspace, "kasumi"),
+                              hooks));
     EXPECT_EQ(prepare_calls, 0);
 }
 #endif
@@ -962,7 +999,8 @@ TEST(CliUpdateTest, LinuxPrivilegedHandoffRejectsUnauthenticatedOrStalePackage) 
 #if !defined(_WIN32)
 TEST(CliUpdateTest, InstallsIntoAnOwnedTemporaryDirectoryWithoutRootChown) {
     if (::geteuid() == 0) {
-        GTEST_SKIP() << "this ownership regression needs an unprivileged test process";
+        GTEST_SKIP()
+            << "this ownership regression needs an unprivileged test process";
     }
     auto workspace = kasumi::test::make_temp_workspace("update-unprivileged");
     const auto target = kasumi::test::workspace_path(workspace, "kasumi");
@@ -975,7 +1013,7 @@ TEST(CliUpdateTest, InstallsIntoAnOwnedTemporaryDirectoryWithoutRootChown) {
         std::ofstream output(prepared, std::ios::binary);
         output << "new executable";
     }
-    struct stat before {};
+    struct stat before{};
     ASSERT_EQ(::stat(target.c_str(), &before), 0);
     const auto digest = kasumi::cli::update::sha256_file(prepared);
     ASSERT_TRUE(digest);
@@ -984,7 +1022,7 @@ TEST(CliUpdateTest, InstallsIntoAnOwnedTemporaryDirectoryWithoutRootChown) {
         prepared, target, *digest);
 
     ASSERT_TRUE(installed.has_value()) << installed.error().detail;
-    struct stat after {};
+    struct stat after{};
     ASSERT_EQ(::stat(target.c_str(), &after), 0);
     EXPECT_EQ(after.st_uid, before.st_uid);
     EXPECT_EQ(after.st_gid, before.st_gid);
@@ -1004,9 +1042,11 @@ TEST(CliUpdateTest, WindowsWorkspaceGrantsAdministratorsReadOnlyAccess) {
 }
 
 TEST(CliUpdateTest, WindowsDestinationIdentityRejectsAnotherKasumiExecutable) {
-    auto workspace = kasumi::test::make_temp_workspace("update-windows-identity");
+    auto workspace =
+        kasumi::test::make_temp_workspace("update-windows-identity");
     const auto original = kasumi::test::workspace_path(workspace, "kasumi.exe");
-    const auto alternate = kasumi::test::workspace_path(workspace, "other-kasumi.exe");
+    const auto alternate =
+        kasumi::test::workspace_path(workspace, "other-kasumi.exe");
     {
         std::ofstream output(original, std::ios::binary);
         output << "first executable";
@@ -1037,9 +1077,11 @@ TEST(CliUpdateTest, WindowsDestinationIdentityRejectsAnotherKasumiExecutable) {
 
 TEST(CliUpdateTest, WindowsInstallerRejectsDestinationChangedDuringHandoff) {
     using namespace kasumi::cli::update;
-    auto workspace = kasumi::test::make_temp_workspace("update-windows-target-change");
+    auto workspace =
+        kasumi::test::make_temp_workspace("update-windows-target-change");
     const auto target = kasumi::test::workspace_path(workspace, "kasumi.exe");
-    const auto prepared = kasumi::test::workspace_path(workspace, "prepared.exe");
+    const auto prepared =
+        kasumi::test::workspace_path(workspace, "prepared.exe");
     {
         std::ofstream output(target, std::ios::binary);
         output << "original installation";
@@ -1051,7 +1093,8 @@ TEST(CliUpdateTest, WindowsInstallerRejectsDestinationChangedDuringHandoff) {
     const auto identity = windows_file_identity(target);
     const auto digest = sha256_file(prepared);
     ASSERT_TRUE(identity && digest);
-    const auto previous = kasumi::test::workspace_path(workspace, "previous.exe");
+    const auto previous =
+        kasumi::test::workspace_path(workspace, "previous.exe");
     std::error_code error;
     std::filesystem::rename(target, previous, error);
     ASSERT_FALSE(error) << error.message();
@@ -1060,8 +1103,8 @@ TEST(CliUpdateTest, WindowsInstallerRejectsDestinationChangedDuringHandoff) {
         output << "replacement installation";
     }
     InstallHooks hooks;
-    hooks.validate_target = [identity = *identity](
-        const std::filesystem::path& candidate)
+    hooks.validate_target =
+        [identity = *identity](const std::filesystem::path& candidate)
         -> std::expected<void, std::string> {
         if (!windows_file_identity_matches(candidate, identity)) {
             return std::unexpected("target identity changed");
@@ -1069,8 +1112,8 @@ TEST(CliUpdateTest, WindowsInstallerRejectsDestinationChangedDuringHandoff) {
         return {};
     };
 
-    const auto installed = install_prepared_executable(prepared, target,
-                                                       *digest, &hooks);
+    const auto installed =
+        install_prepared_executable(prepared, target, *digest, &hooks);
 
     ASSERT_FALSE(installed);
     std::ifstream input(target, std::ios::binary);

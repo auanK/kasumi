@@ -1,7 +1,6 @@
+#include "platform/path.hpp"
 #include "provider_certification_support.hpp"
 #include "provider_target_config.hpp"
-
-#include "platform/path.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -15,7 +14,7 @@ namespace {
 using namespace kasumi::operational::provider_certification;
 
 std::expected<void, std::string> write_json(const std::filesystem::path& path,
-                                           const nlohmann::json& value) {
+                                            const nlohmann::json& value) {
     std::error_code error;
     if (!path.parent_path().empty()) {
         std::filesystem::create_directories(path.parent_path(), error);
@@ -56,11 +55,11 @@ read_report(const std::filesystem::path& path) {
             } else if (status == "Failed") {
                 parsed = CapabilityStatus::Failed;
             } else if (status != "Unsupported") {
-                return std::unexpected("input report has an invalid capability status");
+                return std::unexpected(
+                    "input report has an invalid capability status");
             }
             report.capabilities.push_back(
-                {.name = item.at("name").get<std::string>(),
-                 .status = parsed});
+                {.name = item.at("name").get<std::string>(), .status = parsed});
         }
         for (const auto& item : json.at("scenarios")) {
             const auto status = item.at("status").get<std::string>();
@@ -72,11 +71,11 @@ read_report(const std::filesystem::path& path) {
             } else if (status == "Blocked") {
                 parsed = ScenarioStatus::Blocked;
             } else if (status != "NotRun") {
-                return std::unexpected("input report has an invalid scenario status");
+                return std::unexpected(
+                    "input report has an invalid scenario status");
             }
             report.scenarios.push_back(
-                {.name = item.at("name").get<std::string>(),
-                 .status = parsed});
+                {.name = item.at("name").get<std::string>(), .status = parsed});
         }
         return report;
     } catch (const std::exception&) {
@@ -97,16 +96,16 @@ void finish_cleanup(ProviderTarget& target,
         return;
     }
 
-    std::expected<void, std::string> cleanup = std::unexpected(
-        "target ownership information is unavailable");
+    std::expected<void, std::string> cleanup =
+        std::unexpected("target ownership information is unavailable");
     if (target.transport == "Local" && target.local_ownership) {
         cleanup = cleanup_local_target(*target.local_ownership);
     } else if (target.transport == "Rclone") {
         cleanup = cleanup_rclone_target(target);
     }
     report.cleanup = cleanup ? "CLEANED" : "FAILED";
-    cleanup_scenario->status = cleanup ? ScenarioStatus::Pass
-                                      : ScenarioStatus::Fail;
+    cleanup_scenario->status =
+        cleanup ? ScenarioStatus::Pass : ScenarioStatus::Fail;
     if (!cleanup) {
         report.diagnostics.push_back(cleanup.error());
         cleanup_scenario->diagnostics.push_back(cleanup.error());
@@ -125,9 +124,8 @@ int main(int argc, char** argv) {
     for (int index = 0; index < argc; ++index) {
         arguments.emplace_back(argv[index]);
     }
-    auto target_selection =
-        kasumi::operational::provider_target_config::
-            parse_target_selection_arguments(arguments);
+    auto target_selection = kasumi::operational::provider_target_config::
+        parse_target_selection_arguments(arguments);
     if (!target_selection) {
         std::cerr << target_selection.error() << '\n';
         return 2;
@@ -146,7 +144,7 @@ int main(int argc, char** argv) {
             ++index;
         } else if ((argument == "--local-parent" ||
                     argument == "--local-root") &&
-            index + 1 < argc) {
+                   index + 1 < argc) {
             local_parent = argv[++index];
         } else if (argument == "--output" && index + 1 < argc) {
             output_path = argv[++index];
@@ -215,27 +213,28 @@ int main(int argc, char** argv) {
             std::cerr << "Rclone target was not selected\n";
             return 2;
         }
-        target = create_rclone_target(
-            (*selected_live_target)->provider_id,
-            (*selected_live_target)->remote,
-            (*selected_live_target)->authorized_parent);
+        target =
+            create_rclone_target((*selected_live_target)->provider_id,
+                                 (*selected_live_target)->remote,
+                                 (*selected_live_target)->authorized_parent);
         if (!target) {
             std::cerr << target.error() << '\n';
             return 2;
         }
         if (!output_explicit) {
-            output_path = std::filesystem::current_path() /
-                          std::filesystem::path{
-                              "benchmark-results/phase41-multi-backend-certification/"} /
-                          (target->provider_id + "-certification.json");
+            output_path =
+                std::filesystem::current_path() /
+                std::filesystem::path{
+                    "benchmark-results/phase41-multi-backend-certification/"} /
+                (target->provider_id + "-certification.json");
         }
     } else {
         std::cerr << "unsupported target: " << target_kind << '\n';
         return 2;
     }
 
-    const auto absolute_output = std::filesystem::absolute(output_path)
-                                     .lexically_normal();
+    const auto absolute_output =
+        std::filesystem::absolute(output_path).lexically_normal();
     const auto output_relative =
         absolute_output.lexically_relative(target->workspace_root);
     if (!output_relative.empty() && output_relative != "." &&

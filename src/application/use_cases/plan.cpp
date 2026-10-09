@@ -44,14 +44,14 @@ core_action_to_plan_action(Action action) {
 }
 
 std::expected<PlanReport, std::string>
-reconciliation_to_report(
-    const reconciliation::Input& input,
-    const reconciliation::Result& result) {
+reconciliation_to_report(const reconciliation::Input& input,
+                         const reconciliation::Result& result) {
     PlanReport report;
     report.target_generation = result.plan.target_generation;
     report.has_conflicts = result.has_conflicts;
     for (const auto& row : input.pending_materializations) {
-        const auto* candidate = find_row(result.candidate_shared_tree, row.path);
+        const auto* candidate =
+            find_row(result.candidate_shared_tree, row.path);
         if (find_row(input.local_tree, row.path) == nullptr &&
             candidate != nullptr && !candidate->is_directory &&
             candidate->hash == row.hash && candidate->size == row.size) {

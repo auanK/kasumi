@@ -1,8 +1,8 @@
+#include "application/integrity/maintenance.hpp"
+
 #include "application/concurrency.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
-#include "application/integrity/maintenance.hpp"
-
 #include "application/sync/coordinator.hpp"
 #include "application/use_cases/context.hpp"
 #include "application/use_cases/error_mapping.hpp"
@@ -17,7 +17,8 @@ std::expected<Response, Error> run_maintenance(OperationContext& context,
     std::optional<FsckProgress> last_fsck_progress;
     integrity::FsckProgressCallback fsck_progress{};
     if (fsck && context.on_progress) {
-        fsck_progress = [&context, &last_fsck_progress](const FsckProgress& progress) noexcept {
+        fsck_progress = [&context, &last_fsck_progress](
+                            const FsckProgress& progress) noexcept {
             last_fsck_progress = progress;
             try {
                 context.on_progress(progress);
@@ -36,21 +37,25 @@ std::expected<Response, Error> run_maintenance(OperationContext& context,
     }
 
     if (fsck) {
-        auto checked = integrity::fsck(context.runtime, context.storage, context.key,
-                                        content_concurrency(),
-                                        std::move(fsck_progress));
+        auto checked = integrity::fsck(context.runtime,
+                                       context.storage,
+                                       context.key,
+                                       content_concurrency(),
+                                       std::move(fsck_progress));
         if (!checked) {
             return std::unexpected(maintenance_error(
                 context.operation, checked.error(), context.summary));
         }
-        return Response{.operation = context.operation,
-                        .runtime = context.summary,
-                        .data = FsckCompleted{
-                            .checked_objects = checked->checked_objects,
-                            .checked_plaintext_bytes = last_fsck_progress
-                                                         ? last_fsck_progress->completed_plaintext_bytes
-                                                         : std::nullopt,
-                        }};
+        return Response{
+            .operation = context.operation,
+            .runtime = context.summary,
+            .data = FsckCompleted{
+                .checked_objects = checked->checked_objects,
+                .checked_plaintext_bytes =
+                    last_fsck_progress
+                        ? last_fsck_progress->completed_plaintext_bytes
+                        : std::nullopt,
+            }};
     }
 
     integrity::GarbageCollectProgressCallback gc_progress{};
@@ -60,9 +65,13 @@ std::expected<Response, Error> run_maintenance(OperationContext& context,
         };
     }
 
-    auto collected = integrity::garbage_collect(
-        context.runtime, context.storage, context.key,
-        8, 8, 8, std::move(gc_progress));
+    auto collected = integrity::garbage_collect(context.runtime,
+                                                context.storage,
+                                                context.key,
+                                                8,
+                                                8,
+                                                8,
+                                                std::move(gc_progress));
     if (!collected) {
         return std::unexpected(maintenance_error(
             context.operation, collected.error(), context.summary));
@@ -94,23 +103,23 @@ std::expected<Response, Error> run_purge_quarantine(OperationContext& context) {
         return std::unexpected(maintenance_error(
             context.operation, purged.error(), context.summary));
     }
-    return Response{
-        .operation = context.operation,
-        .runtime = context.summary,
-        .data = GarbageCollectCompleted{.purged_objects = *purged}};
+    return Response{.operation = context.operation,
+                    .runtime = context.summary,
+                    .data = GarbageCollectCompleted{.purged_objects = *purged}};
 }
 
-std::expected<Response, Error> run_repair_quarantine(OperationContext& context) {
+std::expected<Response, Error>
+run_repair_quarantine(OperationContext& context) {
     auto repaired = integrity::repair_quarantine(
         context.runtime, context.storage, context.key);
     if (!repaired) {
         return std::unexpected(maintenance_error(
             context.operation, repaired.error(), context.summary));
     }
-    return Response{
-        .operation = context.operation,
-        .runtime = context.summary,
-        .data = RepairQuarantineCompleted{.repaired_metadata_count = *repaired}};
+    return Response{.operation = context.operation,
+                    .runtime = context.summary,
+                    .data = RepairQuarantineCompleted{.repaired_metadata_count =
+                                                          *repaired}};
 }
 
 std::expected<Response, Error> run_remove_writer(OperationContext& context) {
@@ -125,11 +134,10 @@ std::expected<Response, Error> run_remove_writer(OperationContext& context) {
             .runtime = context.summary,
         });
     }
-    return Response{
-        .operation = context.operation,
-        .runtime = context.summary,
-        .data = ManualWriterRemovalCompleted{
-            .identifier = context.writer_identifier}};
+    return Response{.operation = context.operation,
+                    .runtime = context.summary,
+                    .data = ManualWriterRemovalCompleted{
+                        .identifier = context.writer_identifier}};
 }
 
 } // namespace kasumi::application::detail

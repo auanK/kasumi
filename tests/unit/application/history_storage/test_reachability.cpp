@@ -673,8 +673,7 @@ TEST(ReachabilityTest, EpochAnchorMustBePresentAndMatchItsHeight) {
                                  const Commit& commit,
                                  const std::string& anchor_id,
                                  std::uint64_t anchor_height) {
-        auto workspace =
-            kasumi::test::make_temp_workspace(std::string{suffix});
+        auto workspace = kasumi::test::make_temp_workspace(std::string{suffix});
         FakeState* state = nullptr;
         auto transport = make_fake_transport(state);
         ASSERT_TRUE(kasumi::transport::initialize(transport));
@@ -687,17 +686,18 @@ TEST(ReachabilityTest, EpochAnchorMustBePresentAndMatchItsHeight) {
             .policy = {},
             .anchors = {{.commit_id = anchor_id, .height = anchor_height}},
         };
-        const auto sealed =
-            kasumi::application::history_storage::epoch::seal(value, test_key());
+        const auto sealed = kasumi::application::history_storage::epoch::seal(
+            value, test_key());
         ASSERT_TRUE(sealed.has_value()) << sealed.error().detail;
         ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
-            transport, test_key(), *sealed,
+            transport,
+            test_key(),
+            *sealed,
             kasumi::test::workspace_root(workspace)));
 
         const auto result =
             kasumi::application::history_storage::inventory_reachability(
-                transport, test_key(),
-                kasumi::test::workspace_root(workspace));
+                transport, test_key(), kasumi::test::workspace_root(workspace));
         EXPECT_FALSE(result.has_value());
     };
 
@@ -845,9 +845,10 @@ TEST(ReachabilityTest, SingleCommitVariantBypassesBatchAndUsesDirectDownload) {
     EXPECT_EQ(state->commit_get_count, 1U);
 }
 
-TEST(ReachabilityTest, TwoPhysicalVariantsForSameCommitPreserveBatchWhenSupported) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("reachability-two-variants-same-commit");
+TEST(ReachabilityTest,
+     TwoPhysicalVariantsForSameCommitPreserveBatchWhenSupported) {
+    auto workspace = kasumi::test::make_temp_workspace(
+        "reachability-two-variants-same-commit");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
@@ -914,7 +915,8 @@ TEST(ReachabilityTest, SingleCommitVariantWithoutGetBatchUsesDirectDownload) {
     EXPECT_EQ(state->commit_get_count, 1U);
 }
 
-TEST(ReachabilityTest, SingleCommitVariantTamperedCiphertextIsClassifiedAsInvalid) {
+TEST(ReachabilityTest,
+     SingleCommitVariantTamperedCiphertextIsClassifiedAsInvalid) {
     auto workspace =
         kasumi::test::make_temp_workspace("reachability-single-tampered");
     FakeState* state = nullptr;
@@ -942,10 +944,12 @@ TEST(ReachabilityTest, SingleCommitVariantTamperedCiphertextIsClassifiedAsInvali
     EXPECT_EQ(state->commit_get_count, 1U);
 }
 
-TEST(ReachabilityTest, EquivalenceUnsortedAndDuplicateIdentifiersInHistoryListing) {
+TEST(ReachabilityTest,
+     EquivalenceUnsortedAndDuplicateIdentifiersInHistoryListing) {
     auto storage = make_local_storage();
     const auto base = kasumi::history::make_empty_bootstrap().value();
-    const auto child = make_commit(1, {commit_id(base)}, "child.txt", "child").value();
+    const auto child =
+        make_commit(1, {commit_id(base)}, "child.txt", "child").value();
     const auto base_ref = publish(storage, base);
     const auto child_ref = publish(storage, child);
 
@@ -958,18 +962,31 @@ TEST(ReachabilityTest, EquivalenceUnsortedAndDuplicateIdentifiersInHistoryListin
 
     // Unsorted, reversed and with duplicates
     std::vector<std::string> identifiers = {
-        marker_child, obj_child, layout.history_prefix + "unknown_1.bin", marker_base, obj_base,
-        marker_child, obj_child, layout.history_prefix + "unknown_2.bin", marker_base, obj_base
-    };
+        marker_child,
+        obj_child,
+        layout.history_prefix + "unknown_1.bin",
+        marker_base,
+        obj_base,
+        marker_child,
+        obj_child,
+        layout.history_prefix + "unknown_2.bin",
+        marker_base,
+        obj_base};
 
-    const auto result = kasumi::application::history_storage::inventory_reachability(
-        storage.transport, test_key(), identifiers, kasumi::test::workspace_root(storage.workspace));
+    const auto result =
+        kasumi::application::history_storage::inventory_reachability(
+            storage.transport,
+            test_key(),
+            identifiers,
+            kasumi::test::workspace_root(storage.workspace));
     ASSERT_TRUE(result.has_value()) << result.error().detail;
 
     EXPECT_TRUE(std::ranges::is_sorted(result->logical_heads));
     EXPECT_TRUE(std::ranges::is_sorted(result->reachable_commits));
     EXPECT_TRUE(std::ranges::is_sorted(
-        result->commits, {}, &kasumi::application::history_storage::ReachabilityCommit::commit_id));
+        result->commits,
+        {},
+        &kasumi::application::history_storage::ReachabilityCommit::commit_id));
     EXPECT_TRUE(std::ranges::is_sorted(result->unknown_history_objects));
 
     EXPECT_EQ(result->logical_heads.size(), 2U);
@@ -981,9 +998,14 @@ TEST(ReachabilityTest, EquivalenceUnsortedAndDuplicateIdentifiersInHistoryListin
 TEST(ReachabilityTest, EquivalenceBranchDivergenceAndMerge) {
     auto storage = make_local_storage();
     const auto base = kasumi::history::make_empty_bootstrap().value();
-    const auto left = make_commit(1, {commit_id(base)}, "left.txt", "left").value();
-    const auto right = make_commit(1, {commit_id(base)}, "right.txt", "right").value();
-    const auto merge = make_commit(2, {commit_id(left), commit_id(right)}, "merged.txt", "merged").value();
+    const auto left =
+        make_commit(1, {commit_id(base)}, "left.txt", "left").value();
+    const auto right =
+        make_commit(1, {commit_id(base)}, "right.txt", "right").value();
+    const auto merge =
+        make_commit(
+            2, {commit_id(left), commit_id(right)}, "merged.txt", "merged")
+            .value();
     const auto orphan = make_commit(0, {}, "orphan.txt", "orphan").value();
 
     const auto base_ref = publish(storage, base);
@@ -993,33 +1015,48 @@ TEST(ReachabilityTest, EquivalenceBranchDivergenceAndMerge) {
     const auto orphan_ref = publish(storage, orphan);
 
     // Keep only merge as logical head marker; delete other markers
-    ASSERT_EQ(kasumi::transport::remove(storage.transport, marker_path(base_ref.head)).value(),
+    ASSERT_EQ(
+        kasumi::transport::remove(storage.transport, marker_path(base_ref.head))
+            .value(),
+        kasumi::transport::Removal::Removed);
+    ASSERT_EQ(
+        kasumi::transport::remove(storage.transport, marker_path(left_ref.head))
+            .value(),
+        kasumi::transport::Removal::Removed);
+    ASSERT_EQ(kasumi::transport::remove(storage.transport,
+                                        marker_path(right_ref.head))
+                  .value(),
               kasumi::transport::Removal::Removed);
-    ASSERT_EQ(kasumi::transport::remove(storage.transport, marker_path(left_ref.head)).value(),
-              kasumi::transport::Removal::Removed);
-    ASSERT_EQ(kasumi::transport::remove(storage.transport, marker_path(right_ref.head)).value(),
-              kasumi::transport::Removal::Removed);
-    ASSERT_EQ(kasumi::transport::remove(storage.transport, marker_path(orphan_ref.head)).value(),
+    ASSERT_EQ(kasumi::transport::remove(storage.transport,
+                                        marker_path(orphan_ref.head))
+                  .value(),
               kasumi::transport::Removal::Removed);
 
-    const auto result = kasumi::application::history_storage::inventory_reachability(
-        storage.transport, test_key(), kasumi::test::workspace_root(storage.workspace));
+    const auto result =
+        kasumi::application::history_storage::inventory_reachability(
+            storage.transport,
+            test_key(),
+            kasumi::test::workspace_root(storage.workspace));
     ASSERT_TRUE(result.has_value()) << result.error().detail;
 
-    EXPECT_EQ(result->logical_heads, std::vector<std::string>{commit_id(merge)});
+    EXPECT_EQ(result->logical_heads,
+              std::vector<std::string>{commit_id(merge)});
     std::vector<std::string> expected_reachable = {
-        commit_id(base), commit_id(left), commit_id(right), commit_id(merge)
-    };
+        commit_id(base), commit_id(left), commit_id(right), commit_id(merge)};
     std::ranges::sort(expected_reachable);
     EXPECT_EQ(result->reachable_commits, expected_reachable);
-    EXPECT_EQ(result->orphan_commits, std::vector<std::string>{commit_id(orphan)});
+    EXPECT_EQ(result->orphan_commits,
+              std::vector<std::string>{commit_id(orphan)});
 
     EXPECT_TRUE(std::ranges::is_sorted(
-        result->commits, {}, &kasumi::application::history_storage::ReachabilityCommit::commit_id));
+        result->commits,
+        {},
+        &kasumi::application::history_storage::ReachabilityCommit::commit_id));
 }
 
 TEST(ReachabilityTest, EquivalenceMultipleCiphertextVariantsPerCommit) {
-    auto workspace = kasumi::test::make_temp_workspace("reachability-multi-variants");
+    auto workspace =
+        kasumi::test::make_temp_workspace("reachability-multi-variants");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
@@ -1029,12 +1066,11 @@ TEST(ReachabilityTest, EquivalenceMultipleCiphertextVariantsPerCommit) {
     // Add a second distinct ciphertext for the exact same commit
     const auto canonical = kasumi::history::serialize(commit).value();
     add_fake_payload(
-        transport, workspace, commit_id(commit),
-        canonical,
-        "variant2", false);
+        transport, workspace, commit_id(commit), canonical, "variant2", false);
 
-    const auto result = kasumi::application::history_storage::inventory_reachability(
-        transport, test_key(), kasumi::test::workspace_root(workspace));
+    const auto result =
+        kasumi::application::history_storage::inventory_reachability(
+            transport, test_key(), kasumi::test::workspace_root(workspace));
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     ASSERT_EQ(result->commits.size(), 1U);
     EXPECT_EQ(result->commits.front().variants.size(), 2U);
@@ -1056,12 +1092,16 @@ TEST(ReachabilityTest, AllocationBudgetAvoidsNodeBasedHistoryContainers) {
     kasumi::platform::perf_trace::force_enable(true);
     kasumi::platform::perf_trace::reset();
 
-    const auto result = kasumi::application::history_storage::inventory_reachability(
-        storage.transport, test_key(), kasumi::test::workspace_root(storage.workspace));
+    const auto result =
+        kasumi::application::history_storage::inventory_reachability(
+            storage.transport,
+            test_key(),
+            kasumi::test::workspace_root(storage.workspace));
     ASSERT_TRUE(result.has_value()) << result.error().detail;
 
     // Budget: Zero intermediate node-based tree containers (std::set, std::map)
-    // and zero node allocations in history inventory and reachability reconstruction
+    // and zero node allocations in history inventory and reachability
+    // reconstruction
     EXPECT_EQ(kasumi::platform::perf_trace::get_count(
                   "history_inventory.intermediate_tree_containers"),
               0U);

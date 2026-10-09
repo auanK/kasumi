@@ -212,29 +212,32 @@ bool unsupported_job_batch_endpoint(const Error& error) noexcept {
             error.message.find("method not found") != std::string::npos);
 }
 
-std::expected<int, Error> parse_job_batch_status(
-    const nlohmann::json& status_json,
-    std::string_view operation_name) {
+std::expected<int, Error>
+parse_job_batch_status(const nlohmann::json& status_json,
+                       std::string_view operation_name) {
     if (!status_json.is_number_integer()) {
-        return std::unexpected(make_error(
-            ErrorCode::ProtocolFailure,
-            std::string("invalid ") + std::string(operation_name) + " job/batch result status"));
+        return std::unexpected(make_error(ErrorCode::ProtocolFailure,
+                                          std::string("invalid ") +
+                                              std::string(operation_name) +
+                                              " job/batch result status"));
     }
     std::int64_t status = 0;
     if (status_json.is_number_unsigned()) {
         const auto val = status_json.get<std::uint64_t>();
         if (val < 100 || val > 599) {
-            return std::unexpected(make_error(
-                ErrorCode::ProtocolFailure,
-                std::string("out-of-range ") + std::string(operation_name) + " job/batch result status"));
+            return std::unexpected(make_error(ErrorCode::ProtocolFailure,
+                                              std::string("out-of-range ") +
+                                                  std::string(operation_name) +
+                                                  " job/batch result status"));
         }
         status = static_cast<std::int64_t>(val);
     } else {
         const auto val = status_json.get<std::int64_t>();
         if (val < 100 || val > 599) {
-            return std::unexpected(make_error(
-                ErrorCode::ProtocolFailure,
-                std::string("out-of-range ") + std::string(operation_name) + " job/batch result status"));
+            return std::unexpected(make_error(ErrorCode::ProtocolFailure,
+                                              std::string("out-of-range ") +
+                                                  std::string(operation_name) +
+                                                  " job/batch result status"));
         }
         status = val;
     }
@@ -244,12 +247,11 @@ std::expected<int, Error> parse_job_batch_status(
 Result parse_copy_batch_response(const nlohmann::json& response,
                                  const nlohmann::json& inputs) {
     if (!response.is_object() || response.contains("error") ||
-        !response.contains("results") ||
-        !response.at("results").is_array() ||
+        !response.contains("results") || !response.at("results").is_array() ||
         response.at("results").size() != inputs.size()) {
-        return std::unexpected(make_error(
-            ErrorCode::ProtocolFailure,
-            "invalid or incomplete copy job/batch response"));
+        return std::unexpected(
+            make_error(ErrorCode::ProtocolFailure,
+                       "invalid or incomplete copy job/batch response"));
     }
 
     std::size_t successes = 0;
@@ -258,16 +260,16 @@ Result parse_copy_batch_response(const nlohmann::json& response,
         const auto& result = response.at("results").at(index);
         const auto& input = inputs.at(index);
         if (!result.is_object()) {
-            return std::unexpected(make_error(
-                ErrorCode::ProtocolFailure,
-                "invalid copy job/batch subresult"));
+            return std::unexpected(
+                make_error(ErrorCode::ProtocolFailure,
+                           "invalid copy job/batch subresult"));
         }
         if (result.contains("path") &&
             (!result.at("path").is_string() ||
              result.at("path") != input.at("_path"))) {
-            return std::unexpected(make_error(
-                ErrorCode::ProtocolFailure,
-                "copy job/batch result path does not match input"));
+            return std::unexpected(
+                make_error(ErrorCode::ProtocolFailure,
+                           "copy job/batch result path does not match input"));
         }
         if (result.contains("input")) {
             auto parameters = input;
@@ -282,7 +284,8 @@ Result parse_copy_batch_response(const nlohmann::json& response,
 
         bool item_failed = false;
         if (result.contains("status")) {
-            auto parsed_status = parse_job_batch_status(result.at("status"), "copy");
+            auto parsed_status =
+                parse_job_batch_status(result.at("status"), "copy");
             if (!parsed_status) {
                 return std::unexpected(parsed_status.error());
             }
@@ -292,9 +295,9 @@ Result parse_copy_batch_response(const nlohmann::json& response,
             if (!result.at("error").is_string() ||
                 result.at("error").get_ref<const std::string&>().empty() ||
                 !result.contains("status")) {
-                return std::unexpected(make_error(
-                    ErrorCode::ProtocolFailure,
-                    "invalid copy job/batch error result"));
+                return std::unexpected(
+                    make_error(ErrorCode::ProtocolFailure,
+                               "invalid copy job/batch error result"));
             }
             item_failed = true;
         }
@@ -306,12 +309,12 @@ Result parse_copy_batch_response(const nlohmann::json& response,
     }
 
     if (failed) {
-        platform::perf_trace::count(
-            "rclone.copy_batch_reported_successes", successes);
+        platform::perf_trace::count("rclone.copy_batch_reported_successes",
+                                    successes);
         platform::perf_trace::count("rclone.copy_batch_partial_responses", 1);
-        return std::unexpected(make_error(
-            ErrorCode::ProtocolFailure,
-            "one or more copy job/batch subcommands failed"));
+        return std::unexpected(
+            make_error(ErrorCode::ProtocolFailure,
+                       "one or more copy job/batch subcommands failed"));
     }
     platform::perf_trace::count("rclone.copy_batch_reported_successes",
                                 successes);
@@ -397,13 +400,12 @@ Result rclone_initialize(void* context) {
         return std::unexpected(invalid_context_error());
     }
 
-    const auto created =
-        request_json(*state,
-                     "operations/mkdir",
-                     nlohmann::json{{"fs", rooted_remote_fs(*state)},
-                                    {"remote", ""}},
-                     maximum_response_size,
-                     quick_timeout);
+    const auto created = request_json(
+        *state,
+        "operations/mkdir",
+        nlohmann::json{{"fs", rooted_remote_fs(*state)}, {"remote", ""}},
+        maximum_response_size,
+        quick_timeout);
     if (!created) {
         return std::unexpected(created.error());
     }
@@ -440,17 +442,16 @@ Result rclone_put(void* context,
     }
 
     const auto copy_trace = platform::perf_trace::begin();
-    const auto copied =
-        request_json(*state,
-                     "operations/copyfile",
-                     nlohmann::json{
-                         {"srcFs", source_parent},
-                         {"srcRemote", source_name},
-                         {"dstFs", rooted_remote_fs(*state)},
-                         {"dstRemote", std::string{identifier}},
-                     },
-                     maximum_response_size,
-                     transfer_timeout);
+    const auto copied = request_json(*state,
+                                     "operations/copyfile",
+                                     nlohmann::json{
+                                         {"srcFs", source_parent},
+                                         {"srcRemote", source_name},
+                                         {"dstFs", rooted_remote_fs(*state)},
+                                         {"dstRemote", std::string{identifier}},
+                                     },
+                                     maximum_response_size,
+                                     transfer_timeout);
     platform::perf_trace::finish("rclone copyfile upload", copy_trace);
     if (!copied) {
         return std::unexpected(copied.error());
@@ -477,8 +478,7 @@ Result rclone_put_batch(void* context, const PutBatch& batch) {
     nlohmann::json payload = {{"srcFs", source_path},
                               {"dstFs", rooted_remote_fs(*state)},
                               {"createEmptySrcDirs", false}};
-    nlohmann::json config = {{"NoTraverse", true},
-                             {"NoUpdateModTime", true}};
+    nlohmann::json config = {{"NoTraverse", true}, {"NoUpdateModTime", true}};
     if (batch.max_parallel_transfers > 0) {
         config["Transfers"] = batch.max_parallel_transfers;
     }
@@ -502,9 +502,9 @@ Result rclone_put_files_batch(void* context, const PutFilesBatch& batch) {
         return {};
     }
     if (batch.concurrency == 0) {
-        return std::unexpected(make_error(
-            ErrorCode::InvalidContext,
-            "put files batch concurrency must be positive"));
+        return std::unexpected(
+            make_error(ErrorCode::InvalidContext,
+                       "put files batch concurrency must be positive"));
     }
 
     nlohmann::json inputs = nlohmann::json::array();
@@ -521,13 +521,12 @@ Result rclone_put_files_batch(void* context, const PutFilesBatch& batch) {
         if (auto valid = require_regular_source(*source); !valid) {
             return valid;
         }
-        const auto source_name =
-            platform::path::to_utf8(source->filename());
+        const auto source_name = platform::path::to_utf8(source->filename());
         const auto source_parent =
             platform::path::to_utf8(source->parent_path());
         if (source_name.empty() || source_parent.empty()) {
-            return std::unexpected(make_error(
-                ErrorCode::InvalidContext, "invalid source file"));
+            return std::unexpected(
+                make_error(ErrorCode::InvalidContext, "invalid source file"));
         }
         inputs.push_back(nlohmann::json{
             {"_path", "operations/copyfile"},
@@ -554,13 +553,13 @@ Result rclone_put_files_batch(void* context, const PutFilesBatch& batch) {
         if (unsupported_job_batch_endpoint(response.error())) {
             platform::perf_trace::count(
                 "rclone.put_files_batch_unsupported_before_submission", 1);
-            return std::unexpected(make_error(
-                ErrorCode::Unsupported,
-                "rclone does not support job/batch",
-                response.error().native_code));
+            return std::unexpected(
+                make_error(ErrorCode::Unsupported,
+                           "rclone does not support job/batch",
+                           response.error().native_code));
         }
-        platform::perf_trace::count(
-            "rclone.put_files_batch_transport_errors", 1);
+        platform::perf_trace::count("rclone.put_files_batch_transport_errors",
+                                    1);
         return std::unexpected(response.error());
     }
 
@@ -604,17 +603,16 @@ Result rclone_get(void* context,
     }
 
     const auto copy_trace = platform::perf_trace::begin();
-    const auto copied =
-        request_json(*state,
-                     "operations/copyfile",
-                     nlohmann::json{
-                         {"srcFs", rooted_remote_fs(*state)},
-                         {"srcRemote", std::string{identifier}},
-                         {"dstFs", destination_parent},
-                         {"dstRemote", destination_name},
-                     },
-                     maximum_response_size,
-                     transfer_timeout);
+    const auto copied = request_json(*state,
+                                     "operations/copyfile",
+                                     nlohmann::json{
+                                         {"srcFs", rooted_remote_fs(*state)},
+                                         {"srcRemote", std::string{identifier}},
+                                         {"dstFs", destination_parent},
+                                         {"dstRemote", destination_name},
+                                     },
+                                     maximum_response_size,
+                                     transfer_timeout);
     platform::perf_trace::finish("rclone copyfile download", copy_trace);
     if (!copied) {
         if (not_found(copied.error())) {
@@ -664,8 +662,8 @@ Result rclone_copy(void* context,
     platform::perf_trace::finish("rclone copyfile remote copy", copy_trace);
     if (!copied) {
         if (not_found(copied.error())) {
-            return std::unexpected(make_error(
-                ErrorCode::ObjectNotFound, "remote source does not exist"));
+            return std::unexpected(make_error(ErrorCode::ObjectNotFound,
+                                              "remote source does not exist"));
         }
         return std::unexpected(copied.error());
     }
@@ -681,9 +679,9 @@ Result rclone_copy_batch(void* context, const CopyBatch& batch) {
         return {};
     }
     if (batch.concurrency == 0) {
-        return std::unexpected(make_error(
-            ErrorCode::InvalidContext,
-            "copy batch concurrency must be positive"));
+        return std::unexpected(
+            make_error(ErrorCode::InvalidContext,
+                       "copy batch concurrency must be positive"));
     }
 
     nlohmann::json inputs = nlohmann::json::array();
@@ -714,10 +712,10 @@ Result rclone_copy_batch(void* context, const CopyBatch& batch) {
         transfer_timeout);
     if (!response) {
         if (unsupported_job_batch_endpoint(response.error())) {
-            return std::unexpected(make_error(
-                ErrorCode::Unsupported,
-                "rclone does not support job/batch",
-                response.error().native_code));
+            return std::unexpected(
+                make_error(ErrorCode::Unsupported,
+                           "rclone does not support job/batch",
+                           response.error().native_code));
         }
         return std::unexpected(response.error());
     }
@@ -759,8 +757,7 @@ Result rclone_get_batch(void* context, const GetBatch& batch) {
         {"srcFs",
          batch.source_prefix.empty()
              ? rooted_remote_fs(*state)
-             : join_remote_path(rooted_remote_fs(*state),
-                                batch.source_prefix)},
+             : join_remote_path(rooted_remote_fs(*state), batch.source_prefix)},
         {"dstFs", platform::path::to_utf8(*absolute_destination)},
         {"createEmptySrcDirs", false},
         {"_filter", {{"IncludeRule", std::move(include_rules)}}},
@@ -908,19 +905,20 @@ ListingResult rclone_list_prefix(void* context, std::string_view prefix) {
 
     const auto remote = std::string{prefix};
     const auto list_trace = platform::perf_trace::begin();
-    const auto response = request_read_json(*state,
-                                            "operations/list",
-                                            nlohmann::json{
-                                                {"fs", rooted_remote_fs(*state)},
-                                                {"remote", remote},
-                                                {"opt",
-                                                 {{"recurse", false},
-                                                  {"filesOnly", true},
-                                                  {"noModTime", true},
-                                                  {"noMimeType", true}}},
-                                            },
-                                            maximum_list_response_size,
-                                            control_read_deadline);
+    const auto response =
+        request_read_json(*state,
+                          "operations/list",
+                          nlohmann::json{
+                              {"fs", rooted_remote_fs(*state)},
+                              {"remote", remote},
+                              {"opt",
+                               {{"recurse", false},
+                                {"filesOnly", true},
+                                {"noModTime", true},
+                                {"noMimeType", true}}},
+                          },
+                          maximum_list_response_size,
+                          control_read_deadline);
     platform::perf_trace::finish("rc/list_prefix", list_trace);
     if (!response) {
         if (not_found(response.error())) {
@@ -963,10 +961,10 @@ std::expected<std::string, Error> rclone_physical_hash(
             response.error().message.find(
                 "couldn't find method \"operations/hashsumfile\"") !=
                 std::string::npos) {
-            return std::unexpected(make_error(
-                ErrorCode::Unsupported,
-                "rclone does not support operations/hashsumfile",
-                response.error().native_code));
+            return std::unexpected(
+                make_error(ErrorCode::Unsupported,
+                           "rclone does not support operations/hashsumfile",
+                           response.error().native_code));
         }
         if (not_found(response.error())) {
             return std::unexpected(make_error(ErrorCode::ObjectNotFound,
@@ -1147,25 +1145,23 @@ rclone_control_read_batch(void* context,
 
     nlohmann::json inputs = nlohmann::json::array();
     for (const auto& prefix : request.list_prefixes) {
-        inputs.push_back(nlohmann::json{
-            {"_path", "operations/list"},
-            {"fs", rooted_remote_fs(*state)},
-            {"remote", relative_remote(prefix)},
-            {"opt",
-             {{"recurse", false},
-              {"filesOnly", true},
-              {"noModTime", true},
-              {"noMimeType", true}}}});
+        inputs.push_back(nlohmann::json{{"_path", "operations/list"},
+                                        {"fs", rooted_remote_fs(*state)},
+                                        {"remote", relative_remote(prefix)},
+                                        {"opt",
+                                         {{"recurse", false},
+                                          {"filesOnly", true},
+                                          {"noModTime", true},
+                                          {"noMimeType", true}}}});
     }
     for (const auto& identifier : request.presence_identifiers) {
-        inputs.push_back(
-            nlohmann::json{{"_path", "operations/stat"},
-                           {"fs", rooted_remote_fs(*state)},
-                           {"remote", relative_remote(identifier)},
-                           {"opt",
-                            {{"filesOnly", true},
-                             {"noModTime", true},
-                             {"noMimeType", true}}}});
+        inputs.push_back(nlohmann::json{{"_path", "operations/stat"},
+                                        {"fs", rooted_remote_fs(*state)},
+                                        {"remote", relative_remote(identifier)},
+                                        {"opt",
+                                         {{"filesOnly", true},
+                                          {"noModTime", true},
+                                          {"noMimeType", true}}}});
     }
 
     const auto response = request_read_json(
@@ -1205,13 +1201,13 @@ RemovalResult rclone_remove(void* context, std::string_view identifier) {
         return std::unexpected(invalid_identifier_error());
     }
 
-    const auto deleted = request_json(
-        *state,
-        "operations/deletefile",
-        nlohmann::json{{"fs", rooted_remote_fs(*state)},
-                       {"remote", std::string{identifier}}},
-        maximum_response_size,
-        quick_timeout);
+    const auto deleted =
+        request_json(*state,
+                     "operations/deletefile",
+                     nlohmann::json{{"fs", rooted_remote_fs(*state)},
+                                    {"remote", std::string{identifier}}},
+                     maximum_response_size,
+                     quick_timeout);
     if (!deleted) {
         if (not_found(deleted.error())) {
             return Removal::AlreadyAbsent;
@@ -1230,9 +1226,9 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
         return RemoveBatchReport{};
     }
     if (batch.concurrency == 0) {
-        return std::unexpected(make_error(
-            ErrorCode::InvalidContext,
-            "remove batch concurrency must be positive"));
+        return std::unexpected(
+            make_error(ErrorCode::InvalidContext,
+                       "remove batch concurrency must be positive"));
     }
 
     nlohmann::json inputs = nlohmann::json::array();
@@ -1269,22 +1265,21 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
         if (unsupported_job_batch_endpoint(response.error())) {
             platform::perf_trace::count(
                 "rclone.remove_batch_unsupported_before_submission", 1);
-            return std::unexpected(make_error(
-                ErrorCode::Unsupported,
-                "rclone does not support job/batch",
-                response.error().native_code));
+            return std::unexpected(
+                make_error(ErrorCode::Unsupported,
+                           "rclone does not support job/batch",
+                           response.error().native_code));
         }
         platform::perf_trace::count("rclone.remove_batch_transport_errors", 1);
         return std::unexpected(response.error());
     }
 
     if (!response->is_object() || response->contains("error") ||
-        !response->contains("results") ||
-        !response->at("results").is_array() ||
+        !response->contains("results") || !response->at("results").is_array() ||
         response->at("results").size() != batch.items.size()) {
-        return std::unexpected(make_error(
-            ErrorCode::ProtocolFailure,
-            "invalid or incomplete remove job/batch response"));
+        return std::unexpected(
+            make_error(ErrorCode::ProtocolFailure,
+                       "invalid or incomplete remove job/batch response"));
     }
 
     RemoveBatchReport report;
@@ -1297,9 +1292,9 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
     for (std::size_t index = 0; index < batch.items.size(); ++index) {
         const auto& result = response->at("results").at(index);
         if (!result.is_object()) {
-            return std::unexpected(make_error(
-                ErrorCode::ProtocolFailure,
-                "invalid remove job/batch subresult"));
+            return std::unexpected(
+                make_error(ErrorCode::ProtocolFailure,
+                           "invalid remove job/batch subresult"));
         }
         if (result.contains("path") &&
             (!result.at("path").is_string() ||
@@ -1329,15 +1324,16 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
         }
 
         if (matched[target_index]) {
-            return std::unexpected(make_error(
-                ErrorCode::ProtocolFailure,
-                "duplicate item in remove job/batch response"));
+            return std::unexpected(
+                make_error(ErrorCode::ProtocolFailure,
+                           "duplicate item in remove job/batch response"));
         }
         matched[target_index] = true;
 
         int status = 200;
         if (result.contains("status")) {
-            auto parsed_status = parse_job_batch_status(result.at("status"), "remove");
+            auto parsed_status =
+                parse_job_batch_status(result.at("status"), "remove");
             if (!parsed_status) {
                 return std::unexpected(parsed_status.error());
             }
@@ -1348,31 +1344,33 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
         bool has_error = result.contains("error");
         if (has_error) {
             if (!result.at("error").is_string()) {
-                return std::unexpected(make_error(
-                    ErrorCode::ProtocolFailure,
-                    "invalid remove job/batch error result"));
+                return std::unexpected(
+                    make_error(ErrorCode::ProtocolFailure,
+                               "invalid remove job/batch error result"));
             }
             err_msg = result.at("error").get<std::string>();
         }
 
-        if (status == 404 || (has_error && (err_msg.find("not found") != std::string::npos ||
-                                            err_msg.find("directory not found") != std::string::npos))) {
+        if (status == 404 ||
+            (has_error &&
+             (err_msg.find("not found") != std::string::npos ||
+              err_msg.find("directory not found") != std::string::npos))) {
             report.items[target_index].result = Removal::AlreadyAbsent;
         } else if (status >= 200 && status < 300 && !has_error) {
             report.items[target_index].result = Removal::Removed;
         } else {
-            report.items[target_index].result = std::unexpected(make_error(
-                ErrorCode::ProtocolFailure,
-                err_msg.empty() ? "remote remove failed" : err_msg,
-                status));
+            report.items[target_index].result = std::unexpected(
+                make_error(ErrorCode::ProtocolFailure,
+                           err_msg.empty() ? "remote remove failed" : err_msg,
+                           status));
         }
     }
 
     for (bool m : matched) {
         if (!m) {
-            return std::unexpected(make_error(
-                ErrorCode::ProtocolFailure,
-                "missing item in remove job/batch response"));
+            return std::unexpected(
+                make_error(ErrorCode::ProtocolFailure,
+                           "missing item in remove job/batch response"));
         }
     }
 
@@ -1469,8 +1467,8 @@ parse_control_read_batch_response(std::string_view response_body,
                 result.listings.emplace_back();
                 continue;
             }
-            auto listing = parse_list_response_json(
-                item, request.list_prefixes[index]);
+            auto listing =
+                parse_list_response_json(item, request.list_prefixes[index]);
             if (!listing) {
                 return std::unexpected(listing.error());
             }

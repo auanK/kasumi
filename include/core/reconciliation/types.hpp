@@ -107,7 +107,8 @@ struct Input {
     // Accepted logical files that are not physically present locally.
     std::vector<NodeRow> pending_materializations;
 
-    // Transient authority to resolve unrecoverable pending materializations as logical deletions.
+    // Transient authority to resolve unrecoverable pending materializations as
+    // logical deletions.
     std::vector<NodeRow> pending_deletion_authority;
 
     // Content known missing from demand-driven probes in this run.

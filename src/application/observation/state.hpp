@@ -69,7 +69,8 @@ struct StorageObservation {
     std::vector<std::string> physical_identifiers;
 };
 
-// Collects and validates the observed remote state along with the observed physical namespace snapshot.
+// Collects and validates the observed remote state along with the observed
+// physical namespace snapshot.
 std::expected<StorageObservation, std::string>
 collect_storage_observation(transport::Transport& storage,
                             std::span<const std::uint8_t, crypto::KEY_SIZE> key,

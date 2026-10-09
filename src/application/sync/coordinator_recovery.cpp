@@ -155,8 +155,8 @@ ensure_state(const runtime::RuntimeData& runtime_data,
             ErrorCode::RecoveryConflict,
             "remote Epoch regressed relative to locally accepted Epoch"));
     }
-    auto target_pending = resolve_pending_paths(
-        commit.commit.tree, record.pending_paths);
+    auto target_pending =
+        resolve_pending_paths(commit.commit.tree, record.pending_paths);
     if (!target_pending) {
         return std::unexpected(target_pending.error());
     }
@@ -164,19 +164,18 @@ ensure_state(const runtime::RuntimeData& runtime_data,
         (*current)->height == commit.commit.height &&
         same_tree((*current)->tree, commit.commit.tree) &&
         same_pending_paths((*current)->pending_materializations,
-                          record.pending_paths) &&
+                           record.pending_paths) &&
         (epoch_id.empty() || (*current)->epoch_id == epoch_id)) {
         return {};
     }
     const bool matches_old =
-        *current
-            ? !record.observed_base_id.empty() &&
-                  (*current)->commit_id == record.observed_base_id &&
-                  (*current)->height == record.local_generation &&
-                  same_pending_paths((*current)->pending_materializations,
-                                     record.observed_pending_paths)
-            : record.observed_base_id.empty() &&
-                  record.observed_pending_paths.empty();
+        *current ? !record.observed_base_id.empty() &&
+                       (*current)->commit_id == record.observed_base_id &&
+                       (*current)->height == record.local_generation &&
+                       same_pending_paths((*current)->pending_materializations,
+                                          record.observed_pending_paths)
+                 : record.observed_base_id.empty() &&
+                       record.observed_pending_paths.empty();
     if (!matches_old) {
         return std::unexpected(detail::make_error(
             ErrorCode::RecoveryConflict,
@@ -263,9 +262,8 @@ roll_forward_local_only(const journal::Paths& paths,
                 ? !record.observed_base_id.empty() &&
                       (*current)->commit_id == record.observed_base_id &&
                       (*current)->height == record.local_generation &&
-                      same_pending_paths(
-                          (*current)->pending_materializations,
-                          record.observed_pending_paths)
+                      same_pending_paths((*current)->pending_materializations,
+                                         record.observed_pending_paths)
                 : record.observed_base_id.empty() &&
                       record.observed_pending_paths.empty();
         if (target_committed) {

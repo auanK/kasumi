@@ -1,5 +1,4 @@
 #include "gc_live_preflight_support.hpp"
-
 #include "platform/random.hpp"
 #include "transport/transport.hpp"
 
@@ -29,7 +28,8 @@ struct RcloneConfigEnvironment {
     std::optional<std::string> previous;
 
     RcloneConfigEnvironment() {
-        if (const char* value = std::getenv("RCLONE_CONFIG"); value != nullptr) {
+        if (const char* value = std::getenv("RCLONE_CONFIG");
+            value != nullptr) {
             previous = value;
         }
     }
@@ -60,8 +60,7 @@ std::expected<Arguments, std::string> parse_arguments(int argc, char** argv) {
         const std::string value{argv[++index]};
         if (option == "--remote" && result.remote.empty()) {
             result.remote = value;
-        } else if (option == "--rclone-config" &&
-                   !result.rclone_config) {
+        } else if (option == "--rclone-config" && !result.rclone_config) {
             result.rclone_config = std::filesystem::path{value};
         } else if (option == "--output" && result.output.empty()) {
             result.output = std::filesystem::path{value};
@@ -141,8 +140,8 @@ int execute(const Arguments& arguments) {
 
     if (arguments.rclone_config) {
         fs_error.clear();
-        const auto status = std::filesystem::symlink_status(
-            *arguments.rclone_config, fs_error);
+        const auto status =
+            std::filesystem::symlink_status(*arguments.rclone_config, fs_error);
         if (fs_error || std::filesystem::is_symlink(status) ||
             !std::filesystem::is_regular_file(status)) {
             report["parent_validation"]["error_category"] = "invalid_context";
@@ -156,8 +155,8 @@ int execute(const Arguments& arguments) {
 
     RcloneConfigEnvironment restore_environment;
     if (arguments.rclone_config) {
-        const auto config = std::filesystem::absolute(*arguments.rclone_config,
-                                                      fs_error);
+        const auto config =
+            std::filesystem::absolute(*arguments.rclone_config, fs_error);
         if (fs_error) {
             report["parent_validation"]["error_category"] = "invalid_context";
             report["parent_validation"]["error_message"] =
@@ -208,7 +207,8 @@ int execute(const Arguments& arguments) {
         report["parent_validation"]["native_code"] =
             parent_storage.error().native_code;
         report["parent_validation"]["error_message"] =
-            "transport open failed; message omitted to avoid leaking RC diagnostics";
+            "transport open failed; message omitted to avoid leaking RC "
+            "diagnostics";
         write_report(output, report);
         return 1;
     }
@@ -220,7 +220,8 @@ int execute(const Arguments& arguments) {
         report["parent_validation"]["native_code"] =
             parent_listing.error().native_code;
         report["parent_validation"]["error_message"] =
-            "parent listing failed; raw diagnostics are captured only for the child probe";
+            "parent listing failed; raw diagnostics are captured only for the "
+            "child probe";
         write_report(output, report);
         return 1;
     }
@@ -231,25 +232,23 @@ int execute(const Arguments& arguments) {
     std::cout << "Effective GC-live child namespace: " << *location << '\n';
     std::cout.flush();
 
-    auto observation = gc_live::observe_pre_initialize(
-        *parent_storage, *parent, *child);
+    auto observation =
+        gc_live::observe_pre_initialize(*parent_storage, *parent, *child);
     const auto classification =
         gc_live::classify_pre_initialize(observation, *parent, *child);
     report["pre_initialize"] = gc_live::to_json(observation, classification);
-    report["status"] = classification.disposition ==
-                               gc_live::ChildDisposition::Unused
-                           ? "CANDIDATE_UNUSED"
-                           : classification.disposition ==
-                                     gc_live::ChildDisposition::Existing
-                                 ? "EXISTING"
-                                 : "REFUSED";
+    report["status"] =
+        classification.disposition == gc_live::ChildDisposition::Unused
+            ? "CANDIDATE_UNUSED"
+        : classification.disposition == gc_live::ChildDisposition::Existing
+            ? "EXISTING"
+            : "REFUSED";
     if (!write_report(output, report)) {
         std::cerr << "Could not write local JSON report.\n";
         return 2;
     }
-    return classification.disposition == gc_live::ChildDisposition::Unused
-               ? 0
-               : 1;
+    return classification.disposition == gc_live::ChildDisposition::Unused ? 0
+                                                                           : 1;
 }
 
 } // namespace

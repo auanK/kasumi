@@ -18,10 +18,10 @@ bool safe_relative_identifier(std::string_view identifier) noexcept {
     std::size_t begin = 0;
     while (begin <= identifier.size()) {
         const auto end = identifier.find('/', begin);
-        const auto component = identifier.substr(
-            begin,
-            end == std::string_view::npos ? identifier.size() - begin
-                                          : end - begin);
+        const auto component = identifier.substr(begin,
+                                                 end == std::string_view::npos
+                                                     ? identifier.size() - begin
+                                                     : end - begin);
         if (component.empty() || component == "." || component == ".." ||
             std::isspace(static_cast<unsigned char>(component.front())) != 0 ||
             std::isspace(static_cast<unsigned char>(component.back())) != 0 ||
@@ -73,8 +73,8 @@ CleanupResult refused(std::string detail,
                          .error_category = code};
 }
 
-nlohmann::json error_category_json(
-    const std::optional<transport::ErrorCode>& code) {
+nlohmann::json
+error_category_json(const std::optional<transport::ErrorCode>& code) {
     return code ? nlohmann::json(std::string{transport::error_code_name(*code)})
                 : nlohmann::json(nullptr);
 }
@@ -134,9 +134,9 @@ std::array<std::chrono::milliseconds, 6> readiness_schedule() noexcept {
     return schedule;
 }
 
-ReadinessClassification classify_readiness(
-    std::span<const ReadinessAttempt> attempts,
-    std::chrono::milliseconds maximum_elapsed) {
+ReadinessClassification
+classify_readiness(std::span<const ReadinessAttempt> attempts,
+                   std::chrono::milliseconds maximum_elapsed) {
     if (attempts.empty()) {
         return ReadinessClassification::Failed;
     }
@@ -165,25 +165,23 @@ ReadinessClassification classify_readiness(
     }
 
     const auto schedule = readiness_schedule();
-    const bool contradictory = attempts.size() == schedule.size() &&
-                               attempts.back().elapsed_since_reference >=
-                                   schedule.back() &&
-                               attempts.back().presence ==
-                                   ReadinessPresence::Present &&
-                               std::all_of(
-                                   attempts.begin(),
-                                   attempts.end(),
-                                   [](const ReadinessAttempt& attempt) {
-                                       return attempt.physical_hash ==
-                                                  ReadinessHash::ObjectNotFound;
-                                   });
+    const bool contradictory =
+        attempts.size() == schedule.size() &&
+        attempts.back().elapsed_since_reference >= schedule.back() &&
+        attempts.back().presence == ReadinessPresence::Present &&
+        std::all_of(attempts.begin(),
+                    attempts.end(),
+                    [](const ReadinessAttempt& attempt) {
+                        return attempt.physical_hash ==
+                               ReadinessHash::ObjectNotFound;
+                    });
     return contradictory
                ? ReadinessClassification::FailedContradictoryVisibility
                : ReadinessClassification::Failed;
 }
 
-std::string_view readiness_classification_name(
-    ReadinessClassification classification) noexcept {
+std::string_view
+readiness_classification_name(ReadinessClassification classification) noexcept {
     switch (classification) {
         case ReadinessClassification::Ready:
             return "READY";
@@ -204,9 +202,8 @@ parse_remote_parent(std::string_view location) {
     const auto separator = location.find(':');
     if (separator == std::string_view::npos || separator == 0 ||
         location.starts_with('/') || location.starts_with("\\\\") ||
-        (separator == 1 && std::isalpha(
-                               static_cast<unsigned char>(location.front())) !=
-                               0)) {
+        (separator == 1 &&
+         std::isalpha(static_cast<unsigned char>(location.front())) != 0)) {
         return std::unexpected("remote must use rclone remote:path syntax");
     }
     const auto remote_name = location.substr(0, separator);
@@ -257,16 +254,17 @@ child_location(const RemoteParent& parent, std::string_view child) {
 std::expected<void, transport::Error>
 require_unused_child(transport::Transport& storage, std::string_view child) {
     if (!valid_child(child)) {
-        return std::unexpected(transport::Error{
-            .code = transport::ErrorCode::InvalidIdentifier,
-            .message = "invalid generated child namespace"});
+        return std::unexpected(
+            transport::Error{.code = transport::ErrorCode::InvalidIdentifier,
+                             .message = "invalid generated child namespace"});
     }
     const auto listing = transport::list(storage, child);
     if (listing) {
         return std::unexpected(transport::Error{
             .code = transport::ErrorCode::InvalidIdentifier,
             .message = listing->empty()
-                           ? "empty child listing is ambiguous; refusing to assume unused"
+                           ? "empty child listing is ambiguous; refusing to "
+                             "assume unused"
                            : "test child namespace already exists"});
     }
     if (listing.error().code == transport::ErrorCode::StorageNotFound) {
@@ -285,15 +283,15 @@ bool identifier_in_child(std::string_view child,
            safe_relative_identifier(identifier.substr(prefix.size()));
 }
 
-CleanupResult cleanup_owned_child(
-    transport::Transport& storage,
-    std::string_view child,
-    std::string_view owner_token,
-    const std::vector<std::string>& object_identifiers,
-    const std::filesystem::path& local_scratch) {
+CleanupResult
+cleanup_owned_child(transport::Transport& storage,
+                    std::string_view child,
+                    std::string_view owner_token,
+                    const std::vector<std::string>& object_identifiers,
+                    const std::filesystem::path& local_scratch) {
     constexpr std::string_view owner_name = "owner.marker";
-    const auto owner_identifier = std::string{child} + "/" +
-                                  std::string{owner_name};
+    const auto owner_identifier =
+        std::string{child} + "/" + std::string{owner_name};
     if (!valid_child(child) || owner_token.empty() ||
         !std::filesystem::is_directory(local_scratch) ||
         std::filesystem::is_symlink(local_scratch)) {
@@ -302,7 +300,8 @@ CleanupResult cleanup_owned_child(
     std::set<std::string> unique;
     for (const auto& identifier : object_identifiers) {
         if (!identifier_in_child(child, identifier) ||
-            identifier == owner_identifier || !unique.insert(identifier).second) {
+            identifier == owner_identifier ||
+            !unique.insert(identifier).second) {
             return refused("cleanup target is duplicate or outside child");
         }
     }
@@ -319,7 +318,8 @@ CleanupResult cleanup_owned_child(
     if (!marker_input) {
         return refused("could not read cleanup ownership marker");
     }
-    const std::string observed{std::istreambuf_iterator<char>{marker_input}, {}};
+    const std::string observed{std::istreambuf_iterator<char>{marker_input},
+                               {}};
     const bool marker_read_failed = marker_input.bad();
     marker_input.close();
     std::error_code ignored;
@@ -346,7 +346,8 @@ CleanupResult cleanup_owned_child(
         const auto removed = transport::remove(storage, identifier);
         if (!removed) {
             return CleanupResult{.result = "failed",
-                                 .detail = "failed to remove an owned child object",
+                                 .detail =
+                                     "failed to remove an owned child object",
                                  .removed_objects = result.removed_objects,
                                  .error_category = removed.error().code};
         }
@@ -376,11 +377,11 @@ nlohmann::json to_json(const OperationRecord& operation) {
 }
 
 nlohmann::json to_json(const CleanupResult& cleanup) {
-    return nlohmann::json{{"result", cleanup.result},
-                          {"detail", cleanup.detail},
-                          {"removed_objects", cleanup.removed_objects},
-                          {"error_category",
-                           error_category_json(cleanup.error_category)}};
+    return nlohmann::json{
+        {"result", cleanup.result},
+        {"detail", cleanup.detail},
+        {"removed_objects", cleanup.removed_objects},
+        {"error_category", error_category_json(cleanup.error_category)}};
 }
 
 nlohmann::json to_json(const ReadinessAttempt& attempt) {
@@ -412,20 +413,19 @@ nlohmann::json to_json(const ReadinessAttempt& attempt) {
 
     return nlohmann::json{
         {"attempt_index", attempt.attempt_index},
-        {"elapsed_since_reference_ms",
-         attempt.elapsed_since_reference.count()},
+        {"elapsed_since_reference_ms", attempt.elapsed_since_reference.count()},
         {"presence",
          {{"result", presence_result},
           {"error_category", error_category_json(attempt.presence_error)},
           {"error_message", attempt.presence_error_message}}},
         {"physical_hash",
          {{"result", hash_result},
-          {"error_category",
-           error_category_json(attempt.physical_hash_error)},
+          {"error_category", error_category_json(attempt.physical_hash_error)},
           {"error_message", attempt.physical_hash_error_message},
-          {"sha256", attempt.physical_hash == ReadinessHash::Valid
-                          ? nlohmann::json(attempt.sha256)
-                          : nlohmann::json(nullptr)}}}};
+          {"sha256",
+           attempt.physical_hash == ReadinessHash::Valid
+               ? nlohmann::json(attempt.sha256)
+               : nlohmann::json(nullptr)}}}};
 }
 
 } // namespace kasumi::operational::remote_copy_smoke

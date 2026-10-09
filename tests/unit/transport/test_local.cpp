@@ -50,8 +50,7 @@ TEST(LocalTransportTest, StoresListsAndRemovesObjects) {
 }
 
 TEST(LocalTransportTest, CopiesNestedObjectsWithoutRemovingTheSource) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("transport-local-copy");
+    auto workspace = kasumi::test::make_temp_workspace("transport-local-copy");
     auto opened = kasumi::transport::open_transport(
         kasumi::test::workspace_path(workspace, "storage").string());
     ASSERT_TRUE(opened.has_value());

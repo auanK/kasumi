@@ -870,15 +870,16 @@ TEST(ContentReachabilityTest,
         kasumi::test::workspace_root(workspace)));
 }
 
-TEST(ContentReachabilityTest, EquivalenceMultiplePhysicalObjectsArbitraryOrder) {
+TEST(ContentReachabilityTest,
+     EquivalenceMultiplePhysicalObjectsArbitraryOrder) {
     auto storage = make_local_storage();
-    const auto commit = make_tree_commit(
-        0,
-        {},
-        {NodeRow{.path = "", .is_directory = true},
-         file_row("a.txt", "content_a"),
-         file_row("b.txt", "content_b"),
-         file_row("c.txt", "content_c")});
+    const auto commit =
+        make_tree_commit(0,
+                         {},
+                         {NodeRow{.path = "", .is_directory = true},
+                          file_row("a.txt", "content_a"),
+                          file_row("b.txt", "content_b"),
+                          file_row("c.txt", "content_c")});
     publish(storage, commit);
 
     const auto id_a = content_id("content_a");
@@ -909,13 +910,14 @@ TEST(ContentReachabilityTest, EquivalenceMultiplePhysicalObjectsArbitraryOrder) 
     EXPECT_EQ(result->contents.size(), 5U);
 }
 
-TEST(ContentReachabilityTest, EquivalenceDuplicateIdentifiersInPhysicalListing) {
+TEST(ContentReachabilityTest,
+     EquivalenceDuplicateIdentifiersInPhysicalListing) {
     auto storage = make_local_storage();
-    const auto commit = make_tree_commit(
-        0,
-        {},
-        {NodeRow{.path = "", .is_directory = true},
-         file_row("a.txt", "content_a")});
+    const auto commit =
+        make_tree_commit(0,
+                         {},
+                         {NodeRow{.path = "", .is_directory = true},
+                          file_row("a.txt", "content_a")});
     publish(storage, commit);
 
     const auto id_a = content_id("content_a");
@@ -943,16 +945,16 @@ TEST(ContentReachabilityTest, EquivalenceDuplicateIdentifiersInPhysicalListing) 
 
 TEST(ContentReachabilityTest, EquivalenceSharedContentAcrossBranches) {
     auto storage = make_local_storage();
-    const auto commit_a = make_tree_commit(
-        0,
-        {},
-        {NodeRow{.path = "", .is_directory = true},
-         file_row("shared.txt", "common_payload")});
-    const auto commit_b = make_tree_commit(
-        0,
-        {},
-        {NodeRow{.path = "", .is_directory = true},
-         file_row("shared_alias.txt", "common_payload")});
+    const auto commit_a =
+        make_tree_commit(0,
+                         {},
+                         {NodeRow{.path = "", .is_directory = true},
+                          file_row("shared.txt", "common_payload")});
+    const auto commit_b =
+        make_tree_commit(0,
+                         {},
+                         {NodeRow{.path = "", .is_directory = true},
+                          file_row("shared_alias.txt", "common_payload")});
     publish(storage, commit_a);
     publish(storage, commit_b);
 
@@ -970,7 +972,8 @@ TEST(ContentReachabilityTest, EquivalenceSharedContentAcrossBranches) {
             false);
     ASSERT_TRUE(result.has_value());
 
-    EXPECT_EQ(result->reachable_content_ids, std::vector<std::string>{id_shared});
+    EXPECT_EQ(result->reachable_content_ids,
+              std::vector<std::string>{id_shared});
     ASSERT_EQ(result->contents.size(), 1U);
     EXPECT_EQ(result->contents.front().references.size(), 2U);
 }
@@ -981,13 +984,13 @@ TEST(ContentReachabilityTest, EquivalenceTransportListingFailureReported) {
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
 
-    const auto history = history_inventory(
-        transport, kasumi::test::workspace_root(workspace));
+    const auto history =
+        history_inventory(transport, kasumi::test::workspace_root(workspace));
 
     transport.storage.list = [](void*) -> kasumi::transport::ListingResult {
-        return std::unexpected(kasumi::transport::Error{
-            .code = kasumi::transport::ErrorCode::Io,
-            .message = "injected list error"});
+        return std::unexpected(
+            kasumi::transport::Error{.code = kasumi::transport::ErrorCode::Io,
+                                     .message = "injected list error"});
     };
 
     const auto result =
@@ -1004,7 +1007,8 @@ TEST(ContentReachabilityTest, EquivalenceInvalidReachableCommitTreeFails) {
     auto storage = make_local_storage();
     ReachabilityInventory history;
     kasumi::application::history_storage::ReachabilityCommit bad_commit{
-        .commit_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        .commit_id =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         .valid = true,
         .reachable = true,
         .parents = {},
@@ -1012,9 +1016,8 @@ TEST(ContentReachabilityTest, EquivalenceInvalidReachableCommitTreeFails) {
             .height = 0,
             .created_at = 0,
             .parents = {},
-            .tree = Snapshot{.rows = {NodeRow{.path = "orphan_dir/file.txt", .is_directory = false}}}
-        }
-    };
+            .tree = Snapshot{.rows = {NodeRow{.path = "orphan_dir/file.txt",
+                                              .is_directory = false}}}}};
     history.commits.push_back(std::move(bad_commit));
 
     const auto result =
@@ -1026,15 +1029,18 @@ TEST(ContentReachabilityTest, EquivalenceInvalidReachableCommitTreeFails) {
             kasumi::test::workspace_root(storage.workspace),
             false);
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, kasumi::application::history_storage::ErrorCode::InvalidCommit);
+    EXPECT_EQ(result.error().code,
+              kasumi::application::history_storage::ErrorCode::InvalidCommit);
 }
 
-TEST(ContentReachabilityTest, EquivalenceLargeListingMaintainsOrderAndUniqueness) {
+TEST(ContentReachabilityTest,
+     EquivalenceLargeListingMaintainsOrderAndUniqueness) {
     auto storage = make_local_storage();
     std::vector<NodeRow> rows;
     rows.push_back(NodeRow{.path = "", .is_directory = true});
     for (std::size_t i = 0; i < 100; ++i) {
-        rows.push_back(file_row("f" + std::to_string(i), "c" + std::to_string(i)));
+        rows.push_back(
+            file_row("f" + std::to_string(i), "c" + std::to_string(i)));
     }
     const auto commit = make_tree_commit(0, {}, std::move(rows));
     publish(storage, commit);
@@ -1050,7 +1056,8 @@ TEST(ContentReachabilityTest, EquivalenceLargeListingMaintainsOrderAndUniqueness
     for (std::size_t i = 0; i < 10; ++i) {
         identifiers.push_back("unknown_obj_" + std::to_string(i));
     }
-    identifiers.insert(identifiers.end(), identifiers.begin(), identifiers.begin() + 30);
+    identifiers.insert(
+        identifiers.end(), identifiers.begin(), identifiers.begin() + 30);
     std::ranges::reverse(identifiers);
 
     const auto history = history_inventory(
@@ -1079,16 +1086,20 @@ TEST(ContentReachabilityTest, EquivalenceLargeListingMaintainsOrderAndUniqueness
 
 TEST(ContentReachabilityTest, SharedCommitTreesAvoidPerCommitCapacityGrowth) {
     struct TraceGuard {
-        ~TraceGuard() { kasumi::platform::perf_trace::force_enable(false); }
+        ~TraceGuard() {
+            kasumi::platform::perf_trace::force_enable(false);
+        }
     } trace_guard;
     constexpr std::size_t commit_count = 64;
     auto storage = make_local_storage();
     ReachabilityInventory history;
     history.commits.reserve(commit_count);
     for (std::size_t index = 0; index < commit_count; ++index) {
-        const auto commit = make_tree_commit(
-            index, {}, {NodeRow{.path = "", .is_directory = true},
-                        file_row("shared.txt", "same payload")});
+        const auto commit =
+            make_tree_commit(index,
+                             {},
+                             {NodeRow{.path = "", .is_directory = true},
+                              file_row("shared.txt", "same payload")});
         history.commits.push_back(
             kasumi::application::history_storage::ReachabilityCommit{
                 .commit_id = commit_id(commit),
@@ -1122,7 +1133,8 @@ TEST(ContentReachabilityTest, AllocationBudgetAvoidsNodeBasedContainers) {
     std::vector<NodeRow> rows;
     rows.push_back(NodeRow{.path = "", .is_directory = true});
     for (std::size_t i = 0; i < 50; ++i) {
-        rows.push_back(file_row("f" + std::to_string(i), "p" + std::to_string(i)));
+        rows.push_back(
+            file_row("f" + std::to_string(i), "p" + std::to_string(i)));
     }
     const auto commit = make_tree_commit(0, {}, std::move(rows));
     publish(storage, commit);

@@ -98,12 +98,11 @@ kasumi::Snapshot tree_with(std::string_view path,
     return tree;
 }
 
-kasumi::history::CommitResult
-make_commit(std::uint64_t height,
-            std::vector<std::string> parents,
-            std::string_view path,
-            std::string_view contents,
-            kasumi::TimestampNs mtime = 0) {
+kasumi::history::CommitResult make_commit(std::uint64_t height,
+                                          std::vector<std::string> parents,
+                                          std::string_view path,
+                                          std::string_view contents,
+                                          kasumi::TimestampNs mtime = 0) {
     return kasumi::history::make_commit(height,
                                         std::move(parents),
                                         tree_with(path, contents, mtime),
@@ -501,22 +500,22 @@ TEST(RcloneSystemTest, BootstrapAndSecondClientUseOneImmutableHead) {
     ASSERT_TRUE(object_listing.has_value());
     auto identifiers = kasumi::transport::list(*object_listing);
     ASSERT_TRUE(identifiers.has_value());
-    EXPECT_EQ(std::ranges::count_if(*identifiers,
-                                    [&layout](const auto& id) {
-                                        return kasumi::application::
-                                            history_storage::parse_commit_object(
-                                                layout, id)
-                                            .has_value();
-                                    }),
-              1);
-    EXPECT_EQ(std::ranges::count_if(*identifiers,
-                                    [&layout](const auto& id) {
-                                        return kasumi::application::
-                                            history_storage::parse_marker_object(
-                                                layout, id)
-                                            .has_value();
-                                    }),
-              1);
+    EXPECT_EQ(
+        std::ranges::count_if(*identifiers,
+                              [&layout](const auto& id) {
+                                  return kasumi::application::history_storage::
+                                      parse_commit_object(layout, id)
+                                          .has_value();
+                              }),
+        1);
+    EXPECT_EQ(
+        std::ranges::count_if(*identifiers,
+                              [&layout](const auto& id) {
+                                  return kasumi::application::history_storage::
+                                      parse_marker_object(layout, id)
+                                          .has_value();
+                              }),
+        1);
 
     ASSERT_TRUE(sync_client(client_b));
     EXPECT_EQ(kasumi::test::read_text(client_b.local_dir / "alpha.txt"),
@@ -605,8 +604,7 @@ TEST(RcloneSystemTest, TwoPersistedClientsPropagateRemoteDeletes) {
         runtime_a->database_path);
     ASSERT_TRUE(checkpoint_a.has_value()) << checkpoint_a.error();
     const bool checkpoint_supported =
-        kasumi::platform::capture_change_journal_checkpoint(
-            client_a.local_dir)
+        kasumi::platform::capture_change_journal_checkpoint(client_a.local_dir)
             .has_value();
     if (checkpoint_supported) {
         ASSERT_TRUE(checkpoint_a->has_value());
@@ -646,11 +644,11 @@ TEST(RcloneSystemTest, ImmutableHistoryReachabilityInventoryIsReadOnly) {
 
     auto orphan = make_commit(0, {}, "orphan.txt", "orphan");
     ASSERT_TRUE(orphan.has_value());
-    auto published = publish_staged(
-        *storage,
-        layout,
-        *orphan,
-        harness_root(harness) / "reachability-orphan");
+    auto published =
+        publish_staged(*storage,
+                       layout,
+                       *orphan,
+                       harness_root(harness) / "reachability-orphan");
     ASSERT_TRUE(published.has_value());
     ASSERT_EQ(kasumi::transport::remove(
                   *storage,
@@ -754,30 +752,30 @@ TEST(RcloneSystemTest, MissingReferencedObjectIsTrustedUntilFsckOrRequiredGet) {
               kasumi::transport::Presence::Absent);
     auto after = kasumi::transport::list(*storage);
     ASSERT_TRUE(after.has_value());
-    EXPECT_EQ(std::ranges::count_if(*before,
-                                    [&layout](const auto& id) {
-                                        return kasumi::application::
-                                            history_storage::parse_commit_object(
-                                                layout, id)
-                                            .has_value();
-                                    }),
-              std::ranges::count_if(*after, [&layout](const auto& id) {
-                  return kasumi::application::history_storage::
-                      parse_commit_object(layout, id)
-                          .has_value();
-              }));
-    EXPECT_EQ(std::ranges::count_if(*before,
-                                    [&layout](const auto& id) {
-                                        return kasumi::application::
-                                            history_storage::parse_marker_object(
-                                                layout, id)
-                                            .has_value();
-                                    }),
-              std::ranges::count_if(*after, [&layout](const auto& id) {
-                  return kasumi::application::history_storage::
-                      parse_marker_object(layout, id)
-                          .has_value();
-              }));
+    EXPECT_EQ(
+        std::ranges::count_if(*before,
+                              [&layout](const auto& id) {
+                                  return kasumi::application::history_storage::
+                                      parse_commit_object(layout, id)
+                                          .has_value();
+                              }),
+        std::ranges::count_if(*after, [&layout](const auto& id) {
+            return kasumi::application::history_storage::parse_commit_object(
+                       layout, id)
+                .has_value();
+        }));
+    EXPECT_EQ(
+        std::ranges::count_if(*before,
+                              [&layout](const auto& id) {
+                                  return kasumi::application::history_storage::
+                                      parse_marker_object(layout, id)
+                                          .has_value();
+                              }),
+        std::ranges::count_if(*after, [&layout](const auto& id) {
+            return kasumi::application::history_storage::parse_marker_object(
+                       layout, id)
+                .has_value();
+        }));
     EXPECT_EQ(find_reference(*storage, layout), reference);
 
     const auto fsck = kasumi::application::execute(
@@ -843,21 +841,19 @@ TEST(RcloneSystemTest, CommitObjectAndMarkerStagesAreIndependent) {
 
     auto listing_before_marker = kasumi::transport::list(*storage);
     ASSERT_TRUE(listing_before_marker.has_value());
-    EXPECT_EQ(std::ranges::count_if(*listing_before_marker,
-                                    [&layout](const auto& id) {
-                                        return kasumi::application::
-                                            history_storage::parse_marker_object(
-                                                layout, id)
-                                            .has_value();
-                                    }),
-              1);
+    EXPECT_EQ(
+        std::ranges::count_if(*listing_before_marker,
+                              [&layout](const auto& id) {
+                                  return kasumi::application::history_storage::
+                                      parse_marker_object(layout, id)
+                                          .has_value();
+                              }),
+        1);
 
-    ASSERT_TRUE(kasumi::application::history_storage::publish_head_marker(
-                    *storage,
-                    layout,
-                    object->head,
-                    harness_root(harness) / "stages")
-                    .has_value());
+    ASSERT_TRUE(
+        kasumi::application::history_storage::publish_head_marker(
+            *storage, layout, object->head, harness_root(harness) / "stages")
+            .has_value());
     ASSERT_TRUE(kasumi::application::history_storage::verify_head_marker(
         *storage, layout, object->head, harness_root(harness) / "stages"));
 
@@ -866,12 +862,10 @@ TEST(RcloneSystemTest, CommitObjectAndMarkerStagesAreIndependent) {
     ASSERT_TRUE(reused.has_value());
     EXPECT_TRUE(reused->reused_existing_ciphertext);
     EXPECT_EQ(reused->head, object->head);
-    ASSERT_TRUE(kasumi::application::history_storage::publish_head_marker(
-                    *storage,
-                    layout,
-                    object->head,
-                    harness_root(harness) / "stages")
-                    .has_value());
+    ASSERT_TRUE(
+        kasumi::application::history_storage::publish_head_marker(
+            *storage, layout, object->head, harness_root(harness) / "stages")
+            .has_value());
 }
 
 TEST(RcloneSystemTest, SequentialMutationKeepsThePreviousCommitAsParent) {
@@ -951,8 +945,11 @@ TEST(RcloneSystemTest, ThreeConcurrentPublishersConvergeThroughRealTransport) {
                                 "alpha.txt",
                                 "branch-a",
                                 *alpha_mtime);
-    auto branch_b = make_commit(
-        base->commit.height + 1, {base_id}, "beta.txt", "branch-b", *beta_mtime);
+    auto branch_b = make_commit(base->commit.height + 1,
+                                {base_id},
+                                "beta.txt",
+                                "branch-b",
+                                *beta_mtime);
     auto branch_c = make_commit(base->commit.height + 1,
                                 {base_id},
                                 "gamma.txt",
@@ -1142,9 +1139,8 @@ TEST(RcloneSystemTest, ReadvertisedHeadRestoresQuarantinedCommitAndContent) {
         recovered_head = published->head;
         commit_object = kasumi::application::history_storage::commit_object(
             layout, recovered_head);
-        const auto marker =
-            kasumi::application::history_storage::marker_object(
-                layout, recovered_head);
+        const auto marker = kasumi::application::history_storage::marker_object(
+            layout, recovered_head);
         ASSERT_EQ(kasumi::transport::remove(*storage, marker).value(),
                   kasumi::transport::Removal::Removed);
     }
@@ -1170,7 +1166,8 @@ TEST(RcloneSystemTest, ReadvertisedHeadRestoresQuarantinedCommitAndContent) {
         ensure_workspace(harness_root(harness) / "recovery-readvertise");
         const auto advertised =
             kasumi::application::history_storage::publish_head_marker(
-                *storage, layout,
+                *storage,
+                layout,
                 recovered_head,
                 harness_root(harness) / "recovery-readvertise");
         ASSERT_TRUE(advertised.has_value())
@@ -1337,8 +1334,7 @@ TEST(RcloneSystemTest, CorruptedCommitCiphertextFailsClosed) {
     const auto before = kasumi::transport::list(*storage);
     ASSERT_TRUE(before.has_value());
     const auto commit_id =
-        kasumi::application::history_storage::commit_object(
-            layout, *reference);
+        kasumi::application::history_storage::commit_object(layout, *reference);
     const auto commit_path = storage_root(harness) / commit_id;
     ASSERT_TRUE(std::filesystem::is_regular_file(commit_path)) << commit_path;
     kasumi::test::write_text(commit_path, "corrupt ciphertext");
@@ -1514,8 +1510,8 @@ TEST(RcloneSystemTest, RealCliUsesOnlyTheTemporaryEnvironment) {
                     }
                     return;
                 }
-                destination.append(
-                    reinterpret_cast<const char*>(buffer.data()), size);
+                destination.append(reinterpret_cast<const char*>(buffer.data()),
+                                   size);
             };
             if ((events & reproc::event::out) != 0) {
                 read_output(reproc::stream::out, output);
@@ -1540,12 +1536,11 @@ TEST(RcloneSystemTest, RealCliUsesOnlyTheTemporaryEnvironment) {
                 {reproc::stop::wait, reproc::milliseconds{0}},
                 {reproc::stop::terminate, reproc::milliseconds{0}},
                 {reproc::stop::kill, reproc::milliseconds{2000}}});
-            ADD_FAILURE()
-                << (failure ? "Kasumi CLI process failed: " +
-                                  failure.message()
-                            : "Kasumi CLI timed out after 30 seconds")
-                << "; stop_error=" << stopped.second.message()
-                << "; stdout=" << output << "; stderr=" << error;
+            ADD_FAILURE() << (failure ? "Kasumi CLI process failed: " +
+                                            failure.message()
+                                      : "Kasumi CLI timed out after 30 seconds")
+                          << "; stop_error=" << stopped.second.message()
+                          << "; stdout=" << output << "; stderr=" << error;
             return false;
         }
         EXPECT_EQ(exit_code, 0) << "stdout=" << output << " stderr=" << error;
@@ -1651,9 +1646,8 @@ TEST(RcloneSystemTest, RcReadinessUsesPidWithoutVersionProbe) {
         kasumi::platform::perf_trace::get_count("rc/core/pid");
     const auto readiness_attempts =
         kasumi::platform::perf_trace::get_count("RC readiness attempts");
-    const auto readiness_successes =
-        kasumi::platform::perf_trace::get_count(
-            "RC readiness successful attempts");
+    const auto readiness_successes = kasumi::platform::perf_trace::get_count(
+        "RC readiness successful attempts");
     const auto readiness_retries =
         kasumi::platform::perf_trace::get_count("RC readiness retries");
     EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/core/version"), 0U);

@@ -1,13 +1,12 @@
 #ifndef KASUMI_GC_LIVE_PHASE11_SUPPORT_HPP
 #define KASUMI_GC_LIVE_PHASE11_SUPPORT_HPP
 
+#include "crypto/physical_hash.hpp"
 #include "gc_live_preflight_support.hpp"
 #include "gc_live_runner_support.hpp"
-#include "remote_copy_smoke_support.hpp"
-
-#include "crypto/physical_hash.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/random.hpp"
+#include "remote_copy_smoke_support.hpp"
 #include "transport/transport.hpp"
 
 #include <chrono>
@@ -27,8 +26,7 @@ namespace kasumi::operational::phase11 {
 namespace transport = kasumi::transport;
 namespace preflight = kasumi::operational::gc_live_preflight;
 namespace smoke = kasumi::operational::remote_copy_smoke;
-namespace provider_target_config =
-    kasumi::operational::provider_target_config;
+namespace provider_target_config = kasumi::operational::provider_target_config;
 
 enum class BenchmarkMode {
     Individual,
@@ -46,12 +44,17 @@ enum class CapabilityStatus {
     Refused
 };
 
-constexpr std::string_view capability_status_name(CapabilityStatus status) noexcept {
+constexpr std::string_view
+capability_status_name(CapabilityStatus status) noexcept {
     switch (status) {
-        case CapabilityStatus::Supported: return "SUPPORTED";
-        case CapabilityStatus::Unsupported: return "UNSUPPORTED";
-        case CapabilityStatus::Failed: return "FAILED";
-        case CapabilityStatus::Refused: return "REFUSED";
+        case CapabilityStatus::Supported:
+            return "SUPPORTED";
+        case CapabilityStatus::Unsupported:
+            return "UNSUPPORTED";
+        case CapabilityStatus::Failed:
+            return "FAILED";
+        case CapabilityStatus::Refused:
+            return "REFUSED";
     }
     return "UNKNOWN";
 }
@@ -77,7 +80,8 @@ struct Phase11RunReport {
     std::string mode = "batch";
     std::size_t candidate_count = 0;
     std::size_t payload_bytes_per_object = 0;
-    std::string status = "NOT_RUN"; // "PASS", "FAIL", "INVALID_RUN", "UNSUPPORTED", "REFUSED"
+    std::string status =
+        "NOT_RUN"; // "PASS", "FAIL", "INVALID_RUN", "UNSUPPORTED", "REFUSED"
     std::string error_message;
 
     struct TimingsMs {
@@ -137,20 +141,21 @@ struct Phase11RunReport {
     } cleanup;
 };
 
-std::expected<std::string, std::string> generate_benchmark_child(std::string_view random_hex);
+std::expected<std::string, std::string>
+generate_benchmark_child(std::string_view random_hex);
 
 // Phase 3 Capability Test
-CapabilityStatus run_capability_test(
-    const Phase11Config& config,
-    Phase11RunReport& report,
-    transport::Transport* parent_transport_override = nullptr,
-    transport::Transport* child_transport_override = nullptr);
+CapabilityStatus
+run_capability_test(const Phase11Config& config,
+                    Phase11RunReport& report,
+                    transport::Transport* parent_transport_override = nullptr,
+                    transport::Transport* child_transport_override = nullptr);
 
 // Phase 4+ Benchmark Trial
-Phase11RunReport run_benchmark_trial(
-    const Phase11Config& config,
-    transport::Transport* parent_transport_override = nullptr,
-    transport::Transport* child_transport_override = nullptr);
+Phase11RunReport
+run_benchmark_trial(const Phase11Config& config,
+                    transport::Transport* parent_transport_override = nullptr,
+                    transport::Transport* child_transport_override = nullptr);
 
 nlohmann::json to_json(const Phase11RunReport& report);
 

@@ -33,16 +33,26 @@ void print_usage(std::ostream& out) {
     out << "Usage: kasumi_gc_live_phase11 [options]\n\n"
         << "Phase 11 Controlled Live Remote GC Batch Gain Benchmark\n\n"
         << "Options:\n"
-        << "  --config <path>                         Live target configuration\n"
-        << "  --target-id <id>                        Exact configured target id\n"
-        << "  --output <path>                         Path to save output JSON\n"
-        << "  --mode <individual|batch>               Benchmark mode (default: batch)\n"
-        << "  --candidates <N>                        Candidate count (default: 8)\n"
-        << "  --payload-bytes <bytes>                 Payload bytes per object (default: 4096)\n"
-        << "  --capability-test                       Run Phase 3 batch capability test only\n"
-        << "  --execute-live                          Required authorization gate for live operations\n"
-        << "  --rclone-config <path>                  Optional rclone config file path\n"
-        << "  --local-scratch <path>                  Optional local scratch folder\n"
+        << "  --config <path>                         Live target "
+           "configuration\n"
+        << "  --target-id <id>                        Exact configured target "
+           "id\n"
+        << "  --output <path>                         Path to save output "
+           "JSON\n"
+        << "  --mode <individual|batch>               Benchmark mode (default: "
+           "batch)\n"
+        << "  --candidates <N>                        Candidate count "
+           "(default: 8)\n"
+        << "  --payload-bytes <bytes>                 Payload bytes per object "
+           "(default: 4096)\n"
+        << "  --capability-test                       Run Phase 3 batch "
+           "capability test only\n"
+        << "  --execute-live                          Required authorization "
+           "gate for live operations\n"
+        << "  --rclone-config <path>                  Optional rclone config "
+           "file path\n"
+        << "  --local-scratch <path>                  Optional local scratch "
+           "folder\n"
         << "  --help, -h                              Show this help\n";
 }
 
@@ -69,13 +79,16 @@ std::optional<CliArgs> parse_args(std::span<std::string_view> args) {
             }
             result.target_id = std::string{args[i]};
         } else if (arg == "--output") {
-            if (++i >= args.size()) return std::nullopt;
+            if (++i >= args.size())
+                return std::nullopt;
             result.output = std::filesystem::path{args[i]};
         } else if (arg == "--local-scratch") {
-            if (++i >= args.size()) return std::nullopt;
+            if (++i >= args.size())
+                return std::nullopt;
             result.scratch = std::filesystem::path{args[i]};
         } else if (arg == "--mode") {
-            if (++i >= args.size()) return std::nullopt;
+            if (++i >= args.size())
+                return std::nullopt;
             if (args[i] == "individual") {
                 result.mode = phase11::BenchmarkMode::Individual;
             } else if (args[i] == "batch") {
@@ -85,13 +98,18 @@ std::optional<CliArgs> parse_args(std::span<std::string_view> args) {
                 return std::nullopt;
             }
         } else if (arg == "--candidates") {
-            if (++i >= args.size()) return std::nullopt;
-            result.candidate_count = static_cast<std::size_t>(std::stoul(std::string{args[i]}));
+            if (++i >= args.size())
+                return std::nullopt;
+            result.candidate_count =
+                static_cast<std::size_t>(std::stoul(std::string{args[i]}));
         } else if (arg == "--payload-bytes") {
-            if (++i >= args.size()) return std::nullopt;
-            result.payload_bytes = static_cast<std::size_t>(std::stoul(std::string{args[i]}));
+            if (++i >= args.size())
+                return std::nullopt;
+            result.payload_bytes =
+                static_cast<std::size_t>(std::stoul(std::string{args[i]}));
         } else if (arg == "--rclone-config") {
-            if (++i >= args.size()) return std::nullopt;
+            if (++i >= args.size())
+                return std::nullopt;
             result.rclone_config = std::filesystem::path{args[i]};
         } else {
             std::cerr << "Unknown argument: " << arg << '\n';
@@ -126,7 +144,8 @@ int main(int argc, char** argv) {
         });
     if (!selected || !selected->has_value()) {
         std::cerr << (selected ? "Rclone target was not selected"
-                               : selected.error()) << '\n';
+                               : selected.error())
+                  << '\n';
         return 2;
     }
 
@@ -135,33 +154,43 @@ int main(int argc, char** argv) {
         .authorization = {.authorized_parent = (*selected)->authorized_parent},
         .rclone_config = parsed->rclone_config,
         .output_path = parsed->output,
-        .local_scratch = parsed->scratch.empty() ? (std::filesystem::current_path() / "phase11_scratch") : parsed->scratch,
+        .local_scratch =
+            parsed->scratch.empty()
+                ? (std::filesystem::current_path() / "phase11_scratch")
+                : parsed->scratch,
         .execute_live = parsed->execute_live,
         .candidate_count = parsed->candidate_count,
         .payload_bytes = parsed->payload_bytes,
         .mode = parsed->mode,
         .explicit_child = std::nullopt,
         .explicit_token = std::nullopt,
-        .preflight_timeout = std::chrono::minutes{2}
-    };
+        .preflight_timeout = std::chrono::minutes{2}};
 
     if (parsed->capability_test) {
-        std::cout << "Running Phase 3 Capability Test against " << config.remote_parent << "...\n";
+        std::cout << "Running Phase 3 Capability Test against "
+                  << config.remote_parent << "...\n";
         phase11::Phase11RunReport report;
         const auto status = phase11::run_capability_test(config, report);
-        std::cout << "Capability test status: " << phase11::capability_status_name(status) << '\n';
+        std::cout << "Capability test status: "
+                  << phase11::capability_status_name(status) << '\n';
         std::cout << "Report status: " << report.status << '\n';
         if (!report.error_message.empty()) {
             std::cout << "Error: " << report.error_message << '\n';
         }
-        std::cout << "Wall clock: " << report.timings_ms.total_wall_ms << " ms\n";
+        std::cout << "Wall clock: " << report.timings_ms.total_wall_ms
+                  << " ms\n";
         std::cout << "RC requests: " << report.rc_requests.total << '\n';
-        return (status == phase11::CapabilityStatus::Supported || status == phase11::CapabilityStatus::Unsupported) ? 0 : 1;
+        return (status == phase11::CapabilityStatus::Supported ||
+                status == phase11::CapabilityStatus::Unsupported)
+                   ? 0
+                   : 1;
     }
 
-    std::cout << "Running Phase 11 Benchmark Trial: N=" << config.candidate_count
+    std::cout << "Running Phase 11 Benchmark Trial: N="
+              << config.candidate_count
               << ", mode=" << phase11::mode_name(config.mode)
-              << ", payload=" << config.payload_bytes << " bytes against " << config.remote_parent << "...\n";
+              << ", payload=" << config.payload_bytes << " bytes against "
+              << config.remote_parent << "...\n";
 
     const auto report = phase11::run_benchmark_trial(config);
     std::cout << "Trial status: " << report.status << '\n';
@@ -169,12 +198,17 @@ int main(int argc, char** argv) {
         std::cout << "Error: " << report.error_message << '\n';
     }
     std::cout << "Wall clock: " << report.timings_ms.total_wall_ms << " ms\n";
-    std::cout << "Native copies: " << report.kasumi_operations.native_copy_successes << "/" << report.kasumi_operations.native_copy_attempts << '\n';
-    std::cout << "Batch hash calls: " << report.kasumi_operations.batch_hash_calls << '\n';
-    std::cout << "Individual dest hashes: " << report.kasumi_operations.individual_destination_hashes << '\n';
+    std::cout << "Native copies: "
+              << report.kasumi_operations.native_copy_successes << "/"
+              << report.kasumi_operations.native_copy_attempts << '\n';
+    std::cout << "Batch hash calls: "
+              << report.kasumi_operations.batch_hash_calls << '\n';
+    std::cout << "Individual dest hashes: "
+              << report.kasumi_operations.individual_destination_hashes << '\n';
     std::cout << "RC requests: " << report.rc_requests.total << '\n';
     std::cout << "Removals: " << report.kasumi_operations.removals << '\n';
-    std::cout << "Cleanup: " << report.cleanup.result << " (" << report.cleanup.objects_removed << " objects removed)\n";
+    std::cout << "Cleanup: " << report.cleanup.result << " ("
+              << report.cleanup.objects_removed << " objects removed)\n";
 
     return report.status == "PASS" ? 0 : 1;
 }

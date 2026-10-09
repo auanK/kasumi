@@ -756,10 +756,10 @@ prepare_operation_impl(const Operation& operation,
     }
 
     if (operation.action == Action::RenameLocal) {
-        auto source =
-            resolve_local_path(local_root, operation.path, operation_index, plan_operations);
-        auto destination =
-            resolve_local_path(local_root, operation.alt_path, operation_index, plan_operations);
+        auto source = resolve_local_path(
+            local_root, operation.path, operation_index, plan_operations);
+        auto destination = resolve_local_path(
+            local_root, operation.alt_path, operation_index, plan_operations);
         if (!source)
             return std::unexpected(source.error());
         if (!destination)
@@ -851,7 +851,9 @@ prepare_operation_impl(const Operation& operation,
         }
         bool source_of_preceding_rename = false;
         if (operation.action == Action::CreateLocalDirectory) {
-            for (std::size_t i = 0; i < operation_index && i < plan_operations.size(); ++i) {
+            for (std::size_t i = 0;
+                 i < operation_index && i < plan_operations.size();
+                 ++i) {
                 if (plan_operations[i].action == Action::RenameLocal &&
                     plan_operations[i].path == operation.path) {
                     source_of_preceding_rename = true;
@@ -985,8 +987,12 @@ prepare_operation(const Operation& operation,
                   const platform::Workspace& workspace,
                   const transaction::OperationProgress& current_progress,
                   std::span<const Operation> plan_operations) {
-    return prepare_operation_impl(
-        operation, operation_index, local_root, workspace, current_progress, plan_operations);
+    return prepare_operation_impl(operation,
+                                  operation_index,
+                                  local_root,
+                                  workspace,
+                                  current_progress,
+                                  plan_operations);
 }
 
 std::expected<void, MutationError>

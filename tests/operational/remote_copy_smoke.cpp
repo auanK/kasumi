@@ -1,8 +1,7 @@
-#include "remote_copy_smoke_support.hpp"
-
-#include "platform/random.hpp"
-#include "transport/transport.hpp"
 #include "../../src/transport/rclone/detail.hpp"
+#include "platform/random.hpp"
+#include "remote_copy_smoke_support.hpp"
+#include "transport/transport.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -61,11 +60,13 @@ struct ScratchDirectory {
 
     ScratchDirectory() = default;
     explicit ScratchDirectory(std::filesystem::path value)
-        : path(std::move(value)) {}
+        : path(std::move(value)) {
+    }
     ScratchDirectory(const ScratchDirectory&) = delete;
     ScratchDirectory& operator=(const ScratchDirectory&) = delete;
     ScratchDirectory(ScratchDirectory&& other) noexcept
-        : path(std::exchange(other.path, {})) {}
+        : path(std::exchange(other.path, {})) {
+    }
     ScratchDirectory& operator=(ScratchDirectory&& other) noexcept {
         if (this != &other) {
             if (!path.empty()) {
@@ -85,10 +86,9 @@ struct ScratchDirectory {
     }
 };
 
-void record_skipped(nlohmann::json& records,
-                    std::string name) {
-    records.push_back(smoke::to_json(smoke::OperationRecord{
-        .name = std::move(name), .result = "SKIPPED"}));
+void record_skipped(nlohmann::json& records, std::string name) {
+    records.push_back(smoke::to_json(
+        smoke::OperationRecord{.name = std::move(name), .result = "SKIPPED"}));
 }
 
 template <typename Function>
@@ -131,11 +131,11 @@ void fail_operation(nlohmann::json& records,
 
 bool valid_sha256(std::string_view hash);
 
-std::vector<smoke::ReadinessAttempt> probe_readiness(
-    transport::Transport& storage,
-    std::string_view identifier,
-    std::string_view operation_prefix,
-    nlohmann::json& operations) {
+std::vector<smoke::ReadinessAttempt>
+probe_readiness(transport::Transport& storage,
+                std::string_view identifier,
+                std::string_view operation_prefix,
+                nlohmann::json& operations) {
     const auto started = std::chrono::steady_clock::now();
     const auto schedule = smoke::readiness_schedule();
     std::vector<smoke::ReadinessAttempt> attempts;
@@ -150,11 +150,13 @@ std::vector<smoke::ReadinessAttempt> probe_readiness(
                     std::chrono::steady_clock::now() - started),
         };
 
-        auto presence = run_operation(
-            operations,
-            std::string{operation_prefix} + "_presence_attempt_" +
-                std::to_string(attempt.attempt_index),
-            [&] { return transport::presence(storage, identifier); });
+        auto presence =
+            run_operation(operations,
+                          std::string{operation_prefix} + "_presence_attempt_" +
+                              std::to_string(attempt.attempt_index),
+                          [&] {
+                              return transport::presence(storage, identifier);
+                          });
         if (!presence) {
             attempt.presence = smoke::ReadinessPresence::Failed;
             attempt.presence_error = presence.error().code;
@@ -169,13 +171,17 @@ std::vector<smoke::ReadinessAttempt> probe_readiness(
             operations,
             std::string{operation_prefix} + "_physical_hash_attempt_" +
                 std::to_string(attempt.attempt_index),
-            [&] { return transport::physical_hash(storage, identifier, "sha256"); });
+            [&] {
+                return transport::physical_hash(storage, identifier, "sha256");
+            });
         if (!physical_hash) {
             attempt.physical_hash_error = physical_hash.error().code;
             attempt.physical_hash_error_message = physical_hash.error().message;
-            if (physical_hash.error().code == transport::ErrorCode::ObjectNotFound) {
+            if (physical_hash.error().code ==
+                transport::ErrorCode::ObjectNotFound) {
                 attempt.physical_hash = smoke::ReadinessHash::ObjectNotFound;
-            } else if (physical_hash.error().code == transport::ErrorCode::Unsupported) {
+            } else if (physical_hash.error().code ==
+                       transport::ErrorCode::Unsupported) {
                 attempt.physical_hash = smoke::ReadinessHash::Unsupported;
             } else {
                 attempt.physical_hash = smoke::ReadinessHash::Failed;
@@ -196,9 +202,9 @@ std::vector<smoke::ReadinessAttempt> probe_readiness(
             attempt.sha256 = *physical_hash;
         }
 
-        const bool stop = attempt.presence == smoke::ReadinessPresence::Failed ||
-                          attempt.physical_hash !=
-                              smoke::ReadinessHash::ObjectNotFound;
+        const bool stop =
+            attempt.presence == smoke::ReadinessPresence::Failed ||
+            attempt.physical_hash != smoke::ReadinessHash::ObjectNotFound;
         attempts.push_back(std::move(attempt));
         if (stop) {
             break;
@@ -207,10 +213,10 @@ std::vector<smoke::ReadinessAttempt> probe_readiness(
     return attempts;
 }
 
-nlohmann::json readiness_report(
-    const std::vector<smoke::ReadinessAttempt>& attempts,
-    smoke::ReadinessClassification classification,
-    std::string_view elapsed_field) {
+nlohmann::json
+readiness_report(const std::vector<smoke::ReadinessAttempt>& attempts,
+                 smoke::ReadinessClassification classification,
+                 std::string_view elapsed_field) {
     nlohmann::json attempt_reports = nlohmann::json::array();
     for (const auto& attempt : attempts) {
         auto value = smoke::to_json(attempt);
@@ -226,23 +232,21 @@ nlohmann::json readiness_report(
     };
 }
 
-nlohmann::json diagnostic_hashsumfile(
-    rclone_detail::State& state,
-    nlohmann::json& operations,
-    std::string_view form_name,
-    std::string fs,
-    std::string remote) {
+nlohmann::json diagnostic_hashsumfile(rclone_detail::State& state,
+                                      nlohmann::json& operations,
+                                      std::string_view form_name,
+                                      std::string fs,
+                                      std::string remote) {
     constexpr std::size_t maximum_response_size = 64 * 1024;
-    const nlohmann::json request{{"fs", fs},
-                                 {"remote", remote},
-                                 {"hashType", "SHA-256"}};
+    const nlohmann::json request{
+        {"fs", fs}, {"remote", remote}, {"hashType", "SHA-256"}};
     const auto started = std::chrono::steady_clock::now();
-    const auto response = rclone_detail::post_rc_read_only(
-        state,
-        "operations/hashsumfile",
-        request.dump(),
-        maximum_response_size,
-        std::chrono::seconds{5});
+    const auto response =
+        rclone_detail::post_rc_read_only(state,
+                                         "operations/hashsumfile",
+                                         request.dump(),
+                                         maximum_response_size,
+                                         std::chrono::seconds{5});
     const auto elapsed = std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - started)
                              .count();
@@ -272,8 +276,8 @@ nlohmann::json diagnostic_hashsumfile(
         result["error_message"] = std::move(message);
     }
 
-    const auto operation_name = "diagnostic_hashsumfile_" +
-                                std::string{form_name};
+    const auto operation_name =
+        "diagnostic_hashsumfile_" + std::string{form_name};
     smoke::OperationRecord operation{
         .name = operation_name,
         .result = result.at("result").get<std::string>(),
@@ -287,11 +291,10 @@ nlohmann::json diagnostic_hashsumfile(
     return result;
 }
 
-nlohmann::json compare_hashsumfile_path_forms(
-    transport::Transport& storage,
-    nlohmann::json& operations,
-    const smoke::RemoteParent& parent,
-    std::string_view child) {
+nlohmann::json compare_hashsumfile_path_forms(transport::Transport& storage,
+                                              nlohmann::json& operations,
+                                              const smoke::RemoteParent& parent,
+                                              std::string_view child) {
     auto* state = static_cast<rclone_detail::State*>(storage.state.get());
     if (state == nullptr) {
         return nlohmann::json{
@@ -302,24 +305,17 @@ nlohmann::json compare_hashsumfile_path_forms(
     const auto remote_root = parent.directory + "/" + std::string{child};
     const auto root_fs = state->configuration.remote_name + ":";
     auto form_a = diagnostic_hashsumfile(
-        *state,
-        operations,
-        "form_a",
-        root_fs,
-        remote_root + "/source.bin");
+        *state, operations, "form_a", root_fs, remote_root + "/source.bin");
     auto form_b = diagnostic_hashsumfile(
-        *state,
-        operations,
-        "form_b",
-        root_fs + remote_root,
-        "source.bin");
-    const bool identical = form_a.at("result") == form_b.at("result") &&
-                           form_a.value("response", nlohmann::json{}) ==
-                               form_b.value("response", nlohmann::json{}) &&
-                           form_a.value("error_category", nlohmann::json{}) ==
-                               form_b.value("error_category", nlohmann::json{}) &&
-                           form_a.value("error_message", nlohmann::json{}) ==
-                               form_b.value("error_message", nlohmann::json{});
+        *state, operations, "form_b", root_fs + remote_root, "source.bin");
+    const bool identical =
+        form_a.at("result") == form_b.at("result") &&
+        form_a.value("response", nlohmann::json{}) ==
+            form_b.value("response", nlohmann::json{}) &&
+        form_a.value("error_category", nlohmann::json{}) ==
+            form_b.value("error_category", nlohmann::json{}) &&
+        form_a.value("error_message", nlohmann::json{}) ==
+            form_b.value("error_message", nlohmann::json{});
     return nlohmann::json{
         {"method", "operations/hashsumfile"},
         {"hashType", "SHA-256"},
@@ -357,9 +353,10 @@ std::expected<Arguments, std::string> parse_arguments(int argc, char** argv) {
 }
 
 void print_usage(std::ostream& output) {
-    output << "Usage: kasumi_remote_copy_smoke --remote <remote:path/test-parent> "
-              "[--rclone-config <config-file>] --output <local-json-file>\n"
-              "The remote must be a dedicated, non-root test parent.\n";
+    output
+        << "Usage: kasumi_remote_copy_smoke --remote <remote:path/test-parent> "
+           "[--rclone-config <config-file>] --output <local-json-file>\n"
+           "The remote must be a dedicated, non-root test parent.\n";
 }
 
 std::expected<ScratchDirectory, std::string> make_scratch_directory() {
@@ -378,11 +375,12 @@ std::expected<ScratchDirectory, std::string> make_scratch_directory() {
             return std::unexpected("cannot create local scratch directory");
         }
     }
-    return std::unexpected("could not allocate a unique local scratch directory");
+    return std::unexpected(
+        "could not allocate a unique local scratch directory");
 }
 
-std::expected<void, std::string>
-write_file(const std::filesystem::path& path, std::string_view bytes) {
+std::expected<void, std::string> write_file(const std::filesystem::path& path,
+                                            std::string_view bytes) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     if (!output) {
@@ -399,7 +397,8 @@ read_file(const std::filesystem::path& path) {
     }
     std::string bytes{std::istreambuf_iterator<char>{input}, {}};
     if (input.bad()) {
-        return std::unexpected("failed while reading downloaded synthetic file");
+        return std::unexpected(
+            "failed while reading downloaded synthetic file");
     }
     return bytes;
 }
@@ -478,12 +477,14 @@ int execute(const Arguments& arguments) {
 
     if (arguments.rclone_config) {
         std::error_code error;
-        if (!std::filesystem::is_regular_file(*arguments.rclone_config, error) ||
+        if (!std::filesystem::is_regular_file(*arguments.rclone_config,
+                                              error) ||
             error) {
-            fail_operation(records,
-                           "validate_rclone_config",
-                           transport::ErrorCode::InvalidContext,
-                           "rclone config must be an existing local regular file");
+            fail_operation(
+                records,
+                "validate_rclone_config",
+                transport::ErrorCode::InvalidContext,
+                "rclone config must be an existing local regular file");
             report["cleanup"]["result"] = "not_needed";
             write_report(arguments.output, report);
             return 2;
@@ -491,8 +492,8 @@ int execute(const Arguments& arguments) {
     }
     EnvironmentValue previous_config{"RCLONE_CONFIG"};
     if (arguments.rclone_config) {
-        const auto config_path = std::filesystem::absolute(
-            *arguments.rclone_config);
+        const auto config_path =
+            std::filesystem::absolute(*arguments.rclone_config);
 #ifdef _WIN32
         if (_putenv_s("RCLONE_CONFIG", config_path.string().c_str()) != 0) {
 #else
@@ -547,9 +548,10 @@ int execute(const Arguments& arguments) {
         failed = true;
     }
     if (parent_result) {
-        auto parent_listing = run_operation(records, "validate_remote_parent", [&] {
-            return transport::list(*parent_result);
-        });
+        auto parent_listing =
+            run_operation(records, "validate_remote_parent", [&] {
+                return transport::list(*parent_result);
+            });
         if (!parent_listing) {
             failed = true;
         } else {
@@ -587,7 +589,8 @@ int execute(const Arguments& arguments) {
     const auto destination_path = scratch.path / "destination.bin";
     const auto marker_path = scratch.path / "owner.marker";
     owner_token = *nonce + "-kasumi-copy-smoke-owner";
-    if (!write_file(source_path, payload) || !write_file(marker_path, owner_token)) {
+    if (!write_file(source_path, payload) ||
+        !write_file(marker_path, owner_token)) {
         fail_operation(records,
                        "prepare_synthetic_files",
                        transport::ErrorCode::Io,
@@ -604,19 +607,21 @@ int execute(const Arguments& arguments) {
         failed = true;
         report["cleanup"]["result"] = "not_needed";
     } else {
-        auto initialized = run_operation(records, "initialize_child_namespace", [&] {
-            return transport::initialize(*child_result);
-        });
+        auto initialized =
+            run_operation(records, "initialize_child_namespace", [&] {
+                return transport::initialize(*child_result);
+            });
         if (!initialized) {
             failed = true;
             ownership_ambiguous = true;
             report["cleanup"]["result"] = "refused";
-            report["cleanup"]["detail"] =
-                "initialization may have created the child; no owner marker exists";
+            report["cleanup"]["detail"] = "initialization may have created the "
+                                          "child; no owner marker exists";
         } else {
-            auto empty_child = run_operation(records, "list_initialized_child", [&] {
-                return transport::list(*child_result);
-            });
+            auto empty_child =
+                run_operation(records, "list_initialized_child", [&] {
+                    return transport::list(*child_result);
+                });
             if (!empty_child || !empty_child->empty()) {
                 if (empty_child && !empty_child->empty()) {
                     fail_operation(records,
@@ -630,31 +635,35 @@ int execute(const Arguments& arguments) {
                 report["cleanup"]["detail"] =
                     "child contents are not owned by this run";
             } else {
-                auto owner_put = run_operation(records, "write_owner_marker", [&] {
-                    return transport::put(*child_result, marker_path, "owner.marker");
-                });
+                auto owner_put =
+                    run_operation(records, "write_owner_marker", [&] {
+                        return transport::put(
+                            *child_result, marker_path, "owner.marker");
+                    });
                 if (!owner_put) {
                     failed = true;
                     ownership_ambiguous = true;
                     report["cleanup"]["result"] = "refused";
                     report["cleanup"]["detail"] =
-                        "owner-marker write may have completed; ownership is ambiguous";
+                        "owner-marker write may have completed; ownership is "
+                        "ambiguous";
                 } else {
                     owned_child = true;
                     auto source_put = run_operation(records, "put_source", [&] {
-                        return transport::put(*child_result, source_path, "source.bin");
+                        return transport::put(
+                            *child_result, source_path, "source.bin");
                     });
                     if (!source_put) {
                         failed = true;
                     } else {
-                        const auto source_attempts = probe_readiness(
-                            *child_result,
-                            "source.bin",
-                            "source_readiness",
-                            records);
+                        const auto source_attempts =
+                            probe_readiness(*child_result,
+                                            "source.bin",
+                                            "source_readiness",
+                                            records);
                         const auto source_classification =
-                            smoke::classify_readiness(
-                                source_attempts, std::chrono::seconds{8});
+                            smoke::classify_readiness(source_attempts,
+                                                      std::chrono::seconds{8});
                         report["diagnostics"]["source_readiness"] =
                             readiness_report(source_attempts,
                                              source_classification,
@@ -663,7 +672,8 @@ int execute(const Arguments& arguments) {
                         if (source_classification ==
                                 smoke::ReadinessClassification::Ready ||
                             source_classification ==
-                                smoke::ReadinessClassification::ReadyAfterDelay) {
+                                smoke::ReadinessClassification::
+                                    ReadyAfterDelay) {
                             const auto ready = std::find_if(
                                 source_attempts.begin(),
                                 source_attempts.end(),
@@ -675,10 +685,12 @@ int execute(const Arguments& arguments) {
                                 source_hash = ready->sha256;
                                 outcome.source_hash_valid = true;
                                 report["source_sha256"] = *source_hash;
-                                report["sha256_verification"] = "source_available";
+                                report["sha256_verification"] =
+                                    "source_available";
                             }
                         } else if (source_classification ==
-                                   smoke::ReadinessClassification::Unsupported) {
+                                   smoke::ReadinessClassification::
+                                       Unsupported) {
                             outcome.source_hash_unsupported = true;
                             report["sha256_verification"] = "UNSUPPORTED";
                         } else {
@@ -687,30 +699,29 @@ int execute(const Arguments& arguments) {
                             if (source_classification ==
                                 smoke::ReadinessClassification::
                                     FailedContradictoryVisibility) {
-                                report["diagnostics"]["source_hash_rc_path_forms"] =
-                                    compare_hashsumfile_path_forms(
-                                        *child_result,
-                                        records,
-                                        *parsed_parent,
-                                        child);
+                                report["diagnostics"]
+                                      ["source_hash_rc_path_forms"] =
+                                          compare_hashsumfile_path_forms(
+                                              *child_result,
+                                              records,
+                                              *parsed_parent,
+                                              child);
                             }
                         }
 
                         const bool source_ready = source_hash.has_value();
                         if (!source_ready) {
-                            record_skipped(records, "copy_source_to_destination");
+                            record_skipped(records,
+                                           "copy_source_to_destination");
                             record_skipped(records,
                                            "destination_physical_hash_sha256");
                             record_skipped(records, "get_destination");
                         } else {
                             auto copied = run_operation(
-                                records,
-                                "copy_source_to_destination",
-                                [&] {
-                                    return transport::copy(
-                                        *child_result,
-                                        "source.bin",
-                                        "destination.bin");
+                                records, "copy_source_to_destination", [&] {
+                                    return transport::copy(*child_result,
+                                                           "source.bin",
+                                                           "destination.bin");
                                 });
                             if (copied) {
                                 outcome.native_copy_succeeded = true;
@@ -732,20 +743,19 @@ int execute(const Arguments& arguments) {
                             }
 
                             if (outcome.native_copy_succeeded) {
-                                const auto destination_attempts = probe_readiness(
-                                    *child_result,
-                                    "destination.bin",
-                                    "destination_readiness",
-                                    records);
+                                const auto destination_attempts =
+                                    probe_readiness(*child_result,
+                                                    "destination.bin",
+                                                    "destination_readiness",
+                                                    records);
                                 const auto destination_classification =
                                     smoke::classify_readiness(
                                         destination_attempts,
                                         std::chrono::seconds{8});
                                 report["diagnostics"]["destination_readiness"] =
-                                    readiness_report(
-                                        destination_attempts,
-                                        destination_classification,
-                                        "elapsed_since_copy_ms");
+                                    readiness_report(destination_attempts,
+                                                     destination_classification,
+                                                     "elapsed_since_copy_ms");
 
                                 std::optional<std::string> destination_hash;
                                 if (destination_classification ==
@@ -771,7 +781,8 @@ int execute(const Arguments& arguments) {
                                                 "compare_physical_sha256",
                                                 transport::ErrorCode::
                                                     ProtocolFailure,
-                                                "source and destination SHA-256 differ");
+                                                "source and destination "
+                                                "SHA-256 differ");
                                             failed = true;
                                             report["sha256_verification"] =
                                                 "FAILED";
@@ -795,9 +806,7 @@ int execute(const Arguments& arguments) {
 
                                 if (destination_hash) {
                                     auto destination_get = run_operation(
-                                        records,
-                                        "get_destination",
-                                        [&] {
+                                        records, "get_destination", [&] {
                                             return transport::get(
                                                 *child_result,
                                                 "destination.bin",
@@ -817,7 +826,9 @@ int execute(const Arguments& arguments) {
                                                 "verify_destination_bytes",
                                                 transport::ErrorCode::
                                                     ProtocolFailure,
-                                                "downloaded destination differs from synthetic payload");
+                                                "downloaded destination "
+                                                "differs from synthetic "
+                                                "payload");
                                             failed = true;
                                             report["exact_byte_verification"] =
                                                 "FAILED";
@@ -828,8 +839,8 @@ int execute(const Arguments& arguments) {
                                                 "VERIFIED";
                                             records.push_back(smoke::to_json(
                                                 smoke::OperationRecord{
-                                                    .name =
-                                                        "verify_destination_bytes",
+                                                    .name = "verify_"
+                                                            "destination_bytes",
                                                     .result = "SUCCESS"}));
                                         }
                                     }
@@ -860,8 +871,8 @@ int execute(const Arguments& arguments) {
                             failed = true;
                         } else {
                             outcome.source_remains = true;
-                            records.push_back(smoke::to_json(
-                                smoke::OperationRecord{
+                            records.push_back(
+                                smoke::to_json(smoke::OperationRecord{
                                     .name = "verify_source_remains",
                                     .result = "SUCCESS"}));
                         }
@@ -879,10 +890,10 @@ int execute(const Arguments& arguments) {
             owner_token,
             {child + "/source.bin", child + "/destination.bin"},
             scratch.path);
-        const auto cleanup_elapsed = std::chrono::duration<double, std::milli>(
-                                         std::chrono::steady_clock::now() -
-                                         cleanup_started)
-                                         .count();
+        const auto cleanup_elapsed =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - cleanup_started)
+                .count();
         smoke::OperationRecord cleanup_operation{
             .name = "cleanup_owned_objects",
             .result = cleanup.result == "removed" ? "SUCCESS" : "FAILED",
@@ -895,7 +906,8 @@ int execute(const Arguments& arguments) {
         report["cleanup"]["namespace_directory_may_remain"] = true;
         if (cleanup.result != "removed") {
             failed = true;
-            report["cleanup"]["exact_namespace_to_inspect"] = effective_namespace;
+            report["cleanup"]["exact_namespace_to_inspect"] =
+                effective_namespace;
         } else {
             outcome.cleanup_succeeded = true;
         }

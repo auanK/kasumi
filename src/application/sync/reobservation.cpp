@@ -4,8 +4,8 @@
 #include "application/sync/coordinator_detail.hpp"
 #include "application/sync/journal.hpp"
 #include "application/sync/mutation.hpp"
-#include "crypto/key_derivation.hpp"
 #include "core/reconciliation/plan.hpp"
+#include "crypto/key_derivation.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 
@@ -65,18 +65,19 @@ bool same_storage(const reconciliation::StorageState& left,
 
 bool same_rows(std::span<const NodeRow> left,
                std::span<const NodeRow> right) noexcept {
-    return left.size() == right.size() &&
-           std::ranges::equal(left, right);
+    return left.size() == right.size() && std::ranges::equal(left, right);
 }
 
-std::expected<void, Error>
-observe_content_availability(reconciliation::Input& input,
-                             const reconciliation::Result& result,
-                             transport::Transport& storage,
-                             std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                             std::span<const Hash> confirmed_missing) {
+std::expected<void, Error> observe_content_availability(
+    reconciliation::Input& input,
+    const reconciliation::Result& result,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    std::span<const Hash> confirmed_missing) {
     HashSet hashes{0, hash_key};
-    const auto add_hash = [&](const Hash& hash) { hashes.insert(hash); };
+    const auto add_hash = [&](const Hash& hash) {
+        hashes.insert(hash);
+    };
     for (const auto& operation : sync_plan_operations(result.plan)) {
         if (operation.action == Action::Download) {
             if (const auto hash = hash_from_hex(operation.hash)) {
@@ -135,9 +136,9 @@ observe_content_availability(reconciliation::Input& input,
             }
             presences = std::move(batch->presences);
         } else if (batch.error().code != transport::ErrorCode::Unsupported) {
-            return std::unexpected(detail::make_error(
-                ErrorCode::ObservationFailure,
-                transport::describe(batch.error())));
+            return std::unexpected(
+                detail::make_error(ErrorCode::ObservationFailure,
+                                   transport::describe(batch.error())));
         }
     }
     if (presences.empty() && storage.storage.presence != nullptr) {
@@ -145,19 +146,21 @@ observe_content_availability(reconciliation::Input& input,
         for (const auto& [hash, identifier] : requested) {
             auto observed = transport::presence(storage, identifier);
             if (!observed) {
-                if (observed.error().code == transport::ErrorCode::Unsupported) {
+                if (observed.error().code ==
+                    transport::ErrorCode::Unsupported) {
                     presences.clear();
                     break;
                 }
-                return std::unexpected(detail::make_error(
-                    ErrorCode::ObservationFailure,
-                    transport::describe(observed.error())));
+                return std::unexpected(
+                    detail::make_error(ErrorCode::ObservationFailure,
+                                       transport::describe(observed.error())));
             }
             presences.push_back(*observed);
         }
     }
     if (presences.empty()) {
-        return {}; // No probe capability: the verified GET remains authoritative.
+        return {}; // No probe capability: the verified GET remains
+                   // authoritative.
     }
     for (std::size_t index = 0; index < requested.size(); ++index) {
         if (presences[index] == transport::Presence::Absent) {
@@ -307,10 +310,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
                 ErrorCode::ObservationFailure, observed.error().detail));
         }
         observed->pending_deletion_authority = input.pending_deletion_authority;
-        auto local_after_storage =
-            observation::collect_local_tree(runtime_data.local_dir,
-                                            session,
-                                            observed->ignore_list);
+        auto local_after_storage = observation::collect_local_tree(
+            runtime_data.local_dir, session, observed->ignore_list);
         if (!local_after_storage) {
             auto removed = detail::remove_transaction_workspace(workspace);
             if (!removed) {

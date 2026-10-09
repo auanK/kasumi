@@ -285,7 +285,8 @@ load_latest_impl(transport::Transport& storage,
     if (!inventory) {
         return std::unexpected(inventory.error());
     }
-    platform::perf_trace::count("epoch.candidates_observed", inventory->references.size());
+    platform::perf_trace::count("epoch.candidates_observed",
+                                inventory->references.size());
     if (inventory->references.empty()) {
         return std::optional<VerifiedEpoch>{};
     }

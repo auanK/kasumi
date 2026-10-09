@@ -74,8 +74,8 @@ metadata_restore_paths(const transaction::Record& record,
                 observed->is_directory != expected.is_directory) {
                 continue;
             }
-            if (!platform::metadata::filesystem_equivalent(
-                    observed->mtime, expected.mtime)) {
+            if (!platform::metadata::filesystem_equivalent(observed->mtime,
+                                                           expected.mtime)) {
                 if (expected.is_directory ||
                     (expected.hash == observed->hash &&
                      expected.size == observed->size)) {

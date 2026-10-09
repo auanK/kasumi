@@ -16,9 +16,20 @@
 
 namespace kasumi::operational::gc_live_preflight {
 
-enum class ChildDisposition { Unused, Existing, Refused };
-enum class PostInitializeDisposition { Empty, Refused };
-enum class EmptyDirectoryCapability { Unknown, CanHave, CannotHave };
+enum class ChildDisposition {
+    Unused,
+    Existing,
+    Refused
+};
+enum class PostInitializeDisposition {
+    Empty,
+    Refused
+};
+enum class EmptyDirectoryCapability {
+    Unknown,
+    CanHave,
+    CannotHave
+};
 
 struct ListingObservation {
     std::string result = "FAILED";
@@ -84,35 +95,35 @@ using EmptyDirectoryCleanup = std::function<std::expected<void, std::string>()>;
 std::expected<std::string, std::string>
 child_namespace(std::string_view random_hex);
 bool valid_child(std::string_view child) noexcept;
-std::expected<std::string, std::string> child_location(
-    const remote_copy_smoke::RemoteParent& parent,
-    std::string_view child);
+std::expected<std::string, std::string>
+child_location(const remote_copy_smoke::RemoteParent& parent,
+               std::string_view child);
 
 PreInitializeObservation observe_pre_initialize(
     transport::Transport& parent_storage,
     const remote_copy_smoke::RemoteParent& parent,
     std::string_view child,
     std::chrono::milliseconds diagnostic_deadline = std::chrono::minutes{2});
-Classification classify_pre_initialize(
-    const PreInitializeObservation& observation,
-    const remote_copy_smoke::RemoteParent& parent,
-    std::string_view child);
+Classification
+classify_pre_initialize(const PreInitializeObservation& observation,
+                        const remote_copy_smoke::RemoteParent& parent,
+                        std::string_view child);
 
-std::expected<ChildStorage, transport::Error> open_child_storage(
-    const remote_copy_smoke::RemoteParent& parent,
-    std::string_view child);
-transport::Result initialize_child(
-    ChildStorage& child,
-    const PreInitializeObservation& pre_initialize);
+std::expected<ChildStorage, transport::Error>
+open_child_storage(const remote_copy_smoke::RemoteParent& parent,
+                   std::string_view child);
+transport::Result
+initialize_child(ChildStorage& child,
+                 const PreInitializeObservation& pre_initialize);
 PostInitializeObservation observe_post_initialize(ChildStorage& child);
-PostInitializeDisposition classify_post_initialize(
-    const PostInitializeObservation& observation) noexcept;
-transport::Result establish_ownership_marker(
-    ChildStorage& child,
-    const PostInitializeObservation& post_initialize,
-    std::string_view owner_token,
-    const std::filesystem::path& marker_source,
-    const std::filesystem::path& marker_readback);
+PostInitializeDisposition
+classify_post_initialize(const PostInitializeObservation& observation) noexcept;
+transport::Result
+establish_ownership_marker(ChildStorage& child,
+                           const PostInitializeObservation& post_initialize,
+                           std::string_view owner_token,
+                           const std::filesystem::path& marker_source,
+                           const std::filesystem::path& marker_readback);
 CleanupResult cleanup_owned_child(
     ChildStorage& child,
     std::string_view owner_token,

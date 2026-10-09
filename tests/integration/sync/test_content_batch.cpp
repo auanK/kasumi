@@ -393,9 +393,12 @@ kasumi::transport::PhysicalHashBatchResult recording_physical_hash_batch(
         }
     }
     for (const auto& object : request.objects) {
-        if (std::ranges::find(report.mismatched, object.identifier) == report.mismatched.end() &&
-            std::ranges::find(report.missing, object.identifier) == report.missing.end() &&
-            std::ranges::find(report.errors, object.identifier) == report.errors.end()) {
+        if (std::ranges::find(report.mismatched, object.identifier) ==
+                report.mismatched.end() &&
+            std::ranges::find(report.missing, object.identifier) ==
+                report.missing.end() &&
+            std::ranges::find(report.errors, object.identifier) ==
+                report.errors.end()) {
             report.matched.push_back(object.identifier);
         }
     }

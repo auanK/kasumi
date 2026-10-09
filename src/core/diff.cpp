@@ -64,17 +64,18 @@ void find_missing_blocks(const Snapshot& snapshot,
     }
 }
 
-void compare_nodes_3way(const Snapshot* local_snapshot,
-                        const Snapshot* base_snapshot,
-                        const Snapshot* cloud_snapshot,
-                        const NodeRow* local,
-                        const NodeRow* base,
-                        const NodeRow* cloud,
-                        std::string_view current_path,
-                        const HashSet& missing_blocks,
-                        std::vector<SyncOperation>& ops,
-                        const ignore::IgnoreList* ignore_list,
-                        const std::unordered_set<std::string>* authorized_deletions) {
+void compare_nodes_3way(
+    const Snapshot* local_snapshot,
+    const Snapshot* base_snapshot,
+    const Snapshot* cloud_snapshot,
+    const NodeRow* local,
+    const NodeRow* base,
+    const NodeRow* cloud,
+    std::string_view current_path,
+    const HashSet& missing_blocks,
+    std::vector<SyncOperation>& ops,
+    const ignore::IgnoreList* ignore_list,
+    const std::unordered_set<std::string>* authorized_deletions) {
     if (!local && !base && !cloud)
         return;
     if (same_hash(local, cloud) && missing_blocks.empty())
@@ -136,11 +137,15 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
         if (c && !c->is_directory && missing_blocks.contains(c->hash)) {
             if (authorized_deletions != nullptr &&
                 authorized_deletions->contains(std::string(path))) {
-                // Authorized for deletion: allow 3-way merge to emit DeleteRemote
+                // Authorized for deletion: allow 3-way merge to emit
+                // DeleteRemote
             } else {
                 if (authorized_deletions == nullptr && l && !l->is_directory)
-                    ops.push_back(
-                        {Action::Upload, target, hash_hex(l->hash), {}, l->size});
+                    ops.push_back({Action::Upload,
+                                   target,
+                                   hash_hex(l->hash),
+                                   {},
+                                   l->size});
                 continue;
             }
         }
@@ -187,7 +192,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                         if (l && cloud_snapshot) {
                             for (const auto& row : cloud_snapshot->rows) {
                                 if (!row.is_directory && row.hash == l->hash &&
-                                    row.path.starts_with(std::string(path) + ".kasumiconflict_")) {
+                                    row.path.starts_with(std::string(path) +
+                                                         ".kasumiconflict_")) {
                                     conflict_artifact = &row;
                                     break;
                                 }
@@ -197,7 +203,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                             ops.push_back({Action::RenameLocal,
                                            target,
                                            "",
-                                           platform::path::from_utf8(conflict_artifact->path),
+                                           platform::path::from_utf8(
+                                               conflict_artifact->path),
                                            0,
                                            false});
                         }
@@ -258,8 +265,8 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                                        authorized_deletions);
             }
         } else if (!l && c) {
-            const bool already_relocated = std::ranges::any_of(
-                ops, [&](const SyncOperation& op) {
+            const bool already_relocated =
+                std::ranges::any_of(ops, [&](const SyncOperation& op) {
                     return op.action == Action::RenameLocal &&
                            op.alt_path == target;
                 });
@@ -329,8 +336,11 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                         make_conflict_path(path, ".kasumiconflict_local"));
                     ops.push_back(
                         {Action::RenameLocal, target, "", conflict, 0, true});
-                    ops.push_back(
-                        {Action::Upload, conflict, hash_hex(l->hash), {}, l->size});
+                    ops.push_back({Action::Upload,
+                                   conflict,
+                                   hash_hex(l->hash),
+                                   {},
+                                   l->size});
                     ops.push_back(
                         {Action::CreateLocalDirectory, target, "", {}});
                     compare_nodes_3way(local_snapshot,
@@ -386,10 +396,10 @@ void compare_nodes_3way(const Snapshot* local_snapshot,
                     else {
                         ops.push_back({Action::DeleteLocal, target, "", {}});
                         ops.push_back({Action::Download,
-                                        target,
-                                        hash_hex(c->hash),
-                                        {},
-                                        c->size});
+                                       target,
+                                       hash_hex(c->hash),
+                                       {},
+                                       c->size});
                     }
                     compare_nodes_3way(local_snapshot,
                                        base_snapshot,

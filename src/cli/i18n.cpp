@@ -373,8 +373,7 @@ parse_catalog(std::string_view json_str) {
 }
 
 const std::unordered_map<std::string, std::string>& get_default_en_map() {
-    static const auto s_map =
-        parse_catalog(embedded::reconstructed_en_json());
+    static const auto s_map = parse_catalog(embedded::reconstructed_en_json());
     return s_map;
 }
 

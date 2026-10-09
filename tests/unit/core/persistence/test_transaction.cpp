@@ -211,9 +211,13 @@ TEST(TransactionTypesTest, LocalOnlyRecordsHaveNoPublicationPhases) {
 
 TEST(TransactionTypesTest, PublicationRecordsPersistObservedBaseIdentity) {
     const auto observed_head = std::string(64, 'e');
-    auto record = kasumi::transaction::make_record(
-        std::string(32, 'f'), 0, 0, kasumi::make_sync_plan({}, 0), true,
-        observed_head);
+    auto record =
+        kasumi::transaction::make_record(std::string(32, 'f'),
+                                         0,
+                                         0,
+                                         kasumi::make_sync_plan({}, 0),
+                                         true,
+                                         observed_head);
     ASSERT_TRUE(record.has_value());
     EXPECT_TRUE(kasumi::transaction::valid(*record));
 
@@ -296,8 +300,7 @@ TEST(TransactionCodecTest, RoundTripsAllActionsAndProgressFields) {
     EXPECT_EQ(decoded->publication_required, original.publication_required);
     EXPECT_EQ(decoded->observed_head_id, original.observed_head_id);
     EXPECT_EQ(decoded->observed_base_id, original.observed_base_id);
-    EXPECT_EQ(decoded->observed_pending_paths,
-              original.observed_pending_paths);
+    EXPECT_EQ(decoded->observed_pending_paths, original.observed_pending_paths);
     EXPECT_EQ(decoded->pending_paths, original.pending_paths);
     EXPECT_EQ(decoded->local_generation, original.local_generation);
     EXPECT_EQ(decoded->storage_generation, original.storage_generation);
@@ -560,10 +563,12 @@ TEST(TransactionCodecTest, RejectsInvalidEnumsAndInvalidRecords) {
 
     auto invalid_pending = representative_record();
     invalid_pending.pending_paths = {"../outside"};
-    EXPECT_FALSE(kasumi::transaction::codec::encode(invalid_pending).has_value());
+    EXPECT_FALSE(
+        kasumi::transaction::codec::encode(invalid_pending).has_value());
     invalid_pending = representative_record();
     invalid_pending.pending_paths = {"same.txt", "same.txt"};
-    EXPECT_FALSE(kasumi::transaction::codec::encode(invalid_pending).has_value());
+    EXPECT_FALSE(
+        kasumi::transaction::codec::encode(invalid_pending).has_value());
 }
 
 } // namespace

@@ -60,7 +60,8 @@ audit_object(transport::Transport& storage,
     platform::perf_trace::count("reachability.audit_get_calls");
     const auto get_token = platform::perf_trace::begin();
     const auto downloaded = transport::get(storage, content_id, encrypted);
-    platform::perf_trace::finish("reachability.audit_get_duration_us", get_token);
+    platform::perf_trace::finish("reachability.audit_get_duration_us",
+                                 get_token);
     if (!downloaded) {
         cleanup();
         if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
@@ -72,19 +73,23 @@ audit_object(transport::Transport& storage,
     std::error_code enc_size_error;
     const auto enc_size = std::filesystem::file_size(encrypted, enc_size_error);
     if (!enc_size_error) {
-        platform::perf_trace::count("reachability.encrypted_bytes_downloaded", enc_size);
+        platform::perf_trace::count("reachability.encrypted_bytes_downloaded",
+                                    enc_size);
     }
 
     ContentObjectState state = ContentObjectState::Corrupt;
     platform::perf_trace::count("reachability.audit_decrypt_calls");
     const auto decrypt_token = platform::perf_trace::begin();
     const bool decrypted = crypto::decrypt_file(encrypted, plaintext, key);
-    platform::perf_trace::finish("reachability.audit_decrypt_duration_us", decrypt_token);
+    platform::perf_trace::finish("reachability.audit_decrypt_duration_us",
+                                 decrypt_token);
     if (decrypted) {
         std::error_code plain_size_error;
-        const auto plain_size = std::filesystem::file_size(plaintext, plain_size_error);
+        const auto plain_size =
+            std::filesystem::file_size(plaintext, plain_size_error);
         if (!plain_size_error) {
-            platform::perf_trace::count("reachability.plaintext_bytes_verified", plain_size);
+            platform::perf_trace::count("reachability.plaintext_bytes_verified",
+                                        plain_size);
         }
         platform::perf_trace::count("reachability.audit_verify_calls");
         const auto verify_token = platform::perf_trace::begin();
@@ -99,7 +104,8 @@ audit_object(transport::Transport& storage,
             crypto::content_identifier(key, *actual_hash) == content_id) {
             state = ContentObjectState::Present;
         }
-        platform::perf_trace::finish("reachability.audit_verify_duration_us", verify_token);
+        platform::perf_trace::finish("reachability.audit_verify_duration_us",
+                                     verify_token);
     }
     cleanup();
     return state;
@@ -158,11 +164,12 @@ inventory_impl(transport::Transport& storage,
                 raw_references.push_back(RawReference{
                     .remote_id = remote_id,
                     .plaintext_hash = plaintext_hash,
-                    .reference = ContentReference{
-                        .commit_id = commit.commit_id,
-                        .path = row.path,
-                        .size = row.size,
-                    },
+                    .reference =
+                        ContentReference{
+                            .commit_id = commit.commit_id,
+                            .path = row.path,
+                            .size = row.size,
+                        },
                 });
                 if (measure_capacity_growth &&
                     raw_references.capacity() != capacity_before_push) {
@@ -308,11 +315,10 @@ inventory_impl(transport::Transport& storage,
                     result.corrupt_content_ids.push_back(content_id);
                 }
             }
-            result.contents.push_back(
-                ContentEntry{.content_id = content_id,
-                             .state = state,
-                             .reachable = false,
-                             .references = {}});
+            result.contents.push_back(ContentEntry{.content_id = content_id,
+                                                   .state = state,
+                                                   .reachable = false,
+                                                   .references = {}});
         }
 
         sort_unique(unknown);

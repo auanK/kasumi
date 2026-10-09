@@ -74,9 +74,8 @@ void finish(std::string_view name, Token token) noexcept {
 void count(std::string_view name, std::uint64_t amount) noexcept {
     if (!enabled() || name.empty())
         return;
-    const bool live_progress =
-        name == "fsck.audit_completion_count" ||
-        name == "fsck.checkpoint_durable_writes";
+    const bool live_progress = name == "fsck.audit_completion_count" ||
+                               name == "fsck.checkpoint_durable_writes";
     std::uint64_t calls = 0;
     try {
         std::lock_guard lock(metrics_mutex);

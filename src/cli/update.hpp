@@ -1,8 +1,8 @@
 #ifndef KASUMI_CLI_UPDATE_HPP
 #define KASUMI_CLI_UPDATE_HPP
 
-#include <compare>
 #include <array>
+#include <compare>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -66,22 +66,24 @@ using InstallAction = std::function<InstallResult()>;
 
 struct InstallHooks {
     std::function<std::expected<std::string, std::string>(
-        const std::filesystem::path&)> hash_file;
+        const std::filesystem::path&)>
+        hash_file;
     std::function<std::expected<void, std::string>(
-        const std::filesystem::path&,
-        const std::filesystem::path&)> replace_atomically;
+        const std::filesystem::path&, const std::filesystem::path&)>
+        replace_atomically;
     std::function<std::expected<void, std::string>(
-        const std::filesystem::path&)> validate_target;
+        const std::filesystem::path&)>
+        validate_target;
 };
 
 using ApiGet = std::function<std::expected<HttpResponse, std::string>(
-    std::string_view url,
-    std::size_t maximum_bytes)>;
+    std::string_view url, std::size_t maximum_bytes)>;
 
 std::optional<Version> parse_version(std::string_view text);
 std::strong_ordering compare_versions(const Version& left,
                                       const Version& right) noexcept;
-std::optional<std::size_t> select_release_index(std::span<const Release> releases);
+std::optional<std::size_t>
+select_release_index(std::span<const Release> releases);
 bool installed_version_is_current_or_newer(std::string_view current,
                                            const Version& latest);
 std::expected<std::vector<Release>, std::string>
@@ -105,11 +107,10 @@ std::expected<std::string, std::string>
 verify_package_checksum(const std::filesystem::path& archive,
                         const std::filesystem::path& checksum_file,
                         std::string_view archive_name);
-InstallResult
-install_prepared_executable(const std::filesystem::path& prepared,
-                            const std::filesystem::path& target,
-                            std::string_view expected_sha256,
-                            const InstallHooks* hooks = nullptr);
+InstallResult install_prepared_executable(const std::filesystem::path& prepared,
+                                          const std::filesystem::path& target,
+                                          std::string_view expected_sha256,
+                                          const InstallHooks* hooks = nullptr);
 InstallResult install_once_then_elevate(const InstallAction& install,
                                         const InstallAction& elevate);
 
@@ -133,18 +134,22 @@ struct LinuxElevationResult {
 
 using LinuxElevationAttempt = std::function<LinuxElevationResult()>;
 
-LinuxElevationResult classify_linux_pkexec_result(int exit_code,
-                                                  std::string_view error_output);
-LinuxElevationResult attempt_linux_elevation(bool interactive,
-                                             const LinuxElevationAttempt& pkexec,
-                                             const LinuxElevationAttempt& sudo);
+LinuxElevationResult
+classify_linux_pkexec_result(int exit_code, std::string_view error_output);
+LinuxElevationResult
+attempt_linux_elevation(bool interactive,
+                        const LinuxElevationAttempt& pkexec,
+                        const LinuxElevationAttempt& sudo);
 
 struct LinuxHandoffHooks {
-    std::function<std::expected<std::string, std::string>(std::string_view)> fetch_checksum;
+    std::function<std::expected<std::string, std::string>(std::string_view)>
+        fetch_checksum;
     std::function<std::expected<PreparedExecutable, std::string>(
-        const std::filesystem::path&, std::string_view)> prepare;
+        const std::filesystem::path&, std::string_view)>
+        prepare;
     std::function<InstallResult(const PreparedExecutable&,
-                                const std::filesystem::path&)> install;
+                                const std::filesystem::path&)>
+        install;
 };
 
 InstallResult install_linux_handoff(const std::filesystem::path& archive,
@@ -174,7 +179,8 @@ std::optional<std::vector<std::wstring>>
 windows_decode_arguments(std::wstring_view command_line);
 #endif
 
-// Runs only the public `kasumi update` operation or its private installer handoff.
+// Runs only the public `kasumi update` operation or its private installer
+// handoff.
 int run(int argc, char* argv[]);
 
 } // namespace kasumi::cli::update

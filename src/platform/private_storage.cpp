@@ -180,10 +180,10 @@ protect_windows_tree(const std::filesystem::path& root) {
             if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
                 continue;
             }
-            return std::unexpected(windows_error(
-                "FindFirstFileW failed for '" +
-                    platform::path::to_utf8(directory) + "'",
-                code));
+            return std::unexpected(
+                windows_error("FindFirstFileW failed for '" +
+                                  platform::path::to_utf8(directory) + "'",
+                              code));
         }
 
         std::string failure;
@@ -227,10 +227,10 @@ protect_windows_tree(const std::filesystem::path& root) {
         if (enumeration_error != ERROR_NO_MORE_FILES &&
             enumeration_error != ERROR_FILE_NOT_FOUND &&
             enumeration_error != ERROR_PATH_NOT_FOUND) {
-            return std::unexpected(windows_error(
-                "FindNextFileW failed for '" +
-                    platform::path::to_utf8(directory) + "'",
-                enumeration_error));
+            return std::unexpected(
+                windows_error("FindNextFileW failed for '" +
+                                  platform::path::to_utf8(directory) + "'",
+                              enumeration_error));
         }
     }
     return {};

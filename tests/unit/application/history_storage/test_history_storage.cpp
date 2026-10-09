@@ -220,10 +220,10 @@ TEST(HistoryStorageTest, CompleteLoadConsumesOneNativeCommitBatch) {
 
 TEST(HistoryStorageTest, LinuxNanosecondGoldenVariantAuthenticates) {
     auto storage = make_local_storage();
-    const auto reference = add_variant_bytes(
-        storage,
-        std::span<const std::uint8_t>{
-            kasumi::test::fixtures::linux_nanosecond_commit});
+    const auto reference =
+        add_variant_bytes(storage,
+                          std::span<const std::uint8_t>{
+                              kasumi::test::fixtures::linux_nanosecond_commit});
 
     const auto loaded = kasumi::application::history_storage::load_history(
         storage.transport,
@@ -234,8 +234,7 @@ TEST(HistoryStorageTest, LinuxNanosecondGoldenVariantAuthenticates) {
         << (loaded.has_value() ? "" : loaded.error().detail);
     ASSERT_EQ(loaded->commits.size(), 1U);
     EXPECT_EQ(loaded->commits.front().id, reference.commit_id);
-    EXPECT_EQ(loaded->authenticated_commit_variants,
-              std::vector{reference});
+    EXPECT_EQ(loaded->authenticated_commit_variants, std::vector{reference});
 }
 
 TEST(HistoryStorageTest,
@@ -1608,15 +1607,16 @@ TestHistoryFixture make_test_history_fixture(std::string_view name) {
         .vault_id = std::string(64, 'a'),
         .sequence = 0,
         .issued_at = 100,
-        .policy = {
-            .min_history_depth = 1,
-            .min_history_age_hours = 1,
-        },
+        .policy =
+            {
+                .min_history_depth = 1,
+                .min_history_age_hours = 1,
+            },
         .anchors = {{.commit_id = commit_id(commit), .height = 0}},
         .previous_epoch_id = {},
     };
-    auto sealed =
-        kasumi::application::history_storage::epoch::seal(epoch_data, test_key());
+    auto sealed = kasumi::application::history_storage::epoch::seal(epoch_data,
+                                                                    test_key());
     EXPECT_TRUE(sealed.has_value());
     EXPECT_TRUE(kasumi::application::history_storage::epoch::publish(
         storage, test_key(), *sealed, root));
@@ -1631,7 +1631,8 @@ TestHistoryFixture make_test_history_fixture(std::string_view name) {
     };
 }
 
-TEST(HistoryStorageTest, DemonstratesCurrentHistoryLoadingIsSerialOrConcurrent) {
+TEST(HistoryStorageTest,
+     DemonstratesCurrentHistoryLoadingIsSerialOrConcurrent) {
     auto fixture = make_test_history_fixture("history-serial-characterization");
     HistoryReadGates gates;
     active_gates = &gates;
@@ -1647,8 +1648,7 @@ TEST(HistoryStorageTest, DemonstratesCurrentHistoryLoadingIsSerialOrConcurrent) 
     {
         std::unique_lock lock(gates.mutex);
         gates.cv.wait(lock, [&] {
-            return gates.batch_entered.load() &&
-                   gates.epoch_entered.load() &&
+            return gates.batch_entered.load() && gates.epoch_entered.load() &&
                    gates.marker_entered.load();
         });
     }
@@ -1671,8 +1671,8 @@ TEST(HistoryStorageTest, DemonstratesCurrentHistoryLoadingIsSerialOrConcurrent) 
     EXPECT_EQ(gates.peak_in_flight, 3U);
 }
 
-
-TEST(HistoryStorageTest, NativeCompletePathOverlapsBatchEpochAndMarkerWithPeakThree) {
+TEST(HistoryStorageTest,
+     NativeCompletePathOverlapsBatchEpochAndMarkerWithPeakThree) {
     auto fixture = make_test_history_fixture("history-concurrent-peak");
     HistoryReadGates gates;
     active_gates = &gates;
@@ -1688,8 +1688,8 @@ TEST(HistoryStorageTest, NativeCompletePathOverlapsBatchEpochAndMarkerWithPeakTh
     bool all_three_entered = false;
     {
         std::unique_lock lock(gates.mutex);
-        all_three_entered = gates.cv.wait_for(
-            lock, std::chrono::milliseconds(200), [&] {
+        all_three_entered =
+            gates.cv.wait_for(lock, std::chrono::milliseconds(200), [&] {
                 return gates.batch_entered.load() &&
                        gates.epoch_entered.load() &&
                        gates.marker_entered.load();
@@ -1735,8 +1735,9 @@ TEST(HistoryStorageTest, DeterministicErrorPrecedenceBatchOverEpochAndMarker) {
     active_gates = nullptr;
 
     ASSERT_FALSE(loaded.has_value());
-    EXPECT_EQ(loaded.error().code,
-              kasumi::application::history_storage::ErrorCode::TransportFailure);
+    EXPECT_EQ(
+        loaded.error().code,
+        kasumi::application::history_storage::ErrorCode::TransportFailure);
     EXPECT_NE(loaded.error().detail.find("injected batch failure"),
               std::string::npos);
 }
@@ -1765,13 +1766,15 @@ TEST(HistoryStorageTest, DeterministicErrorPrecedenceEpochOverMarker) {
     active_gates = nullptr;
 
     ASSERT_FALSE(loaded.has_value());
-    EXPECT_EQ(loaded.error().code,
-              kasumi::application::history_storage::ErrorCode::TransportFailure);
+    EXPECT_EQ(
+        loaded.error().code,
+        kasumi::application::history_storage::ErrorCode::TransportFailure);
     EXPECT_NE(loaded.error().detail.find("injected epoch failure"),
               std::string::npos);
 }
 
-TEST(HistoryStorageTest, DeterministicErrorPrecedenceMarkerWhenBatchAndEpochSucceed) {
+TEST(HistoryStorageTest,
+     DeterministicErrorPrecedenceMarkerWhenBatchAndEpochSucceed) {
     auto fixture = make_test_history_fixture("history-precedence-marker");
     HistoryReadGates gates;
     gates.fail_batch = false;
@@ -1795,8 +1798,9 @@ TEST(HistoryStorageTest, DeterministicErrorPrecedenceMarkerWhenBatchAndEpochSucc
     active_gates = nullptr;
 
     ASSERT_FALSE(loaded.has_value());
-    EXPECT_EQ(loaded.error().code,
-              kasumi::application::history_storage::ErrorCode::TransportFailure);
+    EXPECT_EQ(
+        loaded.error().code,
+        kasumi::application::history_storage::ErrorCode::TransportFailure);
     EXPECT_NE(loaded.error().detail.find("injected marker failure"),
               std::string::npos);
 }
@@ -1818,8 +1822,9 @@ TEST(HistoryStorageTest, DrainsAllLanesWhenOneFailsEarly) {
             fixture.storage, test_key(), fixture.root);
     });
 
-    // In a three-lane model, all lanes must be drained/joined before load_history returns.
-    // Give it a short moment, then release epoch and marker
+    // In a three-lane model, all lanes must be drained/joined before
+    // load_history returns. Give it a short moment, then release epoch and
+    // marker
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     gates.release_epoch = true;
     gates.release_marker = true;
@@ -1828,8 +1833,9 @@ TEST(HistoryStorageTest, DrainsAllLanesWhenOneFailsEarly) {
     active_gates = nullptr;
 
     ASSERT_FALSE(loaded.has_value());
-    EXPECT_EQ(loaded.error().code,
-              kasumi::application::history_storage::ErrorCode::TransportFailure);
+    EXPECT_EQ(
+        loaded.error().code,
+        kasumi::application::history_storage::ErrorCode::TransportFailure);
 }
 
 TEST(HistoryStorageTest, RespectsGlobalCancellationAndDrains) {
@@ -1848,8 +1854,7 @@ TEST(HistoryStorageTest, RespectsGlobalCancellationAndDrains) {
     {
         std::unique_lock lock(gates.mutex);
         gates.cv.wait(lock, [&] {
-            return gates.batch_entered.load() ||
-                   gates.epoch_entered.load() ||
+            return gates.batch_entered.load() || gates.epoch_entered.load() ||
                    gates.marker_entered.load();
         });
     }

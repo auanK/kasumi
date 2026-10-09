@@ -77,10 +77,9 @@ active_writers(transport::Transport& storage);
 
 // Removes only the explicitly selected writer marker after verifying it is
 // listed and present in this vault's keyed writer namespace.
-std::expected<void, Error>
-remove_writer(transport::Transport& storage,
-              const RemoteLayout& layout,
-              std::string_view identifier);
+std::expected<void, Error> remove_writer(transport::Transport& storage,
+                                         const RemoteLayout& layout,
+                                         std::string_view identifier);
 
 // Confirms immediate read-after-write and read-after-delete visibility in
 // listings.
@@ -149,12 +148,11 @@ record_quarantine(transport::Transport& storage,
 // Builds the existing authenticated metadata format in a caller-owned local
 // workspace without publishing it remotely.
 std::expected<PreparedQuarantineMetadata, Error>
-prepare_quarantine_metadata(
-    std::string_view quarantine_identifier,
-    std::int64_t quarantined_at,
-    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-    const std::filesystem::path& ciphertext_path,
-    std::string_view verified_sha256);
+prepare_quarantine_metadata(std::string_view quarantine_identifier,
+                            std::int64_t quarantined_at,
+                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                            const std::filesystem::path& ciphertext_path,
+                            std::string_view verified_sha256);
 
 // Confirms that the copy still matches the authenticated metadata.
 std::expected<bool, Error>
@@ -162,21 +160,20 @@ verify_quarantine(transport::Transport& storage,
                   const QuarantineEntry& entry,
                   const std::filesystem::path& workspace_root);
 
-// Verifies destination object bytes match expected physical hash via local workspace readback.
+// Verifies destination object bytes match expected physical hash via local
+// workspace readback.
 std::expected<void, Error>
-verify_destination_via_workspace(
-    transport::Transport& storage,
-    std::string_view destination_identifier,
-    std::string_view expected_sha256,
-    const std::filesystem::path& workspace_root);
+verify_destination_via_workspace(transport::Transport& storage,
+                                 std::string_view destination_identifier,
+                                 std::string_view expected_sha256,
+                                 const std::filesystem::path& workspace_root);
 
 // Copies bytes via local workspace download and upload, validating hash.
 std::expected<std::string, Error>
-copy_verified_via_workspace(
-    transport::Transport& storage,
-    std::string_view source_identifier,
-    std::string_view destination_identifier,
-    const std::filesystem::path& workspace_root);
+copy_verified_via_workspace(transport::Transport& storage,
+                            std::string_view source_identifier,
+                            std::string_view destination_identifier,
+                            const std::filesystem::path& workspace_root);
 
 // Copies bytes, validates destination SHA-256, and returns the hash.
 std::expected<std::string, Error>
@@ -195,9 +192,8 @@ struct QuarantineRepairClassification {
 // Classifies quarantine objects into healthy pairs, metadata-only repair
 // candidates, payload-only objects, and invalid/ambiguous entries.
 std::expected<QuarantineRepairClassification, Error>
-classify_quarantine_for_repair(
-    transport::Transport& storage,
-    const RemoteLayout& layout);
+classify_quarantine_for_repair(transport::Transport& storage,
+                               const RemoteLayout& layout);
 
 struct AuthenticatedQuarantineMetadata {
     std::int64_t quarantined_at = 0;

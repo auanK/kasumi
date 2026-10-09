@@ -19,10 +19,10 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     output.operation = operation;
     output.writer_identifier = input.request.writer_identifier;
     output.on_progress = input.on_progress;
-    const auto access_mode = (operation == Operation::Sync ||
-                              operation == Operation::ResolveMissing)
-                                 ? runtime::AccessMode::ReadWrite
-                                 : runtime::AccessMode::ReadOnly;
+    const auto access_mode =
+        (operation == Operation::Sync || operation == Operation::ResolveMissing)
+            ? runtime::AccessMode::ReadWrite
+            : runtime::AccessMode::ReadOnly;
     const auto resolve_trace = platform::perf_trace::begin();
     auto runtime_data = runtime::resolve(input.environment.app_data_dir,
                                          input.request.profile_name,

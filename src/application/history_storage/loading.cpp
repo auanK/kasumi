@@ -364,7 +364,8 @@ try_load_variant(transport::Transport& storage,
                              .commit = std::nullopt};
     }
     platform::perf_trace::count("commit.authenticated_variants", 1);
-    platform::perf_trace::count("commit.plaintext_bytes_authenticated", bytes->size());
+    platform::perf_trace::count("commit.plaintext_bytes_authenticated",
+                                bytes->size());
     return LoadedVariant{
         .state = VariantState::Valid,
         .commit = history::LoadedCommit{.id = reference.commit_id,
@@ -528,7 +529,8 @@ build_scoped_history_inventory(transport::Transport& storage,
             std::move(*reference));
     }
     std::ranges::sort(inventory.identifiers);
-    auto [first_marker, last_marker] = std::ranges::unique(inventory.identifiers);
+    auto [first_marker, last_marker] =
+        std::ranges::unique(inventory.identifiers);
     inventory.identifiers.erase(first_marker, last_marker);
     if (inventory.identifiers.size() > maximum_history_object_count) {
         return std::unexpected(
@@ -578,7 +580,8 @@ discover_scoped_commit_variants(transport::Transport& storage,
         variants.push_back(std::move(*reference));
     }
     std::ranges::sort(inventory.identifiers);
-    auto [first_commit, last_commit] = std::ranges::unique(inventory.identifiers);
+    auto [first_commit, last_commit] =
+        std::ranges::unique(inventory.identifiers);
     inventory.identifiers.erase(first_commit, last_commit);
     sort_unique(variants);
     if (inventory.identifiers.size() > maximum_history_object_count ||
@@ -641,14 +644,16 @@ LoadResult load_impl(transport::Transport& storage,
         static_cast<void>(unused);
         commit_variant_count += references.size();
     }
-    platform::perf_trace::count("commit.variants_observed", commit_variant_count);
+    platform::perf_trace::count("commit.variants_observed",
+                                commit_variant_count);
 
     std::size_t marker_variant_count = 0;
     for (const auto& [commit_id, references] : inventory->marker_variants) {
         static_cast<void>(commit_id);
         marker_variant_count += references.size();
     }
-    platform::perf_trace::count("marker.variants_observed", marker_variant_count);
+    platform::perf_trace::count("marker.variants_observed",
+                                marker_variant_count);
 
     std::optional<epoch::VerifiedEpoch> discovered_epoch;
     std::map<std::string, std::vector<HeadReference>> marker_candidates;
@@ -663,26 +668,30 @@ LoadResult load_impl(transport::Transport& storage,
 
         struct RemoteHistoryReads {
             std::expected<void, Error> commit_batch_result;
-            std::expected<std::optional<epoch::VerifiedEpoch>, Error> epoch_result;
-            std::expected<std::map<std::string, std::vector<HeadReference>>, Error> marker_result;
+            std::expected<std::optional<epoch::VerifiedEpoch>, Error>
+                epoch_result;
+            std::expected<std::map<std::string, std::vector<HeadReference>>,
+                          Error>
+                marker_result;
         } reads;
 
         auto fetch_commit_batch = [&]() -> std::expected<void, Error> {
             if (platform::cancellation::requested()) {
-                return std::unexpected(
-                    error(ErrorCode::TransportFailure,
-                          "operation cancelled by user"));
+                return std::unexpected(error(ErrorCode::TransportFailure,
+                                             "operation cancelled by user"));
             }
             const auto commit_batch_trace = platform::perf_trace::begin();
-            const auto commits_dir = layout.commits_prefix.ends_with('/')
-                                         ? layout.commits_prefix.substr(
-                                               0, layout.commits_prefix.size() - 1)
-                                         : layout.commits_prefix;
+            const auto commits_dir =
+                layout.commits_prefix.ends_with('/')
+                    ? layout.commits_prefix.substr(
+                          0, layout.commits_prefix.size() - 1)
+                    : layout.commits_prefix;
             transport::GetBatch batch{
                 .source_prefix = commits_dir,
                 .destination_root = (*temporary)->root,
             };
-            for (const auto& [unused, references] : inventory->commit_variants) {
+            for (const auto& [unused, references] :
+                 inventory->commit_variants) {
                 static_cast<void>(unused);
                 for (const auto& reference : references) {
                     batch.identifiers.push_back(reference.commit_id + "/" +
@@ -704,34 +713,29 @@ LoadResult load_impl(transport::Transport& storage,
                                              commit_batch_trace);
             }
             if (platform::cancellation::requested()) {
-                return std::unexpected(
-                    error(ErrorCode::TransportFailure,
-                          "operation cancelled by user"));
+                return std::unexpected(error(ErrorCode::TransportFailure,
+                                             "operation cancelled by user"));
             }
             return {};
         };
 
-        auto load_epoch = [&]() -> std::expected<std::optional<epoch::VerifiedEpoch>, Error> {
+        auto load_epoch =
+            [&]() -> std::expected<std::optional<epoch::VerifiedEpoch>, Error> {
             if (platform::cancellation::requested()) {
-                return std::unexpected(
-                    error(ErrorCode::TransportFailure,
-                          "operation cancelled by user"));
+                return std::unexpected(error(ErrorCode::TransportFailure,
+                                             "operation cancelled by user"));
             }
             auto raw_epoch =
-                identifiers
-                    ? epoch::load_latest(storage,
-                                         key,
-                                         workspace_root,
-                                         *identifiers,
-                                         std::nullopt)
-                    : epoch::load_latest(storage,
-                                         key,
-                                         workspace_root,
-                                         std::nullopt);
+                identifiers ? epoch::load_latest(storage,
+                                                 key,
+                                                 workspace_root,
+                                                 *identifiers,
+                                                 std::nullopt)
+                            : epoch::load_latest(
+                                  storage, key, workspace_root, std::nullopt);
             if (platform::cancellation::requested()) {
-                return std::unexpected(
-                    error(ErrorCode::TransportFailure,
-                          "operation cancelled by user"));
+                return std::unexpected(error(ErrorCode::TransportFailure,
+                                             "operation cancelled by user"));
             }
             if (!raw_epoch) {
                 const auto code = [&] {
@@ -751,16 +755,18 @@ LoadResult load_impl(transport::Transport& storage,
             return *raw_epoch;
         };
 
-        auto load_markers = [&]() -> std::expected<std::map<std::string, std::vector<HeadReference>>, Error> {
+        auto load_markers = [&]()
+            -> std::expected<std::map<std::string, std::vector<HeadReference>>,
+                             Error> {
             if (platform::cancellation::requested()) {
-                return std::unexpected(
-                    error(ErrorCode::TransportFailure,
-                          "operation cancelled by user"));
+                return std::unexpected(error(ErrorCode::TransportFailure,
+                                             "operation cancelled by user"));
             }
             const auto heads_trace = platform::perf_trace::begin();
             std::map<std::string, std::vector<HeadReference>> candidates;
             std::size_t sequence = 0;
-            for (const auto& [commit_id, references] : inventory->marker_variants) {
+            for (const auto& [commit_id, references] :
+                 inventory->marker_variants) {
                 if (platform::cancellation::requested()) {
                     platform::perf_trace::finish("head loading", heads_trace);
                     return std::unexpected(
@@ -769,17 +775,19 @@ LoadResult load_impl(transport::Transport& storage,
                 }
                 for (const auto& reference : references) {
                     const auto marker_id = marker_object(layout, reference);
-                    auto state =
-                        std::ranges::find(trusted_marker_identifiers, marker_id) !=
-                                trusted_marker_identifiers.end()
-                            ? std::expected<MarkerState, Error>{MarkerState::Valid}
-                            : inspect_marker(storage,
-                                             layout,
-                                             reference,
-                                             (*marker_temporary)->root,
-                                             sequence);
+                    auto state = std::ranges::find(trusted_marker_identifiers,
+                                                   marker_id) !=
+                                         trusted_marker_identifiers.end()
+                                     ? std::expected<MarkerState,
+                                                     Error>{MarkerState::Valid}
+                                     : inspect_marker(storage,
+                                                      layout,
+                                                      reference,
+                                                      (*marker_temporary)->root,
+                                                      sequence);
                     if (!state) {
-                        platform::perf_trace::finish("head loading", heads_trace);
+                        platform::perf_trace::finish("head loading",
+                                                     heads_trace);
                         return std::unexpected(state.error());
                     }
                     if (*state == MarkerState::Valid) {
@@ -852,9 +860,8 @@ LoadResult load_impl(transport::Transport& storage,
             return std::unexpected(reads.marker_result.error());
         }
         if (platform::cancellation::requested()) {
-            return std::unexpected(
-                error(ErrorCode::TransportFailure,
-                      "operation cancelled by user"));
+            return std::unexpected(error(ErrorCode::TransportFailure,
+                                         "operation cancelled by user"));
         }
 
         discovered_epoch = std::move(*reads.epoch_result);
@@ -880,13 +887,17 @@ LoadResult load_impl(transport::Transport& storage,
                 error(ErrorCode::InvalidInput, "invalid history anchor"));
         }
 
-        const auto accepted_epoch =
-            frontier ? frontier->accepted_epoch : std::optional<epoch::Reference>{};
+        const auto accepted_epoch = frontier
+                                        ? frontier->accepted_epoch
+                                        : std::optional<epoch::Reference>{};
         auto raw_epoch =
-            identifiers
-                ? epoch::load_latest(
-                      storage, key, workspace_root, *identifiers, accepted_epoch)
-                : epoch::load_latest(storage, key, workspace_root, accepted_epoch);
+            identifiers ? epoch::load_latest(storage,
+                                             key,
+                                             workspace_root,
+                                             *identifiers,
+                                             accepted_epoch)
+                        : epoch::load_latest(
+                              storage, key, workspace_root, accepted_epoch);
         if (!raw_epoch) {
             const auto code = [&] {
                 switch (raw_epoch.error().code) {

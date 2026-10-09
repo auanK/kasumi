@@ -45,8 +45,7 @@ struct FsckResult {
     std::size_t repaired_objects = 0;
 };
 
-using FsckProgressCallback =
-    std::function<void(const FsckProgress&)>;
+using FsckProgressCallback = std::function<void(const FsckProgress&)>;
 
 // Counts produced by recoverable garbage collection.
 struct GarbageCollectResult {

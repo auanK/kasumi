@@ -49,28 +49,29 @@ void find_missing_blocks(const Snapshot& snapshot,
                          HashSet& missing);
 
 // Produces operations via three-way comparison of the node and descendants.
-void compare_nodes_3way(const Snapshot* local_snapshot,
-                        const Snapshot* base_snapshot,
-                        const Snapshot* cloud_snapshot,
-                        const NodeRow* local,
-                        const NodeRow* base,
-                        const NodeRow* cloud,
-                        std::string_view current_path,
-                        const HashSet& missing_blocks,
-                        std::vector<SyncOperation>& operations,
-                        const ignore::IgnoreList* ignore_list = nullptr,
-                        const std::unordered_set<std::string>* authorized_deletions = nullptr);
+void compare_nodes_3way(
+    const Snapshot* local_snapshot,
+    const Snapshot* base_snapshot,
+    const Snapshot* cloud_snapshot,
+    const NodeRow* local,
+    const NodeRow* base,
+    const NodeRow* cloud,
+    std::string_view current_path,
+    const HashSet& missing_blocks,
+    std::vector<SyncOperation>& operations,
+    const ignore::IgnoreList* ignore_list = nullptr,
+    const std::unordered_set<std::string>* authorized_deletions = nullptr);
 
 } // namespace detail
 
 // Compares local, base, and remote considering missing physical objects.
-std::vector<SyncOperation>
-compare_trees(const Snapshot& local,
-              const Snapshot& base,
-              const Snapshot& cloud,
-              const HashSet& missing_blocks,
-              const ignore::IgnoreList* ignore_list = nullptr,
-              const std::unordered_set<std::string>* authorized_deletions = nullptr);
+std::vector<SyncOperation> compare_trees(
+    const Snapshot& local,
+    const Snapshot& base,
+    const Snapshot& cloud,
+    const HashSet& missing_blocks,
+    const ignore::IgnoreList* ignore_list = nullptr,
+    const std::unordered_set<std::string>* authorized_deletions = nullptr);
 
 // Compares local, base, and remote assuming referenced objects are available.
 std::vector<SyncOperation>

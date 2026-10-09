@@ -1,15 +1,14 @@
 #include "provider_certification_support.hpp"
 
-#include "gc_live_preflight_support.hpp"
-#include "gc_live_runner_support.hpp"
-
 #include "application/execute.hpp"
 #include "application/integrity/maintenance.hpp"
 #include "application/observation/history.hpp"
 #include "application/profile.hpp"
 #include "core/hasher.hpp"
-#include "crypto/physical_hash.hpp"
 #include "crypto/key_derivation.hpp"
+#include "crypto/physical_hash.hpp"
+#include "gc_live_preflight_support.hpp"
+#include "gc_live_runner_support.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/provider_scenarios.hpp"
 #include "platform/path.hpp"
@@ -25,10 +24,9 @@
 #include <fstream>
 #include <iterator>
 #include <random>
+#include <reproc++/run.hpp>
 #include <stdexcept>
 #include <system_error>
-
-#include <reproc++/run.hpp>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -41,8 +39,7 @@ namespace kasumi::operational::provider_certification {
 namespace {
 
 constexpr std::string_view owner_file = ".kasumi-certification-owner";
-constexpr std::string_view remote_owner_name =
-    "provider-certification-owner";
+constexpr std::string_view remote_owner_name = "provider-certification-owner";
 constexpr std::string_view master_hex =
     "7777777777777777777777777777777777777777777777777777777777777777";
 constexpr std::string_view demo_payload = "provider-certification-payload";
@@ -411,7 +408,8 @@ void characterize_capabilities(Report& report,
         record_direct(report, "remove");
         if (!valid || !remove_destination || !remove_source) {
             fail_optional(
-                "copy", "transport copy capability did not preserve source bytes");
+                "copy",
+                "transport copy capability did not preserve source bytes");
         } else {
             std::ranges::find(
                 report.capabilities, std::string{"copy"}, &Capability::name)
@@ -494,19 +492,21 @@ void characterize_capabilities(Report& report,
                 record_direct(report, "physical_hash_batch");
                 if (!observed && observed.error().code ==
                                      transport::ErrorCode::Unsupported) {
-                    mark_unsupported(
-                        "physical_hash_batch",
-                        "target reports SHA-256 physical hash batch unsupported");
+                    mark_unsupported("physical_hash_batch",
+                                     "target reports SHA-256 physical hash "
+                                     "batch unsupported");
                 } else if (!observed) {
                     fail_optional("physical_hash_batch",
                                   transport::describe(observed.error()));
-                } else if (observed->matched != std::vector<std::string>{
-                               std::string{identifier}} ||
+                } else if (observed->matched !=
+                               std::vector<std::string>{
+                                   std::string{identifier}} ||
                            !observed->mismatched.empty() ||
                            !observed->missing.empty() ||
                            !observed->errors.empty()) {
-                    fail_optional("physical_hash_batch",
-                                  "batch physical hash did not match local SHA-256");
+                    fail_optional(
+                        "physical_hash_batch",
+                        "batch physical hash did not match local SHA-256");
                 } else {
                     std::ranges::find(report.capabilities,
                                       std::string{"physical_hash_batch"},
@@ -520,18 +520,21 @@ void characterize_capabilities(Report& report,
             record_direct(report, "remove");
             if (!removed) {
                 if (ops.physical_hash != nullptr) {
-                    fail_optional("physical_hash",
-                                  "could not remove physical hash probe object");
+                    fail_optional(
+                        "physical_hash",
+                        "could not remove physical hash probe object");
                 }
                 if (ops.physical_hash_batch != nullptr) {
-                    fail_optional("physical_hash_batch",
-                                  "could not remove physical hash probe object");
+                    fail_optional(
+                        "physical_hash_batch",
+                        "could not remove physical hash probe object");
                 }
             }
         }
     }
     for (auto& item : report.capabilities) {
-        if (item.status == CapabilityStatus::Unsupported && item.detail.empty()) {
+        if (item.status == CapabilityStatus::Unsupported &&
+            item.detail.empty()) {
             item.detail = "optional operation is not exposed by this transport";
         }
     }
@@ -540,7 +543,7 @@ void characterize_capabilities(Report& report,
 
 std::expected<void, std::string>
 remove_local_gc_empty_directories(const std::filesystem::path& root,
-                                 std::string_view owner_token) {
+                                  std::string_view owner_token) {
     const auto marker = root / "owner.marker";
     const auto verify_marker = [&]() -> std::expected<void, std::string> {
         std::error_code error;
@@ -624,7 +627,8 @@ Scenario run_gc_lifecycle(const ProviderTarget& target,
         auto nonce = platform::random::hex_id();
         if (!nonce) {
             result.status = ScenarioStatus::Fail;
-            result.diagnostics.push_back("could not generate local GC child name");
+            result.diagnostics.push_back(
+                "could not generate local GC child name");
             return result;
         }
         auto child_name = gc_live_preflight::child_namespace(*nonce);
@@ -643,10 +647,12 @@ Scenario run_gc_lifecycle(const ProviderTarget& target,
         std::error_code error;
         if (!std::filesystem::create_directory(child_root, error) || error) {
             result.status = ScenarioStatus::Fail;
-            result.diagnostics.push_back("could not create unique local GC child");
+            result.diagnostics.push_back(
+                "could not create unique local GC child");
             return result;
         }
-        auto parent_storage = open_storage(platform::path::to_utf8(local_parent));
+        auto parent_storage =
+            open_storage(platform::path::to_utf8(local_parent));
         auto child_storage = open_storage(platform::path::to_utf8(child_root));
         if (!parent_storage || !child_storage) {
             result.status = ScenarioStatus::Fail;
@@ -664,21 +670,24 @@ Scenario run_gc_lifecycle(const ProviderTarget& target,
         gc = gc_live_runner::run(options, &*parent_storage, &*child_storage);
         if (gc.status == "PASS" && gc.cleanup.result == "removed") {
             error.clear();
-            const auto status = std::filesystem::symlink_status(child_root, error);
+            const auto status =
+                std::filesystem::symlink_status(child_root, error);
             if (!error && std::filesystem::is_directory(status) &&
                 !std::filesystem::is_symlink(status) &&
                 std::filesystem::is_empty(child_root, error) && !error &&
                 std::filesystem::remove(child_root, error) && !error) {
             } else {
                 gc.status = "FAILED";
-                gc.error_message = "owned local GC child root was not empty after cleanup";
+                gc.error_message =
+                    "owned local GC child root was not empty after cleanup";
             }
         }
     } else {
         auto nonce = platform::random::hex_id();
         if (!nonce) {
             result.status = ScenarioStatus::Fail;
-            result.diagnostics.push_back("could not generate Rclone GC child name");
+            result.diagnostics.push_back(
+                "could not generate Rclone GC child name");
             return result;
         }
         auto child_name = gc_live_preflight::child_namespace(*nonce);
@@ -691,22 +700,25 @@ Scenario run_gc_lifecycle(const ProviderTarget& target,
         options.explicit_child = *child_name;
         options.explicit_owner_token = unique_token();
         options.cleanup_empty_directories = [remote_gc_root] {
-            const auto removed =
-                rclone_command({"rclone", "rmdirs", "--leave-root", remote_gc_root});
+            const auto removed = rclone_command(
+                {"rclone", "rmdirs", "--leave-root", remote_gc_root});
             if (!removed) {
-                return std::expected<void, std::string>{
-                    std::unexpected("could not remove owned Rclone GC subdirectories")};
+                return std::expected<void, std::string>{std::unexpected(
+                    "could not remove owned Rclone GC subdirectories")};
             }
             return std::expected<void, std::string>{};
         };
         gc = gc_live_runner::run(options);
         if (gc.status == "PASS" && gc.cleanup.result == "removed") {
-            const auto removed = rclone_command({"rclone", "rmdir", remote_gc_root});
+            const auto removed =
+                rclone_command({"rclone", "rmdir", remote_gc_root});
             const auto remaining = rclone_child_names(options.remote_parent);
             if (!removed || !remaining ||
-                std::ranges::find(*remaining, *child_name) != remaining->end()) {
+                std::ranges::find(*remaining, *child_name) !=
+                    remaining->end()) {
                 gc.status = "FAILED";
-                gc.error_message = "owned Rclone GC child remains after cleanup";
+                gc.error_message =
+                    "owned Rclone GC child remains after cleanup";
             }
         }
     }
@@ -717,8 +729,8 @@ Scenario run_gc_lifecycle(const ProviderTarget& target,
         gc.ownership.marker_readback_verified && gc.gc.called &&
         gc.gc.call_count == 1U && gc.gc.result == "SUCCESS" &&
         gc.gc.restored_objects == 1U && gc.gc.purged_objects == 1U &&
-        gc.validation.reachable_preserved &&
-        gc.validation.quarantine_present && gc.validation.quarantine_verified &&
+        gc.validation.reachable_preserved && gc.validation.quarantine_present &&
+        gc.validation.quarantine_verified &&
         gc.validation.metadata_authenticated && gc.validation.source_removed &&
         gc.validation.unexpected_removed == 0U &&
         gc.validation.unexpected_created == 0U &&
@@ -726,8 +738,9 @@ Scenario run_gc_lifecycle(const ProviderTarget& target,
     result.status = passed ? ScenarioStatus::Pass : ScenarioStatus::Fail;
     if (!passed) {
         result.diagnostics.push_back(
-            (gc.error_message.empty() ? "guarded GC lifecycle verification failed"
-                                      : gc.error_message) +
+            (gc.error_message.empty()
+                 ? "guarded GC lifecycle verification failed"
+                 : gc.error_message) +
             ": " + gc_live_runner::to_json(gc).dump());
     } else {
         result.diagnostics.push_back(
@@ -739,12 +752,12 @@ Scenario run_gc_lifecycle(const ProviderTarget& target,
 
 } // namespace
 
-std::expected<void, std::string> install_verified_object(
-    Report& report,
-    transport::Transport& storage,
-    const std::filesystem::path& source,
-    std::string_view identifier,
-    const std::filesystem::path& readback) {
+std::expected<void, std::string>
+install_verified_object(Report& report,
+                        transport::Transport& storage,
+                        const std::filesystem::path& source,
+                        std::string_view identifier,
+                        const std::filesystem::path& readback) {
     const auto expected = read_bytes(source);
     if (!expected) {
         return std::unexpected(expected.error());
@@ -983,8 +996,8 @@ rclone_command(const std::vector<std::string>& arguments) {
 
 std::expected<std::vector<std::string>, std::string>
 rclone_child_names(std::string_view parent) {
-    auto listing = rclone_command({"rclone", "lsf", "--max-depth", "1",
-                                   std::string{parent}});
+    auto listing = rclone_command(
+        {"rclone", "lsf", "--max-depth", "1", std::string{parent}});
     if (!listing) {
         return std::unexpected("authorized Rclone parent is unavailable");
     }
@@ -1018,8 +1031,8 @@ bool valid_remote_component(std::string_view value) {
 bool remote_child_name(std::string_view parent,
                        std::string_view child,
                        std::string_view locator) {
-    return locator.size() > parent.size() + 1 &&
-           locator.starts_with(parent) && locator[parent.size()] == '/' &&
+    return locator.size() > parent.size() + 1 && locator.starts_with(parent) &&
+           locator[parent.size()] == '/' &&
            locator.find('/', parent.size() + 1) == std::string_view::npos &&
            locator.substr(parent.size() + 1) == child;
 }
@@ -1058,11 +1071,11 @@ create_rclone_target(std::string provider_id,
     std::size_t segment_begin = 0;
     while (segment_begin <= parent_path.size()) {
         const auto segment_end = parent_path.find('/', segment_begin);
-        const auto segment = parent_path.substr(
-            segment_begin,
-            segment_end == std::string_view::npos
-                ? parent_path.size() - segment_begin
-                : segment_end - segment_begin);
+        const auto segment =
+            parent_path.substr(segment_begin,
+                               segment_end == std::string_view::npos
+                                   ? parent_path.size() - segment_begin
+                                   : segment_end - segment_begin);
         if (segment.empty() || segment == "." || segment == ".." ||
             segment.find('\\') != std::string_view::npos) {
             return std::unexpected("Rclone authorized parent is not a safe "
@@ -1093,16 +1106,16 @@ create_rclone_target(std::string provider_id,
         return std::unexpected("could not choose an unused Rclone child");
     }
 
-    auto workspace = create_local_target(std::filesystem::temp_directory_path());
+    auto workspace =
+        create_local_target(std::filesystem::temp_directory_path());
     if (!workspace) {
         return std::unexpected(workspace.error());
     }
     const auto remote_root = authorized_parent + "/" + child;
     const auto locator = remote_root + "/objects";
     const auto revalidated_parent = rclone_child_names(authorized_parent);
-    if (!revalidated_parent ||
-        std::ranges::find(*revalidated_parent, child) !=
-            revalidated_parent->end()) {
+    if (!revalidated_parent || std::ranges::find(*revalidated_parent, child) !=
+                                   revalidated_parent->end()) {
         (void)cleanup_local_target(*workspace);
         return std::unexpected("Rclone child appeared after preflight");
     }
@@ -1112,11 +1125,12 @@ create_rclone_target(std::string provider_id,
         (void)cleanup_local_target(*workspace);
         return std::unexpected("could not stage Rclone ownership marker");
     }
-    const auto marker_locator = remote_root + "/" +
-                                std::string{remote_owner_name};
-    const auto put = rclone_command(
-        {"rclone", "copyto", platform::path::to_utf8(marker_source),
-         marker_locator});
+    const auto marker_locator =
+        remote_root + "/" + std::string{remote_owner_name};
+    const auto put = rclone_command({"rclone",
+                                     "copyto",
+                                     platform::path::to_utf8(marker_source),
+                                     marker_locator});
     if (!put) {
         return std::unexpected("could not create Rclone ownership marker");
     }
@@ -1139,11 +1153,9 @@ create_rclone_target(std::string provider_id,
     };
 }
 
-std::expected<void, std::string>
-cleanup_rclone_target(ProviderTarget& target) {
+std::expected<void, std::string> cleanup_rclone_target(ProviderTarget& target) {
     if (target.transport != "Rclone" || target.locator.empty() ||
-        target.remote_root.empty() ||
-        target.authorized_remote_parent.empty() ||
+        target.remote_root.empty() || target.authorized_remote_parent.empty() ||
         target.remote_ownership_token.empty() ||
         target.remote_root.size() <=
             target.authorized_remote_parent.size() + 1 ||
@@ -1155,22 +1167,20 @@ cleanup_rclone_target(ProviderTarget& target) {
         return std::unexpected("refusing cleanup: Rclone target is not the "
                                "owned direct child");
     }
-    const auto child = target.remote_root.substr(
-        target.authorized_remote_parent.size() + 1);
+    const auto child =
+        target.remote_root.substr(target.authorized_remote_parent.size() + 1);
     const auto before = rclone_child_names(target.authorized_remote_parent);
     if (!before || std::ranges::find(*before, child) == before->end()) {
         return std::unexpected("refusing cleanup: owned Rclone child changed");
     }
-    const auto marker_locator = target.remote_root + "/" +
-                                std::string{remote_owner_name};
-    const auto marker = rclone_command(
-        {"rclone", "cat", marker_locator});
+    const auto marker_locator =
+        target.remote_root + "/" + std::string{remote_owner_name};
+    const auto marker = rclone_command({"rclone", "cat", marker_locator});
     if (!marker || *marker != target.remote_ownership_token) {
         return std::unexpected("refusing cleanup: Rclone ownership marker "
                                "does not match");
     }
-    const auto purged =
-        rclone_command({"rclone", "purge", target.remote_root});
+    const auto purged = rclone_command({"rclone", "purge", target.remote_root});
     if (!purged) {
         return std::unexpected("Rclone refused cleanup of the owned child");
     }
@@ -1550,9 +1560,12 @@ Report run_certification(const ProviderTarget& target) {
             if (ciphertext && !ciphertext->empty()) {
                 ciphertext->back() ^= 1U;
                 if (write_bytes(corrupt_file, *ciphertext)) {
-                    corruption_install = install_verified_object(
-                        report, storage, corrupt_file, fsck_object,
-                        corrupt_readback);
+                    corruption_install =
+                        install_verified_object(report,
+                                                storage,
+                                                corrupt_file,
+                                                fsck_object,
+                                                corrupt_readback);
                 } else {
                     corruption_install = std::unexpected(
                         "could not write altered ciphertext fixture");
@@ -1594,8 +1607,7 @@ Report run_certification(const ProviderTarget& target) {
                 corrupt_result.diagnostics.push_back(
                     "FSCK corruption scenario did not reach cryptographic "
                     "audit: audit_get_calls=" +
-                    std::to_string(audit_get_calls) +
-                    " audit_decrypt_calls=" +
+                    std::to_string(audit_get_calls) + " audit_decrypt_calls=" +
                     std::to_string(audit_decrypt_calls));
             }
             record_trace(report, corrupt_result);
@@ -1608,14 +1620,13 @@ Report run_certification(const ProviderTarget& target) {
         report.diagnostics.push_back(error.what());
     }
     for (const auto& scenario_name : scenario_registry(target)) {
-        const auto present = std::ranges::find(
-            report.scenarios, scenario_name, &Scenario::name);
+        const auto present =
+            std::ranges::find(report.scenarios, scenario_name, &Scenario::name);
         if (present == report.scenarios.end()) {
             report.scenarios.push_back(
                 {.name = scenario_name,
-                 .status = scenario_name == "cleanup"
-                               ? ScenarioStatus::NotRun
-                               : ScenarioStatus::Blocked,
+                 .status = scenario_name == "cleanup" ? ScenarioStatus::NotRun
+                                                      : ScenarioStatus::Blocked,
                  .diagnostics =
                      scenario_name == "cleanup"
                          ? std::vector<std::string>{}
@@ -1627,11 +1638,10 @@ Report run_certification(const ProviderTarget& target) {
         return std::ranges::find(scenario_names, scenario_name) -
                scenario_names.begin();
     };
-    std::ranges::stable_sort(report.scenarios,
-                             [&](const auto& left, const auto& right) {
-                                 return scenario_index(left.name) <
-                                        scenario_index(right.name);
-                             });
+    std::ranges::stable_sort(
+        report.scenarios, [&](const auto& left, const auto& right) {
+            return scenario_index(left.name) < scenario_index(right.name);
+        });
     platform::perf_trace::force_enable(false);
     if (target.transport == "Rclone") {
         const auto separator = target.locator.find(':');
@@ -1641,8 +1651,8 @@ Report run_certification(const ProviderTarget& target) {
         const auto redact = [&](std::string& value) {
             replace_all(value, target.locator, "<target>");
             replace_all(value, target.remote_root, "<target-root>");
-            replace_all(value, target.authorized_remote_parent,
-                        "<authorized-parent>");
+            replace_all(
+                value, target.authorized_remote_parent, "<authorized-parent>");
             replace_all(value, remote_name, "<remote>");
         };
         for (auto& diagnostic : report.diagnostics) {
@@ -1771,9 +1781,10 @@ nlohmann::json aggregate_reports(const std::vector<Report>& reports) {
     for (const auto& [scenario_name, _] : scenario_values) {
         ordered_scenarios.push_back(scenario_name);
     }
-    std::ranges::sort(ordered_scenarios, [&](const auto& left, const auto& right) {
-        return scenario_order(left) < scenario_order(right);
-    });
+    std::ranges::sort(ordered_scenarios,
+                      [&](const auto& left, const auto& right) {
+                          return scenario_order(left) < scenario_order(right);
+                      });
     for (const auto& scenario_name : ordered_scenarios) {
         nlohmann::json targets = nlohmann::json::object();
         const auto& values = scenario_values.at(scenario_name);

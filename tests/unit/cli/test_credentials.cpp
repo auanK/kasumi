@@ -130,8 +130,10 @@ TEST(CliAppTest, PrintsMinimalHelpWithoutRuntimeAccess) {
               std::string::npos);
     EXPECT_NE(output.find("does not run GC"), std::string::npos);
     EXPECT_NE(output.find("health diagnostic"), std::string::npos);
-    EXPECT_NE(output.find("kasumi gc purge-quarantine <profile> --confirm-permanent-loss"),
-              std::string::npos);
+    EXPECT_NE(
+        output.find(
+            "kasumi gc purge-quarantine <profile> --confirm-permanent-loss"),
+        std::string::npos);
     EXPECT_NE(output.find("destroy reachable content"), std::string::npos);
 }
 
@@ -149,8 +151,10 @@ TEST(CliAppTest, PrintsHelpInPortugueseWhenFlagProvided) {
     EXPECT_NE(output.find("kasumi sync <perfil>"), std::string::npos);
     EXPECT_NE(output.find("não executa GC"), std::string::npos);
     EXPECT_NE(output.find("diagnóstico remoto completo"), std::string::npos);
-    EXPECT_NE(output.find("kasumi gc purge-quarantine <perfil> --confirm-permanent-loss"),
-              std::string::npos);
+    EXPECT_NE(
+        output.find(
+            "kasumi gc purge-quarantine <perfil> --confirm-permanent-loss"),
+        std::string::npos);
     EXPECT_NE(output.find("destruir conteúdo alcançável"), std::string::npos);
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
 }
@@ -240,7 +244,8 @@ TEST(CliAppTest, PrintsGarbageCollectStartingProgressOnce) {
     EXPECT_EQ(kasumi::cli::run(3, argv), 1);
 
     const auto output = testing::internal::GetCapturedStdout();
-    const auto expected_starting = "Running garbage collection for \"missing\"...";
+    const auto expected_starting =
+        "Running garbage collection for \"missing\"...";
     EXPECT_NE(output.find(expected_starting), std::string::npos);
 }
 
@@ -265,7 +270,8 @@ TEST(CliAppTest, PrintsGarbageCollectStartingProgressInPortuguese) {
     EXPECT_EQ(kasumi::cli::run(5, argv), 1);
 
     const auto output = testing::internal::GetCapturedStdout();
-    const auto expected_starting = "Executando coleta de lixo em \"missing\"...";
+    const auto expected_starting =
+        "Executando coleta de lixo em \"missing\"...";
     EXPECT_NE(output.find(expected_starting), std::string::npos);
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
 }

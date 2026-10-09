@@ -7,8 +7,8 @@
 #include "cli/i18n.hpp"
 #include "cli/parser.hpp"
 #include "cli/presenter.hpp"
-#include "cli/wizard.hpp"
 #include "cli/update.hpp"
+#include "cli/wizard.hpp"
 #include "platform/cancellation.hpp"
 
 #include <csignal>
@@ -160,8 +160,7 @@ int run(int argc, char* argv[]) {
         };
     } else if (request.operation == application::Operation::Fsck) {
         std::println(
-            "{}",
-            i18n::format(i18n::Key::FsckStarting, request.profile_name));
+            "{}", i18n::format(i18n::Key::FsckStarting, request.profile_name));
         on_progress = [&fsck_display_state](
                           const application::ExecutionProgress& progress) {
             if (const auto* fsck =
@@ -170,12 +169,12 @@ int run(int argc, char* argv[]) {
             }
         };
     } else if (request.operation == application::Operation::GarbageCollect) {
-        std::println(
-            "{}",
-            i18n::format(i18n::Key::GcStarting, request.profile_name));
+        std::println("{}",
+                     i18n::format(i18n::Key::GcStarting, request.profile_name));
         on_progress = [](const application::ExecutionProgress& progress) {
             if (const auto* gc =
-                    std::get_if<application::GarbageCollectProgress>(&progress)) {
+                    std::get_if<application::GarbageCollectProgress>(
+                        &progress)) {
                 present(*gc);
             }
         };

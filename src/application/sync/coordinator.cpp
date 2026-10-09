@@ -577,12 +577,11 @@ bool same_materialized_head_rows(const std::vector<NodeRow>& expected_rows,
 }
 
 bool same_materialized_row(const NodeRow& expected,
-                          const NodeRow& actual) noexcept {
+                           const NodeRow& actual) noexcept {
     return expected.path == actual.path && expected.hash == actual.hash &&
            expected.size == actual.size &&
-           (expected.mtime == 0 ||
-            platform::metadata::filesystem_equivalent(expected.mtime,
-                                                      actual.mtime)) &&
+           (expected.mtime == 0 || platform::metadata::filesystem_equivalent(
+                                       expected.mtime, actual.mtime)) &&
            expected.is_directory == actual.is_directory;
 }
 
@@ -738,13 +737,11 @@ namespace {
 
 Error mutation_error(const mutation::MutationError& error) {
     return detail::make_error(
-                              error.code ==
-                                      mutation::MutationErrorCode::
-                                          RemoteContentMissing
-                                  ? ErrorCode::RemoteContentMissing
-                                  : ErrorCode::MutationFailure,
-                              mutation::describe(error),
-                              error.operation_index);
+        error.code == mutation::MutationErrorCode::RemoteContentMissing
+            ? ErrorCode::RemoteContentMissing
+            : ErrorCode::MutationFailure,
+        mutation::describe(error),
+        error.operation_index);
 }
 
 Error publication_error(const publication::Error& error) {
@@ -1110,9 +1107,8 @@ restore_transaction_metadata(const Snapshot& expected_tree,
                 "failed to restore materialized timestamp for " + path_name +
                     ": timestamp is out of range"));
         }
-        auto written =
-            ::kasumi::platform::metadata::set_last_write_time(path,
-                                                              *native_mtime);
+        auto written = ::kasumi::platform::metadata::set_last_write_time(
+            path, *native_mtime);
         if (!written) {
             return std::unexpected(detail::make_error(
                 ErrorCode::MutationFailure,
@@ -1293,7 +1289,8 @@ execute(const runtime::RuntimeData& runtime_data,
         observed_pending_paths.push_back(row.path);
     }
     std::vector<std::string> pending_paths;
-    pending_paths.reserve(reconciliation_result.pending_materializations.size());
+    pending_paths.reserve(
+        reconciliation_result.pending_materializations.size());
     for (const auto& row : reconciliation_result.pending_materializations) {
         pending_paths.push_back(row.path);
     }
@@ -1528,8 +1525,7 @@ execute(const runtime::RuntimeData& runtime_data,
     const auto fail_mutation = [&](std::size_t index,
                                    const mutation::MutationError& failure)
         -> std::expected<void, Error> {
-        if (failure.code ==
-            mutation::MutationErrorCode::RemoteContentMissing) {
+        if (failure.code == mutation::MutationErrorCode::RemoteContentMissing) {
             auto rolled = detail::rollback_transaction(*paths,
                                                        *record,
                                                        transaction_workspace,
@@ -1941,13 +1937,10 @@ execute(const runtime::RuntimeData& runtime_data,
             if (actual.path != expected.path) {
                 detail_message += ", actual_path=" + actual.path;
             }
-            if (expected.mtime != 0 &&
-                actual.mtime != expected.mtime) {
+            if (expected.mtime != 0 && actual.mtime != expected.mtime) {
                 detail_message +=
-                    ", actual_mtime=" +
-                    std::to_string(actual.mtime) +
-                    ", expected_mtime=" +
-                    std::to_string(expected.mtime);
+                    ", actual_mtime=" + std::to_string(actual.mtime) +
+                    ", expected_mtime=" + std::to_string(expected.mtime);
             }
             if (actual.size != expected.size) {
                 detail_message +=
@@ -2007,11 +2000,10 @@ execute(const runtime::RuntimeData& runtime_data,
                          actual.mtime != expected.mtime) ||
                         actual.is_directory != expected.is_directory) {
                         detail_message +=
-                            " (path=" + expected.path + ", actual_mtime=" +
-                            std::to_string(actual.mtime) +
+                            " (path=" + expected.path +
+                            ", actual_mtime=" + std::to_string(actual.mtime) +
                             ", expected_mtime=" +
-                            std::to_string(expected.mtime) +
-                            ", actual_type=" +
+                            std::to_string(expected.mtime) + ", actual_type=" +
                             std::to_string(actual.is_directory) +
                             ", expected_type=" +
                             std::to_string(expected.is_directory) + ")";

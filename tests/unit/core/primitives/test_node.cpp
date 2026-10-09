@@ -29,8 +29,7 @@ NodeRow make_file(std::string path,
     };
 }
 
-NodeRow make_directory(std::string path,
-                       kasumi::TimestampNs modified = 0) {
+NodeRow make_directory(std::string path, kasumi::TimestampNs modified = 0) {
     return {
         .path = std::move(path),
         .mtime = modified,

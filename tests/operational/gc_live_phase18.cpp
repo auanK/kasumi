@@ -12,9 +12,9 @@
 #include "crypto/physical_hash.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/random.hpp"
+#include "provider_target_config.hpp"
 #include "runtime/resolver.hpp"
 #include "transport/transport.hpp"
-#include "provider_target_config.hpp"
 
 #include <algorithm>
 #include <array>
@@ -53,12 +53,15 @@ std::string pad_index(std::size_t value) {
     return out.str();
 }
 
-std::string make_payload(std::string_view run_id, std::string_view scenario, std::size_t index) {
+std::string make_payload(std::string_view run_id,
+                         std::string_view scenario,
+                         std::size_t index) {
     std::string value = "Kasumi live GC operational content " +
                         std::string{run_id} + " " + std::string{scenario} +
                         " " + std::to_string(index) + " ";
     while (value.size() < file_bytes) {
-        value.push_back(static_cast<char>((index * 37 + value.size() * 19) & 0x7f));
+        value.push_back(
+            static_cast<char>((index * 37 + value.size() * 19) & 0x7f));
     }
     value.resize(file_bytes);
     return value;
@@ -71,7 +74,8 @@ std::vector<std::string> sorted(std::vector<std::string> ids) {
 
 bool write_json(const std::filesystem::path& path, const Json& json) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) return false;
+    if (!out)
+        return false;
     out << json.dump(2) << '\n';
     out.flush();
     return static_cast<bool>(out);
@@ -86,44 +90,59 @@ struct Phase20Asset {
     std::uint64_t ciphertext_size = 0;
 };
 
-std::optional<Phase20Asset> prepare_asset(
-    std::string_view run_id, std::string_view kind, std::size_t index,
-    const std::filesystem::path& directory,
-    std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key) {
+std::optional<Phase20Asset>
+prepare_asset(std::string_view run_id,
+              std::string_view kind,
+              std::size_t index,
+              const std::filesystem::path& directory,
+              std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key) {
     std::error_code ec;
     std::filesystem::create_directories(directory, ec);
-    if (ec) return std::nullopt;
+    if (ec)
+        return std::nullopt;
     const auto name = std::string{kind} + "-" + pad_index(index);
     const auto plaintext_path = directory / (name + ".plain");
     const auto encrypted_path = directory / (name + ".enc");
     const auto payload = make_payload(run_id, kind, index);
     {
         std::ofstream file(plaintext_path, std::ios::binary | std::ios::trunc);
-        file.write(payload.data(), static_cast<std::streamsize>(payload.size()));
-        if (!file) return std::nullopt;
+        file.write(payload.data(),
+                   static_cast<std::streamsize>(payload.size()));
+        if (!file)
+            return std::nullopt;
     }
     if (std::filesystem::exists(encrypted_path, ec)) {
-        if (ec) return std::nullopt;
+        if (ec)
+            return std::nullopt;
         const auto verify_path = directory / (name + ".verify");
-        if (!kasumi::crypto::decrypt_file(encrypted_path, verify_path, key,
-                                          kasumi::crypto::FilePurpose::Content)) {
+        if (!kasumi::crypto::decrypt_file(
+                encrypted_path,
+                verify_path,
+                key,
+                kasumi::crypto::FilePurpose::Content)) {
             return std::nullopt;
         }
         std::ifstream verify(verify_path, std::ios::binary);
         const std::string observed{std::istreambuf_iterator<char>{verify}, {}};
         std::filesystem::remove(verify_path, ec);
-        if (!verify || observed != payload) return std::nullopt;
+        if (!verify || observed != payload)
+            return std::nullopt;
     } else {
         auto encrypted = kasumi::crypto::encrypt_file_with_hashes(
-            plaintext_path, encrypted_path, key,
+            plaintext_path,
+            encrypted_path,
+            key,
             kasumi::crypto::FilePurpose::Content);
-        if (!encrypted) return std::nullopt;
+        if (!encrypted)
+            return std::nullopt;
     }
     auto plain_hash = kasumi::crypto::content::hash_file(plaintext_path);
-    auto encrypted_hash = kasumi::crypto::physical::hash_file(encrypted_path, "sha256");
+    auto encrypted_hash =
+        kasumi::crypto::physical::hash_file(encrypted_path, "sha256");
     const auto size = std::filesystem::file_size(encrypted_path, ec);
     std::filesystem::remove(plaintext_path, ec);
-    if (!plain_hash || !encrypted_hash || ec) return std::nullopt;
+    if (!plain_hash || !encrypted_hash || ec)
+        return std::nullopt;
     return Phase20Asset{
         .id = kasumi::crypto::content_identifier(key, *plain_hash),
         .encrypted_path = encrypted_path,
@@ -139,29 +158,37 @@ bool verify_content_samples(
     std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key,
     const std::filesystem::path& workspace,
     const std::vector<std::string>& sample_ids,
-    const std::map<std::string, std::pair<kasumi::Hash, std::uint64_t>>& live_info,
+    const std::map<std::string, std::pair<kasumi::Hash, std::uint64_t>>&
+        live_info,
     std::size_t& verified_count) {
     verified_count = 0;
     std::error_code ec;
     for (const auto& id : sample_ids) {
         auto it = live_info.find(id);
-        if (it == live_info.end()) return false;
+        if (it == live_info.end())
+            return false;
         const auto enc_path = workspace / ("sample-" + id + ".enc");
         const auto plain_path = workspace / ("sample-" + id + ".plain");
         auto get_res = kasumi::transport::get(storage, id, enc_path);
-        if (!get_res) return false;
-        if (!kasumi::crypto::decrypt_file(enc_path, plain_path, key,
-                                          kasumi::crypto::FilePurpose::Content)) {
+        if (!get_res)
+            return false;
+        if (!kasumi::crypto::decrypt_file(
+                enc_path,
+                plain_path,
+                key,
+                kasumi::crypto::FilePurpose::Content)) {
             return false;
         }
         auto hash = kasumi::crypto::content::hash_file(plain_path);
         const auto size = std::filesystem::file_size(plain_path, ec);
         std::filesystem::remove(enc_path, ec);
         std::filesystem::remove(plain_path, ec);
-        if (!hash || ec || *hash != it->second.first || size != it->second.second) {
+        if (!hash || ec || *hash != it->second.first ||
+            size != it->second.second) {
             return false;
         }
-        if (kasumi::crypto::content_identifier(key, *hash) != id) return false;
+        if (kasumi::crypto::content_identifier(key, *hash) != id)
+            return false;
         ++verified_count;
     }
     return true;
@@ -183,26 +210,37 @@ bool validate_fixture_inventory(
         validation["history_error"] = history.error().detail;
         return false;
     }
-    const auto valid_markers = std::ranges::count_if(
-        history->markers, [](const auto& marker) {
-            return marker.state == history_storage::ReachabilityMarkerState::Valid;
+    const auto valid_markers =
+        std::ranges::count_if(history->markers, [](const auto& marker) {
+            return marker.state ==
+                   history_storage::ReachabilityMarkerState::Valid;
         });
-    const auto physical_commits = std::ranges::count_if(
-        identifiers, [&](const auto& id) { return id.starts_with(layout.commits_prefix); });
-    const auto physical_markers = std::ranges::count_if(
-        identifiers, [&](const auto& id) { return id.starts_with(layout.heads_prefix); });
-    const auto physical_epochs = std::ranges::count_if(
-        identifiers, [&](const auto& id) { return id.starts_with(layout.epochs_prefix); });
-    const bool history_valid = history->logical_heads.size() == 1 &&
+    const auto physical_commits =
+        std::ranges::count_if(identifiers, [&](const auto& id) {
+            return id.starts_with(layout.commits_prefix);
+        });
+    const auto physical_markers =
+        std::ranges::count_if(identifiers, [&](const auto& id) {
+            return id.starts_with(layout.heads_prefix);
+        });
+    const auto physical_epochs =
+        std::ranges::count_if(identifiers, [&](const auto& id) {
+            return id.starts_with(layout.epochs_prefix);
+        });
+    const bool history_valid =
+        history->logical_heads.size() == 1 &&
         history->logical_heads.front() == expected_head &&
-        history->reachable_commits.size() == 1 && history->orphan_commits.empty() &&
-        history->missing_parent_ids.empty() && history->invalid_parent_ids.empty() &&
+        history->reachable_commits.size() == 1 &&
+        history->orphan_commits.empty() &&
+        history->missing_parent_ids.empty() &&
+        history->invalid_parent_ids.empty() &&
         history->unknown_history_objects.empty() && valid_markers == 1 &&
         history->valid_epochs.empty() && history->orphan_epochs.empty() &&
         physical_commits == 1 && physical_markers == 1 && physical_epochs == 0;
     validation["history_valid"] = history_valid;
-    validation["authenticated_head_matches"] = history->logical_heads.size() == 1 &&
-                                                history->logical_heads.front() == expected_head;
+    validation["authenticated_head_matches"] =
+        history->logical_heads.size() == 1 &&
+        history->logical_heads.front() == expected_head;
     validation["logical_heads"] = history->logical_heads;
     validation["reachable_commits"] = history->reachable_commits.size();
     validation["orphan_commits"] = history->orphan_commits.size();
@@ -211,7 +249,8 @@ bool validate_fixture_inventory(
     validation["physical_markers"] = physical_markers;
     validation["E_epochs"] = physical_epochs;
     validation["valid_epochs"] = history->valid_epochs.size();
-    if (!history_valid) return false;
+    if (!history_valid)
+        return false;
 
     auto contents = history_storage::inventory_content_reachability(
         storage, key, identifiers, *history, workspace, false);
@@ -222,15 +261,18 @@ bool validate_fixture_inventory(
     const bool content_valid =
         sorted(contents->reachable_content_ids) == sorted(live_ids) &&
         sorted(contents->orphan_content_ids) == sorted(candidate_ids) &&
-        contents->missing_content_ids.empty() && contents->corrupt_content_ids.empty() &&
+        contents->missing_content_ids.empty() &&
+        contents->corrupt_content_ids.empty() &&
         contents->unknown_storage_objects.empty();
     validation["content_valid"] = content_valid;
     validation["N_live"] = contents->reachable_content_ids.size();
     validation["N_orphan"] = contents->orphan_content_ids.size();
     validation["N_total_content"] = contents->reachable_content_ids.size() +
-                                     contents->orphan_content_ids.size();
-    validation["missing_content_objects"] = contents->missing_content_ids.size();
-    validation["corrupt_content_objects"] = contents->corrupt_content_ids.size();
+                                    contents->orphan_content_ids.size();
+    validation["missing_content_objects"] =
+        contents->missing_content_ids.size();
+    validation["corrupt_content_objects"] =
+        contents->corrupt_content_ids.size();
     validation["unknown_storage_objects"] = contents->unknown_storage_objects;
     return content_valid;
 }
@@ -242,24 +284,35 @@ Json phase_times_json() {
     return Json{
         {"total_gc_us", get_time("gc.total_duration_us")},
         {"barrier_acquire_us", get_time("gc barrier acquire")},
-        {"writer_consistency_checks_us", get_time("gc writer consistency checks")},
-        {"backend_consistency_probe_us", get_time("gc backend consistency probe")},
+        {"writer_consistency_checks_us",
+         get_time("gc writer consistency checks")},
+        {"backend_consistency_probe_us",
+         get_time("gc backend consistency probe")},
         {"quarantine_inventory_us", get_time("gc quarantine inventory")},
         {"quarantine_restoration_us", get_time("gc quarantine restoration")},
-        {"prior_metadata_initialization_us", get_time("gc prior metadata initialization")},
-        {"reachability_observation_1_us", get_time("gc reachability observation 1")},
-        {"reachability_observation_2_us", get_time("gc reachability observation 2")},
+        {"prior_metadata_initialization_us",
+         get_time("gc prior metadata initialization")},
+        {"reachability_observation_1_us",
+         get_time("gc reachability observation 1")},
+        {"reachability_observation_2_us",
+         get_time("gc reachability observation 2")},
         {"stable_state_comparison_us", get_time("gc stable-state comparison")},
-        {"final_namespace_verification_us", get_time("gc final namespace verification")},
-        {"expired_quarantine_purge_us", get_time("gc expired quarantine purge")},
+        {"final_namespace_verification_us",
+         get_time("gc final namespace verification")},
+        {"expired_quarantine_purge_us",
+         get_time("gc expired quarantine purge")},
         {"batch_prepare_duration_us", get_time("gc.batch_prepare_duration_us")},
         {"batch_verify_duration_us", get_time("gc.batch_verify_duration_us")},
-        {"batch_publish_remove_duration_us", get_time("gc.batch_publish_remove_duration_us")},
+        {"batch_publish_remove_duration_us",
+         get_time("gc.batch_publish_remove_duration_us")},
         {"copy_batch_duration_us", get_time("gc candidate copy batch")},
-        {"metadata_publish_batch_duration_us", get_time("gc.metadata_publish_batch_duration_us")},
-        {"metadata_verify_batch_duration_us", get_time("gc.metadata_verify_batch_duration_us")},
+        {"metadata_publish_batch_duration_us",
+         get_time("gc.metadata_publish_batch_duration_us")},
+        {"metadata_verify_batch_duration_us",
+         get_time("gc.metadata_verify_batch_duration_us")},
         {"remove_batch_duration_us", get_time("gc candidate remove batch")},
-        {"barrier_ownership_verification_us", get_time("gc barrier ownership verification")},
+        {"barrier_ownership_verification_us",
+         get_time("gc barrier ownership verification")},
         {"barrier_release_us", get_time("gc barrier release")},
     };
 }
@@ -332,11 +385,17 @@ Json gc_counters_json() {
         counters[name] = get_count(name);
     }
     counters["rc_requests_by_endpoint"] = Json::object();
-    for (const auto* endpoint : {"operations/check", "operations/hashsumfile",
-                                  "operations/copyfile", "operations/deletefile",
-                                  "operations/stat", "operations/mkdir",
-                                  "operations/list", "sync/copy", "job/batch"}) {
-        const auto metric = std::string{"rc.http_requests_by_endpoint."} + endpoint;
+    for (const auto* endpoint : {"operations/check",
+                                 "operations/hashsumfile",
+                                 "operations/copyfile",
+                                 "operations/deletefile",
+                                 "operations/stat",
+                                 "operations/mkdir",
+                                 "operations/list",
+                                 "sync/copy",
+                                 "job/batch"}) {
+        const auto metric =
+            std::string{"rc.http_requests_by_endpoint."} + endpoint;
         counters["rc_requests_by_endpoint"][endpoint] = get_count(metric);
     }
     return counters;
@@ -362,21 +421,29 @@ struct GcLiveOptions {
 };
 
 void print_help() {
-    std::cout << "Usage: kasumi_gc_live_phase18 [options]\n\n"
-              << "Options:\n"
-              << "  --help, -h                  Show this help message\n"
-              << "  --self-test                 Run internal sanity checks\n"
-              << "  --config <path>             Live target configuration\n"
-              << "  --target-id <id>            Exact configured target id\n"
-              << "  --output <path>             Path for output JSON result (default: gc_live_result.json)\n"
-              << "  -F, --files <N>             Number of protected live files (default: 10)\n"
-              << "  -C, --candidates <N>        Number of orphan candidate files (default: 8)\n"
-              << "  --copy-concurrency <N>      Batch copy concurrency (default: 8)\n"
-              << "  --metadata-concurrency <N>  Batch metadata concurrency (default: 8)\n"
-              << "  --remove-concurrency <N>    Batch remove concurrency (default: 8)\n"
-              << "  --young-quarantine-noop-runs <N>  Repeat GC on unchanged young quarantine (default: 0)\n"
-              << "  --preflight-only            Verify remote connectivity and exit\n"
-              << "  --execute-live              Required to confirm execution of live remote mutations\n";
+    std::cout
+        << "Usage: kasumi_gc_live_phase18 [options]\n\n"
+        << "Options:\n"
+        << "  --help, -h                  Show this help message\n"
+        << "  --self-test                 Run internal sanity checks\n"
+        << "  --config <path>             Live target configuration\n"
+        << "  --target-id <id>            Exact configured target id\n"
+        << "  --output <path>             Path for output JSON result "
+           "(default: gc_live_result.json)\n"
+        << "  -F, --files <N>             Number of protected live files "
+           "(default: 10)\n"
+        << "  -C, --candidates <N>        Number of orphan candidate files "
+           "(default: 8)\n"
+        << "  --copy-concurrency <N>      Batch copy concurrency (default: 8)\n"
+        << "  --metadata-concurrency <N>  Batch metadata concurrency (default: "
+           "8)\n"
+        << "  --remove-concurrency <N>    Batch remove concurrency (default: "
+           "8)\n"
+        << "  --young-quarantine-noop-runs <N>  Repeat GC on unchanged young "
+           "quarantine (default: 0)\n"
+        << "  --preflight-only            Verify remote connectivity and exit\n"
+        << "  --execute-live              Required to confirm execution of "
+           "live remote mutations\n";
 }
 
 std::optional<GcLiveOptions> parse_arguments(int argc, char** argv) {
@@ -395,8 +462,7 @@ std::optional<GcLiveOptions> parse_arguments(int argc, char** argv) {
         } else if (arg == "--config" && i + 1 < argc &&
                    !options.provider_config) {
             options.provider_config = std::filesystem::path{argv[++i]};
-        } else if (arg == "--target-id" && i + 1 < argc &&
-                   !options.target_id) {
+        } else if (arg == "--target-id" && i + 1 < argc && !options.target_id) {
             options.target_id = argv[++i];
         } else if (arg == "--output" && i + 1 < argc) {
             options.output_path = argv[++i];
@@ -428,25 +494,28 @@ std::optional<GcLiveOptions> parse_arguments(int argc, char** argv) {
                     });
         if (!target || !target->has_value()) {
             std::cerr << (target ? "Rclone target was not selected"
-                                 : target.error()) << '\n';
+                                 : target.error())
+                      << '\n';
             return std::nullopt;
         }
         options.remote_parent = (*target)->authorized_parent;
-        options.authorization.authorized_parent =
-            (*target)->authorized_parent;
+        options.authorization.authorized_parent = (*target)->authorized_parent;
     }
     return options;
 }
 
 bool run_self_test() {
     std::cout << "[INFO] Running internal operational harness self-test...\n";
-    if (pad_index(0) != "0000" || pad_index(42) != "0042") return false;
+    if (pad_index(0) != "0000" || pad_index(42) != "0042")
+        return false;
     const auto payload = make_payload("test-run", "test", 1);
-    if (payload.size() != file_bytes) return false;
+    if (payload.size() != file_bytes)
+        return false;
 
     std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
     std::ranges::fill(key, 0xaa);
-    const auto tmp_dir = std::filesystem::temp_directory_path() / "kasumi_harness_selftest";
+    const auto tmp_dir =
+        std::filesystem::temp_directory_path() / "kasumi_harness_selftest";
     std::error_code ec;
     std::filesystem::remove_all(tmp_dir, ec);
     std::filesystem::create_directories(tmp_dir, ec);
@@ -470,7 +539,8 @@ bool run_self_test() {
 bool run_live_gc(const GcLiveOptions& options) {
     if (!kasumi::operational::provider_target_config::authorized_live_parent(
             options.authorization, options.remote_parent) ||
-        !kasumi::transport::validate_transport_location(options.remote_parent)) {
+        !kasumi::transport::validate_transport_location(
+            options.remote_parent)) {
         std::cerr << "[ERROR] selected target authorization is invalid.\n";
         return false;
     }
@@ -481,12 +551,14 @@ bool run_live_gc(const GcLiveOptions& options) {
         std::filesystem::create_directories(output.parent_path(), ec);
     }
 
-    const auto artifacts = std::filesystem::path{output.string() + ".artifacts"};
+    const auto artifacts =
+        std::filesystem::path{output.string() + ".artifacts"};
     std::filesystem::create_directories(artifacts, ec);
     const auto local_root = artifacts / "workspace";
     std::filesystem::create_directories(local_root, ec);
 
-    const auto remote_fixture = options.remote_parent + "/gc-run-" + run_id + "/fixture";
+    const auto remote_fixture =
+        options.remote_parent + "/gc-run-" + run_id + "/fixture";
 
     std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
     std::ranges::fill(key, 0x42);
@@ -497,11 +569,16 @@ bool run_live_gc(const GcLiveOptions& options) {
               << "       remote_fixture:       " << remote_fixture << "\n"
               << "       files (F):            " << options.files << "\n"
               << "       candidates (C):       " << options.candidates << "\n"
-              << "       copy_concurrency:     " << options.copy_concurrency << "\n"
-              << "       metadata_concurrency: " << options.metadata_concurrency << "\n"
-              << "       remove_concurrency:   " << options.remove_concurrency << "\n"
-              << "       no-op repetitions:    " << options.young_quarantine_noop_runs << "\n"
-              << "       execute_live:         " << (options.execute_live ? "YES" : "NO (dry)") << "\n";
+              << "       copy_concurrency:     " << options.copy_concurrency
+              << "\n"
+              << "       metadata_concurrency: " << options.metadata_concurrency
+              << "\n"
+              << "       remove_concurrency:   " << options.remove_concurrency
+              << "\n"
+              << "       no-op repetitions:    "
+              << options.young_quarantine_noop_runs << "\n"
+              << "       execute_live:         "
+              << (options.execute_live ? "YES" : "NO (dry)") << "\n";
 
     if (options.preflight_only) {
         std::cout << "[INFO] Preflight-only requested. Verifying parent...\n";
@@ -511,22 +588,27 @@ bool run_live_gc(const GcLiveOptions& options) {
             return false;
         }
         std::cout << "[INFO] Preflight check PASSED.\n";
-        write_json(output, Json{{"status", "PREFLIGHT_PASSED"}, {"remote_parent", options.remote_parent}});
+        write_json(output,
+                   Json{{"status", "PREFLIGHT_PASSED"},
+                        {"remote_parent", options.remote_parent}});
         return true;
     }
 
     if (!options.execute_live) {
-        std::cerr << "[ERROR] --execute-live flag is required to perform live remote operations.\n";
+        std::cerr << "[ERROR] --execute-live flag is required to perform live "
+                     "remote operations.\n";
         return false;
     }
 
     // 1. Prepare local live assets and tree
-    std::cout << "[INFO] Preparing " << options.files << " protected assets locally...\n";
+    std::cout << "[INFO] Preparing " << options.files
+              << " protected assets locally...\n";
     std::vector<Phase20Asset> live_assets;
     std::vector<std::string> live_ids;
     std::map<std::string, std::pair<kasumi::Hash, std::uint64_t>> live_info;
     kasumi::Snapshot tree;
-    tree.rows.push_back(kasumi::NodeRow{.path = "", .hash = {}, .size = 0, .mtime = {}, .is_directory = true});
+    tree.rows.push_back(kasumi::NodeRow{
+        .path = "", .hash = {}, .size = 0, .mtime = {}, .is_directory = true});
     const auto live_dir = artifacts / "prepared" / "live";
     for (std::size_t i = 0; i < options.files; ++i) {
         auto asset = prepare_asset(run_id, "live", i, live_dir, key);
@@ -535,16 +617,21 @@ bool run_live_gc(const GcLiveOptions& options) {
             return false;
         }
         live_ids.push_back(asset->id);
-        live_info.emplace(asset->id, std::pair{asset->plaintext_hash, asset->plaintext_size});
-        tree.rows.push_back(kasumi::NodeRow{
-            .path = "file_" + pad_index(i) + ".bin", .hash = asset->plaintext_hash,
-            .size = asset->plaintext_size, .mtime = {}, .is_directory = false});
+        live_info.emplace(
+            asset->id, std::pair{asset->plaintext_hash, asset->plaintext_size});
+        tree.rows.push_back(
+            kasumi::NodeRow{.path = "file_" + pad_index(i) + ".bin",
+                            .hash = asset->plaintext_hash,
+                            .size = asset->plaintext_size,
+                            .mtime = {},
+                            .is_directory = false});
         live_assets.push_back(std::move(*asset));
     }
     kasumi::finalize_snapshot(tree);
 
     // 2. Prepare candidates locally
-    std::cout << "[INFO] Preparing " << options.candidates << " candidate assets locally...\n";
+    std::cout << "[INFO] Preparing " << options.candidates
+              << " candidate assets locally...\n";
     std::vector<Phase20Asset> candidates;
     std::vector<std::string> candidate_ids;
     std::set<std::string> unique_ids(live_ids.begin(), live_ids.end());
@@ -563,7 +650,8 @@ bool run_live_gc(const GcLiveOptions& options) {
     // 3. Open remote transport
     auto opened = kasumi::transport::open_transport(remote_fixture);
     if (!opened || !kasumi::transport::initialize(*opened)) {
-        std::cerr << "[ERROR] Failed to initialize fixture transport at " << remote_fixture << "\n";
+        std::cerr << "[ERROR] Failed to initialize fixture transport at "
+                  << remote_fixture << "\n";
         return false;
     }
     auto& storage = *opened;
@@ -578,49 +666,68 @@ bool run_live_gc(const GcLiveOptions& options) {
     // 4. Upload all content via batch put
     std::vector<Phase20Asset*> all_content;
     all_content.reserve(live_assets.size() + candidates.size());
-    for (auto& asset : live_assets) all_content.push_back(&asset);
-    for (auto& asset : candidates) all_content.push_back(&asset);
+    for (auto& asset : live_assets)
+        all_content.push_back(&asset);
+    for (auto& asset : candidates)
+        all_content.push_back(&asset);
 
-    std::cout << "[INFO] Uploading " << all_content.size() << " assets to remote...\n";
+    std::cout << "[INFO] Uploading " << all_content.size()
+              << " assets to remote...\n";
     constexpr std::size_t upload_batch_size = 25;
     constexpr std::size_t upload_transfers = 4;
-    for (std::size_t begin = 0; begin < all_content.size(); begin += upload_batch_size) {
-        const auto end = std::min(begin + upload_batch_size, all_content.size());
-        const auto batch_root = artifacts / "upload_staging" / ("batch-" + pad_index(begin));
+    for (std::size_t begin = 0; begin < all_content.size();
+         begin += upload_batch_size) {
+        const auto end =
+            std::min(begin + upload_batch_size, all_content.size());
+        const auto batch_root =
+            artifacts / "upload_staging" / ("batch-" + pad_index(begin));
         std::filesystem::create_directories(batch_root, ec);
         std::vector<std::string> batch_ids;
         for (std::size_t i = begin; i < end; ++i) {
-            std::filesystem::copy_file(all_content[i]->encrypted_path, batch_root / all_content[i]->id,
-                                       std::filesystem::copy_options::overwrite_existing, ec);
+            std::filesystem::copy_file(
+                all_content[i]->encrypted_path,
+                batch_root / all_content[i]->id,
+                std::filesystem::copy_options::overwrite_existing,
+                ec);
             batch_ids.push_back(all_content[i]->id);
         }
         auto uploaded = kasumi::transport::put_batch(
-            storage, kasumi::transport::PutBatch{.source_root = batch_root,
-                                                 .identifiers = batch_ids,
-                                                 .max_parallel_transfers = upload_transfers});
+            storage,
+            kasumi::transport::PutBatch{.source_root = batch_root,
+                                        .identifiers = batch_ids,
+                                        .max_parallel_transfers =
+                                            upload_transfers});
         if (!uploaded) {
-            std::cerr << "[ERROR] Batch upload failed: " << kasumi::transport::describe(uploaded.error()) << "\n";
+            std::cerr << "[ERROR] Batch upload failed: "
+                      << kasumi::transport::describe(uploaded.error()) << "\n";
             return false;
         }
     }
 
     // 5. Publish commit & HEAD marker
-    const auto commit_unix = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+    const auto commit_unix =
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
     auto commit = kasumi::history::make_commit(0, {}, tree, commit_unix);
     if (!commit) {
         std::cerr << "[ERROR] Failed to make commit.\n";
         return false;
     }
-    auto published = history_storage::publish_commit_object(storage, layout, key, *commit, local_root);
+    auto published = history_storage::publish_commit_object(
+        storage, layout, key, *commit, local_root);
     if (!published) {
-        std::cerr << "[ERROR] Failed to publish commit: " << published.error().detail << "\n";
+        std::cerr << "[ERROR] Failed to publish commit: "
+                  << published.error().detail << "\n";
         return false;
     }
-    const auto commit_id = history_storage::commit_object(layout, published->head);
-    auto marker = history_storage::publish_head_marker(storage, layout, published->head, local_root);
+    const auto commit_id =
+        history_storage::commit_object(layout, published->head);
+    auto marker = history_storage::publish_head_marker(
+        storage, layout, published->head, local_root);
     if (!marker) {
-        std::cerr << "[ERROR] Failed to publish HEAD marker: " << marker.error().detail << "\n";
+        std::cerr << "[ERROR] Failed to publish HEAD marker: "
+                  << marker.error().detail << "\n";
         return false;
     }
     const auto head_marker_id = marker->marker_id;
@@ -633,12 +740,21 @@ bool run_live_gc(const GcLiveOptions& options) {
         return false;
     }
     Json pre_val = Json::object();
-    if (!validate_fixture_inventory(storage, key, layout, *pre_list, live_ids, candidate_ids,
-                                    local_root, published->head.commit_id, pre_val)) {
-        std::cerr << "[ERROR] Pre-GC validation failed: " << pre_val.dump(2) << "\n";
+    if (!validate_fixture_inventory(storage,
+                                    key,
+                                    layout,
+                                    *pre_list,
+                                    live_ids,
+                                    candidate_ids,
+                                    local_root,
+                                    published->head.commit_id,
+                                    pre_val)) {
+        std::cerr << "[ERROR] Pre-GC validation failed: " << pre_val.dump(2)
+                  << "\n";
         return false;
     }
-    std::cout << "[INFO] Pre-GC inventory confirmed: " << pre_list->size() << " objects.\n";
+    std::cout << "[INFO] Pre-GC inventory confirmed: " << pre_list->size()
+              << " objects.\n";
 
     // 7. Execute single GC
     std::cout << "[INFO] Executing measured Garbage Collection...\n";
@@ -650,34 +766,47 @@ bool run_live_gc(const GcLiveOptions& options) {
         .storage_location = remote_fixture,
     };
     std::filesystem::create_directories(runtime.local_dir, ec);
-    std::filesystem::create_directories(runtime.database_path.parent_path(), ec);
+    std::filesystem::create_directories(runtime.database_path.parent_path(),
+                                        ec);
 
     kasumi::platform::perf_trace::force_enable(true);
     kasumi::platform::perf_trace::reset();
     const auto gc_start = Clock::now();
 
     auto collected = kasumi::application::integrity::garbage_collect(
-        runtime, storage, key, options.copy_concurrency,
-        options.metadata_concurrency, options.remove_concurrency);
+        runtime,
+        storage,
+        key,
+        options.copy_concurrency,
+        options.metadata_concurrency,
+        options.remove_concurrency);
 
     const auto gc_end = Clock::now();
-    const auto gc_wall_us = std::chrono::duration_cast<std::chrono::microseconds>(gc_end - gc_start).count();
+    const auto gc_wall_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(gc_end - gc_start)
+            .count();
     auto gc_times = phase_times_json();
     auto gc_counters = gc_counters_json();
     kasumi::platform::perf_trace::force_enable(false);
 
     if (!collected) {
-        std::cerr << "[ERROR] GC execution failed: " << kasumi::application::integrity::describe(collected.error()) << "\n";
+        std::cerr << "[ERROR] GC execution failed: "
+                  << kasumi::application::integrity::describe(collected.error())
+                  << "\n";
         return false;
     }
-    std::cout << "[INFO] GC completed in " << (static_cast<double>(gc_wall_us) / 1'000'000.0) << " seconds.\n"
-              << "       Candidates quarantined: " << collected->quarantined_objects << "\n";
+    std::cout << "[INFO] GC completed in "
+              << (static_cast<double>(gc_wall_us) / 1'000'000.0)
+              << " seconds.\n"
+              << "       Candidates quarantined: "
+              << collected->quarantined_objects << "\n";
     if (options.young_quarantine_noop_runs > 0 &&
         (collected->candidate_objects != options.candidates ||
          collected->quarantined_objects != options.candidates ||
          collected->restored_objects != 0 || collected->purged_objects != 0 ||
          collected->analysis_only)) {
-        std::cerr << "[ERROR] First GC did not create the expected online quarantine.\n";
+        std::cerr << "[ERROR] First GC did not create the expected online "
+                     "quarantine.\n";
         return false;
     }
 
@@ -688,11 +817,14 @@ bool run_live_gc(const GcLiveOptions& options) {
         std::cerr << "[ERROR] Post-GC listing failed.\n";
         return false;
     }
-    auto quarantine = history_storage::maintenance_protocol::inventory_quarantine(
-        storage, key, *post_list, local_root);
+    auto quarantine =
+        history_storage::maintenance_protocol::inventory_quarantine(
+            storage, key, *post_list, local_root);
     if (!quarantine || quarantine->size() != options.candidates) {
-        std::cerr << "[ERROR] Quarantine entry count (" << (quarantine ? quarantine->size() : 0)
-                  << ") does not equal expected candidates (" << options.candidates << ")\n";
+        std::cerr << "[ERROR] Quarantine entry count ("
+                  << (quarantine ? quarantine->size() : 0)
+                  << ") does not equal expected candidates ("
+                  << options.candidates << ")\n";
         return false;
     }
 
@@ -702,8 +834,11 @@ bool run_live_gc(const GcLiveOptions& options) {
         qids.push_back(entry.quarantine_identifier);
         metadata_ids.push_back(entry.metadata_identifier);
         originals.push_back(entry.original_identifier);
-        auto verified = history_storage::maintenance_protocol::verify_quarantine(storage, entry, local_root);
-        if (!verified || !*verified) qvalid = false;
+        auto verified =
+            history_storage::maintenance_protocol::verify_quarantine(
+                storage, entry, local_root);
+        if (!verified || !*verified)
+            qvalid = false;
     }
     if (!qvalid || sorted(originals) != sorted(candidate_ids)) {
         std::cerr << "[ERROR] Quarantine verification failed.\n";
@@ -714,56 +849,86 @@ bool run_live_gc(const GcLiveOptions& options) {
     expected_post.push_back(commit_id);
     expected_post.push_back(head_marker_id);
     expected_post.insert(expected_post.end(), qids.begin(), qids.end());
-    expected_post.insert(expected_post.end(), metadata_ids.begin(), metadata_ids.end());
+    expected_post.insert(
+        expected_post.end(), metadata_ids.begin(), metadata_ids.end());
 
     Json post_val = Json::object();
     if (sorted(*post_list) != sorted(expected_post) ||
-        !validate_fixture_inventory(storage, key, layout, *post_list, live_ids, {},
-                                    local_root, published->head.commit_id, post_val)) {
+        !validate_fixture_inventory(storage,
+                                    key,
+                                    layout,
+                                    *post_list,
+                                    live_ids,
+                                    {},
+                                    local_root,
+                                    published->head.commit_id,
+                                    post_val)) {
         std::cerr << "[ERROR] Post-GC fixture validation failed.\n";
         return false;
     }
 
     // Verify sample of protected live content
-    const std::size_t sample_target = std::min<std::size_t>(10, live_ids.size());
+    const std::size_t sample_target =
+        std::min<std::size_t>(10, live_ids.size());
     std::vector<std::string> sample_ids;
     for (std::size_t i = 0; i < sample_target; ++i) {
-        sample_ids.push_back(sorted(live_ids)[i * (live_ids.size() - 1) / std::max<std::size_t>(1, sample_target - 1)]);
+        sample_ids.push_back(
+            sorted(live_ids)[i * (live_ids.size() - 1) /
+                             std::max<std::size_t>(1, sample_target - 1)]);
     }
     std::size_t samples_verified = 0;
-    if (!verify_content_samples(storage, key, local_root, sample_ids, live_info, samples_verified) ||
+    if (!verify_content_samples(storage,
+                                key,
+                                local_root,
+                                sample_ids,
+                                live_info,
+                                samples_verified) ||
         samples_verified != sample_target) {
         std::cerr << "[ERROR] Protected content sample verification failed.\n";
         return false;
     }
-    std::cout << "[INFO] Post-GC validation PASSED: " << samples_verified << " samples verified intact.\n";
+    std::cout << "[INFO] Post-GC validation PASSED: " << samples_verified
+              << " samples verified intact.\n";
 
     Json noop_runs = Json::array();
     bool baseline_valid = true;
     if (options.young_quarantine_noop_runs > 0) {
-        std::map<std::string, std::pair<std::int64_t, std::string>> expected_quarantine;
-        const auto now = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
+        std::map<std::string, std::pair<std::int64_t, std::string>>
+            expected_quarantine;
+        const auto now =
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
         for (const auto& entry : *quarantine) {
             if (!entry.quarantined_at || *entry.quarantined_at > now ||
                 now - *entry.quarantined_at >=
-                    history_storage::maintenance_protocol::quarantine_retention_seconds) {
-                std::cerr << "[ERROR] Quarantine metadata is missing or not young.\n";
+                    history_storage::maintenance_protocol::
+                        quarantine_retention_seconds) {
+                std::cerr
+                    << "[ERROR] Quarantine metadata is missing or not young.\n";
                 return false;
             }
-            expected_quarantine.emplace(entry.original_identifier,
-                                        std::pair{*entry.quarantined_at, entry.physical_sha256});
+            expected_quarantine.emplace(
+                entry.original_identifier,
+                std::pair{*entry.quarantined_at, entry.physical_sha256});
         }
-        for (std::size_t run = 0; run < options.young_quarantine_noop_runs; ++run) {
+        for (std::size_t run = 0; run < options.young_quarantine_noop_runs;
+             ++run) {
             kasumi::platform::perf_trace::force_enable(true);
             kasumi::platform::perf_trace::reset();
             const auto start = Clock::now();
             auto repeated = kasumi::application::integrity::garbage_collect(
-                runtime, storage, key, options.copy_concurrency,
-                options.metadata_concurrency, options.remove_concurrency);
+                runtime,
+                storage,
+                key,
+                options.copy_concurrency,
+                options.metadata_concurrency,
+                options.remove_concurrency);
             const auto end = Clock::now();
-            const auto wall_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                end - start).count();
+            const auto wall_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(end -
+                                                                      start)
+                    .count();
             Json measured{
                 {"run", run + 1},
                 {"wall_us", wall_us},
@@ -772,7 +937,8 @@ bool run_live_gc(const GcLiveOptions& options) {
             };
             kasumi::platform::perf_trace::force_enable(false);
             if (!repeated) {
-                measured["error"] = kasumi::application::integrity::describe(repeated.error());
+                measured["error"] =
+                    kasumi::application::integrity::describe(repeated.error());
                 baseline_valid = false;
             } else {
                 measured["result"] = {
@@ -788,11 +954,13 @@ bool run_live_gc(const GcLiveOptions& options) {
                                  repeated->purged_objects == 0 &&
                                  !repeated->analysis_only;
                 if (repeated->analysis_only) {
-                    std::cerr << "[ERROR] Backend returned analysis_only; online-GC baseline unavailable.\n";
+                    std::cerr << "[ERROR] Backend returned analysis_only; "
+                                 "online-GC baseline unavailable.\n";
                 }
             }
             noop_runs.push_back(std::move(measured));
-            if (!baseline_valid) break;
+            if (!baseline_valid)
+                break;
         }
 
         auto repeated_list = kasumi::transport::list(storage);
@@ -807,11 +975,14 @@ bool run_live_gc(const GcLiveOptions& options) {
                 baseline_valid = false;
             } else {
                 for (const auto& entry : *repeated_quarantine) {
-                    const auto expected = expected_quarantine.find(entry.original_identifier);
-                    auto verified = history_storage::maintenance_protocol::verify_quarantine(
-                        storage, entry, local_root);
-                    if (expected == expected_quarantine.end() || !entry.quarantined_at ||
-                        std::pair{*entry.quarantined_at, entry.physical_sha256} != expected->second ||
+                    const auto expected =
+                        expected_quarantine.find(entry.original_identifier);
+                    auto verified = history_storage::maintenance_protocol::
+                        verify_quarantine(storage, entry, local_root);
+                    if (expected == expected_quarantine.end() ||
+                        !entry.quarantined_at ||
+                        std::pair{*entry.quarantined_at,
+                                  entry.physical_sha256} != expected->second ||
                         !verified || !*verified) {
                         baseline_valid = false;
                         break;
@@ -820,13 +991,18 @@ bool run_live_gc(const GcLiveOptions& options) {
             }
         }
         std::size_t repeated_samples_verified = 0;
-        if (!verify_content_samples(storage, key, local_root, sample_ids, live_info,
+        if (!verify_content_samples(storage,
+                                    key,
+                                    local_root,
+                                    sample_ids,
+                                    live_info,
                                     repeated_samples_verified) ||
             repeated_samples_verified != sample_target) {
             baseline_valid = false;
         }
         if (!baseline_valid) {
-            std::cerr << "[ERROR] Repeated GC or post-run fixture validation failed.\n";
+            std::cerr << "[ERROR] Repeated GC or post-run fixture validation "
+                         "failed.\n";
         }
     }
 
@@ -834,23 +1010,28 @@ bool run_live_gc(const GcLiveOptions& options) {
     std::cout << "[INFO] Cleaning up remote fixture...\n";
     std::vector<std::string> cleanup_ids = expected_post;
     std::ranges::sort(cleanup_ids);
-    cleanup_ids.erase(std::ranges::unique(cleanup_ids).begin(), cleanup_ids.end());
+    cleanup_ids.erase(std::ranges::unique(cleanup_ids).begin(),
+                      cleanup_ids.end());
     for (const auto& id : cleanup_ids) {
         auto rem = kasumi::transport::remove(storage, id);
         if (!rem || *rem != kasumi::transport::Removal::Removed) {
-            std::cerr << "[WARN] Failed to remove fixture object: " << id << "\n";
+            std::cerr << "[WARN] Failed to remove fixture object: " << id
+                      << "\n";
         }
     }
     auto final_list = kasumi::transport::list(storage);
     const bool cleaned = (!final_list || final_list->empty());
     const bool baseline_cleaned = final_list && final_list->empty();
-    std::cout << "[INFO] Fixture cleanup: " << (cleaned ? "CLEAN" : "REMAINS DETECTED") << "\n";
+    std::cout << "[INFO] Fixture cleanup: "
+              << (cleaned ? "CLEAN" : "REMAINS DETECTED") << "\n";
 
     // 10. Write report
     Json result{
-        {"status", options.young_quarantine_noop_runs > 0 &&
-                        (!baseline_valid || !baseline_cleaned) ? "BASELINE_INVALID" :
-                    (cleaned ? "PASS_CLEANED" : "PASS_WITH_REMAINS")},
+        {"status",
+         options.young_quarantine_noop_runs > 0 &&
+                 (!baseline_valid || !baseline_cleaned)
+             ? "BASELINE_INVALID"
+             : (cleaned ? "PASS_CLEANED" : "PASS_WITH_REMAINS")},
         {"run_id", run_id},
         {"remote_fixture", remote_fixture},
         {"files", options.files},
@@ -870,7 +1051,8 @@ bool run_live_gc(const GcLiveOptions& options) {
         result["build_commit"] = KASUMI_PHASE18_BUILD_COMMIT;
         result["target_id"] = options.target_id.value_or("");
         result["transport_kind"] = "rclone";
-        result["young_quarantine_noop_runs_requested"] = options.young_quarantine_noop_runs;
+        result["young_quarantine_noop_runs_requested"] =
+            options.young_quarantine_noop_runs;
         result["young_quarantine_noop_runs"] = std::move(noop_runs);
         result["post_repetition_validation"] = baseline_valid;
     }
@@ -885,7 +1067,8 @@ bool run_live_gc(const GcLiveOptions& options) {
 
 int main(int argc, char** argv) {
     auto options = parse_arguments(argc, argv);
-    if (!options) return 1;
+    if (!options)
+        return 1;
     if (options->help) {
         print_help();
         return 0;

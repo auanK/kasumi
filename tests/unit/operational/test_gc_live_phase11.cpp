@@ -27,29 +27,30 @@ TEST(Phase11GuardrailTest, DisallowedRootValidation) {
     EXPECT_FALSE(phase11::smoke::parse_remote_parent("remote-a:").has_value());
     EXPECT_FALSE(phase11::smoke::parse_remote_parent("remote-a").has_value());
     EXPECT_FALSE(phase11::smoke::parse_remote_parent("").has_value());
-    EXPECT_TRUE(phase11::smoke::parse_remote_parent(
-                    "remote-a:integration-tests").has_value());
+    EXPECT_TRUE(
+        phase11::smoke::parse_remote_parent("remote-a:integration-tests")
+            .has_value());
 }
 
 TEST(Phase11GuardrailTest, GenerateBenchmarkChildNonceValidation) {
-    auto valid = phase11::generate_benchmark_child("0123456789abcdef0123456789abcdef");
+    auto valid =
+        phase11::generate_benchmark_child("0123456789abcdef0123456789abcdef");
     ASSERT_TRUE(valid.has_value());
     EXPECT_EQ(*valid, "kasumi-gc-benchmark-0123456789abcdef0123456789abcdef");
 
     auto too_short = phase11::generate_benchmark_child("1234");
     EXPECT_FALSE(too_short.has_value());
 
-    auto invalid_hex = phase11::generate_benchmark_child("0123456789abcdefghij0123456789");
+    auto invalid_hex =
+        phase11::generate_benchmark_child("0123456789abcdefghij0123456789");
     EXPECT_FALSE(invalid_hex.has_value());
 }
 
 TEST(Phase11SafetyTest, DryRunRefusesExecutionWithoutExecuteLiveFlag) {
     phase11::Phase11Config config{
         .remote_parent = "remote-a:integration-tests",
-        .authorization = {
-            .authorized_parent = "remote-a:integration-tests"},
-        .execute_live = false
-    };
+        .authorization = {.authorized_parent = "remote-a:integration-tests"},
+        .execute_live = false};
     phase11::Phase11RunReport report;
     auto status = phase11::run_capability_test(config, report);
     EXPECT_EQ(status, phase11::CapabilityStatus::Refused);
@@ -58,16 +59,15 @@ TEST(Phase11SafetyTest, DryRunRefusesExecutionWithoutExecuteLiveFlag) {
 
     auto trial_report = phase11::run_benchmark_trial(config);
     EXPECT_EQ(trial_report.status, "REFUSED");
-    EXPECT_NE(trial_report.error_message.find("dry run safety"), std::string::npos);
+    EXPECT_NE(trial_report.error_message.find("dry run safety"),
+              std::string::npos);
 }
 
 TEST(Phase11SafetyTest, RefusesUnauthorizedParentEvenWithLiveFlag) {
     phase11::Phase11Config config{
         .remote_parent = "remote-a:unauthorized-vault",
-        .authorization = {
-            .authorized_parent = "remote-a:integration-tests"},
-        .execute_live = true
-    };
+        .authorization = {.authorized_parent = "remote-a:integration-tests"},
+        .execute_live = true};
     phase11::Phase11RunReport report;
     auto status = phase11::run_capability_test(config, report);
     EXPECT_EQ(status, phase11::CapabilityStatus::Refused);
@@ -76,7 +76,8 @@ TEST(Phase11SafetyTest, RefusesUnauthorizedParentEvenWithLiveFlag) {
 
     auto trial_report = phase11::run_benchmark_trial(config);
     EXPECT_EQ(trial_report.status, "REFUSED");
-    EXPECT_NE(trial_report.error_message.find("not authorized"), std::string::npos);
+    EXPECT_NE(trial_report.error_message.find("not authorized"),
+              std::string::npos);
 }
 
 } // namespace

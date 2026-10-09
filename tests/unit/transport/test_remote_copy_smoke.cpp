@@ -1,13 +1,12 @@
-#include "../../operational/remote_copy_smoke_support.hpp"
 #include "../../operational/gc_live_preflight_support.hpp"
-
+#include "../../operational/remote_copy_smoke_support.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
-#include <chrono>
 #include <map>
 #include <optional>
 #include <set>
@@ -31,14 +30,14 @@ smoke::CopySmokeOutcome verified_native_copy() {
     };
 }
 
-smoke::ReadinessAttempt readiness_attempt(
-    std::size_t index,
-    std::chrono::milliseconds elapsed,
-    smoke::ReadinessPresence presence,
-    smoke::ReadinessHash hash,
-    std::string sha256 = {},
-    std::optional<transport::ErrorCode> hash_error = std::nullopt,
-    std::string hash_error_message = {}) {
+smoke::ReadinessAttempt
+readiness_attempt(std::size_t index,
+                  std::chrono::milliseconds elapsed,
+                  smoke::ReadinessPresence presence,
+                  smoke::ReadinessHash hash,
+                  std::string sha256 = {},
+                  std::optional<transport::ErrorCode> hash_error = std::nullopt,
+                  std::string hash_error_message = {}) {
     return smoke::ReadinessAttempt{
         .attempt_index = index,
         .elapsed_since_reference = elapsed,
@@ -62,7 +61,8 @@ struct FakeState {
     std::size_t get_count = 0;
 };
 
-std::string full_identifier(const FakeState& state, std::string_view identifier) {
+std::string full_identifier(const FakeState& state,
+                            std::string_view identifier) {
     return state.scope_root.empty()
                ? std::string{identifier}
                : state.scope_root + "/" + std::string{identifier};
@@ -84,9 +84,9 @@ transport::Result put(void* context,
                       std::string_view identifier) {
     std::ifstream input(source, std::ios::binary);
     if (!input) {
-        return std::unexpected(transport::Error{
-            .code = transport::ErrorCode::ObjectNotFound,
-            .message = "local test file missing"});
+        return std::unexpected(
+            transport::Error{.code = transport::ErrorCode::ObjectNotFound,
+                             .message = "local test file missing"});
     }
     std::string bytes{std::istreambuf_iterator<char>{input}, {}};
     auto* state = static_cast<FakeState*>(context);
@@ -102,16 +102,17 @@ transport::Result get(void* context,
     ++state->get_count;
     const auto found = state->objects.find(full_identifier(*state, identifier));
     if (found == state->objects.end()) {
-        return std::unexpected(transport::Error{
-            .code = transport::ErrorCode::ObjectNotFound,
-            .message = "test object missing"});
+        return std::unexpected(
+            transport::Error{.code = transport::ErrorCode::ObjectNotFound,
+                             .message = "test object missing"});
     }
     std::ofstream output(destination, std::ios::binary | std::ios::trunc);
     output.write(found->second.data(),
                  static_cast<std::streamsize>(found->second.size()));
-    return output ? transport::Result{} : transport::Result{std::unexpected(
-                             transport::Error{.code = transport::ErrorCode::Io,
-                                              .message = "write failed"})};
+    return output ? transport::Result{}
+                  : transport::Result{std::unexpected(
+                        transport::Error{.code = transport::ErrorCode::Io,
+                                         .message = "write failed"})};
 }
 
 transport::PresenceResult presence(void* context, std::string_view identifier) {
@@ -124,9 +125,9 @@ transport::PresenceResult presence(void* context, std::string_view identifier) {
 transport::ListingResult list(void* context) {
     auto* state = static_cast<FakeState*>(context);
     if (!state->storage_root_exists) {
-        return std::unexpected(transport::Error{
-            .code = transport::ErrorCode::StorageNotFound,
-            .message = "storage root missing"});
+        return std::unexpected(
+            transport::Error{.code = transport::ErrorCode::StorageNotFound,
+                             .message = "storage root missing"});
     }
     std::vector<std::string> identifiers;
     for (const auto& [identifier, _] : state->objects) {
@@ -154,9 +155,9 @@ transport::ListingResult list_prefix(void* context, std::string_view prefix) {
     if (identifiers.empty() &&
         !state->existing_prefixes.contains(std::string{prefix}) &&
         !state->empty_success_prefixes.contains(std::string{prefix})) {
-        return std::unexpected(transport::Error{
-            .code = transport::ErrorCode::StorageNotFound,
-            .message = "prefix missing"});
+        return std::unexpected(
+            transport::Error{.code = transport::ErrorCode::StorageNotFound,
+                             .message = "prefix missing"});
     }
     return identifiers;
 }
@@ -165,9 +166,8 @@ transport::RemovalResult remove(void* context, std::string_view identifier) {
     auto* state = static_cast<FakeState*>(context);
     const auto full = full_identifier(*state, identifier);
     state->removed.push_back(full);
-    return state->objects.erase(full) != 0
-               ? transport::Removal::Removed
-               : transport::Removal::AlreadyAbsent;
+    return state->objects.erase(full) != 0 ? transport::Removal::Removed
+                                           : transport::Removal::AlreadyAbsent;
 }
 
 transport::Transport make_transport(FakeState*& state) {
@@ -186,17 +186,24 @@ transport::Transport make_transport(FakeState*& state) {
 }
 
 TEST(RemoteCopySmokeSafetyTest, RejectsRemoteRootAndUnsafeParentPaths) {
-    for (const auto value : {"remote:", "remote:.", "remote:a/../b",
-                             "remote:a//b", "remote:a\\b", "remote:a/ b",
-                             "C:/local/path", "/tmp/remote"}) {
+    for (const auto value : {"remote:",
+                             "remote:.",
+                             "remote:a/../b",
+                             "remote:a//b",
+                             "remote:a\\b",
+                             "remote:a/ b",
+                             "C:/local/path",
+                             "/tmp/remote"}) {
         EXPECT_FALSE(smoke::parse_remote_parent(value)) << value;
     }
     EXPECT_TRUE(smoke::parse_remote_parent("archive:test-parent"));
 }
 
 TEST(RemoteCopySmokeSafetyTest, ChildNamespaceDiffersForEachRunNonce) {
-    const auto first = smoke::child_namespace("0123456789abcdef0123456789abcdef");
-    const auto second = smoke::child_namespace("fedcba9876543210fedcba9876543210");
+    const auto first =
+        smoke::child_namespace("0123456789abcdef0123456789abcdef");
+    const auto second =
+        smoke::child_namespace("fedcba9876543210fedcba9876543210");
     ASSERT_TRUE(first);
     ASSERT_TRUE(second);
     EXPECT_NE(*first, *second);
@@ -209,10 +216,8 @@ TEST(RemoteCopySmokeSafetyTest, RefusesAnExistingEmptyChildNamespace) {
     state->existing_prefixes.insert(
         "kasumi-copy-smoke-0123456789abcdef0123456789abcdef");
 
-    const auto result =
-        smoke::require_unused_child(
-            storage,
-            "kasumi-copy-smoke-0123456789abcdef0123456789abcdef");
+    const auto result = smoke::require_unused_child(
+        storage, "kasumi-copy-smoke-0123456789abcdef0123456789abcdef");
 
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().code, transport::ErrorCode::InvalidIdentifier);
@@ -265,12 +270,12 @@ TEST(RemoteCopySmokeSafetyTest, RefusesCleanupWithAmbiguousOwnershipMarker) {
     state->objects[std::string{child} + "/owner.marker"] = "someone-else";
     state->objects[std::string{child} + "/source"] = "payload";
 
-    const auto result = smoke::cleanup_owned_child(
-        storage,
-        child,
-        "this-run",
-        {std::string{child} + "/source"},
-        kasumi::test::workspace_root(workspace));
+    const auto result =
+        smoke::cleanup_owned_child(storage,
+                                   child,
+                                   "this-run",
+                                   {std::string{child} + "/source"},
+                                   kasumi::test::workspace_root(workspace));
 
     EXPECT_EQ(result.result, "refused");
     EXPECT_TRUE(state->removed.empty());
@@ -288,54 +293,55 @@ TEST(RemoteCopySmokeSafetyTest, RemovesOnlyOwnedObjectsInsideTheChild) {
     state->objects[std::string{child} + "/source"] = "payload";
     state->objects["outside/object"] = "preserve";
 
-    const auto result = smoke::cleanup_owned_child(
-        storage,
-        child,
-        "this-run",
-        {std::string{child} + "/source"},
-        kasumi::test::workspace_root(workspace));
+    const auto result =
+        smoke::cleanup_owned_child(storage,
+                                   child,
+                                   "this-run",
+                                   {std::string{child} + "/source"},
+                                   kasumi::test::workspace_root(workspace));
 
     EXPECT_EQ(result.result, "removed");
     EXPECT_EQ(result.removed_objects, 2U);
     const std::vector<std::string> expected_removed{
-        std::string{child} + "/source",
-        std::string{child} + "/owner.marker"};
+        std::string{child} + "/source", std::string{child} + "/owner.marker"};
     EXPECT_EQ(state->removed, expected_removed);
     EXPECT_TRUE(state->objects.contains("outside/object"));
 }
 
 namespace gc_live = kasumi::operational::gc_live_preflight;
 
-gc_live::PreInitializeObservation proven_absent_observation(
-    const smoke::RemoteParent& parent,
-    std::string_view child) {
+gc_live::PreInitializeObservation
+proven_absent_observation(const smoke::RemoteParent& parent,
+                          std::string_view child) {
     return gc_live::PreInitializeObservation{
         .transport = {.result = "FAILED",
                       .error_category = transport::ErrorCode::StorageNotFound,
-                      .error_message = "remote objects directory does not exist"},
+                      .error_message =
+                          "remote objects directory does not exist"},
         .raw_rc = {.endpoint = "operations/list",
                    .request_fs = parent.remote_name + ":",
-                   .request_remote = parent.directory + "/" +
-                                     std::string{child},
+                   .request_remote =
+                       parent.directory + "/" + std::string{child},
                    .result = "FAILED",
                    .native_status = 404,
                    .error_category = transport::ErrorCode::ProtocolFailure,
-                   .error_message = "endpoint=operations/list: error in ListJSON: directory not found"},
+                   .error_message = "endpoint=operations/list: error in "
+                                    "ListJSON: directory not found"},
     };
 }
 
 TEST(GcLivePreflightTest, ChildNamespaceUsesOnlyItsDedicatedPrefix) {
-    const auto first = gc_live::child_namespace(
-        "0123456789abcdef0123456789abcdef");
-    const auto second = gc_live::child_namespace(
-        "fedcba9876543210fedcba9876543210");
-    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    const auto first =
+        gc_live::child_namespace("0123456789abcdef0123456789abcdef");
+    const auto second =
+        gc_live::child_namespace("fedcba9876543210fedcba9876543210");
+    const auto parent =
+        smoke::parse_remote_parent("archive:dedicated-test-parent");
     ASSERT_TRUE(first);
     ASSERT_TRUE(second);
     ASSERT_TRUE(parent);
     EXPECT_NE(*first, *second);
-    EXPECT_EQ(*first,
-              "kasumi-gc-live-0123456789abcdef0123456789abcdef");
+    EXPECT_EQ(*first, "kasumi-gc-live-0123456789abcdef0123456789abcdef");
     EXPECT_TRUE(gc_live::valid_child(*first));
     EXPECT_FALSE(gc_live::valid_child(
         "kasumi-copy-smoke-0123456789abcdef0123456789abcdef"));
@@ -346,16 +352,16 @@ TEST(GcLivePreflightTest, ChildNamespaceUsesOnlyItsDedicatedPrefix) {
     mismatched_parent.location = "archive:other-test-parent";
     EXPECT_FALSE(gc_live::child_location(mismatched_parent, *first));
     EXPECT_FALSE(gc_live::child_location(
-        smoke::RemoteParent{.location = "archive:",
-                            .remote_name = "archive",
-                            .directory = ""},
+        smoke::RemoteParent{
+            .location = "archive:", .remote_name = "archive", .directory = ""},
         *first));
 }
 
 TEST(GcLivePreflightTest, StrictMissingDirectoryEvidenceAllowsInitialize) {
     constexpr std::string_view child =
         "kasumi-gc-live-0123456789abcdef0123456789abcdef";
-    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    const auto parent =
+        smoke::parse_remote_parent("archive:dedicated-test-parent");
     ASSERT_TRUE(parent);
     const auto observation = proven_absent_observation(*parent, child);
 
@@ -368,21 +374,22 @@ TEST(GcLivePreflightTest, StrictMissingDirectoryEvidenceAllowsInitialize) {
 TEST(GcLivePreflightTest, ExistingObjectsAndExistingEmptyChildAreRefused) {
     constexpr std::string_view child =
         "kasumi-gc-live-0123456789abcdef0123456789abcdef";
-    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    const auto parent =
+        smoke::parse_remote_parent("archive:dedicated-test-parent");
     ASSERT_TRUE(parent);
 
     auto existing = proven_absent_observation(*parent, child);
     existing.transport = {.result = "SUCCESS", .entry_count = 1};
-    EXPECT_EQ(gc_live::classify_pre_initialize(existing, *parent, child)
-                  .disposition,
-              gc_live::ChildDisposition::Existing);
+    EXPECT_EQ(
+        gc_live::classify_pre_initialize(existing, *parent, child).disposition,
+        gc_live::ChildDisposition::Existing);
 
     auto empty = proven_absent_observation(*parent, child);
     empty.transport = {.result = "SUCCESS", .entry_count = 0};
     empty.raw_rc = {.endpoint = "operations/list",
                     .request_fs = parent->remote_name + ":",
-                    .request_remote = parent->directory + "/" +
-                                      std::string{child},
+                    .request_remote =
+                        parent->directory + "/" + std::string{child},
                     .result = "SUCCESS",
                     .entry_count = 0};
     const auto empty_classification =
@@ -395,7 +402,8 @@ TEST(GcLivePreflightTest, ExistingObjectsAndExistingEmptyChildAreRefused) {
 TEST(GcLivePreflightTest, EmptyExactListingRequiresTrustedBackendCapability) {
     constexpr std::string_view child =
         "kasumi-gc-live-0123456789abcdef0123456789abcdef";
-    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    const auto parent =
+        smoke::parse_remote_parent("archive:dedicated-test-parent");
     ASSERT_TRUE(parent);
 
     const auto empty_success = [&] {
@@ -452,29 +460,39 @@ TEST(GcLivePreflightTest, EmptyExactListingRequiresTrustedBackendCapability) {
         transport::ErrorCode::ProtocolFailure;
 
     const std::vector<Case> cases{
-        {"capability false with complete recursive listing", empty_success(),
+        {"capability false with complete recursive listing",
+         empty_success(),
          gc_live::ChildDisposition::Unused},
-        {"capability true", capability_true,
+        {"capability true",
+         capability_true,
          gc_live::ChildDisposition::Refused},
-        {"capability absent", capability_absent,
+        {"capability absent",
+         capability_absent,
          gc_live::ChildDisposition::Refused},
-        {"capability lookup failed", capability_failed,
+        {"capability lookup failed",
+         capability_failed,
          gc_live::ChildDisposition::Refused},
-        {"capability timeout", capability_timeout,
+        {"capability timeout",
+         capability_timeout,
          gc_live::ChildDisposition::Refused},
-        {"capability response malformed", capability_malformed,
+        {"capability response malformed",
+         capability_malformed,
          gc_live::ChildDisposition::Refused},
-        {"capability filesystem mismatch", capability_mismatched,
+        {"capability filesystem mismatch",
+         capability_mismatched,
          gc_live::ChildDisposition::Refused},
-        {"capability success with error", contradictory_backend,
+        {"capability success with error",
+         contradictory_backend,
          gc_live::ChildDisposition::Refused},
-        {"listing success with error", contradictory_listing,
+        {"listing success with error",
+         contradictory_listing,
          gc_live::ChildDisposition::Refused},
-        {"incomplete shallow listing", shallow,
+        {"incomplete shallow listing",
+         shallow,
          gc_live::ChildDisposition::Refused},
-        {"objects found", existing,
-         gc_live::ChildDisposition::Existing},
-        {"raw RC filesystem mismatch", mismatched,
+        {"objects found", existing, gc_live::ChildDisposition::Existing},
+        {"raw RC filesystem mismatch",
+         mismatched,
          gc_live::ChildDisposition::Refused},
     };
 
@@ -491,7 +509,8 @@ TEST(GcLivePreflightTest,
      NormalizedStorageNotFoundWithoutStrictRcEvidenceIsRefused) {
     constexpr std::string_view child =
         "kasumi-gc-live-0123456789abcdef0123456789abcdef";
-    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    const auto parent =
+        smoke::parse_remote_parent("archive:dedicated-test-parent");
     ASSERT_TRUE(parent);
 
     auto observation = proven_absent_observation(*parent, child);
@@ -522,7 +541,8 @@ TEST(GcLivePreflightTest,
 TEST(GcLivePreflightTest, NonAbsenceTransportErrorsAreRefused) {
     constexpr std::string_view child =
         "kasumi-gc-live-0123456789abcdef0123456789abcdef";
-    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    const auto parent =
+        smoke::parse_remote_parent("archive:dedicated-test-parent");
     ASSERT_TRUE(parent);
     for (const auto code : {transport::ErrorCode::PermissionDenied,
                             transport::ErrorCode::Io,
@@ -541,7 +561,8 @@ TEST(GcLivePreflightTest,
      InitializeThenEmptyPostListingAllowsVerifiedOwnershipMarker) {
     constexpr std::string_view child_name =
         "kasumi-gc-live-0123456789abcdef0123456789abcdef";
-    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    const auto parent =
+        smoke::parse_remote_parent("archive:dedicated-test-parent");
     ASSERT_TRUE(parent);
     FakeState* state = nullptr;
     auto storage = make_transport(state);
@@ -567,14 +588,15 @@ TEST(GcLivePreflightTest,
     ASSERT_TRUE(gc_live::establish_ownership_marker(
         child, post, "run-token", marker_source, marker_readback));
     EXPECT_EQ(state->put_count, 1U);
-    EXPECT_TRUE(state->objects.contains(std::string{child_name} +
-                                        "/owner.marker"));
+    EXPECT_TRUE(
+        state->objects.contains(std::string{child_name} + "/owner.marker"));
 }
 
 TEST(GcLivePreflightTest, RefusedGatesNeverInitializeOrWriteOwnerMarker) {
     constexpr std::string_view child_name =
         "kasumi-gc-live-0123456789abcdef0123456789abcdef";
-    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    const auto parent =
+        smoke::parse_remote_parent("archive:dedicated-test-parent");
     ASSERT_TRUE(parent);
     FakeState* state = nullptr;
     auto storage = make_transport(state);
@@ -624,24 +646,27 @@ TEST(GcLivePreflightTest, RefusedGatesNeverInitializeOrWriteOwnerMarker) {
 }
 
 TEST(GcLivePreflightTest, PostInitializeRequiresSuccessfulEmptyListing) {
-    for (const auto& observation : {
-             gc_live::PostInitializeObservation{
-                 .transport = {.result = "FAILED",
-                               .error_category = transport::ErrorCode::StorageNotFound}},
-             gc_live::PostInitializeObservation{
-                 .transport = {.result = "SUCCESS", .entry_count = 1}},
-             gc_live::PostInitializeObservation{
-                 .transport = {.result = "FAILED",
-                               .error_category = transport::ErrorCode::PermissionDenied}},
-             gc_live::PostInitializeObservation{
-                 .transport = {.result = "FAILED",
-                               .error_category = transport::ErrorCode::Timeout}},
-             gc_live::PostInitializeObservation{
-                 .transport = {.result = "FAILED",
-                               .error_category = transport::ErrorCode::Io}},
-             gc_live::PostInitializeObservation{
-                 .transport = {.result = "FAILED",
-                               .error_category = transport::ErrorCode::ProtocolFailure}}}) {
+    for (const auto& observation :
+         {gc_live::PostInitializeObservation{
+              .transport = {.result = "FAILED",
+                            .error_category =
+                                transport::ErrorCode::StorageNotFound}},
+          gc_live::PostInitializeObservation{
+              .transport = {.result = "SUCCESS", .entry_count = 1}},
+          gc_live::PostInitializeObservation{
+              .transport = {.result = "FAILED",
+                            .error_category =
+                                transport::ErrorCode::PermissionDenied}},
+          gc_live::PostInitializeObservation{
+              .transport = {.result = "FAILED",
+                            .error_category = transport::ErrorCode::Timeout}},
+          gc_live::PostInitializeObservation{
+              .transport = {.result = "FAILED",
+                            .error_category = transport::ErrorCode::Io}},
+          gc_live::PostInitializeObservation{
+              .transport = {.result = "FAILED",
+                            .error_category =
+                                transport::ErrorCode::ProtocolFailure}}}) {
         EXPECT_EQ(gc_live::classify_post_initialize(observation),
                   gc_live::PostInitializeDisposition::Refused);
     }
@@ -650,9 +675,11 @@ TEST(GcLivePreflightTest, PostInitializeRequiresSuccessfulEmptyListing) {
 TEST(GcLivePreflightTest, CleanupRefusesMissingOrMismatchedOwnership) {
     constexpr std::string_view child_name =
         "kasumi-gc-live-0123456789abcdef0123456789abcdef";
-    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    const auto parent =
+        smoke::parse_remote_parent("archive:dedicated-test-parent");
     ASSERT_TRUE(parent);
-    auto workspace = kasumi::test::make_temp_workspace("gc-live-cleanup-refused");
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-live-cleanup-refused");
     FakeState* state = nullptr;
     auto storage = make_transport(state);
     state->scope_root = std::string{child_name};
@@ -660,27 +687,32 @@ TEST(GcLivePreflightTest, CleanupRefusesMissingOrMismatchedOwnership) {
                                 .child = std::string{child_name},
                                 .storage = std::move(storage)};
 
-    const auto missing = gc_live::cleanup_owned_child(
-        child, "run-token", {"payload.bin"},
-        kasumi::test::workspace_root(workspace));
+    const auto missing =
+        gc_live::cleanup_owned_child(child,
+                                     "run-token",
+                                     {"payload.bin"},
+                                     kasumi::test::workspace_root(workspace));
     EXPECT_EQ(missing.result, "refused");
     EXPECT_TRUE(state->removed.empty());
 
     state->objects[std::string{child_name} + "/owner.marker"] = "other-run";
     state->objects[std::string{child_name} + "/payload.bin"] = "payload";
-    const auto mismatched = gc_live::cleanup_owned_child(
-        child, "run-token", {"payload.bin"},
-        kasumi::test::workspace_root(workspace));
+    const auto mismatched =
+        gc_live::cleanup_owned_child(child,
+                                     "run-token",
+                                     {"payload.bin"},
+                                     kasumi::test::workspace_root(workspace));
     EXPECT_EQ(mismatched.result, "refused");
     EXPECT_TRUE(state->removed.empty());
-    EXPECT_TRUE(state->objects.contains(std::string{child_name} +
-                                        "/payload.bin"));
+    EXPECT_TRUE(
+        state->objects.contains(std::string{child_name} + "/payload.bin"));
 }
 
 TEST(GcLivePreflightTest, CleanupRejectsUnsafeIdentifiersBeforeRemoteRead) {
     constexpr std::string_view child_name =
         "kasumi-gc-live-0123456789abcdef0123456789abcdef";
-    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    const auto parent =
+        smoke::parse_remote_parent("archive:dedicated-test-parent");
     ASSERT_TRUE(parent);
     auto workspace = kasumi::test::make_temp_workspace("gc-live-cleanup-path");
     FakeState* state = nullptr;
@@ -691,9 +723,11 @@ TEST(GcLivePreflightTest, CleanupRejectsUnsafeIdentifiersBeforeRemoteRead) {
                                 .child = std::string{child_name},
                                 .storage = std::move(storage)};
 
-    const auto result = gc_live::cleanup_owned_child(
-        child, "run-token", {"../outside.bin"},
-        kasumi::test::workspace_root(workspace));
+    const auto result =
+        gc_live::cleanup_owned_child(child,
+                                     "run-token",
+                                     {"../outside.bin"},
+                                     kasumi::test::workspace_root(workspace));
 
     EXPECT_EQ(result.result, "refused");
     EXPECT_EQ(state->get_count, 0U);
@@ -703,11 +737,13 @@ TEST(GcLivePreflightTest, CleanupRejectsUnsafeIdentifiersBeforeRemoteRead) {
 TEST(GcLivePreflightTest, CleanupRefusesExistingLocalOwnershipCheckPath) {
     constexpr std::string_view child_name =
         "kasumi-gc-live-0123456789abcdef0123456789abcdef";
-    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    const auto parent =
+        smoke::parse_remote_parent("archive:dedicated-test-parent");
     ASSERT_TRUE(parent);
-    auto workspace = kasumi::test::make_temp_workspace("gc-live-cleanup-local-path");
-    const auto check_path = kasumi::test::workspace_path(
-        workspace, "gc-live-owner-check.tmp");
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-live-cleanup-local-path");
+    const auto check_path =
+        kasumi::test::workspace_path(workspace, "gc-live-owner-check.tmp");
     kasumi::test::write_text(check_path, "do-not-overwrite");
     FakeState* state = nullptr;
     auto storage = make_transport(state);
@@ -717,9 +753,11 @@ TEST(GcLivePreflightTest, CleanupRefusesExistingLocalOwnershipCheckPath) {
                                 .child = std::string{child_name},
                                 .storage = std::move(storage)};
 
-    const auto result = gc_live::cleanup_owned_child(
-        child, "run-token", {"payload.bin"},
-        kasumi::test::workspace_root(workspace));
+    const auto result =
+        gc_live::cleanup_owned_child(child,
+                                     "run-token",
+                                     {"payload.bin"},
+                                     kasumi::test::workspace_root(workspace));
 
     EXPECT_EQ(result.result, "refused");
     EXPECT_EQ(state->get_count, 0U);
@@ -732,7 +770,8 @@ TEST(GcLivePreflightTest, CleanupRefusesExistingLocalOwnershipCheckPath) {
 TEST(GcLivePreflightTest, CleanupRemovesOnlyExplicitObjectsAfterOwnerReadback) {
     constexpr std::string_view child_name =
         "kasumi-gc-live-0123456789abcdef0123456789abcdef";
-    const auto parent = smoke::parse_remote_parent("archive:dedicated-test-parent");
+    const auto parent =
+        smoke::parse_remote_parent("archive:dedicated-test-parent");
     ASSERT_TRUE(parent);
     auto workspace = kasumi::test::make_temp_workspace("gc-live-cleanup-owned");
     FakeState* state = nullptr;
@@ -745,16 +784,17 @@ TEST(GcLivePreflightTest, CleanupRemovesOnlyExplicitObjectsAfterOwnerReadback) {
                                 .child = std::string{child_name},
                                 .storage = std::move(storage)};
 
-    const auto result = gc_live::cleanup_owned_child(
-        child, "run-token", {"payload.bin"},
-        kasumi::test::workspace_root(workspace));
+    const auto result =
+        gc_live::cleanup_owned_child(child,
+                                     "run-token",
+                                     {"payload.bin"},
+                                     kasumi::test::workspace_root(workspace));
 
     EXPECT_EQ(result.result, "removed");
-    EXPECT_EQ(state->removed,
-              (std::vector<std::string>{std::string{child_name} +
-                                            "/payload.bin",
-                                        std::string{child_name} +
-                                            "/owner.marker"}));
+    EXPECT_EQ(
+        state->removed,
+        (std::vector<std::string>{std::string{child_name} + "/payload.bin",
+                                  std::string{child_name} + "/owner.marker"}));
     EXPECT_TRUE(state->objects.contains("outside/payload.bin"));
 }
 
@@ -785,8 +825,7 @@ TEST(RemoteCopySmokeJsonTest, OmitsErrorCategoryAsJsonNullForOperations) {
         .result = "SUCCESS",
     });
 
-    EXPECT_TRUE(operation.at("error_category").is_null())
-        << operation.dump();
+    EXPECT_TRUE(operation.at("error_category").is_null()) << operation.dump();
 }
 
 TEST(RemoteCopySmokeJsonTest, OmitsErrorCategoryAsJsonNullForCleanup) {
@@ -798,31 +837,31 @@ TEST(RemoteCopySmokeJsonTest, OmitsErrorCategoryAsJsonNullForCleanup) {
 }
 
 TEST(RemoteCopySmokeReadinessTest, ImmediateHashIsReady) {
-    const auto attempts = std::array{
-        readiness_attempt(1,
-                          std::chrono::milliseconds{0},
-                          smoke::ReadinessPresence::Present,
-                          smoke::ReadinessHash::Valid,
-                          std::string(64, 'a'))};
+    const auto attempts =
+        std::array{readiness_attempt(1,
+                                     std::chrono::milliseconds{0},
+                                     smoke::ReadinessPresence::Present,
+                                     smoke::ReadinessHash::Valid,
+                                     std::string(64, 'a'))};
 
     EXPECT_EQ(smoke::classify_readiness(attempts, std::chrono::seconds{8}),
               smoke::ReadinessClassification::Ready);
 }
 
 TEST(RemoteCopySmokeReadinessTest, LaterHashIsReadyAfterDelay) {
-    const auto attempts = std::array{
-        readiness_attempt(1,
-                          std::chrono::milliseconds{0},
-                          smoke::ReadinessPresence::Present,
-                          smoke::ReadinessHash::ObjectNotFound,
-                          {},
-                          transport::ErrorCode::ObjectNotFound,
-                          "not visible yet"),
-        readiness_attempt(2,
-                          std::chrono::milliseconds{250},
-                          smoke::ReadinessPresence::Present,
-                          smoke::ReadinessHash::Valid,
-                          std::string(64, 'b'))};
+    const auto attempts =
+        std::array{readiness_attempt(1,
+                                     std::chrono::milliseconds{0},
+                                     smoke::ReadinessPresence::Present,
+                                     smoke::ReadinessHash::ObjectNotFound,
+                                     {},
+                                     transport::ErrorCode::ObjectNotFound,
+                                     "not visible yet"),
+                   readiness_attempt(2,
+                                     std::chrono::milliseconds{250},
+                                     smoke::ReadinessPresence::Present,
+                                     smoke::ReadinessHash::Valid,
+                                     std::string(64, 'b'))};
 
     EXPECT_EQ(smoke::classify_readiness(attempts, std::chrono::seconds{8}),
               smoke::ReadinessClassification::ReadyAfterDelay);
@@ -833,15 +872,15 @@ TEST(RemoteCopySmokeReadinessTest,
     const auto schedule = smoke::readiness_schedule();
     std::array<smoke::ReadinessAttempt, 6> attempts;
     for (std::size_t index = 0; index < schedule.size(); ++index) {
-        attempts[index] = readiness_attempt(
-            index + 1,
-            schedule[index],
-            index == 0 ? smoke::ReadinessPresence::Absent
-                       : smoke::ReadinessPresence::Present,
-            smoke::ReadinessHash::ObjectNotFound,
-            {},
-            transport::ErrorCode::ObjectNotFound,
-            "not found");
+        attempts[index] =
+            readiness_attempt(index + 1,
+                              schedule[index],
+                              index == 0 ? smoke::ReadinessPresence::Absent
+                                         : smoke::ReadinessPresence::Present,
+                              smoke::ReadinessHash::ObjectNotFound,
+                              {},
+                              transport::ErrorCode::ObjectNotFound,
+                              "not found");
     }
 
     EXPECT_EQ(smoke::classify_readiness(attempts, std::chrono::seconds{8}),
@@ -849,28 +888,28 @@ TEST(RemoteCopySmokeReadinessTest,
 }
 
 TEST(RemoteCopySmokeReadinessTest, UnsupportedHashStopsAsUnsupported) {
-    const auto attempts = std::array{
-        readiness_attempt(1,
-                          std::chrono::milliseconds{0},
-                          smoke::ReadinessPresence::Present,
-                          smoke::ReadinessHash::Unsupported,
-                          {},
-                          transport::ErrorCode::Unsupported,
-                          "sha256 unsupported")};
+    const auto attempts =
+        std::array{readiness_attempt(1,
+                                     std::chrono::milliseconds{0},
+                                     smoke::ReadinessPresence::Present,
+                                     smoke::ReadinessHash::Unsupported,
+                                     {},
+                                     transport::ErrorCode::Unsupported,
+                                     "sha256 unsupported")};
 
     EXPECT_EQ(smoke::classify_readiness(attempts, std::chrono::seconds{8}),
               smoke::ReadinessClassification::Unsupported);
 }
 
 TEST(RemoteCopySmokeReadinessTest, GenuineHashFailureIsFailed) {
-    const auto attempts = std::array{
-        readiness_attempt(1,
-                          std::chrono::milliseconds{0},
-                          smoke::ReadinessPresence::Present,
-                          smoke::ReadinessHash::Failed,
-                          {},
-                          transport::ErrorCode::Io,
-                          "connection failed")};
+    const auto attempts =
+        std::array{readiness_attempt(1,
+                                     std::chrono::milliseconds{0},
+                                     smoke::ReadinessPresence::Present,
+                                     smoke::ReadinessHash::Failed,
+                                     {},
+                                     transport::ErrorCode::Io,
+                                     "connection failed")};
 
     EXPECT_EQ(smoke::classify_readiness(attempts, std::chrono::seconds{8}),
               smoke::ReadinessClassification::Failed);
@@ -907,21 +946,21 @@ TEST(RemoteCopySmokeReadinessTest, RetryScheduleIsBoundedByEightSeconds) {
     EXPECT_EQ(schedule.front(), std::chrono::milliseconds{0});
     EXPECT_EQ(schedule.back(), std::chrono::milliseconds{7750});
     EXPECT_LE(schedule.back(), std::chrono::seconds{8});
-    const auto late_attempt = std::array{
-        readiness_attempt(1,
-                          std::chrono::milliseconds{8001},
-                          smoke::ReadinessPresence::Present,
-                          smoke::ReadinessHash::ObjectNotFound,
-                          {},
-                          transport::ErrorCode::ObjectNotFound,
-                          "not found")};
-    EXPECT_EQ(smoke::classify_readiness(late_attempt,
-                                        std::chrono::seconds{8}),
+    const auto late_attempt =
+        std::array{readiness_attempt(1,
+                                     std::chrono::milliseconds{8001},
+                                     smoke::ReadinessPresence::Present,
+                                     smoke::ReadinessHash::ObjectNotFound,
+                                     {},
+                                     transport::ErrorCode::ObjectNotFound,
+                                     "not found")};
+    EXPECT_EQ(smoke::classify_readiness(late_attempt, std::chrono::seconds{8}),
               smoke::ReadinessClassification::Failed);
 }
 
 TEST(RemoteCopySmokeClassificationTest, NativeVerifiedCopyIsPass) {
-    EXPECT_EQ(smoke::classify(verified_native_copy()), smoke::SmokeStatus::Pass);
+    EXPECT_EQ(smoke::classify(verified_native_copy()),
+              smoke::SmokeStatus::Pass);
 }
 
 TEST(RemoteCopySmokeClassificationTest,

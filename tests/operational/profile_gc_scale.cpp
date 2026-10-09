@@ -14,16 +14,16 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
-#include <numeric>
 #include <nlohmann/json.hpp>
+#include <numeric>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace {
 
-using kasumi::Snapshot;
 using kasumi::NodeRow;
+using kasumi::Snapshot;
 using kasumi::test::TempWorkspace;
 using Clock = std::chrono::steady_clock;
 
@@ -60,8 +60,8 @@ void put_commit_fast(
     bool publish_head = false) {
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(key);
-    auto published = kasumi::application::history_storage::
-        publish_commit_object_scoped(
+    auto published =
+        kasumi::application::history_storage::publish_commit_object_scoped(
             transport, layout, key, commit, workspace_root);
     if (!published) {
         std::cerr << "publish_commit_object_scoped failed: "
@@ -69,8 +69,8 @@ void put_commit_fast(
         std::abort();
     }
     if (publish_head) {
-        auto marker = kasumi::application::history_storage::
-            publish_head_marker_scoped(
+        auto marker =
+            kasumi::application::history_storage::publish_head_marker_scoped(
                 transport, layout, published->head, workspace_root);
         if (!marker) {
             std::cerr << "publish_head_marker_scoped failed: "
@@ -174,51 +174,68 @@ struct TrialMetrics {
     std::size_t candidates_quarantined = 0;
 };
 
-void collect_metrics_post_gc(TrialMetrics& m, FakeState* state, const kasumi::application::integrity::GarbageCollectResult& collected) {
+void collect_metrics_post_gc(
+    TrialMetrics& m,
+    FakeState* state,
+    const kasumi::application::integrity::GarbageCollectResult& collected) {
     // Collect perf trace timers (in microseconds)
-    m.barrier_acquire_us = kasumi::platform::perf_trace::get_time("gc barrier acquire");
-    m.writer_check_us = kasumi::platform::perf_trace::get_time("gc writer consistency checks");
-    m.consistency_probe_us = kasumi::platform::perf_trace::get_time("gc backend consistency probe");
-    m.stage_barrier_writers_us = m.barrier_acquire_us + m.writer_check_us + m.consistency_probe_us;
+    m.barrier_acquire_us =
+        kasumi::platform::perf_trace::get_time("gc barrier acquire");
+    m.writer_check_us =
+        kasumi::platform::perf_trace::get_time("gc writer consistency checks");
+    m.consistency_probe_us =
+        kasumi::platform::perf_trace::get_time("gc backend consistency probe");
+    m.stage_barrier_writers_us =
+        m.barrier_acquire_us + m.writer_check_us + m.consistency_probe_us;
 
-    m.quarantine_inventory_us = kasumi::platform::perf_trace::get_time("gc quarantine inventory");
-    m.quarantine_restore_us = kasumi::platform::perf_trace::get_time("gc quarantine restoration");
-    m.quarantine_metadata_init_us = kasumi::platform::perf_trace::get_time("gc prior metadata initialization");
-    m.stage_quarantine_inventory_recovery_us = m.quarantine_inventory_us + m.quarantine_restore_us + m.quarantine_metadata_init_us;
+    m.quarantine_inventory_us =
+        kasumi::platform::perf_trace::get_time("gc quarantine inventory");
+    m.quarantine_restore_us =
+        kasumi::platform::perf_trace::get_time("gc quarantine restoration");
+    m.quarantine_metadata_init_us = kasumi::platform::perf_trace::get_time(
+        "gc prior metadata initialization");
+    m.stage_quarantine_inventory_recovery_us = m.quarantine_inventory_us +
+                                               m.quarantine_restore_us +
+                                               m.quarantine_metadata_init_us;
 
-    m.stage_reachability_obs1_us = kasumi::platform::perf_trace::get_time("gc reachability observation 1");
-    m.stage_reachability_obs2_us = kasumi::platform::perf_trace::get_time("gc reachability observation 2");
-    m.stage_snapshot_comparison_us = kasumi::platform::perf_trace::get_time("gc stable-state comparison");
-    m.stage_final_listing_us = kasumi::platform::perf_trace::get_time("gc final namespace verification");
-    m.stage_purge_expired_us = kasumi::platform::perf_trace::get_time("gc expired quarantine purge");
+    m.stage_reachability_obs1_us =
+        kasumi::platform::perf_trace::get_time("gc reachability observation 1");
+    m.stage_reachability_obs2_us =
+        kasumi::platform::perf_trace::get_time("gc reachability observation 2");
+    m.stage_snapshot_comparison_us =
+        kasumi::platform::perf_trace::get_time("gc stable-state comparison");
+    m.stage_final_listing_us = kasumi::platform::perf_trace::get_time(
+        "gc final namespace verification");
+    m.stage_purge_expired_us =
+        kasumi::platform::perf_trace::get_time("gc expired quarantine purge");
 
     m.stage_time_to_first_candidate_us =
-        m.stage_barrier_writers_us +
-        m.stage_quarantine_inventory_recovery_us +
-        m.stage_reachability_obs1_us +
-        m.stage_reachability_obs2_us +
-        m.stage_snapshot_comparison_us +
-        m.stage_final_listing_us +
+        m.stage_barrier_writers_us + m.stage_quarantine_inventory_recovery_us +
+        m.stage_reachability_obs1_us + m.stage_reachability_obs2_us +
+        m.stage_snapshot_comparison_us + m.stage_final_listing_us +
         m.stage_purge_expired_us;
 
-    m.batch_prepare_us = kasumi::platform::perf_trace::get_time("gc.batch_prepare_duration_us");
-    m.batch_verify_us = kasumi::platform::perf_trace::get_time("gc.batch_verify_duration_us");
-    m.batch_publish_remove_us = kasumi::platform::perf_trace::get_time("gc.batch_publish_remove_duration_us");
-    m.stage_candidates_processing_us = m.batch_prepare_us + m.batch_verify_us + m.batch_publish_remove_us;
+    m.batch_prepare_us =
+        kasumi::platform::perf_trace::get_time("gc.batch_prepare_duration_us");
+    m.batch_verify_us =
+        kasumi::platform::perf_trace::get_time("gc.batch_verify_duration_us");
+    m.batch_publish_remove_us = kasumi::platform::perf_trace::get_time(
+        "gc.batch_publish_remove_duration_us");
+    m.stage_candidates_processing_us =
+        m.batch_prepare_us + m.batch_verify_us + m.batch_publish_remove_us;
 
-    m.total_gc_us = kasumi::platform::perf_trace::get_time("gc.total_duration_us");
+    m.total_gc_us =
+        kasumi::platform::perf_trace::get_time("gc.total_duration_us");
 
     m.get_commit_us = kasumi::platform::perf_trace::get_time("rc/get_commit");
-    const auto trace_time = [](std::string_view scope,
-                               std::string_view name) {
+    const auto trace_time = [](std::string_view scope, std::string_view name) {
         std::string metric{scope};
         metric.append(name);
         return kasumi::platform::perf_trace::get_time(metric);
     };
     const auto collect_snapshot = [&](SnapshotTimings& timings,
                                       std::string_view scope) {
-        timings.physical_listing_us =
-            trace_time(scope, ".physical_listing_us");
+        timings.physical_listing_us = trace_time(scope, ".physical_listing_us");
         timings.history_reconstruction_us =
             trace_time(scope, ".history_reconstruction_us");
         timings.build_history_inventory_us =
@@ -236,9 +253,8 @@ void collect_metrics_post_gc(TrialMetrics& m, FakeState* state, const kasumi::ap
     };
     collect_snapshot(m.snapshot1, "gc.snapshot.first");
     collect_snapshot(m.snapshot2, "gc.snapshot.second");
-    m.build_history_inventory_us =
-        m.snapshot1.build_history_inventory_us +
-        m.snapshot2.build_history_inventory_us;
+    m.build_history_inventory_us = m.snapshot1.build_history_inventory_us +
+                                   m.snapshot2.build_history_inventory_us;
     m.load_and_auth_commits_us = m.snapshot1.load_and_auth_commits_us +
                                  m.snapshot2.load_and_auth_commits_us;
     m.inspect_markers_epochs_us = m.snapshot1.inspect_markers_epochs_us +
@@ -301,29 +317,31 @@ TrialMetrics run_trial_serie_a(std::size_t N, std::size_t rep) {
     constexpr std::size_t orphan_count = 10;
     constexpr std::size_t history_count = 2; // 1 commit + 1 head marker
     if (N < orphan_count + history_count) {
-        std::cerr << "N must be at least " << (orphan_count + history_count) << '\n';
+        std::cerr << "N must be at least " << (orphan_count + history_count)
+                  << '\n';
         std::abort();
     }
     const std::size_t live_count = N - orphan_count - history_count;
 
     Snapshot tree;
     tree.rows.reserve(live_count + 1);
-    tree.rows.push_back(NodeRow{.path = "", .hash = {}, .size = 0, .mtime = {}, .is_directory = true});
+    tree.rows.push_back(NodeRow{
+        .path = "", .hash = {}, .size = 0, .mtime = {}, .is_directory = true});
     for (std::size_t i = 0; i < live_count; ++i) {
         std::string path = "file_" + std::to_string(i) + ".bin";
         std::string content = "live_content_" + std::to_string(i);
-        tree.rows.push_back(NodeRow{
-            .path = path,
-            .hash = kasumi::hasher::hash_string(content),
-            .size = content.size(),
-            .mtime = {},
-            .is_directory = false
-        });
+        tree.rows.push_back(
+            NodeRow{.path = path,
+                    .hash = kasumi::hasher::hash_string(content),
+                    .size = content.size(),
+                    .mtime = {},
+                    .is_directory = false});
     }
     kasumi::finalize_snapshot(tree);
     auto commit_res = kasumi::history::make_commit(0, {}, std::move(tree));
     if (!commit_res) {
-        std::cerr << "make_commit failed: " << commit_res.error().detail << '\n';
+        std::cerr << "make_commit failed: " << commit_res.error().detail
+                  << '\n';
         std::abort();
     }
     auto published = kasumi::application::history_storage::publish_commit(
@@ -333,7 +351,8 @@ TrialMetrics run_trial_serie_a(std::size_t N, std::size_t rep) {
         std::abort();
     }
 
-    const auto plain_file = kasumi::test::workspace_path(workspace, "temp.plain");
+    const auto plain_file =
+        kasumi::test::workspace_path(workspace, "temp.plain");
     const auto enc_file = kasumi::test::workspace_path(workspace, "temp.enc");
 
     for (std::size_t i = 0; i < live_count; ++i) {
@@ -347,7 +366,8 @@ TrialMetrics run_trial_serie_a(std::size_t N, std::size_t rep) {
     }
 
     if (state->objects.size() != N) {
-        std::cerr << "Expected " << N << " objects in storage, found " << state->objects.size() << '\n';
+        std::cerr << "Expected " << N << " objects in storage, found "
+                  << state->objects.size() << '\n';
         std::abort();
     }
 
@@ -368,17 +388,24 @@ TrialMetrics run_trial_serie_a(std::size_t N, std::size_t rep) {
     kasumi::platform::perf_trace::reset();
 
     const auto start_gc = Clock::now();
-    auto collected = kasumi::application::integrity::garbage_collect(runtime, transport, key);
+    auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, key);
     const auto end_gc = Clock::now();
     m.wall_clock_us = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(end_gc - start_gc).count());
+        std::chrono::duration_cast<std::chrono::microseconds>(end_gc - start_gc)
+            .count());
 
     if (!collected) {
-        std::cerr << "garbage_collect failed: " << kasumi::application::integrity::describe(collected.error()) << '\n';
+        std::cerr << "garbage_collect failed: "
+                  << kasumi::application::integrity::describe(collected.error())
+                  << '\n';
         std::abort();
     }
-    if (collected->candidate_objects != orphan_count || collected->quarantined_objects != orphan_count) {
-        std::cerr << "Unexpected candidate/quarantine count: " << collected->candidate_objects << " / " << collected->quarantined_objects << '\n';
+    if (collected->candidate_objects != orphan_count ||
+        collected->quarantined_objects != orphan_count) {
+        std::cerr << "Unexpected candidate/quarantine count: "
+                  << collected->candidate_objects << " / "
+                  << collected->quarantined_objects << '\n';
         std::abort();
     }
 
@@ -386,7 +413,8 @@ TrialMetrics run_trial_serie_a(std::size_t N, std::size_t rep) {
     return m;
 }
 
-// Serie B: Vary retained DAG history H in {10, 100, 1000}, constant content (10 live, 10 orphans)
+// Serie B: Vary retained DAG history H in {10, 100, 1000}, constant content (10
+// live, 10 orphans)
 TrialMetrics run_trial_serie_b(std::size_t H, std::size_t rep) {
     TrialMetrics m;
     m.series = "B";
@@ -407,12 +435,14 @@ TrialMetrics run_trial_serie_b(std::size_t H, std::size_t rep) {
 
     auto runtime = make_runtime(workspace);
     const auto key = test_key();
-    const auto layout = kasumi::application::history_storage::derive_remote_layout(key);
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key);
 
     constexpr std::size_t live_count = 10;
     constexpr std::size_t orphan_count = 10;
 
-    const auto plain_file = kasumi::test::workspace_path(workspace, "temp.plain");
+    const auto plain_file =
+        kasumi::test::workspace_path(workspace, "temp.plain");
     const auto enc_file = kasumi::test::workspace_path(workspace, "temp.enc");
 
     for (std::size_t i = 0; i < live_count; ++i) {
@@ -427,17 +457,17 @@ TrialMetrics run_trial_serie_b(std::size_t H, std::size_t rep) {
 
     Snapshot tree;
     tree.rows.reserve(live_count + 1);
-    tree.rows.push_back(NodeRow{.path = "", .hash = {}, .size = 0, .mtime = {}, .is_directory = true});
+    tree.rows.push_back(NodeRow{
+        .path = "", .hash = {}, .size = 0, .mtime = {}, .is_directory = true});
     for (std::size_t i = 0; i < live_count; ++i) {
         std::string path = "file_" + std::to_string(i) + ".bin";
         std::string content = "shared_live_content_" + std::to_string(i);
-        tree.rows.push_back(NodeRow{
-            .path = path,
-            .hash = kasumi::hasher::hash_string(content),
-            .size = content.size(),
-            .mtime = {},
-            .is_directory = false
-        });
+        tree.rows.push_back(
+            NodeRow{.path = path,
+                    .hash = kasumi::hasher::hash_string(content),
+                    .size = content.size(),
+                    .mtime = {},
+                    .is_directory = false});
     }
     kasumi::finalize_snapshot(tree);
 
@@ -480,17 +510,23 @@ TrialMetrics run_trial_serie_b(std::size_t H, std::size_t rep) {
     kasumi::platform::perf_trace::reset();
 
     const auto start_gc = Clock::now();
-    auto collected = kasumi::application::integrity::garbage_collect(runtime, transport, key);
+    auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, key);
     const auto end_gc = Clock::now();
     m.wall_clock_us = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(end_gc - start_gc).count());
+        std::chrono::duration_cast<std::chrono::microseconds>(end_gc - start_gc)
+            .count());
 
     if (!collected) {
-        std::cerr << "garbage_collect failed in Serie B: " << kasumi::application::integrity::describe(collected.error()) << '\n';
+        std::cerr << "garbage_collect failed in Serie B: "
+                  << kasumi::application::integrity::describe(collected.error())
+                  << '\n';
         std::abort();
     }
-    if (collected->candidate_objects != orphan_count || collected->quarantined_objects != orphan_count) {
-        std::cerr << "Unexpected candidate count in Serie B: " << collected->candidate_objects << '\n';
+    if (collected->candidate_objects != orphan_count ||
+        collected->quarantined_objects != orphan_count) {
+        std::cerr << "Unexpected candidate count in Serie B: "
+                  << collected->candidate_objects << '\n';
         std::abort();
     }
 
@@ -537,18 +573,24 @@ TrialMetrics run_trial_retention(std::size_t P,
     const auto key = test_key();
     const auto layout = derive_remote_layout(key);
     const auto workspace_root = kasumi::test::workspace_root(workspace);
-    const auto plain_file = kasumi::test::workspace_path(workspace, "temp.plain");
+    const auto plain_file =
+        kasumi::test::workspace_path(workspace, "temp.plain");
     const auto enc_file = kasumi::test::workspace_path(workspace, "temp.enc");
     constexpr std::string_view content = "phase17-shared-retained-content";
     put_content_fast(transport, plain_file, enc_file, content, key);
 
     Snapshot tree{.rows = {
-        NodeRow{.path = "", .hash = {}, .size = 0, .mtime = {},
-                .is_directory = true},
-        NodeRow{.path = "shared.bin",
-                .hash = kasumi::hasher::hash_string(content),
-                .size = content.size(), .mtime = {}, .is_directory = false},
-    }};
+                      NodeRow{.path = "",
+                              .hash = {},
+                              .size = 0,
+                              .mtime = {},
+                              .is_directory = true},
+                      NodeRow{.path = "shared.bin",
+                              .hash = kasumi::hasher::hash_string(content),
+                              .size = content.size(),
+                              .mtime = {},
+                              .is_directory = false},
+                  }};
     kasumi::finalize_snapshot(tree);
 
     const auto publish_object = [&](const kasumi::history::Commit& commit) {
@@ -580,18 +622,21 @@ TrialMetrics run_trial_retention(std::size_t P,
     heads.reserve(branch_count);
     for (std::size_t branch = 0; branch < branch_count; ++branch) {
         const auto branch_size =
-            base_branch_size + static_cast<std::size_t>(branch < branch_remainder);
+            base_branch_size +
+            static_cast<std::size_t>(branch < branch_remainder);
         const auto tail = branch_size - recent_per_head + 1;
         auto parent = root_reference.commit_id;
         HeadReference head = root_reference;
         for (std::size_t height = 1; height <= branch_size; ++height) {
-            const auto timestamp = height < tail
-                ? root_time + static_cast<std::int64_t>(branch * branch_size + height)
-                : retention_now - 3600 +
-                      static_cast<std::int64_t>(height - tail) *
-                          3600 / static_cast<std::int64_t>(recent_per_head);
-            auto commit = kasumi::history::make_commit(
-                height, {parent}, tree, timestamp);
+            const auto timestamp =
+                height < tail
+                    ? root_time + static_cast<std::int64_t>(
+                                      branch * branch_size + height)
+                    : retention_now - 3600 +
+                          static_cast<std::int64_t>(height - tail) * 3600 /
+                              static_cast<std::int64_t>(recent_per_head);
+            auto commit =
+                kasumi::history::make_commit(height, {parent}, tree, timestamp);
             if (!commit) {
                 std::cerr << "branch commit creation failed at height "
                           << height << '\n';
@@ -602,8 +647,8 @@ TrialMetrics run_trial_retention(std::size_t P,
                 .id = head.commit_id, .commit = *commit});
             parent = head.commit_id;
         }
-        auto marker = publish_head_marker_scoped(
-            transport, layout, head, workspace_root);
+        auto marker =
+            publish_head_marker_scoped(transport, layout, head, workspace_root);
         if (!marker) {
             std::cerr << "publish_head_marker_scoped failed: "
                       << marker.error().detail << '\n';
@@ -621,12 +666,13 @@ TrialMetrics run_trial_retention(std::size_t P,
     }
     const std::string vault_id(64, 'a');
     const auto genesis = epoch::seal(
-        epoch::Epoch{.vault_id = vault_id,
-                     .sequence = 0,
-                     .issued_at = root_time,
-                     .policy = policy,
-                     .anchors = {{.commit_id = root_reference.commit_id,
-                                  .height = 0}}}, key);
+        epoch::Epoch{
+            .vault_id = vault_id,
+            .sequence = 0,
+            .issued_at = root_time,
+            .policy = policy,
+            .anchors = {{.commit_id = root_reference.commit_id, .height = 0}}},
+        key);
     if (!genesis || !epoch::publish(transport, key, *genesis, workspace_root)) {
         std::cerr << "production genesis Epoch publication failed\n";
         std::abort();
@@ -637,15 +683,16 @@ TrialMetrics run_trial_retention(std::size_t P,
                      .issued_at = retention_now,
                      .policy = policy,
                      .anchors = plan->anchors,
-                     .previous_epoch_id = genesis->reference.epoch_id}, key);
+                     .previous_epoch_id = genesis->reference.epoch_id},
+        key);
     if (!latest || !epoch::publish(transport, key, *latest, workspace_root)) {
         std::cerr << "production pruning Epoch publication failed\n";
         std::abort();
     }
 
-    const auto protected_count =
-        planning_commits.size() - plan->prunable_commits.size() +
-        plan->anchors.size();
+    const auto protected_count = planning_commits.size() -
+                                 plan->prunable_commits.size() +
+                                 plan->anchors.size();
     m.N = state->objects.size();
     m.physical_commit_objects = planning_commits.size();
     m.physical_content_objects = 1;
@@ -667,7 +714,8 @@ TrialMetrics run_trial_retention(std::size_t P,
         runtime, transport, key);
     const auto end = Clock::now();
     m.wall_clock_us = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+        std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+            .count());
     if (!collected) {
         std::cerr << "Phase 17 full GC failed: "
                   << kasumi::application::integrity::describe(collected.error())
@@ -696,13 +744,13 @@ struct SummaryStats {
     double mean_v = 0;
 
     static SummaryStats compute(std::vector<double> vals) {
-        if (vals.empty()) return {};
+        if (vals.empty())
+            return {};
         std::ranges::sort(vals);
         double min_v = vals.front();
         double max_v = vals.back();
-        const double mean_v =
-            std::accumulate(vals.begin(), vals.end(), 0.0) /
-            static_cast<double>(vals.size());
+        const double mean_v = std::accumulate(vals.begin(), vals.end(), 0.0) /
+                              static_cast<double>(vals.size());
         double median_v = 0;
         const auto sz = vals.size();
         if (sz % 2 == 1) {
@@ -734,13 +782,15 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
     };
 
     auto s_barrier = extract(&TrialMetrics::stage_barrier_writers_us);
-    auto s_quarantine = extract(&TrialMetrics::stage_quarantine_inventory_recovery_us);
+    auto s_quarantine =
+        extract(&TrialMetrics::stage_quarantine_inventory_recovery_us);
     auto s_obs1 = extract(&TrialMetrics::stage_reachability_obs1_us);
     auto s_obs2 = extract(&TrialMetrics::stage_reachability_obs2_us);
     auto s_compare = extract(&TrialMetrics::stage_snapshot_comparison_us);
     auto s_final_list = extract(&TrialMetrics::stage_final_listing_us);
     auto s_purge = extract(&TrialMetrics::stage_purge_expired_us);
-    auto s_first_cand = extract(&TrialMetrics::stage_time_to_first_candidate_us);
+    auto s_first_cand =
+        extract(&TrialMetrics::stage_time_to_first_candidate_us);
     auto s_cand_proc = extract(&TrialMetrics::stage_candidates_processing_us);
     auto s_batch_prep = extract(&TrialMetrics::batch_prepare_us);
     auto s_batch_verify = extract(&TrialMetrics::batch_verify_us);
@@ -752,24 +802,24 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
     auto s_get_commit = extract(&TrialMetrics::get_commit_us);
     auto snapshot_attribution = [&](bool first) {
         const auto total = first ? s_obs1 : s_obs2;
-        const auto physical = extract_snapshot(
-            first, &SnapshotTimings::physical_listing_us);
+        const auto physical =
+            extract_snapshot(first, &SnapshotTimings::physical_listing_us);
         const auto history = extract_snapshot(
             first, &SnapshotTimings::history_reconstruction_us);
-        const auto validation = extract_snapshot(
-            first, &SnapshotTimings::validate_history_us);
-        const auto content = extract_snapshot(
-            first, &SnapshotTimings::content_reachability_us);
-        const auto candidates = extract_snapshot(
-            first, &SnapshotTimings::candidate_selection_us);
+        const auto validation =
+            extract_snapshot(first, &SnapshotTimings::validate_history_us);
+        const auto content =
+            extract_snapshot(first, &SnapshotTimings::content_reachability_us);
+        const auto candidates =
+            extract_snapshot(first, &SnapshotTimings::candidate_selection_us);
         const auto inventory = extract_snapshot(
             first, &SnapshotTimings::build_history_inventory_us);
-        const auto load = extract_snapshot(
-            first, &SnapshotTimings::load_and_auth_commits_us);
+        const auto load =
+            extract_snapshot(first, &SnapshotTimings::load_and_auth_commits_us);
         const auto inspect = extract_snapshot(
             first, &SnapshotTimings::inspect_markers_epochs_us);
-        const auto dag = extract_snapshot(
-            first, &SnapshotTimings::dag_traversal_us);
+        const auto dag =
+            extract_snapshot(first, &SnapshotTimings::dag_traversal_us);
         const auto history_residual = history.mean_v - inventory.mean_v -
                                       load.mean_v - inspect.mean_v - dag.mean_v;
         const auto snapshot_residual = total.mean_v - physical.mean_v -
@@ -824,49 +874,104 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
         {"purged_objects", rep1.purged_objects},
         {"content_references_examined", rep1.content_references_examined},
         {"unique_reachable_content_ids", rep1.unique_reachable_content_ids},
-        {"orphan_candidates", rep1.orphan_candidates}
-    };
+        {"orphan_candidates", rep1.orphan_candidates}};
 
     entry["history_reconstruction"] = {
         {"retained_commits_fixture", rep1.retained_commits},
         {"commit_object_get_calls", rep1.commit_object_get_calls},
         {"marker_object_get_calls", rep1.marker_object_get_calls},
-        {"other_object_get_calls", rep1.transport_get_count - rep1.commit_object_get_calls - rep1.marker_object_get_calls - rep1.epoch_object_get_calls},
-        {"commit_object_get_calls_per_observation", rep1.commit_object_get_calls / 2},
-        {"commit_object_get_calls_by_observation", {rep1.commit_object_get_calls / 2, rep1.commit_object_get_calls / 2}},
-        {"marker_object_get_calls_per_observation", rep1.marker_object_get_calls / 2},
-        {"epoch_object_get_calls_by_observation", {rep1.epoch_object_get_calls / 2, rep1.epoch_object_get_calls / 2}},
+        {"other_object_get_calls",
+         rep1.transport_get_count - rep1.commit_object_get_calls -
+             rep1.marker_object_get_calls - rep1.epoch_object_get_calls},
+        {"commit_object_get_calls_per_observation",
+         rep1.commit_object_get_calls / 2},
+        {"commit_object_get_calls_by_observation",
+         {rep1.commit_object_get_calls / 2, rep1.commit_object_get_calls / 2}},
+        {"marker_object_get_calls_per_observation",
+         rep1.marker_object_get_calls / 2},
+        {"epoch_object_get_calls_by_observation",
+         {rep1.epoch_object_get_calls / 2, rep1.epoch_object_get_calls / 2}},
         {"epoch_object_get_calls", rep1.epoch_object_get_calls},
-        {"epoch_object_get_calls_per_observation", rep1.epoch_object_get_calls / 2},
-        {"content_reference_capacity_growth_events_both_observations", rep1.content_reference_capacity_growth_events},
-        {"content_reference_capacity_growth_events_per_observation", rep1.content_reference_capacity_growth_events / 2}
-    };
+        {"epoch_object_get_calls_per_observation",
+         rep1.epoch_object_get_calls / 2},
+        {"content_reference_capacity_growth_events_both_observations",
+         rep1.content_reference_capacity_growth_events},
+        {"content_reference_capacity_growth_events_per_observation",
+         rep1.content_reference_capacity_growth_events / 2}};
     entry["snapshot_attribution"] = {
         {"observation_1", snapshot_attribution(true)},
         {"observation_2", snapshot_attribution(false)},
         {"get_commit_transport_time_both_observations_inclusive_us",
-         s_get_commit.median_v}
-    };
+         s_get_commit.median_v}};
 
-    entry["timings_us"] = {
-        {"barrier_and_writers", {{"min", s_barrier.min_v}, {"median", s_barrier.median_v}, {"max", s_barrier.max_v}}},
-        {"quarantine_inventory_recovery", {{"min", s_quarantine.min_v}, {"median", s_quarantine.median_v}, {"max", s_quarantine.max_v}}},
-        {"reachability_obs1", {{"min", s_obs1.min_v}, {"median", s_obs1.median_v}, {"max", s_obs1.max_v}}},
-        {"reachability_obs2", {{"min", s_obs2.min_v}, {"median", s_obs2.median_v}, {"max", s_obs2.max_v}}},
-        {"snapshot_comparison", {{"min", s_compare.min_v}, {"median", s_compare.median_v}, {"max", s_compare.max_v}}},
-        {"final_physical_listing", {{"min", s_final_list.min_v}, {"median", s_final_list.median_v}, {"max", s_final_list.max_v}}},
-        {"purge_expired_quarantine", {{"min", s_purge.min_v}, {"median", s_purge.median_v}, {"max", s_purge.max_v}}},
-        {"time_to_first_candidate", {{"min", s_first_cand.min_v}, {"median", s_first_cand.median_v}, {"max", s_first_cand.max_v}}},
-        {"candidates_processing", {{"min", s_cand_proc.min_v}, {"median", s_cand_proc.median_v}, {"max", s_cand_proc.max_v}}},
-        {"batch_prepare_us", {{"min", s_batch_prep.min_v}, {"median", s_batch_prep.median_v}, {"max", s_batch_prep.max_v}}},
-        {"batch_verify_us", {{"min", s_batch_verify.min_v}, {"median", s_batch_verify.median_v}, {"max", s_batch_verify.max_v}}},
-        {"batch_publish_remove_us", {{"min", s_batch_publish.min_v}, {"median", s_batch_publish.median_v}, {"max", s_batch_publish.max_v}}},
-        {"build_history_inventory_us", {{"min", s_build_hist.min_v}, {"median", s_build_hist.median_v}, {"max", s_build_hist.max_v}}},
-        {"dag_traversal_us", {{"min", s_dag.min_v}, {"median", s_dag.median_v}, {"max", s_dag.max_v}}},
-        {"get_commit_us", {{"min", s_get_commit.min_v}, {"median", s_get_commit.median_v}, {"max", s_get_commit.max_v}}},
-        {"total_gc_us", {{"min", s_total.min_v}, {"median", s_total.median_v}, {"max", s_total.max_v}}},
-        {"wall_clock_us", {{"min", s_wall.min_v}, {"median", s_wall.median_v}, {"max", s_wall.max_v}}}
-    };
+    entry["timings_us"] = {{"barrier_and_writers",
+                            {{"min", s_barrier.min_v},
+                             {"median", s_barrier.median_v},
+                             {"max", s_barrier.max_v}}},
+                           {"quarantine_inventory_recovery",
+                            {{"min", s_quarantine.min_v},
+                             {"median", s_quarantine.median_v},
+                             {"max", s_quarantine.max_v}}},
+                           {"reachability_obs1",
+                            {{"min", s_obs1.min_v},
+                             {"median", s_obs1.median_v},
+                             {"max", s_obs1.max_v}}},
+                           {"reachability_obs2",
+                            {{"min", s_obs2.min_v},
+                             {"median", s_obs2.median_v},
+                             {"max", s_obs2.max_v}}},
+                           {"snapshot_comparison",
+                            {{"min", s_compare.min_v},
+                             {"median", s_compare.median_v},
+                             {"max", s_compare.max_v}}},
+                           {"final_physical_listing",
+                            {{"min", s_final_list.min_v},
+                             {"median", s_final_list.median_v},
+                             {"max", s_final_list.max_v}}},
+                           {"purge_expired_quarantine",
+                            {{"min", s_purge.min_v},
+                             {"median", s_purge.median_v},
+                             {"max", s_purge.max_v}}},
+                           {"time_to_first_candidate",
+                            {{"min", s_first_cand.min_v},
+                             {"median", s_first_cand.median_v},
+                             {"max", s_first_cand.max_v}}},
+                           {"candidates_processing",
+                            {{"min", s_cand_proc.min_v},
+                             {"median", s_cand_proc.median_v},
+                             {"max", s_cand_proc.max_v}}},
+                           {"batch_prepare_us",
+                            {{"min", s_batch_prep.min_v},
+                             {"median", s_batch_prep.median_v},
+                             {"max", s_batch_prep.max_v}}},
+                           {"batch_verify_us",
+                            {{"min", s_batch_verify.min_v},
+                             {"median", s_batch_verify.median_v},
+                             {"max", s_batch_verify.max_v}}},
+                           {"batch_publish_remove_us",
+                            {{"min", s_batch_publish.min_v},
+                             {"median", s_batch_publish.median_v},
+                             {"max", s_batch_publish.max_v}}},
+                           {"build_history_inventory_us",
+                            {{"min", s_build_hist.min_v},
+                             {"median", s_build_hist.median_v},
+                             {"max", s_build_hist.max_v}}},
+                           {"dag_traversal_us",
+                            {{"min", s_dag.min_v},
+                             {"median", s_dag.median_v},
+                             {"max", s_dag.max_v}}},
+                           {"get_commit_us",
+                            {{"min", s_get_commit.min_v},
+                             {"median", s_get_commit.median_v},
+                             {"max", s_get_commit.max_v}}},
+                           {"total_gc_us",
+                            {{"min", s_total.min_v},
+                             {"median", s_total.median_v},
+                             {"max", s_total.max_v}}},
+                           {"wall_clock_us",
+                            {{"min", s_wall.min_v},
+                             {"median", s_wall.median_v},
+                             {"max", s_wall.max_v}}}};
 
     entry["transport_calls"] = {
         {"list_total", rep1.transport_list_count},
@@ -879,8 +984,7 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
         {"presence", rep1.transport_presence_count},
         {"physical_hash_individual", rep1.transport_physical_hash_count},
         {"physical_hash_batch", rep1.transport_physical_hash_batch_count},
-        {"barrier_verify", rep1.transport_barrier_verify_count}
-    };
+        {"barrier_verify", rep1.transport_barrier_verify_count}};
 
     entry["identifiers_examined"] = rep1.total_identifiers_listed;
 
@@ -892,7 +996,8 @@ nlohmann::json summarize_trials(const std::vector<TrialMetrics>& trials) {
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
 
-    std::filesystem::path output_file = "build-msys2-ucrt64/phase17/gc_scale_profile.json";
+    std::filesystem::path output_file =
+        "build-msys2-ucrt64/phase17/gc_scale_profile.json";
     std::string run_series = "all";
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
@@ -903,9 +1008,12 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::cout << "========================================================================\n"
-              << "KASUMI: REAL FULL GC SCALE & HISTORY DAG PROFILING (OFFLINE)\n"
-              << "========================================================================\n\n";
+    std::cout
+        << "==================================================================="
+           "=====\n"
+        << "KASUMI: REAL FULL GC SCALE & HISTORY DAG PROFILING (OFFLINE)\n"
+        << "==================================================================="
+           "=====\n\n";
 
     constexpr std::size_t repetitions = 5;
     nlohmann::json root_json;
@@ -919,39 +1027,61 @@ int main(int argc, char** argv) {
     };
 
     if (run_series == "all" || run_series == "A" || run_series == "a") {
-        std::cout << "=== SÉRIE A: INVENTÁRIO FÍSICO CRESCENTE (N in {100, 1000, 10000}, C=10, H=1) ===\n";
+        std::cout << "=== SÉRIE A: INVENTÁRIO FÍSICO CRESCENTE (N in {100, "
+                     "1000, 10000}, C=10, H=1) ===\n";
         const std::vector<std::size_t> N_values = {100, 1000, 10000};
         for (const auto N : N_values) {
-            std::cout << ">>> Running Série A for N = " << N << " (" << repetitions << " independent repetitions)...\n";
+            std::cout << ">>> Running Série A for N = " << N << " ("
+                      << repetitions << " independent repetitions)...\n";
             std::vector<TrialMetrics> trials;
             trials.reserve(repetitions);
             for (std::size_t r = 1; r <= repetitions; ++r) {
                 auto m = run_trial_serie_a(N, r);
-                std::cout << "  [Rep " << r << "] Total GC: " << (static_cast<double>(m.total_gc_us) / 1000.0) << " ms | Time to first candidate: "
-                          << (static_cast<double>(m.stage_time_to_first_candidate_us) / 1000.0) << " ms | Candidates processing: "
-                          << (static_cast<double>(m.stage_candidates_processing_us) / 1000.0) << " ms\n";
+                std::cout << "  [Rep " << r << "] Total GC: "
+                          << (static_cast<double>(m.total_gc_us) / 1000.0)
+                          << " ms | Time to first candidate: "
+                          << (static_cast<double>(
+                                  m.stage_time_to_first_candidate_us) /
+                              1000.0)
+                          << " ms | Candidates processing: "
+                          << (static_cast<double>(
+                                  m.stage_candidates_processing_us) /
+                              1000.0)
+                          << " ms\n";
                 trials.push_back(m);
             }
-            root_json["series_a"]["N_" + std::to_string(N)] = summarize_trials(trials);
+            root_json["series_a"]["N_" + std::to_string(N)] =
+                summarize_trials(trials);
             std::cout << '\n';
         }
     }
 
     if (run_series == "all" || run_series == "B" || run_series == "b") {
-        std::cout << "=== SÉRIE B: HISTÓRICO PROTEGIDO CRESCENTE (H in {10, 100, 1000}, C=10 live + 10 orphans) ===\n";
+        std::cout << "=== SÉRIE B: HISTÓRICO PROTEGIDO CRESCENTE (H in {10, "
+                     "100, 1000}, C=10 live + 10 orphans) ===\n";
         const std::vector<std::size_t> H_values = {10, 100, 1000};
         for (const auto H : H_values) {
-            std::cout << ">>> Running Série B for H = " << H << " (" << repetitions << " independent repetitions)...\n";
+            std::cout << ">>> Running Série B for H = " << H << " ("
+                      << repetitions << " independent repetitions)...\n";
             std::vector<TrialMetrics> trials;
             trials.reserve(repetitions);
             for (std::size_t r = 1; r <= repetitions; ++r) {
                 auto m = run_trial_serie_b(H, r);
-                std::cout << "  [Rep " << r << "] Total GC: " << (static_cast<double>(m.total_gc_us) / 1000.0) << " ms | Time to first candidate: "
-                          << (static_cast<double>(m.stage_time_to_first_candidate_us) / 1000.0) << " ms | Candidates processing: "
-                          << (static_cast<double>(m.stage_candidates_processing_us) / 1000.0) << " ms\n";
+                std::cout << "  [Rep " << r << "] Total GC: "
+                          << (static_cast<double>(m.total_gc_us) / 1000.0)
+                          << " ms | Time to first candidate: "
+                          << (static_cast<double>(
+                                  m.stage_time_to_first_candidate_us) /
+                              1000.0)
+                          << " ms | Candidates processing: "
+                          << (static_cast<double>(
+                                  m.stage_candidates_processing_us) /
+                              1000.0)
+                          << " ms\n";
                 trials.push_back(m);
             }
-            root_json["series_b"]["H_" + std::to_string(H)] = summarize_trials(trials);
+            root_json["series_b"]["H_" + std::to_string(H)] =
+                summarize_trials(trials);
             std::cout << '\n';
         }
     }
@@ -971,7 +1101,8 @@ int main(int argc, char** argv) {
             {"R4_P1000_two_heads", 1000, 6, 2, 5},
             {"R5_P1000_recent100", 1000, 100, 1, 5},
         };
-        std::cout << "=== PHASE 17: EPOCH RETENTION (REAL FULL GC + FAKE TRANSPORT) ===\n";
+        std::cout << "=== PHASE 17: EPOCH RETENTION (REAL FULL GC + FAKE "
+                     "TRANSPORT) ===\n";
         for (const auto& profile : profiles) {
             if (run_series == "R100" && profile.physical_commits != 100) {
                 continue;
@@ -980,17 +1111,19 @@ int main(int argc, char** argv) {
                 kasumi::history::maximum_loaded_commit_count) {
                 root_json["series_r"][profile.name] = {
                     {"status", "SKIP"},
-                    {"reason", "P exceeds history::maximum_loaded_commit_count"},
+                    {"reason",
+                     "P exceeds history::maximum_loaded_commit_count"},
                     {"configured_limit",
                      kasumi::history::maximum_loaded_commit_count},
                 };
                 std::cout << ">>> " << profile.name << " SKIP: P exceeds "
-                          << kasumi::history::maximum_loaded_commit_count << '\n';
+                          << kasumi::history::maximum_loaded_commit_count
+                          << '\n';
                 checkpoint_report();
                 continue;
             }
-            std::cout << ">>> " << profile.name << " ("
-                      << profile.repetitions << " repetitions)\n";
+            std::cout << ">>> " << profile.name << " (" << profile.repetitions
+                      << " repetitions)\n";
             std::vector<TrialMetrics> trials;
             trials.reserve(profile.repetitions);
             for (std::size_t rep = 1; rep <= profile.repetitions; ++rep) {
@@ -998,10 +1131,11 @@ int main(int argc, char** argv) {
                                                    profile.recent_per_head,
                                                    profile.heads,
                                                    rep);
-                std::cout << "  [Rep " << rep << "] P="
-                          << metrics.physical_commit_objects << " R="
-                          << metrics.retained_commits << " C="
-                          << metrics.candidates_quarantined << " commit GETs/obs="
+                std::cout << "  [Rep " << rep
+                          << "] P=" << metrics.physical_commit_objects
+                          << " R=" << metrics.retained_commits
+                          << " C=" << metrics.candidates_quarantined
+                          << " commit GETs/obs="
                           << metrics.commit_object_get_calls / 2 << " GC="
                           << (static_cast<double>(metrics.total_gc_us) / 1000.0)
                           << " ms\n";
@@ -1016,7 +1150,8 @@ int main(int argc, char** argv) {
     std::ofstream out_stream(output_file, std::ios::binary | std::ios::trunc);
     if (out_stream) {
         out_stream << root_json.dump(2) << '\n';
-        std::cout << "Saved full JSON profile report to: " << output_file << "\n\n";
+        std::cout << "Saved full JSON profile report to: " << output_file
+                  << "\n\n";
     }
 
     return 0;

@@ -161,11 +161,11 @@ process_file(const std::filesystem::path& file_path,
             const auto after_mtime_ns =
                 platform::metadata::unix_nanoseconds(after_mtime);
             if (!after_mtime_ns) {
-                return std::unexpected(ScanError{
-                    ScanErrorCode::Metadata,
-                    file_path,
-                    "convert modification time after hashing",
-                    "timestamp is out of range"});
+                return std::unexpected(
+                    ScanError{ScanErrorCode::Metadata,
+                              file_path,
+                              "convert modification time after hashing",
+                              "timestamp is out of range"});
             }
             const auto after_fingerprint_trace = platform::perf_trace::begin();
             auto after_fingerprint = context.fingerprint_query(file_path);

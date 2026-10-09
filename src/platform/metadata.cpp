@@ -224,13 +224,11 @@ unix_nanoseconds(std::filesystem::file_time_type value) noexcept {
     const auto current_count = value.time_since_epoch().count();
     const auto origin_count = origin.count();
     if ((origin_count > 0 &&
-         current_count <
-             std::numeric_limits<typename Duration::rep>::lowest() +
-                 origin_count) ||
+         current_count < std::numeric_limits<typename Duration::rep>::lowest() +
+                             origin_count) ||
         (origin_count < 0 &&
-         current_count >
-             std::numeric_limits<typename Duration::rep>::max() +
-                 origin_count)) {
+         current_count > std::numeric_limits<typename Duration::rep>::max() +
+                             origin_count)) {
         return std::nullopt;
     }
     return duration_to_nanoseconds(Duration{current_count - origin_count});
@@ -245,19 +243,18 @@ file_time_from_unix_nanoseconds(std::int64_t value) noexcept {
     using Duration = std::filesystem::file_time_type::duration;
     using Rep = Duration::rep;
     static_assert(std::is_integral_v<Rep> && std::is_signed_v<Rep>);
-    static_assert(std::ratio_greater_equal_v<typename Duration::period,
-                                             std::nano>);
+    static_assert(
+        std::ratio_greater_equal_v<typename Duration::period, std::nano>);
 
-    const auto delta = std::chrono::duration_cast<Duration>(
-        std::chrono::nanoseconds{value});
+    const auto delta =
+        std::chrono::duration_cast<Duration>(std::chrono::nanoseconds{value});
     const auto origin = std::chrono::clock_cast<std::chrono::file_clock>(
                             std::chrono::system_clock::time_point{})
                             .time_since_epoch();
     if ((delta.count() > 0 &&
          origin.count() > std::numeric_limits<Rep>::max() - delta.count()) ||
         (delta.count() < 0 &&
-         origin.count() <
-             std::numeric_limits<Rep>::lowest() - delta.count())) {
+         origin.count() < std::numeric_limits<Rep>::lowest() - delta.count())) {
         return std::nullopt;
     }
     return std::filesystem::file_time_type{

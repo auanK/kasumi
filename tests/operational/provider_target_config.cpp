@@ -26,12 +26,14 @@ load_config(const std::filesystem::path& path) {
     for (const auto& [key, unused] : document) {
         (void)unused;
         if (key.str() != "targets") {
-            return std::unexpected("unknown provider certification config field");
+            return std::unexpected(
+                "unknown provider certification config field");
         }
     }
     const auto* targets = document["targets"].as_array();
     if (targets == nullptr || targets->empty()) {
-        return std::unexpected("provider certification config requires targets");
+        return std::unexpected(
+            "provider certification config requires targets");
     }
 
     LiveProviderConfig result;
@@ -58,7 +60,8 @@ load_config(const std::filesystem::path& path) {
             !remote || remote->empty() || !authorized_parent ||
             authorized_parent->empty()) {
             return std::unexpected(
-                "provider target requires nonempty id, provider_id, remote, and authorized_parent");
+                "provider target requires nonempty id, provider_id, remote, "
+                "and authorized_parent");
         }
         if (!ids.insert(*id).second) {
             return std::unexpected("provider target ids must be unique");
@@ -68,13 +71,14 @@ load_config(const std::filesystem::path& path) {
         if (separator == std::string::npos || separator != remote->size() ||
             authorized_parent->substr(0, separator) != *remote ||
             authorized_parent->find(':', separator + 1) != std::string::npos) {
-            return std::unexpected(
-                "authorized_parent must use the configured remote and a relative path");
+            return std::unexpected("authorized_parent must use the configured "
+                                   "remote and a relative path");
         }
         const auto valid_parent =
             transport::validate_transport_location(*authorized_parent);
         if (!valid_parent) {
-            return std::unexpected("authorized_parent is not a safe remote location");
+            return std::unexpected(
+                "authorized_parent is not a safe remote location");
         }
 
         result.targets.push_back(LiveProviderTargetConfig{
@@ -124,8 +128,8 @@ parse_target_selection_arguments(std::span<const std::string_view> args) {
         const auto option = args[index];
         if (option == "--provider-id" || option == "--remote" ||
             option == "--remote-parent" || option == "--authorized-parent") {
-            return std::unexpected(
-                "raw live target values are not accepted; use --config and --target-id");
+            return std::unexpected("raw live target values are not accepted; "
+                                   "use --config and --target-id");
         }
         if (option != "--target" && option != "--config" &&
             option != "--target-id") {
@@ -160,7 +164,8 @@ std::expected<std::optional<LiveProviderTargetConfig>, std::string>
 resolve_target(const TargetSelectionArguments& selection) {
     if (selection.target_kind == "local") {
         if (selection.target_id) {
-            return std::unexpected("--target-id is only valid for --target rclone");
+            return std::unexpected(
+                "--target-id is only valid for --target rclone");
         }
         return std::optional<LiveProviderTargetConfig>{};
     }
@@ -173,8 +178,8 @@ resolve_target(const TargetSelectionArguments& selection) {
     if (!selection.target_id || selection.target_id->empty()) {
         return std::unexpected("Rclone target requires --target-id");
     }
-    auto selected = load_selected_target(*selection.config_path,
-                                         *selection.target_id);
+    auto selected =
+        load_selected_target(*selection.config_path, *selection.target_id);
     if (!selected) {
         return std::unexpected(selected.error());
     }

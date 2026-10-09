@@ -170,8 +170,8 @@ TEST(StateStorageDatabaseTest, PendingMaterializationsRoundTrip) {
         {.tree = snapshot,
          .height = 7,
          .commit_id = std::string(64, 'a'),
-         .pending_materializations = {*kasumi::find_row(snapshot,
-                                                        "docs/state.txt")}}));
+         .pending_materializations = {
+             *kasumi::find_row(snapshot, "docs/state.txt")}}));
     const auto loaded = kasumi::state_storage::load_state(database_path);
     ASSERT_TRUE(loaded.has_value() && *loaded);
     EXPECT_EQ((*loaded)->commit_id, std::string(64, 'a'));
@@ -200,7 +200,8 @@ TEST(StateStorageDatabaseTest, PreservesCanonicalNanosecondSnapshots) {
     ASSERT_TRUE(loaded.has_value() && *loaded);
     ASSERT_EQ((*loaded)->tree.rows.size(), expected.rows.size());
     for (std::size_t index = 0; index < expected.rows.size(); ++index) {
-        EXPECT_EQ((*loaded)->tree.rows[index].mtime, expected.rows[index].mtime);
+        EXPECT_EQ((*loaded)->tree.rows[index].mtime,
+                  expected.rows[index].mtime);
     }
 }
 
@@ -277,8 +278,8 @@ TEST(StateStorageDatabaseTest, StateAndPendingRowsCommitAtomically) {
         {.tree = replacement,
          .height = 2,
          .commit_id = std::string(64, 'b'),
-         .pending_materializations = {*kasumi::find_row(replacement,
-                                                        "a.txt")}}));
+         .pending_materializations = {
+             *kasumi::find_row(replacement, "a.txt")}}));
     const auto loaded = kasumi::state_storage::load_state(database_path);
     ASSERT_TRUE(loaded.has_value() && *loaded);
     EXPECT_EQ((*loaded)->tree, original);

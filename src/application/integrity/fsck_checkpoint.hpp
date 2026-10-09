@@ -16,11 +16,14 @@
 
 namespace kasumi::application::integrity {
 
-inline constexpr std::string_view fsck_checkpoint_file_name = "fsck_checkpoint.bin.enc";
-inline constexpr std::array<std::uint8_t, 8> checkpoint_magic{'K', 'A', 'S', 'U', 'M', 'I', 'C', 'K'};
+inline constexpr std::string_view fsck_checkpoint_file_name =
+    "fsck_checkpoint.bin.enc";
+inline constexpr std::array<std::uint8_t, 8> checkpoint_magic{
+    'K', 'A', 'S', 'U', 'M', 'I', 'C', 'K'};
 inline constexpr std::uint32_t checkpoint_format_version_1 = 1;
 inline constexpr std::uint32_t checkpoint_audit_semantics_version_1 = 1;
-inline constexpr std::uint64_t max_checkpoint_payload_size = 64ULL * 1024ULL * 1024ULL;
+inline constexpr std::uint64_t max_checkpoint_payload_size =
+    64ULL * 1024ULL * 1024ULL;
 inline constexpr std::uint64_t max_checkpoint_entries = 1'000'000ULL;
 
 struct VerifiedObjectEntry {
@@ -35,7 +38,8 @@ struct VerifiedObjectEntry {
 
 struct CheckpointHeader {
     std::uint32_t format_version = checkpoint_format_version_1;
-    std::uint32_t audit_semantics_version = checkpoint_audit_semantics_version_1;
+    std::uint32_t audit_semantics_version =
+        checkpoint_audit_semantics_version_1;
     std::string vault_id;
     std::uint64_t entry_count = 0;
 
