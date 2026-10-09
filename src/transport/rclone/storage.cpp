@@ -1136,17 +1136,13 @@ rclone_physical_hash_batch(void* context,
 }
 
 ControlReadBatchResponse
-rclone_control_read_batch(void* context,
-                          const ControlReadBatchRequest& request) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
-    }
-
+execute_single_control_read_batch(State& state,
+                                  const ControlReadBatchRequest& request,
+                                  std::size_t concurrency) {
     nlohmann::json inputs = nlohmann::json::array();
     for (const auto& prefix : request.list_prefixes) {
         inputs.push_back(nlohmann::json{{"_path", "operations/list"},
-                                        {"fs", rooted_remote_fs(*state)},
+                                        {"fs", rooted_remote_fs(state)},
                                         {"remote", relative_remote(prefix)},
                                         {"opt",
                                          {{"recurse", false},
@@ -1156,7 +1152,7 @@ rclone_control_read_batch(void* context,
     }
     for (const auto& identifier : request.presence_identifiers) {
         inputs.push_back(nlohmann::json{{"_path", "operations/stat"},
-                                        {"fs", rooted_remote_fs(*state)},
+                                        {"fs", rooted_remote_fs(state)},
                                         {"remote", relative_remote(identifier)},
                                         {"opt",
                                          {{"filesOnly", true},
@@ -1165,11 +1161,10 @@ rclone_control_read_batch(void* context,
     }
 
     const auto response = request_read_json(
-        *state,
+        state,
         "job/batch",
-        // Admission depends on the ordering LIST writers -> STAT barrier;
-        // rclone executes inputs sequentially when concurrency <= 1.
-        nlohmann::json{{"inputs", std::move(inputs)}, {"concurrency", 1}},
+        nlohmann::json{{"inputs", std::move(inputs)},
+                       {"concurrency", concurrency}},
         maximum_list_response_size,
         control_read_deadline);
     if (!response) {
@@ -1181,15 +1176,64 @@ rclone_control_read_batch(void* context,
         }
         return std::unexpected(response.error());
     }
-    auto result = parse_control_read_batch_response(response->dump(), request);
-    if (!result) {
+    return parse_control_read_batch_response(response->dump(), request);
+}
+
+ControlReadBatchResponse
+rclone_control_read_batch(void* context,
+                          const ControlReadBatchRequest& request) {
+    auto* state = ready_state(context);
+    if (state == nullptr) {
+        return std::unexpected(invalid_context_error());
+    }
+
+    constexpr std::size_t control_presence_concurrency = 8;
+    constexpr std::size_t max_presence_batch_chunk_size = 128;
+
+    // Admission depends on the ordering LIST writers -> STAT barrier;
+    // rclone executes inputs sequentially when concurrency <= 1.
+    if (!request.list_prefixes.empty()) {
+        auto result = execute_single_control_read_batch(*state, request, 1);
+        if (result) {
+            platform::perf_trace::count("control batch operations",
+                                        request.list_prefixes.size() +
+                                            request.presence_identifiers.size());
+        }
         return result;
     }
 
+    if (request.presence_identifiers.empty()) {
+        return ControlReadBatchResult{};
+    }
+
+    ControlReadBatchResult aggregated;
+    aggregated.presences.reserve(request.presence_identifiers.size());
+
+    for (std::size_t offset = 0;
+         offset < request.presence_identifiers.size();
+         offset += max_presence_batch_chunk_size) {
+        const auto count = std::min(max_presence_batch_chunk_size,
+                                    request.presence_identifiers.size() - offset);
+        ControlReadBatchRequest chunk_req;
+        chunk_req.presence_identifiers.assign(
+            request.presence_identifiers.begin() +
+                static_cast<std::ptrdiff_t>(offset),
+            request.presence_identifiers.begin() +
+                static_cast<std::ptrdiff_t>(offset + count));
+
+        auto chunk_res = execute_single_control_read_batch(
+            *state, chunk_req, control_presence_concurrency);
+        if (!chunk_res) {
+            return std::unexpected(chunk_res.error());
+        }
+        aggregated.presences.insert(aggregated.presences.end(),
+                                    chunk_res->presences.begin(),
+                                    chunk_res->presences.end());
+    }
+
     platform::perf_trace::count("control batch operations",
-                                request.list_prefixes.size() +
-                                    request.presence_identifiers.size());
-    return result;
+                                request.presence_identifiers.size());
+    return aggregated;
 }
 
 RemovalResult rclone_remove(void* context, std::string_view identifier) {
@@ -1480,6 +1524,20 @@ parse_control_read_batch_response(std::string_view response_body,
              ++offset) {
             const auto& item = response.at("results").at(
                 request.list_prefixes.size() + offset);
+            const auto& expected_identifier = request.presence_identifiers[offset];
+
+            if (item.contains("input") && item.at("input").is_object() &&
+                item.at("input").contains("remote") &&
+                item.at("input").at("remote").is_string()) {
+                const auto remote_echo =
+                    item.at("input").at("remote").get<std::string>();
+                if (remote_echo != relative_remote(expected_identifier)) {
+                    return std::unexpected(make_error(
+                        ErrorCode::ProtocolFailure,
+                        "job/batch result input does not match expected position"));
+                }
+            }
+
             auto absent = missing(item);
             if (!absent) {
                 return std::unexpected(absent.error());

@@ -1536,6 +1536,441 @@ TEST(RcloneStorageTest, ControlReadBatchIsScopedToConfiguredRemoteRoot) {
     EXPECT_EQ(request_body.dump(), expected.dump());
 }
 
+TEST(RcloneStorageTest, WriterAdmissionPreservesStrictSequentialOrdering) {
+    RcServerState remote;
+    nlohmann::json captured_body;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            captured_body = nlohmann::json::parse(input.body);
+            response.set_content(
+                nlohmann::json{
+                    {"results",
+                     {{{"list", {{{"Path", "history/writers/node1"}}}},
+                       {"status", 200}},
+                      {{"item", {{"IsDir", false}}}, {"status", 200}}}}}
+                    .dump(),
+                "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    state.configuration.remote_root = "bucket";
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    const kasumi::transport::ControlReadBatchRequest batch{
+        .list_prefixes = {"history/writers"},
+        .presence_identifiers = {"history/gc/barrier"},
+    };
+
+    const auto result = operations.control_read_batch(&state, batch);
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(result.has_value())
+        << (result.has_value() ? ""
+                               : kasumi::transport::describe(result.error()));
+    EXPECT_LE(captured_body.value("concurrency", 1), 1);
+    ASSERT_EQ(captured_body.at("inputs").size(), 2U);
+    EXPECT_EQ(captured_body.at("inputs").at(0).at("_path"), "operations/list");
+    EXPECT_EQ(captured_body.at("inputs").at(1).at("_path"), "operations/stat");
+}
+
+TEST(RcloneStorageTest, IndependentPresenceBatchUsesConcurrentExecution) {
+    RcServerState remote;
+    nlohmann::json captured_body;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            captured_body = nlohmann::json::parse(input.body);
+            nlohmann::json results = nlohmann::json::array();
+            for (std::size_t i = 0; i < captured_body.at("inputs").size(); ++i) {
+                results.push_back(
+                    nlohmann::json{{"item", {{"IsDir", false}}}, {"status", 200}});
+            }
+            response.set_content(nlohmann::json{{"results", results}}.dump(),
+                                 "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    state.configuration.remote_root = "bucket";
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    kasumi::transport::ControlReadBatchRequest batch;
+    batch.presence_identifiers = {"content/blob_a", "content/blob_b",
+                                  "content/blob_c", "content/blob_d"};
+
+    const auto result = operations.control_read_batch(&state, batch);
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(result.has_value())
+        << (result.has_value() ? ""
+                               : kasumi::transport::describe(result.error()));
+    // Independent presence verification should execute concurrently, not serially
+    EXPECT_GT(captured_body.value("concurrency", 1), 1);
+    EXPECT_LE(captured_body.value("concurrency", 1), 16);
+}
+
+TEST(RcloneStorageTest,
+     LargeIndependentPresenceBatchIsPartitionedIntoBoundedChunks) {
+    RcServerState remote;
+    std::vector<nlohmann::json> captured_requests;
+    std::mutex requests_mutex;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            const auto body = nlohmann::json::parse(input.body);
+            {
+                std::lock_guard lock(requests_mutex);
+                captured_requests.push_back(body);
+            }
+            nlohmann::json results = nlohmann::json::array();
+            for (const auto& item : body.at("inputs")) {
+                results.push_back(nlohmann::json{
+                    {"path", "operations/stat"},
+                    {"input", item},
+                    {"item", {{"IsDir", false}}},
+                    {"status", 200}});
+            }
+            response.set_content(nlohmann::json{{"results", results}}.dump(),
+                                 "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    state.configuration.remote_root = "bucket";
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    kasumi::transport::ControlReadBatchRequest batch;
+    batch.presence_identifiers.reserve(500);
+    for (std::size_t i = 0; i < 500; ++i) {
+        batch.presence_identifiers.push_back("content/blob_" +
+                                             std::to_string(i));
+    }
+
+    const auto result = operations.control_read_batch(&state, batch);
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(result.has_value())
+        << (result.has_value() ? ""
+                               : kasumi::transport::describe(result.error()));
+    EXPECT_EQ(result->presences.size(), 500U);
+
+    // Large presence batches must be partitioned into bounded chunks
+    EXPECT_GT(captured_requests.size(), 1U);
+    std::size_t total_inputs = 0;
+    for (const auto& req : captured_requests) {
+        const std::size_t count = req.at("inputs").size();
+        EXPECT_LE(count, 256U);
+        total_inputs += count;
+    }
+    EXPECT_EQ(total_inputs, 500U);
+}
+
+TEST(RcloneStorageTest,
+     PresenceBatchPositionalResultsUnderConcurrencyWithMixedPresence) {
+    RcServerState remote;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            const auto body = nlohmann::json::parse(input.body);
+            nlohmann::json results = nlohmann::json::array();
+            // Real rclone v1.75.1 returns results strictly in positional order,
+            // without echoing the "input" object for standard operations/stat.
+            for (const auto& item : body.at("inputs")) {
+                const auto remote_path = item.at("remote").get<std::string>();
+                if (remote_path.find("absent") != std::string::npos) {
+                    results.push_back(nlohmann::json{
+                        {"item", nullptr},
+                        {"status", 200}});
+                } else {
+                    results.push_back(nlohmann::json{
+                        {"item", {{"IsDir", false}}},
+                        {"status", 200}});
+                }
+            }
+            response.set_content(nlohmann::json{{"results", results}}.dump(),
+                                 "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    state.configuration.remote_root = "bucket";
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    const kasumi::transport::ControlReadBatchRequest batch{
+        .list_prefixes = {},
+        .presence_identifiers = {"content/present_0", "content/absent_1",
+                                 "content/present_2"},
+    };
+
+    const auto result = operations.control_read_batch(&state, batch);
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(result.has_value())
+        << (result.has_value() ? ""
+                               : kasumi::transport::describe(result.error()));
+    ASSERT_EQ(result->presences.size(), 3U);
+    EXPECT_EQ(result->presences[0], kasumi::transport::Presence::Present);
+    EXPECT_EQ(result->presences[1], kasumi::transport::Presence::Absent);
+    EXPECT_EQ(result->presences[2], kasumi::transport::Presence::Present);
+}
+
+TEST(RcloneStorageTest, PresenceBatchAcceptsRepeatedIdentifiersInSameBatch) {
+    RcServerState remote;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            const auto body = nlohmann::json::parse(input.body);
+            nlohmann::json results = nlohmann::json::array();
+            for (const auto& item : body.at("inputs")) {
+                const auto remote_path = item.at("remote").get<std::string>();
+                if (remote_path.find("absent") != std::string::npos) {
+                    results.push_back(nlohmann::json{{"item", nullptr}, {"status", 200}});
+                } else {
+                    results.push_back(nlohmann::json{{"item", {{"IsDir", false}}}, {"status", 200}});
+                }
+            }
+            response.set_content(nlohmann::json{{"results", results}}.dump(),
+                                 "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    state.configuration.remote_root = "bucket";
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    const kasumi::transport::ControlReadBatchRequest batch{
+        .list_prefixes = {},
+        .presence_identifiers = {"content/blob_a", "content/absent_b", "content/blob_a"},
+    };
+
+    const auto result = operations.control_read_batch(&state, batch);
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(result.has_value())
+        << (result.has_value() ? ""
+                               : kasumi::transport::describe(result.error()));
+    ASSERT_EQ(result->presences.size(), 3U);
+    EXPECT_EQ(result->presences[0], kasumi::transport::Presence::Present);
+    EXPECT_EQ(result->presences[1], kasumi::transport::Presence::Absent);
+    EXPECT_EQ(result->presences[2], kasumi::transport::Presence::Present);
+}
+
+TEST(RcloneStorageTest, PresenceBatchRejectsMismatchedEchoedInputRemote) {
+    RcServerState remote;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request&, httplib::Response& response) {
+            // Echo input remote swapped: position 0 receives input for blob_b
+            nlohmann::json results = nlohmann::json::array({
+                {{"input", {{"remote", "content/blob_b"}}}, {"item", {{"IsDir", false}}}, {"status", 200}},
+                {{"input", {{"remote", "content/blob_a"}}}, {"item", {{"IsDir", false}}}, {"status", 200}},
+            });
+            response.set_content(nlohmann::json{{"results", results}}.dump(),
+                                 "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    state.configuration.remote_root = "bucket";
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    const kasumi::transport::ControlReadBatchRequest batch{
+        .list_prefixes = {},
+        .presence_identifiers = {"content/blob_a", "content/blob_b"},
+    };
+
+    const auto result = operations.control_read_batch(&state, batch);
+    stop_rc_server(remote);
+
+    // Mismatched echoed input at position 0 must be rejected fail-closed
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, kasumi::transport::ErrorCode::ProtocolFailure);
+}
+
+TEST(RcloneStorageTest, PresenceBatchPartitioningAtExactBoundaryAndAbove) {
+    RcServerState remote;
+    std::vector<nlohmann::json> captured_requests;
+    std::mutex requests_mutex;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            const auto body = nlohmann::json::parse(input.body);
+            {
+                std::lock_guard lock(requests_mutex);
+                captured_requests.push_back(body);
+            }
+            nlohmann::json results = nlohmann::json::array();
+            for (std::size_t i = 0; i < body.at("inputs").size(); ++i) {
+                results.push_back(nlohmann::json{
+                    {"item", {{"IsDir", false}}},
+                    {"status", 200}});
+            }
+            response.set_content(nlohmann::json{{"results", results}}.dump(),
+                                 "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    state.configuration.remote_root = "bucket";
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    // 1. Exact boundary: 128 items must execute in exactly 1 request
+    std::vector<std::string> ids_128;
+    ids_128.reserve(128);
+    for (int i = 0; i < 128; ++i) {
+        ids_128.push_back("content/id_" + std::to_string(i));
+    }
+    auto result_128 = operations.control_read_batch(&state, {.presence_identifiers = ids_128});
+    ASSERT_TRUE(result_128.has_value());
+    EXPECT_EQ(result_128->presences.size(), 128U);
+    {
+        std::lock_guard lock(requests_mutex);
+        EXPECT_EQ(captured_requests.size(), 1U);
+        EXPECT_EQ(captured_requests[0].at("inputs").size(), 128U);
+        captured_requests.clear();
+    }
+
+    // 2. Just above boundary: 129 items must partition into 2 requests (128 and 1)
+    std::vector<std::string> ids_129;
+    ids_129.reserve(129);
+    for (int i = 0; i < 129; ++i) {
+        ids_129.push_back("content/id_" + std::to_string(i));
+    }
+    auto result_129 = operations.control_read_batch(&state, {.presence_identifiers = ids_129});
+    ASSERT_TRUE(result_129.has_value());
+    EXPECT_EQ(result_129->presences.size(), 129U);
+    {
+        std::lock_guard lock(requests_mutex);
+        EXPECT_EQ(captured_requests.size(), 2U);
+        EXPECT_EQ(captured_requests[0].at("inputs").size(), 128U);
+        EXPECT_EQ(captured_requests[1].at("inputs").size(), 1U);
+    }
+
+    stop_rc_server(remote);
+}
+
+TEST(RcloneStorageTest, PresenceBatchPartialFailureAfterSuccessfulChunkFailsClosed) {
+    RcServerState remote;
+    std::atomic<std::size_t> call_count = 0;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            const auto ordinal = call_count++;
+            if (ordinal == 0) {
+                // First chunk (128 items) succeeds
+                const auto body = nlohmann::json::parse(input.body);
+                nlohmann::json results = nlohmann::json::array();
+                for (std::size_t i = 0; i < body.at("inputs").size(); ++i) {
+                    results.push_back(nlohmann::json{{"item", {{"IsDir", false}}}, {"status", 200}});
+                }
+                response.set_content(nlohmann::json{{"results", results}}.dump(), "application/json");
+            } else {
+                // Second chunk fails with 503
+                response.status = 503;
+                response.set_content(R"({"error":"backend rate limit exceeded"})", "application/json");
+            }
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    state.configuration.remote_root = "bucket";
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    // 200 items -> chunks of 128 and 72
+    std::vector<std::string> ids_200;
+    ids_200.reserve(200);
+    for (int i = 0; i < 200; ++i) {
+        ids_200.push_back("content/id_" + std::to_string(i));
+    }
+
+    const auto result = operations.control_read_batch(&state, {.presence_identifiers = ids_200});
+    stop_rc_server(remote);
+
+    // Fail-closed invariant: partial success in first chunk must NOT produce partial presence!
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, kasumi::transport::ErrorCode::ProtocolFailure);
+}
+
+TEST(RcloneStorageTest,
+     PresenceBatchTransportFailureNeverInterpretedAsPresence) {
+    RcServerState remote;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request&, httplib::Response& response) {
+            response.status = 503;
+            response.set_content(
+                R"({"error":"temporary service unavailable"})",
+                "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    state.configuration.remote_root = "bucket";
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    const kasumi::transport::ControlReadBatchRequest batch{
+        .list_prefixes = {},
+        .presence_identifiers = {"content/test-blob"},
+    };
+
+    const auto result = operations.control_read_batch(&state, batch);
+    stop_rc_server(remote);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code,
+              kasumi::transport::ErrorCode::ProtocolFailure);
+}
+
+TEST(RcloneStorageTest, PresenceBatchIncompleteResultsFailClosed) {
+    RcServerState remote;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request&, httplib::Response& response) {
+            response.set_content(
+                R"({"results":[{"item":{"IsDir":false},"status":200}]})",
+                "application/json");
+        });
+    start_rc_server(remote);
+
+    kasumi::transport::rclone_detail::State state;
+    configure_state(state, remote.port);
+    state.configuration.remote_root = "bucket";
+    const auto operations =
+        kasumi::transport::rclone_detail::make_storage_operations();
+
+    const kasumi::transport::ControlReadBatchRequest batch{
+        .list_prefixes = {},
+        .presence_identifiers = {"content/blob1", "content/blob2"},
+    };
+
+    const auto result = operations.control_read_batch(&state, batch);
+    stop_rc_server(remote);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code,
+              kasumi::transport::ErrorCode::ProtocolFailure);
+}
+
 TEST(RcloneStorageTest, ControlBatchRejectsMalformedEnvelope) {
     for (const auto response : {"not json",
                                 R"({})",

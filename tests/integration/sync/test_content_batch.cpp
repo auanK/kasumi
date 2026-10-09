@@ -5,6 +5,7 @@
 #include "application/sync/journal.hpp"
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_batch.hpp"
+#include "application/sync/reobservation.hpp"
 #include "core/hasher.hpp"
 #include "core/history.hpp"
 #include "core/reconciliation/plan.hpp"
@@ -81,6 +82,15 @@ struct ContentWindowProbe {
     std::vector<std::string> bulk_mismatched;
     std::vector<std::string> bulk_missing;
     std::vector<std::string> bulk_errors;
+    bool control_read_batch_supported = false;
+    std::size_t control_read_batch_calls = 0;
+    std::size_t max_presence_batch_seen = 0;
+    std::size_t individual_presence_calls = 0;
+    bool fail_control_batch_if_oversized = false;
+    std::size_t max_allowed_presence_batch = 0;
+    std::optional<kasumi::transport::ErrorCode> control_read_batch_failure;
+    std::optional<std::size_t> fail_control_batch_on_call_ordinal;
+    std::size_t active_workspaces_at_failure = 0;
 };
 
 struct RecordingTransportState {
@@ -445,7 +455,13 @@ recording_get(void* context,
 
 kasumi::transport::PresenceResult recording_presence(void* context,
                                                      std::string_view id) {
-    return kasumi::transport::presence(*recording_state(context)->base, id);
+    auto* state = recording_state(context);
+    auto* probe = state->probe;
+    if (probe != nullptr) {
+        std::lock_guard lock(probe->mutex);
+        ++probe->individual_presence_calls;
+    }
+    return kasumi::transport::presence(*state->base, id);
 }
 
 kasumi::transport::ListingResult recording_list(void* context) {
@@ -464,6 +480,67 @@ kasumi::transport::RemovalResult recording_remove(void* context,
     return kasumi::transport::remove(*state.base, id);
 }
 
+kasumi::transport::ControlReadBatchResponse
+recording_control_read_batch(void* context,
+                             const kasumi::transport::ControlReadBatchRequest& request) {
+    auto* state = recording_state(context);
+    auto* probe = state->probe;
+    if (probe != nullptr) {
+        std::lock_guard lock(probe->mutex);
+        const std::size_t call_ordinal = probe->control_read_batch_calls++;
+        probe->max_presence_batch_seen = std::max(
+            probe->max_presence_batch_seen, request.presence_identifiers.size());
+        if (!probe->control_read_batch_supported) {
+            return std::unexpected(kasumi::transport::Error{
+                .code = kasumi::transport::ErrorCode::Unsupported,
+                .message = "control read batch unsupported"});
+        }
+        if (probe->fail_control_batch_on_call_ordinal &&
+            call_ordinal == *probe->fail_control_batch_on_call_ordinal) {
+            const auto trans = probe->profile / ".transactions";
+            if (std::filesystem::exists(trans) && !std::filesystem::is_empty(trans)) {
+                probe->active_workspaces_at_failure = 1;
+            }
+            return std::unexpected(kasumi::transport::Error{
+                .code = kasumi::transport::ErrorCode::Timeout,
+                .message = "injected reobservation presence timeout"});
+        }
+        if (probe->control_read_batch_failure) {
+            return std::unexpected(kasumi::transport::Error{
+                .code = *probe->control_read_batch_failure,
+                .message = "injected control read batch failure"});
+        }
+        if (probe->fail_control_batch_if_oversized &&
+            request.presence_identifiers.size() > probe->max_allowed_presence_batch) {
+            return std::unexpected(kasumi::transport::Error{
+                .code = kasumi::transport::ErrorCode::Timeout,
+                .message = "batch request exceeds maximum batch size/deadline"});
+        }
+    } else {
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Unsupported,
+            .message = "control read batch unsupported"});
+    }
+    kasumi::transport::ControlReadBatchResult result;
+    result.listings.reserve(request.list_prefixes.size());
+    for (const auto& prefix : request.list_prefixes) {
+        auto list_res = kasumi::transport::list(*state->base, prefix);
+        if (!list_res) {
+            return std::unexpected(list_res.error());
+        }
+        result.listings.push_back(std::move(*list_res));
+    }
+    result.presences.reserve(request.presence_identifiers.size());
+    for (const auto& id : request.presence_identifiers) {
+        auto pres_res = kasumi::transport::presence(*state->base, id);
+        if (!pres_res) {
+            return std::unexpected(pres_res.error());
+        }
+        result.presences.push_back(*pres_res);
+    }
+    return result;
+}
+
 kasumi::transport::Transport
 make_recording_transport(RecordingTransportState& state) {
     kasumi::transport::Transport result;
@@ -477,6 +554,7 @@ make_recording_transport(RecordingTransportState& state) {
                       .list_prefix = recording_list_prefix,
                       .physical_hash = recording_physical_hash,
                       .physical_hash_batch = recording_physical_hash_batch,
+                      .control_read_batch = recording_control_read_batch,
                       .remove = recording_remove,
                       .physical_hash_batch_min_objects = 6};
     return result;
@@ -1059,6 +1137,203 @@ TEST(SyncContentBatchTest, RecoveryUsesSharedContentConcurrency) {
     EXPECT_FALSE(
         std::filesystem::exists(fixture->profile / "transaction.bin.enc"));
     EXPECT_FALSE(std::filesystem::exists(transaction_root));
+}
+
+TEST(SyncContentBatchTest,
+     LargeContentPresenceVerificationDelegatesToControlBatch) {
+    auto fixture = make_fixture("large-presence-batch-bounds");
+    ContentWindowProbe probe;
+    probe.control_read_batch_supported = true;
+    attach_probe(*fixture, probe);
+
+    kasumi::reconciliation::Input input;
+    input.storage.generation = 1;
+    input.storage.logical_heads = {std::string(64, 'a')};
+    input.storage.history_present = true;
+    input.local_tree.rows.push_back(
+        kasumi::NodeRow{.path = "", .is_directory = true});
+    kasumi::finalize_snapshot(input.local_tree);
+
+    input.storage.tree.rows.push_back(
+        kasumi::NodeRow{.path = "", .is_directory = true});
+    for (std::size_t index = 0; index < 300; ++index) {
+        const auto path = "blob-" + std::to_string(index) + ".txt";
+        const auto hash =
+            kasumi::hasher::hash_string("remote-payload-" + std::to_string(index));
+        input.storage.tree.rows.push_back(kasumi::NodeRow{
+            .path = path,
+            .hash = hash,
+            .size = 14,
+            .is_directory = false,
+        });
+    }
+    kasumi::finalize_snapshot(input.storage.tree);
+
+    auto reconciled = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(reconciled.has_value()) << reconciled.error().detail;
+    ASSERT_EQ(reconciled->plan.operations.size(), 300U);
+
+    ASSERT_TRUE(
+        kasumi::state_storage::initialize(fixture->profile / "state.db"));
+
+    const auto stabilized =
+        kasumi::application::sync::coordinator::reobservation::stabilize(
+            runtime_data(*fixture),
+            fixture->storage,
+            fixture->key,
+            input,
+            *reconciled);
+
+    ASSERT_TRUE(stabilized.has_value()) << stabilized.error().detail;
+    EXPECT_EQ(probe.control_read_batch_calls, 1U);
+    EXPECT_EQ(probe.max_presence_batch_seen, 300U);
+}
+
+TEST(SyncContentBatchTest,
+     ReobservationFallsBackWhenControlReadBatchUnsupported) {
+    auto fixture = make_fixture("presence-unsupported-fallback");
+    ContentWindowProbe probe;
+    probe.control_read_batch_supported = false;
+    attach_probe(*fixture, probe);
+
+    kasumi::reconciliation::Input input;
+    input.storage.generation = 1;
+    input.storage.logical_heads = {std::string(64, 'a')};
+    input.storage.history_present = true;
+    input.local_tree.rows.push_back(
+        kasumi::NodeRow{.path = "", .is_directory = true});
+    kasumi::finalize_snapshot(input.local_tree);
+
+    const auto hash = kasumi::hasher::hash_string("fallback-payload");
+    input.storage.tree.rows.push_back(
+        kasumi::NodeRow{.path = "", .is_directory = true});
+    input.storage.tree.rows.push_back(kasumi::NodeRow{
+        .path = "fallback.txt",
+        .hash = hash,
+        .size = 16,
+        .is_directory = false,
+    });
+    kasumi::finalize_snapshot(input.storage.tree);
+
+    auto reconciled = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(reconciled.has_value()) << reconciled.error().detail;
+
+    ASSERT_TRUE(
+        kasumi::state_storage::initialize(fixture->profile / "state.db"));
+
+    const auto stabilized =
+        kasumi::application::sync::coordinator::reobservation::stabilize(
+            runtime_data(*fixture),
+            fixture->storage,
+            fixture->key,
+            input,
+            *reconciled);
+
+    ASSERT_TRUE(stabilized.has_value()) << stabilized.error().detail;
+    // Failed control_read_batch with Unsupported must cleanly fall back to individual presence
+    EXPECT_EQ(probe.control_read_batch_calls, 1U);
+    EXPECT_GT(probe.individual_presence_calls, 0U);
+}
+
+TEST(SyncContentBatchTest,
+     ContentPresenceTransportTimeoutFailsClosedWithoutFalseAbsence) {
+    auto fixture = make_fixture("presence-timeout-fail-closed");
+    ContentWindowProbe probe;
+    probe.control_read_batch_supported = true;
+    probe.control_read_batch_failure = kasumi::transport::ErrorCode::Timeout;
+    attach_probe(*fixture, probe);
+
+    kasumi::reconciliation::Input input;
+    input.storage.generation = 1;
+    input.storage.logical_heads = {std::string(64, 'a')};
+    input.storage.history_present = true;
+    input.local_tree.rows.push_back(
+        kasumi::NodeRow{.path = "", .is_directory = true});
+    kasumi::finalize_snapshot(input.local_tree);
+
+    const auto hash = kasumi::hasher::hash_string("test-payload");
+    input.storage.tree.rows.push_back(
+        kasumi::NodeRow{.path = "", .is_directory = true});
+    input.storage.tree.rows.push_back(kasumi::NodeRow{
+        .path = "file.txt",
+        .hash = hash,
+        .size = 12,
+        .is_directory = false,
+    });
+    kasumi::finalize_snapshot(input.storage.tree);
+
+    auto reconciled = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(reconciled.has_value()) << reconciled.error().detail;
+
+    ASSERT_TRUE(
+        kasumi::state_storage::initialize(fixture->profile / "state.db"));
+
+    const auto stabilized =
+        kasumi::application::sync::coordinator::reobservation::stabilize(
+            runtime_data(*fixture),
+            fixture->storage,
+            fixture->key,
+            input,
+            *reconciled);
+
+    // Fail-closed invariant: Timeout must abort observation immediately with
+    // ObservationFailure, never producing a successful stable execution with
+    // false absence or proceeding as if the object were missing.
+    ASSERT_FALSE(stabilized.has_value());
+    EXPECT_EQ(
+        stabilized.error().code,
+        kasumi::application::sync::coordinator::ErrorCode::ObservationFailure);
+    EXPECT_NE(stabilized.error().detail.find("timeout"), std::string::npos);
+}
+
+TEST(SyncContentBatchTest,
+     ContentPresenceFailureCleansUpTransactionWorkspace) {
+    auto fixture = make_fixture("presence-cleanup-workspace");
+    add_content_files(*fixture, 1);
+    const auto pub_input = publication_input(*fixture);
+    const auto pub_result = kasumi::reconciliation::reconcile(pub_input);
+    ASSERT_TRUE(pub_result.has_value()) << pub_result.error().detail;
+    ASSERT_TRUE(execute_with(*fixture, pub_input, *pub_result));
+
+    fixture->profile = kasumi::test::workspace_path(
+        fixture->workspace, "receiver-profile");
+    fixture->local = kasumi::test::workspace_path(
+        fixture->workspace, "receiver-local");
+    ASSERT_TRUE(std::filesystem::create_directories(fixture->profile));
+    ASSERT_TRUE(std::filesystem::create_directories(fixture->local));
+
+    ContentWindowProbe probe;
+    probe.control_read_batch_supported = true;
+    // Fail on the second call (reobservation attempt loop, after staging has created a workspace)
+    probe.fail_control_batch_on_call_ordinal = 1;
+    attach_probe(*fixture, probe);
+
+    auto observed =
+        kasumi::application::observation::collect_reconciliation_input(
+            runtime_data(*fixture), fixture->storage, fixture->key, false);
+    ASSERT_TRUE(observed.has_value()) << observed.error().detail;
+
+    auto reconciled = kasumi::reconciliation::reconcile(*observed);
+    ASSERT_TRUE(reconciled.has_value()) << reconciled.error().detail;
+
+    ASSERT_TRUE(
+        kasumi::state_storage::initialize(fixture->profile / "state.db"));
+
+    const auto stabilized =
+        kasumi::application::sync::coordinator::reobservation::stabilize(
+            runtime_data(*fixture),
+            fixture->storage,
+            fixture->key,
+            *observed,
+            *reconciled);
+
+    ASSERT_FALSE(stabilized.has_value());
+    // Verify that stage_attempt did indeed create a workspace before failure
+    EXPECT_EQ(probe.active_workspaces_at_failure, 1U);
+    // Verify that the workspace was properly cleaned up after failure
+    const auto transactions_dir = fixture->profile / ".transactions";
+    EXPECT_TRUE(!std::filesystem::exists(transactions_dir) ||
+                std::filesystem::is_empty(transactions_dir));
 }
 
 } // namespace

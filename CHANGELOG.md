@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.1]
+
+Kasumi - Multi-client bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.
+
+### Fixed
+
+- Fixed rclone job/batch timeouts during large content presence checks by splitting requests into bounded concurrent batches.
+
 ## [0.6.0]
 
 Kasumi - Multi-client bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.
