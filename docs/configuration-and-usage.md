@@ -61,10 +61,28 @@ New profiles default to a minimum retention depth of 5 commits and a minimum ret
 * `status` and `sync --dry-run` are separate user-facing operations, but production dispatch runs both through the same planner and returns a `PlanReport`. Neither executes the plan, recovers an interrupted transaction, advances accepted state, or publishes remote history. They read local profile configuration and private state, acquire the local profile lock, and perform observations. Their result can become stale before a later sync. See [Preview and Status](architecture/planning-and-status.md).
 * **Plan Truncation & `--full`**: When a synchronization plan contains more than 10 items, Kasumi truncates output to display the first 5 and last 5 items, separated by an ellipsis line (`... (N more items) ...` / `... (mais N itens) ...`) to maintain clean terminal output. Pass `--full` to list all items without truncation (useful for inspection scripts, complete audits, or piping to log files).
 * `sync` applies local tree modifications, transfers content payloads, and publishes Commit and HEAD records. See [Synchronization](architecture/synchronization.md).
-* `update` checks the official GitHub Releases API, verifies the platform package's SHA-256 checksum, and replaces only the running Kasumi executable. It does not access profiles or remote storage. Windows uses the built-in `tar` command; Linux requires `curl`, `tar`, and `sha256sum`. Installations owned by a package manager must be updated through that manager. When installation permissions require it, Kasumi requests Windows UAC elevation or uses `pkexec`/interactive `sudo` on Linux.
+* See [Updating Kasumi](#updating-kasumi) for update behavior, platform requirements, and compatibility notes.
 * `gc` coordinates through a distributed barrier protocol, checks backend consistency visibility with probe objects, and stages candidates through a 10-day quarantine before permanent removal. It can return analysis-only results. See [Garbage Collection](architecture/garbage-collection.md).
 * `gc remove-writer` is a manual recovery command for one exact identifier from `kasumi remote writers <profile>`. Kasumi refuses removal when a maintenance barrier is present, but this check does not coordinate distributed operations. Verify that no Sync or maintenance operation is running before removal. It does not run Sync or GC.
 * `fsck` validates observed remote history and physical identifiers, downloads referenced content, checks authentication, size, and logical hashes, and reports missing or corrupted objects. It may update a private checkpoint but does not use that checkpoint to skip payload audits. See [Fsck](architecture/fsck.md).
+
+### Updating Kasumi
+
+Run the command with no command-specific arguments:
+
+```sh
+kasumi update
+```
+
+The command is available in official Windows and Linux x86_64 binaries starting with v0.6.0. Older binaries do not recognize it. Kasumi queries the official GitHub Releases API and selects the newest release on its supported channel: before a stable v1.0.0 release exists, this is the newest v0.x release, including prereleases; after a stable v1.0.0 or later exists, prereleases and v0.x releases are excluded.
+
+Kasumi downloads the platform archive and its published SHA-256 checksum, verifies the archive, then replaces only the Kasumi executable. It keeps the previous executable beside it as a `.kasumi-previous-*` recovery copy. If verification of the replacement fails, Kasumi attempts to restore that copy; this is not a universal rollback guarantee. The updater does not access profile data, configuration files, keys, or configured remote storage, and it does not migrate local data.
+
+On Windows, Kasumi uses the built-in `tar` command and starts a helper that waits for the original process to exit before replacing the executable. The helper requests UAC elevation if installation permissions require it; it completes the update after the original process exits.
+
+On Linux, `curl`, `tar`, and `sha256sum` must be available. Kasumi installs without root when the executable's directory is writable. If permissions deny replacement, it attempts `pkexec`; it falls back to `sudo` only when authentication through `pkexec` is unavailable and the terminal is interactive.
+
+Installations managed by a package manager must be updated through that manager. The v0.6.0 binary updater does not migrate the incompatible local SQLite databases or unfinished transaction journals from v0.5.5. Follow the [v0.6.0 upgrade notes](../CHANGELOG.md#upgrade-notes) before updating; older binaries cannot run `kasumi update` retroactively.
 
 ### Partial Synchronization and Explicit Data-Loss Operations
 

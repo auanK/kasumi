@@ -47,6 +47,8 @@ cmake --build --preset default
 
 The release preset places the binary at `build/kasumi.exe` on Windows or `build/kasumi` on Linux. The examples below assume `kasumi` is on `PATH`; otherwise run the binary from `build/`.
 
+Official binaries from v0.6.0 onward include the manual `kasumi update` command. See [Updating Kasumi](docs/configuration-and-usage.md#updating-kasumi) for platform requirements and compatibility notes; it replaces the executable but does not migrate local state.
+
 For platform prerequisites and build options, see [Build and Test](docs/build-and-test.md).
 
 ### 2. Configure Shared Storage
