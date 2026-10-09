@@ -17,6 +17,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     wipe_operation(output);
     const auto operation = input.request.operation;
     output.operation = operation;
+    output.writer_identifier = input.request.writer_identifier;
     output.on_progress = input.on_progress;
     const auto access_mode = (operation == Operation::Sync ||
                               operation == Operation::ResolveMissing)

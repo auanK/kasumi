@@ -117,13 +117,18 @@ struct RepairQuarantineCompleted {
     std::size_t repaired_metadata_count = 0;
 };
 
+struct ManualWriterRemovalCompleted {
+    std::string identifier;
+};
+
 // Possible payload variants for a successful response.
 using ResponseData = std::variant<SyncCompleted,
                                   PlanReport,
                                   FsckCompleted,
                                   GarbageCollectCompleted,
                                   ResolveMissingCompleted,
-                                  RepairQuarantineCompleted>;
+                                  RepairQuarantineCompleted,
+                                  ManualWriterRemovalCompleted>;
 
 // Successful operation response.
 struct Response {
@@ -144,6 +149,7 @@ enum class ErrorCode {
     PlanFailure,
     FsckFailure,
     GarbageCollectionFailure,
+    WriterRemovalFailure,
     SynchronizationFailure,
     RecoveryFailure
 };

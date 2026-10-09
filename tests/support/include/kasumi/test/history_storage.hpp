@@ -234,6 +234,7 @@ struct FakeState {
     std::size_t fail_list_at = 0;
     std::optional<kasumi::transport::ErrorCode> fail_list;
     bool fail_barrier_presence = false;
+    std::string fail_presence_after_removal_identifier;
     bool fail_commit_put = false;
     bool persist_commit_on_put_failure = false;
     bool fail_quarantine_metadata_put = false;
@@ -690,6 +691,14 @@ kasumi::transport::PresenceResult fake_presence(void* context,
         return std::unexpected(kasumi::transport::Error{
             .code = kasumi::transport::ErrorCode::Io,
             .message = "injected barrier presence failure"});
+    }
+    if (!state->fail_presence_after_removal_identifier.empty() &&
+        identifier == state->fail_presence_after_removal_identifier &&
+        !state->objects.contains(std::string{identifier})) {
+        state->fail_presence_after_removal_identifier.clear();
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Io,
+            .message = "injected post-removal presence failure"});
     }
     return state->objects.contains(std::string{identifier})
                ? kasumi::transport::Presence::Present

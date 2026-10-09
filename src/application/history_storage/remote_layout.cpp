@@ -1,6 +1,7 @@
 #include "application/history_storage/remote_layout.hpp"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 
 namespace kasumi::application::history_storage {
@@ -188,6 +189,41 @@ bool is_control_object(const RemoteLayout& layout,
 bool is_history_object(const RemoteLayout& layout,
                        std::string_view identifier) noexcept {
     return identifier.starts_with(layout.history_prefix);
+}
+
+bool valid_writer_identifier(std::string_view identifier) noexcept {
+    constexpr std::array<std::size_t, 5> component_sizes{8, 8, 4, 8, 32};
+    std::size_t offset = 0;
+    for (std::size_t index = 0; index < component_sizes.size(); ++index) {
+        const auto component = identifier.substr(offset, component_sizes[index]);
+        if (component.size() != component_sizes[index] ||
+            !std::ranges::all_of(component, [](char character) {
+                return (character >= '0' && character <= '9') ||
+                       (character >= 'a' && character <= 'f');
+            })) {
+            return false;
+        }
+        offset += component_sizes[index];
+        if (index + 1 < component_sizes.size()) {
+            if (offset >= identifier.size() || identifier[offset] != '/') {
+                return false;
+            }
+            ++offset;
+        }
+    }
+    return offset == identifier.size();
+}
+
+bool valid_writer_identifier(const RemoteLayout& layout,
+                             std::string_view identifier) noexcept {
+    if (!identifier.starts_with(layout.writers_prefix)) {
+        return false;
+    }
+    const auto token = identifier.substr(layout.writers_prefix.size());
+    return token.size() == 32 && std::ranges::all_of(token, [](char character) {
+               return (character >= '0' && character <= '9') ||
+                      (character >= 'a' && character <= 'f');
+           });
 }
 
 std::optional<std::string>

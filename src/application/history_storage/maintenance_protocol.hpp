@@ -75,6 +75,13 @@ active_writers(transport::Transport& storage, const RemoteLayout& layout);
 std::expected<std::vector<std::string>, Error>
 active_writers(transport::Transport& storage);
 
+// Removes only the explicitly selected writer marker after verifying it is
+// listed and present in this vault's keyed writer namespace.
+std::expected<void, Error>
+remove_writer(transport::Transport& storage,
+              const RemoteLayout& layout,
+              std::string_view identifier);
+
 // Confirms immediate read-after-write and read-after-delete visibility in
 // listings.
 std::expected<bool, Error>

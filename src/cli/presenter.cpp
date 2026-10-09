@@ -1000,6 +1000,20 @@ int present(const application::Response& response, bool full) {
                      i18n::format(i18n::Key::ManualRepairSummary, repaired));
         return 0;
     }
+    if (response.operation == application::Operation::RemoveWriter) {
+        if (const auto* ptr =
+                std::get_if<application::ManualWriterRemovalCompleted>(
+                    &response.data)) {
+            std::println("{}{}{} {}",
+                         style::green,
+                         i18n::tr(i18n::Key::LabelOk),
+                         style::reset,
+                         i18n::format(
+                             i18n::Key::ManualWriterRemovalCompleted,
+                             ptr->identifier));
+            return 0;
+        }
+    }
     if (const auto* ptr =
             std::get_if<application::GarbageCollectCompleted>(&response.data)) {
         if (ptr->analysis_only) {
@@ -1266,6 +1280,14 @@ int present(const application::Error& error) {
                 i18n::tr(i18n::Key::LabelError),
                 style::reset,
                 i18n::format(i18n::Key::ErrorGcCancelled, error.detail));
+            break;
+        case application::ErrorCode::WriterRemovalFailure:
+            std::println("{}{}{} {}",
+                         style::red,
+                         i18n::tr(i18n::Key::LabelError),
+                         style::reset,
+                         i18n::format(i18n::Key::ErrorWriterRemovalFailed,
+                                      error.detail));
             break;
         case application::ErrorCode::SynchronizationFailure:
         case application::ErrorCode::RecoveryFailure:

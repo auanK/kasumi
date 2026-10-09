@@ -227,6 +227,47 @@ TEST(CliParserTest, ManualQuarantineRepairHasDistinctExplicitAuthority) {
               kasumi::application::Operation::RepairQuarantine);
 }
 
+TEST(CliParserTest, ManualWriterRemovalIsAnExplicitGcRequest) {
+    std::vector<std::string> arguments{
+        "kasumi",
+        "gc",
+        "remove-writer",
+        "Pictures",
+        "2796e9c1/99b74a57/8973/0e7f7095/"
+        "f51c45986e4bf1accbf45b9e2a14c8ab"};
+    std::vector<char*> argv;
+    for (auto& argument : arguments) {
+        argv.push_back(argument.data());
+    }
+    const auto invocation = kasumi::cli::parse(
+        static_cast<int>(argv.size()), argv.data());
+    ASSERT_TRUE(invocation.has_value())
+        << "manual writer removal is not supported yet";
+    ASSERT_TRUE(std::holds_alternative<kasumi::application::Request>(
+        *invocation));
+    const auto& request = std::get<kasumi::application::Request>(*invocation);
+    EXPECT_EQ(request.operation, kasumi::application::Operation::RemoveWriter);
+    EXPECT_EQ(request.profile_name, "Pictures");
+    EXPECT_EQ(request.writer_identifier,
+              "2796e9c1/99b74a57/8973/0e7f7095/"
+              "f51c45986e4bf1accbf45b9e2a14c8ab");
+}
+
+TEST(CliParserTest, RejectsMalformedWriterRemovalIdentifiers) {
+    for (const auto* identifier : {"../writer", "history/gc/v1/barrier",
+                                   "2796e9c1/99b74a57/8973/0e7f7095/not-hex"}) {
+        std::vector<std::string> arguments{
+            "kasumi", "gc", "remove-writer", "Pictures", identifier};
+        std::vector<char*> argv;
+        for (auto& argument : arguments) {
+            argv.push_back(argument.data());
+        }
+        EXPECT_FALSE(kasumi::cli::parse(static_cast<int>(argv.size()),
+                                        argv.data()).has_value())
+            << identifier;
+    }
+}
+
 TEST(CliParserTest,
      RejectsMissingArgumentsUnknownCommandsAndInvalidCombinations) {
     const auto check_error = [](std::vector<std::string> values) {
@@ -256,6 +297,9 @@ TEST(CliParserTest,
     check_error({"kasumi", "gc", "repair-quarantine", "demo", "--confirm-permanent-loss", "extra"});
     check_error({"kasumi", "gc", "repair-quarantine", "", "--confirm-permanent-loss"});
     check_error({"kasumi", "gc", "repair-quarantine", "demo", "--unknown"});
+    check_error({"kasumi", "gc", "remove-writer"});
+    check_error({"kasumi", "gc", "remove-writer", "demo"});
+    check_error({"kasumi", "gc", "remove-writer", "", "2796e9c1/99b74a57/8973/0e7f7095/f51c45986e4bf1accbf45b9e2a14c8ab"});
     check_error({"kasumi", "resolve-missing"});
     check_error({"kasumi", "resolve-missing", ""});
     check_error({"kasumi", "resolve-missing", "demo", "extra"});

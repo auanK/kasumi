@@ -18,6 +18,7 @@ std::expected<Response, Error> run_garbage_collect(OperationContext& context);
 std::expected<Response, Error> run_resolve_missing(OperationContext& context);
 std::expected<Response, Error> run_purge_quarantine(OperationContext& context);
 std::expected<Response, Error> run_repair_quarantine(OperationContext& context);
+std::expected<Response, Error> run_remove_writer(OperationContext& context);
 
 std::expected<Response, Error> dispatch(OperationContext& context) {
     switch (context.operation) {
@@ -36,6 +37,8 @@ std::expected<Response, Error> dispatch(OperationContext& context) {
             return run_purge_quarantine(context);
         case Operation::RepairQuarantine:
             return run_repair_quarantine(context);
+        case Operation::RemoveWriter:
+            return run_remove_writer(context);
     }
     std::unreachable();
 }

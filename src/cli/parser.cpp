@@ -1,5 +1,7 @@
 #include "cli/parser.hpp"
 
+#include "application/history_storage/remote_layout.hpp"
+
 #include <string_view>
 
 namespace kasumi::cli {
@@ -58,6 +60,19 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         return request(application::Operation::Fsck, argc, argv);
     }
     if (command == "gc") {
+        if (argc >= 3 && argv[2] != nullptr &&
+            std::string_view{argv[2]} == "remove-writer") {
+            if (argc != 5 || argv[3] == nullptr || argv[3][0] == '\0' ||
+                argv[4] == nullptr ||
+                !application::history_storage::valid_writer_identifier(
+                    argv[4])) {
+                return std::unexpected(ParseError{});
+            }
+            return application::Request{
+                .operation = application::Operation::RemoveWriter,
+                .profile_name = argv[3],
+                .writer_identifier = argv[4]};
+        }
         if (argc >= 3 && argv[2] != nullptr &&
             std::string_view{argv[2]} == "purge-quarantine") {
             if (argc != 5 || argv[3] == nullptr || argv[3][0] == '\0' ||

@@ -12,6 +12,7 @@
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/clock.hpp"
+#include "platform/profile_lock.hpp"
 #include "runtime/vault.hpp"
 #include "transport/transport.hpp"
 
@@ -591,6 +592,133 @@ protected:
         return repair({"--confirm-permanent-loss"});
     }
 };
+
+class ManualWriterRemovalContract : public ManualQuarantinePurgeContract {
+protected:
+    CliResult remove_writer(std::string identifier,
+                            std::string language = "en") {
+        return run_cli({"kasumi", "--lang", std::move(language), "gc",
+                        "remove-writer", "demo", std::move(identifier)});
+    }
+};
+
+TEST_F(ManualWriterRemovalContract,
+       RemovesOnlyTheSelectedWriterAndLeavesNormalGcBlocked) {
+    const auto selected = layout.writers_prefix + std::string(32, 'a');
+    const auto other = layout.writers_prefix + std::string(32, 'b');
+    put_object(selected, "selected writer");
+    put_object(other, "other writer");
+    put_object("unrelated/object", "unrelated");
+    auto expected = remote_snapshot();
+    expected.erase(selected);
+
+    const auto result = remove_writer(selected);
+    ASSERT_EQ(result.code, 0) << result.output;
+    EXPECT_NE(result.output.find("cannot determine whether this writer's process"),
+              std::string::npos);
+    EXPECT_NE(result.output.find(
+                  "Verify that no Sync or maintenance operation is active"),
+              std::string::npos);
+    EXPECT_NE(result.output.find("Removed writer marker: " + selected),
+              std::string::npos);
+    EXPECT_EQ(remote_snapshot(), expected);
+
+    const auto gc = run_cli({"kasumi", "gc", "demo"});
+    EXPECT_NE(gc.code, 0);
+    EXPECT_EQ(remote_snapshot(), expected);
+}
+
+TEST_F(ManualWriterRemovalContract,
+       RejectsMissingAndForeignWriterIdentifiersWithoutMutatingStorage) {
+    const auto missing = layout.writers_prefix + std::string(32, 'a');
+    const auto foreign_key =
+        kasumi::runtime::vault::decode_hex(std::string(64, 'a'));
+    ASSERT_TRUE(foreign_key.has_value());
+    const auto foreign = history::derive_remote_layout(*foreign_key)
+                             .writers_prefix + std::string(32, 'b');
+    const auto before = remote_snapshot();
+
+    EXPECT_NE(remove_writer("../unrelated/object").code, 0);
+    EXPECT_NE(remove_writer(missing).code, 0);
+    EXPECT_NE(remove_writer(foreign).code, 0);
+    EXPECT_EQ(remote_snapshot(), before);
+}
+
+TEST_F(ManualWriterRemovalContract, NeverRemovesAnExistingGcBarrier) {
+    const auto selected = layout.writers_prefix + std::string(32, 'a');
+    put_object(selected, "selected writer");
+    put_object(layout.barrier_identifier, "other operation barrier");
+    const auto before = remote_snapshot();
+
+    const auto result = remove_writer(selected);
+    EXPECT_NE(result.code, 0) << result.output;
+    EXPECT_NE(result.output.find("maintenance barrier is present"),
+              std::string::npos) << result.output;
+    EXPECT_EQ(remote_snapshot(), before);
+}
+
+TEST_F(ManualWriterRemovalContract,
+       RecoversFromAnAbandonedRegisteredWriterSoGcCanRun) {
+    seed_history();
+    auto registration = protocol::register_writer(
+        *storage, layout, kasumi::test::workspace_root(workspace));
+    ASSERT_TRUE(registration.has_value()) << registration.error().detail;
+    const auto identifier = registration->identifier;
+    // Deliberately do not release the registration: this is the remote state
+    // left behind when Sync is terminated unexpectedly.
+    const auto before = remote_snapshot();
+    ASSERT_TRUE(before.contains(identifier));
+
+    const auto blocked = run_cli({"kasumi", "gc", "demo"});
+    EXPECT_NE(blocked.code, 0) << blocked.output;
+    EXPECT_EQ(remote_snapshot(), before);
+
+    const auto removed = remove_writer(identifier);
+    ASSERT_EQ(removed.code, 0) << removed.output;
+    auto expected = before;
+    expected.erase(identifier);
+    EXPECT_EQ(remote_snapshot(), expected);
+
+    const auto collected = run_cli({"kasumi", "gc", "demo"});
+    EXPECT_EQ(collected.code, 0) << collected.output;
+    const auto writers = protocol::active_writers(*storage, layout);
+    ASSERT_TRUE(writers.has_value()) << writers.error().detail;
+    EXPECT_TRUE(writers->empty());
+    EXPECT_EQ(remote_snapshot(), expected);
+}
+
+TEST_F(ManualWriterRemovalContract, RespectsTheLocalProfileLock) {
+    const auto selected = layout.writers_prefix + std::string(32, 'a');
+    put_object(selected, "selected writer");
+    const auto before = remote_snapshot();
+    auto acquired = kasumi::platform::acquire_profile_lock(
+        environment.app_data_dir / "profile-demo.lock");
+    ASSERT_TRUE(acquired.has_value()) << acquired.error();
+    auto held = *acquired;
+
+    const auto blocked = remove_writer(selected);
+    EXPECT_NE(blocked.code, 0);
+    EXPECT_EQ(remote_snapshot(), before);
+
+    kasumi::platform::release_profile_lock(held);
+    const auto removed = remove_writer(selected);
+    EXPECT_EQ(removed.code, 0) << removed.output;
+}
+
+TEST_F(ManualWriterRemovalContract, WarningAndSuccessAreLocalized) {
+    const auto selected = layout.writers_prefix + std::string(32, 'a');
+    put_object(selected, "selected writer");
+
+    const auto result = remove_writer(selected, "pt-BR");
+    ASSERT_EQ(result.code, 0) << result.output;
+    EXPECT_NE(result.output.find("não consegue determinar se o processo"),
+              std::string::npos);
+    EXPECT_NE(result.output.find(
+                  "Verifique se não há Sync ou operação de manutenção"),
+              std::string::npos);
+    EXPECT_NE(result.output.find("Marker de writer removido: " + selected),
+              std::string::npos);
+}
 
 TEST_F(ManualQuarantineRepairContract, MissingConfirmationAndMalformedArgumentsPreserveObjects) {
     const auto entry = add_quarantine("young-one");

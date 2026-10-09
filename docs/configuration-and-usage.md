@@ -52,6 +52,7 @@ New profiles default to a minimum retention depth of 5 commits and a minimum ret
 | `kasumi sync <profile>` | Runs synchronization |
 | `kasumi fsck <profile>` | Validates observed remote history and audits content objects referenced by the effective remote state |
 | `kasumi gc <profile>` | Runs garbage-collection analysis and, when online collection conditions are met, quarantine and removal processing |
+| `kasumi gc remove-writer <profile> <writer-id>` | Manually removes exactly one listed remote writer marker |
 | `kasumi gc purge-quarantine <profile> --confirm-permanent-loss` | Explicitly and permanently purges authenticated quarantine entries; **may destroy still-referenced content** |
 | `kasumi gc repair-quarantine <profile> --confirm-permanent-loss` | Removes eligible orphaned quarantine metadata whose payload is already missing; **does not restore content** |
 | `kasumi resolve-missing <profile>` | Explicitly resolves eligible pending missing remote payloads as logical deletions; **may publish permanent data loss** |
@@ -60,6 +61,7 @@ New profiles default to a minimum retention depth of 5 commits and a minimum ret
 * **Plan Truncation & `--full`**: When a synchronization plan contains more than 10 items, Kasumi truncates output to display the first 5 and last 5 items, separated by an ellipsis line (`... (N more items) ...` / `... (mais N itens) ...`) to maintain clean terminal output. Pass `--full` to list all items without truncation (useful for inspection scripts, complete audits, or piping to log files).
 * `sync` applies local tree modifications, transfers content payloads, and publishes Commit and HEAD records. See [Synchronization](architecture/synchronization.md).
 * `gc` coordinates through a distributed barrier protocol, checks backend consistency visibility with probe objects, and stages candidates through a 10-day quarantine before permanent removal. It can return analysis-only results. See [Garbage Collection](architecture/garbage-collection.md).
+* `gc remove-writer` is a manual recovery command for one exact identifier from `kasumi remote writers <profile>`. Kasumi refuses removal when a maintenance barrier is present, but this check does not coordinate distributed operations. Verify that no Sync or maintenance operation is running before removal. It does not run Sync or GC.
 * `fsck` validates observed remote history and physical identifiers, downloads referenced content, checks authentication, size, and logical hashes, and reports missing or corrupted objects. It may update a private checkpoint but does not use that checkpoint to skip payload audits. See [Fsck](architecture/fsck.md).
 
 ### Partial Synchronization and Explicit Data-Loss Operations

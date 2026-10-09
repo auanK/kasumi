@@ -112,6 +112,11 @@ int run(int argc, char* argv[]) {
     }
 
     auto request = std::get<application::Request>(*parse_result);
+    if (request.operation == application::Operation::RemoveWriter) {
+        std::println("{} {}",
+                     i18n::tr(i18n::Key::LabelWarning),
+                     i18n::tr(i18n::Key::ManualWriterRemovalWarning));
+    }
     auto initial_credentials = credentials::from_environment();
 
     application::ProgressCallback on_progress{};

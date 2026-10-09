@@ -19,6 +19,7 @@ struct OperationContext {
     RuntimeSummary summary;
     std::intptr_t profile_lock = platform::invalid_profile_lock;
     runtime::vault::KeyBytes key{};
+    std::string writer_identifier;
     transport::Transport storage;
     ProgressCallback on_progress{};
 };

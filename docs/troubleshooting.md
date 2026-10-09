@@ -289,13 +289,13 @@ Kasumi's garbage collector enforces strict safety conditions before performing d
    ```bash
    kasumi remote writers <profile>
    ```
-   If you know another client is synchronizing, wait for it to finish. If no client is active but a marker remains, investigate the maintenance state; do not manually delete writer markers from remote storage.
+   If you know another client is synchronizing, wait for it to finish. Before removal, verify that no Sync or maintenance operation is running; the barrier check is not distributed exclusion. Then copy only that writer's exact identifier and run `kasumi gc remove-writer <profile> <writer-id>`. Kasumi cannot establish process liveness; removal is the operator's responsibility. The command removes only the selected marker and does not run GC.
 3. **Inspect Remote Health**:
    ```bash
    kasumi remote health <profile>
    ```
 4. **Retry in a Quiet Maintenance Window**: Rerun `kasumi gc <profile>` during a low-activity window when no clients are synchronizing.
-5. **Never Manually Delete Objects**: Do not attempt to manually delete unreferenced files from the remote storage backend.
+5. **Keep Normal GC Checks**: Retry normal `kasumi gc <profile>` after the marker is removed. Any other writer marker continues to block destructive GC.
 
 ### Related Documentation
 * [Garbage Collection Architecture](architecture/garbage-collection.md)
@@ -368,11 +368,12 @@ The table below clarifies the purpose and operational behavior of Kasumi's diagn
 | `kasumi sync <profile> --dry-run` | Preview pending changes | No | No | Exclusive | Point-in-time observation |
 | `kasumi fsck <profile>` | Audit referenced payloads | Yes | Yes | Exclusive | Audit may overlap writers |
 | `kasumi gc <profile>` | Storage reclamation | No Fsck-style audit | Yes | Exclusive | Barrier blocks collection if any writer marker exists |
+| `kasumi gc remove-writer <profile> <writer-id>` | Remove one explicitly selected writer marker | No | No | Exclusive | Operator verifies liveness; other markers still block GC |
 | `kasumi remote health <profile>` | Operational diagnostic | No | No | None | Point-in-time observation |
 | `kasumi remote contents --audit <profile>` | Audit all physical payloads | Yes (all present) | No | None | Point-in-time observation |
 | `kasumi remote summary <profile>` | Overview of vault state | No | No | None | Point-in-time observation |
 
-The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck and GC run pending Sync transaction recovery first, which may change local files or complete remote publication. Fsck's audit itself does not intentionally modify remote objects. GC may transfer encrypted candidate bytes through a local workspace for quarantine verification without performing Fsck's plaintext audit.
+The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck and GC run pending Sync transaction recovery first, which may change local files or complete remote publication. Manual writer removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit itself does not intentionally modify remote objects. GC may transfer encrypted candidate bytes through a local workspace for quarantine verification without performing Fsck's plaintext audit.
 
 * Use **`status`** to see what will change locally and remotely.
 * Use **`remote health`** for an operational diagnostic without Fsck's payload audit.

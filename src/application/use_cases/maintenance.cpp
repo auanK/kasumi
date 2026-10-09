@@ -1,4 +1,6 @@
 #include "application/concurrency.hpp"
+#include "application/history_storage/maintenance_protocol.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/maintenance.hpp"
 
 #include "application/sync/coordinator.hpp"
@@ -109,6 +111,25 @@ std::expected<Response, Error> run_repair_quarantine(OperationContext& context) 
         .operation = context.operation,
         .runtime = context.summary,
         .data = RepairQuarantineCompleted{.repaired_metadata_count = *repaired}};
+}
+
+std::expected<Response, Error> run_remove_writer(OperationContext& context) {
+    const auto layout = history_storage::derive_remote_layout(context.key);
+    auto removed = history_storage::maintenance_protocol::remove_writer(
+        context.storage, layout, context.writer_identifier);
+    if (!removed) {
+        return std::unexpected(Error{
+            .operation = context.operation,
+            .code = ErrorCode::WriterRemovalFailure,
+            .detail = removed.error().detail,
+            .runtime = context.summary,
+        });
+    }
+    return Response{
+        .operation = context.operation,
+        .runtime = context.summary,
+        .data = ManualWriterRemovalCompleted{
+            .identifier = context.writer_identifier}};
 }
 
 } // namespace kasumi::application::detail

@@ -668,6 +668,76 @@ active_writers(transport::Transport& storage) {
     return active_writers(storage, default_remote_layout());
 }
 
+std::expected<void, Error>
+remove_writer(transport::Transport& storage,
+              const RemoteLayout& layout,
+              std::string_view identifier) {
+    if (!transport::valid(storage) ||
+        !valid_writer_identifier(layout, identifier)) {
+        return std::unexpected(
+            error(ErrorCode::InvalidInput, "invalid writer marker identifier"));
+    }
+
+    auto present = transport::presence(storage, identifier);
+    if (!present) {
+        return std::unexpected(transport_error(present.error()));
+    }
+    if (*present != transport::Presence::Present) {
+        return std::unexpected(
+            error(ErrorCode::InvalidInput, "writer marker does not exist"));
+    }
+
+    auto writers = active_writers(storage, layout);
+    if (!writers) {
+        return std::unexpected(writers.error());
+    }
+    const auto matches = std::ranges::count(*writers, identifier);
+    if (matches != 1) {
+        return std::unexpected(error(
+            ErrorCode::InvalidControlObject,
+            matches == 0 ? "writer marker is not listed"
+                         : "writer marker listing is ambiguous"));
+    }
+
+    auto barrier = transport::presence(storage, layout.barrier_identifier);
+    if (!barrier) {
+        return std::unexpected(transport_error(barrier.error()));
+    }
+    if (*barrier == transport::Presence::Present) {
+        return std::unexpected(error(
+            ErrorCode::Blocked,
+            "maintenance barrier is present; writer removal is blocked"));
+    }
+
+    auto removed = transport::remove(storage, identifier);
+    if (!removed) {
+        return std::unexpected(transport_error(removed.error()));
+    }
+    if (*removed != transport::Removal::Removed) {
+        return std::unexpected(error(
+            ErrorCode::VerificationFailure,
+            "writer marker disappeared before it could be removed"));
+    }
+
+    present = transport::presence(storage, identifier);
+    if (!present) {
+        return std::unexpected(transport_error(present.error()));
+    }
+    if (*present != transport::Presence::Absent) {
+        return std::unexpected(error(ErrorCode::VerificationFailure,
+                                     "writer marker remains after removal"));
+    }
+    writers = active_writers(storage, layout);
+    if (!writers) {
+        return std::unexpected(writers.error());
+    }
+    if (std::ranges::find(*writers, identifier) != writers->end()) {
+        return std::unexpected(error(ErrorCode::VerificationFailure,
+                                     "writer marker remains listed"));
+    }
+    return {};
+}
+
 std::expected<bool, Error>
 supports_online_collection(transport::Transport& storage,
                            const RemoteLayout& layout,

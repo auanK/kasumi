@@ -54,6 +54,9 @@ bool is_control_object(const RemoteLayout& layout,
                        std::string_view identifier) noexcept;
 bool is_history_object(const RemoteLayout& layout,
                        std::string_view identifier) noexcept;
+bool valid_writer_identifier(std::string_view identifier) noexcept;
+bool valid_writer_identifier(const RemoteLayout& layout,
+                             std::string_view identifier) noexcept;
 
 std::optional<std::string>
 quarantine_identifier(const RemoteLayout& layout,

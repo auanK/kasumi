@@ -116,6 +116,7 @@ kasumi_add_test_suite(
         unit/application/history_storage/test_codec_fuzz.cpp
         unit/application/history_storage/test_reachability.cpp
         unit/application/history_storage/test_remote_layout.cpp
+        unit/application/history_storage/test_maintenance_protocol.cpp
     LIBRARIES
         kasumi_application
 )

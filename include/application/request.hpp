@@ -24,13 +24,16 @@ enum class Operation {
     // Explicit manual purge of quarantine entries bypassing retention.
     PurgeQuarantine,
     // Explicit manual repair of incomplete quarantine pairs.
-    RepairQuarantine
+    RepairQuarantine,
+    // Explicit manual removal of one remote writer marker.
+    RemoveWriter
 };
 
 // Request structure defining action to perform and target profile.
 struct Request {
     Operation operation = Operation::Sync;
     std::string profile_name;
+    std::string writer_identifier;
 };
 
 } // namespace kasumi::application
