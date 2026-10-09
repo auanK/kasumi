@@ -150,7 +150,9 @@ replace_atomically(const std::filesystem::path& source,
     std::error_code error;
     std::filesystem::rename(source, target, error);
     if (error) {
-        return std::unexpected("replace_atomically failed: " + error.message());
+        return std::unexpected(
+            "replace_atomically failed (native_code=" +
+            std::to_string(error.value()) + "): " + error.message());
     }
 #endif
     return {};

@@ -31,6 +31,20 @@ enum class Key {
 
     // Version
     VersionText,
+    UpdateChecking,
+    UpdateCurrentVersion,
+    UpdateLatestVersion,
+    UpdateDownloading,
+    UpdateVerifying,
+    UpdateInstalling,
+    UpdateHandoffStarted,
+    UpdateAlreadyCurrent,
+    UpdateCompleted,
+    UpdateAdminRequired,
+    UpdateRequestPermission,
+    UpdateElevationUnavailable,
+    UpdateManagedInstallation,
+    UpdateFailed,
 
     // Sync & Status
     SyncInProgress,

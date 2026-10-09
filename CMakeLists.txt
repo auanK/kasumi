@@ -599,6 +599,7 @@ add_library(kasumi_cli STATIC
     src/cli/i18n.cpp
     src/cli/parser.cpp
     src/cli/presenter.cpp
+    src/cli/update.cpp
     src/cli/wizard.cpp
     "${I18N_EMBEDDED_HEADER}"
 )
@@ -621,7 +622,11 @@ target_link_libraries(
     kasumi_release_optimizations
     kasumi_hardening
     nlohmann_json::nlohmann_json
+    reproc++
 )
+if(WIN32)
+    target_link_libraries(kasumi_cli PRIVATE advapi32 winhttp bcrypt shell32 version)
+endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
     target_link_libraries(kasumi_cli PRIVATE stdc++exp)
 endif()

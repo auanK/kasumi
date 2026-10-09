@@ -8,6 +8,7 @@
 #include "cli/parser.hpp"
 #include "cli/presenter.hpp"
 #include "cli/wizard.hpp"
+#include "cli/update.hpp"
 #include "platform/cancellation.hpp"
 
 #include <csignal>
@@ -27,6 +28,10 @@ void request_cancellation(int) {
 namespace kasumi::cli {
 
 int run(int argc, char* argv[]) {
+    if (argc >= 2 && argv != nullptr && argv[1] != nullptr &&
+        std::string_view{argv[1]}.starts_with("--kasumi-update-")) {
+        return update::run(argc, argv);
+    }
     i18n::init_language(argc, argv);
     const auto sanitized = i18n::extract_language_argument(argc, argv);
     bool full = false;
@@ -77,13 +82,16 @@ int run(int argc, char* argv[]) {
         return parse_result.error().exit_code;
     }
 
+    if (std::holds_alternative<UpdateInvocation>(*parse_result)) {
+        return update::run(effective_argc, effective_argv);
+    }
+
     const auto environment = application::default_execution_environment();
 
     if (std::holds_alternative<ConfigureInvocation>(*parse_result)) {
         run_config_wizard(environment);
         return platform::cancellation::requested() ? 130 : 0;
     }
-
     if (std::holds_alternative<application::InspectionRequest>(*parse_result)) {
         auto request = std::get<application::InspectionRequest>(*parse_result);
         const auto run_remote = [&](application::Credentials credentials) {

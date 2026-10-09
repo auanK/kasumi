@@ -11,11 +11,13 @@ namespace kasumi::cli {
 
 // Requests opening the interactive configuration wizard.
 struct ConfigureInvocation {};
+struct UpdateInvocation {};
 
 // Valid command-line parsing result.
 using Invocation = std::variant<application::Request,
                                 application::InspectionRequest,
-                                ConfigureInvocation>;
+                                ConfigureInvocation,
+                                UpdateInvocation>;
 
 // Command-line argument parsing failure.
 struct ParseError {

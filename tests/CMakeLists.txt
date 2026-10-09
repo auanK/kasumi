@@ -149,6 +149,7 @@ kasumi_add_test_suite(
         unit/cli/test_i18n.cpp
         unit/cli/test_parser.cpp
         unit/cli/test_presenter.cpp
+        unit/cli/test_update.cpp
     LIBRARIES
         kasumi_cli
 )
