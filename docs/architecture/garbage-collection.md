@@ -19,3 +19,18 @@ The reachability walk retains current logical heads and the history required by 
 8. GC attempts to release only a barrier it still owns, closes the transport, and releases the local lock. If ownership changed, it does not delete someone else's barrier. Failures can leave a verified quarantine copy or metadata, an already removed source, or a control marker. GC has no local transaction journal for these mutations: the next run re-inventories and authenticates remote state, restores newly reachable objects, and applies retention rules rather than trusting an earlier partial result.
 
 Remote copy verification protects **physical-byte preservation**, not plaintext validity. Optional provider SHA-256 is a performance capability; verified workspace fallback preserves the safety check without it. The barrier and repeated observations protect against normal cooperating writers and inadequate provider visibility; they are not a global lock for all Sync clients or a claim that an uncooperative external actor cannot mutate storage. [Remote Maintenance Inspection](remote-maintenance-inspection.md) exposes candidate/control diagnostics without performing GC.
+
+## Explicit quarantine maintenance (manual only)
+
+These commands are separate from the retention-aware `kasumi gc <profile>` workflow:
+
+```text
+kasumi gc purge-quarantine <profile> --confirm-permanent-loss
+kasumi gc repair-quarantine <profile> --confirm-permanent-loss
+```
+
+**`purge-quarantine` can permanently destroy referenced data.** Unlike normal GC, its explicit maintenance path does not use the normal 10-day retention/reachability decision as permission to delete. It requires the confirmation flag, establishes and verifies its own barrier, rejects observed writers and inadequate online-visibility guarantees, authenticates quarantine metadata, verifies quarantined physical bytes, checks original-object absence, and revalidates before removal. These precautions do **not** prove that the quarantined bytes are unnecessary or recoverable. If they are the only remaining copy, deletion is irreversible. Partial failures can leave incomplete quarantine pairs that require investigation.
+
+**`repair-quarantine` is metadata cleanup, not payload repair.** It classifies quarantine pairs, refuses malformed, ambiguous, or payload-only entries, authenticates metadata and verifies eligibility before removing orphaned metadata whose quarantine payload is already absent. Healthy pairs are preserved; integrity failures block the operation. Both commands require explicit operator intent and must not be automated as a substitute for normal GC.
+
+Prefer `kasumi remote quarantine <profile>`, `kasumi remote health <profile>`, and `kasumi fsck <profile>` to understand the state before considering an irreversible operation. Never delete remote protocol objects manually.

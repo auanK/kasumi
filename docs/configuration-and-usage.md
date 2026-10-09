@@ -52,12 +52,23 @@ New profiles default to a minimum retention depth of 5 commits and a minimum ret
 | `kasumi sync <profile>` | Runs synchronization |
 | `kasumi fsck <profile>` | Validates observed remote history and audits content objects referenced by the effective remote state |
 | `kasumi gc <profile>` | Runs garbage-collection analysis and, when online collection conditions are met, quarantine and removal processing |
+| `kasumi gc purge-quarantine <profile> --confirm-permanent-loss` | Explicitly and permanently purges authenticated quarantine entries; **may destroy still-referenced content** |
+| `kasumi gc repair-quarantine <profile> --confirm-permanent-loss` | Removes eligible orphaned quarantine metadata whose payload is already missing; **does not restore content** |
+| `kasumi resolve-missing <profile>` | Explicitly resolves eligible pending missing remote payloads as logical deletions; **may publish permanent data loss** |
 
 * `status` and `sync --dry-run` are separate user-facing operations, but production dispatch runs both through the same planner and returns a `PlanReport`. Neither executes the plan, recovers an interrupted transaction, advances accepted state, or publishes remote history. They read local profile configuration and private state, acquire the local profile lock, and perform observations. Their result can become stale before a later sync. See [Preview and Status](architecture/planning-and-status.md).
 * **Plan Truncation & `--full`**: When a synchronization plan contains more than 10 items, Kasumi truncates output to display the first 5 and last 5 items, separated by an ellipsis line (`... (N more items) ...` / `... (mais N itens) ...`) to maintain clean terminal output. Pass `--full` to list all items without truncation (useful for inspection scripts, complete audits, or piping to log files).
 * `sync` applies local tree modifications, transfers content payloads, and publishes Commit and HEAD records. See [Synchronization](architecture/synchronization.md).
 * `gc` coordinates through a distributed barrier protocol, checks backend consistency visibility with probe objects, and stages candidates through a 10-day quarantine before permanent removal. It can return analysis-only results. See [Garbage Collection](architecture/garbage-collection.md).
 * `fsck` validates observed remote history and physical identifiers, downloads referenced content, checks authentication, size, and logical hashes, and reports missing or corrupted objects. It may update a private checkpoint but does not use that checkpoint to skip payload audits. See [Fsck](architecture/fsck.md).
+
+### Partial Synchronization and Explicit Data-Loss Operations
+
+When `kasumi sync <profile>` succeeds with unresolved missing remote payloads, it records pending materializations and exits with status `2`. Treat this as **partial**, not full, synchronization. First restore the missing content from another client or independent backup, then synchronize again. Do not automatically convert status `2` into a deletion.
+
+`kasumi resolve-missing <profile>` is an explicit, potentially destructive resolution path: after validating the accepted state and current observations, it may publish logical deletions for eligible unresolved paths that have no local source. It is not a download/repair command. Use it only when losing those files is an informed decision.
+
+The two manual quarantine commands require the exact final argument `--confirm-permanent-loss`. `gc purge-quarantine` bypasses the ordinary age and reachability criteria used by normal GC, and can delete the only remaining encrypted copy of referenced content. `gc repair-quarantine` is restricted to cleanup of eligible metadata-only quarantine entries; it cannot recover the missing payload. Both require their own maintenance safety checks but are **not routine scheduled GC commands**. See [Garbage Collection](architecture/garbage-collection.md) and [Troubleshooting](troubleshooting.md).
 
 ### Interruption and Recovery
 

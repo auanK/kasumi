@@ -303,6 +303,37 @@ Kasumi's garbage collector enforces strict safety conditions before performing d
 
 ---
 
+## Manual Quarantine Purge or Repair
+
+### Symptom
+
+A quarantine entry remains after normal `kasumi gc <profile>`, or a failed operation has left metadata without a corresponding quarantine payload.
+
+### Safe Next Steps
+
+1. Inspect the state with `kasumi remote quarantine <profile>` and `kasumi remote health <profile>`; use `kasumi fsck <profile>` if referenced content may be missing or corrupt.
+2. Prefer rerunning normal `kasumi gc <profile>` after investigating writer markers, retention and backend visibility. A normal analysis-only result is not permission for manual deletion.
+3. `kasumi gc repair-quarantine <profile> --confirm-permanent-loss` is for eligible **metadata-only** quarantine remnants. It does not restore any file, content object or missing ciphertext. Ambiguous and invalid quarantine state is rejected.
+4. `kasumi gc purge-quarantine <profile> --confirm-permanent-loss` permanently removes authenticated quarantine entries **without the normal retention/reachability safety decision**. This can destroy the only copy of content still referenced by history. Use it only after explicitly deciding to accept that permanent loss and preserving any recoverable independent copies.
+5. Never modify quarantine objects, markers or Epoch data directly through the cloud provider.
+
+The confirmation flag only records deliberate operator intent. It does not guarantee that the deleted data is unnecessary.
+
+### Related Documentation
+
+* [Garbage Collection Architecture](architecture/garbage-collection.md)
+* [Remote Quarantine Inspection](architecture/remote-maintenance-inspection.md)
+
+---
+
+## Explicitly Resolving Missing Remote Content
+
+If pending materializations remain because the necessary encrypted payload no longer exists, first investigate with `kasumi status <profile>`, `kasumi fsck <profile>`, and other enrolled clients. Recover the original bytes or remote object from an intact source whenever possible.
+
+`kasumi resolve-missing <profile>` is a **last-resort logical deletion workflow**, not a repair command. It validates which pending paths are eligible, may publish a new remote history state removing those entries, and can make the loss visible to all clients. Do not run it merely to silence exit code `2`. Preserve an independent copy and confirm that the missing content cannot be restored before choosing to remove its logical references.
+
+---
+
 ## Unknown or Malformed Remote Objects
 
 ### Symptom
@@ -347,4 +378,3 @@ The exclusive lock prevents another normal application command using the same pr
 * Use **`remote health`** for an operational diagnostic without Fsck's payload audit.
 * Use **`fsck`** to verify payload authenticity and detect missing files.
 * Use **`gc`** to reclaim remote disk space.
-

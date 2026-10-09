@@ -50,23 +50,24 @@ jobs:
       - name: Package
         run: |
           mkdir -p package
-          cp build/kasumi package/
-          cp README.md LICENSE CHANGELOG.md THIRD_PARTY_NOTICES.md package/
+          cp build/kasumi LICENSE THIRD_PARTY_NOTICES.md package/
           cd package
-          tar -czvf ../kasumi-linux-x86_64.tar.gz kasumi README.md LICENSE CHANGELOG.md THIRD_PARTY_NOTICES.md
+          tar -czf ../kasumi-linux-x86_64.tar.gz kasumi LICENSE THIRD_PARTY_NOTICES.md
           cd ..
           sha256sum kasumi-linux-x86_64.tar.gz > kasumi-linux-x86_64.tar.gz.sha256
 
-      - name: Release Gate - Smoke Test (Extracted Package)
+      - name: Release Gate - Verify Package
+        env:
+          KASUMI_RELEASE_EVENT: ${{ github.event_name }}
+          KASUMI_RELEASE_REF_TYPE: ${{ github.ref_type }}
+          KASUMI_RELEASE_REF_NAME: ${{ github.ref_name }}
         run: |
-          mkdir -p /tmp/smoke-package
-          tar -xzvf kasumi-linux-x86_64.tar.gz -C /tmp/smoke-package
-          test -f /tmp/smoke-package/kasumi
-          test -x /tmp/smoke-package/kasumi
-          test -f /tmp/smoke-package/THIRD_PARTY_NOTICES.md
-          /tmp/smoke-package/kasumi --version
-          /tmp/smoke-package/kasumi --help
-          rm -rf /tmp/smoke-package
+          python3 scripts/verify_release_package.py \
+            --archive kasumi-linux-x86_64.tar.gz \
+            --checksum kasumi-linux-x86_64.tar.gz.sha256 \
+            --event-name "$KASUMI_RELEASE_EVENT" \
+            --ref-type "$KASUMI_RELEASE_REF_TYPE" \
+            --ref-name "$KASUMI_RELEASE_REF_NAME"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
@@ -112,7 +113,11 @@ jobs:
       - name: Release Gate - Verify Runtime Dependencies (Static MSVC)
         shell: powershell
         run: |
-          if (-not (Get-Command dumpbin -ErrorAction SilentlyContinue)) {
+          $exe = ".\build-release\Release\kasumi.exe"
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+              throw "Release executable not found: $exe"
+          }
+          if (-not (Get-Command dumpbin -CommandType Application -ErrorAction SilentlyContinue)) {
               $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
               if (Test-Path $vswhere) {
                   $vsPath = & $vswhere -latest -property installationPath
@@ -122,13 +127,26 @@ jobs:
                   }
               }
           }
-          $exe = ".\build-release\Release\kasumi.exe"
-          $deps = & dumpbin /DEPENDENTS $exe
+          $dumpbin = Get-Command dumpbin -CommandType Application -ErrorAction SilentlyContinue
+          if (-not $dumpbin) {
+              throw "dumpbin was not found; cannot verify Windows runtime dependencies."
+          }
+          $deps = & $dumpbin.Source /DEPENDENTS $exe 2>&1
+          $dumpbinExitCode = $LASTEXITCODE
+          if ($dumpbinExitCode -ne 0) {
+              throw "dumpbin /DEPENDENTS failed with exit code $dumpbinExitCode."
+          }
+          $depsText = $deps | Out-String
           Write-Host "--- DLL Dependencies for $exe ---"
-          $deps | Write-Host
+          $depsText | Write-Host
+          if ([string]::IsNullOrWhiteSpace($depsText) -or
+              $depsText -notmatch '(?im)^[ \t]*Image has the following dependencies:?[ \t]*\r?$' -or
+              $depsText -notmatch '(?im)^[ \t]*[A-Za-z0-9_.-]+\.dll[ \t]*\r?$') {
+              throw "dumpbin returned an empty or invalid dependency report."
+          }
           $prohibited = @("VCRUNTIME", "MSVCP", "utf8proc", "sqlite3", "monocypher", "blake3", "reproc")
           foreach ($pattern in $prohibited) {
-              $match = $deps | Select-String -Pattern $pattern
+              $match = $depsText | Select-String -Pattern $pattern
               if ($match) {
                   throw "ERROR: Prohibited dependency detected in Windows Release binary: $pattern"
               }
@@ -139,30 +157,25 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path package
           Copy-Item build-release/Release/kasumi.exe package/
-          Copy-Item README.md, LICENSE, CHANGELOG.md, THIRD_PARTY_NOTICES.md package/
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md package/
           Compress-Archive -Path package/* -DestinationPath kasumi-windows-x86_64.zip
           $hash = (Get-FileHash kasumi-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
           "$hash *kasumi-windows-x86_64.zip" | Out-File -FilePath kasumi-windows-x86_64.zip.sha256 -Encoding ascii
 
-      - name: Release Gate - Smoke Test (Extracted Package)
+      - name: Release Gate - Verify Package
         shell: powershell
+        env:
+          KASUMI_RELEASE_EVENT: ${{ github.event_name }}
+          KASUMI_RELEASE_REF_TYPE: ${{ github.ref_type }}
+          KASUMI_RELEASE_REF_NAME: ${{ github.ref_name }}
         run: |
-          $tempExtractDir = Join-Path $env:RUNNER_TEMP "smoke-package"
-          if (Test-Path $tempExtractDir) { Remove-Item -Recurse -Force $tempExtractDir }
-          Expand-Archive -Path kasumi-windows-x86_64.zip -DestinationPath $tempExtractDir
-          $extractedExe = Join-Path $tempExtractDir "kasumi.exe"
-          if (-not (Test-Path $extractedExe)) {
-              throw "kasumi.exe not found in extracted package!"
-          }
-          $extractedNotices = Join-Path $tempExtractDir "THIRD_PARTY_NOTICES.md"
-          if (-not (Test-Path $extractedNotices)) {
-              throw "THIRD_PARTY_NOTICES.md not found in extracted package!"
-          }
-          & $extractedExe --version
-          if ($LASTEXITCODE -ne 0) { throw "Extracted package smoke test --version failed with code $LASTEXITCODE" }
-          & $extractedExe --help
-          if ($LASTEXITCODE -ne 0) { throw "Extracted package smoke test --help failed with code $LASTEXITCODE" }
-          Remove-Item -Recurse -Force $tempExtractDir
+          python scripts/verify_release_package.py `
+            --archive kasumi-windows-x86_64.zip `
+            --checksum kasumi-windows-x86_64.zip.sha256 `
+            --event-name $env:KASUMI_RELEASE_EVENT `
+            --ref-type $env:KASUMI_RELEASE_REF_TYPE `
+            --ref-name $env:KASUMI_RELEASE_REF_NAME
+          if ($LASTEXITCODE -ne 0) { throw "Release package verification failed with code $LASTEXITCODE" }
 
       - name: Upload Artifact
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1

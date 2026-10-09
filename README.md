@@ -22,7 +22,7 @@ Kasumi records synchronization states as immutable commits in a shared history D
 - **Shared Storage Backends**: Supports local filesystems, network shares, and rclone-compatible remotes.
 - **Conflict Reconciliation**: Concurrent divergent branches are reconciled deterministically.
 - **Transaction Recovery**: Interrupted operations are tracked in a transaction journal.
-- **Integrity and Maintenance**: `fsck` audits authenticated remote content; `gc` collects unreachable objects through quarantine.
+- **Integrity and Maintenance**: `fsck` audits authenticated remote content; `gc` collects unreachable objects through quarantine. Explicit high-risk quarantine purge/repair controls are available for manual recovery scenarios.
 - **Remote Inspection**: Read logical history and physical storage diagnostics without running synchronization.
 - **Linux and Windows**: Native builds for Linux and Windows.
 
@@ -123,6 +123,32 @@ Kasumi discovers the remote history, authenticates and decrypts the files, and m
 ---
 
 For detailed CLI options, portable path rules, and `.kasumiignore` syntax, see [Configuration and Usage](docs/configuration-and-usage.md). For operational habits, see [Best Practices](docs/best-practices.md). If you encounter errors, see [Troubleshooting](docs/troubleshooting.md).
+
+> **Before replacing binaries:** Pre-1.0 releases may change persisted formats. Review each release's compatibility notes, complete active synchronizations and recovery, and back up your profile and synchronized files. Preserve `config.toml` and `key.bin`. A sync that exits with code `2` has pending materializations and is not fully complete.
+
+## Local Key Protection
+
+Remote payloads are encrypted and authenticated on your device before upload. The local master key in `key.bin` is stored with reversible XOR masking, not password-based encryption at rest. Its local protection depends on filesystem permissions and protection of the device; use full-disk encryption such as BitLocker or LUKS for sensitive deployments. If the only available master key is lost, the remote encrypted data cannot be recovered. See [Security](docs/security.md) for details.
+
+## Verify Release Downloads
+
+Check the archive against its published SHA-256 file before extracting it.
+
+Linux:
+
+```sh
+sha256sum -c kasumi-linux-x86_64.tar.gz.sha256
+```
+
+Windows PowerShell:
+
+```powershell
+$expected = ((Get-Content .\kasumi-windows-x86_64.zip.sha256 -Raw) -split '\s+')[0].ToLowerInvariant()
+$actual = (Get-FileHash .\kasumi-windows-x86_64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw 'SHA-256 mismatch; do not extract or run this archive.' }
+```
+
+If `SHA256SUMS.txt` is published and you downloaded both archives, verify the consolidated list on Linux with `sha256sum -c SHA256SUMS.txt`. If a checksum does not match, do not extract or run the archive; download it again from the release and report a repeat mismatch. A matching checksum detects file changes but does not, by itself, authenticate who published the file.
 
 ## Documentation
 

@@ -93,6 +93,14 @@ void expect_same_snapshot(const kasumi::Snapshot& left,
                           const kasumi::Snapshot& right) {
     ASSERT_EQ(left.rows.size(), right.rows.size());
     for (std::size_t index = 0; index < left.rows.size(); ++index) {
+        SCOPED_TRACE(::testing::Message()
+                     << "snapshot row " << index << ": left "
+                     << (left.rows[index].is_directory ? "directory '"
+                                                        : "file '")
+                     << left.rows[index].path << "', right "
+                     << (right.rows[index].is_directory ? "directory '"
+                                                        : "file '")
+                     << right.rows[index].path << '\'');
         EXPECT_EQ(left.rows[index].path, right.rows[index].path);
         EXPECT_EQ(left.rows[index].hash, right.rows[index].hash);
         EXPECT_EQ(left.rows[index].size, right.rows[index].size);
@@ -126,6 +134,11 @@ TEST(ScannerTest, IncrementalScanEqualsFullHashScan) {
     kasumi::test::write_text(root / "z.txt", "zulu");
     kasumi::test::write_text(root / "a.txt", "alpha");
     kasumi::test::write_text(root / "nested" / "b.txt", "bravo");
+    const auto fixture_mtime = std::filesystem::file_time_type::clock::now();
+    ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(
+        root / "nested", fixture_mtime));
+    ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(
+        root, fixture_mtime));
     set_fingerprint_fake(FingerprintFakeMode::Supported);
 
     const auto full = kasumi::application::observation::scanner::scan_result(

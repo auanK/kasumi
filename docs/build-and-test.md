@@ -14,6 +14,10 @@ Repository CI exercises:
 * GCC 14 on Windows MSYS2 UCRT64;
 * GCC 14 on Linux.
 
+## Embedded Locale Generation
+
+The build generates `generated/cli/i18n_embedded.hpp` from `locales/en.json` and `locales/pt-BR.json` using `scripts/generate_i18n_embedded.py`. The generated header is a build artifact, not a checked-in source file. The generator emits bounded raw C++ string fragments to remain compatible with MSVC limits while preserving source bytes, including line endings. Keep the generated file under the build tree; do not hand-edit it.
+
 ## CMake Presets
 
 `CMakePresets.json` defines presets using the Ninja generator:

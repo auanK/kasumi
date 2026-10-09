@@ -116,10 +116,10 @@ For cryptographic algorithms and threat models, see [Security Specification](sec
 
 Kasumi follows a strict pre-1.0 release policy:
 
-* **Read Upgrade Notes**: Always review the Upgrade Notes in `RELEASE_NOTES.md` before upgrading to a new version.
+* **Review Release Compatibility**: Read release notes and compatibility information before replacing binaries.
 * **Pre-1.0 Compatibility Boundary**: Before version 1.0, internal persisted formats (such as local SQLite database schemas, transaction journals, or internal protocol layouts) are **not** guaranteed to remain compatible across releases.
-* **Complete In-Flight Operations**: Ensure all pending synchronizations and transaction recoveries are completed before upgrading. Do not upgrade if a sync operation was left in an interrupted state.
-* **No Automatic Migration Machinery**: When an incompatible format change occurs in a pre-1.0 release, Kasumi does not include automatic migration scripts or legacy backward-compatibility readers. Follow the instructions in the release documentation.
+* **Complete In-Flight Operations**: Complete active synchronizations and transaction recovery before replacing binaries. Never delete transaction journals to bypass recovery.
+* **No Automatic Migration Machinery**: Kasumi does not provide automatic migration scripts or legacy compatibility readers for incompatible persisted formats.
 
 ## Automation
 
@@ -162,9 +162,9 @@ These routines serve as practical starting points. Adjust intervals according to
 Avoid these operational anti-patterns:
 
 * **Do NOT manually delete raw remote objects**: Never delete files directly in the remote storage directory using cloud consoles, SFTP clients, or `rclone delete`. Kasumi manages object reachability, Epoch anchors, and retention internally; deleting files manually can cause missing-content errors and break history continuity.
-* **Do NOT manually purge quarantine objects**: Kasumi's quarantine requires a 10-day retention period before purge and verifies physical SHA-256 hashes. Manually modifying quarantine directories corrupts maintenance state.
+* **Do NOT modify quarantine objects through the provider**: Normal `kasumi gc` applies its 10-day retention and verification checks; deleting quarantine files directly can corrupt maintenance state. `kasumi gc purge-quarantine <profile> --confirm-permanent-loss` is an explicit last-resort command that bypasses normal retention/reachability checks and may permanently delete referenced data.
 * **Do NOT assume GC replaces Fsck**: GC verifies physical-byte preservation with SHA-256, but does **not** perform Fsck-style cryptographic plaintext integrity auditing.
-* **Do NOT upgrade with an unfinished transaction**: If a sync was interrupted, run `kasumi sync` to complete recovery before upgrading Kasumi binaries.
+* **Do NOT replace binaries during an unfinished transaction**: Complete recovery before replacing the application binary. Never delete the journal to bypass recovery.
 * **Do NOT rely on `key.bin` for offline protection without Full-Disk Encryption**: `key.bin` uses a reversible XOR mask and OS file permissions; always enable BitLocker or LUKS on devices containing sensitive profile keys.
 * **Do NOT run concurrent normal application operations on the same profile**: `status`, `sync --dry-run`, `sync`, `fsck`, and `gc` use the local exclusive `profile-<name>.lock`. `remote ...` inspection does not acquire it and reports a point-in-time view.
 
