@@ -248,6 +248,7 @@ TEST(ReobservationSafeguardTest, DestructiveSafeguardEvictionPersistsAcrossSessi
 
     const auto hash_a = kasumi::hasher::hash_string("AAAA");
     const auto hash_b = kasumi::hasher::hash_string("BBBB");
+    const auto hash_c = kasumi::hasher::hash_string("CCCC");
 
     const kasumi::Snapshot base_tree{
         .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
@@ -317,32 +318,38 @@ TEST(ReobservationSafeguardTest, DestructiveSafeguardEvictionPersistsAcrossSessi
     ASSERT_TRUE(stable.has_value()) << stable.error().detail;
 
     EXPECT_TRUE(session_1.cache_dirty);
-    auto it_mem = std::ranges::find_if(session_1.cache, [](const auto& r) {
-        return r.path == "file.txt";
-    });
-    EXPECT_EQ(it_mem, session_1.cache.end());
+    ASSERT_EQ(session_1.cache.size(), 1u);
+    EXPECT_EQ(session_1.cache.front().path, "file.txt");
+    EXPECT_EQ(session_1.cache.front().hash, hash_b);
+    EXPECT_NE(session_1.cache.front().hash, hash_a);
 
     ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(
         runtime_data.database_path, session_1.cache));
 
     auto loaded = kasumi::state_storage::load_file_cache(runtime_data.database_path);
     ASSERT_TRUE(loaded.has_value());
-    auto it_db = std::ranges::find_if(*loaded, [](const auto& r) {
-        return r.path == "file.txt";
-    });
-    EXPECT_EQ(it_db, loaded->end());
+    ASSERT_EQ(loaded->size(), 1u);
+    EXPECT_EQ(loaded->front().path, "file.txt");
+    EXPECT_EQ(loaded->front().hash, hash_b);
+    EXPECT_NE(loaded->front().hash, hash_a);
 
     kasumi::application::observation::LocalObservationSession session_2{};
     session_2.database_path = runtime_data.database_path;
-
-    kasumi::test::write_text(local_file, "CCCC");
-    std::filesystem::last_write_time(local_file, old_mtime);
 
     auto tree_2 = kasumi::application::observation::collect_local_tree(local, &session_2);
     ASSERT_TRUE(tree_2.has_value());
     const auto* row_2 = kasumi::find_row(*tree_2, "file.txt");
     ASSERT_NE(row_2, nullptr);
-    EXPECT_EQ(row_2->hash, kasumi::hasher::hash_string("CCCC"));
+    EXPECT_EQ(row_2->hash, hash_b);
+    EXPECT_NE(row_2->hash, hash_a);
+
+    kasumi::test::write_text(local_file, "CCCC");
+
+    auto tree_3 = kasumi::application::observation::collect_local_tree(local, &session_2);
+    ASSERT_TRUE(tree_3.has_value());
+    const auto* row_3 = kasumi::find_row(*tree_3, "file.txt");
+    ASSERT_NE(row_3, nullptr);
+    EXPECT_EQ(row_3->hash, hash_c);
 }
 
 TEST(ReobservationSafeguardTest, DestructiveSafeguardProtectsRenameLocal) {

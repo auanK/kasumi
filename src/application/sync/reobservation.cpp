@@ -237,27 +237,12 @@ bool same_observation(const reconciliation::Input& left,
            same_storage(left.storage, right.storage);
 }
 
-void prune_safeguard_evicted_paths(
-    observation::LocalObservationSession* session,
-    const std::vector<std::string>& evicted_paths) {
-    if (session == nullptr || evicted_paths.empty()) {
-        return;
-    }
-    for (const auto& path : evicted_paths) {
-        std::erase_if(session->cache, [&](const auto& row) {
-            return row.path == path;
-        });
-    }
-    session->cache_dirty = true;
-}
-
 std::expected<bool, coordinator::Error>
 verify_destructive_local_operations(
     const runtime::RuntimeData& runtime_data,
     reconciliation::Input& input,
     const reconciliation::Result& result,
-    observation::LocalObservationSession* session,
-    std::vector<std::string>* evicted_paths = nullptr) {
+    observation::LocalObservationSession* session) {
     bool modified = false;
     for (const auto& op : sync_plan_operations(result.plan)) {
         if (op.action != Action::DeleteLocal &&
@@ -352,9 +337,6 @@ verify_destructive_local_operations(
                     });
                     session->cache_dirty = true;
                 }
-                if (evicted_paths != nullptr) {
-                    evicted_paths->push_back(logical_path);
-                }
                 modified = true;
             }
             return {};
@@ -409,13 +391,12 @@ stabilize(const runtime::RuntimeData& runtime_data,
 
     auto input = std::move(observed_input);
     auto result = std::move(reconciliation_result);
-    std::vector<std::string> safeguard_evicted_paths;
     for (std::size_t attempt = 0; attempt < maximum_observation_attempts;
          ++attempt) {
         std::size_t verification_pass = 0;
         while (true) {
             auto verification = verify_destructive_local_operations(
-                runtime_data, input, result, session, &safeguard_evicted_paths);
+                runtime_data, input, result, session);
             if (!verification) {
                 return std::unexpected(verification.error());
             }
@@ -448,7 +429,6 @@ stabilize(const runtime::RuntimeData& runtime_data,
                 !result.requires_local_mutation &&
                 !result.requires_storage_repair &&
                 !result.requires_state_commit) {
-                prune_safeguard_evicted_paths(session, safeguard_evicted_paths);
                 return StableExecution{.input = std::move(input),
                                        .result = std::move(result)};
             }
@@ -494,7 +474,6 @@ stabilize(const runtime::RuntimeData& runtime_data,
                 ErrorCode::ObservationFailure, observed.error().detail));
         }
         observed->pending_deletion_authority = input.pending_deletion_authority;
-        prune_safeguard_evicted_paths(session, safeguard_evicted_paths);
         auto local_after_storage = observation::collect_local_tree(
             runtime_data.local_dir, session, observed->ignore_list);
         if (!local_after_storage) {
@@ -505,7 +484,6 @@ stabilize(const runtime::RuntimeData& runtime_data,
             return std::unexpected(detail::make_error(
                 ErrorCode::ObservationFailure, local_after_storage.error()));
         }
-        prune_safeguard_evicted_paths(session, safeguard_evicted_paths);
         if (!same_snapshot(observed->local_tree, *local_after_storage)) {
             observed->local_tree = std::move(*local_after_storage);
         }
@@ -541,7 +519,6 @@ stabilize(const runtime::RuntimeData& runtime_data,
             if (!removed) {
                 return std::unexpected(removed.error());
             }
-            prune_safeguard_evicted_paths(session, safeguard_evicted_paths);
             return StableExecution{.input = std::move(*observed),
                                    .result = std::move(*recalculated)};
         }
