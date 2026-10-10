@@ -237,12 +237,27 @@ bool same_observation(const reconciliation::Input& left,
            same_storage(left.storage, right.storage);
 }
 
+void prune_safeguard_evicted_paths(
+    observation::LocalObservationSession* session,
+    const std::vector<std::string>& evicted_paths) {
+    if (session == nullptr || evicted_paths.empty()) {
+        return;
+    }
+    for (const auto& path : evicted_paths) {
+        std::erase_if(session->cache, [&](const auto& row) {
+            return row.path == path;
+        });
+    }
+    session->cache_dirty = true;
+}
+
 std::expected<bool, coordinator::Error>
 verify_destructive_local_operations(
     const runtime::RuntimeData& runtime_data,
     reconciliation::Input& input,
     const reconciliation::Result& result,
-    observation::LocalObservationSession* session) {
+    observation::LocalObservationSession* session,
+    std::vector<std::string>* evicted_paths = nullptr) {
     bool modified = false;
     for (const auto& op : sync_plan_operations(result.plan)) {
         if (op.action != Action::DeleteLocal &&
@@ -251,7 +266,8 @@ verify_destructive_local_operations(
             continue;
         }
 
-        const auto verify_target = [&](const std::filesystem::path& rel_path)
+        const auto verify_target = [&](const std::filesystem::path& rel_path,
+                                       bool is_destination)
             -> std::expected<void, coordinator::Error> {
             if (rel_path.empty()) {
                 return {};
@@ -264,20 +280,46 @@ verify_destructive_local_operations(
             if (!pre_meta) {
                 if (pre_meta.error().code ==
                     observation::cache::FileMetadataErrorCode::NotFound) {
-                    return {};
+                    if (is_destination) {
+                        return {};
+                    }
+                    auto* local_row = find_row(input.local_tree, logical_path);
+                    if (local_row != nullptr) {
+                        return std::unexpected(detail::make_error(
+                            ErrorCode::ObservationFailure,
+                            "destructive target disappeared concurrently: " +
+                                local_path.string()));
+                    }
+                    if (op.action == Action::Download) {
+                        return {};
+                    }
+                    return std::unexpected(detail::make_error(
+                        ErrorCode::ObservationFailure,
+                        "destructive target missing from snapshot: " +
+                            local_path.string()));
                 }
                 return std::unexpected(detail::make_error(
                     ErrorCode::ObservationFailure,
                     "failed to read metadata for destructive target: " +
                         pre_meta.error().message));
             }
-            if (!*pre_meta) {
-                return {};
-            }
 
             auto* local_row = find_row(input.local_tree, logical_path);
-            if (local_row == nullptr || local_row->is_directory) {
-                return {};
+            if (is_destination || local_row == nullptr) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    is_destination
+                        ? "rename destination already exists: " +
+                              local_path.string()
+                        : "destructive destination already exists: " +
+                              local_path.string()));
+            }
+
+            if (local_row->is_directory || !*pre_meta) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    "destructive target replaced by non-regular file: " +
+                        local_path.string()));
             }
 
             auto actual_hash = crypto::content::hash_file(local_path);
@@ -310,17 +352,20 @@ verify_destructive_local_operations(
                     });
                     session->cache_dirty = true;
                 }
+                if (evicted_paths != nullptr) {
+                    evicted_paths->push_back(logical_path);
+                }
                 modified = true;
             }
             return {};
         };
 
-        auto verified_source = verify_target(op.path);
+        auto verified_source = verify_target(op.path, false);
         if (!verified_source) {
             return std::unexpected(verified_source.error());
         }
         if (op.action == Action::RenameLocal && !op.alt_path.empty()) {
-            auto verified_dest = verify_target(op.alt_path);
+            auto verified_dest = verify_target(op.alt_path, true);
             if (!verified_dest) {
                 return std::unexpected(verified_dest.error());
             }
@@ -364,12 +409,13 @@ stabilize(const runtime::RuntimeData& runtime_data,
 
     auto input = std::move(observed_input);
     auto result = std::move(reconciliation_result);
+    std::vector<std::string> safeguard_evicted_paths;
     for (std::size_t attempt = 0; attempt < maximum_observation_attempts;
          ++attempt) {
         std::size_t verification_pass = 0;
         while (true) {
             auto verification = verify_destructive_local_operations(
-                runtime_data, input, result, session);
+                runtime_data, input, result, session, &safeguard_evicted_paths);
             if (!verification) {
                 return std::unexpected(verification.error());
             }
@@ -402,6 +448,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
                 !result.requires_local_mutation &&
                 !result.requires_storage_repair &&
                 !result.requires_state_commit) {
+                prune_safeguard_evicted_paths(session, safeguard_evicted_paths);
                 return StableExecution{.input = std::move(input),
                                        .result = std::move(result)};
             }
@@ -447,6 +494,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
                 ErrorCode::ObservationFailure, observed.error().detail));
         }
         observed->pending_deletion_authority = input.pending_deletion_authority;
+        prune_safeguard_evicted_paths(session, safeguard_evicted_paths);
         auto local_after_storage = observation::collect_local_tree(
             runtime_data.local_dir, session, observed->ignore_list);
         if (!local_after_storage) {
@@ -457,6 +505,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
             return std::unexpected(detail::make_error(
                 ErrorCode::ObservationFailure, local_after_storage.error()));
         }
+        prune_safeguard_evicted_paths(session, safeguard_evicted_paths);
         if (!same_snapshot(observed->local_tree, *local_after_storage)) {
             observed->local_tree = std::move(*local_after_storage);
         }
@@ -492,6 +541,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
             if (!removed) {
                 return std::unexpected(removed.error());
             }
+            prune_safeguard_evicted_paths(session, safeguard_evicted_paths);
             return StableExecution{.input = std::move(*observed),
                                    .result = std::move(*recalculated)};
         }
