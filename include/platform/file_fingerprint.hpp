@@ -31,10 +31,6 @@ using FileFingerprintResult =
 FileFingerprintResult
 regular_file_fingerprint(const std::filesystem::path& path);
 
-// Returns the native directory reference, when available.
-std::expected<std::optional<std::uint64_t>, std::string>
-directory_file_reference(const std::filesystem::path& path);
-
 } // namespace kasumi::platform
 
 #endif

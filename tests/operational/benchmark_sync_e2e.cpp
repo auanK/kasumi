@@ -105,16 +105,17 @@ bool seed_fixture(const std::filesystem::path& root,
     auto commit = kasumi::history::make_bootstrap(seed.snapshot, 0);
     if (!commit)
         return false;
-    auto commit_id = kasumi::history::compute_id(*commit);
-    if (!commit_id)
-        return false;
-    if (!kasumi::application::history_storage::publish_commit(
-            seed.storage, seed.key, *commit, seed.profile))
+    auto published = kasumi::application::history_storage::publish_commit(
+        seed.storage, seed.key, *commit, seed.profile);
+    if (!published)
         return false;
     if (!kasumi::state_storage::initialize(seed.database) ||
         !kasumi::state_storage::save_state(
             seed.database,
-            kasumi::state_storage::StoredState{seed.snapshot, 0, *commit_id}) ||
+            kasumi::state_storage::StoredState{seed.snapshot,
+                                               0,
+                                               published->head.commit_id,
+                                               published->head.ciphertext_id}) ||
         !kasumi::state_storage::save_file_cache_delta(seed.database,
                                                       scanned->cache))
         return false;
@@ -156,13 +157,18 @@ bool run_case(const std::filesystem::path& root,
         auto observed =
             kasumi::application::observation::collect_reconciliation_input(
                 runtime, seed.storage, seed.key, false, {}, &session);
-        if (!observed)
+        if (!observed) {
+            std::cerr << "ERROR|observe|" << phase << '|'
+                      << observed.error().detail << '\n';
             return false;
+        }
         const auto wall_us = elapsed_us(started);
         const auto full =
             kasumi::application::observation::scanner::scan_result(seed.local);
-        if (!full || !same_snapshot(observed->local_tree, full->snapshot))
+        if (!full || !same_snapshot(observed->local_tree, full->snapshot)) {
+            std::cerr << "ERROR|fullhash-equivalence|" << phase << '\n';
             return false;
+        }
         if (std::string_view{phase} == "rewarm" &&
             !same_snapshot(previous, observed->local_tree))
             return false;

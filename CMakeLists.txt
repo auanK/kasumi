@@ -359,7 +359,6 @@ target_include_directories(monocypher PUBLIC ${monocypher_SOURCE_DIR}/src)
 add_library(kasumi_platform STATIC
     src/platform/cancellation.cpp
     src/platform/clock.cpp
-    src/platform/change_journal.cpp
     src/platform/durability.cpp
     src/platform/file_fingerprint.cpp
     src/platform/identity.cpp

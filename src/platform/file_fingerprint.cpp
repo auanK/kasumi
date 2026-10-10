@@ -76,42 +76,4 @@ regular_file_fingerprint(const std::filesystem::path& path) {
 #endif
 }
 
-std::expected<std::optional<std::uint64_t>, std::string>
-directory_file_reference(const std::filesystem::path& path) {
-#if defined(_WIN32)
-    const auto handle =
-        CreateFileW(path.c_str(),
-                    FILE_READ_ATTRIBUTES,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    nullptr,
-                    OPEN_EXISTING,
-                    FILE_FLAG_BACKUP_SEMANTICS,
-                    nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        const auto error = GetLastError();
-        if (unsupported_error(error))
-            return std::optional<std::uint64_t>{};
-        return std::unexpected(
-            std::system_category().message(static_cast<int>(error)));
-    }
-    BY_HANDLE_FILE_INFORMATION info{};
-    const auto ok = GetFileInformationByHandle(handle, &info);
-    const auto error = ok ? ERROR_SUCCESS : GetLastError();
-    CloseHandle(handle);
-    if (!ok) {
-        if (unsupported_error(error))
-            return std::optional<std::uint64_t>{};
-        return std::unexpected(
-            std::system_category().message(static_cast<int>(error)));
-    }
-    if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
-        return std::optional<std::uint64_t>{};
-    return std::optional<std::uint64_t>{
-        (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32) |
-        info.nFileIndexLow};
-#else
-    static_cast<void>(path);
-    return std::optional<std::uint64_t>{};
-#endif
-}
 } // namespace kasumi::platform
