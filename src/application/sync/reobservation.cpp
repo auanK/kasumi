@@ -1,5 +1,6 @@
 #include "application/sync/reobservation.hpp"
 
+#include "application/observation/file_metadata.hpp"
 #include "application/observation/state.hpp"
 #include "application/sync/coordinator_detail.hpp"
 #include "application/sync/journal.hpp"
@@ -236,43 +237,93 @@ bool same_observation(const reconciliation::Input& left,
            same_storage(left.storage, right.storage);
 }
 
-bool verify_destructive_local_operations(
+std::expected<bool, coordinator::Error>
+verify_destructive_local_operations(
     const runtime::RuntimeData& runtime_data,
     reconciliation::Input& input,
     const reconciliation::Result& result,
     observation::LocalObservationSession* session) {
     bool modified = false;
     for (const auto& op : sync_plan_operations(result.plan)) {
-        if (op.action != Action::DeleteLocal && op.action != Action::Download) {
+        if (op.action != Action::DeleteLocal &&
+            op.action != Action::Download &&
+            op.action != Action::RenameLocal) {
             continue;
         }
-        const auto local_path = runtime_data.local_dir / op.path;
-        std::error_code ec;
-        if (!std::filesystem::is_regular_file(local_path, ec)) {
-            continue;
-        }
-        const auto logical_path = platform::path::to_logical_utf8(op.path);
-        auto* local_row = find_row(input.local_tree, logical_path);
-        if (local_row == nullptr || local_row->is_directory) {
-            continue;
-        }
-        auto actual_hash = crypto::content::hash_file(local_path);
-        if (!actual_hash) {
-            continue;
-        }
-        if (local_row->hash != *actual_hash) {
-            local_row->hash = *actual_hash;
-            local_row->size = std::filesystem::file_size(local_path, ec);
-            const auto mtime = std::filesystem::last_write_time(local_path, ec);
-            if (const auto mtime_ns = platform::metadata::unix_nanoseconds(mtime)) {
-                local_row->mtime = *mtime_ns;
+
+        const auto verify_target = [&](const std::filesystem::path& rel_path)
+            -> std::expected<void, coordinator::Error> {
+            if (rel_path.empty()) {
+                return {};
             }
-            if (session != nullptr) {
-                std::erase_if(session->cache, [&](const auto& row) {
-                    return row.path == logical_path;
-                });
+            const auto local_path = runtime_data.local_dir / rel_path;
+            const auto logical_path = platform::path::to_logical_utf8(rel_path);
+
+            auto pre_meta =
+                observation::cache::read_file_metadata(local_path, logical_path);
+            if (!pre_meta) {
+                if (pre_meta.error().code ==
+                    observation::cache::FileMetadataErrorCode::NotFound) {
+                    return {};
+                }
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    "failed to read metadata for destructive target: " +
+                        pre_meta.error().message));
             }
-            modified = true;
+            if (!*pre_meta) {
+                return {};
+            }
+
+            auto* local_row = find_row(input.local_tree, logical_path);
+            if (local_row == nullptr || local_row->is_directory) {
+                return {};
+            }
+
+            auto actual_hash = crypto::content::hash_file(local_path);
+            if (!actual_hash) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    "failed to compute hash for destructive target: " +
+                        local_path.string()));
+            }
+
+            auto post_meta =
+                observation::cache::read_file_metadata(local_path, logical_path);
+            if (!post_meta || !*post_meta ||
+                (*pre_meta)->size != (*post_meta)->size ||
+                (*pre_meta)->mtime_nanoseconds !=
+                    (*post_meta)->mtime_nanoseconds ||
+                (*pre_meta)->identity != (*post_meta)->identity) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    "file changed while being read"));
+            }
+
+            if (local_row->hash != *actual_hash) {
+                local_row->hash = *actual_hash;
+                local_row->size = (*post_meta)->size;
+                local_row->mtime = (*post_meta)->mtime_nanoseconds;
+                if (session != nullptr) {
+                    std::erase_if(session->cache, [&](const auto& row) {
+                        return row.path == logical_path;
+                    });
+                    session->cache_dirty = true;
+                }
+                modified = true;
+            }
+            return {};
+        };
+
+        auto verified_source = verify_target(op.path);
+        if (!verified_source) {
+            return std::unexpected(verified_source.error());
+        }
+        if (op.action == Action::RenameLocal && !op.alt_path.empty()) {
+            auto verified_dest = verify_target(op.alt_path);
+            if (!verified_dest) {
+                return std::unexpected(verified_dest.error());
+            }
         }
     }
     return modified;
@@ -315,7 +366,22 @@ stabilize(const runtime::RuntimeData& runtime_data,
     auto result = std::move(reconciliation_result);
     for (std::size_t attempt = 0; attempt < maximum_observation_attempts;
          ++attempt) {
-        if (verify_destructive_local_operations(runtime_data, input, result, session)) {
+        std::size_t verification_pass = 0;
+        while (true) {
+            auto verification = verify_destructive_local_operations(
+                runtime_data, input, result, session);
+            if (!verification) {
+                return std::unexpected(verification.error());
+            }
+            if (!*verification) {
+                break;
+            }
+            ++verification_pass;
+            if (verification_pass >= maximum_observation_attempts) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ConcurrentModification,
+                    "state changed repeatedly before publication"));
+            }
             auto recalculated = reconciliation::reconcile(input);
             if (!recalculated) {
                 return std::unexpected(detail::make_error(
