@@ -15,6 +15,8 @@
 #include <string_view>
 #include <vector>
 
+#include "application/observation/file_metadata.hpp"
+
 namespace kasumi::application::observation::scanner {
 
 // Failure categories during local scanning.
@@ -57,9 +59,10 @@ struct ScanError {
     std::string detail;
 };
 
-// Function used to obtain a file fingerprint.
-using FingerprintQuery =
-    platform::FileFingerprintResult (*)(const std::filesystem::path&);
+// Function used to obtain file metadata and identity.
+using MetadataQuery =
+    std::expected<std::optional<cache::FileMetadata>, cache::FileMetadataError> (*)(
+        const std::filesystem::path&, std::string_view);
 
 // Formats a scan failure.
 std::string describe(const ScanError& error);
@@ -69,14 +72,14 @@ std::expected<ScanResult, ScanError> scan_result(
     const std::filesystem::path& local_root,
     std::span<const state_storage::FileCacheRow> previous_cache = {},
     ScanPolicy policy = ScanPolicy::FullHash,
-    FingerprintQuery fingerprint_query = platform::regular_file_fingerprint);
+    MetadataQuery metadata_query = cache::read_file_metadata);
 
 // Scans using the ignore rules selected by the current reconciliation.
 std::expected<ScanResult, ScanError>
 scan_result(const std::filesystem::path& local_root,
             std::span<const state_storage::FileCacheRow> previous_cache,
             ScanPolicy policy,
-            FingerprintQuery fingerprint_query,
+            MetadataQuery metadata_query,
             const kasumi::ignore::IgnoreList& ignore_list);
 
 // Observes a single safe relative path.
@@ -84,7 +87,7 @@ std::expected<TargetedFileObservation, ScanError> observe_file(
     const std::filesystem::path& local_root,
     std::string_view relative_path,
     std::optional<state_storage::FileCacheRow> cached = std::nullopt,
-    FingerprintQuery fingerprint_query = platform::regular_file_fingerprint);
+    MetadataQuery metadata_query = cache::read_file_metadata);
 
 } // namespace kasumi::application::observation::scanner
 

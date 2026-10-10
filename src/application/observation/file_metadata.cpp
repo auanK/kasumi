@@ -122,16 +122,21 @@ read_file_metadata(const std::filesystem::path& physical_path,
         return std::nullopt;
     }
 
+    std::optional<FileIdentity> identity;
+    if (st.st_dev != 0 || st.st_ino != 0) {
+        identity = FileIdentity{
+            .volume = static_cast<std::uint64_t>(st.st_dev),
+            .file_low = static_cast<std::uint64_t>(st.st_ino),
+            .file_high = 0ULL,
+        };
+    }
+
     FileMetadata metadata{
         .path = logical_path,
         .kind = EntryKind::RegularFile,
         .size = static_cast<std::uint64_t>(st.st_size),
         .mtime_nanoseconds = *mtime_ns,
-        .identity = FileIdentity{
-            .volume = static_cast<std::uint64_t>(st.st_dev),
-            .file_low = static_cast<std::uint64_t>(st.st_ino),
-            .file_high = 0ULL,
-        },
+        .identity = identity,
         .is_valid = true,
     };
 
@@ -245,37 +250,37 @@ read_file_metadata(const std::filesystem::path& physical_path,
         return std::nullopt;
     }
 
-    FILE_ID_INFO id{};
-    if (!::GetFileInformationByHandleEx(
-            handle.handle, FileIdInfo, &id, sizeof(id))) {
-        const DWORD err = ::GetLastError();
-        if (is_unsupported_id_error(err)) {
-            return std::nullopt;
-        }
-        return std::unexpected(FileMetadataError{
-            .code = FileMetadataErrorCode::IoError,
-            .os_error = err,
-            .message = std::system_category().message(static_cast<int>(err)),
-        });
-    }
-
-    FileIdentity file_identity{};
-    file_identity.volume = id.VolumeSerialNumber;
-    std::memcpy(&file_identity.file_low,
-                id.FileId.Identifier,
-                sizeof(std::uint64_t));
-    std::memcpy(&file_identity.file_high,
-                id.FileId.Identifier + sizeof(std::uint64_t),
-                sizeof(std::uint64_t));
-
     FileMetadata metadata{
         .path = logical_path,
         .kind = EntryKind::RegularFile,
         .size = static_cast<std::uint64_t>(standard.EndOfFile.QuadPart),
         .mtime_nanoseconds = *mtime_ns,
-        .identity = file_identity,
+        .identity = std::nullopt,
         .is_valid = true,
     };
+
+    FILE_ID_INFO id{};
+    if (::GetFileInformationByHandleEx(
+            handle.handle, FileIdInfo, &id, sizeof(id))) {
+        FileIdentity file_identity{};
+        file_identity.volume = id.VolumeSerialNumber;
+        std::memcpy(&file_identity.file_low,
+                    id.FileId.Identifier,
+                    sizeof(std::uint64_t));
+        std::memcpy(&file_identity.file_high,
+                    id.FileId.Identifier + sizeof(std::uint64_t),
+                    sizeof(std::uint64_t));
+        metadata.identity = file_identity;
+    } else {
+        const DWORD err = ::GetLastError();
+        if (!is_unsupported_id_error(err)) {
+            return std::unexpected(FileMetadataError{
+                .code = FileMetadataErrorCode::IoError,
+                .os_error = err,
+                .message = std::system_category().message(static_cast<int>(err)),
+            });
+        }
+    }
 
     return metadata;
 }

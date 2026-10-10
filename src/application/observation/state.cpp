@@ -2,6 +2,7 @@
 
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/remote_layout.hpp"
+#include "application/observation/file_metadata.hpp"
 #include "application/observation/history.hpp"
 #include "application/observation/patch.hpp"
 #include "application/observation/scanner.hpp"
@@ -398,7 +399,7 @@ collect_local_tree(const std::filesystem::path& local_root,
     auto current = scanner::scan_result(local_root,
                                         {},
                                         scanner::ScanPolicy::FullHash,
-                                        platform::regular_file_fingerprint,
+                                        cache::read_file_metadata,
                                         ignore_list);
     if (!current) {
         return std::unexpected(scanner::describe(current.error()));

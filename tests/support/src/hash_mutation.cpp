@@ -53,6 +53,10 @@ void mutation_blake3_update(blake3_hasher* state,
 #include "../../../src/platform/file_fingerprint.cpp"
 #undef regular_file_fingerprint
 
+#define read_file_metadata native_read_file_metadata
+#include "../../../src/application/observation/file_metadata.cpp"
+#undef read_file_metadata
+
 namespace kasumi::crypto::content {
 std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
     watching_hash = active_mutation && active_mutation->path == path;
@@ -167,3 +171,16 @@ regular_file_fingerprint(const std::filesystem::path& path) {
     return native_regular_file_fingerprint(path);
 }
 } // namespace kasumi::platform
+
+namespace kasumi::application::observation::cache {
+std::expected<std::optional<FileMetadata>, FileMetadataError>
+read_file_metadata(const std::filesystem::path& physical_path,
+                   std::string_view logical_path) {
+    auto result = native_read_file_metadata(physical_path, logical_path);
+    if (unavailable_fingerprint && *unavailable_fingerprint == physical_path &&
+        result && result->has_value()) {
+        (**result).identity = std::nullopt;
+    }
+    return result;
+}
+} // namespace kasumi::application::observation::cache

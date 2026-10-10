@@ -5,13 +5,16 @@
 #include "application/sync/journal.hpp"
 #include "application/sync/mutation.hpp"
 #include "core/reconciliation/plan.hpp"
+#include "crypto/content.hpp"
 #include "crypto/key_derivation.hpp"
+#include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <cstddef>
 #include <exception>
+#include <filesystem>
 #include <string>
 #include <utility>
 #include <vector>
@@ -233,6 +236,48 @@ bool same_observation(const reconciliation::Input& left,
            same_storage(left.storage, right.storage);
 }
 
+bool verify_destructive_local_operations(
+    const runtime::RuntimeData& runtime_data,
+    reconciliation::Input& input,
+    const reconciliation::Result& result,
+    observation::LocalObservationSession* session) {
+    bool modified = false;
+    for (const auto& op : sync_plan_operations(result.plan)) {
+        if (op.action != Action::DeleteLocal && op.action != Action::Download) {
+            continue;
+        }
+        const auto local_path = runtime_data.local_dir / op.path;
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(local_path, ec)) {
+            continue;
+        }
+        const auto logical_path = platform::path::to_logical_utf8(op.path);
+        auto* local_row = find_row(input.local_tree, logical_path);
+        if (local_row == nullptr || local_row->is_directory) {
+            continue;
+        }
+        auto actual_hash = crypto::content::hash_file(local_path);
+        if (!actual_hash) {
+            continue;
+        }
+        if (local_row->hash != *actual_hash) {
+            local_row->hash = *actual_hash;
+            local_row->size = std::filesystem::file_size(local_path, ec);
+            const auto mtime = std::filesystem::last_write_time(local_path, ec);
+            if (const auto mtime_ns = platform::metadata::unix_nanoseconds(mtime)) {
+                local_row->mtime = *mtime_ns;
+            }
+            if (session != nullptr) {
+                std::erase_if(session->cache, [&](const auto& row) {
+                    return row.path == logical_path;
+                });
+            }
+            modified = true;
+        }
+    }
+    return modified;
+}
+
 std::expected<StableExecution, coordinator::Error>
 stabilize(const runtime::RuntimeData& runtime_data,
           transport::Transport& storage,
@@ -270,6 +315,32 @@ stabilize(const runtime::RuntimeData& runtime_data,
     auto result = std::move(reconciliation_result);
     for (std::size_t attempt = 0; attempt < maximum_observation_attempts;
          ++attempt) {
+        if (verify_destructive_local_operations(runtime_data, input, result, session)) {
+            auto recalculated = reconciliation::reconcile(input);
+            if (!recalculated) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure, recalculated.error().detail));
+            }
+            auto reobserved_availability = observe_content_availability(
+                input, *recalculated, storage, key, confirmed_missing);
+            if (!reobserved_availability) {
+                return std::unexpected(reobserved_availability.error());
+            }
+            recalculated = reconciliation::reconcile(input);
+            if (!recalculated) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure, recalculated.error().detail));
+            }
+            result = std::move(*recalculated);
+            if (!result.requires_publication &&
+                !result.requires_local_mutation &&
+                !result.requires_storage_repair &&
+                !result.requires_state_commit) {
+                return StableExecution{.input = std::move(input),
+                                       .result = std::move(result)};
+            }
+        }
+
         std::optional<platform::Workspace> workspace;
         if (!result.plan.operations.empty()) {
             auto staged =
