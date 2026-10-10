@@ -27,10 +27,34 @@ const char* describe_result(CacheReuseResult result) noexcept {
 }
 
 CacheReuseResult evaluate_cache_reuse(
-    const FileMetadata& /*cached*/,
-    const FileMetadata& /*current*/) noexcept {
-    // TDD RED Phase: Stub returning failure to verify test harness fails
-    return CacheReuseResult::InvalidCurrentMetadata;
+    const FileMetadata& cached,
+    const FileMetadata& current) noexcept {
+    if (!cached.is_valid) {
+        return CacheReuseResult::InvalidCachedEntry;
+    }
+    if (!current.is_valid) {
+        return CacheReuseResult::InvalidCurrentMetadata;
+    }
+    if (cached.path.empty() || current.path.empty() || cached.path != current.path) {
+        return CacheReuseResult::PathMismatch;
+    }
+    if (cached.kind != EntryKind::RegularFile || current.kind != EntryKind::RegularFile) {
+        return CacheReuseResult::NotRegularFile;
+    }
+    if (cached.size != current.size) {
+        return CacheReuseResult::SizeMismatch;
+    }
+    if (cached.mtime_nanoseconds != current.mtime_nanoseconds) {
+        return CacheReuseResult::MtimeMismatch;
+    }
+    if (!cached.identity.has_value() || !current.identity.has_value()) {
+        return CacheReuseResult::MissingRequiredIdentity;
+    }
+    if (*cached.identity != *current.identity) {
+        return CacheReuseResult::IdentityMismatch;
+    }
+
+    return CacheReuseResult::Reusable;
 }
 
 } // namespace kasumi::application::observation::cache
