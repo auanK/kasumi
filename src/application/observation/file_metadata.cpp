@@ -36,8 +36,9 @@ posix_timespec_to_unix_nanoseconds(std::int64_t sec, std::int64_t nsec) noexcept
         return std::nullopt;
     }
     constexpr std::int64_t kMaxSec = 9'223'372'036LL;
-    constexpr std::int64_t kMinSec = -9'223'372'036LL;
     constexpr std::int64_t kMaxNsecForMaxSec = 854'775'807LL;
+    constexpr std::int64_t kMinSec = -9'223'372'037LL;
+    constexpr std::int64_t kMinNsecForMinSec = 145'224'192LL;
 
     if (sec > kMaxSec || sec < kMinSec) {
         return std::nullopt;
@@ -45,25 +46,35 @@ posix_timespec_to_unix_nanoseconds(std::int64_t sec, std::int64_t nsec) noexcept
     if (sec == kMaxSec && nsec > kMaxNsecForMaxSec) {
         return std::nullopt;
     }
+    if (sec == kMinSec) {
+        if (nsec < kMinNsecForMinSec) {
+            return std::nullopt;
+        }
+        return std::numeric_limits<std::int64_t>::min() + (nsec - kMinNsecForMinSec);
+    }
     return sec * 1'000'000'000LL + nsec;
 }
 
 std::optional<std::int64_t>
 windows_filetime_to_unix_nanoseconds(std::uint64_t filetime_ticks) noexcept {
-    constexpr std::int64_t kEpochOffset = 116'444'736'000'000'000LL;
-    constexpr std::int64_t kMaxTicksSinceEpoch = 92'233'720'368'547'758LL;
-    constexpr std::int64_t kMinTicksSinceEpoch = -92'233'720'368'547'758LL;
+    constexpr std::uint64_t kEpochOffset = 116'444'736'000'000'000ULL;
+    constexpr std::uint64_t kMaxTicksSinceEpoch = 92'233'720'368'547'758ULL;
+    constexpr std::uint64_t kMinTicksSinceEpoch = 92'233'720'368'547'758ULL;
 
-    constexpr std::int64_t kMaxFiletimeTicks = kEpochOffset + kMaxTicksSinceEpoch;
-    constexpr std::int64_t kMinFiletimeTicks = kEpochOffset + kMinTicksSinceEpoch;
+    constexpr std::uint64_t kMaxFiletimeTicks = kEpochOffset + kMaxTicksSinceEpoch;
+    constexpr std::uint64_t kMinFiletimeTicks = kEpochOffset - kMinTicksSinceEpoch;
 
-    const auto signed_ticks = static_cast<std::int64_t>(filetime_ticks);
-    if (signed_ticks < kMinFiletimeTicks || signed_ticks > kMaxFiletimeTicks) {
+    if (filetime_ticks < kMinFiletimeTicks || filetime_ticks > kMaxFiletimeTicks) {
         return std::nullopt;
     }
 
-    const std::int64_t ticks_since_1970 = signed_ticks - kEpochOffset;
-    return ticks_since_1970 * 100LL;
+    if (filetime_ticks >= kEpochOffset) {
+        const std::uint64_t diff = filetime_ticks - kEpochOffset;
+        return static_cast<std::int64_t>(diff) * 100LL;
+    } else {
+        const std::uint64_t diff = kEpochOffset - filetime_ticks;
+        return -static_cast<std::int64_t>(diff) * 100LL;
+    }
 }
 
 #if !defined(_WIN32)
@@ -76,17 +87,20 @@ read_file_metadata(const std::filesystem::path& physical_path,
         if (err == ENOENT || err == ENOTDIR) {
             return std::unexpected(FileMetadataError{
                 .code = FileMetadataErrorCode::NotFound,
+                .os_error = static_cast<std::uint32_t>(err),
                 .message = std::system_category().message(err),
             });
         }
         if (err == EACCES || err == EPERM) {
             return std::unexpected(FileMetadataError{
                 .code = FileMetadataErrorCode::PermissionDenied,
+                .os_error = static_cast<std::uint32_t>(err),
                 .message = std::system_category().message(err),
             });
         }
         return std::unexpected(FileMetadataError{
             .code = FileMetadataErrorCode::IoError,
+            .os_error = static_cast<std::uint32_t>(err),
             .message = std::system_category().message(err),
         });
     }
@@ -127,6 +141,8 @@ read_file_metadata(const std::filesystem::path& physical_path,
 namespace {
 struct ScopedHandle {
     HANDLE handle = INVALID_HANDLE_VALUE;
+
+    explicit ScopedHandle(HANDLE h = INVALID_HANDLE_VALUE) noexcept : handle(h) {}
     ~ScopedHandle() noexcept {
         if (handle != INVALID_HANDLE_VALUE && handle != nullptr) {
             ::CloseHandle(handle);
@@ -136,6 +152,16 @@ struct ScopedHandle {
     ScopedHandle& operator=(const ScopedHandle&) = delete;
     ScopedHandle(ScopedHandle&& other) noexcept : handle(other.handle) {
         other.handle = INVALID_HANDLE_VALUE;
+    }
+    ScopedHandle& operator=(ScopedHandle&& other) noexcept {
+        if (this != &other) {
+            if (handle != INVALID_HANDLE_VALUE && handle != nullptr) {
+                ::CloseHandle(handle);
+            }
+            handle = other.handle;
+            other.handle = INVALID_HANDLE_VALUE;
+        }
+        return *this;
     }
 };
 
@@ -162,17 +188,20 @@ read_file_metadata(const std::filesystem::path& physical_path,
         if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
             return std::unexpected(FileMetadataError{
                 .code = FileMetadataErrorCode::NotFound,
+                .os_error = err,
                 .message = std::system_category().message(static_cast<int>(err)),
             });
         }
         if (err == ERROR_ACCESS_DENIED || err == ERROR_SHARING_VIOLATION) {
             return std::unexpected(FileMetadataError{
                 .code = FileMetadataErrorCode::PermissionDenied,
+                .os_error = err,
                 .message = std::system_category().message(static_cast<int>(err)),
             });
         }
         return std::unexpected(FileMetadataError{
             .code = FileMetadataErrorCode::IoError,
+            .os_error = err,
             .message = std::system_category().message(static_cast<int>(err)),
         });
     }
@@ -185,6 +214,7 @@ read_file_metadata(const std::filesystem::path& physical_path,
         const DWORD err = ::GetLastError();
         return std::unexpected(FileMetadataError{
             .code = FileMetadataErrorCode::IoError,
+            .os_error = err,
             .message = std::system_category().message(static_cast<int>(err)),
         });
     }
@@ -195,7 +225,7 @@ read_file_metadata(const std::filesystem::path& physical_path,
     }
 
     const auto mtime_ns = windows_filetime_to_unix_nanoseconds(
-        basic.LastWriteTime.QuadPart);
+        static_cast<std::uint64_t>(basic.LastWriteTime.QuadPart));
     if (!mtime_ns.has_value()) {
         return std::nullopt;
     }
@@ -206,6 +236,7 @@ read_file_metadata(const std::filesystem::path& physical_path,
         const DWORD err = ::GetLastError();
         return std::unexpected(FileMetadataError{
             .code = FileMetadataErrorCode::IoError,
+            .os_error = err,
             .message = std::system_category().message(static_cast<int>(err)),
         });
     }
@@ -223,6 +254,7 @@ read_file_metadata(const std::filesystem::path& physical_path,
         }
         return std::unexpected(FileMetadataError{
             .code = FileMetadataErrorCode::IoError,
+            .os_error = err,
             .message = std::system_category().message(static_cast<int>(err)),
         });
     }

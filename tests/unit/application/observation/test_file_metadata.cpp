@@ -446,5 +446,242 @@ TEST(FileMetadataNativeTest, PermissionDeniedErrorDetected) {
 }
 #endif // !defined(_WIN32)
 
+#if defined(_WIN32)
+// ============================================================================
+// 3. Native Filesystem Tests (Windows / Win32)
+// ============================================================================
+
+TEST(FileMetadataWin32NativeTest, ExistingRegularFileReturnsValidMetadata) {
+    TempDirFixture fixture;
+    const auto file_path = fixture.path() / "sample.bin";
+    const std::string content = "Windows Native Metadata Test Content";
+
+    {
+        std::ofstream ofs(file_path, std::ios::binary);
+        ofs.write(content.data(), static_cast<std::streamsize>(content.size()));
+    }
+
+    const std::string_view logical_path = "data/sample.bin";
+    const auto result = read_file_metadata(file_path, logical_path);
+
+    ASSERT_TRUE(result.has_value()) << "Failed with error: " << result.error().message;
+    ASSERT_TRUE(result->has_value()) << "Expected regular file to produce metadata";
+
+    const auto& meta = **result;
+    EXPECT_TRUE(meta.is_valid);
+    EXPECT_EQ(meta.path, logical_path);
+    EXPECT_EQ(meta.kind, EntryKind::RegularFile);
+    EXPECT_EQ(meta.size, content.size());
+    ASSERT_TRUE(meta.identity.has_value());
+    EXPECT_NE(meta.identity->volume, 0ULL);
+    EXPECT_TRUE(meta.identity->file_low != 0ULL || meta.identity->file_high != 0ULL);
+}
+
+TEST(FileMetadataWin32NativeTest, EmptyRegularFileReturnsValidMetadata) {
+    TempDirFixture fixture;
+    const auto file_path = fixture.path() / "empty.txt";
+
+    {
+        std::ofstream ofs(file_path, std::ios::binary);
+    }
+
+    const auto result = read_file_metadata(file_path, "empty.txt");
+    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result->has_value());
+
+    const auto& meta = **result;
+    EXPECT_TRUE(meta.is_valid);
+    EXPECT_EQ(meta.size, 0ULL);
+    EXPECT_EQ(meta.kind, EntryKind::RegularFile);
+    EXPECT_TRUE(meta.identity.has_value());
+}
+
+TEST(FileMetadataWin32NativeTest, LogicalPathPreservedWithoutAllocation) {
+    TempDirFixture fixture;
+    const auto file_path = fixture.path() / "test.txt";
+    {
+        std::ofstream ofs(file_path);
+        ofs << "test";
+    }
+
+    const std::string logical_str = "deeply/nested/path/to/test.txt";
+    const auto result = read_file_metadata(file_path, logical_str);
+    ASSERT_TRUE(result.has_value() && result->has_value());
+
+    EXPECT_EQ((**result).path.data(), logical_str.data());
+    EXPECT_EQ((**result).path, logical_str);
+}
+
+TEST(FileMetadataWin32NativeTest, NonExistentFileReturnsNotFoundError) {
+    TempDirFixture fixture;
+    const auto file_path = fixture.path() / "does_not_exist.bin";
+
+    const auto result = read_file_metadata(file_path, "missing.bin");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, FileMetadataErrorCode::NotFound);
+    EXPECT_EQ(result.error().os_error, static_cast<std::uint32_t>(ERROR_FILE_NOT_FOUND));
+    EXPECT_STREQ(describe_metadata_error(result.error().code), "NotFound");
+}
+
+TEST(FileMetadataWin32NativeTest, DirectoryReturnsNulloptIneligible) {
+    TempDirFixture fixture;
+    const auto sub_dir = fixture.path() / "subdirectory";
+    fs::create_directories(sub_dir);
+
+    const auto result = read_file_metadata(sub_dir, "subdirectory");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_FALSE(result->has_value()) << "Directory must not produce regular file cache metadata";
+}
+
+TEST(FileMetadataWin32NativeTest, FileSizeModificationReflectedInMetadata) {
+    TempDirFixture fixture;
+    const auto file_path = fixture.path() / "mutate_size.txt";
+
+    {
+        std::ofstream ofs(file_path, std::ios::binary);
+        ofs << "Initial";
+    }
+
+    const auto meta1 = read_file_metadata(file_path, "file.txt");
+    ASSERT_TRUE(meta1.has_value() && meta1->has_value());
+    EXPECT_EQ((**meta1).size, 7ULL);
+
+    {
+        std::ofstream ofs(file_path, std::ios::binary | std::ios::app);
+        ofs << " + Appended";
+    }
+
+    const auto meta2 = read_file_metadata(file_path, "file.txt");
+    ASSERT_TRUE(meta2.has_value() && meta2->has_value());
+    EXPECT_EQ((**meta2).size, 18ULL);
+}
+
+TEST(FileMetadataWin32NativeTest, MtimeModificationReflectedInMetadata) {
+    TempDirFixture fixture;
+    const auto file_path = fixture.path() / "mutate_mtime.txt";
+
+    {
+        std::ofstream ofs(file_path);
+        ofs << "Timestamp test";
+    }
+
+    const auto meta1 = read_file_metadata(file_path, "file.txt");
+    ASSERT_TRUE(meta1.has_value() && meta1->has_value());
+
+    // Explicitly modify LastWriteTime using Win32 SetFileTime
+    HANDLE hFile = ::CreateFileW(
+        file_path.c_str(),
+        FILE_WRITE_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    ASSERT_NE(hFile, INVALID_HANDLE_VALUE);
+
+    FILETIME ft;
+    ULARGE_INTEGER uli;
+    uli.QuadPart = 133801248000000000ULL;
+    ft.dwLowDateTime = uli.LowPart;
+    ft.dwHighDateTime = uli.HighPart;
+    const BOOL set_ok = ::SetFileTime(hFile, nullptr, nullptr, &ft);
+    ::CloseHandle(hFile);
+    ASSERT_TRUE(set_ok);
+
+    const auto meta2 = read_file_metadata(file_path, "file.txt");
+    ASSERT_TRUE(meta2.has_value() && meta2->has_value());
+    const auto expected_ns = windows_filetime_to_unix_nanoseconds(uli.QuadPart);
+    ASSERT_TRUE(expected_ns.has_value());
+    EXPECT_EQ((**meta2).mtime_nanoseconds, *expected_ns);
+}
+
+TEST(FileMetadataWin32NativeTest, FileReplacementChangesIdentity) {
+    TempDirFixture fixture;
+    const auto target_path = fixture.path() / "target.txt";
+    const auto temp_path = fixture.path() / "temp.txt";
+
+    {
+        std::ofstream ofs(target_path);
+        ofs << "Original";
+    }
+
+    const auto meta1 = read_file_metadata(target_path, "target.txt");
+    ASSERT_TRUE(meta1.has_value() && meta1->has_value());
+    const auto original_id = (**meta1).identity;
+    ASSERT_TRUE(original_id.has_value());
+
+    {
+        std::ofstream ofs(temp_path);
+        ofs << "Replaced";
+    }
+
+    // Atomic replacement using MoveFileExW
+    ASSERT_TRUE(::MoveFileExW(temp_path.c_str(), target_path.c_str(), MOVEFILE_REPLACE_EXISTING));
+
+    const auto meta2 = read_file_metadata(target_path, "target.txt");
+    ASSERT_TRUE(meta2.has_value() && meta2->has_value());
+    const auto new_id = (**meta2).identity;
+    ASSERT_TRUE(new_id.has_value());
+
+    // FileId on NTFS must change upon replacement
+    EXPECT_TRUE(original_id->file_low != new_id->file_low || original_id->file_high != new_id->file_high);
+}
+
+TEST(FileMetadataWin32NativeTest, SymlinkOrReparsePointIneligible) {
+    TempDirFixture fixture;
+    const auto target_path = fixture.path() / "target.txt";
+    const auto symlink_path = fixture.path() / "symlink.txt";
+
+    {
+        std::ofstream ofs(target_path);
+        ofs << "target payload";
+    }
+
+    // Attempt to create symlink (SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE = 0x2)
+    BOOLEAN created = ::CreateSymbolicLinkW(
+        symlink_path.c_str(), target_path.c_str(), 0x2);
+    if (!created) {
+        created = ::CreateSymbolicLinkW(symlink_path.c_str(), target_path.c_str(), 0);
+    }
+
+    if (!created) {
+        GTEST_SKIP() << "Creating symbolic links on Windows requires Developer Mode or SeCreateSymbolicLinkPrivilege";
+    }
+
+    const auto result = read_file_metadata(symlink_path, "symlink.txt");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_FALSE(result->has_value())
+        << "Symlink/reparse point must not produce regular file cache metadata";
+}
+
+TEST(FileMetadataWin32NativeTest, SharingViolationOrAccessDeniedDetected) {
+    TempDirFixture fixture;
+    const auto file_path = fixture.path() / "locked.txt";
+
+    {
+        std::ofstream ofs(file_path);
+        ofs << "locked content";
+    }
+
+    // Lock file with exclusive access (share mode 0)
+    HANDLE hLock = ::CreateFileW(
+        file_path.c_str(),
+        GENERIC_READ | GENERIC_WRITE,
+        0, // Exclusive: no sharing allowed
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    ASSERT_NE(hLock, INVALID_HANDLE_VALUE);
+
+    const auto result = read_file_metadata(file_path, "locked.txt");
+    ::CloseHandle(hLock);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
+    EXPECT_EQ(result.error().os_error, static_cast<std::uint32_t>(ERROR_SHARING_VIOLATION));
+}
+#endif // defined(_WIN32)
+
 } // namespace
 
