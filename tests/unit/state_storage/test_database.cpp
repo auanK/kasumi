@@ -131,6 +131,29 @@ TEST(StateStorageDatabaseTest, InitializesFreshDatabaseIdempotently) {
     EXPECT_FALSE(*loaded);
 }
 
+TEST(StateStorageDatabaseTest,
+     CanonicalStateAndCacheDoNotRequireObservationTables) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-no-checkpoint");
+    const auto db = kasumi::test::workspace_path(workspace, "state.db");
+    ASSERT_TRUE(kasumi::state_storage::initialize(db));
+    const auto snapshot = make_snapshot("a.txt", "alpha", 9);
+    ASSERT_TRUE(kasumi::state_storage::save_state(
+        db,
+        kasumi::state_storage::StoredState{snapshot, 7, std::string(64, 'a')}));
+    execute_sql(db,
+                "DROP TABLE observation_checkpoint; DROP TABLE "
+                "directory_lineage; DROP TABLE directory_lineage_metadata;");
+    EXPECT_TRUE(kasumi::state_storage::initialize(db));
+    const auto loaded = kasumi::state_storage::load_state(db);
+    ASSERT_TRUE(loaded.has_value()) << loaded.error();
+    ASSERT_TRUE(loaded->has_value());
+    EXPECT_EQ((*loaded)->tree, snapshot);
+    EXPECT_EQ((*loaded)->height, 7U);
+    EXPECT_TRUE(kasumi::state_storage::load_file_cache(db).has_value());
+    EXPECT_TRUE(kasumi::state_storage::save_file_cache_delta(db, {}));
+}
+
 TEST(StateStorageDatabaseTest, FreshDatabaseCreatesInitialSchemaAndEmptyCache) {
     auto workspace = kasumi::test::make_temp_workspace("persistence-schema");
     const auto database_path =
@@ -1140,12 +1163,15 @@ TEST(StateStorageDatabaseTest, ExtremeTimestampsPreservedBitwise) {
             .file_low = 8,
             .file_high = 9}};
 
-    ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(database_path, rows));
+    ASSERT_TRUE(
+        kasumi::state_storage::save_file_cache_delta(database_path, rows));
     const auto loaded = kasumi::state_storage::load_file_cache(database_path);
     ASSERT_TRUE(loaded.has_value());
     ASSERT_EQ(loaded->size(), 3U);
-    EXPECT_EQ(loaded->at(0).mtime_nanoseconds, std::numeric_limits<std::int64_t>::max());
-    EXPECT_EQ(loaded->at(1).mtime_nanoseconds, std::numeric_limits<std::int64_t>::min());
+    EXPECT_EQ(loaded->at(0).mtime_nanoseconds,
+              std::numeric_limits<std::int64_t>::max());
+    EXPECT_EQ(loaded->at(1).mtime_nanoseconds,
+              std::numeric_limits<std::int64_t>::min());
     EXPECT_EQ(loaded->at(2).mtime_nanoseconds, 0);
 }
 
@@ -1158,18 +1184,30 @@ TEST(StateStorageDatabaseTest, LegacyEntriesAreIgnoredOnLoadAndPurgedOnDelta) {
 
     const std::string dummy_hash(64, '0');
     execute_sql(database_path,
-        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
-        "VALUES ('legacy_win.txt', '" + dummy_hash + "', 100, 1, "
-        "'0000000000000001', '0000000000000002', '0000000000000003', '0000000000000004')");
+                "INSERT INTO file_cache (path, hash, size, fingerprint_kind, "
+                "fp0, fp1, fp2, fp3) "
+                "VALUES ('legacy_win.txt', '" +
+                    dummy_hash +
+                    "', 100, 1, "
+                    "'0000000000000001', '0000000000000002', "
+                    "'0000000000000003', '0000000000000004')");
     execute_sql(database_path,
-        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
-        "VALUES ('legacy_posix.txt', '" + dummy_hash + "', 200, 2, "
-        "'0000000000000005', '0000000000000006', '0000000000000007', '0000000000000008')");
+                "INSERT INTO file_cache (path, hash, size, fingerprint_kind, "
+                "fp0, fp1, fp2, fp3) "
+                "VALUES ('legacy_posix.txt', '" +
+                    dummy_hash +
+                    "', 200, 2, "
+                    "'0000000000000005', '0000000000000006', "
+                    "'0000000000000007', '0000000000000008')");
 
     execute_sql(database_path,
-        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
-        "VALUES ('unified.txt', '" + dummy_hash + "', 300, 3, "
-        "'0000000000000009', '000000000000000a', '000000000000000b', '000000000000000c')");
+                "INSERT INTO file_cache (path, hash, size, fingerprint_kind, "
+                "fp0, fp1, fp2, fp3) "
+                "VALUES ('unified.txt', '" +
+                    dummy_hash +
+                    "', 300, 3, "
+                    "'0000000000000009', '000000000000000a', "
+                    "'000000000000000b', '000000000000000c')");
 
     const auto loaded = kasumi::state_storage::load_file_cache(database_path);
     ASSERT_TRUE(loaded.has_value());
@@ -1189,8 +1227,9 @@ TEST(StateStorageDatabaseTest, LegacyEntriesAreIgnoredOnLoadAndPurgedOnDelta) {
         database_path,
         std::span<const kasumi::state_storage::FileCacheRow>{&new_row, 1}));
 
-    const auto remaining_legacy = query_text(
-        database_path, "SELECT path FROM file_cache WHERE fingerprint_kind != 3");
+    const auto remaining_legacy =
+        query_text(database_path,
+                   "SELECT path FROM file_cache WHERE fingerprint_kind != 3");
     EXPECT_TRUE(remaining_legacy.empty());
 }
 
@@ -1203,14 +1242,21 @@ TEST(StateStorageDatabaseTest, CorruptedCacheEntriesIgnoredFailClosed) {
 
     const std::string dummy_hash(64, 'a');
     execute_sql(database_path,
-        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
-        "VALUES ('bad_hex.txt', '" + dummy_hash + "', 10, 3, 'NOT_HEX_VALUE!!', '0', '0', '0')");
+                "INSERT INTO file_cache (path, hash, size, fingerprint_kind, "
+                "fp0, fp1, fp2, fp3) "
+                "VALUES ('bad_hex.txt', '" +
+                    dummy_hash + "', 10, 3, 'NOT_HEX_VALUE!!', '0', '0', '0')");
     execute_sql(database_path,
-        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
-        "VALUES ('bad_hash.txt', 'short_hash', 10, 3, '0000000000000001', '0', '0', '0')");
+                "INSERT INTO file_cache (path, hash, size, fingerprint_kind, "
+                "fp0, fp1, fp2, fp3) "
+                "VALUES ('bad_hash.txt', 'short_hash', 10, 3, "
+                "'0000000000000001', '0', '0', '0')");
     execute_sql(database_path,
-        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
-        "VALUES ('neg_size.txt', '" + dummy_hash + "', -5, 3, '0000000000000001', '0', '0', '0')");
+                "INSERT INTO file_cache (path, hash, size, fingerprint_kind, "
+                "fp0, fp1, fp2, fp3) "
+                "VALUES ('neg_size.txt', '" +
+                    dummy_hash +
+                    "', -5, 3, '0000000000000001', '0', '0', '0')");
 
     const auto loaded = kasumi::state_storage::load_file_cache(database_path);
     ASSERT_TRUE(loaded.has_value());
@@ -1244,10 +1290,15 @@ TEST(StateStorageDatabaseTest, UnchangedCacheDeltaAvoidsRedundantWrites) {
         database_path,
         std::span<const kasumi::state_storage::FileCacheRow>{&row, 1}));
 
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache unchanged"), 1U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache inserts"), 0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache updates"), 0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache deletes"), 0U);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("state db cache unchanged"),
+        1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache inserts"),
+              0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache updates"),
+              0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache deletes"),
+              0U);
 }
 
 TEST(StateStorageDatabaseTest, ObsoleteEntriesRemovedByDelta) {
@@ -1275,12 +1326,15 @@ TEST(StateStorageDatabaseTest, ObsoleteEntriesRemovedByDelta) {
             .file_low = 2,
             .file_high = 2}};
 
-    ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(database_path, initial));
-    ASSERT_EQ(kasumi::state_storage::load_file_cache(database_path)->size(), 2U);
+    ASSERT_TRUE(
+        kasumi::state_storage::save_file_cache_delta(database_path, initial));
+    ASSERT_EQ(kasumi::state_storage::load_file_cache(database_path)->size(),
+              2U);
 
-    const auto delta = std::span<const kasumi::state_storage::FileCacheRow>{
-        initial.data(), 1};
-    ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(database_path, delta));
+    const auto delta =
+        std::span<const kasumi::state_storage::FileCacheRow>{initial.data(), 1};
+    ASSERT_TRUE(
+        kasumi::state_storage::save_file_cache_delta(database_path, delta));
 
     const auto loaded = kasumi::state_storage::load_file_cache(database_path);
     ASSERT_TRUE(loaded.has_value());
