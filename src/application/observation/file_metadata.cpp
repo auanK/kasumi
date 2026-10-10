@@ -49,7 +49,7 @@ posix_timespec_to_unix_nanoseconds(std::int64_t sec, std::int64_t nsec) noexcept
 }
 
 std::optional<std::int64_t>
-windows_filetime_to_unix_nanoseconds(std::int64_t filetime_ticks) noexcept {
+windows_filetime_to_unix_nanoseconds(std::uint64_t filetime_ticks) noexcept {
     constexpr std::int64_t kEpochOffset = 116'444'736'000'000'000LL;
     constexpr std::int64_t kMaxTicksSinceEpoch = 92'233'720'368'547'758LL;
     constexpr std::int64_t kMinTicksSinceEpoch = -92'233'720'368'547'758LL;
@@ -57,18 +57,19 @@ windows_filetime_to_unix_nanoseconds(std::int64_t filetime_ticks) noexcept {
     constexpr std::int64_t kMaxFiletimeTicks = kEpochOffset + kMaxTicksSinceEpoch;
     constexpr std::int64_t kMinFiletimeTicks = kEpochOffset + kMinTicksSinceEpoch;
 
-    if (filetime_ticks < kMinFiletimeTicks || filetime_ticks > kMaxFiletimeTicks) {
+    const auto signed_ticks = static_cast<std::int64_t>(filetime_ticks);
+    if (signed_ticks < kMinFiletimeTicks || signed_ticks > kMaxFiletimeTicks) {
         return std::nullopt;
     }
 
-    const std::int64_t ticks_since_1970 = filetime_ticks - kEpochOffset;
+    const std::int64_t ticks_since_1970 = signed_ticks - kEpochOffset;
     return ticks_since_1970 * 100LL;
 }
 
 #if !defined(_WIN32)
 std::expected<std::optional<FileMetadata>, FileMetadataError>
 read_file_metadata(const std::filesystem::path& physical_path,
-                   std::string_view logical_path) noexcept {
+                   std::string_view logical_path) {
     struct stat st{};
     if (::lstat(physical_path.c_str(), &st) != 0) {
         const int err = errno;
@@ -146,7 +147,7 @@ bool is_unsupported_id_error(DWORD error) noexcept {
 
 std::expected<std::optional<FileMetadata>, FileMetadataError>
 read_file_metadata(const std::filesystem::path& physical_path,
-                   std::string_view logical_path) noexcept {
+                   std::string_view logical_path) {
     const HANDLE raw_handle = ::CreateFileW(
         physical_path.c_str(),
         FILE_READ_ATTRIBUTES,

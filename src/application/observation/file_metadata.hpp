@@ -23,9 +23,10 @@ enum class FileMetadataErrorCode : std::uint8_t {
 // Explicit error from filesystem metadata query.
 struct FileMetadataError {
     FileMetadataErrorCode code = FileMetadataErrorCode::Other;
+    std::uint32_t os_error = 0;
     std::string message;
 
-    constexpr bool operator==(const FileMetadataError&) const = default;
+    bool operator==(const FileMetadataError&) const = default;
 };
 
 // Formats error code as human-readable string.
@@ -37,7 +38,7 @@ std::optional<std::int64_t>
 posix_timespec_to_unix_nanoseconds(std::int64_t sec, std::int64_t nsec) noexcept;
 
 std::optional<std::int64_t>
-windows_filetime_to_unix_nanoseconds(std::int64_t filetime_ticks) noexcept;
+windows_filetime_to_unix_nanoseconds(std::uint64_t filetime_ticks) noexcept;
 
 // Queries native filesystem metadata for a file.
 //
@@ -51,7 +52,7 @@ windows_filetime_to_unix_nanoseconds(std::int64_t filetime_ticks) noexcept;
 // The `logical_path` view must outlive the returned `FileMetadata`.
 std::expected<std::optional<FileMetadata>, FileMetadataError>
 read_file_metadata(const std::filesystem::path& physical_path,
-                   std::string_view logical_path) noexcept;
+                   std::string_view logical_path);
 
 } // namespace kasumi::application::observation::cache
 

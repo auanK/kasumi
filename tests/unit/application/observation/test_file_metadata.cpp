@@ -1,14 +1,25 @@
 #include "application/observation/file_metadata.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
-#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <string>
+#include <gtest/gtest.h>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <cerrno>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <gtest/gtest.h>
+#endif
 
 namespace {
 
@@ -27,8 +38,11 @@ using kasumi::application::observation::cache::windows_filetime_to_unix_nanoseco
 class TempDirFixture {
 public:
     TempDirFixture() {
+        static std::atomic<std::uint64_t> counter{0};
+        const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
         const auto temp_base = fs::temp_directory_path();
-        path_ = temp_base / ("kasumi_file_metadata_test_" + std::to_string(::getpid()) + "_" +
+        path_ = temp_base / ("kasumi_file_metadata_test_" + std::to_string(now) + "_" +
+                             std::to_string(counter.fetch_add(1)) + "_" +
                              std::to_string(reinterpret_cast<std::uintptr_t>(this)));
         fs::create_directories(path_);
     }
@@ -86,7 +100,6 @@ TEST(FileMetadataTimestampTest, PosixTimespecInvalidNsecFraction) {
 
 TEST(FileMetadataTimestampTest, PosixTimespecOverflowAndUnderflow) {
     constexpr std::int64_t kMaxSec = 9223372036LL;
-    constexpr std::int64_t kMinSec = -9223372036LL;
     constexpr std::int64_t kMaxNsec = 854775807LL;
 
     // Max safe value -> INT64_MAX
@@ -99,36 +112,55 @@ TEST(FileMetadataTimestampTest, PosixTimespecOverflowAndUnderflow) {
 
     // 1 second beyond max safe seconds
     EXPECT_FALSE(posix_timespec_to_unix_nanoseconds(kMaxSec + 1, 0).has_value());
+}
 
-    // 1 second below min safe seconds
-    EXPECT_FALSE(posix_timespec_to_unix_nanoseconds(kMinSec - 1, 0).has_value());
+TEST(FileMetadataTimestampTest, PosixTimespecInt64MinBoundary) {
+    // sec = -9223372037, nsec = 145224192 is exactly INT64_MIN (-9223372036854775808)
+    constexpr std::int64_t kExactSec = -9223372037LL;
+    constexpr std::int64_t kExactNsec = 145224192LL;
+
+    const auto exact_min = posix_timespec_to_unix_nanoseconds(kExactSec, kExactNsec);
+    ASSERT_TRUE(exact_min.has_value());
+    EXPECT_EQ(*exact_min, std::numeric_limits<std::int64_t>::min());
+
+    // 1 nanosecond above INT64_MIN: must be accepted
+    const auto one_above = posix_timespec_to_unix_nanoseconds(kExactSec, kExactNsec + 1);
+    ASSERT_TRUE(one_above.has_value());
+    EXPECT_EQ(*one_above, std::numeric_limits<std::int64_t>::min() + 1);
+
+    // 1 nanosecond below INT64_MIN: must be rejected (underflow)
+    const auto one_below = posix_timespec_to_unix_nanoseconds(kExactSec, kExactNsec - 1);
+    EXPECT_FALSE(one_below.has_value());
+
+    // 1 second below min safe seconds: must be rejected
+    EXPECT_FALSE(posix_timespec_to_unix_nanoseconds(kExactSec - 1, 0).has_value());
 }
 
 TEST(FileMetadataTimestampTest, WindowsFiletimeUnixEpoch) {
     // Unix Epoch in 100ns ticks = 116444736000000000
-    constexpr std::int64_t kEpochTicks = 116444736000000000LL;
+    constexpr std::uint64_t kEpochTicks = 116444736000000000ULL;
     const auto ns = windows_filetime_to_unix_nanoseconds(kEpochTicks);
     ASSERT_TRUE(ns.has_value());
     EXPECT_EQ(*ns, 0);
 }
 
 TEST(FileMetadataTimestampTest, WindowsFiletimePositiveDateWith100nsPrecision) {
-    constexpr std::int64_t kEpochTicks = 116444736000000000LL;
+    constexpr std::uint64_t kEpochTicks = 116444736000000000ULL;
     // 1 tick = 100 nanoseconds
-    const auto ns_one_tick = windows_filetime_to_unix_nanoseconds(kEpochTicks + 1);
+    const auto ns_one_tick = windows_filetime_to_unix_nanoseconds(kEpochTicks + 1ULL);
     ASSERT_TRUE(ns_one_tick.has_value());
     EXPECT_EQ(*ns_one_tick, 100);
 
     // 10'000'000 ticks = 1 second = 1'000'000'000 ns
-    const auto ns_one_sec = windows_filetime_to_unix_nanoseconds(kEpochTicks + 10000000LL);
+    const auto ns_one_sec = windows_filetime_to_unix_nanoseconds(kEpochTicks + 10000000ULL);
     ASSERT_TRUE(ns_one_sec.has_value());
     EXPECT_EQ(*ns_one_sec, 1000000000LL);
 }
 
 TEST(FileMetadataTimestampTest, WindowsFiletimeBefore1970) {
-    constexpr std::int64_t kEpochTicks = 116444736000000000LL;
+    constexpr std::uint64_t kEpochTicks = 116444736000000000ULL;
     // 1 tick before Unix Epoch
-    const auto ns_before = windows_filetime_to_unix_nanoseconds(kEpochTicks - 1);
+    const auto ns_before = windows_filetime_to_unix_nanoseconds(kEpochTicks - 1ULL);
     ASSERT_TRUE(ns_before.has_value());
     EXPECT_EQ(*ns_before, -100LL);
 }
@@ -141,30 +173,39 @@ TEST(FileMetadataTimestampTest, WindowsFiletimeYear1601OverflowsInt64Nanoseconds
 }
 
 TEST(FileMetadataTimestampTest, WindowsFiletimeOverflowAndUnderflow) {
-    constexpr std::int64_t kEpochTicks = 116444736000000000LL;
-    constexpr std::int64_t kMaxTicksSinceEpoch = 92233720368547758LL;
-    constexpr std::int64_t kMinTicksSinceEpoch = -92233720368547758LL;
+    constexpr std::uint64_t kEpochTicks = 116444736000000000ULL;
+    constexpr std::uint64_t kMaxTicksSinceEpoch = 92233720368547758ULL;
+    constexpr std::uint64_t kMinTicksSinceEpoch = 92233720368547758ULL;
 
     const auto max_safe = windows_filetime_to_unix_nanoseconds(kEpochTicks + kMaxTicksSinceEpoch);
     ASSERT_TRUE(max_safe.has_value());
     EXPECT_EQ(*max_safe, 9223372036854775800LL);
 
     // 1 tick beyond max
-    EXPECT_FALSE(windows_filetime_to_unix_nanoseconds(kEpochTicks + kMaxTicksSinceEpoch + 1).has_value());
+    EXPECT_FALSE(windows_filetime_to_unix_nanoseconds(kEpochTicks + kMaxTicksSinceEpoch + 1ULL).has_value());
 
     // Min safe
-    const auto min_safe = windows_filetime_to_unix_nanoseconds(kEpochTicks + kMinTicksSinceEpoch);
+    const auto min_safe = windows_filetime_to_unix_nanoseconds(kEpochTicks - kMinTicksSinceEpoch);
     ASSERT_TRUE(min_safe.has_value());
     EXPECT_EQ(*min_safe, -9223372036854775800LL);
 
     // 1 tick below min
-    EXPECT_FALSE(windows_filetime_to_unix_nanoseconds(kEpochTicks + kMinTicksSinceEpoch - 1).has_value());
+    EXPECT_FALSE(windows_filetime_to_unix_nanoseconds(kEpochTicks - kMinTicksSinceEpoch - 1ULL).has_value());
+}
+
+TEST(FileMetadataTimestampTest, WindowsFiletimeUint64Boundaries) {
+    // UINT64_MAX would overflow signed int64 if cast implicitly
+    EXPECT_FALSE(windows_filetime_to_unix_nanoseconds(
+        std::numeric_limits<std::uint64_t>::max()).has_value());
+    EXPECT_FALSE(windows_filetime_to_unix_nanoseconds(
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 1ULL).has_value());
 }
 
 // ============================================================================
 // 2. Native Filesystem Tests (Linux / POSIX)
 // ============================================================================
 
+#if !defined(_WIN32)
 TEST(FileMetadataNativeTest, ExistingRegularFileReturnsValidMetadata) {
     TempDirFixture fixture;
     const auto file_path = fixture.path() / "sample.bin";
@@ -242,6 +283,7 @@ TEST(FileMetadataNativeTest, NonExistentFileReturnsNotFoundError) {
     const auto result = read_file_metadata(file_path, "missing.bin");
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, FileMetadataErrorCode::NotFound);
+    EXPECT_EQ(result.error().os_error, static_cast<std::uint32_t>(ENOENT));
     EXPECT_STREQ(describe_metadata_error(result.error().code), "NotFound");
 }
 
@@ -400,7 +442,9 @@ TEST(FileMetadataNativeTest, PermissionDeniedErrorDetected) {
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
+    EXPECT_EQ(result.error().os_error, static_cast<std::uint32_t>(EACCES));
 }
+#endif // !defined(_WIN32)
 
 } // namespace
 
