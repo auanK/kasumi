@@ -61,6 +61,7 @@ kasumi_add_test_suite(
         unit/application/observation/test_history.cpp
         unit/application/observation/test_scanner.cpp
         unit/application/observation/test_cache_contract.cpp
+        unit/application/observation/test_file_metadata.cpp
         support/src/hash_mutation.cpp
     LIBRARIES
         kasumi_application
