@@ -33,11 +33,9 @@ MetadataFakeMode metadata_fake_mode = MetadataFakeMode::Unsupported;
 int metadata_fake_calls = 0;
 int native_metadata_calls = 0;
 
-std::expected<
-    std::optional<kasumi::application::observation::cache::FileMetadata>,
-    kasumi::application::observation::cache::FileMetadataError>
-fake_metadata(const std::filesystem::path& path,
-              std::string_view relative_path) {
+std::expected<std::optional<kasumi::application::observation::cache::FileMetadata>,
+              kasumi::application::observation::cache::FileMetadataError>
+fake_metadata(const std::filesystem::path& path, std::string_view relative_path) {
     auto result = kasumi::application::observation::cache::read_file_metadata(
         path, relative_path);
     if (!result || !result->has_value()) {
@@ -47,22 +45,23 @@ fake_metadata(const std::filesystem::path& path,
     if (metadata_fake_mode == MetadataFakeMode::ErrorBefore) {
         return std::unexpected(
             kasumi::application::observation::cache::FileMetadataError{
-                .code = kasumi::application::observation::cache::
-                    FileMetadataErrorCode::IoError,
+                .code =
+                    kasumi::application::observation::cache::
+                        FileMetadataErrorCode::IoError,
                 .message = "metadata before hash failed"});
     }
     if (metadata_fake_mode == MetadataFakeMode::ErrorAfter &&
         metadata_fake_calls > 1) {
         return std::unexpected(
             kasumi::application::observation::cache::FileMetadataError{
-                .code = kasumi::application::observation::cache::
-                    FileMetadataErrorCode::IoError,
+                .code =
+                    kasumi::application::observation::cache::
+                        FileMetadataErrorCode::IoError,
                 .message = "metadata after hash failed"});
     }
     auto meta = **result;
     if (metadata_fake_mode == MetadataFakeMode::Unsupported) {
-        std::cout << "metadata_call=" << metadata_fake_calls
-                  << " unavailable\n";
+        std::cout << "metadata_call=" << metadata_fake_calls << " unavailable\n";
         meta.identity = std::nullopt;
         return meta;
     }
@@ -94,9 +93,8 @@ constexpr auto fake_fingerprint = fake_metadata;
 #define fingerprint_fake_calls metadata_fake_calls
 #define native_fingerprint_calls native_metadata_calls
 
-std::expected<
-    std::optional<kasumi::application::observation::cache::FileMetadata>,
-    kasumi::application::observation::cache::FileMetadataError>
+std::expected<std::optional<kasumi::application::observation::cache::FileMetadata>,
+              kasumi::application::observation::cache::FileMetadataError>
 traced_native_metadata(const std::filesystem::path& path,
                        std::string_view relative_path) {
     ++native_metadata_calls;
@@ -495,11 +493,10 @@ TEST(ScannerTest, RestoredMtimeDoesNotHideContentMutationUnderFullHash) {
               kasumi::find_row(second->snapshot, "a.txt")->hash);
 
     // Explicit FullHash scan forces re-hashing, detecting the mutation.
-    const auto full_scan =
-        kasumi::application::observation::scanner::scan_result(
-            root,
-            second->cache,
-            kasumi::application::observation::scanner::ScanPolicy::FullHash);
+    const auto full_scan = kasumi::application::observation::scanner::scan_result(
+        root,
+        second->cache,
+        kasumi::application::observation::scanner::ScanPolicy::FullHash);
     ASSERT_TRUE(full_scan.has_value());
     EXPECT_NE(kasumi::find_row(first->snapshot, "a.txt")->hash,
               kasumi::find_row(full_scan->snapshot, "a.txt")->hash);
@@ -600,67 +597,6 @@ TEST(ScannerTest, FingerprintUnavailableNeverReusesPreviousHash) {
     EXPECT_NE(old_hash, new_hash);
     EXPECT_FALSE(new_hash.empty());
     EXPECT_TRUE(second->cache.empty());
-}
-
-TEST(ScannerTest,
-     PersistedCheckpointNoOpCannotFallBackBecauseOfWorkerScheduling) {
-    auto workspace = kasumi::test::make_temp_workspace("scanner-usn-clean");
-    const auto root = kasumi::test::workspace_path(workspace, "local");
-    const auto checkpoint =
-        kasumi::platform::capture_change_journal_checkpoint(root);
-    if (!checkpoint) {
-        GTEST_SKIP() << checkpoint.error();
-    }
-    kasumi::test::write_text(root / "a.txt", "alpha");
-    kasumi::application::observation::LocalObservationSession session;
-    const auto scanned =
-        kasumi::application::observation::collect_local_tree(root, &session);
-    ASSERT_TRUE(scanned.has_value());
-    const auto scanner_invocations = session.scanner_invocations;
-    session.cache_dirty = false;
-
-    const auto result =
-        kasumi::application::observation::collect_local_tree(root, &session);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(session.scanner_invocations, scanner_invocations);
-    EXPECT_FALSE(session.cache_dirty);
-    expect_same_snapshot(*result, *scanned);
-}
-
-TEST(ScannerTest, DirtyUsnFallsBackOnceAndMarksCacheDirty) {
-    auto workspace = kasumi::test::make_temp_workspace("scanner-usn-dirty");
-    const auto root = kasumi::test::workspace_path(workspace, "local");
-    const auto file = root / "a.txt";
-    kasumi::test::write_text(file, "alpha");
-    auto scanned = kasumi::application::observation::scanner::scan_result(
-        root,
-        {},
-        kasumi::application::observation::scanner::ScanPolicy::FullHash);
-    ASSERT_TRUE(scanned.has_value());
-    auto checkpoint = kasumi::platform::capture_change_journal_checkpoint(root);
-    if (!checkpoint) {
-        GTEST_SKIP() << checkpoint.error();
-    }
-    kasumi::application::observation::LocalObservationSession session;
-    session.cache = scanned->cache;
-    session.cache_loaded = true;
-    session.checkpoint = kasumi::state_storage::ObservationCheckpoint{
-        .journal = *checkpoint,
-        .tree_root_hash = scanned->snapshot.rows.front().hash,
-        .row_count = scanned->snapshot.rows.size(),
-        .directory_file_references = {},
-        .lineage_complete = false};
-    session.last_snapshot = scanned->snapshot;
-    std::this_thread::sleep_for(std::chrono::milliseconds{25});
-    kasumi::test::write_text(file, "omega");
-
-    const auto result =
-        kasumi::application::observation::collect_local_tree(root, &session);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(session.scanner_invocations, 1U);
-    EXPECT_TRUE(session.cache_dirty);
-    ASSERT_EQ(result->rows.size(), scanned->snapshot.rows.size());
-    EXPECT_NE(result->rows.front().hash, scanned->snapshot.rows.front().hash);
 }
 
 TEST(ScannerTest, ResolutionSeamKeepsLiveInsideObjectsDirty) {
@@ -1230,8 +1166,7 @@ TEST(ScannerTest, ScanResultRejectsUnicodeCaseCollisionsOnPosix) {
 #endif
 
 TEST(ScannerUnifiedCacheTest, ColdScanComputesHashesWarmScanReusesHashes) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("scanner-unified-cold-warm");
+    auto workspace = kasumi::test::make_temp_workspace("scanner-unified-cold-warm");
     const auto root = kasumi::test::workspace_path(workspace, "local");
     kasumi::test::write_text(root / "a.txt", "alpha content");
     kasumi::test::write_text(root / "b.txt", "beta content");
@@ -1242,52 +1177,36 @@ TEST(ScannerUnifiedCacheTest, ColdScanComputesHashesWarmScanReusesHashes) {
     kasumi::platform::perf_trace::reset();
 
     const auto cold = kasumi::application::observation::scanner::scan_result(
-        root,
-        {},
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, {}, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(cold.has_value())
         << kasumi::application::observation::scanner::describe(cold.error());
 
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash file calls"),
-              4U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"),
-              0U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("local hash cache misses"), 4U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash file calls"), 4U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache misses"), 4U);
     ASSERT_EQ(cold->cache.size(), 4U);
 
     kasumi::platform::perf_trace::reset();
     const auto warm = kasumi::application::observation::scanner::scan_result(
-        root,
-        cold->cache,
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, cold->cache, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(warm.has_value())
         << kasumi::application::observation::scanner::describe(warm.error());
 
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash file calls"),
-              0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"),
-              4U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("local hash cache misses"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash file calls"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"), 4U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache misses"), 0U);
     expect_same_snapshot(cold->snapshot, warm->snapshot);
     EXPECT_EQ(warm->cache.size(), 4U);
 }
 
 TEST(ScannerUnifiedCacheTest, SizeModificationForcesRehash) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("scanner-unified-size-change");
+    auto workspace = kasumi::test::make_temp_workspace("scanner-unified-size-change");
     const auto root = kasumi::test::workspace_path(workspace, "local");
     kasumi::test::write_text(root / "f1.txt", "file 1");
     kasumi::test::write_text(root / "f2.txt", "file 2");
 
     const auto cold = kasumi::application::observation::scanner::scan_result(
-        root,
-        {},
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, {}, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(cold.has_value());
 
     kasumi::test::write_text(root / "f1.txt", "file 1 with appended data");
@@ -1296,60 +1215,42 @@ TEST(ScannerUnifiedCacheTest, SizeModificationForcesRehash) {
     kasumi::platform::perf_trace::reset();
 
     const auto rescan = kasumi::application::observation::scanner::scan_result(
-        root,
-        cold->cache,
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, cold->cache, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(rescan.has_value());
 
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash file calls"),
-              1U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"),
-              1U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("local hash cache misses"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash file calls"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache misses"), 1U);
 }
 
 TEST(ScannerUnifiedCacheTest, MtimeModificationForcesRehash) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("scanner-unified-mtime-change");
+    auto workspace = kasumi::test::make_temp_workspace("scanner-unified-mtime-change");
     const auto root = kasumi::test::workspace_path(workspace, "local");
     const auto file = root / "mtime_test.txt";
     kasumi::test::write_text(file, "mtime payload");
 
     const auto cold = kasumi::application::observation::scanner::scan_result(
-        root,
-        {},
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, {}, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(cold.has_value());
 
     const auto current_time = std::filesystem::last_write_time(file);
     const auto new_time = current_time + std::chrono::seconds(5);
-    ASSERT_TRUE(
-        kasumi::platform::metadata::set_last_write_time(file, new_time));
+    ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(file, new_time));
 
     kasumi::platform::perf_trace::force_enable(true);
     kasumi::platform::perf_trace::reset();
 
     const auto rescan = kasumi::application::observation::scanner::scan_result(
-        root,
-        cold->cache,
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, cold->cache, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(rescan.has_value());
 
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash file calls"),
-              1U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"),
-              0U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("local hash cache misses"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash file calls"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache misses"), 1U);
 }
 
 TEST(ScannerUnifiedCacheTest, FileReplacementChangesIdentityAndForcesRehash) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("scanner-unified-replacement");
+    auto workspace = kasumi::test::make_temp_workspace("scanner-unified-replacement");
     const auto root = kasumi::test::workspace_path(workspace, "local");
     const auto target = root / "target.txt";
     const auto temp = root / "temp.txt";
@@ -1360,10 +1261,7 @@ TEST(ScannerUnifiedCacheTest, FileReplacementChangesIdentityAndForcesRehash) {
     ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(temp, mtime));
 
     const auto cold = kasumi::application::observation::scanner::scan_result(
-        root,
-        {},
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, {}, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(cold.has_value());
 
     std::filesystem::rename(temp, target);
@@ -1372,32 +1270,22 @@ TEST(ScannerUnifiedCacheTest, FileReplacementChangesIdentityAndForcesRehash) {
     kasumi::platform::perf_trace::reset();
 
     const auto rescan = kasumi::application::observation::scanner::scan_result(
-        root,
-        cold->cache,
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, cold->cache, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(rescan.has_value());
 
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash file calls"),
-              1U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"),
-              0U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("local hash cache misses"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash file calls"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache misses"), 1U);
 }
 
 TEST(ScannerUnifiedCacheTest, ExplicitFullHashBypassesValidCache) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("scanner-unified-fullhash-bypass");
+    auto workspace = kasumi::test::make_temp_workspace("scanner-unified-fullhash-bypass");
     const auto root = kasumi::test::workspace_path(workspace, "local");
     kasumi::test::write_text(root / "a.txt", "apple");
     kasumi::test::write_text(root / "b.txt", "banana");
 
     const auto cold = kasumi::application::observation::scanner::scan_result(
-        root,
-        {},
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, {}, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(cold.has_value());
     ASSERT_EQ(cold->cache.size(), 2U);
 
@@ -1405,41 +1293,29 @@ TEST(ScannerUnifiedCacheTest, ExplicitFullHashBypassesValidCache) {
     kasumi::platform::perf_trace::reset();
 
     const auto rescan = kasumi::application::observation::scanner::scan_result(
-        root,
-        cold->cache,
-        kasumi::application::observation::scanner::ScanPolicy::FullHash);
+        root, cold->cache, kasumi::application::observation::scanner::ScanPolicy::FullHash);
     ASSERT_TRUE(rescan.has_value());
 
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash file calls"),
-              2U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"),
-              0U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("local hash cache misses"), 2U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash file calls"), 2U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache misses"), 2U);
 }
 
 TEST(ScannerUnifiedCacheTest, DeletedFileRemovedFromCache) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("scanner-unified-deleted");
+    auto workspace = kasumi::test::make_temp_workspace("scanner-unified-deleted");
     const auto root = kasumi::test::workspace_path(workspace, "local");
     kasumi::test::write_text(root / "kept.txt", "keep me");
     kasumi::test::write_text(root / "removed.txt", "delete me");
 
     const auto cold = kasumi::application::observation::scanner::scan_result(
-        root,
-        {},
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, {}, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(cold.has_value());
     ASSERT_EQ(cold->cache.size(), 2U);
 
     std::filesystem::remove(root / "removed.txt");
 
     const auto warm = kasumi::application::observation::scanner::scan_result(
-        root,
-        cold->cache,
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, cold->cache, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(warm.has_value());
 
     EXPECT_EQ(warm->snapshot.rows.size(), 2U);
@@ -1455,10 +1331,7 @@ TEST(ScannerIdentityTest, VolumeMutationInvalidatesCache) {
     kasumi::test::write_text(root / "a.txt", "content");
 
     const auto cold = kasumi::application::observation::scanner::scan_result(
-        root,
-        {},
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, {}, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(cold.has_value());
     ASSERT_EQ(cold->cache.size(), 1U);
 
@@ -1467,15 +1340,10 @@ TEST(ScannerIdentityTest, VolumeMutationInvalidatesCache) {
 
     kasumi::platform::perf_trace::reset();
     const auto warm = kasumi::application::observation::scanner::scan_result(
-        root,
-        mutated_cache,
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, mutated_cache, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(warm.has_value());
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("local hash cache misses"), 1U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"),
-              0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache misses"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"), 0U);
 }
 
 TEST(ScannerIdentityTest, FileLowMutationInvalidatesCache) {
@@ -1486,10 +1354,7 @@ TEST(ScannerIdentityTest, FileLowMutationInvalidatesCache) {
     kasumi::test::write_text(root / "a.txt", "content");
 
     const auto cold = kasumi::application::observation::scanner::scan_result(
-        root,
-        {},
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, {}, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(cold.has_value());
     ASSERT_EQ(cold->cache.size(), 1U);
 
@@ -1498,15 +1363,10 @@ TEST(ScannerIdentityTest, FileLowMutationInvalidatesCache) {
 
     kasumi::platform::perf_trace::reset();
     const auto warm = kasumi::application::observation::scanner::scan_result(
-        root,
-        mutated_cache,
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, mutated_cache, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(warm.has_value());
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("local hash cache misses"), 1U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"),
-              0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache misses"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"), 0U);
 }
 
 TEST(ScannerIdentityTest, FileHighMutationInvalidatesCache) {
@@ -1517,10 +1377,7 @@ TEST(ScannerIdentityTest, FileHighMutationInvalidatesCache) {
     kasumi::test::write_text(root / "a.txt", "content");
 
     const auto cold = kasumi::application::observation::scanner::scan_result(
-        root,
-        {},
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, {}, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(cold.has_value());
     ASSERT_EQ(cold->cache.size(), 1U);
 
@@ -1529,15 +1386,10 @@ TEST(ScannerIdentityTest, FileHighMutationInvalidatesCache) {
 
     kasumi::platform::perf_trace::reset();
     const auto warm = kasumi::application::observation::scanner::scan_result(
-        root,
-        mutated_cache,
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint);
+        root, mutated_cache, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(warm.has_value());
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("local hash cache misses"), 1U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"),
-              0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache misses"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"), 0U);
 }
 
 TEST(ScannerIdentityTest, NoXorCompressionInCacheComparison) {
@@ -1549,39 +1401,28 @@ TEST(ScannerIdentityTest, NoXorCompressionInCacheComparison) {
     kasumi::test::write_text(file, "content");
     set_metadata_fake(MetadataFakeMode::Supported);
 
-    // fake_metadata Supported returns uncompressed identity {volume=1,
-    // file_low=2, file_high=3}.
+    // fake_metadata Supported returns uncompressed identity {volume=1, file_low=2, file_high=3}.
     const auto cold = kasumi::application::observation::scanner::scan_result(
-        root,
-        {},
-        kasumi::application::observation::scanner::ScanPolicy::FullHash,
-        fake_metadata);
+        root, {}, kasumi::application::observation::scanner::ScanPolicy::FullHash, fake_metadata);
     ASSERT_TRUE(cold.has_value());
     ASSERT_EQ(cold->cache.size(), 1U);
     EXPECT_EQ(cold->cache.front().file_high, 3ULL);
 
-    // In a compressed XOR scheme, values like {1, 2, 7, 4} and {1, 2, 3, 0}
-    // would both evaluate to file_high = 7 ^ 4 = 3 and 3 ^ 0 = 3, causing a
-    // false cache hit. Under the true 192-bit identity model without XOR
-    // compression, file_high is stored and compared directly as a distinct
-    // 64-bit field. If cache has file_high = 7ULL, it must NOT match current
-    // metadata's file_high = 3ULL!
+    // In a compressed XOR scheme, values like {1, 2, 7, 4} and {1, 2, 3, 0} would both
+    // evaluate to file_high = 7 ^ 4 = 3 and 3 ^ 0 = 3, causing a false cache hit.
+    // Under the true 192-bit identity model without XOR compression, file_high is
+    // stored and compared directly as a distinct 64-bit field.
+    // If cache has file_high = 7ULL, it must NOT match current metadata's file_high = 3ULL!
     auto colliding_cache = cold->cache;
     colliding_cache.front().file_high = 7ULL;
 
     kasumi::platform::perf_trace::reset();
     const auto warm = kasumi::application::observation::scanner::scan_result(
-        root,
-        colliding_cache,
-        kasumi::application::observation::scanner::ScanPolicy::
-            ReuseStrongFingerprint,
-        fake_metadata);
+        root, colliding_cache, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint, fake_metadata);
     set_metadata_fake(MetadataFakeMode::Unsupported);
     ASSERT_TRUE(warm.has_value());
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("local hash cache misses"), 1U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"),
-              0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache misses"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash cache hits"), 0U);
 }
 
 } // namespace

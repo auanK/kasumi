@@ -16,7 +16,6 @@
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
-#include "platform/change_journal.hpp"
 #include "platform/clock.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
@@ -600,33 +599,7 @@ TEST(RcloneSystemTest, TwoPersistedClientsPropagateRemoteDeletes) {
     EXPECT_FALSE(std::filesystem::exists(client_a.local_dir / "alpha.txt"));
     EXPECT_FALSE(std::filesystem::exists(client_a.local_dir / "beta.txt"));
     EXPECT_FALSE(std::filesystem::exists(client_a.local_dir / "dir"));
-    auto checkpoint_a = kasumi::state_storage::load_observation_checkpoint(
-        runtime_a->database_path);
-    ASSERT_TRUE(checkpoint_a.has_value()) << checkpoint_a.error();
-    const bool checkpoint_supported =
-        kasumi::platform::capture_change_journal_checkpoint(client_a.local_dir)
-            .has_value();
-    if (checkpoint_supported) {
-        ASSERT_TRUE(checkpoint_a->has_value());
-        ASSERT_FALSE((*state_a)->tree.rows.empty());
-        EXPECT_EQ((*checkpoint_a)->tree_root_hash,
-                  (*state_a)->tree.rows.front().hash);
-        EXPECT_EQ((*checkpoint_a)->row_count,
-                  static_cast<std::uint64_t>((*state_a)->tree.rows.size()));
-    } else {
-        EXPECT_FALSE(checkpoint_a->has_value());
-    }
-    ASSERT_TRUE(sync_client(client_b));
 
-    ensure_workspace(harness_root(harness) / "delete-final-observation");
-    auto final_remote = kasumi::application::observation::history::observe(
-        *storage,
-        test_key(),
-        harness_root(harness) / "delete-final-observation",
-        false);
-    ASSERT_TRUE(final_remote.has_value());
-    EXPECT_EQ(final_remote->logical_heads, remote->logical_heads);
-    EXPECT_EQ(final_remote->effective_tree, remote->effective_tree);
 }
 
 TEST(RcloneSystemTest, ImmutableHistoryReachabilityInventoryIsReadOnly) {

@@ -10,7 +10,6 @@
 #include "kasumi/test/hash_mutation.hpp"
 #include "kasumi/test/provider_scenarios.hpp"
 #include "kasumi/test/temp_workspace.hpp"
-#include "platform/change_journal.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "runtime/resolver.hpp"
@@ -189,26 +188,6 @@ state(const Client& client) {
     return kasumi::state_storage::load_state(runtime->database_path);
 }
 
-std::expected<std::optional<kasumi::state_storage::ObservationCheckpoint>,
-              std::string>
-checkpoint(const Client& client) {
-    auto runtime =
-        kasumi::runtime::resolve(client_environment(client).app_data_dir,
-                                 client_name(client),
-                                 kasumi::runtime::AccessMode::ReadOnly);
-    if (!runtime) {
-        return std::unexpected(runtime.error().detail);
-    }
-    return kasumi::state_storage::load_observation_checkpoint(
-        runtime->database_path);
-}
-
-bool supports_observation_checkpoint(const Client& client) {
-    return kasumi::platform::capture_change_journal_checkpoint(
-               client_local_dir(client))
-        .has_value();
-}
-
 void expect_converged(Scenario& scenario,
                       std::initializer_list<const Client*> clients) {
     auto observed = remote(scenario);
@@ -222,18 +201,7 @@ void expect_converged(Scenario& scenario,
         EXPECT_EQ((*stored)->commit_id, observed->logical_heads.front());
         EXPECT_EQ((*stored)->tree, observed->effective_tree);
 
-        auto stored_checkpoint = checkpoint(*client);
-        ASSERT_TRUE(stored_checkpoint.has_value()) << stored_checkpoint.error();
-        if (supports_observation_checkpoint(*client)) {
-            ASSERT_TRUE(stored_checkpoint->has_value());
-            ASSERT_FALSE((*stored)->tree.rows.empty());
-            EXPECT_EQ((*stored_checkpoint)->tree_root_hash,
-                      (*stored)->tree.rows.front().hash);
-            EXPECT_EQ((*stored_checkpoint)->row_count,
-                      static_cast<std::uint64_t>((*stored)->tree.rows.size()));
-        } else {
-            EXPECT_FALSE(stored_checkpoint->has_value());
-        }
+
     }
 }
 
@@ -243,14 +211,6 @@ void expect_fixed_point(Scenario& scenario, const Client& client) {
     auto before_state = state(client);
     ASSERT_TRUE(before_state.has_value()) << before_state.error();
     ASSERT_TRUE(before_state->has_value());
-    auto before_checkpoint = checkpoint(client);
-    ASSERT_TRUE(before_checkpoint.has_value()) << before_checkpoint.error();
-    const bool has_checkpoint = supports_observation_checkpoint(client);
-    if (has_checkpoint) {
-        ASSERT_TRUE(before_checkpoint->has_value());
-    } else {
-        EXPECT_FALSE(before_checkpoint->has_value());
-    }
     auto before_remote = remote(scenario);
     ASSERT_TRUE(before_remote.has_value()) << before_remote.error();
     auto before_identifiers = remote_identifiers(scenario);
@@ -266,18 +226,6 @@ void expect_fixed_point(Scenario& scenario, const Client& client) {
     ASSERT_TRUE(after_state->has_value());
     EXPECT_EQ((*after_state)->commit_id, (*before_state)->commit_id);
     EXPECT_EQ((*after_state)->tree, (*before_state)->tree);
-
-    auto after_checkpoint = checkpoint(client);
-    ASSERT_TRUE(after_checkpoint.has_value()) << after_checkpoint.error();
-    if (has_checkpoint) {
-        ASSERT_TRUE(after_checkpoint->has_value());
-        EXPECT_EQ((*after_checkpoint)->tree_root_hash,
-                  (*before_checkpoint)->tree_root_hash);
-        EXPECT_EQ((*after_checkpoint)->row_count,
-                  (*before_checkpoint)->row_count);
-    } else {
-        EXPECT_FALSE(after_checkpoint->has_value());
-    }
 
     auto after_remote = remote(scenario);
     ASSERT_TRUE(after_remote.has_value()) << after_remote.error();

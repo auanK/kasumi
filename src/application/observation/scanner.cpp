@@ -44,18 +44,6 @@ struct ScanContext {
     bool targeted = false;
 };
 
-void remember_directory(const std::filesystem::path& path,
-                        ScanContext& context) {
-    platform::perf_trace::count("local directory identity queries");
-    const auto reference = platform::directory_file_reference(path);
-    if (!reference || !*reference) {
-        context.directory_lineage_complete = false;
-        platform::perf_trace::count("local directory identity failures");
-        return;
-    }
-    context.directory_file_references.push_back(**reference);
-}
-
 ScanError scan_error(const std::filesystem::path& path,
                      std::string operation,
                      const std::error_code& error,
@@ -286,7 +274,6 @@ scan_result(const std::filesystem::path& local_root,
 
     Snapshot snapshot;
     snapshot.rows.reserve(previous_cache.size() + 1);
-    remember_directory(local_root, context);
     const auto modified = std::filesystem::last_write_time(local_root, error);
     if (error)
         return std::unexpected(scan_error(local_root,
@@ -370,7 +357,6 @@ scan_result(const std::filesystem::path& local_root,
         }
         snapshot.rows.push_back(
             {.path = relative, .mtime = *mtime_ns, .is_directory = true});
-        remember_directory(entry.path(), context);
         std::filesystem::directory_iterator nested(entry.path(), error);
         if (error)
             return std::unexpected(scan_error(

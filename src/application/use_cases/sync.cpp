@@ -22,43 +22,6 @@ namespace kasumi::application::detail {
 
 namespace {
 
-void save_observation_checkpoint(
-    const runtime::RuntimeData& runtime,
-    const observation::LocalObservationSession& session,
-    bool local_tree_is_authoritative) {
-    if (!local_tree_is_authoritative) {
-        return;
-    }
-    if (!session.checkpoint || !session.last_snapshot ||
-        session.last_snapshot->rows.empty()) {
-        return;
-    }
-    auto checkpoint = *session.checkpoint;
-    checkpoint.tree_root_hash = session.last_snapshot->rows.front().hash;
-    checkpoint.row_count = session.last_snapshot->rows.size();
-    checkpoint.directory_file_references = session.directory_file_references;
-    checkpoint.lineage_complete = session.lineage_complete;
-    if (auto current =
-            state_storage::load_observation_checkpoint(runtime.database_path);
-        current && *current &&
-        (*current)->tree_root_hash == checkpoint.tree_root_hash &&
-        (*current)->row_count == checkpoint.row_count &&
-        (*current)->journal.kind == checkpoint.journal.kind &&
-        (*current)->journal.volume_serial == checkpoint.journal.volume_serial &&
-        (*current)->journal.journal_id == checkpoint.journal.journal_id &&
-        (*current)->journal.next_usn == checkpoint.journal.next_usn &&
-        (*current)->journal.root_file_reference ==
-            checkpoint.journal.root_file_reference &&
-        (*current)->lineage_complete == checkpoint.lineage_complete &&
-        (*current)->directory_file_references ==
-            checkpoint.directory_file_references) {
-        platform::perf_trace::count("checkpoint save avoided");
-        return;
-    }
-    static_cast<void>(state_storage::save_observation_checkpoint(
-        runtime.database_path, checkpoint));
-}
-
 SyncCompleted compute_sync_summary(const reconciliation::Result& result) {
     SyncCompleted summary;
     summary.total = static_cast<std::uint32_t>(sync_plan_size(result.plan));
@@ -271,8 +234,6 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 } else {
                     platform::perf_trace::count("file cache save avoided");
                 }
-                save_observation_checkpoint(
-                    context.runtime, observation_session, true);
                 platform::perf_trace::finish("finalization",
                                              finalization_trace);
                 summary.duration =
@@ -432,10 +393,6 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             } else {
                 platform::perf_trace::count("file cache save avoided");
             }
-            // Execution ends with a final scan of the materialized
-            // state.
-            save_observation_checkpoint(
-                context.runtime, observation_session, true);
             platform::perf_trace::finish("finalization", finalization_trace);
             summary.duration = std::chrono::steady_clock::now() - sync_start;
             return Response{.operation = context.operation,

@@ -4,7 +4,6 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/file_metadata.hpp"
 #include "application/observation/history.hpp"
-#include "application/observation/patch.hpp"
 #include "application/observation/scanner.hpp"
 #include "core/ignore.hpp"
 #include "crypto/content.hpp"
@@ -14,7 +13,6 @@
 #include "state_storage/database.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <exception>
 #include <optional>
 #include <thread>
@@ -193,28 +191,6 @@ bool same_cache(
     return true;
 }
 
-bool checkpoint_matches(const state_storage::ObservationCheckpoint& checkpoint,
-                        const Snapshot& snapshot) noexcept {
-    return checkpoint.row_count == snapshot.rows.size() &&
-           !snapshot.rows.empty() &&
-           checkpoint.tree_root_hash == snapshot.rows.front().hash;
-}
-
-void set_checkpoint_tree(state_storage::ObservationCheckpoint& checkpoint,
-                         const Snapshot& snapshot) noexcept {
-    checkpoint.tree_root_hash = snapshot.rows.front().hash;
-    checkpoint.row_count = snapshot.rows.size();
-}
-
-const state_storage::FileCacheRow*
-find_cached_row(const LocalObservationSession& session,
-                std::string_view path) noexcept {
-    const auto found = std::ranges::lower_bound(
-        session.cache, path, path_less, &state_storage::FileCacheRow::path);
-    return found != session.cache.end() && found->path == path ? &*found
-                                                               : nullptr;
-}
-
 std::optional<reconciliation::EpochRetentionPolicy> epoch_policy(
     const std::optional<history_storage::epoch::VerifiedEpoch>& epoch) {
     if (!epoch) {
@@ -239,113 +215,6 @@ std::vector<reconciliation::EpochAnchor> epoch_anchors(
     return result;
 }
 
-void upsert_cached_row(LocalObservationSession& session,
-                       const state_storage::FileCacheRow& row) {
-    const auto found = std::ranges::lower_bound(
-        session.cache, row.path, path_less, &state_storage::FileCacheRow::path);
-    if (found == session.cache.end() || found->path != row.path)
-        session.cache.insert(found, row);
-    else
-        *found = row;
-}
-
-void ensure_file_cache_loaded(LocalObservationSession& session);
-
-constexpr std::size_t maximum_selective_entries = 1024;
-
-std::expected<Snapshot, std::string>
-apply_selective_delta(const std::filesystem::path& local_root,
-                      LocalObservationSession& session,
-                      const platform::LocalDeltaProbe& delta) {
-    if (delta.entries.empty() ||
-        delta.entries.size() > maximum_selective_entries)
-        return std::unexpected("selective delta exceeds limit");
-    ensure_file_cache_loaded(session);
-    std::vector<ObservedFileDelta> observations;
-    observations.reserve(delta.entries.size());
-    std::vector<state_storage::FileCacheRow> cache_updates;
-    cache_updates.reserve(delta.entries.size());
-    for (const auto& entry : delta.entries) {
-        if (entry.kind != platform::LocalDeltaKind::ModifyExistingFile ||
-            entry.current_relative_path.empty())
-            return std::unexpected("unsupported delta");
-        const auto relative =
-            platform::path::to_logical_utf8(entry.current_relative_path);
-        const auto* cached = find_cached_row(session, relative);
-        ++session.targeted_file_observations;
-        auto observed = scanner::observe_file(
-            local_root,
-            relative,
-            cached == nullptr
-                ? std::nullopt
-                : std::optional<state_storage::FileCacheRow>{*cached});
-        if (!observed)
-            return std::unexpected(scanner::describe(observed.error()));
-        observations.push_back(ObservedFileDelta{
-            .path = observed->row.path, .row = std::move(observed->row)});
-        if (observed->cache)
-            cache_updates.push_back(std::move(*observed->cache));
-    }
-    auto patched = apply_local_delta(*session.last_snapshot, observations);
-    if (!patched)
-        return std::unexpected(patched.error());
-    const auto post = platform::probe_change_journal_delta(
-        local_root,
-        delta.next,
-        platform::DirectoryLineageView{.inside_directory_frns =
-                                           session.directory_file_references,
-                                       .complete = true,
-                                       .checkpoint_bound = true});
-    if (!post || post->disposition != platform::LocalDeltaDisposition::Clean)
-        return std::unexpected("selective window changed during observation");
-
-    for (const auto& row : cache_updates)
-        upsert_cached_row(session, row);
-    session.last_snapshot = *patched;
-    session.cache_loaded = true;
-    session.cache_dirty = true;
-    session.last_evidence = platform::ChangeEvidence::Dirty;
-    session.last_delta_entry_count = delta.entries.size();
-    if (session.checkpoint) {
-        session.checkpoint->journal = post->next;
-        set_checkpoint_tree(*session.checkpoint, *patched);
-    }
-    return std::move(*patched);
-}
-
-void remember_scan(
-    LocalObservationSession& session,
-    const Snapshot& snapshot,
-    const std::optional<platform::ChangeJournalCheckpoint>& scan_start,
-    const std::optional<platform::ChangeJournalCheckpoint>& scan_end,
-    std::vector<std::uint64_t> directory_file_references,
-    bool lineage_complete,
-    bool lineage_window_safe) {
-    session.last_snapshot = snapshot;
-    session.cache_loaded = true;
-    session.cache_dirty = true;
-    const bool stable_journal =
-        scan_start && scan_end && scan_start->kind == scan_end->kind &&
-        scan_start->volume_serial == scan_end->volume_serial &&
-        scan_start->journal_id == scan_end->journal_id &&
-        scan_start->root_file_reference == scan_end->root_file_reference &&
-        scan_start->next_usn == scan_end->next_usn;
-    session.lineage_complete =
-        lineage_complete && (stable_journal || lineage_window_safe);
-    session.directory_file_references =
-        session.lineage_complete ? std::move(directory_file_references)
-                                 : std::vector<std::uint64_t>{};
-    if (scan_start) {
-        session.checkpoint = state_storage::ObservationCheckpoint{
-            .journal = session.lineage_complete ? *scan_end : *scan_start,
-            .directory_file_references = session.directory_file_references,
-            .lineage_complete = session.lineage_complete};
-        set_checkpoint_tree(*session.checkpoint, snapshot);
-    } else {
-        session.checkpoint.reset();
-    }
-}
-
 void ensure_file_cache_loaded(LocalObservationSession& session) {
     if (session.cache_loaded) {
         return;
@@ -357,27 +226,6 @@ void ensure_file_cache_loaded(LocalObservationSession& session) {
         }
     }
     session.cache_loaded = true;
-}
-
-std::optional<platform::ChangeJournalCheckpoint>
-capture_settled_checkpoint(const std::filesystem::path& local_root) {
-    auto previous = platform::capture_change_journal_checkpoint(local_root);
-    if (!previous)
-        return std::nullopt;
-    for (int attempt = 0; attempt != 4; ++attempt) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        auto current = platform::capture_change_journal_checkpoint(local_root);
-        if (!current)
-            return std::nullopt;
-        if (current->kind == previous->kind &&
-            current->volume_serial == previous->volume_serial &&
-            current->journal_id == previous->journal_id &&
-            current->root_file_reference == previous->root_file_reference &&
-            current->next_usn == previous->next_usn)
-            return *current;
-        previous = std::move(current);
-    }
-    return *previous;
 }
 
 } // namespace
@@ -428,74 +276,9 @@ collect_local_tree(const std::filesystem::path& local_root,
         if (session == nullptr)
             return scan_local_tree(local_root);
 
-        if (session->checkpoint && session->last_snapshot &&
-            checkpoint_matches(*session->checkpoint, *session->last_snapshot)) {
-            if (session->lineage_complete &&
-                session->checkpoint->lineage_complete) {
-                const auto delta = platform::probe_change_journal_delta(
-                    local_root,
-                    session->checkpoint->journal,
-                    platform::DirectoryLineageView{
-                        .inside_directory_frns =
-                            session->directory_file_references,
-                        .complete = true,
-                        .checkpoint_bound = true});
-                if (delta && delta->disposition ==
-                                 platform::LocalDeltaDisposition::Clean) {
-                    session->last_evidence = platform::ChangeEvidence::Clean;
-                    session->last_delta_entry_count = 0;
-                    session->last_delta_record_count = delta->records_read;
-                    platform::perf_trace::count("USN clean fast paths");
-                    platform::perf_trace::count("local scanner avoided");
-                    platform::perf_trace::count("file cache load avoided");
-                    // Preserves bytes; next observation saves the cursor.
-                    return *session->last_snapshot;
-                }
-                if (delta && delta->disposition ==
-                                 platform::LocalDeltaDisposition::Patchable) {
-                    session->last_delta_record_count = delta->records_read;
-                    ++session->selective_patch_attempts;
-                    auto patched =
-                        apply_selective_delta(local_root, *session, *delta);
-                    if (patched) {
-                        ++session->selective_patch_successes;
-                        platform::perf_trace::count(
-                            "selective patch successes");
-                        return std::move(*patched);
-                    }
-                    ++session->selective_patch_fallbacks;
-                    platform::perf_trace::count("selective patch fallbacks");
-                } else {
-                    ++session->selective_patch_fallbacks;
-                }
-                session->last_evidence =
-                    delta && delta->relevant_records != 0
-                        ? std::optional{platform::ChangeEvidence::Dirty}
-                        : std::optional{
-                              platform::ChangeEvidence::Indeterminate};
-                platform::perf_trace::count("USN selective fallbacks");
-            } else {
-                const auto probed = platform::probe_change_journal(
-                    local_root, session->checkpoint->journal);
-                session->last_evidence =
-                    probed ? std::optional{probed->evidence}
-                           : std::optional{
-                                 platform::ChangeEvidence::Indeterminate};
-                if (probed &&
-                    probed->evidence == platform::ChangeEvidence::Clean) {
-                    platform::perf_trace::count("USN clean fast paths");
-                    platform::perf_trace::count("local scanner avoided");
-                    platform::perf_trace::count("file cache load avoided");
-                    return *session->last_snapshot;
-                }
-            }
-        }
-
         ensure_file_cache_loaded(*session);
         ++session->scanner_invocations;
         platform::perf_trace::count("local scanner invocations");
-        std::optional<platform::ChangeJournalCheckpoint> scan_start;
-        scan_start = capture_settled_checkpoint(local_root);
         auto previous = std::move(session->cache);
         const bool cache_was_dirty = session->cache_dirty;
         auto scanned = scanner::scan_result(
@@ -504,33 +287,8 @@ collect_local_tree(const std::filesystem::path& local_root,
             session->cache = std::move(previous);
             return std::unexpected(scanner::describe(scanned.error()));
         }
-        std::optional<platform::ChangeJournalCheckpoint> scan_end;
-        scan_end = capture_settled_checkpoint(local_root);
-        const bool cache_changed = !same_cache(previous, scanned->cache);
+        session->cache_dirty = cache_was_dirty || !same_cache(previous, scanned->cache);
         session->cache = std::move(scanned->cache);
-        bool lineage_window_safe = false;
-        if (scanned->directory_lineage_complete && scan_start && scan_end &&
-            scan_start->next_usn != scan_end->next_usn) {
-            const auto window = platform::probe_change_journal(
-                local_root,
-                *scan_start,
-                platform::DirectoryLineageView{
-                    .inside_directory_frns = scanned->directory_file_references,
-                    .complete = true,
-                    .checkpoint_bound = true});
-            lineage_window_safe =
-                window && window->evidence == platform::ChangeEvidence::Clean;
-        }
-        remember_scan(*session,
-                      scanned->snapshot,
-                      scan_start,
-                      scan_end,
-                      std::move(scanned->directory_file_references),
-                      scanned->directory_lineage_complete,
-                      lineage_window_safe);
-        if (!cache_changed && !cache_was_dirty) {
-            session->cache_dirty = false;
-        }
         return std::move(scanned->snapshot);
     } catch (const std::exception& exception) {
         return std::unexpected(exception.what());
@@ -598,34 +356,13 @@ collect_reconciliation_input(
     LocalObservationSession* session,
     const std::function<void()>& on_proven_local_change) {
     std::expected<Snapshot, std::string> local_tree;
-    if (session != nullptr && !session->checkpoint) {
-        if (auto checkpoint = state_storage::load_observation_checkpoint(
-                runtime_data.database_path);
-            checkpoint && *checkpoint) {
-            session->checkpoint = std::move(**checkpoint);
-            session->directory_file_references =
-                session->checkpoint->directory_file_references;
-            session->lineage_complete = session->checkpoint->lineage_complete;
-        }
-    }
     auto persisted = state_storage::load_state(runtime_data.database_path);
-    if (session != nullptr && session->checkpoint &&
-        (!persisted || !*persisted ||
-         !checkpoint_matches(session->checkpoint.value(),
-                             (*persisted)->tree))) {
-        session->checkpoint.reset();
-        session->directory_file_references.clear();
-        session->lineage_complete = false;
-    }
 
     reconciliation::Input input;
     if (persisted && *persisted) {
         input.base_tree = std::move((*persisted)->tree);
         input.pending_materializations =
             std::move((*persisted)->pending_materializations);
-        if (session != nullptr && session->checkpoint) {
-            session->last_snapshot = input.base_tree;
-        }
         input.local_generation = (*persisted)->height;
         input.base_commit_id = std::move((*persisted)->commit_id);
         input.base_ciphertext_id = std::move((*persisted)->ciphertext_id);
