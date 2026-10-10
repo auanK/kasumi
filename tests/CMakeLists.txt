@@ -90,6 +90,7 @@ kasumi_add_test_suite(
         integration/sync/test_coordinator.cpp
         integration/sync/test_content_batch.cpp
         integration/sync/test_publication.cpp
+        integration/sync/test_reobservation_safeguards.cpp
     LIBRARIES
         kasumi_application
         kasumi_sqlite3
