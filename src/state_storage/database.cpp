@@ -523,9 +523,11 @@ bool valid_fingerprint_kind(std::int64_t value) noexcept {
 }
 
 bool same_cache_row(const FileCacheRow& left, const FileCacheRow& right) {
-    return left.hash == right.hash && left.size == right.size &&
-           left.fingerprint.kind == right.fingerprint.kind &&
-           left.fingerprint.value == right.fingerprint.value;
+    return left.path == right.path && left.hash == right.hash &&
+           left.size == right.size &&
+           left.mtime_nanoseconds == right.mtime_nanoseconds &&
+           left.volume == right.volume && left.file_low == right.file_low &&
+           left.file_high == right.file_high;
 }
 
 std::vector<FileCacheRow> read_cache_rows(sqlite3* database) {
@@ -555,9 +557,10 @@ std::vector<FileCacheRow> read_cache_rows(sqlite3* database) {
             .path = sqlite::text(query, 0),
             .hash = *hash,
             .size = static_cast<std::uint64_t>(size),
-            .fingerprint = platform::FileFingerprint{
-                .kind = static_cast<platform::FileFingerprintKind>(kind),
-                .value = {*words[0], *words[1], *words[2], *words[3]}}});
+            .mtime_nanoseconds = 0,
+            .volume = *words[0],
+            .file_low = *words[1],
+            .file_high = *words[2]});
     }
     return rows;
 }
@@ -580,14 +583,11 @@ void write_cache_delta(sqlite3* database,
         require(sqlite::bind(upsert, 1, row.path));
         require(sqlite::bind(upsert, 2, hash_hex(row.hash)));
         require(sqlite::bind(upsert, 3, static_cast<std::int64_t>(row.size)));
-        require(sqlite::bind(
-            upsert, 4, static_cast<std::int64_t>(row.fingerprint.kind)));
-        for (int index = 0; index < 4; ++index)
-            require(sqlite::bind(
-                upsert,
-                index + 5,
-                word_hex(
-                    row.fingerprint.value[static_cast<std::size_t>(index)])));
+        require(sqlite::bind(upsert, 4, 1LL));
+        require(sqlite::bind(upsert, 5, word_hex(row.volume)));
+        require(sqlite::bind(upsert, 6, word_hex(row.file_low)));
+        require(sqlite::bind(upsert, 7, word_hex(row.file_high)));
+        require(sqlite::bind(upsert, 8, word_hex(0)));
         require(sqlite::run(upsert));
         require(sqlite::reset(upsert));
     };

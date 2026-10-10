@@ -183,8 +183,9 @@ bool same_cache(
         const auto& a = left[index];
         const auto& b = right[index];
         if (a.path != b.path || a.hash != b.hash || a.size != b.size ||
-            a.fingerprint.kind != b.fingerprint.kind ||
-            a.fingerprint.value != b.fingerprint.value) {
+            a.mtime_nanoseconds != b.mtime_nanoseconds ||
+            a.volume != b.volume || a.file_low != b.file_low ||
+            a.file_high != b.file_high) {
             return false;
         }
     }

@@ -115,8 +115,9 @@ process_file(const std::filesystem::path& file_path,
             ? context.previous.find(row.path)
             : context.previous.end();
     if (cached != context.previous.end() && cached->second->size == row.size &&
-        cached->second->fingerprint.kind == (**fingerprint).kind &&
-        cached->second->fingerprint.value == (**fingerprint).value) {
+        cached->second->volume == (**fingerprint).value[0] &&
+        cached->second->file_low == (**fingerprint).value[1] &&
+        cached->second->file_high == (**fingerprint).value[2]) {
         row.hash = cached->second->hash;
         context.cache.push_back(*cached->second);
         platform::perf_trace::count("local hash cache hits");
@@ -212,10 +213,14 @@ process_file(const std::filesystem::path& file_path,
         row.hash = *hash;
         if (cache_allowed && fingerprint && fingerprint->has_value()) {
             context.cache.push_back(
-                state_storage::FileCacheRow{.path = row.path,
-                                            .hash = row.hash,
-                                            .size = row.size,
-                                            .fingerprint = **fingerprint});
+                state_storage::FileCacheRow{
+                    .path = row.path,
+                    .hash = row.hash,
+                    .size = row.size,
+                    .mtime_nanoseconds = row.mtime,
+                    .volume = (**fingerprint).value[0],
+                    .file_low = (**fingerprint).value[1],
+                    .file_high = (**fingerprint).value[2]});
         }
     }
     return row;

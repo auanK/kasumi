@@ -67,11 +67,10 @@ std::vector<FileCacheRow> make_cache(const Snapshot& snapshot) {
             .path = row.path,
             .hash = row.hash,
             .size = row.size,
-            .fingerprint = kasumi::platform::FileFingerprint{
-                .kind =
-                    kasumi::platform::FileFingerprintKind::PosixFileIdentity,
-                .value = {
-                    1, static_cast<std::uint64_t>(cache.size() + 1), 2, 3}}});
+            .mtime_nanoseconds = row.mtime,
+            .volume = 1,
+            .file_low = static_cast<std::uint64_t>(cache.size() + 1),
+            .file_high = 0});
     }
     return cache;
 }
@@ -125,8 +124,9 @@ bool same_cache(const std::vector<FileCacheRow>& left,
         const auto& a = left[index];
         const auto& b = right[index];
         if (a.path != b.path || a.hash != b.hash || a.size != b.size ||
-            a.fingerprint.kind != b.fingerprint.kind ||
-            a.fingerprint.value != b.fingerprint.value)
+            a.mtime_nanoseconds != b.mtime_nanoseconds ||
+            a.volume != b.volume || a.file_low != b.file_low ||
+            a.file_high != b.file_high)
             return false;
     }
     return true;

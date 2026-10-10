@@ -33,7 +33,10 @@ struct FileCacheRow {
     std::string path;
     Hash hash{};
     std::uint64_t size = 0;
-    platform::FileFingerprint fingerprint{};
+    std::int64_t mtime_nanoseconds = 0;
+    std::uint64_t volume = 0;
+    std::uint64_t file_low = 0;
+    std::uint64_t file_high = 0;
 };
 
 // Observation checkpoint linked to the identified tree state.
