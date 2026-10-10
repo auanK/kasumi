@@ -272,6 +272,24 @@ TEST(ReobservationSafeguardTest, DestructiveSafeguardProtectsRenameLocal) {
             .ciphertext_id = published_base->head.ciphertext_id,
         }));
 
+    const auto hash_c = kasumi::hasher::hash_string("CCCC");
+    kasumi::Snapshot remote_tree = base_tree;
+    kasumi::find_row(remote_tree, "file.txt")->hash = hash_c;
+    const std::array base_parents{published_base->head.commit_id};
+    const auto prepared_remote =
+        kasumi::application::sync::publication::prepare_commit(
+            remote_tree, true, prepared_base->commit.height,
+            base_parents, 101, key);
+    ASSERT_TRUE(prepared_remote.has_value());
+    const auto published_remote =
+        kasumi::application::sync::publication::publish_commit(
+            *storage, key, *prepared_remote, profile);
+    ASSERT_TRUE(published_remote.has_value());
+
+    const auto remote_payload = kasumi::test::workspace_path(workspace, "payload.bin");
+    kasumi::test::write_text(remote_payload, "CCCC");
+    add_storage_payload(*storage, remote_payload, hash_c);
+
     // Modify file.txt on disk to "BBBB" with same size and restored mtime
     kasumi::test::write_text(local_file, "BBBB");
     std::filesystem::last_write_time(local_file, old_mtime);
@@ -283,20 +301,11 @@ TEST(ReobservationSafeguardTest, DestructiveSafeguardProtectsRenameLocal) {
         runtime_data, *storage, key, false, {}, &session);
     ASSERT_TRUE(observed.has_value());
 
-    // Plan contains RenameLocal on file.txt (e.g. conflict relocation)
-    kasumi::reconciliation::Result result{};
-    result.plan.operations.push_back(kasumi::Operation{
-        .action = kasumi::Action::RenameLocal,
-        .path = "file.txt",
-        .hash = "",
-        .alt_path = "renamed.txt",
-        .size = 0,
-        .exclusive_destination = false,
-    });
-    result.requires_local_mutation = true;
+    auto result = kasumi::reconciliation::reconcile(*observed);
+    ASSERT_TRUE(result.has_value());
 
     const auto stable = kasumi::application::sync::coordinator::reobservation::stabilize(
-        runtime_data, *storage, key, *observed, result, &session);
+        runtime_data, *storage, key, *observed, *result, &session);
     ASSERT_TRUE(stable.has_value()) << stable.error().detail;
 
     // Verify that the safeguard inspected the source of RenameLocal, detected on-disk modification,
