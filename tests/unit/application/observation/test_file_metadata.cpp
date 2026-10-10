@@ -473,8 +473,32 @@ TEST(FileMetadataWin32NativeTest, ExistingRegularFileReturnsValidMetadata) {
     EXPECT_EQ(meta.kind, EntryKind::RegularFile);
     EXPECT_EQ(meta.size, content.size());
     ASSERT_TRUE(meta.identity.has_value());
-    EXPECT_NE(meta.identity->volume, 0ULL);
-    EXPECT_TRUE(meta.identity->file_low != 0ULL || meta.identity->file_high != 0ULL);
+
+    // Compare directly against native FILE_ID_INFO
+    HANDLE hFile = ::CreateFileW(
+        file_path.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        nullptr);
+    ASSERT_NE(hFile, INVALID_HANDLE_VALUE);
+
+    FILE_ID_INFO expected_id{};
+    const BOOL id_ok = ::GetFileInformationByHandleEx(
+        hFile, FileIdInfo, &expected_id, sizeof(expected_id));
+    ::CloseHandle(hFile);
+    ASSERT_TRUE(id_ok);
+
+    std::uint64_t expected_low = 0;
+    std::uint64_t expected_high = 0;
+    std::memcpy(&expected_low, expected_id.FileId.Identifier, sizeof(std::uint64_t));
+    std::memcpy(&expected_high, expected_id.FileId.Identifier + sizeof(std::uint64_t), sizeof(std::uint64_t));
+
+    EXPECT_EQ(meta.identity->volume, expected_id.VolumeSerialNumber);
+    EXPECT_EQ(meta.identity->file_low, expected_low);
+    EXPECT_EQ(meta.identity->file_high, expected_high);
 }
 
 TEST(FileMetadataWin32NativeTest, EmptyRegularFileReturnsValidMetadata) {
@@ -645,7 +669,12 @@ TEST(FileMetadataWin32NativeTest, SymlinkOrReparsePointIneligible) {
     }
 
     if (!created) {
-        GTEST_SKIP() << "Creating symbolic links on Windows requires Developer Mode or SeCreateSymbolicLinkPrivilege";
+        const DWORD err = ::GetLastError();
+        if (err == ERROR_PRIVILEGE_NOT_HELD || err == ERROR_NOT_SUPPORTED || err == ERROR_INVALID_FUNCTION) {
+            GTEST_SKIP() << "Creating symbolic links on Windows requires Developer Mode or SeCreateSymbolicLinkPrivilege (error " << err << ")";
+        } else {
+            FAIL() << "CreateSymbolicLinkW failed with unexpected error: " << err;
+        }
     }
 
     const auto result = read_file_metadata(symlink_path, "symlink.txt");
