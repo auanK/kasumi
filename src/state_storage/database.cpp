@@ -515,14 +515,9 @@ std::optional<std::uint64_t> parse_decimal(std::string_view value) {
                : std::nullopt;
 }
 
-bool valid_fingerprint_kind(std::int64_t value) noexcept {
-    return value == static_cast<std::int64_t>(
-                        platform::FileFingerprintKind::WindowsFileIdentity) ||
-           value == static_cast<std::int64_t>(
-                        platform::FileFingerprintKind::PosixFileIdentity);
-}
+constexpr std::int64_t kUnifiedMetadataKind = 3;
 
-bool same_cache_row(const FileCacheRow& left, const FileCacheRow& right) {
+bool same_cache_row(const FileCacheRow& left, const FileCacheRow& right) noexcept {
     return left.path == right.path && left.hash == right.hash &&
            left.size == right.size &&
            left.mtime_nanoseconds == right.mtime_nanoseconds &&
@@ -544,7 +539,7 @@ std::vector<FileCacheRow> read_cache_rows(sqlite3* database) {
                                       parse_word(sqlite::text(query, 6)),
                                       parse_word(sqlite::text(query, 7))};
         const auto hash = hash_from_hex(sqlite::text(query, 1));
-        if (size < 0 || !valid_fingerprint_kind(kind) ||
+        if (size < 0 || kind != kUnifiedMetadataKind ||
             std::ranges::any_of(
                 words,
                 [](const auto& word) {
@@ -557,7 +552,7 @@ std::vector<FileCacheRow> read_cache_rows(sqlite3* database) {
             .path = sqlite::text(query, 0),
             .hash = *hash,
             .size = static_cast<std::uint64_t>(size),
-            .mtime_nanoseconds = 0,
+            .mtime_nanoseconds = static_cast<std::int64_t>(*words[3]),
             .volume = *words[0],
             .file_low = *words[1],
             .file_high = *words[2]});
@@ -568,6 +563,8 @@ std::vector<FileCacheRow> read_cache_rows(sqlite3* database) {
 void write_cache_delta(sqlite3* database,
                        const std::vector<FileCacheRow>& previous,
                        std::span<const FileCacheRow> current) {
+    require(sqlite::execute(
+        database, "DELETE FROM file_cache WHERE fingerprint_kind != 3"));
     auto upsert = require_statement(sqlite::prepare(
         database,
         "INSERT INTO file_cache "
@@ -583,11 +580,12 @@ void write_cache_delta(sqlite3* database,
         require(sqlite::bind(upsert, 1, row.path));
         require(sqlite::bind(upsert, 2, hash_hex(row.hash)));
         require(sqlite::bind(upsert, 3, static_cast<std::int64_t>(row.size)));
-        require(sqlite::bind(upsert, 4, 1LL));
+        require(sqlite::bind(upsert, 4, kUnifiedMetadataKind));
         require(sqlite::bind(upsert, 5, word_hex(row.volume)));
         require(sqlite::bind(upsert, 6, word_hex(row.file_low)));
         require(sqlite::bind(upsert, 7, word_hex(row.file_high)));
-        require(sqlite::bind(upsert, 8, word_hex(0)));
+        require(sqlite::bind(
+            upsert, 8, word_hex(static_cast<std::uint64_t>(row.mtime_nanoseconds))));
         require(sqlite::run(upsert));
         require(sqlite::reset(upsert));
     };
