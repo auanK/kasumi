@@ -450,6 +450,9 @@ TEST(RcloneSystemTest, KilledOwnedRcloneFailsClosedAndCleansUp) {
     const auto state = std::unique_ptr<kasumi::transport::rclone_detail::State,
                                        void (*)(void*)>{
         *started, kasumi::transport::rclone_detail::destroy_state};
+    // Stop the polling worker before taking its mutex, as destroy_state does.
+    state->stop_drain.store(true);
+    state->drain_future.wait();
     {
         std::lock_guard lock(state->process_mutex);
         const auto stopped = state->process.stop(reproc::stop_actions{

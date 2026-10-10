@@ -270,6 +270,37 @@ TEST(UniformObservationTest, MissingRootPropagatesErrorAndPreservesCache) {
     EXPECT_FALSE(session.cache_dirty);
 }
 
+TEST(UniformObservationTest, DirectoryMovesAcrossRootAreObservedWithoutEvents) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("uniform-directory-moves");
+    const auto root = kasumi::test::workspace_path(workspace, "local");
+    const auto outside = kasumi::test::workspace_path(workspace, "outside");
+    kasumi::test::write_text(root / "inside/a.txt", "outgoing");
+    kasumi::test::write_text(outside / "incoming/b.txt", "incoming");
+    kasumi::application::observation::LocalObservationSession session;
+    ASSERT_TRUE(
+        kasumi::application::observation::collect_local_tree(root, &session));
+    std::filesystem::rename(outside / "incoming", root / "incoming");
+    std::filesystem::rename(root / "inside", outside / "outgoing");
+    const auto moved =
+        kasumi::application::observation::collect_local_tree(root, &session);
+    ASSERT_TRUE(moved.has_value());
+    EXPECT_EQ(kasumi::find_row(*moved, "inside"), nullptr);
+    EXPECT_EQ(kasumi::find_row(*moved, "inside/a.txt"), nullptr);
+    const auto* incoming = kasumi::find_row(*moved, "incoming/b.txt");
+    ASSERT_NE(incoming, nullptr);
+    EXPECT_EQ(incoming->hash,
+              kasumi::test::independent_file_hash(root / "incoming/b.txt"));
+    std::filesystem::remove_all(root / "incoming");
+    const auto removed =
+        kasumi::application::observation::collect_local_tree(root, &session);
+    ASSERT_TRUE(removed.has_value());
+    ASSERT_EQ(removed->rows.size(), 1U);
+    EXPECT_TRUE(removed->rows.front().is_directory);
+    EXPECT_TRUE(session.cache.empty());
+    EXPECT_TRUE(session.cache_dirty);
+}
+
 TEST(ScannerTest, IncrementalScanEqualsFullHashScan) {
     auto workspace = kasumi::test::make_temp_workspace("scanner-equivalence");
     const auto root = kasumi::test::workspace_path(workspace, "local");
@@ -875,16 +906,19 @@ TEST(ScannerTest, ScanResultRejectsNonPortableEntriesOnPosix) {
     auto workspace =
         kasumi::test::make_temp_workspace("scanner-posix-non-portable");
     const auto root = kasumi::test::workspace_path(workspace, "local");
-    kasumi::test::write_text(root / "CON", "reserved device name on windows");
-
-    const auto result =
-        kasumi::application::observation::scanner::scan_result(root);
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::observation::scanner::ScanErrorCode::Io);
-    EXPECT_NE(
-        result.error().detail.find("unsupported non-portable path component"),
-        std::string::npos);
+    for (const auto path : {"CON", "a:b", "dir/file."}) {
+        SCOPED_TRACE(path);
+        kasumi::test::write_text(root / path, "non-portable name on Windows");
+        const auto result =
+            kasumi::application::observation::scanner::scan_result(root);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code,
+                  kasumi::application::observation::scanner::ScanErrorCode::Io);
+        EXPECT_NE(result.error().detail.find(
+                      "unsupported non-portable path component"),
+                  std::string::npos);
+        std::filesystem::remove(root / path);
+    }
 }
 
 TEST(ScannerTest, ScanResultRejectsUnicodeCaseCollisionsOnPosix) {

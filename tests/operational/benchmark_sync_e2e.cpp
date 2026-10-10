@@ -163,6 +163,7 @@ bool run_case(const std::filesystem::path& root,
             return false;
         }
         const auto wall_us = elapsed_us(started);
+        kasumi::platform::perf_trace::report(phase);
         const auto full =
             kasumi::application::observation::scanner::scan_result(seed.local);
         if (!full || !same_snapshot(observed->local_tree, full->snapshot)) {
@@ -182,10 +183,12 @@ bool run_case(const std::filesystem::path& root,
     }
     return true;
 }
+
 bool run_r18_reuse(const std::filesystem::path& root, std::size_t files) {
     Seed seed;
     if (!seed_fixture(root, files, seed))
         return false;
+    kasumi::platform::perf_trace::reset();
     const kasumi::runtime::RuntimeData runtime{
         .local_dir = seed.local,
         .database_path = seed.database,
@@ -204,7 +207,7 @@ bool run_r18_reuse(const std::filesystem::path& root, std::size_t files) {
                 runtime, seed.storage, seed.key, false, {}, &session);
         const auto wall = elapsed_us(started);
         std::cout << "R18_OP|" << operation << '|' << wall << '|'
-                  << (observed ? "clean" : "error") << '|'
+                  << (observed ? "ok" : "error") << '|'
                   << kasumi::platform::perf_trace::get_count("local scanner invocations") << '|'
                   << kasumi::platform::perf_trace::get_count("local hash file calls") << '\n';
         if (!observed)
@@ -228,6 +231,7 @@ bool run_r18_overlap(const std::filesystem::path& root, std::size_t files) {
     Seed seed;
     if (!seed_fixture(root, files, seed))
         return false;
+    kasumi::platform::perf_trace::reset();
     seed.storage = {};
 
     struct PendingOpen {
@@ -306,6 +310,7 @@ bool run_r18_fresh(const std::filesystem::path& root, std::size_t files) {
     seed.storage = {};
     const std::array<std::string_view, 3> cases{"clean", "modify", "rewarm"};
     for (const auto name : cases) {
+        kasumi::platform::perf_trace::reset();
         if (name == "modify") {
             std::ofstream changed(seed.local / "file-0.bin",
                                   std::ios::binary | std::ios::trunc);
@@ -341,6 +346,7 @@ bool run_r18_fresh(const std::filesystem::path& root, std::size_t files) {
 } // namespace
 
 int main(int argc, char** argv) {
+    kasumi::platform::perf_trace::force_enable(true);
     if (argc < 2) {
         std::cerr << "usage: kasumi_benchmark_sync_e2e ROOT [FILES...]\n";
         return 2;
