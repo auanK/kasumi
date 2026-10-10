@@ -2,8 +2,6 @@
 #include "application/observation/scanner.hpp"
 #include "application/observation/state.hpp"
 #include "core/history.hpp"
-#include "platform/change_journal.hpp"
-#include "platform/change_journal_diagnostic.hpp"
 #include "platform/perf_trace.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
@@ -18,7 +16,6 @@
 #include <iostream>
 #include <string>
 #include <string_view>
-#include <thread>
 
 namespace {
 
@@ -70,8 +67,6 @@ struct Seed {
     kasumi::transport::Transport storage;
     std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
     kasumi::Snapshot snapshot;
-    std::vector<std::uint64_t> directory_file_references;
-    bool lineage_complete = false;
 };
 
 bool seed_fixture(const std::filesystem::path& root,
@@ -99,8 +94,6 @@ bool seed_fixture(const std::filesystem::path& root,
     if (!scanned)
         return false;
     seed.snapshot = scanned->snapshot;
-    seed.directory_file_references = scanned->directory_file_references;
-    seed.lineage_complete = scanned->directory_lineage_complete;
 
     const auto transport_started = Clock::now();
     auto opened = kasumi::transport::open_transport(seed.storage_location);
@@ -125,38 +118,7 @@ bool seed_fixture(const std::filesystem::path& root,
         !kasumi::state_storage::save_file_cache_delta(seed.database,
                                                       scanned->cache))
         return false;
-    // O NTFS pode registrar o CLOSE após a última gravação.
-    auto checkpoint =
-        kasumi::platform::capture_change_journal_checkpoint(seed.local);
-    for (int attempt = 0; checkpoint && attempt != 4; ++attempt) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        auto settled =
-            kasumi::platform::capture_change_journal_checkpoint(seed.local);
-        if (!settled || settled->next_usn == checkpoint->next_usn)
-            break;
-        checkpoint = std::move(settled);
-    }
-    if (!checkpoint)
-        return false;
-    for (int attempt = 0; attempt != 8; ++attempt) {
-        auto probe =
-            kasumi::platform::probe_change_journal(seed.local, *checkpoint);
-        if (probe && probe->evidence == kasumi::platform::ChangeEvidence::Clean)
-            break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        checkpoint =
-            kasumi::platform::capture_change_journal_checkpoint(seed.local);
-        if (!checkpoint)
-            return false;
-    }
-    return kasumi::state_storage::save_observation_checkpoint(
-        seed.database,
-        kasumi::state_storage::ObservationCheckpoint{
-            .journal = *checkpoint,
-            .tree_root_hash = seed.snapshot.rows.front().hash,
-            .row_count = seed.snapshot.rows.size(),
-            .directory_file_references = seed.directory_file_references,
-            .lineage_complete = seed.lineage_complete});
+    return true;
 }
 
 bool run_case(const std::filesystem::path& root,
@@ -175,227 +137,45 @@ bool run_case(const std::filesystem::path& root,
         .key_path = seed.profile / "key.bin",
         .storage_location = seed.storage_location};
 
-    auto persisted_checkpoint =
-        kasumi::state_storage::load_observation_checkpoint(seed.database);
-    if (!persisted_checkpoint || !persisted_checkpoint->has_value())
-        return false;
-    auto gate = kasumi::platform::probe_change_journal(
-        seed.local,
-        persisted_checkpoint->value().journal,
-        kasumi::platform::DirectoryLineageView{
-            .inside_directory_frns =
-                persisted_checkpoint->value().directory_file_references,
-            .complete = persisted_checkpoint->value().lineage_complete,
-            .checkpoint_bound =
-                persisted_checkpoint->value().lineage_complete});
-    if (!gate)
-        return false;
-    std::cout << "GATE|" << files << "|"
-              << (gate->evidence == kasumi::platform::ChangeEvidence::Clean
-                      ? "clean"
-                  : gate->evidence == kasumi::platform::ChangeEvidence::Dirty
-                      ? "dirty"
-                      : "indeterminate")
-              << '|' << gate->records_read << '|' << gate->relevant_records
-              << '|' << gate->unrelated_records << '|'
-              << gate->unresolved_records << '\n';
-    std::cout << "BACKEND|"
-              << (seed.storage_location.find(':') == std::string::npos
-                      ? "local"
-                      : "rclone")
-              << '\n';
-
-    kasumi::platform::ChangeJournalDiagnostics diagnostics;
-    auto forensic = kasumi::platform::probe_change_journal_diagnostic(
-        seed.local, persisted_checkpoint->value().journal, diagnostics);
-    if (forensic) {
-        std::cout << "FORENSICS|" << files << '|' << forensic->records_read
-                  << '|' << forensic->relevant_records << '|'
-                  << forensic->unrelated_records << '|'
-                  << forensic->unresolved_records << '|'
-                  << diagnostics.file_open_attempts << '|'
-                  << diagnostics.parent_open_attempts << '|'
-                  << diagnostics.parent_reconstruction_successes << '|'
-                  << diagnostics.unique_file_references << '|'
-                  << diagnostics.unique_parent_references << '|'
-                  << (diagnostics.unresolved_diagnostics_truncated ? 1 : 0)
-                  << '\n';
-        for (const auto& item : diagnostics.unresolved) {
-            std::cout << "UNRESOLVED|" << files << '|' << item.usn << '|'
-                      << item.file_reference << '|' << item.parent_reference
-                      << '|' << item.reason << '|'
-                      << kasumi::platform::unresolved_reason_name(item.category)
-                      << '|' << std::filesystem::path(item.file_name).string()
-                      << '|' << item.file_open_error << '|'
-                      << item.parent_open_error << '|'
-                      << std::filesystem::path(item.parent_path).string() << '|'
-                      << (item.file_path_resolved ? 1 : 0) << '|'
-                      << (item.parent_path_resolved ? 1 : 0) << '|'
-                      << item.major_version << '|' << item.minor_version << '|'
-                      << item.file_name_offset << '|' << item.file_name_length
-                      << '\n';
+    kasumi::application::observation::LocalObservationSession session;
+    session.database_path = seed.database;
+    kasumi::Snapshot previous;
+    for (const auto phase : {"warm", "modify", "rewarm"}) {
+        if (std::string_view{phase} == "modify") {
+            for (std::size_t index = 0; index < changed_files; ++index) {
+                const auto file =
+                    seed.local / ("file-" + std::to_string(index) + ".bin");
+                const auto mtime = std::filesystem::last_write_time(file);
+                std::ofstream(file, std::ios::binary | std::ios::trunc) << 'y';
+                std::filesystem::last_write_time(
+                    file, mtime + std::chrono::seconds{5});
+            }
         }
-    }
-    kasumi::platform::ChangeJournalDiagnostics lineage_diagnostics;
-    auto lineage_gate = kasumi::platform::probe_change_journal(
-        seed.local,
-        persisted_checkpoint->value().journal,
-        kasumi::platform::DirectoryLineageView{
-            .inside_directory_frns =
-                persisted_checkpoint->value().directory_file_references,
-            .complete = persisted_checkpoint->value().lineage_complete,
-            .checkpoint_bound = persisted_checkpoint->value().lineage_complete},
-        &lineage_diagnostics);
-    if (lineage_gate) {
-        std::cout << "LINEAGE|" << files << '|'
-                  << (persisted_checkpoint->value().lineage_complete ? 1 : 0)
-                  << '|' << lineage_gate->records_read << '|'
-                  << lineage_gate->relevant_records << '|'
-                  << lineage_gate->unrelated_records << '|'
-                  << lineage_gate->unresolved_records << '|'
-                  << lineage_diagnostics.file_open_attempts << '|'
-                  << lineage_diagnostics.parent_open_attempts << '|'
-                  << lineage_diagnostics.lineage_classified_records << '|'
-                  << lineage_diagnostics.lineage_membership_lookups << '\n';
-    }
-
-    // Simula o carregamento e a gravação antigos do cache.
-    kasumi::application::observation::LocalObservationSession before_session;
-    before_session.database_path = seed.database;
-    const auto before_load_started = Clock::now();
-    auto loaded_cache = kasumi::state_storage::load_file_cache(seed.database);
-    const auto before_load_us = elapsed_us(before_load_started);
-    if (!loaded_cache)
-        return false;
-    before_session.cache = std::move(*loaded_cache);
-    before_session.cache_loaded = true;
-    const auto before_started = Clock::now();
-    auto before =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime, seed.storage, seed.key, false, {}, &before_session);
-    const auto before_us = elapsed_us(before_started);
-    const auto before_save_started = Clock::now();
-    const auto before_saved = kasumi::state_storage::save_file_cache_delta(
-        seed.database, before_session.cache);
-    const auto before_save_us = elapsed_us(before_save_started);
-    if (!before || !before_saved)
-        return false;
-
-    // O caminho otimizado evita percorrer o cache quando o USN está limpo.
-    kasumi::application::observation::LocalObservationSession after_session;
-    after_session.database_path = seed.database;
-    const auto after_started = Clock::now();
-    auto after = kasumi::application::observation::collect_reconciliation_input(
-        runtime, seed.storage, seed.key, false, {}, &after_session);
-    const auto after_us = elapsed_us(after_started);
-    if (!after)
-        return false;
-    const auto checkpoint_saved =
-        after_session.checkpoint && after_session.last_snapshot &&
-        kasumi::state_storage::save_observation_checkpoint(
-            seed.database, *after_session.checkpoint);
-
-    const auto before_evidence = before_session.last_evidence.value_or(
-        kasumi::platform::ChangeEvidence::Indeterminate);
-    std::cout << "E2E|" << files << "|before|" << before_us << '|'
-              << before_load_us << '|' << before_save_us << '|'
-              << before_session.scanner_invocations << '|'
-              << (before_evidence == kasumi::platform::ChangeEvidence::Clean
-                      ? "clean"
-                  : before_evidence == kasumi::platform::ChangeEvidence::Dirty
-                      ? "dirty"
-                      : "indeterminate")
-              << "|1|1\n";
-    std::cout << "E2E|" << files << "|after|" << after_us << "|0|0|"
-              << after_session.scanner_invocations << '|'
-              << (after_session.last_evidence ==
-                          kasumi::platform::ChangeEvidence::Clean
-                      ? "clean"
-                  : after_session.last_evidence ==
-                          kasumi::platform::ChangeEvidence::Dirty
-                      ? "dirty"
-                      : "indeterminate")
-              << '|' << (after_session.cache_loaded ? 1 : 0) << "|0\n";
-
-    for (std::size_t index = 0; index < changed_files; ++index) {
-        const auto changed =
-            seed.local / ("file-" + std::to_string(index) + ".bin");
-        std::ofstream output(changed, std::ios::binary | std::ios::trunc);
-        output << 'y';
-    }
-    // Isola a medição alterada da preparação com hash completo.
-    kasumi::platform::perf_trace::reset();
-    kasumi::application::observation::LocalObservationSession changed_session;
-    changed_session.database_path = seed.database;
-    const auto changed_started = Clock::now();
-    auto changed_result =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime, seed.storage, seed.key, false, {}, &changed_session);
-    const auto changed_us = elapsed_us(changed_started);
-    if (!changed_result)
-        return false;
-    std::cout << "E2E|" << files << "|changed|" << changed_us << "|0|0|"
-              << changed_session.scanner_invocations << '|'
-              << (changed_session.last_evidence ==
-                          kasumi::platform::ChangeEvidence::Clean
-                      ? "clean"
-                  : changed_session.last_evidence ==
-                          kasumi::platform::ChangeEvidence::Dirty
-                      ? "dirty"
-                      : "indeterminate")
-              << '|' << (changed_session.cache_loaded ? 1 : 0) << "|0\n";
-    std::cout << "SELECTIVE|" << files << '|'
-              << changed_session.selective_patch_attempts << '|'
-              << changed_session.selective_patch_successes << '|'
-              << changed_session.selective_patch_fallbacks << '|'
-              << changed_session.last_delta_entry_count << '|'
-              << changed_session.targeted_file_observations << '|'
-              << changed_session.last_delta_record_count << '\n';
-    if (std::getenv("KASUMI_COMPARE_FULLHASH") != nullptr) {
+        kasumi::platform::perf_trace::reset();
+        const auto started = Clock::now();
+        auto observed =
+            kasumi::application::observation::collect_reconciliation_input(
+                runtime, seed.storage, seed.key, false, {}, &session);
+        if (!observed)
+            return false;
+        const auto wall_us = elapsed_us(started);
         const auto full =
-            kasumi::application::observation::scanner::scan_result(
-                seed.local,
-                {},
-                kasumi::application::observation::scanner::ScanPolicy::
-                    FullHash);
-        std::cout << "CORRECTNESS|" << files << '|'
-                  << (full && same_snapshot(changed_result->local_tree,
-                                            full->snapshot)
-                          ? "equal"
-                          : "different")
-                  << '\n';
+            kasumi::application::observation::scanner::scan_result(seed.local);
+        if (!full || !same_snapshot(observed->local_tree, full->snapshot))
+            return false;
+        if (std::string_view{phase} == "rewarm" &&
+            !same_snapshot(previous, observed->local_tree))
+            return false;
+        previous = observed->local_tree;
+        if (session.cache_dirty &&
+            !kasumi::state_storage::save_file_cache_delta(seed.database,
+                                                          session.cache))
+            return false;
+        session.cache_dirty = false;
+        std::cout << "E2E|" << files << '|' << phase << '|' << wall_us << '\n';
     }
-
-    // Confirma o avanço do cursor sem repetir a varredura completa.
-    const auto rewarm_started = Clock::now();
-    auto rewarm = kasumi::application::observation::collect_local_tree(
-        seed.local, &changed_session);
-    const auto rewarm_us = elapsed_us(rewarm_started);
-    if (!rewarm)
-        return false;
-    std::cout << "E2E|" << files << "|rewarm|" << rewarm_us << "|0|0|"
-              << changed_session.scanner_invocations << '|'
-              << (changed_session.last_evidence ==
-                          kasumi::platform::ChangeEvidence::Clean
-                      ? "clean"
-                  : changed_session.last_evidence ==
-                          kasumi::platform::ChangeEvidence::Dirty
-                      ? "dirty"
-                      : "indeterminate")
-              << "|0|0\n";
-    std::cout << "RESTART|" << files << '|' << (checkpoint_saved ? 1 : 0) << '|'
-              << after_session.scanner_invocations << '|'
-              << (after_session.last_evidence ==
-                          kasumi::platform::ChangeEvidence::Clean
-                      ? "clean"
-                  : after_session.last_evidence ==
-                          kasumi::platform::ChangeEvidence::Dirty
-                      ? "dirty"
-                      : "indeterminate")
-              << '\n';
     return true;
 }
-
 bool run_r18_reuse(const std::filesystem::path& root, std::size_t files) {
     Seed seed;
     if (!seed_fixture(root, files, seed))
@@ -419,8 +199,8 @@ bool run_r18_reuse(const std::filesystem::path& root, std::size_t files) {
         const auto wall = elapsed_us(started);
         std::cout << "R18_OP|" << operation << '|' << wall << '|'
                   << (observed ? "clean" : "error") << '|'
-                  << session.scanner_invocations << '|'
-                  << session.targeted_file_observations << '\n';
+                  << kasumi::platform::perf_trace::get_count("local scanner invocations") << '|'
+                  << kasumi::platform::perf_trace::get_count("local hash file calls") << '\n';
         if (!observed)
             std::cerr << "R18_ERROR|" << operation << '|'
                       << observed.error().detail << '\n';
@@ -476,16 +256,6 @@ bool run_r18_overlap(const std::filesystem::path& root, std::size_t files) {
     if (cache) {
         local_session.cache = std::move(*cache);
         local_session.cache_loaded = true;
-    }
-    if (auto checkpoint =
-            kasumi::state_storage::load_observation_checkpoint(seed.database);
-        checkpoint && *checkpoint && persisted && *persisted) {
-        local_session.checkpoint = std::move(**checkpoint);
-        local_session.last_snapshot = (*persisted)->tree;
-        local_session.directory_file_references =
-            local_session.checkpoint->directory_file_references;
-        local_session.lineage_complete =
-            local_session.checkpoint->lineage_complete;
     }
     const auto local_started = Clock::now();
     auto local = kasumi::application::observation::collect_local_tree(
@@ -554,14 +324,9 @@ bool run_r18_fresh(const std::filesystem::path& root, std::size_t files) {
             static_cast<void>(kasumi::state_storage::save_file_cache_delta(
                 seed.database, session.cache));
         }
-        if (session.checkpoint) {
-            static_cast<void>(
-                kasumi::state_storage::save_observation_checkpoint(
-                    seed.database, *session.checkpoint));
-        }
         std::cout << "R18_FRESH|" << name << "|open_us|" << open_us
                   << "|observation_us|" << observation_us << "|scanner|"
-                  << session.scanner_invocations << '\n';
+                  << kasumi::platform::perf_trace::get_count("local scanner invocations") << '\n';
         storage = {};
     }
     return true;

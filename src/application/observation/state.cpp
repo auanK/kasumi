@@ -277,7 +277,6 @@ collect_local_tree(const std::filesystem::path& local_root,
             return scan_local_tree(local_root);
 
         ensure_file_cache_loaded(*session);
-        ++session->scanner_invocations;
         platform::perf_trace::count("local scanner invocations");
         auto previous = std::move(session->cache);
         const bool cache_was_dirty = session->cache_dirty;
@@ -287,7 +286,8 @@ collect_local_tree(const std::filesystem::path& local_root,
             session->cache = std::move(previous);
             return std::unexpected(scanner::describe(scanned.error()));
         }
-        session->cache_dirty = cache_was_dirty || !same_cache(previous, scanned->cache);
+        session->cache_dirty =
+            cache_was_dirty || !same_cache(previous, scanned->cache);
         session->cache = std::move(scanned->cache);
         return std::move(scanned->snapshot);
     } catch (const std::exception& exception) {

@@ -2,8 +2,6 @@
 #define KASUMI_STATE_STORAGE_DATABASE_HPP
 
 #include "core/node.hpp"
-#include "platform/change_journal.hpp"
-#include "platform/file_fingerprint.hpp"
 
 #include <cstdint>
 #include <expected>
@@ -39,19 +37,6 @@ struct FileCacheRow {
     std::uint64_t file_high = 0;
 };
 
-// Observation checkpoint linked to the identified tree state.
-struct ObservationCheckpoint {
-    platform::ChangeJournalCheckpoint journal{};
-    // Root hash binding the checkpoint to the tree.
-    Hash tree_root_hash{};
-    // Row count used to validate the binding.
-    std::uint64_t row_count = 0;
-    // Ordered references of directories included in the tree.
-    std::vector<std::uint64_t> directory_file_references;
-    // Indicates whether the list covers the entire observed lineage.
-    bool lineage_complete = false;
-};
-
 // Creates or validates the canonical database schema.
 bool initialize(const std::filesystem::path& database_path);
 
@@ -71,14 +56,6 @@ load_file_cache(const std::filesystem::path& database_path);
 // Synchronizes the persisted cache with the provided set.
 bool save_file_cache_delta(const std::filesystem::path& database_path,
                            std::span<const FileCacheRow> rows);
-
-// Loads the observation checkpoint or returns nullopt when absent.
-std::expected<std::optional<ObservationCheckpoint>, std::string>
-load_observation_checkpoint(const std::filesystem::path& database_path);
-
-// Validates and replaces the persisted observation checkpoint.
-bool save_observation_checkpoint(const std::filesystem::path& database_path,
-                                 const ObservationCheckpoint& checkpoint);
 
 } // namespace kasumi::state_storage
 

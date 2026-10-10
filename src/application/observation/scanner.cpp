@@ -39,9 +39,6 @@ struct ScanContext {
     std::unordered_map<std::string_view, const state_storage::FileCacheRow*>
         previous;
     std::vector<state_storage::FileCacheRow> cache;
-    std::vector<std::uint64_t> directory_file_references;
-    bool directory_lineage_complete = true;
-    bool targeted = false;
 };
 
 ScanError scan_error(const std::filesystem::path& path,
@@ -131,11 +128,6 @@ process_file(const std::filesystem::path& file_path,
                                          hash_trace);
             platform::perf_trace::count("local hash file calls");
             platform::perf_trace::count("local hash bytes", before_meta.size);
-            if (context.targeted) {
-                platform::perf_trace::count("targeted hash calls");
-                platform::perf_trace::count("targeted hash bytes",
-                                            before_meta.size);
-            }
             if (!hash)
                 break;
 
@@ -239,10 +231,7 @@ scan_result(const std::filesystem::path& local_root,
     ScanContext context{.policy = policy,
                         .metadata_query = metadata_query,
                         .previous = {},
-                        .cache = {},
-                        .directory_file_references = {},
-                        .directory_lineage_complete = true,
-                        .targeted = false};
+                        .cache = {}};
     context.cache.reserve(previous_cache.size());
     context.previous.reserve(previous_cache.size());
     for (const auto& row : previous_cache)
@@ -265,9 +254,7 @@ scan_result(const std::filesystem::path& local_root,
         if (!row)
             return std::unexpected(row.error());
         ScanResult result{.snapshot = Snapshot{{std::move(*row)}},
-                          .cache = std::move(context.cache),
-                          .directory_file_references = {},
-                          .directory_lineage_complete = false};
+                          .cache = std::move(context.cache)};
         platform::perf_trace::finish("local filesystem scan wall", scan_trace);
         return result;
     }
@@ -375,107 +362,9 @@ scan_result(const std::filesystem::path& local_root,
     }
     std::ranges::sort(
         context.cache, path_less, &state_storage::FileCacheRow::path);
-    std::sort(context.directory_file_references.begin(),
-              context.directory_file_references.end());
-    context.directory_file_references.erase(
-        std::unique(context.directory_file_references.begin(),
-                    context.directory_file_references.end()),
-        context.directory_file_references.end());
     platform::perf_trace::finish("local filesystem scan wall", scan_trace);
     return ScanResult{.snapshot = std::move(snapshot),
-                      .cache = std::move(context.cache),
-                      .directory_file_references =
-                          std::move(context.directory_file_references),
-                      .directory_lineage_complete =
-                          context.directory_lineage_complete};
-}
-
-std::expected<TargetedFileObservation, ScanError>
-observe_file(const std::filesystem::path& local_root,
-             std::string_view relative_path,
-             std::optional<state_storage::FileCacheRow> cached,
-             MetadataQuery metadata_query) {
-    if (relative_path.empty() || relative_path.front() == '/' ||
-        relative_path.back() == '/') {
-        return std::unexpected(
-            ScanError{ScanErrorCode::Metadata,
-                      platform::path::from_utf8(relative_path),
-                      "observe targeted file",
-                      "invalid relative path"});
-    }
-
-    std::size_t comp_start = 0;
-    while (comp_start < relative_path.size()) {
-        const auto slash = relative_path.find('/', comp_start);
-        const auto component =
-            slash == std::string_view::npos
-                ? relative_path.substr(comp_start)
-                : relative_path.substr(comp_start, slash - comp_start);
-        if (!valid_logical_path_component(component)) {
-            return std::unexpected(
-                ScanError{ScanErrorCode::Metadata,
-                          platform::path::from_utf8(relative_path),
-                          "observe targeted file",
-                          "unsupported non-portable path component: '" +
-                              std::string(component) + "'"});
-        }
-        if (slash == std::string_view::npos) {
-            break;
-        }
-        comp_start = slash + 1;
-    }
-
-    const auto relative = platform::path::from_utf8(relative_path);
-    if (relative.is_absolute() || relative.has_root_name() ||
-        relative.has_root_directory() ||
-        std::ranges::find(relative, std::filesystem::path{".."}) !=
-            relative.end()) {
-        return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                         relative,
-                                         "observe targeted file",
-                                         "invalid relative path"});
-    }
-    const auto file_path = local_root / relative;
-    std::error_code error;
-    const auto status = std::filesystem::symlink_status(file_path, error);
-    if (error || std::filesystem::is_symlink(status) ||
-        !std::filesystem::is_regular_file(status)) {
-        return std::unexpected(scan_error(file_path,
-                                          "observe targeted file",
-                                          error,
-                                          ScanErrorCode::Metadata));
-    }
-    const auto ignore_list = load_ignore_list(local_root / ".kasumiignore");
-    const auto normalized = platform::path::to_logical_utf8(relative);
-    if (is_ignored(normalized, ignore_list, false)) {
-        return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                         file_path,
-                                         "observe targeted file",
-                                         "ignored file"});
-    }
-
-    std::vector<state_storage::FileCacheRow> previous;
-    if (cached) {
-        cached->path = normalized;
-        previous.push_back(*cached);
-    }
-    ScanContext context{.policy = ScanPolicy::ReuseStrongFingerprint,
-                        .metadata_query = metadata_query,
-                        .previous = {},
-                        .cache = {},
-                        .directory_file_references = {},
-                        .directory_lineage_complete = false,
-                        .targeted = true};
-    if (!previous.empty())
-        context.previous.emplace(previous.front().path, &previous.front());
-    auto row = process_file(file_path, normalized, context);
-    if (!row)
-        return std::unexpected(std::move(row.error()));
-    TargetedFileObservation result{.row = std::move(*row),
-                                   .cache = std::nullopt};
-    if (!context.cache.empty())
-        result.cache = std::move(context.cache.front());
-    return result;
+                      .cache = std::move(context.cache)};
 }
 
 } // namespace kasumi::application::observation::scanner

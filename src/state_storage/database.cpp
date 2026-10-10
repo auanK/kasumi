@@ -60,29 +60,6 @@ constexpr std::array file_cache_columns{
     ColumnDefinition{"fp2", "TEXT", true, 0},
     ColumnDefinition{"fp3", "TEXT", true, 0}};
 
-constexpr std::array checkpoint_columns{
-    ColumnDefinition{"id", "INTEGER", false, 1},
-    ColumnDefinition{"kind", "INTEGER", true, 0},
-    ColumnDefinition{"volume_serial", "TEXT", true, 0},
-    ColumnDefinition{"journal_id", "TEXT", true, 0},
-    ColumnDefinition{"next_usn", "TEXT", true, 0},
-    ColumnDefinition{"root_file_reference", "TEXT", true, 0},
-    ColumnDefinition{"tree_root_hash", "TEXT", true, 0},
-    ColumnDefinition{"row_count", "TEXT", true, 0}};
-
-constexpr std::array lineage_metadata_columns{
-    ColumnDefinition{"id", "INTEGER", false, 1},
-    ColumnDefinition{"volume_serial", "TEXT", true, 0},
-    ColumnDefinition{"journal_id", "TEXT", true, 0},
-    ColumnDefinition{"root_file_reference", "TEXT", true, 0},
-    ColumnDefinition{"tree_root_hash", "TEXT", true, 0},
-    ColumnDefinition{"row_count", "TEXT", true, 0},
-    ColumnDefinition{"directory_count", "TEXT", true, 0},
-    ColumnDefinition{"lineage_complete", "INTEGER", true, 0}};
-
-constexpr std::array lineage_columns{
-    ColumnDefinition{"file_reference", "TEXT", false, 1}};
-
 enum class ObjectKind {
     Missing,
     Table,
@@ -222,24 +199,11 @@ bool has_expected_schema(sqlite3* database) {
            has_columns(database, "metadata", metadata_columns) &&
            object_kind(database, "file_cache") == ObjectKind::Table &&
            has_columns(database, "file_cache", file_cache_columns) &&
-           object_kind(database, "observation_checkpoint") ==
-               ObjectKind::Table &&
-           has_columns(
-               database, "observation_checkpoint", checkpoint_columns) &&
-           object_kind(database, "directory_lineage_metadata") ==
-               ObjectKind::Table &&
-           has_columns(database,
-                       "directory_lineage_metadata",
-                       lineage_metadata_columns) &&
-           object_kind(database, "directory_lineage") == ObjectKind::Table &&
-           has_columns(database, "directory_lineage", lineage_columns) &&
            has_binary_primary_key(database, "nodes", "path") &&
            has_binary_primary_key(
                database, "pending_materializations", "path") &&
            has_binary_primary_key(database, "metadata", "key") &&
-           has_binary_primary_key(database, "file_cache", "path") &&
-           has_binary_primary_key(
-               database, "directory_lineage", "file_reference");
+           has_binary_primary_key(database, "file_cache", "path");
 }
 
 void create_file_cache(sqlite3* database) {
@@ -251,45 +215,6 @@ void create_file_cache(sqlite3* database) {
         "NOT NULL, size INTEGER NOT NULL, fingerprint_kind INTEGER NOT NULL, "
         "fp0 TEXT NOT NULL, fp1 TEXT NOT NULL, fp2 TEXT NOT NULL, fp3 TEXT NOT "
         "NULL)"));
-}
-
-void create_observation_checkpoint(sqlite3* database) {
-    if (object_kind(database, "observation_checkpoint") != ObjectKind::Missing)
-        throw std::runtime_error(
-            "state.db observation_checkpoint already exists");
-    require(sqlite::execute(database, R"(
-        CREATE TABLE observation_checkpoint (
-            id INTEGER PRIMARY KEY CHECK(id = 1),
-            kind INTEGER NOT NULL,
-            volume_serial TEXT NOT NULL,
-            journal_id TEXT NOT NULL,
-            next_usn TEXT NOT NULL,
-            root_file_reference TEXT NOT NULL,
-            tree_root_hash TEXT NOT NULL,
-            row_count TEXT NOT NULL
-        ))"));
-}
-
-void create_directory_lineage(sqlite3* database) {
-    if (object_kind(database, "directory_lineage_metadata") !=
-            ObjectKind::Missing ||
-        object_kind(database, "directory_lineage") != ObjectKind::Missing) {
-        throw std::runtime_error("state.db directory lineage already exists");
-    }
-    require(sqlite::execute(database, R"(
-        CREATE TABLE directory_lineage_metadata (
-            id INTEGER PRIMARY KEY CHECK(id = 1),
-            volume_serial TEXT NOT NULL,
-            journal_id TEXT NOT NULL,
-            root_file_reference TEXT NOT NULL,
-            tree_root_hash TEXT NOT NULL,
-            row_count TEXT NOT NULL,
-            directory_count TEXT NOT NULL,
-            lineage_complete INTEGER NOT NULL CHECK(lineage_complete IN (0, 1))
-        ))"));
-    require(sqlite::execute(database,
-                            "CREATE TABLE directory_lineage ("
-                            "file_reference TEXT PRIMARY KEY NOT NULL)"));
 }
 
 void create_schema(sqlite3* database) {
@@ -314,8 +239,6 @@ void create_schema(sqlite3* database) {
             mtime INTEGER NOT NULL
         ))"));
     create_file_cache(database);
-    create_observation_checkpoint(database);
-    create_directory_lineage(database);
 }
 
 std::int64_t mtime_value(const NodeRow& row) {
@@ -950,214 +873,6 @@ bool save_file_cache_delta(const std::filesystem::path& database_path,
         platform::perf_trace::finish("state db transaction wall",
                                      transaction_trace);
         platform::perf_trace::finish("file cache save wall", cache_trace);
-        return true;
-    } catch (const std::exception&) {
-        return false;
-    }
-}
-
-std::expected<std::optional<ObservationCheckpoint>, std::string>
-load_observation_checkpoint(const std::filesystem::path& database_path) {
-    const auto checkpoint_trace = platform::perf_trace::begin();
-    platform::perf_trace::count("checkpoint load calls");
-    try {
-        if (!std::filesystem::exists(database_path))
-            return std::optional<ObservationCheckpoint>{};
-        auto opened = detail::open_state_database_readonly(database_path);
-        if (!opened)
-            return std::unexpected(opened.error());
-        if (read_schema_version(opened->get()) != schema_version ||
-            !has_expected_schema(opened->get()))
-            return std::unexpected("state.db schema is not version 1");
-        auto query = require_statement(
-            sqlite::prepare(opened->get(),
-                            "SELECT kind, volume_serial, journal_id, next_usn, "
-                            "root_file_reference, tree_root_hash, row_count "
-                            "FROM observation_checkpoint WHERE id = 1"));
-        if (!require_step(query))
-            return std::optional<ObservationCheckpoint>{};
-        const auto kind = sqlite::integer(query, 0);
-        const auto volume = parse_decimal(sqlite::text(query, 1));
-        const auto journal = parse_decimal(sqlite::text(query, 2));
-        const auto next = parse_decimal(sqlite::text(query, 3));
-        const auto root = parse_decimal(sqlite::text(query, 4));
-        const auto hash = hash_from_hex(sqlite::text(query, 5));
-        const auto rows = parse_decimal(sqlite::text(query, 6));
-        if (kind != static_cast<std::int64_t>(
-                        platform::ChangeJournalKind::WindowsNtfsUsnV1) ||
-            !volume || !journal || !next || !root || !hash || !rows ||
-            *next > static_cast<std::uint64_t>(
-                        std::numeric_limits<std::int64_t>::max()) ||
-            *rows == 0) {
-            return std::unexpected(
-                "state.db observation checkpoint is invalid");
-        }
-        ObservationCheckpoint result{
-            .journal =
-                platform::ChangeJournalCheckpoint{
-                    .kind = platform::ChangeJournalKind::WindowsNtfsUsnV1,
-                    .volume_serial = *volume,
-                    .journal_id = *journal,
-                    .next_usn = static_cast<std::int64_t>(*next),
-                    .root_file_reference = *root},
-            .tree_root_hash = *hash,
-            .row_count = *rows,
-            .directory_file_references = {},
-            .lineage_complete = false};
-        if (!platform::valid_change_journal_checkpoint(result.journal))
-            return std::unexpected(
-                "state.db observation checkpoint is invalid");
-
-        auto lineage_metadata = require_statement(sqlite::prepare(
-            opened->get(),
-            "SELECT volume_serial, journal_id, root_file_reference, "
-            "tree_root_hash, row_count, directory_count, lineage_complete "
-            "FROM directory_lineage_metadata WHERE id = 1"));
-        if (require_step(lineage_metadata)) {
-            const auto metadata_volume =
-                parse_decimal(sqlite::text(lineage_metadata, 0));
-            const auto metadata_journal =
-                parse_decimal(sqlite::text(lineage_metadata, 1));
-            const auto metadata_root =
-                parse_decimal(sqlite::text(lineage_metadata, 2));
-            const auto metadata_hash =
-                hash_from_hex(sqlite::text(lineage_metadata, 3));
-            const auto metadata_rows =
-                parse_decimal(sqlite::text(lineage_metadata, 4));
-            const auto directory_count =
-                parse_decimal(sqlite::text(lineage_metadata, 5));
-            const auto complete = sqlite::integer(lineage_metadata, 6);
-            if (!metadata_volume || !metadata_journal || !metadata_root ||
-                !metadata_hash || !metadata_rows || !directory_count ||
-                (complete != 0 && complete != 1) ||
-                *metadata_volume != result.journal.volume_serial ||
-                *metadata_journal != result.journal.journal_id ||
-                *metadata_root != result.journal.root_file_reference ||
-                *metadata_hash != result.tree_root_hash ||
-                *metadata_rows != result.row_count) {
-                return std::unexpected(
-                    "state.db directory lineage binding is invalid");
-            }
-            auto references = require_statement(
-                sqlite::prepare(opened->get(),
-                                "SELECT file_reference FROM directory_lineage "
-                                "ORDER BY file_reference"));
-            while (require_step(references)) {
-                const auto reference =
-                    parse_decimal(sqlite::text(references, 0));
-                if (!reference || *reference == 0)
-                    return std::unexpected(
-                        "state.db directory lineage is invalid");
-                result.directory_file_references.push_back(*reference);
-            }
-            std::ranges::sort(result.directory_file_references);
-            if (std::ranges::adjacent_find(result.directory_file_references) !=
-                    result.directory_file_references.end() ||
-                *directory_count != result.directory_file_references.size() ||
-                (complete == 1 && (result.directory_file_references.empty() ||
-                                   !std::ranges::binary_search(
-                                       result.directory_file_references,
-                                       result.journal.root_file_reference))) ||
-                (complete == 0 && !result.directory_file_references.empty())) {
-                return std::unexpected(
-                    "state.db directory lineage completeness is invalid");
-            }
-            result.lineage_complete = complete == 1;
-        }
-        auto loaded = std::optional<ObservationCheckpoint>{std::move(result)};
-        platform::perf_trace::finish("checkpoint load wall", checkpoint_trace);
-        return loaded;
-    } catch (const std::exception& exception) {
-        return std::unexpected(std::string{"could not load "
-                                           "observation checkpoint: "} +
-                               exception.what());
-    }
-}
-
-bool save_observation_checkpoint(const std::filesystem::path& database_path,
-                                 const ObservationCheckpoint& checkpoint) {
-    const auto checkpoint_trace = platform::perf_trace::begin();
-    platform::perf_trace::count("checkpoint save calls");
-    if (!platform::valid_change_journal_checkpoint(checkpoint.journal) ||
-        checkpoint.row_count == 0 ||
-        (!checkpoint.lineage_complete &&
-         !checkpoint.directory_file_references.empty()) ||
-        (checkpoint.lineage_complete &&
-         (checkpoint.directory_file_references.empty() ||
-          std::ranges::find(checkpoint.directory_file_references,
-                            checkpoint.journal.root_file_reference) ==
-              checkpoint.directory_file_references.end()))) {
-        return false;
-    }
-    try {
-        auto opened = detail::open_state_database_readwrite(database_path);
-        if (!opened)
-            return false;
-        auto transaction = sqlite::begin(opened->get());
-        if (!transaction ||
-            read_schema_version(opened->get()) != schema_version ||
-            !has_expected_schema(opened->get())) {
-            return false;
-        }
-        auto insert = require_statement(
-            sqlite::prepare(opened->get(),
-                            "INSERT OR REPLACE INTO observation_checkpoint "
-                            "(id, kind, volume_serial, journal_id, next_usn, "
-                            "root_file_reference, tree_root_hash, row_count) "
-                            "VALUES (1, ?, ?, ?, ?, ?, ?, ?)"));
-        require(sqlite::bind(
-            insert, 1, static_cast<std::int64_t>(checkpoint.journal.kind)));
-        require(sqlite::bind(
-            insert, 2, std::to_string(checkpoint.journal.volume_serial)));
-        require(sqlite::bind(
-            insert, 3, std::to_string(checkpoint.journal.journal_id)));
-        require(sqlite::bind(
-            insert, 4, std::to_string(checkpoint.journal.next_usn)));
-        require(sqlite::bind(
-            insert, 5, std::to_string(checkpoint.journal.root_file_reference)));
-        require(sqlite::bind(insert, 6, hash_hex(checkpoint.tree_root_hash)));
-        require(sqlite::bind(insert, 7, std::to_string(checkpoint.row_count)));
-        require(sqlite::run(insert));
-        require(sqlite::execute(opened->get(),
-                                "DELETE FROM directory_lineage_metadata"));
-        require(
-            sqlite::execute(opened->get(), "DELETE FROM directory_lineage"));
-        auto lineage = require_statement(sqlite::prepare(
-            opened->get(),
-            "INSERT INTO directory_lineage_metadata "
-            "(id, volume_serial, journal_id, root_file_reference, "
-            "tree_root_hash, row_count, directory_count, lineage_complete) "
-            "VALUES (1, ?, ?, ?, ?, ?, ?, ?)"));
-        require(sqlite::bind(
-            lineage, 1, std::to_string(checkpoint.journal.volume_serial)));
-        require(sqlite::bind(
-            lineage, 2, std::to_string(checkpoint.journal.journal_id)));
-        require(sqlite::bind(
-            lineage,
-            3,
-            std::to_string(checkpoint.journal.root_file_reference)));
-        require(sqlite::bind(lineage, 4, hash_hex(checkpoint.tree_root_hash)));
-        require(sqlite::bind(lineage, 5, std::to_string(checkpoint.row_count)));
-        require(sqlite::bind(
-            lineage,
-            6,
-            std::to_string(checkpoint.lineage_complete
-                               ? checkpoint.directory_file_references.size()
-                               : 0)));
-        require(sqlite::bind(lineage, 7, checkpoint.lineage_complete ? 1 : 0));
-        require(sqlite::run(lineage));
-        if (checkpoint.lineage_complete) {
-            auto reference = require_statement(sqlite::prepare(
-                opened->get(),
-                "INSERT INTO directory_lineage (file_reference) VALUES (?)"));
-            for (const auto value : checkpoint.directory_file_references) {
-                require(sqlite::bind(reference, 1, std::to_string(value)));
-                require(sqlite::run(reference));
-                require(sqlite::reset(reference));
-            }
-        }
-        require(sqlite::commit(*transaction));
-        platform::perf_trace::finish("checkpoint save wall", checkpoint_trace);
         return true;
     } catch (const std::exception&) {
         return false;

@@ -492,15 +492,6 @@ def run_r21_mutation_scenario(
         "local_scanner_invocations": metrics.get(
             "local scanner invocations", {"calls": 0}
         )["calls"],
-        "local_scanner_avoided": metrics.get(
-            "local scanner avoided", {"calls": 0}
-        )["calls"],
-        "usn_delta_records": metrics.get(
-            "USN delta records", {"calls": 0}
-        )["calls"],
-        "usn_selective_fallbacks": metrics.get(
-            "USN selective fallbacks", {"calls": 0}
-        )["calls"],
         "local_scan_wall_seconds": round(
             metrics.get("local filesystem scan", {"total_ms": 0})[
                 "total_ms"

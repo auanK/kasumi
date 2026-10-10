@@ -1,12 +1,9 @@
-#include "application/observation/patch.hpp"
 #include "application/observation/scanner.hpp"
 #include "application/observation/state.hpp"
 #include "core/history.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/hash_mutation.hpp"
 #include "kasumi/test/temp_workspace.hpp"
-#include "platform/change_journal.hpp"
-#include "platform/change_journal_diagnostic.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
@@ -340,84 +337,6 @@ TEST(ScannerTest, IgnoreRulesHandleGlobsAnchorsDirectoriesAndNegation) {
     EXPECT_NE(kasumi::find_row(result->snapshot, "docs/v1/public.txt"),
               nullptr);
 
-    EXPECT_FALSE(kasumi::application::observation::scanner::observe_file(
-        root, "drop.tmp"));
-    EXPECT_TRUE(kasumi::application::observation::scanner::observe_file(
-        root, "important.tmp"));
-}
-
-TEST(ScannerTest, TargetedObservationAndPatchMatchFullHash) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("scanner-targeted-patch");
-    const auto root = kasumi::test::workspace_path(workspace, "local");
-    const auto file = root / "a.txt";
-    kasumi::test::write_text(file, "alpha");
-    set_fingerprint_fake(FingerprintFakeMode::Supported);
-    const auto first = kasumi::application::observation::scanner::scan_result(
-        root,
-        {},
-        kasumi::application::observation::scanner::ScanPolicy::FullHash,
-        fake_fingerprint);
-    ASSERT_TRUE(first.has_value());
-    ASSERT_FALSE(first->cache.empty());
-    kasumi::test::write_text(file, "omega");
-    set_fingerprint_fake(FingerprintFakeMode::Unsupported);
-    const auto targeted =
-        kasumi::application::observation::scanner::observe_file(
-            root, "a.txt", first->cache.front(), fake_fingerprint);
-    ASSERT_TRUE(targeted.has_value());
-    const auto patched = kasumi::application::observation::apply_local_delta(
-        first->snapshot,
-        std::array<kasumi::application::observation::ObservedFileDelta, 1>{
-            kasumi::application::observation::ObservedFileDelta{
-                .path = targeted->row.path, .row = targeted->row}});
-    ASSERT_TRUE(patched.has_value());
-    const auto full = kasumi::application::observation::scanner::scan_result(
-        root,
-        {},
-        kasumi::application::observation::scanner::ScanPolicy::FullHash);
-    ASSERT_TRUE(full.has_value());
-    expect_same_snapshot(*patched, full->snapshot);
-}
-
-TEST(ScannerTest, TargetedCreateNeedsFullScan) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("scanner-targeted-create");
-    const auto root = kasumi::test::workspace_path(workspace, "local");
-    kasumi::test::write_text(root / "a.txt", "alpha");
-    const auto first = kasumi::application::observation::scanner::scan_result(
-        root,
-        {},
-        kasumi::application::observation::scanner::ScanPolicy::FullHash);
-    ASSERT_TRUE(first.has_value());
-    kasumi::test::write_text(root / "b.txt", "bravo");
-    const auto targeted =
-        kasumi::application::observation::scanner::observe_file(root, "b.txt");
-    ASSERT_TRUE(targeted.has_value());
-    const auto patched = kasumi::application::observation::apply_local_delta(
-        first->snapshot,
-        std::array<kasumi::application::observation::ObservedFileDelta, 1>{
-            kasumi::application::observation::ObservedFileDelta{
-                .path = targeted->row.path, .row = targeted->row}});
-    EXPECT_FALSE(patched.has_value());
-    const auto full = kasumi::application::observation::scanner::scan_result(
-        root,
-        {},
-        kasumi::application::observation::scanner::ScanPolicy::FullHash);
-    ASSERT_TRUE(full.has_value());
-    EXPECT_NE(kasumi::find_row(full->snapshot, "b.txt"), nullptr);
-}
-
-TEST(ScannerTest, TargetedObservationRejectsDirectory) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("scanner-targeted-directory");
-    const auto root = kasumi::test::workspace_path(workspace, "local");
-    std::error_code error;
-    std::filesystem::create_directories(root / "nested", error);
-    ASSERT_FALSE(error);
-    const auto targeted =
-        kasumi::application::observation::scanner::observe_file(root, "nested");
-    EXPECT_FALSE(targeted.has_value());
 }
 
 TEST(ScannerTest, SameSizeMutationInvalidatesCachedHash) {
@@ -599,152 +518,7 @@ TEST(ScannerTest, FingerprintUnavailableNeverReusesPreviousHash) {
     EXPECT_TRUE(second->cache.empty());
 }
 
-TEST(ScannerTest, ResolutionSeamKeepsLiveInsideObjectsDirty) {
-    const kasumi::platform::SyntheticResolutionEvidence evidence{
-        .file_path_resolved = true, .file_inside_root = true};
-    EXPECT_EQ(kasumi::platform::classify_resolution_evidence(evidence),
-              kasumi::platform::ChangeEvidence::Dirty);
-}
-
-TEST(ScannerTest, ResolutionSeamAllowsOnlyProvenDeletedOutsideObjectsClean) {
-    const kasumi::platform::SyntheticResolutionEvidence evidence{
-        .parent_path_resolved = true,
-        .parent_inside_root = false,
-        .file_missing = true,
-        .filename_valid = true};
-    EXPECT_EQ(kasumi::platform::classify_resolution_evidence(evidence),
-              kasumi::platform::ChangeEvidence::Clean);
-}
-
-TEST(ScannerTest, ResolutionSeamKeepsMissingParentIndeterminate) {
-    const kasumi::platform::SyntheticResolutionEvidence evidence{
-        .file_missing = true, .parent_missing = true, .filename_valid = true};
-    EXPECT_EQ(kasumi::platform::classify_resolution_evidence(evidence),
-              kasumi::platform::ChangeEvidence::Indeterminate);
-}
-
-TEST(ScannerTest, ResolutionSeamNeverTurnsAmbiguousRenameClean) {
-    const kasumi::platform::SyntheticResolutionEvidence evidence{
-        .parent_path_resolved = true,
-        .parent_inside_root = false,
-        .file_missing = true,
-        .filename_valid = true,
-        .parent_history_ambiguous = true};
-    EXPECT_EQ(kasumi::platform::classify_resolution_evidence(evidence),
-              kasumi::platform::ChangeEvidence::Indeterminate);
-}
-
-TEST(ScannerTest, ResolutionSeamKeepsAccessDeniedIndeterminate) {
-    const kasumi::platform::SyntheticResolutionEvidence evidence{
-        .parent_path_resolved = true,
-        .parent_inside_root = false,
-        .file_missing = true,
-        .filename_valid = true,
-        .access_denied = true};
-    EXPECT_EQ(kasumi::platform::classify_resolution_evidence(evidence),
-              kasumi::platform::ChangeEvidence::Indeterminate);
-}
-
-kasumi::platform::DirectoryLineageView
-complete_lineage(const std::vector<std::uint64_t>& references) {
-    return {.inside_directory_frns = references,
-            .complete = true,
-            .checkpoint_bound = true};
-}
-
-TEST(ScannerTest, CompleteLineageClassifiesOutsideTransientAsClean) {
-    const std::vector<std::uint64_t> directories{10, 20, 30};
-    EXPECT_EQ(kasumi::platform::classify_record_membership(
-                  {.file_reference = 99, .parent_reference = 98},
-                  complete_lineage(directories)),
-              kasumi::platform::ChangeEvidence::Clean);
-}
-
-TEST(ScannerTest, CompleteLineageClassifiesInsideTransientAsDirty) {
-    const std::vector<std::uint64_t> directories{10, 20, 30};
-    EXPECT_EQ(kasumi::platform::classify_record_membership(
-                  {.file_reference = 99, .parent_reference = 20},
-                  complete_lineage(directories)),
-              kasumi::platform::ChangeEvidence::Dirty);
-}
-
-TEST(ScannerTest, IncompleteLineageIsIndeterminate) {
-    const std::vector<std::uint64_t> directories{10};
-    EXPECT_EQ(kasumi::platform::classify_record_membership(
-                  {.file_reference = 99, .parent_reference = 98},
-                  {.inside_directory_frns = directories,
-                   .complete = false,
-                   .checkpoint_bound = true}),
-              kasumi::platform::ChangeEvidence::Indeterminate);
-}
-
-TEST(ScannerTest, KnownInsideDirectoryFileFrnIsDirty) {
-    const std::vector<std::uint64_t> directories{10, 20};
-    EXPECT_EQ(kasumi::platform::classify_record_membership(
-                  {.file_reference = 20, .parent_reference = 99},
-                  complete_lineage(directories)),
-              kasumi::platform::ChangeEvidence::Dirty);
-}
-
-TEST(ScannerTest, KnownInsideParentFrnIsDirty) {
-    const std::vector<std::uint64_t> directories{10, 20};
-    EXPECT_EQ(kasumi::platform::classify_record_membership(
-                  {.file_reference = 99, .parent_reference = 20},
-                  complete_lineage(directories)),
-              kasumi::platform::ChangeEvidence::Dirty);
-}
-
-TEST(ScannerTest, OutsideToInsideRenameIsDirty) {
-    const std::vector<std::uint64_t> directories{10, 20};
-    EXPECT_EQ(kasumi::platform::classify_record_membership(
-                  {.file_reference = 99,
-                   .parent_reference = 20,
-                   .is_directory = true},
-                  complete_lineage(directories)),
-              kasumi::platform::ChangeEvidence::Dirty);
-}
-
-TEST(ScannerTest, InsideToOutsideRenameIsDirty) {
-    const std::vector<std::uint64_t> directories{10, 20};
-    EXPECT_EQ(kasumi::platform::classify_record_membership(
-                  {.file_reference = 20,
-                   .parent_reference = 99,
-                   .is_directory = true},
-                  complete_lineage(directories)),
-              kasumi::platform::ChangeEvidence::Dirty);
-}
-
-TEST(ScannerTest, DeletedKnownInsideDirectoryIsDirty) {
-    const std::vector<std::uint64_t> directories{10, 20};
-    EXPECT_EQ(kasumi::platform::classify_record_membership(
-                  {.file_reference = 20,
-                   .parent_reference = 10,
-                   .is_directory = true},
-                  complete_lineage(directories)),
-              kasumi::platform::ChangeEvidence::Dirty);
-}
-
-TEST(ScannerTest, JournalGapWithLineageIsIndeterminate) {
-    const std::vector<std::uint64_t> directories{10, 20};
-    EXPECT_EQ(kasumi::platform::classify_record_membership(
-                  {.file_reference = 99, .parent_reference = 98},
-                  {.inside_directory_frns = directories,
-                   .complete = true,
-                   .checkpoint_bound = false}),
-              kasumi::platform::ChangeEvidence::Indeterminate);
-}
-
-TEST(ScannerTest, LineageCheckpointMismatchFallsBack) {
-    const std::vector<std::uint64_t> directories{10, 20};
-    EXPECT_EQ(kasumi::platform::classify_record_membership(
-                  {.file_reference = 99, .parent_reference = 98},
-                  {.inside_directory_frns = directories,
-                   .complete = true,
-                   .checkpoint_bound = false}),
-              kasumi::platform::ChangeEvidence::Indeterminate);
-}
-
-TEST(ScannerTest, UnicodeSupplementaryPathsAndTargetedObservation) {
+TEST(ScannerTest, UnicodeSupplementaryPathsAndRescan) {
     auto workspace =
         kasumi::test::make_temp_workspace("scanner-unicode-supplementary");
     const auto root = kasumi::test::workspace_path(workspace, "local");
@@ -781,17 +555,13 @@ TEST(ScannerTest, UnicodeSupplementaryPathsAndTargetedObservation) {
 
         const auto file = root / kasumi::platform::path::from_utf8(path);
         kasumi::test::write_text(file, "updated Unicode content");
-        const auto targeted =
-            kasumi::application::observation::scanner::observe_file(
-                root, path, *cached, fake_fingerprint);
-        ASSERT_TRUE(targeted.has_value())
-            << kasumi::application::observation::scanner::describe(
-                   targeted.error());
-        EXPECT_EQ(targeted->row.path, path);
-        EXPECT_NE(targeted->row.hash, row->hash);
-        ASSERT_TRUE(targeted->cache.has_value());
-        EXPECT_EQ(targeted->cache->path, path);
-        EXPECT_EQ(targeted->cache->hash, targeted->row.hash);
+        const auto rescanned =
+            kasumi::application::observation::scanner::scan_result(root);
+        ASSERT_TRUE(rescanned.has_value());
+        const auto* updated = kasumi::find_row(rescanned->snapshot, path);
+        ASSERT_NE(updated, nullptr);
+        EXPECT_NE(updated->hash, row->hash);
+
     }
 }
 
@@ -1003,8 +773,8 @@ TEST(ScannerTest, UnicodeSingleFileAndErrorDisplay) {
     EXPECT_EQ(scanned->snapshot.rows.front().path, "千早愛音🌸.txt");
 
     const auto missing =
-        kasumi::application::observation::scanner::observe_file(
-            file.parent_path(), "missing-𓆩🌸𓆪.txt");
+        kasumi::application::observation::scanner::scan_result(
+            file.parent_path() / kasumi::platform::path::from_utf8("missing-𓆩🌸𓆪.txt"));
     ASSERT_FALSE(missing.has_value());
     EXPECT_NE(
         kasumi::application::observation::scanner::describe(missing.error())
@@ -1041,18 +811,11 @@ TEST(ScannerTest, UnicodeIgnoreRulesExcludeAndReincludeFiles) {
     for (const auto path : excluded) {
         SCOPED_TRACE(path);
         EXPECT_EQ(kasumi::find_row(scanned->snapshot, path), nullptr);
-        EXPECT_FALSE(kasumi::application::observation::scanner::observe_file(
-            root, path));
     }
     for (const auto path : included) {
         SCOPED_TRACE(path);
         EXPECT_NE(kasumi::find_row(scanned->snapshot, path), nullptr);
-        const auto observed =
-            kasumi::application::observation::scanner::observe_file(root, path);
-        ASSERT_TRUE(observed.has_value())
-            << kasumi::application::observation::scanner::describe(
-                   observed.error());
-        EXPECT_EQ(observed->row.path, path);
+
     }
 }
 
@@ -1105,33 +868,6 @@ TEST(ScannerTest, UnicodeFilenameRoundTrip) {
     EXPECT_EQ(roundtrip_file->path, expected_file_utf8);
     EXPECT_EQ(roundtrip_file->hash, file_row->hash);
     EXPECT_EQ(roundtrip_file->size, file_row->size);
-}
-
-TEST(ScannerTest, ObserveFileRejectsNonPortablePathComponents) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("scanner-observe-non-portable");
-    const auto root = kasumi::test::workspace_path(workspace, "local");
-
-    auto res1 =
-        kasumi::application::observation::scanner::observe_file(root, "CON");
-    ASSERT_FALSE(res1.has_value());
-    EXPECT_NE(
-        res1.error().detail.find("unsupported non-portable path component"),
-        std::string::npos);
-
-    auto res2 =
-        kasumi::application::observation::scanner::observe_file(root, "a:b");
-    ASSERT_FALSE(res2.has_value());
-    EXPECT_NE(
-        res2.error().detail.find("unsupported non-portable path component"),
-        std::string::npos);
-
-    auto res3 = kasumi::application::observation::scanner::observe_file(
-        root, "dir/file.");
-    ASSERT_FALSE(res3.has_value());
-    EXPECT_NE(
-        res3.error().detail.find("unsupported non-portable path component"),
-        std::string::npos);
 }
 
 #if !defined(_WIN32)

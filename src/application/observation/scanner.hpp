@@ -3,7 +3,6 @@
 
 #include "core/ignore.hpp"
 #include "core/node.hpp"
-#include "platform/file_fingerprint.hpp"
 #include "state_storage/database.hpp"
 
 #include <cstdint>
@@ -38,17 +37,6 @@ enum class ScanPolicy {
 struct ScanResult {
     Snapshot snapshot;
     std::vector<state_storage::FileCacheRow> cache;
-    // Sorted file references of observed directories.
-    std::vector<std::uint64_t> directory_file_references;
-    // Indicates that all directory file references were obtained.
-    bool directory_lineage_complete = false;
-};
-
-// Result of an isolated file observation.
-struct TargetedFileObservation {
-    NodeRow row;
-    // Present only when strong fingerprint allows safe reuse.
-    std::optional<state_storage::FileCacheRow> cache;
 };
 
 // Contextualized local scan failure.
@@ -81,13 +69,6 @@ scan_result(const std::filesystem::path& local_root,
             ScanPolicy policy,
             MetadataQuery metadata_query,
             const kasumi::ignore::IgnoreList& ignore_list);
-
-// Observes a single safe relative path.
-std::expected<TargetedFileObservation, ScanError> observe_file(
-    const std::filesystem::path& local_root,
-    std::string_view relative_path,
-    std::optional<state_storage::FileCacheRow> cached = std::nullopt,
-    MetadataQuery metadata_query = cache::read_file_metadata);
 
 } // namespace kasumi::application::observation::scanner
 

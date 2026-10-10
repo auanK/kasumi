@@ -457,7 +457,6 @@ add_library(kasumi_application STATIC
     src/application/observation/cache_contract.cpp
     src/application/observation/file_metadata.cpp
     src/application/observation/scanner.cpp
-    src/application/observation/patch.cpp
     src/application/observation/state.cpp
     src/application/observation/history.cpp
     src/application/sync/journal.cpp
