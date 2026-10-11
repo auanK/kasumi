@@ -113,8 +113,16 @@ std::expected<Response, Error> run_plan(OperationContext& context) {
         });
     }
 
+    observation::LocalObservationSession observation_session;
+    observation_session.database_path = context.runtime.database_path;
+
     auto collected = observation::collect_reconciliation_input(
-        context.runtime, context.storage, context.key, false);
+        context.runtime,
+        context.storage,
+        context.key,
+        false,
+        {},
+        &observation_session);
     if (!collected) {
         auto err = plan_error(
             context.operation, collected.error().detail, context.summary);

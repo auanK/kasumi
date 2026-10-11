@@ -114,10 +114,12 @@ Inspect the proposed changes:
 kasumi status work
 ```
 
-Or preview with `kasumi sync work --dry-run`. Both commands read file content
-to compute a full-hash plan, without applying sync changes or recovering pending
-transactions. Add `--full` if you want every plan item. A preview is a
-point-in-time observation; the later sync can replan if files or remote history change.
+Or preview with `kasumi sync work --dry-run`. Both commands reuse valid strong
+fingerprints from the persistent local cache when available, falling back to
+reading file content for new, modified, or uncached files. Neither command applies
+sync changes, writes cache updates, or recovers pending transactions. Add `--full`
+if you want every plan item. A preview is a point-in-time observation; the later
+sync can replan if files or remote history change.
 
 When the plan is acceptable:
 

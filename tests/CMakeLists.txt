@@ -74,6 +74,7 @@ kasumi_add_test_suite(
     SOURCES
         unit/application/test_profile.cpp
         unit/application/test_execute.cpp
+        unit/application/test_plan_cache.cpp
         unit/application/test_concurrency.cpp
         unit/application/test_inspection.cpp
         unit/application/integrity/test_maintenance.cpp
