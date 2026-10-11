@@ -49,9 +49,12 @@ jobs:
           ctest --test-dir build-ci-release -C Release --output-on-failure
 
   gcc:
-    name: GCC 14 (MSYS2 UCRT64)
+    name: GCC (MSYS2 UCRT64)
     runs-on: windows-2022
     timeout-minutes: 90
+    defaults:
+      run:
+        shell: msys2 {0}
     env:
       CC: gcc
       CXX: g++
@@ -71,39 +74,46 @@ jobs:
             mingw-w64-ucrt-x86_64-cmake
             git
 
-      - name: Prioritize MSYS2 UCRT64 in PATH
-        shell: powershell
+      - name: Verify MSYS2 toolchain
         run: |
-          "C:\msys64\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          test "$MSYSTEM" = "UCRT64"
 
-      - name: Display tool versions
-        shell: powershell
-        run: |
-          Get-Command gcc | Select-Object -ExpandProperty Source
-          Get-Command g++ | Select-Object -ExpandProperty Source
+          command -v gcc
+          command -v g++
+          command -v cmake
+          command -v ninja
+
           gcc --version
           g++ --version
           cmake --version
           ninja --version
 
+          for tool in gcc g++ cmake ninja; do
+            tool_path=$(command -v "$tool")
+            echo "$tool path: $tool_path"
+            case "$tool_path" in
+              /ucrt64/bin/*) ;;
+              *)
+                echo "ERROR: $tool is not from /ucrt64/bin/ (found: $tool_path)" >&2
+                exit 1
+                ;;
+            esac
+          done
+
       - name: Build (Debug)
-        shell: powershell
         run: |
           cmake --preset debug
           cmake --build --preset debug
 
       - name: Run Tests (Debug)
-        shell: powershell
         run: |
           ctest --preset debug --output-on-failure --parallel 2
 
       - name: Build (Release)
-        shell: powershell
         run: |
           cmake --preset default -DBUILD_TESTING=ON
           cmake --build --preset default
 
       - name: Run Tests (Release)
-        shell: powershell
         run: |
           ctest --test-dir build --output-on-failure --parallel 2
