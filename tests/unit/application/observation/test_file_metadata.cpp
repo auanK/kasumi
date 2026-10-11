@@ -20,6 +20,10 @@
 #endif
 #include <windows.h>
 #include <aclapi.h>
+#include <cstddef>
+#include <vector>
+#include <functional>
+#include <thread>
 #else
 #include <cerrno>
 #include <fcntl.h>
@@ -772,6 +776,284 @@ bool is_dacl_protected(const std::filesystem::path& path) {
     return (ok != FALSE) && ((control & SE_DACL_PROTECTED) != 0);
 }
 
+// Win32 API abstraction frontier for ScopedDisableAllPrivileges fault injection testing
+struct PrivilegeWin32Api {
+    std::function<BOOL(HANDLE, DWORD, BOOL, PHANDLE)> open_thread_token =
+        [](HANDLE thread, DWORD access, BOOL open_as_self, PHANDLE token) {
+            return ::OpenThreadToken(thread, access, open_as_self, token);
+        };
+    std::function<BOOL(SECURITY_IMPERSONATION_LEVEL)> impersonate_self =
+        [](SECURITY_IMPERSONATION_LEVEL level) {
+            return ::ImpersonateSelf(level);
+        };
+    std::function<BOOL()> revert_to_self =
+        []() {
+            return ::RevertToSelf();
+        };
+    std::function<BOOL(HANDLE, BOOL, PTOKEN_PRIVILEGES, DWORD, PTOKEN_PRIVILEGES, PDWORD)> adjust_token_privileges =
+        [](HANDLE token, BOOL disable_all, PTOKEN_PRIVILEGES new_state, DWORD buffer_len, PTOKEN_PRIVILEGES prev_state, PDWORD ret_len) {
+            return ::AdjustTokenPrivileges(token, disable_all, new_state, buffer_len, prev_state, ret_len);
+        };
+    std::function<BOOL(HANDLE, TOKEN_INFORMATION_CLASS, LPVOID, DWORD, PDWORD)> get_token_information =
+        [](HANDLE token, TOKEN_INFORMATION_CLASS info_class, LPVOID info, DWORD length, PDWORD ret_length) {
+            return ::GetTokenInformation(token, info_class, info, length, ret_length);
+        };
+    std::function<BOOL(HANDLE)> close_handle =
+        [](HANDLE handle) {
+            return ::CloseHandle(handle);
+        };
+    std::function<DWORD()> get_last_error =
+        []() {
+            return ::GetLastError();
+        };
+};
+
+bool token_privileges_fit(const std::vector<BYTE>& buffer, DWORD length) {
+    constexpr auto header = offsetof(TOKEN_PRIVILEGES, Privileges);
+    if (length < header || length > buffer.size()) return false;
+    const auto* privileges = reinterpret_cast<const TOKEN_PRIVILEGES*>(buffer.data());
+    return privileges->PrivilegeCount <= (length - header) / sizeof(LUID_AND_ATTRIBUTES);
+}
+
+std::expected<bool, DWORD> query_token_privilege_enabled(
+    HANDLE token, LPCWSTR privilege_name, const PrivilegeWin32Api& api = {}) {
+    if (token == NULL || token == INVALID_HANDLE_VALUE) {
+        return std::unexpected(static_cast<DWORD>(ERROR_INVALID_HANDLE));
+    }
+    LUID luid;
+    if (!::LookupPrivilegeValueW(nullptr, privilege_name, &luid)) {
+        const DWORD err = api.get_last_error();
+        return std::unexpected(err != ERROR_SUCCESS ? err : static_cast<DWORD>(ERROR_GEN_FAILURE));
+    }
+    DWORD length = 0;
+    if (!api.get_token_information(token, TokenPrivileges, nullptr, 0, &length)) {
+        const DWORD err = api.get_last_error();
+        if (err != ERROR_INSUFFICIENT_BUFFER) {
+            return std::unexpected(err != ERROR_SUCCESS ? err : static_cast<DWORD>(ERROR_GEN_FAILURE));
+        }
+    }
+    if (length == 0) {
+        return std::unexpected(static_cast<DWORD>(ERROR_GEN_FAILURE));
+    }
+    std::vector<BYTE> buffer(length);
+    if (!api.get_token_information(token, TokenPrivileges, buffer.data(), length, &length)) {
+        const DWORD err = api.get_last_error();
+        return std::unexpected(err != ERROR_SUCCESS ? err : static_cast<DWORD>(ERROR_GEN_FAILURE));
+    }
+    if (!token_privileges_fit(buffer, length)) {
+        return std::unexpected(static_cast<DWORD>(ERROR_INVALID_DATA));
+    }
+    const auto* privs = reinterpret_cast<const TOKEN_PRIVILEGES*>(buffer.data());
+    for (DWORD i = 0; i < privs->PrivilegeCount; ++i) {
+        if (privs->Privileges[i].Luid.LowPart == luid.LowPart &&
+            privs->Privileges[i].Luid.HighPart == luid.HighPart) {
+            return (privs->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED) != 0;
+        }
+    }
+    return false;
+}
+
+// Queries whether a Win32 privilege is currently enabled in thread or process token
+std::expected<bool, DWORD> is_privilege_enabled(LPCWSTR privilege_name) {
+    HANDLE token = NULL;
+    if (!::OpenThreadToken(::GetCurrentThread(), TOKEN_QUERY, TRUE, &token)) {
+        const DWORD err = ::GetLastError();
+        if (err == ERROR_NO_TOKEN) {
+            if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) {
+                return std::unexpected(::GetLastError());
+            }
+        } else {
+            return std::unexpected(err);
+        }
+    }
+    const auto enabled = query_token_privilege_enabled(token, privilege_name);
+    if (!::CloseHandle(token)) {
+        const DWORD error = ::GetLastError();
+        ADD_FAILURE() << "CloseHandle after privilege query failed: " << error;
+        if (enabled.has_value()) return std::unexpected(error);
+    }
+    return enabled;
+}
+
+// RAII guard ensuring Win32 privileges (such as SeBackupPrivilege and SeRestorePrivilege)
+// are safely, verifiably and reversibly disabled during access control tests using thread-scoped
+// impersonation (Invariant E) to strictly enforce DACLs even in elevated environments without
+// mutating the global process token.
+class ScopedDisableAllPrivileges {
+public:
+    explicit ScopedDisableAllPrivileges(PrivilegeWin32Api api = {})
+        : api_(std::move(api)) {
+        enter();
+    }
+
+    ~ScopedDisableAllPrivileges() {
+        if (!restored_) {
+            const DWORD res = restore_internal();
+            if (res != ERROR_SUCCESS) {
+                ADD_FAILURE() << "ScopedDisableAllPrivileges destructor failed to restore security context: "
+                              << failure_reason_ << " (Win32 error " << res << ")";
+            }
+        }
+    }
+
+    ScopedDisableAllPrivileges(const ScopedDisableAllPrivileges&) = delete;
+    ScopedDisableAllPrivileges& operator=(const ScopedDisableAllPrivileges&) = delete;
+    ScopedDisableAllPrivileges(ScopedDisableAllPrivileges&&) = delete;
+    ScopedDisableAllPrivileges& operator=(ScopedDisableAllPrivileges&&) = delete;
+
+    [[nodiscard]] bool is_isolated() const noexcept { return is_isolated_; }
+    [[nodiscard]] DWORD last_error() const noexcept { return last_error_; }
+    [[nodiscard]] const std::string& failure_reason() const noexcept { return failure_reason_; }
+    [[nodiscard]] bool is_restored() const noexcept { return restored_; }
+
+    DWORD restore() {
+        return restore_internal();
+    }
+
+private:
+    DWORD record_failure(const char* operation, DWORD error) {
+        if (error == ERROR_SUCCESS) error = ERROR_GEN_FAILURE;
+        if (last_error_ == ERROR_SUCCESS) last_error_ = error;
+        if (!failure_reason_.empty()) failure_reason_ += "; ";
+        failure_reason_ += std::string(operation) + ": error " + std::to_string(error);
+        return error;
+    }
+
+    void enter() {
+        HANDLE token = NULL;
+        if (api_.open_thread_token(::GetCurrentThread(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, TRUE, &token)) {
+            thread_token_ = token;
+            created_impersonation_ = false;
+        } else {
+            const DWORD err = api_.get_last_error();
+            if (err == ERROR_NO_TOKEN) {
+                if (!api_.impersonate_self(SecurityImpersonation)) {
+                    record_failure("ImpersonateSelf failed", api_.get_last_error());
+                    return;
+                }
+                created_impersonation_ = true;
+                if (!api_.open_thread_token(::GetCurrentThread(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, TRUE, &token)) {
+                    record_failure("OpenThreadToken after ImpersonateSelf failed", api_.get_last_error());
+                    restore_internal();
+                    return;
+                }
+                thread_token_ = token;
+            } else {
+                record_failure("OpenThreadToken failed", err);
+                return;
+            }
+        }
+
+        // Dynamically size buffer and disable privileges on thread token
+        std::vector<BYTE> prev(256);
+        DWORD adjustment_error = ERROR_INSUFFICIENT_BUFFER;
+        DWORD actual_len = 0;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            actual_len = static_cast<DWORD>(prev.size());
+            const BOOL adj_ok = api_.adjust_token_privileges(
+                thread_token_, TRUE, nullptr, static_cast<DWORD>(prev.size()),
+                reinterpret_cast<PTOKEN_PRIVILEGES>(prev.data()), &actual_len);
+            const DWORD adj_err = api_.get_last_error();
+            if (adj_ok) {
+                // TRUE with ERROR_NOT_ALL_ASSIGNED can still have changed privileges.
+                privileges_modified_ = true;
+                if (token_privileges_fit(prev, actual_len)) {
+                    prev.resize(actual_len);
+                    prev_privileges_ = std::move(prev);
+                    adjustment_error = adj_err;
+                } else {
+                    adjustment_error = ERROR_INVALID_DATA;
+                }
+                break;
+            }
+            adjustment_error = adj_err != ERROR_SUCCESS ? adj_err : static_cast<DWORD>(ERROR_GEN_FAILURE);
+            if (adj_err == ERROR_INSUFFICIENT_BUFFER && actual_len > prev.size() && attempt < 2) {
+                prev.resize(actual_len);
+                continue;
+            }
+            break;
+        }
+
+        if (adjustment_error != ERROR_SUCCESS) {
+            record_failure("AdjustTokenPrivileges failed", adjustment_error);
+            restore_internal();
+            return;
+        }
+
+        // Invariant A: Confirm effective token cannot bypass restrictive DACLs
+        const auto backup_priv = query_token_privilege_enabled(thread_token_, L"SeBackupPrivilege", api_);
+        if (!backup_priv.has_value()) {
+            record_failure("Verification failed querying SeBackupPrivilege", backup_priv.error());
+            restore_internal();
+            return;
+        }
+        const auto restore_priv = query_token_privilege_enabled(thread_token_, L"SeRestorePrivilege", api_);
+        if (!restore_priv.has_value()) {
+            record_failure("Verification failed querying SeRestorePrivilege", restore_priv.error());
+            restore_internal();
+            return;
+        }
+
+        if (*backup_priv || *restore_priv) {
+            record_failure("Verification failed: bypass privileges remain enabled in thread token", ERROR_ACCESS_DENIED);
+            restore_internal();
+            return;
+        }
+
+        is_isolated_ = true;
+    }
+
+    DWORD restore_internal() {
+        if (restored_) {
+            return ERROR_SUCCESS;
+        }
+        is_isolated_ = false;
+        if (created_impersonation_) {
+            if (!api_.revert_to_self()) {
+                return record_failure("RevertToSelf failed", api_.get_last_error());
+            }
+            created_impersonation_ = false;
+            privileges_modified_ = false;
+            prev_privileges_.clear();
+        }
+        if (privileges_modified_) {
+            if (thread_token_ == NULL || prev_privileges_.empty()) {
+                return record_failure("Cannot restore privileges without saved state and token", ERROR_INVALID_DATA);
+            }
+            const BOOL ok = api_.adjust_token_privileges(
+                thread_token_, FALSE,
+                reinterpret_cast<PTOKEN_PRIVILEGES>(prev_privileges_.data()),
+                0, nullptr, nullptr);
+            const DWORD adj_err = api_.get_last_error();
+            if (!ok || adj_err != ERROR_SUCCESS) {
+                return record_failure("Failed to restore privileges on thread token", adj_err);
+            }
+            privileges_modified_ = false;
+            prev_privileges_.clear();
+        }
+
+        if (thread_token_ != NULL) {
+            if (!api_.close_handle(thread_token_)) {
+                return record_failure("CloseHandle failed for thread token", api_.get_last_error());
+            }
+            thread_token_ = NULL;
+        }
+
+        restored_ = true;
+        return ERROR_SUCCESS;
+    }
+
+    PrivilegeWin32Api api_;
+    HANDLE thread_token_{NULL};
+    bool created_impersonation_{false};
+    bool privileges_modified_{false};
+    bool is_isolated_{false};
+    bool restored_{false};
+    DWORD last_error_{ERROR_SUCCESS};
+    std::string failure_reason_;
+    std::vector<BYTE> prev_privileges_;
+};
+
 // RAII guard ensuring original DACL restoration even if an assertion fails
 struct DaclRestoreGuard {
     std::wstring path;
@@ -906,11 +1188,28 @@ TEST(FileMetadataWin32NativeTest, AccessDeniedDetectedViaDacl) {
 
     EXPECT_TRUE(is_dacl_protected(file_path));
 
+    // Direct open without backup semantics is always denied by the empty DACL
+    HANDLE h_no_backup = ::CreateFileW(
+        file_path.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    EXPECT_EQ(h_no_backup, INVALID_HANDLE_VALUE);
+    EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
+
     // 3. Confirm reading metadata fails with PermissionDenied / ERROR_ACCESS_DENIED
-    const auto result = read_file_metadata(file_path, "denied.txt");
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
-    EXPECT_EQ(result.error().os_error, static_cast<std::uint32_t>(ERROR_ACCESS_DENIED));
+    // when token privileges are disabled (ensures deterministic testing across all environments)
+    {
+        ScopedDisableAllPrivileges no_priv;
+        ASSERT_TRUE(no_priv.is_isolated()) << no_priv.failure_reason();
+        const auto result = read_file_metadata(file_path, "denied.txt");
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
+        EXPECT_EQ(result.error().os_error, static_cast<std::uint32_t>(ERROR_ACCESS_DENIED));
+    }
 
     // 4. Restore original security state and verify result
     const auto restore_res = guard.restore();
@@ -968,10 +1267,28 @@ TEST(FileMetadataWin32NativeTest, AccessDeniedDetectedViaProtectedDacl) {
         &empty_acl,
         nullptr), ERROR_SUCCESS);
 
+    // Direct open without backup semantics is always denied by the empty DACL
+    HANDLE h_no_backup = ::CreateFileW(
+        file_path.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    EXPECT_EQ(h_no_backup, INVALID_HANDLE_VALUE);
+    EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
+
     // 3. Confirm reading metadata fails with PermissionDenied
-    const auto result = read_file_metadata(file_path, "denied_prot.txt");
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
+    // when token privileges are disabled (ensures deterministic testing across all environments)
+    {
+        ScopedDisableAllPrivileges no_priv;
+        ASSERT_TRUE(no_priv.is_isolated()) << no_priv.failure_reason();
+        const auto result = read_file_metadata(file_path, "denied_prot.txt");
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
+        EXPECT_EQ(result.error().os_error, static_cast<std::uint32_t>(ERROR_ACCESS_DENIED));
+    }
 
     // 4. Restore original security state and verify result
     const auto restore_res = guard.restore();
@@ -1028,7 +1345,23 @@ TEST(FileMetadataWin32NativeTest, DaclRestoreGuardMoveConstructorTransfersOwners
         DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
         nullptr, nullptr, &empty_acl, nullptr), ERROR_SUCCESS);
 
-    EXPECT_FALSE(read_file_metadata(file_path, "move_transfer.txt").has_value());
+    // Direct open without backup semantics is always denied by the empty DACL
+    HANDLE h_no_backup = ::CreateFileW(
+        file_path.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    EXPECT_EQ(h_no_backup, INVALID_HANDLE_VALUE);
+    EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
+
+    {
+        ScopedDisableAllPrivileges no_priv;
+        ASSERT_TRUE(no_priv.is_isolated()) << no_priv.failure_reason();
+        EXPECT_FALSE(read_file_metadata(file_path, "move_transfer.txt").has_value());
+    }
 
     {
         DaclRestoreGuard moved_guard = std::move(*guard_res);
@@ -1071,7 +1404,23 @@ TEST(FileMetadataWin32NativeTest, DaclRestoreGuardDestructorRestoresOnScopeExit)
             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
             nullptr, nullptr, &empty_acl, nullptr), ERROR_SUCCESS);
 
-        EXPECT_FALSE(read_file_metadata(file_path, "scope_exit.txt").has_value());
+        // Direct open without backup semantics is always denied by the empty DACL
+        HANDLE h_no_backup_scope = ::CreateFileW(
+            file_path.c_str(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            nullptr);
+        EXPECT_EQ(h_no_backup_scope, INVALID_HANDLE_VALUE);
+        EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
+
+        {
+            ScopedDisableAllPrivileges no_priv;
+            ASSERT_TRUE(no_priv.is_isolated()) << no_priv.failure_reason();
+            EXPECT_FALSE(read_file_metadata(file_path, "scope_exit.txt").has_value());
+        }
         // Do NOT call restore() explicitly; let destructor run
     }
 
@@ -1098,6 +1447,738 @@ TEST(FileMetadataWin32NativeTest, DaclRestoreGuardDestructorReportsFailureWhenNo
     EXPECT_NONFATAL_FAILURE(([&]() {
         DaclRestoreGuard guard{non_existent.wstring(), &empty_acl, nullptr, false};
     }()), "DaclRestoreGuard destructor failed to restore DACL");
+}
+
+TEST(FileMetadataWin32NativeTest, RestrictiveDaclAccessBehaviorWithAndWithoutBackupPrivilege) {
+    TempDirFixture fixture;
+    const auto file_path = fixture.path() / "priv_behavior.txt";
+    {
+        std::ofstream ofs(file_path);
+        ofs << "privilege behavior test";
+    }
+
+    auto guard_res = DaclRestoreGuard::capture(file_path);
+    ASSERT_TRUE(guard_res.has_value());
+    auto& guard = *guard_res;
+
+    ACL empty_acl{};
+    ASSERT_TRUE(::InitializeAcl(&empty_acl, sizeof(empty_acl), ACL_REVISION));
+    ASSERT_EQ(::SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(file_path.c_str()),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, &empty_acl, nullptr), ERROR_SUCCESS);
+
+    // 1. Direct open without backup semantics is always denied by the empty DACL
+    HANDLE h_raw = ::CreateFileW(
+        file_path.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    EXPECT_EQ(h_raw, INVALID_HANDLE_VALUE);
+    EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
+
+    // 2. Open without backup semantics for GENERIC_READ is also denied
+    HANDLE h_read = ::CreateFileW(
+        file_path.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        0,
+        nullptr);
+    EXPECT_EQ(h_read, INVALID_HANDLE_VALUE);
+    EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
+
+    // 3. With token privileges disabled, read_file_metadata fails with PermissionDenied
+    {
+        ScopedDisableAllPrivileges no_priv;
+        ASSERT_TRUE(no_priv.is_isolated()) << no_priv.failure_reason();
+        const auto result = read_file_metadata(file_path, "priv_behavior.txt");
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
+        EXPECT_EQ(result.error().os_error, static_cast<std::uint32_t>(ERROR_ACCESS_DENIED));
+    }
+
+    // 4. If environment has SeBackupPrivilege enabled, read_file_metadata legitimately succeeds
+    const auto backup_enabled = is_privilege_enabled(L"SeBackupPrivilege");
+    ASSERT_TRUE(backup_enabled.has_value()) << backup_enabled.error();
+    if (*backup_enabled) {
+        const auto backup_result = read_file_metadata(file_path, "priv_behavior.txt");
+        ASSERT_TRUE(backup_result.has_value());
+        ASSERT_TRUE(backup_result->has_value());
+        EXPECT_EQ((**backup_result).size, 23ULL);
+    }
+
+    // 5. Restore original DACL and confirm full access is restored
+    EXPECT_EQ(guard.restore(), ERROR_SUCCESS);
+    EXPECT_TRUE(guard.restored);
+    const auto final_meta = read_file_metadata(file_path, "priv_behavior.txt");
+    ASSERT_TRUE(final_meta.has_value() && final_meta->has_value());
+    EXPECT_EQ((**final_meta).size, 23ULL);
+}
+
+// ============================================================================
+// 4. ScopedDisableAllPrivileges Invariant & Fault Injection Tests
+// ============================================================================
+
+PrivilegeWin32Api fake_privilege_api() {
+    PrivilegeWin32Api api;
+    api.open_thread_token = [](HANDLE, DWORD, BOOL, PHANDLE token) {
+        *token = reinterpret_cast<HANDLE>(0x1234);
+        return TRUE;
+    };
+    api.impersonate_self = [](SECURITY_IMPERSONATION_LEVEL) { return TRUE; };
+    api.revert_to_self = []() { return TRUE; };
+    api.adjust_token_privileges = [](HANDLE, BOOL disable_all, PTOKEN_PRIVILEGES state,
+                                    DWORD, PTOKEN_PRIVILEGES previous, PDWORD length) {
+        if (disable_all) {
+            previous->PrivilegeCount = 1;
+            previous->Privileges[0].Luid = {1, 0};
+            previous->Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            *length = sizeof(TOKEN_PRIVILEGES);
+        } else {
+            EXPECT_NE(state, nullptr);
+            EXPECT_EQ(state->PrivilegeCount, 1U);
+            EXPECT_EQ(state->Privileges[0].Attributes, SE_PRIVILEGE_ENABLED);
+        }
+        ::SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    };
+    api.get_token_information = [](HANDLE, TOKEN_INFORMATION_CLASS, LPVOID info, DWORD, PDWORD length) {
+        *length = sizeof(TOKEN_PRIVILEGES);
+        if (info) {
+            static_cast<PTOKEN_PRIVILEGES>(info)->PrivilegeCount = 0;
+        }
+        ::SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    };
+    api.close_handle = [](HANDLE) { return TRUE; };
+    return api;
+}
+
+TEST(ScopedDisableAllPrivilegesTest, RestorationFailureRetainsStateForRetry) {
+    auto api = fake_privilege_api();
+    const auto adjust = api.adjust_token_privileges;
+    bool fail_restore = true;
+    int restores = 0;
+    int closes = 0;
+    api.adjust_token_privileges = [&](HANDLE token, BOOL disable_all, PTOKEN_PRIVILEGES state,
+                                      DWORD size, PTOKEN_PRIVILEGES previous, PDWORD length) {
+        if (!disable_all) {
+            ++restores;
+            if (fail_restore) {
+                ::SetLastError(ERROR_NOT_ALL_ASSIGNED);
+                return FALSE;
+            }
+        }
+        return adjust(token, disable_all, state, size, previous, length);
+    };
+    api.close_handle = [&](HANDLE) { ++closes; return TRUE; };
+    ScopedDisableAllPrivileges guard(api);
+    ASSERT_TRUE(guard.is_isolated());
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        EXPECT_EQ(guard.restore(), ERROR_NOT_ALL_ASSIGNED);
+        EXPECT_FALSE(guard.is_restored());
+        EXPECT_FALSE(guard.is_isolated());
+        EXPECT_EQ(closes, 0);
+    }
+    EXPECT_EQ(restores, 2);
+    fail_restore = false;
+    EXPECT_EQ(guard.restore(), ERROR_SUCCESS);
+    EXPECT_TRUE(guard.is_restored());
+    EXPECT_EQ(restores, 3);
+    EXPECT_EQ(closes, 1);
+}
+
+TEST(ScopedDisableAllPrivilegesTest, ConstructionRollbackRetainsImpersonationAndBothErrors) {
+    for (int stage = 0; stage < 3; ++stage) {
+        SCOPED_TRACE(stage);
+        auto api = fake_privilege_api();
+        const auto open = api.open_thread_token;
+        int opens = 0;
+        api.open_thread_token = [&](HANDLE thread, DWORD access, BOOL as_self, PHANDLE token) {
+            if (++opens == 1 || stage == 0) {
+                ::SetLastError(opens == 1 ? ERROR_NO_TOKEN : ERROR_ACCESS_DENIED);
+                return FALSE;
+            }
+            return open(thread, access, as_self, token);
+        };
+        if (stage == 1) {
+            api.adjust_token_privileges = [](HANDLE, BOOL, PTOKEN_PRIVILEGES, DWORD, PTOKEN_PRIVILEGES, PDWORD) {
+                ::SetLastError(ERROR_ACCESS_DENIED);
+                return FALSE;
+            };
+        } else if (stage == 2) {
+            api.get_token_information = [](HANDLE, TOKEN_INFORMATION_CLASS, LPVOID, DWORD, PDWORD) {
+                ::SetLastError(ERROR_ACCESS_DENIED);
+                return FALSE;
+            };
+        }
+        bool fail_revert = true;
+        int reverts = 0;
+        api.revert_to_self = [&]() {
+            ++reverts;
+            ::SetLastError(fail_revert ? ERROR_GEN_FAILURE : ERROR_SUCCESS);
+            return fail_revert ? FALSE : TRUE;
+        };
+        ScopedDisableAllPrivileges guard(api);
+        EXPECT_FALSE(guard.is_isolated());
+        EXPECT_FALSE(guard.is_restored());
+        EXPECT_EQ(guard.last_error(), ERROR_ACCESS_DENIED);
+        EXPECT_NE(guard.failure_reason().find("5"), std::string::npos);
+        EXPECT_NE(guard.failure_reason().find("RevertToSelf"), std::string::npos);
+        EXPECT_NE(guard.failure_reason().find("31"), std::string::npos);
+        EXPECT_EQ(guard.restore(), ERROR_GEN_FAILURE);
+        EXPECT_FALSE(guard.is_restored());
+        EXPECT_EQ(reverts, 2);
+        fail_revert = false;
+        EXPECT_EQ(guard.restore(), ERROR_SUCCESS);
+        EXPECT_TRUE(guard.is_restored());
+        EXPECT_EQ(reverts, 3);
+    }
+}
+
+TEST(ScopedDisableAllPrivilegesTest, NormalRevertFailureCannotBecomeNoWorkSuccess) {
+    auto api = fake_privilege_api();
+    const auto open = api.open_thread_token;
+    int opens = 0;
+    api.open_thread_token = [&](HANDLE thread, DWORD access, BOOL as_self, PHANDLE token) {
+        if (++opens == 1) { ::SetLastError(ERROR_NO_TOKEN); return FALSE; }
+        return open(thread, access, as_self, token);
+    };
+    bool fail_revert = true;
+    int reverts = 0;
+    int closes = 0;
+    api.revert_to_self = [&]() {
+        ++reverts;
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return fail_revert ? FALSE : TRUE;
+    };
+    api.close_handle = [&](HANDLE) { ++closes; return TRUE; };
+    {
+        ScopedDisableAllPrivileges guard(api);
+        ASSERT_TRUE(guard.is_isolated());
+        EXPECT_EQ(guard.restore(), ERROR_ACCESS_DENIED);
+        EXPECT_FALSE(guard.is_isolated());
+        EXPECT_EQ(guard.restore(), ERROR_ACCESS_DENIED);
+        EXPECT_FALSE(guard.is_restored());
+        EXPECT_EQ(reverts, 2);
+        fail_revert = false;
+        EXPECT_EQ(guard.restore(), ERROR_SUCCESS);
+        EXPECT_TRUE(guard.is_restored());
+        EXPECT_EQ(guard.restore(), ERROR_SUCCESS);
+    }
+    EXPECT_EQ(reverts, 3);
+    EXPECT_EQ(closes, 1);
+}
+
+TEST(ScopedDisableAllPrivilegesTest, CloseFailureRetainsOwnershipWithoutRepeatingPrivilegeRestore) {
+    auto api = fake_privilege_api();
+    const auto adjust = api.adjust_token_privileges;
+    int restores = 0;
+    api.adjust_token_privileges = [&](HANDLE token, BOOL disable_all, PTOKEN_PRIVILEGES state,
+                                      DWORD size, PTOKEN_PRIVILEGES previous, PDWORD length) {
+        if (!disable_all) ++restores;
+        return adjust(token, disable_all, state, size, previous, length);
+    };
+    bool fail_close = true;
+    int closes = 0;
+    api.close_handle = [&](HANDLE) {
+        ++closes;
+        ::SetLastError(ERROR_GEN_FAILURE);
+        return fail_close ? FALSE : TRUE;
+    };
+    {
+        ScopedDisableAllPrivileges guard(api);
+        ASSERT_TRUE(guard.is_isolated());
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            EXPECT_EQ(guard.restore(), ERROR_GEN_FAILURE);
+            EXPECT_FALSE(guard.is_restored());
+            EXPECT_FALSE(guard.is_isolated());
+            EXPECT_NE(guard.failure_reason().find("CloseHandle"), std::string::npos);
+        }
+        EXPECT_EQ(restores, 1);
+        fail_close = false;
+        EXPECT_EQ(guard.restore(), ERROR_SUCCESS);
+        EXPECT_TRUE(guard.is_restored());
+    }
+    EXPECT_EQ(restores, 1);
+    EXPECT_EQ(closes, 3);
+}
+
+TEST(ScopedDisableAllPrivilegesTest, BufferRetryExhaustionHasExplicitErrorAndNoVerification) {
+    auto api = fake_privilege_api();
+    int adjusts = 0;
+    int queries = 0;
+    api.adjust_token_privileges = [&](HANDLE, BOOL, PTOKEN_PRIVILEGES, DWORD size, PTOKEN_PRIVILEGES, PDWORD length) {
+        ++adjusts;
+        *length = size + 256;
+        ::SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    };
+    api.get_token_information = [&](HANDLE, TOKEN_INFORMATION_CLASS, LPVOID, DWORD, PDWORD) {
+        ++queries;
+        return FALSE;
+    };
+    ScopedDisableAllPrivileges guard(api);
+    EXPECT_FALSE(guard.is_isolated());
+    EXPECT_EQ(guard.last_error(), ERROR_INSUFFICIENT_BUFFER);
+    EXPECT_NE(guard.failure_reason().find("AdjustTokenPrivileges"), std::string::npos);
+    EXPECT_EQ(adjusts, 3);
+    EXPECT_EQ(queries, 0);
+    EXPECT_EQ(guard.restore(), ERROR_SUCCESS);
+}
+
+TEST(ScopedDisableAllPrivilegesTest, VerificationAndPrivilegeRollbackErrorsAreBothPreserved) {
+    auto api = fake_privilege_api();
+    const auto adjust = api.adjust_token_privileges;
+    bool fail_restore = true;
+    api.adjust_token_privileges = [&](HANDLE token, BOOL disable_all, PTOKEN_PRIVILEGES state,
+                                      DWORD size, PTOKEN_PRIVILEGES previous, PDWORD length) {
+        if (!disable_all && fail_restore) {
+            ::SetLastError(ERROR_NOT_ALL_ASSIGNED);
+            return FALSE;
+        }
+        return adjust(token, disable_all, state, size, previous, length);
+    };
+    api.get_token_information = [](HANDLE, TOKEN_INFORMATION_CLASS, LPVOID, DWORD, PDWORD) {
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    };
+    ScopedDisableAllPrivileges guard(api);
+    EXPECT_FALSE(guard.is_isolated());
+    EXPECT_FALSE(guard.is_restored());
+    EXPECT_EQ(guard.last_error(), ERROR_ACCESS_DENIED);
+    EXPECT_NE(guard.failure_reason().find("SeBackupPrivilege"), std::string::npos);
+    EXPECT_NE(guard.failure_reason().find("restore privileges"), std::string::npos);
+    EXPECT_NE(guard.failure_reason().find("1300"), std::string::npos);
+    EXPECT_EQ(guard.restore(), ERROR_NOT_ALL_ASSIGNED);
+    fail_restore = false;
+    EXPECT_EQ(guard.restore(), ERROR_SUCCESS);
+    EXPECT_TRUE(guard.is_restored());
+}
+
+TEST(ScopedDisableAllPrivilegesTest, EitherPrivilegeQueryFailurePreventsIsolation) {
+    for (int failing_query = 1; failing_query <= 4; ++failing_query) {
+        SCOPED_TRACE(failing_query);
+        auto api = fake_privilege_api();
+        const auto query = api.get_token_information;
+        int queries = 0;
+        api.get_token_information = [&](HANDLE token, TOKEN_INFORMATION_CLASS kind, LPVOID info, DWORD size, PDWORD length) {
+            if (++queries == failing_query) {
+                ::SetLastError(ERROR_ACCESS_DENIED);
+                return FALSE;
+            }
+            return query(token, kind, info, size, length);
+        };
+        ScopedDisableAllPrivileges guard(api);
+        EXPECT_FALSE(guard.is_isolated());
+        EXPECT_EQ(guard.last_error(), ERROR_ACCESS_DENIED);
+        EXPECT_NE(guard.failure_reason().find(failing_query <= 2 ? "SeBackupPrivilege" : "SeRestorePrivilege"), std::string::npos);
+        EXPECT_TRUE(guard.is_restored());
+    }
+}
+
+TEST(ScopedDisableAllPrivilegesTest, PartialAdjustmentRollsBackInsteadOfConfirmingIsolation) {
+    auto api = fake_privilege_api();
+    const auto adjust = api.adjust_token_privileges;
+    int restores = 0;
+    api.adjust_token_privileges = [&](HANDLE token, BOOL disable_all, PTOKEN_PRIVILEGES state,
+                                      DWORD size, PTOKEN_PRIVILEGES previous, PDWORD length) {
+        const BOOL result = adjust(token, disable_all, state, size, previous, length);
+        if (disable_all) ::SetLastError(ERROR_NOT_ALL_ASSIGNED);
+        else ++restores;
+        return result;
+    };
+    ScopedDisableAllPrivileges guard(api);
+    EXPECT_FALSE(guard.is_isolated());
+    EXPECT_EQ(guard.last_error(), ERROR_NOT_ALL_ASSIGNED);
+    EXPECT_EQ(restores, 1);
+    EXPECT_TRUE(guard.is_restored());
+}
+
+TEST(ScopedDisableAllPrivilegesTest, VerificationRejectsTruncatedTokenInformation) {
+    auto api = fake_privilege_api();
+    const auto query = api.get_token_information;
+    api.get_token_information = [query](HANDLE token, TOKEN_INFORMATION_CLASS kind, LPVOID info, DWORD size, PDWORD length) {
+        const BOOL result = query(token, kind, info, size, length);
+        if (info) *length = 0;
+        return result;
+    };
+    ScopedDisableAllPrivileges guard(api);
+    EXPECT_FALSE(guard.is_isolated());
+    EXPECT_EQ(guard.last_error(), ERROR_INVALID_DATA);
+    EXPECT_NE(guard.failure_reason().find("SeBackupPrivilege"), std::string::npos);
+    EXPECT_TRUE(guard.is_restored());
+}
+
+TEST(ScopedDisableAllPrivilegesTest, DestructorReportsUnrecoverableCleanupForEveryResource) {
+    for (int stage = 0; stage < 3; ++stage) {
+        SCOPED_TRACE(stage);
+        auto api = fake_privilege_api();
+        const auto open = api.open_thread_token;
+        int opens = 0;
+        if (stage == 1) {
+            api.open_thread_token = [&](HANDLE thread, DWORD access, BOOL as_self, PHANDLE token) {
+                if (++opens == 1) { ::SetLastError(ERROR_NO_TOKEN); return FALSE; }
+                return open(thread, access, as_self, token);
+            };
+            api.revert_to_self = []() { ::SetLastError(ERROR_ACCESS_DENIED); return FALSE; };
+        } else if (stage == 2) {
+            api.close_handle = [](HANDLE) { ::SetLastError(ERROR_ACCESS_DENIED); return FALSE; };
+        } else {
+            const auto adjust = api.adjust_token_privileges;
+            api.adjust_token_privileges = [adjust](HANDLE token, BOOL disable_all, PTOKEN_PRIVILEGES state,
+                                                  DWORD size, PTOKEN_PRIVILEGES previous, PDWORD length) {
+                if (!disable_all) { ::SetLastError(ERROR_ACCESS_DENIED); return FALSE; }
+                return adjust(token, disable_all, state, size, previous, length);
+            };
+        }
+        testing::TestPartResultArray failures;
+        {
+            testing::ScopedFakeTestPartResultReporter reporter(
+                testing::ScopedFakeTestPartResultReporter::INTERCEPT_ONLY_CURRENT_THREAD, &failures);
+            ScopedDisableAllPrivileges guard(api);
+            guard.restore();
+        }
+        EXPECT_EQ(failures.size(), 1);
+        if (failures.size() != 1) continue;
+        EXPECT_TRUE(failures.GetTestPartResult(0).nonfatally_failed());
+        EXPECT_NE(std::string(failures.GetTestPartResult(0).message()).find(
+                      stage == 0 ? "restore privileges" : stage == 1 ? "RevertToSelf" : "CloseHandle"),
+                  std::string::npos);
+    }
+}
+
+TEST(ScopedDisableAllPrivilegesTest, RestoresExistingRealThreadTokenIdentityAndPrivileges) {
+    // A worker thread releases its real impersonation context even after a fatal assertion.
+    std::jthread worker([]() {
+        ASSERT_TRUE(::ImpersonateSelf(SecurityImpersonation));
+        auto snapshot = []() -> std::expected<std::pair<TOKEN_STATISTICS, std::vector<BYTE>>, DWORD> {
+            HANDLE token = NULL;
+            if (!::OpenThreadToken(::GetCurrentThread(), TOKEN_QUERY, TRUE, &token)) {
+                return std::unexpected(::GetLastError());
+            }
+            TOKEN_STATISTICS stats{};
+            DWORD length = 0;
+            DWORD error = ERROR_SUCCESS;
+            if (!::GetTokenInformation(token, TokenStatistics, &stats, sizeof(stats), &length)) {
+                error = ::GetLastError();
+            }
+            if (!::GetTokenInformation(token, TokenPrivileges, nullptr, 0, &length) &&
+                ::GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+                error = ::GetLastError();
+            }
+            std::vector<BYTE> privileges(length);
+            if (!::GetTokenInformation(token, TokenPrivileges, privileges.data(), length, &length)) {
+                error = ::GetLastError();
+            }
+            if (!::CloseHandle(token)) error = ::GetLastError();
+            if (error != ERROR_SUCCESS) return std::unexpected(error);
+            return std::pair{stats, std::move(privileges)};
+        };
+        const auto before = snapshot();
+        ASSERT_TRUE(before.has_value());
+        {
+            ScopedDisableAllPrivileges guard;
+            ASSERT_TRUE(guard.is_isolated()) << guard.failure_reason();
+            ASSERT_EQ(guard.restore(), ERROR_SUCCESS) << guard.failure_reason();
+        }
+        const auto after = snapshot();
+        ASSERT_TRUE(after.has_value());
+        EXPECT_EQ(before->first.TokenId.LowPart, after->first.TokenId.LowPart);
+        EXPECT_EQ(before->first.TokenId.HighPart, after->first.TokenId.HighPart);
+        EXPECT_EQ(before->second, after->second);
+        EXPECT_TRUE(::RevertToSelf());
+    });
+}
+
+// 1. Falha ao adquirir um token obrigatório (erro inesperado != ERROR_NO_TOKEN)
+TEST(ScopedDisableAllPrivilegesTest, AcquisitionFailureFailsClosed) {
+    PrivilegeWin32Api api;
+    api.open_thread_token = [](HANDLE, DWORD, BOOL, PHANDLE) {
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    };
+    bool impersonate_called = false;
+    api.impersonate_self = [&](SECURITY_IMPERSONATION_LEVEL) {
+        impersonate_called = true;
+        return TRUE;
+    };
+
+    ScopedDisableAllPrivileges guard(api);
+    EXPECT_FALSE(guard.is_isolated());
+    EXPECT_EQ(guard.last_error(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
+    EXPECT_FALSE(impersonate_called) << "Must not proceed to impersonation on unexpected open failure";
+    EXPECT_NE(guard.failure_reason().find("OpenThreadToken"), std::string::npos);
+}
+
+// 2. ERROR_NO_TOKEN quando não existe token de impersonação aciona ImpersonateSelf legitimamente
+TEST(ScopedDisableAllPrivilegesTest, ErrorNoTokenTriggersImpersonation) {
+    PrivilegeWin32Api api;
+    bool impersonate_called = false;
+    api.open_thread_token = [](HANDLE, DWORD, BOOL, PHANDLE) {
+        ::SetLastError(ERROR_NO_TOKEN);
+        return FALSE;
+    };
+    api.impersonate_self = [&](SECURITY_IMPERSONATION_LEVEL level) {
+        EXPECT_EQ(level, SecurityImpersonation);
+        impersonate_called = true;
+        return TRUE;
+    };
+    api.revert_to_self = []() { return TRUE; };
+
+    ScopedDisableAllPrivileges guard(api);
+    EXPECT_TRUE(impersonate_called) << "ERROR_NO_TOKEN must legitimately trigger ImpersonateSelf";
+}
+
+// 3. Falha de GetTokenInformation durante verificação fail-closed
+TEST(ScopedDisableAllPrivilegesTest, GetTokenInformationFailureFailsClosed) {
+    PrivilegeWin32Api api;
+    HANDLE fake_token = reinterpret_cast<HANDLE>(0x1234);
+    api.open_thread_token = [fake_token](HANDLE, DWORD, BOOL, PHANDLE token) {
+        *token = fake_token;
+        return TRUE;
+    };
+    api.adjust_token_privileges = [](HANDLE, BOOL, PTOKEN_PRIVILEGES, DWORD, PTOKEN_PRIVILEGES, PDWORD) {
+        ::SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    };
+    api.get_token_information = [](HANDLE, TOKEN_INFORMATION_CLASS, LPVOID, DWORD, PDWORD) {
+        ::SetLastError(ERROR_GEN_FAILURE);
+        return FALSE;
+    };
+    api.close_handle = [](HANDLE) { return TRUE; };
+
+    ScopedDisableAllPrivileges guard(api);
+    EXPECT_FALSE(guard.is_isolated());
+    EXPECT_EQ(guard.last_error(), static_cast<DWORD>(ERROR_GEN_FAILURE));
+}
+
+// 4. Buffer insuficiente para capturar o estado original redimensiona dinamicamente
+TEST(ScopedDisableAllPrivilegesTest, DynamicBufferResizesOnInsufficientBuffer) {
+    PrivilegeWin32Api api;
+    HANDLE fake_token = reinterpret_cast<HANDLE>(0x1234);
+    api.open_thread_token = [fake_token](HANDLE, DWORD, BOOL, PHANDLE token) {
+        *token = fake_token;
+        return TRUE;
+    };
+    int adjust_calls = 0;
+    api.adjust_token_privileges = [&](HANDLE, BOOL disable_all, PTOKEN_PRIVILEGES, DWORD buffer_len, PTOKEN_PRIVILEGES, PDWORD ret_len) {
+        adjust_calls++;
+        if (disable_all) {
+            if (adjust_calls == 1) {
+                if (ret_len) *ret_len = 1024;
+                ::SetLastError(ERROR_INSUFFICIENT_BUFFER);
+                return FALSE;
+            }
+            EXPECT_GE(buffer_len, 1024U);
+            if (ret_len) *ret_len = 1024;
+        }
+        ::SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    };
+    api.get_token_information = [](HANDLE, TOKEN_INFORMATION_CLASS, LPVOID, DWORD, PDWORD ret_len) {
+        if (ret_len) *ret_len = sizeof(TOKEN_PRIVILEGES);
+        ::SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    };
+    api.close_handle = [](HANDLE) { return TRUE; };
+
+    ScopedDisableAllPrivileges guard(api);
+    EXPECT_TRUE(guard.is_isolated());
+    EXPECT_GE(adjust_calls, 2) << "Must dynamically resize buffer and retry";
+}
+
+// 5. Falha de AdjustTokenPrivileges falha closed
+TEST(ScopedDisableAllPrivilegesTest, AdjustTokenPrivilegesFailureFailsClosed) {
+    PrivilegeWin32Api api;
+    HANDLE fake_token = reinterpret_cast<HANDLE>(0x1234);
+    api.open_thread_token = [fake_token](HANDLE, DWORD, BOOL, PHANDLE token) {
+        *token = fake_token;
+        return TRUE;
+    };
+    api.adjust_token_privileges = [](HANDLE, BOOL, PTOKEN_PRIVILEGES, DWORD, PTOKEN_PRIVILEGES, PDWORD) {
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    };
+    api.close_handle = [](HANDLE) { return TRUE; };
+
+    ScopedDisableAllPrivileges guard(api);
+    EXPECT_FALSE(guard.is_isolated());
+    EXPECT_EQ(guard.last_error(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
+    EXPECT_NE(guard.failure_reason().find("AdjustTokenPrivileges"), std::string::npos);
+}
+
+// 6. Falha depois de uma primeira modificação bem-sucedida aciona rollback imediato
+TEST(ScopedDisableAllPrivilegesTest, IntermediateFailureTriggersRollback) {
+    PrivilegeWin32Api api;
+    bool revert_called = false;
+    int open_calls = 0;
+    api.open_thread_token = [&](HANDLE, DWORD, BOOL, PHANDLE) {
+        open_calls++;
+        if (open_calls == 1) {
+            ::SetLastError(ERROR_NO_TOKEN);
+            return FALSE;
+        }
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    };
+    api.impersonate_self = [](SECURITY_IMPERSONATION_LEVEL) {
+        return TRUE;
+    };
+    api.revert_to_self = [&]() {
+        revert_called = true;
+        return TRUE;
+    };
+
+    ScopedDisableAllPrivileges guard(api);
+    EXPECT_FALSE(guard.is_isolated());
+    EXPECT_TRUE(revert_called) << "Must immediately rollback (RevertToSelf) on intermediate failure";
+}
+
+// 7. Falha ao restaurar privilégios reporta erro
+TEST(ScopedDisableAllPrivilegesTest, RestorationFailureReportsError) {
+    PrivilegeWin32Api api;
+    HANDLE fake_token = reinterpret_cast<HANDLE>(0x1234);
+    api.open_thread_token = [fake_token](HANDLE, DWORD, BOOL, PHANDLE token) {
+        *token = fake_token;
+        return TRUE;
+    };
+    bool fail_restore = false;
+    api.adjust_token_privileges = [&fail_restore](HANDLE, BOOL, PTOKEN_PRIVILEGES, DWORD, PTOKEN_PRIVILEGES, PDWORD ret_len) {
+        if (fail_restore) {
+            ::SetLastError(ERROR_NOT_ALL_ASSIGNED);
+            return FALSE;
+        }
+        if (ret_len) *ret_len = sizeof(TOKEN_PRIVILEGES);
+        ::SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    };
+    api.get_token_information = [](HANDLE, TOKEN_INFORMATION_CLASS, LPVOID, DWORD, PDWORD ret_len) {
+        if (ret_len) *ret_len = sizeof(TOKEN_PRIVILEGES);
+        ::SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    };
+    api.close_handle = [](HANDLE) { return TRUE; };
+
+    ScopedDisableAllPrivileges guard(api);
+    EXPECT_TRUE(guard.is_isolated());
+
+    // Invert adjust to fail on restoration
+    fail_restore = true;
+
+    const DWORD res = guard.restore();
+    EXPECT_NE(res, static_cast<DWORD>(ERROR_SUCCESS));
+    EXPECT_FALSE(guard.is_restored());
+
+    fail_restore = false;
+    EXPECT_EQ(guard.restore(), ERROR_SUCCESS);
+}
+
+// 8. Tentativa de restauração após erro intermediário não executa restauração indevida
+TEST(ScopedDisableAllPrivilegesTest, NoRestorationAttemptAfterEarlyFailure) {
+    PrivilegeWin32Api api;
+    api.open_thread_token = [](HANDLE, DWORD, BOOL, PHANDLE) {
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    };
+    int revert_calls = 0;
+    api.revert_to_self = [&]() {
+        revert_calls++;
+        return TRUE;
+    };
+
+    ScopedDisableAllPrivileges guard(api);
+    EXPECT_FALSE(guard.is_isolated());
+
+    const DWORD res = guard.restore();
+    EXPECT_EQ(res, static_cast<DWORD>(ERROR_SUCCESS));
+    EXPECT_EQ(revert_calls, 0);
+}
+
+// 9. Ausência de dupla liberação ou restauração indevida
+TEST(ScopedDisableAllPrivilegesTest, ExplicitRestorePreventsDoubleCleanup) {
+    PrivilegeWin32Api api;
+    HANDLE fake_token = reinterpret_cast<HANDLE>(0x1234);
+    int open_calls = 0;
+    api.open_thread_token = [&](HANDLE, DWORD, BOOL, PHANDLE token) {
+        open_calls++;
+        if (open_calls == 1) {
+            ::SetLastError(ERROR_NO_TOKEN);
+            return FALSE;
+        }
+        *token = fake_token;
+        return TRUE;
+    };
+    api.impersonate_self = [](SECURITY_IMPERSONATION_LEVEL) {
+        return TRUE;
+    };
+    api.adjust_token_privileges = [](HANDLE, BOOL, PTOKEN_PRIVILEGES, DWORD, PTOKEN_PRIVILEGES, PDWORD ret_len) {
+        if (ret_len) *ret_len = sizeof(TOKEN_PRIVILEGES);
+        ::SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    };
+    api.get_token_information = [](HANDLE, TOKEN_INFORMATION_CLASS, LPVOID, DWORD, PDWORD ret_len) {
+        if (ret_len) *ret_len = sizeof(TOKEN_PRIVILEGES);
+        ::SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    };
+    int close_calls = 0;
+    api.close_handle = [&](HANDLE) {
+        close_calls++;
+        return TRUE;
+    };
+    int revert_calls = 0;
+    api.revert_to_self = [&]() {
+        revert_calls++;
+        return TRUE;
+    };
+
+    {
+        ScopedDisableAllPrivileges guard(api);
+        EXPECT_TRUE(guard.is_isolated());
+        EXPECT_EQ(guard.restore(), ERROR_SUCCESS);
+        EXPECT_TRUE(guard.is_restored());
+        EXPECT_EQ(close_calls, 1);
+        EXPECT_EQ(revert_calls, 1);
+    }
+    EXPECT_EQ(close_calls, 1);
+    EXPECT_EQ(revert_calls, 1);
+}
+
+// 10. Estado original preservado após execução normal
+TEST(ScopedDisableAllPrivilegesTest, PreservesOriginalStateAcrossNormalExecution) {
+    HANDLE initial_thread_token = NULL;
+    const BOOL had_thread_token = ::OpenThreadToken(
+        ::GetCurrentThread(), TOKEN_QUERY, TRUE, &initial_thread_token);
+    if (initial_thread_token != NULL) {
+        EXPECT_TRUE(::CloseHandle(initial_thread_token));
+    }
+
+    {
+        ScopedDisableAllPrivileges guard;
+        ASSERT_TRUE(guard.is_isolated()) << guard.failure_reason();
+
+        const auto backup = is_privilege_enabled(L"SeBackupPrivilege");
+        const auto restore = is_privilege_enabled(L"SeRestorePrivilege");
+        ASSERT_TRUE(backup.has_value()) << backup.error();
+        ASSERT_TRUE(restore.has_value()) << restore.error();
+        EXPECT_FALSE(*backup);
+        EXPECT_FALSE(*restore);
+    }
+
+    HANDLE after_thread_token = NULL;
+    const BOOL has_thread_token = ::OpenThreadToken(
+        ::GetCurrentThread(), TOKEN_QUERY, TRUE, &after_thread_token);
+    if (after_thread_token != NULL) {
+        EXPECT_TRUE(::CloseHandle(after_thread_token));
+    }
+    EXPECT_EQ(has_thread_token, had_thread_token);
 }
 #endif // defined(_WIN32)
 
