@@ -773,11 +773,13 @@ bool is_dacl_protected(const std::filesystem::path& path) {
     return (ok != FALSE) && ((control & SE_DACL_PROTECTED) != 0);
 }
 
-// Queries whether a Win32 privilege is currently enabled in the process token
+// Queries whether a Win32 privilege is currently enabled in thread or process token
 bool is_privilege_enabled(LPCWSTR privilege_name) {
     HANDLE token = NULL;
-    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) {
-        return false;
+    if (!::OpenThreadToken(::GetCurrentThread(), TOKEN_QUERY, TRUE, &token)) {
+        if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) {
+            return false;
+        }
     }
     LUID luid;
     if (!::LookupPrivilegeValueW(nullptr, privilege_name, &luid)) {
@@ -786,7 +788,7 @@ bool is_privilege_enabled(LPCWSTR privilege_name) {
     }
     DWORD length = 0;
     ::GetTokenInformation(token, TokenPrivileges, nullptr, 0, &length);
-    if (::GetLastError() != ERROR_INSUFFICIENT_BUFFER || length == 0) {
+    if (length == 0) {
         ::CloseHandle(token);
         return false;
     }
@@ -806,81 +808,64 @@ bool is_privilege_enabled(LPCWSTR privilege_name) {
     return false;
 }
 
-// RAII guard ensuring a Win32 privilege (such as SeBackupPrivilege) is temporarily disabled
-// during access control tests so DACLs are strictly enforced even in elevated environments
-// (e.g. MSYS2 bash under runneradmin), and restored upon scope exit.
-class ScopedPrivilegeDisable {
+// RAII guard ensuring all Win32 privileges (such as SeBackupPrivilege and SeRestorePrivilege)
+// are temporarily disabled during access control tests so DACLs are strictly enforced even in
+// elevated environments (e.g. MSYS2 bash under runneradmin), and restored upon scope exit.
+class ScopedDisableAllPrivileges {
 public:
-    explicit ScopedPrivilegeDisable(LPCWSTR privilege_name)
-        : privilege_name_(privilege_name) {
-        HANDLE token = NULL;
-        if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
-            return;
+    ScopedDisableAllPrivileges() {
+        HANDLE thread_token = NULL;
+        if (::OpenThreadToken(::GetCurrentThread(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, TRUE, &thread_token)) {
+            thread_token_ = thread_token;
+            disable_token(thread_token_, thread_prev_);
         }
-        LUID luid;
-        if (!::LookupPrivilegeValueW(nullptr, privilege_name, &luid)) {
-            ::CloseHandle(token);
-            return;
+        HANDLE proc_token = NULL;
+        if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &proc_token)) {
+            proc_token_ = proc_token;
+            disable_token(proc_token_, proc_prev_);
         }
-        DWORD length = 0;
-        ::GetTokenInformation(token, TokenPrivileges, nullptr, 0, &length);
-        if (::GetLastError() == ERROR_INSUFFICIENT_BUFFER && length > 0) {
-            std::vector<BYTE> buffer(length);
-            if (::GetTokenInformation(token, TokenPrivileges, buffer.data(), length, &length)) {
-                const auto* privs = reinterpret_cast<const TOKEN_PRIVILEGES*>(buffer.data());
-                for (DWORD i = 0; i < privs->PrivilegeCount; ++i) {
-                    if (privs->Privileges[i].Luid.LowPart == luid.LowPart &&
-                        privs->Privileges[i].Luid.HighPart == luid.HighPart) {
-                        if ((privs->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED) != 0) {
-                            was_enabled_ = true;
-                            TOKEN_PRIVILEGES tp{};
-                            tp.PrivilegeCount = 1;
-                            tp.Privileges[0].Luid = luid;
-                            tp.Privileges[0].Attributes = 0; // Disable
-                            if (::AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp), nullptr, nullptr) &&
-                                ::GetLastError() == ERROR_SUCCESS) {
-                                adjusted_ = true;
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        ::CloseHandle(token);
     }
 
-    ~ScopedPrivilegeDisable() {
-        if (!adjusted_ || !was_enabled_) {
-            return;
+    ~ScopedDisableAllPrivileges() {
+        restore_token(thread_token_, thread_prev_);
+        restore_token(proc_token_, proc_prev_);
+        if (thread_token_ != NULL) {
+            ::CloseHandle(thread_token_);
         }
-        HANDLE token = NULL;
-        if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
-            return;
+        if (proc_token_ != NULL) {
+            ::CloseHandle(proc_token_);
         }
-        LUID luid;
-        if (::LookupPrivilegeValueW(nullptr, privilege_name_, &luid)) {
-            TOKEN_PRIVILEGES tp{};
-            tp.PrivilegeCount = 1;
-            tp.Privileges[0].Luid = luid;
-            tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-            ::AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp), nullptr, nullptr);
-        }
-        ::CloseHandle(token);
     }
 
-    ScopedPrivilegeDisable(const ScopedPrivilegeDisable&) = delete;
-    ScopedPrivilegeDisable& operator=(const ScopedPrivilegeDisable&) = delete;
-    ScopedPrivilegeDisable(ScopedPrivilegeDisable&&) = delete;
-    ScopedPrivilegeDisable& operator=(ScopedPrivilegeDisable&&) = delete;
-
-    bool was_enabled() const noexcept { return was_enabled_; }
-    bool adjusted() const noexcept { return adjusted_; }
+    ScopedDisableAllPrivileges(const ScopedDisableAllPrivileges&) = delete;
+    ScopedDisableAllPrivileges& operator=(const ScopedDisableAllPrivileges&) = delete;
+    ScopedDisableAllPrivileges(ScopedDisableAllPrivileges&&) = delete;
+    ScopedDisableAllPrivileges& operator=(ScopedDisableAllPrivileges&&) = delete;
 
 private:
-    LPCWSTR privilege_name_;
-    bool was_enabled_{false};
-    bool adjusted_{false};
+    static void disable_token(HANDLE token, std::vector<BYTE>& prev) {
+        prev.resize(4096);
+        DWORD prev_len = static_cast<DWORD>(prev.size());
+        if (::AdjustTokenPrivileges(token, TRUE, nullptr, prev_len,
+                                    reinterpret_cast<PTOKEN_PRIVILEGES>(prev.data()), &prev_len)) {
+            prev.resize(prev_len);
+        } else {
+            prev.clear();
+        }
+    }
+
+    static void restore_token(HANDLE token, const std::vector<BYTE>& prev) {
+        if (token != NULL && !prev.empty()) {
+            ::AdjustTokenPrivileges(token, FALSE,
+                                    reinterpret_cast<PTOKEN_PRIVILEGES>(const_cast<BYTE*>(prev.data())),
+                                    0, nullptr, nullptr);
+        }
+    }
+
+    HANDLE thread_token_{NULL};
+    HANDLE proc_token_{NULL};
+    std::vector<BYTE> thread_prev_;
+    std::vector<BYTE> proc_prev_;
 };
 
 // RAII guard ensuring original DACL restoration even if an assertion fails
@@ -1030,9 +1015,9 @@ TEST(FileMetadataWin32NativeTest, AccessDeniedDetectedViaDacl) {
     EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
 
     // 3. Confirm reading metadata fails with PermissionDenied / ERROR_ACCESS_DENIED
-    // when backup privilege is disabled (ensures deterministic testing across all environments)
+    // when token privileges are disabled (ensures deterministic testing across all environments)
     {
-        ScopedPrivilegeDisable no_backup(L"SeBackupPrivilege");
+        ScopedDisableAllPrivileges no_priv;
         const auto result = read_file_metadata(file_path, "denied.txt");
         ASSERT_FALSE(result.has_value());
         EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
@@ -1108,9 +1093,9 @@ TEST(FileMetadataWin32NativeTest, AccessDeniedDetectedViaProtectedDacl) {
     EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
 
     // 3. Confirm reading metadata fails with PermissionDenied
-    // when backup privilege is disabled (ensures deterministic testing across all environments)
+    // when token privileges are disabled (ensures deterministic testing across all environments)
     {
-        ScopedPrivilegeDisable no_backup(L"SeBackupPrivilege");
+        ScopedDisableAllPrivileges no_priv;
         const auto result = read_file_metadata(file_path, "denied_prot.txt");
         ASSERT_FALSE(result.has_value());
         EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
@@ -1185,7 +1170,7 @@ TEST(FileMetadataWin32NativeTest, DaclRestoreGuardMoveConstructorTransfersOwners
     EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
 
     {
-        ScopedPrivilegeDisable no_backup(L"SeBackupPrivilege");
+        ScopedDisableAllPrivileges no_priv;
         EXPECT_FALSE(read_file_metadata(file_path, "move_transfer.txt").has_value());
     }
 
@@ -1243,7 +1228,7 @@ TEST(FileMetadataWin32NativeTest, DaclRestoreGuardDestructorRestoresOnScopeExit)
         EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
 
         {
-            ScopedPrivilegeDisable no_backup(L"SeBackupPrivilege");
+            ScopedDisableAllPrivileges no_priv;
             EXPECT_FALSE(read_file_metadata(file_path, "scope_exit.txt").has_value());
         }
         // Do NOT call restore() explicitly; let destructor run
@@ -1318,9 +1303,9 @@ TEST(FileMetadataWin32NativeTest, RestrictiveDaclAccessBehaviorWithAndWithoutBac
     EXPECT_EQ(h_read, INVALID_HANDLE_VALUE);
     EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
 
-    // 3. With SeBackupPrivilege disabled, read_file_metadata fails with PermissionDenied
+    // 3. With token privileges disabled, read_file_metadata fails with PermissionDenied
     {
-        ScopedPrivilegeDisable no_backup(L"SeBackupPrivilege");
+        ScopedDisableAllPrivileges no_priv;
         const auto result = read_file_metadata(file_path, "priv_behavior.txt");
         ASSERT_FALSE(result.has_value());
         EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
