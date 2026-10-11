@@ -40,10 +40,9 @@ void expect_written(const std::filesystem::path& path,
     if (!check_filesystem_readback) {
         return;
     }
-    std::error_code error;
-    const auto actual = std::filesystem::last_write_time(path, error);
-    ASSERT_FALSE(error);
-    EXPECT_EQ(actual, requested);
+    const auto actual = kasumi::platform::metadata::last_write_time(path);
+    ASSERT_TRUE(actual.has_value()) << actual.error();
+    EXPECT_EQ(*actual, requested);
 }
 
 TEST(PlatformMetadataTest, WritesRegularFileAndConfirmsIt) {
@@ -100,7 +99,7 @@ TEST(PlatformMetadataTest, ConfirmsSubsecondFiletimeRoundTrip) {
         kasumi::test::make_temp_workspace("platform-metadata-subsecond");
     const auto file = kasumi::test::workspace_path(workspace, "file.txt");
     kasumi::test::write_text(file, "content");
-    expect_written(file, subsecond_timestamp(), false);
+    expect_written(file, subsecond_timestamp(), true);
 }
 
 TEST(PlatformMetadataTest, ConvertsCanonicalNanosecondsAtFilesystemBoundary) {
@@ -174,7 +173,114 @@ TEST(PlatformMetadataTest, PreservesUnspecifiedNegativeAndChecksNativeRange) {
     }
 }
 
+TEST(PlatformMetadataTest, FilesystemEquivalentSafeAcrossFullInt64Domain) {
+    constexpr auto min_i64 = std::numeric_limits<std::int64_t>::min();
+    constexpr auto max_i64 = std::numeric_limits<std::int64_t>::max();
+
+    // Reflexivity
+    EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(min_i64, min_i64));
+    EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(max_i64, max_i64));
+    EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(0, 0));
+    EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(-1, -1));
+    EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(-100, -100));
+
+    // Symmetry
+    const std::vector<std::pair<std::int64_t, std::int64_t>> pairs = {
+        {min_i64, max_i64},
+        {0, 99},
+        {0, 100},
+        {-1, -99},
+        {-100, -1},
+        {-101, -100},
+        {-1, 0},
+        {min_i64, 0},
+        {max_i64, 0},
+    };
+    for (const auto& [a, b] : pairs) {
+        EXPECT_EQ(kasumi::platform::metadata::filesystem_equivalent(a, b),
+                  kasumi::platform::metadata::filesystem_equivalent(b, a))
+            << "symmetry broken for a=" << a << ", b=" << b;
+    }
+
+    // Extremes
+    EXPECT_FALSE(kasumi::platform::metadata::filesystem_equivalent(min_i64, max_i64));
+    EXPECT_FALSE(kasumi::platform::metadata::filesystem_equivalent(min_i64, 0));
+    EXPECT_FALSE(kasumi::platform::metadata::filesystem_equivalent(max_i64, 0));
+
 #if defined(_WIN32)
+    // 100ns tick quantum on Windows
+    EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(0, 99));
+    EXPECT_FALSE(kasumi::platform::metadata::filesystem_equivalent(0, 100));
+    EXPECT_FALSE(kasumi::platform::metadata::filesystem_equivalent(99, 100));
+
+    EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(-1, -99));
+    EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(-100, -1));
+    EXPECT_FALSE(kasumi::platform::metadata::filesystem_equivalent(-101, -100));
+    EXPECT_FALSE(kasumi::platform::metadata::filesystem_equivalent(-101, -1));
+    EXPECT_FALSE(kasumi::platform::metadata::filesystem_equivalent(-1, 0));
+#endif
+}
+
+#if defined(_WIN32)
+TEST(PlatformMetadataTest, WindowsFiletimeTicksBoundariesAndOverflow) {
+    constexpr std::uint64_t unix_epoch_ticks = 116444736000000000ULL;
+
+    // 1. Unix epoch (1970-01-01 00:00:00 UTC)
+    const auto unix_epoch_ft =
+        kasumi::platform::metadata::detail::from_windows_ticks(unix_epoch_ticks);
+    ASSERT_TRUE(unix_epoch_ft.has_value()) << unix_epoch_ft.error();
+    const auto epoch_ns = kasumi::platform::metadata::unix_nanoseconds(*unix_epoch_ft);
+    ASSERT_TRUE(epoch_ns.has_value());
+    EXPECT_EQ(*epoch_ns, 0);
+    const auto roundtrip_epoch_ticks =
+        kasumi::platform::metadata::detail::to_windows_ticks(*unix_epoch_ft);
+    ASSERT_TRUE(roundtrip_epoch_ticks.has_value());
+    EXPECT_EQ(*roundtrip_epoch_ticks, unix_epoch_ticks);
+
+    // 2. Timestamps before Unix epoch (e.g. 1969-12-31 23:59:59 UTC, 1s before)
+    const auto before_epoch_ticks = unix_epoch_ticks - 10000000ULL;
+    const auto before_epoch_ft =
+        kasumi::platform::metadata::detail::from_windows_ticks(before_epoch_ticks);
+    ASSERT_TRUE(before_epoch_ft.has_value()) << before_epoch_ft.error();
+    const auto before_epoch_ns =
+        kasumi::platform::metadata::unix_nanoseconds(*before_epoch_ft);
+    ASSERT_TRUE(before_epoch_ns.has_value());
+    EXPECT_EQ(*before_epoch_ns, -1000000000LL);
+    const auto roundtrip_before_ticks =
+        kasumi::platform::metadata::detail::to_windows_ticks(*before_epoch_ft);
+    ASSERT_TRUE(roundtrip_before_ticks.has_value());
+    EXPECT_EQ(*roundtrip_before_ticks, before_epoch_ticks);
+
+    // 3. Current timestamp with 100ns fraction
+    const auto subsecond_ticks = unix_epoch_ticks + 12345678901234ULL;
+    const auto subsecond_ft =
+        kasumi::platform::metadata::detail::from_windows_ticks(subsecond_ticks);
+    ASSERT_TRUE(subsecond_ft.has_value()) << subsecond_ft.error();
+    const auto roundtrip_subsecond_ticks =
+        kasumi::platform::metadata::detail::to_windows_ticks(*subsecond_ft);
+    ASSERT_TRUE(roundtrip_subsecond_ticks.has_value());
+    EXPECT_EQ(*roundtrip_subsecond_ticks, subsecond_ticks);
+
+    // 4. Extreme values: UINT64_MAX must fail explicitly
+    const auto max_u64_ft =
+        kasumi::platform::metadata::detail::from_windows_ticks(
+            std::numeric_limits<std::uint64_t>::max());
+    EXPECT_FALSE(max_u64_ft.has_value());
+
+    // 5. Value with bit 63 set (exceeds signed int64_t max) must fail
+    const auto high_bit_ticks = 0x8000000000000000ULL;
+    const auto high_bit_ft =
+        kasumi::platform::metadata::detail::from_windows_ticks(high_bit_ticks);
+    EXPECT_FALSE(high_bit_ft.has_value());
+
+    // 6. Zero ticks (Jan 1, 1601 - outside representable nanoseconds)
+    const auto zero_ft = kasumi::platform::metadata::detail::from_windows_ticks(0);
+#if !defined(_MSC_VER)
+    // In libstdc++, file_time_type has 1ns resolution; 1601 exceeds int64 nanoseconds
+    EXPECT_FALSE(zero_ft.has_value());
+#endif
+}
+
 TEST(PlatformMetadataTest, WindowsRoundTripsFilesAndDirectories) {
     auto workspace =
         kasumi::test::make_temp_workspace("platform-metadata-windows-range");

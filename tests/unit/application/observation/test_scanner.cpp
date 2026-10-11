@@ -148,8 +148,9 @@ TEST(ScannerTest, StoresCanonicalUnixNanosecondsAtNativeResolution) {
     const auto scanned =
         kasumi::application::observation::scanner::scan_result(root);
     ASSERT_TRUE(scanned.has_value());
-    const auto native = std::filesystem::last_write_time(file);
-    const auto expected = kasumi::platform::metadata::unix_nanoseconds(native);
+    const auto native = kasumi::platform::metadata::last_write_time(file);
+    ASSERT_TRUE(native.has_value());
+    const auto expected = kasumi::platform::metadata::unix_nanoseconds(*native);
     ASSERT_TRUE(expected.has_value());
     const auto* row = kasumi::find_row(scanned->snapshot, "file.txt");
     ASSERT_NE(row, nullptr);
@@ -420,7 +421,8 @@ TEST(ScannerTest, RestoredMtimeDoesNotHideContentMutationUnderFullHash) {
     const auto root = kasumi::test::workspace_path(workspace, "local");
     const auto file = root / "a.txt";
     kasumi::test::write_text(file, "alpha");
-    const auto old_mtime = std::filesystem::last_write_time(file);
+    const auto old_mtime = kasumi::platform::metadata::last_write_time(file);
+    ASSERT_TRUE(old_mtime.has_value());
     const auto first = kasumi::application::observation::scanner::scan_result(
         root,
         {},
@@ -429,7 +431,7 @@ TEST(ScannerTest, RestoredMtimeDoesNotHideContentMutationUnderFullHash) {
     std::this_thread::sleep_for(std::chrono::milliseconds{25});
     kasumi::test::write_text(file, "omega");
     ASSERT_TRUE(
-        kasumi::platform::metadata::set_last_write_time(file, old_mtime));
+        kasumi::platform::metadata::set_last_write_time(file, *old_mtime));
 
     // Under the unified cache contract (mtime + size + identity), identical
     // metadata authorizes cache reuse by design under ReuseStrongFingerprint.

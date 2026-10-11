@@ -928,12 +928,11 @@ TEST(H3LocalSyncTest,
     const auto written = kasumi::platform::metadata::set_last_write_time(
         ignore, local_subsecond);
     ASSERT_TRUE(written.has_value()) << written.error();
-    std::error_code error;
     const auto observed_local_mtime =
-        std::filesystem::last_write_time(ignore, error);
-    ASSERT_FALSE(error);
+        kasumi::platform::metadata::last_write_time(ignore);
+    ASSERT_TRUE(observed_local_mtime.has_value());
     const auto observed_local_mtime_ns =
-        kasumi::platform::metadata::unix_nanoseconds(observed_local_mtime);
+        kasumi::platform::metadata::unix_nanoseconds(*observed_local_mtime);
     ASSERT_TRUE(observed_local_mtime_ns.has_value());
     ASSERT_NE(*observed_local_mtime_ns, before_ignore->mtime);
 

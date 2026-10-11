@@ -1078,17 +1078,18 @@ restore_transaction_metadata(const Snapshot& expected_tree,
             operation_paths->end();
         if (observed_only) {
             const auto* observed = find_row(observed_tree, path_name);
-            const auto current = std::filesystem::last_write_time(path, error);
-            if (error) {
+            const auto current = platform::metadata::last_write_time(path);
+            if (!current) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::MutationFailure,
                     "failed to confirm observed timestamp for " + path_name +
-                        ": " + error.message()));
+                        ": " + current.error()));
             }
             const auto current_ns =
-                ::kasumi::platform::metadata::unix_nanoseconds(current);
+                ::kasumi::platform::metadata::unix_nanoseconds(*current);
             if (observed == nullptr || !current_ns ||
-                *current_ns != observed->mtime) {
+                !platform::metadata::filesystem_equivalent(*current_ns,
+                                                           observed->mtime)) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::ConcurrentModification,
                     "entry modified after observation: " + path_name));

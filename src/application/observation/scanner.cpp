@@ -261,13 +261,13 @@ scan_result(const std::filesystem::path& local_root,
 
     Snapshot snapshot;
     snapshot.rows.reserve(previous_cache.size() + 1);
-    const auto modified = std::filesystem::last_write_time(local_root, error);
-    if (error)
-        return std::unexpected(scan_error(local_root,
+    const auto modified = platform::metadata::last_write_time(local_root);
+    if (!modified)
+        return std::unexpected(ScanError{ScanErrorCode::Metadata,
+                                          local_root,
                                           "read modification time",
-                                          error,
-                                          ScanErrorCode::Metadata));
-    const auto root_mtime = platform::metadata::unix_nanoseconds(modified);
+                                          modified.error()});
+    const auto root_mtime = platform::metadata::unix_nanoseconds(*modified);
     if (!root_mtime) {
         return std::unexpected(ScanError{ScanErrorCode::Metadata,
                                          local_root,
@@ -329,13 +329,13 @@ scan_result(const std::filesystem::path& local_root,
             snapshot.rows.push_back(std::move(*row));
             continue;
         }
-        const auto mtime = entry.last_write_time(error);
-        if (error)
-            return std::unexpected(scan_error(entry.path(),
+        const auto mtime = platform::metadata::last_write_time(entry.path());
+        if (!mtime)
+            return std::unexpected(ScanError{ScanErrorCode::Metadata,
+                                              entry.path(),
                                               "read modification time",
-                                              error,
-                                              ScanErrorCode::Metadata));
-        const auto mtime_ns = platform::metadata::unix_nanoseconds(mtime);
+                                              mtime.error()});
+        const auto mtime_ns = platform::metadata::unix_nanoseconds(*mtime);
         if (!mtime_ns) {
             return std::unexpected(ScanError{ScanErrorCode::Metadata,
                                              entry.path(),

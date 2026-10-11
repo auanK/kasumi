@@ -4,17 +4,22 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <expected>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <string>
 #include <gtest/gtest.h>
+#include <gtest/gtest-spi.h>
+
+#include "crypto/content.hpp"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <aclapi.h>
 #else
 #include <cerrno>
 #include <fcntl.h>
@@ -704,12 +709,395 @@ TEST(FileMetadataWin32NativeTest, SharingViolationOrAccessDeniedDetected) {
         nullptr);
     ASSERT_NE(hLock, INVALID_HANDLE_VALUE);
 
-    const auto result = read_file_metadata(file_path, "locked.txt");
-    ::CloseHandle(hLock);
+    // 1. Consulta de atributos com arquivo bloqueado:
+    // FILE_READ_ATTRIBUTES succeeds because Windows NT share mode 0 only restricts
+    // read/write data access, not attribute queries.
+    const auto meta_result = read_file_metadata(file_path, "locked.txt");
+    ASSERT_TRUE(meta_result.has_value());
+    ASSERT_TRUE(meta_result->has_value());
+    EXPECT_EQ(meta_result->value().size, 14U);
 
+    // 2. Tentativa de leitura de conteúdo com arquivo bloqueado:
+    // Fails with ERROR_SHARING_VIOLATION
+    HANDLE hRead = ::CreateFileW(
+        file_path.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    EXPECT_EQ(hRead, INVALID_HANDLE_VALUE);
+    EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_SHARING_VIOLATION));
+
+    // 3. Calculo de BLAKE3 com arquivo bloqueado:
+    // Cannot read content, so hashing fails
+    const auto hash_result = kasumi::crypto::content::hash_file(file_path);
+    EXPECT_FALSE(hash_result.has_value());
+
+    // 4. Tentativa de mutacao destrutiva com arquivo bloqueado:
+    // Fails with ERROR_SHARING_VIOLATION
+    HANDLE hWrite = ::CreateFileW(
+        file_path.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    EXPECT_EQ(hWrite, INVALID_HANDLE_VALUE);
+    EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_SHARING_VIOLATION));
+
+    ::CloseHandle(hLock);
+}
+
+bool is_dacl_protected(const std::filesystem::path& path) {
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    const DWORD res = ::GetNamedSecurityInfoW(
+        const_cast<LPWSTR>(path.c_str()),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        &sd);
+    if (res != ERROR_SUCCESS || sd == nullptr) {
+        return false;
+    }
+    SECURITY_DESCRIPTOR_CONTROL control = 0;
+    DWORD revision = 0;
+    const BOOL ok = ::GetSecurityDescriptorControl(sd, &control, &revision);
+    ::LocalFree(sd);
+    return (ok != FALSE) && ((control & SE_DACL_PROTECTED) != 0);
+}
+
+// RAII guard ensuring original DACL restoration even if an assertion fails
+struct DaclRestoreGuard {
+    std::wstring path;
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    bool is_protected = false;
+    bool restored = false;
+    bool dismissed = false;
+
+    DaclRestoreGuard(std::wstring p, PACL d, PSECURITY_DESCRIPTOR s, bool prot = false)
+        : path(std::move(p)), dacl(d), sd(s), is_protected(prot) {}
+
+    DaclRestoreGuard(const DaclRestoreGuard&) = delete;
+    DaclRestoreGuard& operator=(const DaclRestoreGuard&) = delete;
+    DaclRestoreGuard& operator=(DaclRestoreGuard&&) = delete;
+
+    DaclRestoreGuard(DaclRestoreGuard&& other) noexcept
+        : path(std::move(other.path)),
+          dacl(other.dacl),
+          sd(other.sd),
+          is_protected(other.is_protected),
+          restored(other.restored),
+          dismissed(other.dismissed) {
+        other.sd = nullptr;
+        other.dacl = nullptr;
+        other.restored = true;
+        other.dismissed = true;
+    }
+
+    ~DaclRestoreGuard() noexcept {
+        if (!restored && !dismissed) {
+            const DWORD err = restore();
+            if (err != ERROR_SUCCESS) {
+                ADD_FAILURE() << "DaclRestoreGuard destructor failed to restore DACL for path '"
+                              << std::filesystem::path(path).string()
+                              << "'. Win32 error: " << err;
+            }
+        }
+        if (sd != nullptr) {
+            ::LocalFree(sd);
+            sd = nullptr;
+        }
+    }
+
+    void dismiss() noexcept {
+        dismissed = true;
+    }
+
+    static std::expected<DaclRestoreGuard, DWORD> capture(const std::filesystem::path& file_path) {
+        PACL orig_dacl = nullptr;
+        PSECURITY_DESCRIPTOR orig_sd = nullptr;
+        const DWORD res = ::GetNamedSecurityInfoW(
+            const_cast<LPWSTR>(file_path.c_str()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            nullptr,
+            nullptr,
+            &orig_dacl,
+            nullptr,
+            &orig_sd);
+        if (res != ERROR_SUCCESS) {
+            return std::unexpected(res);
+        }
+        if (orig_sd == nullptr) {
+            return std::unexpected(static_cast<DWORD>(ERROR_INVALID_SECURITY_DESCR));
+        }
+
+        SECURITY_DESCRIPTOR_CONTROL control = 0;
+        DWORD revision = 0;
+        if (!::GetSecurityDescriptorControl(orig_sd, &control, &revision)) {
+            const DWORD err = ::GetLastError();
+            ::LocalFree(orig_sd);
+            return std::unexpected(err);
+        }
+
+        const bool prot = (control & SE_DACL_PROTECTED) != 0;
+        return DaclRestoreGuard(file_path.wstring(), orig_dacl, orig_sd, prot);
+    }
+
+    DWORD restore() noexcept {
+        if (restored) {
+            return ERROR_SUCCESS;
+        }
+        const SECURITY_INFORMATION sec_info =
+            DACL_SECURITY_INFORMATION |
+            (is_protected ? PROTECTED_DACL_SECURITY_INFORMATION
+                          : UNPROTECTED_DACL_SECURITY_INFORMATION);
+        const DWORD err = ::SetNamedSecurityInfoW(
+            const_cast<LPWSTR>(path.c_str()),
+            SE_FILE_OBJECT,
+            sec_info,
+            nullptr,
+            nullptr,
+            dacl,
+            nullptr);
+        if (err == ERROR_SUCCESS) {
+            restored = true;
+        }
+        return err;
+    }
+};
+
+TEST(FileMetadataWin32NativeTest, AccessDeniedDetectedViaDacl) {
+    TempDirFixture fixture;
+    const auto file_path = fixture.path() / "denied.txt";
+    {
+        std::ofstream ofs(file_path);
+        ofs << "secret content";
+    }
+
+    EXPECT_FALSE(is_dacl_protected(file_path));
+
+    // 1. Capture original security descriptor and DACL
+    auto guard_res = DaclRestoreGuard::capture(file_path);
+    ASSERT_TRUE(guard_res.has_value());
+    auto& guard = *guard_res;
+    EXPECT_FALSE(guard.is_protected);
+
+    // 2. Apply restrictive empty DACL denying access
+    ACL empty_acl{};
+    ASSERT_TRUE(::InitializeAcl(&empty_acl, sizeof(empty_acl), ACL_REVISION));
+    const auto set_res = ::SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(file_path.c_str()),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr,
+        nullptr,
+        &empty_acl,
+        nullptr);
+    ASSERT_EQ(set_res, ERROR_SUCCESS)
+        << "SetNamedSecurityInfoW failed: " << ::GetLastError();
+
+    EXPECT_TRUE(is_dacl_protected(file_path));
+
+    // 3. Confirm reading metadata fails with PermissionDenied / ERROR_ACCESS_DENIED
+    const auto result = read_file_metadata(file_path, "denied.txt");
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
-    EXPECT_EQ(result.error().os_error, static_cast<std::uint32_t>(ERROR_SHARING_VIOLATION));
+    EXPECT_EQ(result.error().os_error, static_cast<std::uint32_t>(ERROR_ACCESS_DENIED));
+
+    // 4. Restore original security state and verify result
+    const auto restore_res = guard.restore();
+    EXPECT_EQ(restore_res, ERROR_SUCCESS)
+        << "Restoring DACL failed: " << ::GetLastError();
+    EXPECT_TRUE(guard.restored);
+    EXPECT_FALSE(is_dacl_protected(file_path));
+
+    const auto restored_meta = read_file_metadata(file_path, "denied.txt");
+    ASSERT_TRUE(restored_meta.has_value() && restored_meta->has_value());
+    EXPECT_EQ((**restored_meta).size, 14ULL);
+}
+
+TEST(FileMetadataWin32NativeTest, AccessDeniedDetectedViaProtectedDacl) {
+    TempDirFixture fixture;
+    const auto file_path = fixture.path() / "denied_prot.txt";
+    {
+        std::ofstream ofs(file_path);
+        ofs << "secret content";
+    }
+
+    // Set original file DACL to protected
+    PACL initial_dacl = nullptr;
+    PSECURITY_DESCRIPTOR initial_sd = nullptr;
+    ASSERT_EQ(::GetNamedSecurityInfoW(
+        const_cast<LPWSTR>(file_path.c_str()),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, &initial_dacl, nullptr, &initial_sd), ERROR_SUCCESS);
+    ASSERT_NE(initial_sd, nullptr);
+    ASSERT_EQ(::SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(file_path.c_str()),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, initial_dacl, nullptr), ERROR_SUCCESS);
+    ::LocalFree(initial_sd);
+
+    ASSERT_TRUE(is_dacl_protected(file_path));
+
+    // 1. Capture original security descriptor and DACL
+    auto guard_res = DaclRestoreGuard::capture(file_path);
+    ASSERT_TRUE(guard_res.has_value());
+    auto& guard = *guard_res;
+    EXPECT_TRUE(guard.is_protected);
+
+    // 2. Apply restrictive empty DACL denying access
+    ACL empty_acl{};
+    ASSERT_TRUE(::InitializeAcl(&empty_acl, sizeof(empty_acl), ACL_REVISION));
+    ASSERT_EQ(::SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(file_path.c_str()),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr,
+        nullptr,
+        &empty_acl,
+        nullptr), ERROR_SUCCESS);
+
+    // 3. Confirm reading metadata fails with PermissionDenied
+    const auto result = read_file_metadata(file_path, "denied_prot.txt");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
+
+    // 4. Restore original security state and verify result
+    const auto restore_res = guard.restore();
+    EXPECT_EQ(restore_res, ERROR_SUCCESS);
+    EXPECT_TRUE(guard.restored);
+
+    // Protection against inheritance must be preserved
+    EXPECT_TRUE(is_dacl_protected(file_path));
+
+    const auto restored_meta = read_file_metadata(file_path, "denied_prot.txt");
+    ASSERT_TRUE(restored_meta.has_value() && restored_meta->has_value());
+    EXPECT_EQ((**restored_meta).size, 14ULL);
+}
+
+TEST(FileMetadataWin32NativeTest, DaclRestoreGuardFailureDoesNotMarkRestored) {
+    TempDirFixture fixture;
+    const auto non_existent = fixture.path() / "non_existent_file.txt";
+
+    ACL empty_acl{};
+    ASSERT_TRUE(::InitializeAcl(&empty_acl, sizeof(empty_acl), ACL_REVISION));
+
+    DaclRestoreGuard guard{non_existent.wstring(), &empty_acl, nullptr, false};
+
+    const auto restore_res = guard.restore();
+    EXPECT_NE(restore_res, static_cast<DWORD>(ERROR_SUCCESS));
+    EXPECT_FALSE(guard.restored);
+
+    // Subsequent restore should still attempt and return error rather than false success
+    const auto second_res = guard.restore();
+    EXPECT_NE(second_res, static_cast<DWORD>(ERROR_SUCCESS));
+    EXPECT_FALSE(guard.restored);
+
+    // Intentional failure test: dismiss automatic destruction failure report
+    guard.dismiss();
+}
+
+TEST(FileMetadataWin32NativeTest, DaclRestoreGuardMoveConstructorTransfersOwnership) {
+    TempDirFixture fixture;
+    const auto file_path = fixture.path() / "move_transfer.txt";
+    {
+        std::ofstream ofs(file_path);
+        ofs << "move transfer payload";
+    }
+
+    auto guard_res = DaclRestoreGuard::capture(file_path);
+    ASSERT_TRUE(guard_res.has_value());
+
+    // Apply restrictive empty DACL
+    ACL empty_acl{};
+    ASSERT_TRUE(::InitializeAcl(&empty_acl, sizeof(empty_acl), ACL_REVISION));
+    ASSERT_EQ(::SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(file_path.c_str()),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, &empty_acl, nullptr), ERROR_SUCCESS);
+
+    EXPECT_FALSE(read_file_metadata(file_path, "move_transfer.txt").has_value());
+
+    {
+        DaclRestoreGuard moved_guard = std::move(*guard_res);
+        EXPECT_EQ(guard_res->sd, nullptr);
+        EXPECT_TRUE(guard_res->restored);
+        EXPECT_TRUE(guard_res->dismissed);
+        EXPECT_NE(moved_guard.sd, nullptr);
+        EXPECT_FALSE(moved_guard.restored);
+        EXPECT_FALSE(moved_guard.dismissed);
+
+        // Explicit restoration through moved guard
+        EXPECT_EQ(moved_guard.restore(), ERROR_SUCCESS);
+        EXPECT_TRUE(moved_guard.restored);
+    }
+
+    // Access restored
+    const auto restored_meta = read_file_metadata(file_path, "move_transfer.txt");
+    ASSERT_TRUE(restored_meta.has_value() && restored_meta->has_value());
+    EXPECT_EQ((**restored_meta).size, 21ULL);
+}
+
+TEST(FileMetadataWin32NativeTest, DaclRestoreGuardDestructorRestoresOnScopeExit) {
+    TempDirFixture fixture;
+    const auto file_path = fixture.path() / "scope_exit.txt";
+    {
+        std::ofstream ofs(file_path);
+        ofs << "scope exit test";
+    }
+
+    {
+        auto guard_res = DaclRestoreGuard::capture(file_path);
+        ASSERT_TRUE(guard_res.has_value());
+
+        // Apply restrictive DACL
+        ACL empty_acl{};
+        ASSERT_TRUE(::InitializeAcl(&empty_acl, sizeof(empty_acl), ACL_REVISION));
+        ASSERT_EQ(::SetNamedSecurityInfoW(
+            const_cast<LPWSTR>(file_path.c_str()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            nullptr, nullptr, &empty_acl, nullptr), ERROR_SUCCESS);
+
+        EXPECT_FALSE(read_file_metadata(file_path, "scope_exit.txt").has_value());
+        // Do NOT call restore() explicitly; let destructor run
+    }
+
+    // After guard destruction, access must be restored
+    const auto restored_meta = read_file_metadata(file_path, "scope_exit.txt");
+    ASSERT_TRUE(restored_meta.has_value() && restored_meta->has_value());
+    EXPECT_EQ((**restored_meta).size, 15ULL);
+}
+
+TEST(FileMetadataWin32NativeTest, DaclRestoreGuardMoveAssignmentIsDisabled) {
+    // Problem A: Move assignment must be deleted to prevent resource leakage on unconfirmed cleanup
+    EXPECT_FALSE(std::is_move_assignable_v<DaclRestoreGuard>);
+    EXPECT_TRUE(std::is_move_constructible_v<DaclRestoreGuard>);
+}
+
+TEST(FileMetadataWin32NativeTest, DaclRestoreGuardDestructorReportsFailureWhenNotDismissed) {
+    // Problem B: Destructor must report unexpected restoration failures via GoogleTest diagnostics
+    TempDirFixture fixture;
+    const auto non_existent = fixture.path() / "non_existent_fail.txt";
+
+    ACL empty_acl{};
+    ASSERT_TRUE(::InitializeAcl(&empty_acl, sizeof(empty_acl), ACL_REVISION));
+
+    EXPECT_NONFATAL_FAILURE(([&]() {
+        DaclRestoreGuard guard{non_existent.wstring(), &empty_acl, nullptr, false};
+    }()), "DaclRestoreGuard destructor failed to restore DACL");
 }
 #endif // defined(_WIN32)
 

@@ -13,6 +13,7 @@
 #include "crypto/physical_hash.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
+#include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
@@ -21,6 +22,13 @@
 #include <array>
 #include <filesystem>
 #include <gtest/gtest.h>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -58,7 +66,8 @@ TEST(ReobservationSafeguardTest, DestructiveSafeguardSetsCacheDirtyUponEviction)
     const auto initial_scan = kasumi::application::observation::scanner::scan_result(
         local, {}, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(initial_scan.has_value());
-    const auto old_mtime = std::filesystem::last_write_time(local_file);
+    const auto old_mtime = kasumi::platform::metadata::last_write_time(local_file);
+    ASSERT_TRUE(old_mtime.has_value());
 
     auto storage = kasumi::transport::open_transport(storage_path.string());
     ASSERT_TRUE(storage.has_value());
@@ -112,7 +121,8 @@ TEST(ReobservationSafeguardTest, DestructiveSafeguardSetsCacheDirtyUponEviction)
 
     // Modify local file to "BBBB" with same size and restored mtime
     kasumi::test::write_text(local_file, "BBBB");
-    std::filesystem::last_write_time(local_file, old_mtime);
+    ASSERT_TRUE(
+        kasumi::platform::metadata::set_last_write_time(local_file, *old_mtime));
 
     kasumi::application::observation::LocalObservationSession session{};
     session.cache = initial_scan->cache;
@@ -207,16 +217,33 @@ TEST(ReobservationSafeguardTest, DestructiveSafeguardFailsClosedWhenHashFails) {
     ASSERT_TRUE(observed.has_value());
     auto result = kasumi::reconciliation::reconcile(*observed);
     ASSERT_TRUE(result.has_value());
+    ASSERT_FALSE(result->plan.operations.empty());
     ASSERT_EQ(result->plan.operations.front().action, kasumi::Action::Download);
 
     // Make local_file completely unreadable
+#if defined(_WIN32)
+    HANDLE hLock = ::CreateFileW(
+        local_file.c_str(),
+        GENERIC_READ | GENERIC_WRITE,
+        0, // Exclusive: share mode 0 denies content reading
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    ASSERT_NE(hLock, INVALID_HANDLE_VALUE);
+#else
     std::filesystem::permissions(local_file, std::filesystem::perms::none);
+#endif
 
     const auto stable = kasumi::application::sync::coordinator::reobservation::stabilize(
         runtime_data, *storage, key, *observed, *result, &session);
 
-    // Restore permissions for clean workspace cleanup
+    // Restore permissions / release lock for clean workspace cleanup
+#if defined(_WIN32)
+    ::CloseHandle(hLock);
+#else
     std::filesystem::permissions(local_file, std::filesystem::perms::all);
+#endif
 
     // Safeguard MUST fail closed when local file cannot be hashed
     ASSERT_FALSE(stable.has_value());
@@ -237,7 +264,8 @@ TEST(ReobservationSafeguardTest, DestructiveSafeguardEvictionPersistsAcrossSessi
     const auto initial_scan = kasumi::application::observation::scanner::scan_result(
         local, {}, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(initial_scan.has_value());
-    const auto old_mtime = std::filesystem::last_write_time(local_file);
+    const auto old_mtime = kasumi::platform::metadata::last_write_time(local_file);
+    ASSERT_TRUE(old_mtime.has_value());
 
     auto storage = kasumi::transport::open_transport(storage_path.string());
     ASSERT_TRUE(storage.has_value());
@@ -302,13 +330,15 @@ TEST(ReobservationSafeguardTest, DestructiveSafeguardEvictionPersistsAcrossSessi
     add_storage_payload(*storage, remote_payload, hash_b);
 
     kasumi::test::write_text(local_file, "BBBB");
-    std::filesystem::last_write_time(local_file, old_mtime);
+    ASSERT_TRUE(
+        kasumi::platform::metadata::set_last_write_time(local_file, *old_mtime));
 
     auto observed = kasumi::application::observation::collect_reconciliation_input(
         runtime_data, *storage, key, false, {}, &session_1);
     ASSERT_TRUE(observed.has_value());
     auto result = kasumi::reconciliation::reconcile(*observed);
     ASSERT_TRUE(result.has_value());
+    ASSERT_FALSE(result->plan.operations.empty());
     ASSERT_EQ(result->plan.operations.front().action, kasumi::Action::Download);
 
     session_1.cache_dirty = false;
@@ -416,7 +446,8 @@ TEST(ReobservationSafeguardTest, DestructiveSafeguardProtectsRenameLocal) {
     add_storage_payload(*storage, remote_payload, hash_c);
 
     kasumi::test::write_text(local_file, "BBBB");
-    const auto local_mtime = std::filesystem::last_write_time(local_file);
+    const auto local_mtime = kasumi::platform::metadata::last_write_time(local_file);
+    ASSERT_TRUE(local_mtime.has_value());
 
     const auto initial_scan = kasumi::application::observation::scanner::scan_result(
         local, {}, kasumi::application::observation::scanner::ScanPolicy::ReuseStrongFingerprint);
@@ -444,7 +475,7 @@ TEST(ReobservationSafeguardTest, DestructiveSafeguardProtectsRenameLocal) {
     EXPECT_EQ(rename_op->alt_path, "file.txt.kasumiconflict_local");
 
     kasumi::test::write_text(local_file, "DDDD");
-    std::filesystem::last_write_time(local_file, local_mtime);
+    ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(local_file, *local_mtime));
 
     const auto stable = kasumi::application::sync::coordinator::reobservation::stabilize(
         runtime_data, *storage, key, *observed, *result, &session);

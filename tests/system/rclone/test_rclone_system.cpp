@@ -603,6 +603,20 @@ TEST(RcloneSystemTest, TwoPersistedClientsPropagateRemoteDeletes) {
     EXPECT_FALSE(std::filesystem::exists(client_a.local_dir / "beta.txt"));
     EXPECT_FALSE(std::filesystem::exists(client_a.local_dir / "dir"));
 
+    ASSERT_TRUE(sync_client(client_b));
+    EXPECT_FALSE(std::filesystem::exists(client_b.local_dir / "alpha.txt"));
+    EXPECT_FALSE(std::filesystem::exists(client_b.local_dir / "beta.txt"));
+    EXPECT_FALSE(std::filesystem::exists(client_b.local_dir / "dir"));
+
+    ensure_workspace(harness_root(harness) / "delete-final-observation");
+    auto final_remote = kasumi::application::observation::history::observe(
+        *storage,
+        test_key(),
+        harness_root(harness) / "delete-final-observation",
+        false);
+    ASSERT_TRUE(final_remote.has_value());
+    EXPECT_EQ(final_remote->logical_heads, remote->logical_heads);
+    EXPECT_EQ(final_remote->effective_tree, remote->effective_tree);
 }
 
 TEST(RcloneSystemTest, ImmutableHistoryReachabilityInventoryIsReadOnly) {
