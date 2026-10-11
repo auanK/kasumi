@@ -216,6 +216,15 @@ kasumi_add_test_suite(
 )
 
 kasumi_add_test_suite(
+    kasumi_test_unit_core_ignore
+    "unit.core.ignore"
+    SOURCES
+        unit/core/ignore/test_ignore.cpp
+    LIBRARIES
+        kasumi_core
+)
+
+kasumi_add_test_suite(
     kasumi_test_unit_runtime
     "unit.runtime"
     SOURCES
@@ -411,6 +420,23 @@ target_link_libraries(
 )
 target_include_directories(
     kasumi_benchmark_sync_e2e
+    PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/include
+)
+
+add_executable(
+    kasumi_benchmark_ignore_perf
+    operational/benchmark_ignore_perf.cpp
+)
+target_link_libraries(
+    kasumi_benchmark_ignore_perf
+    PRIVATE
+    kasumi_core
+    kasumi_warnings
+)
+target_include_directories(
+    kasumi_benchmark_ignore_perf
     PRIVATE
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/include
