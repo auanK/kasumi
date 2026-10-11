@@ -17,7 +17,7 @@ CLI/profile → local observation + authenticated remote history + StoredState
 | How does an operation resolve runtime, lock, credentials, and transport? | [Application and Runtime](architecture/application-and-runtime.md) |
 | What is a Snapshot, NodeRow, or Merkle hash? | [Data Model](architecture/data-model.md) |
 | What do SQLite, StoredState, caches, checkpoints, keys, and locks own? | [Local Persistent State](architecture/local-state.md) |
-| How is disk observed, and when are hashes or journal checkpoints reused? | [Local Observation](architecture/local-observation.md) |
+| How does each tree scan validate metadata and reuse persisted file hashes? | [Local Observation](architecture/local-observation.md) |
 | How do local/base/remote form a candidate tree and SyncPlan? | [Reconciliation](architecture/reconciliation.md) |
 | What does `sync --dry-run`/Preview or `status` observe and report? | [Preview and Status](architecture/planning-and-status.md) |
 | How does `sync` stabilize, execute, and publish? | [Synchronization](architecture/synchronization.md) |
@@ -36,7 +36,7 @@ CLI/profile → local observation + authenticated remote history + StoredState
 |---|---|---|
 | `config` list/create/edit/rename/delete | Reads or changes `config.toml` and private profile paths; delete preserves the synchronized directory | None |
 | Preview (`sync --dry-run`), Status | Reads local/SQLite state; profile lock and permission normalization are possible | Observation only; no recovery or publication |
-| Sync | May change synchronized files, cache/checkpoint, transaction journal, and accepted `StoredState` | May upload content and publish/prune history; registers a writer for active work |
+| Sync | May change synchronized files, file-hash cache, transaction journal, and accepted `StoredState` | May upload content and publish/prune history; registers a writer for active work |
 | Fsck | Checkpoint/workspace; preceding recovery can change local state | Audit reads only, **except** effects of preceding transaction recovery |
 | GC | Workspace; preceding recovery can change local state | Barrier/probe even in analysis-only mode; online restore, quarantine, source removal, and purge when safe |
 | `remote ...` | Temporary workspace and possible private history cache; `remote get` writes its chosen destination | Inspection reads only; no normal transaction recovery |

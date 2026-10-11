@@ -11,8 +11,8 @@ Building Kasumi requires CMake 3.28+, Git, and a C++23 compiler:
 
 Repository CI exercises:
 * Visual Studio 2022 / MSVC on Windows;
-* GCC 14 on Windows MSYS2 UCRT64;
-* GCC 14 on Linux.
+* GCC from the Windows MSYS2 UCRT64 environment (the installed package version, not a pinned GCC major; tools are verified under `/ucrt64/bin`);
+* GCC 14 on Ubuntu.
 
 ## C++ Formatting
 
@@ -32,6 +32,10 @@ The build generates `generated/cli/i18n_embedded.hpp` from `locales/en.json` and
 ## CMake Presets
 
 `CMakePresets.json` defines presets using the Ninja generator:
+
+On Windows, run preset commands from a Visual Studio 2022 developer shell for
+MSVC, or an MSYS2 UCRT64 shell with its GCC, CMake, and Ninja on `PATH`. Keep one
+compiler per build directory; choose a separate directory for another toolchain.
 
 ### Debug (with tests enabled)
 
@@ -110,14 +114,12 @@ The `kasumi_architecture_dag` test validates internal architectural dependency r
 
 ## Operational Performance Trace
 
-Setting `KASUMI_PERF_TRACE=1` enables operational trace instrumentation:
-
-```powershell
-$env:KASUMI_PERF_TRACE="1"
-./build/kasumi.exe remote commits <profile>
-```
-
-Trace output is written to `stderr` and reports call counts and elapsed wall-clock microseconds for instrumented operations. Audit-style inspection commands may fetch and validate content objects rather than relying only on structural metadata.
+Use [performance tracing](troubleshooting.md#slow-synchronization-or-preview)
+for PowerShell, CMD, and POSIX command examples and interpretation of scanner,
+hash-cache, and remote-observation metrics. `KASUMI_PERF_TRACE=1` writes counters
+and accumulated wall-clock microseconds for instrumented operations to `stderr`.
+Audit-style inspection commands may fetch and validate content objects rather
+than relying only on structural metadata.
 
 ## Rclone System Tests
 

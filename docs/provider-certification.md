@@ -1,6 +1,6 @@
 # Provider Certification
 
-Kasumi's provider-neutral certification suite was successfully completed against the following storage backends. Every listed provider passed all 16 certification scenarios and completed ownership-safe cleanup.
+The recorded provider-neutral certification runs cover the following storage backends. Every listed provider passed all 16 scenarios and completed ownership-safe cleanup; see the [changelog's validation record](../CHANGELOG.md#060). These results describe those runs, not certification of every later binary or provider configuration.
 
 | Provider | Remote physical SHA-256 |
 |---|---|

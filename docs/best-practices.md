@@ -26,7 +26,7 @@ Kasumi provides non-mutating preview commands to inspect synchronization plans b
 
 * **`kasumi status <profile>`**: Compares the local filesystem snapshot, the accepted local base state, and the authenticated remote tree, then displays the resulting synchronization plan. Use this for quick, routine inspection.
 * **`kasumi sync <profile> --dry-run`**: Dispatches through the same planner as `status`, verifying prerequisites without applying changes. Use this before running automated workflows or after significant local edits.
-* **Plan Truncation & `--full`**: When a synchronization plan contains more than 10 items, Kasumi truncates output to show the first 5 and last 5 items (separated by an ellipsis line) to avoid terminal overflow. Pass `--full` to display all items:
+* **Complete Plan**: Pass `--full` to display all items; the [command reference](configuration-and-usage.md#core-commands) describes truncation:
   ```bash
   kasumi status my-profile --full
   kasumi sync my-profile --dry-run --full
@@ -34,6 +34,24 @@ Kasumi provides non-mutating preview commands to inspect synchronization plans b
 * **Staleness Notice**: Output from `status` or `sync --dry-run` reflects the observed state at that specific moment. If local files or remote storage change before a subsequent `kasumi sync`, the actual execution will re-observe and re-plan against current state.
 
 For internal planning details, see [Preview and Status](architecture/planning-and-status.md).
+
+Both previews hash local file content in full. Normal sync can reuse persisted
+hashes when the complete fingerprint matches, but it still walks the local tree
+and observes remote history. Diagnose slow runs with
+[performance tracing](troubleshooting.md#slow-synchronization-or-preview).
+
+## Backups
+
+Synchronization propagates changes and deletions. Immutable history is subject
+to retention and garbage collection; it does not replace an independent backup.
+Keep versioned copies outside the synchronized folder and encrypted vault.
+
+Back up synchronized files and the complete Kasumi data directory, including
+`config.toml`, profile `key.bin`, accepted SQLite state, and any recovery workspace.
+Take the private-state backup with Kasumi stopped so database files and WAL
+sidecars are copied consistently. Preserve both Password and Password Salt
+securely, and test restoration to a separate location. Do not delete accepted
+state or transaction evidence merely to make a failing synchronization proceed.
 
 ## Garbage Collection
 
@@ -95,22 +113,12 @@ For merge rules and conflict naming, see [History and Concurrency](architecture/
 
 ## Credentials and Local Machine Security
 
-Kasumi enforces client-side encryption and authentication, but operational security depends on proper credential handling and host-level protection:
-
-* **Password & Password Salt Reproducibility**:
-  * The **Password** (minimum 12 characters) and **Password Salt** (minimum 16 characters) are used by Argon2id to derive the 32-byte master key.
-  * The salt is **user-provided and reproducible**, not an automatically generated random salt stored remotely.
-  * Any machine connecting to the same vault must be configured with the **exact same** Password and Password Salt.
-* **Local Key Storage Boundary (`key.bin`)**:
-  * Once a profile is created, the derived master key is stored in `profiles/<profile>/key.bin` using a **reversible XOR mask** and restricted OS filesystem permissions (explicit DACLs on Windows, `0600`/`0700` on POSIX).
-  * `key.bin` is **not** password-encrypted at rest against an attacker with physical access to the disk. An adversary with offline read access can extract the file and unmask the key without guessing the password.
-* **Host Protection Recommendations**:
-  * Use OS-level **Full-Disk Encryption (FDE)** to protect local profile keys and data against physical theft or offline disk inspection:
-    * **Windows**: BitLocker
-    * **Linux**: LUKS (`dm-crypt`)
-  * Keep the local operating system updated. Operating system permissions prevent unprivileged accounts on the same machine from accessing `key.bin`, but processes executing under your local user account inherit full access.
-
-For cryptographic algorithms and threat models, see [Security Specification](security.md).
+Keep Password and Password Salt in a secure record; the wizard needs the exact
+same pair to enroll another machine. The local `key.bin` uses reversible masking,
+not password encryption at rest. Anyone who can read it can recover the vault key.
+Use BitLocker on Windows or LUKS on Linux for sensitive devices, and protect the
+local account: same-user processes can access its private state. See
+[Security](security.md) for key derivation, filesystem permissions, and threat models.
 
 ## Upgrading Kasumi
 
@@ -125,11 +133,7 @@ Kasumi follows a strict pre-1.0 release policy:
 
 When running Kasumi in automated scripts, cron jobs, or task schedulers:
 
-* **Process Exit Codes**:
-  * **`0`**: Success. The operation finished cleanly.
-  * **`2`**: Partial synchronization with pending materializations. Synchronization accepted remote metadata into history, but one or more file payloads could not be downloaded or are temporarily unavailable on remote storage. Automated workflows should treat exit code 2 as a non-fatal condition; pending materializations will be downloaded on a subsequent sync once payloads become available.
-  * **`1`**: Hard failure (e.g., network failure, storage inaccessible, permission denied, cryptographic failure, or profile lock error).
-  * **`130`**: Process terminated by user cancellation (SIGINT / SIGTERM).
+* **Process Exit Codes**: Handle every [documented exit code](configuration-and-usage.md#exit-codes). Code `2` means partial synchronization with pending materializations, not full success; retry once the missing content is restored. Never automatically accept those files as deletions.
 * **Single-Process Profile Lock**: `status`, `sync --dry-run`, `sync`, `fsck`, and `gc` use an OS file lock (`profile-<name>.lock`). If an automated script attempts one of these operations while another holds that profile lock, it exits with code `1`. Remote inspection uses a separate path without this lock. Ensure scheduled jobs do not overlap.
 * **External Scheduling**: Kasumi does not contain an internal background daemon. Use system scheduling tools:
   * **Linux**: `cron` or `systemd` timers.
