@@ -20,6 +20,7 @@
 #endif
 #include <windows.h>
 #include <aclapi.h>
+#include <vector>
 #else
 #include <cerrno>
 #include <fcntl.h>
@@ -772,6 +773,116 @@ bool is_dacl_protected(const std::filesystem::path& path) {
     return (ok != FALSE) && ((control & SE_DACL_PROTECTED) != 0);
 }
 
+// Queries whether a Win32 privilege is currently enabled in the process token
+bool is_privilege_enabled(LPCWSTR privilege_name) {
+    HANDLE token = NULL;
+    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        return false;
+    }
+    LUID luid;
+    if (!::LookupPrivilegeValueW(nullptr, privilege_name, &luid)) {
+        ::CloseHandle(token);
+        return false;
+    }
+    DWORD length = 0;
+    ::GetTokenInformation(token, TokenPrivileges, nullptr, 0, &length);
+    if (::GetLastError() != ERROR_INSUFFICIENT_BUFFER || length == 0) {
+        ::CloseHandle(token);
+        return false;
+    }
+    std::vector<BYTE> buffer(length);
+    if (!::GetTokenInformation(token, TokenPrivileges, buffer.data(), length, &length)) {
+        ::CloseHandle(token);
+        return false;
+    }
+    ::CloseHandle(token);
+    const auto* privs = reinterpret_cast<const TOKEN_PRIVILEGES*>(buffer.data());
+    for (DWORD i = 0; i < privs->PrivilegeCount; ++i) {
+        if (privs->Privileges[i].Luid.LowPart == luid.LowPart &&
+            privs->Privileges[i].Luid.HighPart == luid.HighPart) {
+            return (privs->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED) != 0;
+        }
+    }
+    return false;
+}
+
+// RAII guard ensuring a Win32 privilege (such as SeBackupPrivilege) is temporarily disabled
+// during access control tests so DACLs are strictly enforced even in elevated environments
+// (e.g. MSYS2 bash under runneradmin), and restored upon scope exit.
+class ScopedPrivilegeDisable {
+public:
+    explicit ScopedPrivilegeDisable(LPCWSTR privilege_name)
+        : privilege_name_(privilege_name) {
+        HANDLE token = NULL;
+        if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
+            return;
+        }
+        LUID luid;
+        if (!::LookupPrivilegeValueW(nullptr, privilege_name, &luid)) {
+            ::CloseHandle(token);
+            return;
+        }
+        DWORD length = 0;
+        ::GetTokenInformation(token, TokenPrivileges, nullptr, 0, &length);
+        if (::GetLastError() == ERROR_INSUFFICIENT_BUFFER && length > 0) {
+            std::vector<BYTE> buffer(length);
+            if (::GetTokenInformation(token, TokenPrivileges, buffer.data(), length, &length)) {
+                const auto* privs = reinterpret_cast<const TOKEN_PRIVILEGES*>(buffer.data());
+                for (DWORD i = 0; i < privs->PrivilegeCount; ++i) {
+                    if (privs->Privileges[i].Luid.LowPart == luid.LowPart &&
+                        privs->Privileges[i].Luid.HighPart == luid.HighPart) {
+                        if ((privs->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED) != 0) {
+                            was_enabled_ = true;
+                            TOKEN_PRIVILEGES tp{};
+                            tp.PrivilegeCount = 1;
+                            tp.Privileges[0].Luid = luid;
+                            tp.Privileges[0].Attributes = 0; // Disable
+                            if (::AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp), nullptr, nullptr) &&
+                                ::GetLastError() == ERROR_SUCCESS) {
+                                adjusted_ = true;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        ::CloseHandle(token);
+    }
+
+    ~ScopedPrivilegeDisable() {
+        if (!adjusted_ || !was_enabled_) {
+            return;
+        }
+        HANDLE token = NULL;
+        if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
+            return;
+        }
+        LUID luid;
+        if (::LookupPrivilegeValueW(nullptr, privilege_name_, &luid)) {
+            TOKEN_PRIVILEGES tp{};
+            tp.PrivilegeCount = 1;
+            tp.Privileges[0].Luid = luid;
+            tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            ::AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp), nullptr, nullptr);
+        }
+        ::CloseHandle(token);
+    }
+
+    ScopedPrivilegeDisable(const ScopedPrivilegeDisable&) = delete;
+    ScopedPrivilegeDisable& operator=(const ScopedPrivilegeDisable&) = delete;
+    ScopedPrivilegeDisable(ScopedPrivilegeDisable&&) = delete;
+    ScopedPrivilegeDisable& operator=(ScopedPrivilegeDisable&&) = delete;
+
+    bool was_enabled() const noexcept { return was_enabled_; }
+    bool adjusted() const noexcept { return adjusted_; }
+
+private:
+    LPCWSTR privilege_name_;
+    bool was_enabled_{false};
+    bool adjusted_{false};
+};
+
 // RAII guard ensuring original DACL restoration even if an assertion fails
 struct DaclRestoreGuard {
     std::wstring path;
@@ -906,11 +1017,27 @@ TEST(FileMetadataWin32NativeTest, AccessDeniedDetectedViaDacl) {
 
     EXPECT_TRUE(is_dacl_protected(file_path));
 
+    // Direct open without backup semantics is always denied by the empty DACL
+    HANDLE h_no_backup = ::CreateFileW(
+        file_path.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    EXPECT_EQ(h_no_backup, INVALID_HANDLE_VALUE);
+    EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
+
     // 3. Confirm reading metadata fails with PermissionDenied / ERROR_ACCESS_DENIED
-    const auto result = read_file_metadata(file_path, "denied.txt");
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
-    EXPECT_EQ(result.error().os_error, static_cast<std::uint32_t>(ERROR_ACCESS_DENIED));
+    // when backup privilege is disabled (ensures deterministic testing across all environments)
+    {
+        ScopedPrivilegeDisable no_backup(L"SeBackupPrivilege");
+        const auto result = read_file_metadata(file_path, "denied.txt");
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
+        EXPECT_EQ(result.error().os_error, static_cast<std::uint32_t>(ERROR_ACCESS_DENIED));
+    }
 
     // 4. Restore original security state and verify result
     const auto restore_res = guard.restore();
@@ -968,10 +1095,27 @@ TEST(FileMetadataWin32NativeTest, AccessDeniedDetectedViaProtectedDacl) {
         &empty_acl,
         nullptr), ERROR_SUCCESS);
 
+    // Direct open without backup semantics is always denied by the empty DACL
+    HANDLE h_no_backup = ::CreateFileW(
+        file_path.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    EXPECT_EQ(h_no_backup, INVALID_HANDLE_VALUE);
+    EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
+
     // 3. Confirm reading metadata fails with PermissionDenied
-    const auto result = read_file_metadata(file_path, "denied_prot.txt");
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
+    // when backup privilege is disabled (ensures deterministic testing across all environments)
+    {
+        ScopedPrivilegeDisable no_backup(L"SeBackupPrivilege");
+        const auto result = read_file_metadata(file_path, "denied_prot.txt");
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
+        EXPECT_EQ(result.error().os_error, static_cast<std::uint32_t>(ERROR_ACCESS_DENIED));
+    }
 
     // 4. Restore original security state and verify result
     const auto restore_res = guard.restore();
@@ -1028,7 +1172,22 @@ TEST(FileMetadataWin32NativeTest, DaclRestoreGuardMoveConstructorTransfersOwners
         DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
         nullptr, nullptr, &empty_acl, nullptr), ERROR_SUCCESS);
 
-    EXPECT_FALSE(read_file_metadata(file_path, "move_transfer.txt").has_value());
+    // Direct open without backup semantics is always denied by the empty DACL
+    HANDLE h_no_backup = ::CreateFileW(
+        file_path.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    EXPECT_EQ(h_no_backup, INVALID_HANDLE_VALUE);
+    EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
+
+    {
+        ScopedPrivilegeDisable no_backup(L"SeBackupPrivilege");
+        EXPECT_FALSE(read_file_metadata(file_path, "move_transfer.txt").has_value());
+    }
 
     {
         DaclRestoreGuard moved_guard = std::move(*guard_res);
@@ -1071,7 +1230,22 @@ TEST(FileMetadataWin32NativeTest, DaclRestoreGuardDestructorRestoresOnScopeExit)
             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
             nullptr, nullptr, &empty_acl, nullptr), ERROR_SUCCESS);
 
-        EXPECT_FALSE(read_file_metadata(file_path, "scope_exit.txt").has_value());
+        // Direct open without backup semantics is always denied by the empty DACL
+        HANDLE h_no_backup_scope = ::CreateFileW(
+            file_path.c_str(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            nullptr);
+        EXPECT_EQ(h_no_backup_scope, INVALID_HANDLE_VALUE);
+        EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
+
+        {
+            ScopedPrivilegeDisable no_backup(L"SeBackupPrivilege");
+            EXPECT_FALSE(read_file_metadata(file_path, "scope_exit.txt").has_value());
+        }
         // Do NOT call restore() explicitly; let destructor run
     }
 
@@ -1098,6 +1272,75 @@ TEST(FileMetadataWin32NativeTest, DaclRestoreGuardDestructorReportsFailureWhenNo
     EXPECT_NONFATAL_FAILURE(([&]() {
         DaclRestoreGuard guard{non_existent.wstring(), &empty_acl, nullptr, false};
     }()), "DaclRestoreGuard destructor failed to restore DACL");
+}
+
+TEST(FileMetadataWin32NativeTest, RestrictiveDaclAccessBehaviorWithAndWithoutBackupPrivilege) {
+    TempDirFixture fixture;
+    const auto file_path = fixture.path() / "priv_behavior.txt";
+    {
+        std::ofstream ofs(file_path);
+        ofs << "privilege behavior test";
+    }
+
+    auto guard_res = DaclRestoreGuard::capture(file_path);
+    ASSERT_TRUE(guard_res.has_value());
+    auto& guard = *guard_res;
+
+    ACL empty_acl{};
+    ASSERT_TRUE(::InitializeAcl(&empty_acl, sizeof(empty_acl), ACL_REVISION));
+    ASSERT_EQ(::SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(file_path.c_str()),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, &empty_acl, nullptr), ERROR_SUCCESS);
+
+    // 1. Direct open without backup semantics is always denied by the empty DACL
+    HANDLE h_raw = ::CreateFileW(
+        file_path.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    EXPECT_EQ(h_raw, INVALID_HANDLE_VALUE);
+    EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
+
+    // 2. Open without backup semantics for GENERIC_READ is also denied
+    HANDLE h_read = ::CreateFileW(
+        file_path.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        0,
+        nullptr);
+    EXPECT_EQ(h_read, INVALID_HANDLE_VALUE);
+    EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ACCESS_DENIED));
+
+    // 3. With SeBackupPrivilege disabled, read_file_metadata fails with PermissionDenied
+    {
+        ScopedPrivilegeDisable no_backup(L"SeBackupPrivilege");
+        const auto result = read_file_metadata(file_path, "priv_behavior.txt");
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, FileMetadataErrorCode::PermissionDenied);
+        EXPECT_EQ(result.error().os_error, static_cast<std::uint32_t>(ERROR_ACCESS_DENIED));
+    }
+
+    // 4. If environment has SeBackupPrivilege enabled, read_file_metadata legitimately succeeds
+    if (is_privilege_enabled(L"SeBackupPrivilege")) {
+        const auto backup_result = read_file_metadata(file_path, "priv_behavior.txt");
+        ASSERT_TRUE(backup_result.has_value());
+        ASSERT_TRUE(backup_result->has_value());
+        EXPECT_EQ((**backup_result).size, 23ULL);
+    }
+
+    // 5. Restore original DACL and confirm full access is restored
+    EXPECT_EQ(guard.restore(), ERROR_SUCCESS);
+    EXPECT_TRUE(guard.restored);
+    const auto final_meta = read_file_metadata(file_path, "priv_behavior.txt");
+    ASSERT_TRUE(final_meta.has_value() && final_meta->has_value());
+    EXPECT_EQ((**final_meta).size, 23ULL);
 }
 #endif // defined(_WIN32)
 
