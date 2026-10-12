@@ -10,9 +10,11 @@ Building Kasumi requires CMake 3.28+, Git, and a C++23 compiler:
 * **rclone**: Required for rclone-backed remote operation and for system tests that exercise the rclone transport. Not required for building or running local transport tests.
 
 Repository CI exercises:
-* Visual Studio 2022 / MSVC on Windows;
-* GCC from the Windows MSYS2 UCRT64 environment (the installed package version, not a pinned GCC major; tools are verified under `/ucrt64/bin`);
-* GCC 14 on Ubuntu.
+* Visual Studio 2022 / MSVC on Windows (Debug and Release);
+* GCC from the Windows MSYS2 UCRT64 environment (Debug and Release; tools verified under `/ucrt64/bin`);
+* Clang from the Windows MSYS2 CLANG64 environment (Debug and Release; tools verified under `/clang64/bin`);
+* GCC 14 on Ubuntu (Debug and Release);
+* Clang on Ubuntu (Debug and Release).
 
 ## C++ Formatting
 
@@ -79,6 +81,38 @@ ctest --test-dir build-msvc -C Debug --output-on-failure
 ```
 
 This configuration exercises the MSVC toolchain with multi-config build support. MSVC builds use the static C/C++ runtime (/MT in Release, /MTd in Debug).
+
+### Clang (Windows — MSYS2 CLANG64)
+
+From an MSYS2 CLANG64 shell with `mingw-w64-clang-x86_64-clang`, `mingw-w64-clang-x86_64-ninja`, `mingw-w64-clang-x86_64-cmake`, and `mingw-w64-clang-x86_64-python` installed:
+
+```bash
+# Debug build and test
+cmake -S . -B build-clang64-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+cmake --build build-clang64-debug
+ctest --test-dir build-clang64-debug --output-on-failure --parallel 2
+
+# Release build and test
+cmake -S . -B build-clang64-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build-clang64-release
+ctest --test-dir build-clang64-release --output-on-failure --parallel 2
+```
+
+### Clang (Ubuntu / Linux)
+
+On Ubuntu with `clang`, `cmake`, and `ninja-build` installed:
+
+```bash
+# Debug build and test
+cmake -S . -B build-clang-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DBUILD_TESTING=ON
+cmake --build build-clang-debug -j$(nproc)
+ctest --test-dir build-clang-debug --output-on-failure
+
+# Release build and test
+cmake -S . -B build-clang-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DBUILD_TESTING=ON
+cmake --build build-clang-release -j$(nproc)
+ctest --test-dir build-clang-release --output-on-failure
+```
 
 ---
 

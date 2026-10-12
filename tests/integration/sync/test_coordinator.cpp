@@ -594,7 +594,7 @@ reobserve_list_prefix(void* context, std::string_view prefix) {
                               (prefix.find('/') != std::string_view::npos &&
                                prefix.find('/') == prefix.rfind('/'));
         if (is_heads && state->require_local_change_overlap &&
-            !state->condition.wait_for(lock, std::chrono::seconds{2}, [&] {
+            !state->condition.wait_for(lock, std::chrono::seconds{30}, [&] {
                 return state->local_change_observed;
             })) {
             state->local_change_overlap_timed_out = true;

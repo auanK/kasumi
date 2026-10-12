@@ -279,6 +279,14 @@ if(BUILD_TESTING)
         SYSTEM
     )
     fetchcontent_makeavailable(googletest)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        if(TARGET gtest)
+            target_compile_options(gtest PRIVATE -Wno-character-conversion)
+        endif()
+        if(TARGET gtest_main)
+            target_compile_options(gtest_main PRIVATE -Wno-character-conversion)
+        endif()
+    endif()
 endif()
 
 set(UTF8PROC_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
@@ -841,6 +849,8 @@ set_target_properties(${KASUMI_FIRST_PARTY_TARGETS} PROPERTIES POSITION_INDEPEND
 include(CheckIPOSupported)
 check_ipo_supported(RESULT ipo_supported)
 if(ipo_supported AND NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND WIN32))
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
     set_target_properties(${KASUMI_FIRST_PARTY_TARGETS} PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION TRUE
         INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE

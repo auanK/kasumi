@@ -3,6 +3,7 @@
 #include "platform/metadata.hpp"
 
 #include <blake3.h>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -148,7 +149,8 @@ void print_file_evidence(const char* label, const std::filesystem::path& path) {
     std::cout
         << label << " size=" << std::filesystem::file_size(path)
         << " mtime_ticks="
-        << std::filesystem::last_write_time(path).time_since_epoch().count()
+        << static_cast<long long>(
+               std::filesystem::last_write_time(path).time_since_epoch().count())
         << " hash=" << hash_hex(independent_file_hash(path)) << " fingerprint=";
     if (!fingerprint)
         std::cout << "error:" << fingerprint.error();

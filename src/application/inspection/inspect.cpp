@@ -1246,11 +1246,6 @@ inspect_contents(const observation::history::StorageView& observed,
 }
 
 constexpr std::size_t maximum_physical_object_count = 1'000'000;
-constexpr std::string_view gc_prefix = "history/gc/v1/";
-constexpr std::string_view writer_prefix = "history/gc/v1/writers/";
-constexpr std::string_view probe_prefix = "history/gc/v1/probes/";
-constexpr std::string_view quarantine_prefix = "history/gc/v1/quarantine/";
-constexpr std::string_view barrier_identifier = "history/gc/v1/barrier";
 
 std::expected<std::vector<std::string>, InspectionError>
 physical_objects(InspectionContext& context, InspectionOperation operation) {

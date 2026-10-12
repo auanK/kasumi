@@ -10,6 +10,24 @@
 
 namespace {
 
+template <typename TimePoint>
+constexpr auto file_clock_to_sys(TimePoint tp) {
+#if defined(_LIBCPP_VERSION)
+    return std::chrono::file_clock::to_sys(tp);
+#else
+    return std::chrono::clock_cast<std::chrono::system_clock>(tp);
+#endif
+}
+
+template <typename TimePoint>
+constexpr auto file_clock_from_sys(TimePoint tp) {
+#if defined(_LIBCPP_VERSION)
+    return std::chrono::file_clock::from_sys(tp);
+#else
+    return std::chrono::clock_cast<std::chrono::file_clock>(tp);
+#endif
+}
+
 std::filesystem::file_time_type timestamp(std::chrono::seconds offset) {
     const auto value = std::filesystem::file_time_type::clock::now() + offset;
     return std::filesystem::file_time_type{
@@ -22,12 +40,12 @@ std::filesystem::file_time_type subsecond_timestamp() {
     using filetime_tick =
         std::chrono::duration<long long, std::ratio<1, 10000000>>;
     const auto base = std::chrono::time_point_cast<filetime_tick>(
-        std::chrono::clock_cast<std::chrono::system_clock>(
+        file_clock_to_sys(
             std::filesystem::file_time_type::clock::now()));
     const auto value =
         base.time_since_epoch() + std::chrono::duration_cast<filetime_tick>(
-                                      std::chrono::nanoseconds{123456700});
-    return std::chrono::clock_cast<std::chrono::file_clock>(
+                                       std::chrono::nanoseconds{123456700});
+    return file_clock_from_sys(
         std::chrono::sys_time<filetime_tick>{value});
 }
 
@@ -307,7 +325,7 @@ TEST(PlatformMetadataTest, RejectsTimestampBeforeWindowsFiletimeEpoch) {
         kasumi::test::make_temp_workspace("platform-metadata-range");
     const auto file = kasumi::test::workspace_path(workspace, "file.txt");
     kasumi::test::write_text(file, "content");
-    const auto before_epoch = std::chrono::clock_cast<std::chrono::file_clock>(
+    const auto before_epoch = file_clock_from_sys(
         std::chrono::sys_time<std::chrono::seconds>{
             std::chrono::seconds{-11644473601}});
     if (before_epoch.time_since_epoch() <

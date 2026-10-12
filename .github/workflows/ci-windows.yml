@@ -117,3 +117,75 @@ jobs:
       - name: Run Tests (Release)
         run: |
           ctest --test-dir build --output-on-failure --parallel 2
+
+  clang64:
+    name: Clang (MSYS2 CLANG64)
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      CC: clang
+      CXX: clang++
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure MSYS2 (CLANG64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: false
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-python
+            git
+
+      - name: Verify MSYS2 toolchain
+        run: |
+          test "$MSYSTEM" = "CLANG64"
+
+          command -v clang
+          command -v clang++
+          command -v cmake
+          command -v ninja
+
+          clang --version
+          clang++ --version
+          cmake --version
+          ninja --version
+
+          for tool in clang clang++ cmake ninja; do
+            tool_path=$(command -v "$tool")
+            echo "$tool path: $tool_path"
+            case "$tool_path" in
+              /clang64/bin/*) ;;
+              *)
+                echo "ERROR: $tool is not from /clang64/bin/ (found: $tool_path)" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+      - name: Build (Debug)
+        run: |
+          cmake -S . -B build-clang64-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+          cmake --build build-clang64-debug
+
+      - name: Run Tests (Debug)
+        run: |
+          ctest --test-dir build-clang64-debug --output-on-failure --parallel 2
+
+      - name: Build (Release)
+        run: |
+          cmake -S . -B build-clang64-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build build-clang64-release
+
+      - name: Run Tests (Release)
+        run: |
+          ctest --test-dir build-clang64-release --output-on-failure --parallel 2
+

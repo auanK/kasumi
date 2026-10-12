@@ -66,4 +66,27 @@ TEST(ManualWriterRemovalTest,
     EXPECT_FALSE(state->objects.contains(selected));
 }
 
+TEST(MaintenanceProtocolPayloadTest, FormatProducesExactExpectedBytesAcrossKindsAndTokens) {
+    const std::vector<std::pair<std::string, std::string>> test_cases = {
+        {"writer", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+        {"barrier", "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"},
+        {"probe", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"},
+        {"custom", ""},
+        {"", "empty_kind"},
+        {"short", "x"},
+        {"boundary", std::string(1024, 'z')},
+        {"utf8_safe", "token_with_hyphens-and_underscores.123"},
+    };
+
+    for (const auto& [kind, token] : test_cases) {
+        const auto actual = protocol::testing::format_payload(kind, token);
+        const std::string expected_str =
+            "kasumi-gc-v1:" + std::string{kind} + ':' + std::string{token};
+        const std::vector<std::uint8_t> expected(expected_str.begin(),
+                                                 expected_str.end());
+        EXPECT_EQ(actual, expected)
+            << "Mismatch for kind: '" << kind << "' and token: '" << token << "'";
+    }
+}
+
 } // namespace

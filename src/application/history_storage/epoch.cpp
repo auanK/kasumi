@@ -25,12 +25,8 @@ inline constexpr std::array<std::byte, 4> epoch_magic{
 inline constexpr std::array<std::uint8_t, 5> envelope_header{
     'K', 'E', 'P', 'A', 1};
 inline constexpr std::uint8_t format_version = 1;
-inline constexpr std::size_t sequence_width = 20;
 inline constexpr std::size_t mac_size = 16;
 inline constexpr std::size_t nonce_size = 24;
-inline constexpr std::string_view object_prefix = "history/epochs/v1/";
-inline constexpr std::string_view object_directory = "history/epochs/v1";
-inline constexpr std::string_view object_suffix = ".epoch";
 
 Error error(ErrorCode code, std::string detail) {
     return Error{.code = code, .detail = std::move(detail)};

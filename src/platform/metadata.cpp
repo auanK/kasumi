@@ -19,6 +19,29 @@
 #endif
 
 namespace kasumi::platform::metadata {
+
+namespace {
+
+template <typename TimePoint>
+constexpr auto file_clock_to_sys(TimePoint tp) {
+#if defined(_LIBCPP_VERSION)
+    return std::chrono::file_clock::to_sys(tp);
+#else
+    return std::chrono::clock_cast<std::chrono::system_clock>(tp);
+#endif
+}
+
+template <typename TimePoint>
+constexpr auto file_clock_from_sys(TimePoint tp) {
+#if defined(_LIBCPP_VERSION)
+    return std::chrono::file_clock::from_sys(tp);
+#else
+    return std::chrono::clock_cast<std::chrono::file_clock>(tp);
+#endif
+}
+
+} // namespace
+
 #if defined(_WIN32)
 namespace detail {
 
@@ -47,7 +70,7 @@ from_windows_ticks(std::uint64_t ticks) noexcept {
     const auto unix_ns = diff_ticks * 100LL;
     using Duration = std::filesystem::file_time_type::duration;
     using Rep = Duration::rep;
-    const auto origin = std::chrono::clock_cast<std::chrono::file_clock>(
+    const auto origin = file_clock_from_sys(
                             std::chrono::system_clock::time_point{})
                             .time_since_epoch();
     const auto delta =
@@ -80,7 +103,7 @@ to_windows_ticks(std::filesystem::file_time_type value) noexcept {
         std::chrono::duration<std::int64_t, std::ratio<1, 10000000>>;
     constexpr std::int64_t unix_to_windows_epoch_ticks = 116444736000000000LL;
     const auto sys_time =
-        std::chrono::clock_cast<std::chrono::system_clock>(value);
+        file_clock_to_sys(value);
     const auto sys_ticks =
         std::chrono::duration_cast<file_ticks>(sys_time.time_since_epoch())
             .count();
@@ -267,7 +290,7 @@ unix_nanoseconds(std::filesystem::file_time_type value) noexcept {
     }
 
     using Duration = std::filesystem::file_time_type::duration;
-    const auto origin = std::chrono::clock_cast<std::chrono::file_clock>(
+    const auto origin = file_clock_from_sys(
                             std::chrono::system_clock::time_point{})
                             .time_since_epoch();
     const auto current_count = value.time_since_epoch().count();
@@ -297,7 +320,7 @@ file_time_from_unix_nanoseconds(std::int64_t value) noexcept {
 
     const auto delta =
         std::chrono::duration_cast<Duration>(std::chrono::nanoseconds{value});
-    const auto origin = std::chrono::clock_cast<std::chrono::file_clock>(
+    const auto origin = file_clock_from_sys(
                             std::chrono::system_clock::time_point{})
                             .time_since_epoch();
     if ((delta.count() > 0 &&

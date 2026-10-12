@@ -1023,7 +1023,7 @@ int present(const application::Response& response, bool full) {
         if (ptr->analysis_only) {
             const auto header =
                 (ptr->candidate_objects == 1)
-                    ? i18n::tr(i18n::Key::GcWarningHeaderSingular)
+                    ? std::string{i18n::tr(i18n::Key::GcWarningHeaderSingular)}
                     : i18n::format(i18n::Key::GcWarningHeaderPlural,
                                    ptr->candidate_objects);
             const auto label = i18n::tr(i18n::Key::LabelWarning);

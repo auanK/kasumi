@@ -284,7 +284,7 @@ MutationResult verify_upload_batch_individually(
     threads.reserve(worker_count);
 
     for (std::size_t w = 0; w < worker_count; ++w) {
-        threads.emplace_back([&, w](std::stop_token stop) {
+        threads.emplace_back([&](std::stop_token stop) {
             while (!stop.stop_requested()) {
                 std::size_t index = 0;
                 {

@@ -427,16 +427,6 @@ std::optional<std::uint64_t> parse_word(std::string_view value) {
                : std::nullopt;
 }
 
-std::optional<std::uint64_t> parse_decimal(std::string_view value) {
-    if (value.empty())
-        return std::nullopt;
-    std::uint64_t result = 0;
-    const auto parsed =
-        std::from_chars(value.data(), value.data() + value.size(), result, 10);
-    return parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size()
-               ? std::optional<std::uint64_t>{result}
-               : std::nullopt;
-}
 
 constexpr std::int64_t kUnifiedMetadataKind = 3;
 

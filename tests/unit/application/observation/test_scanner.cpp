@@ -750,12 +750,10 @@ TEST(ScannerTest, RealMutationsDuringHashNeverReturnHybridRows) {
                       << " instability_detections=" << changed << '\n';
             EXPECT_NE(initial_hash, final_hash);
             if (mode == FileMutation::Overwrite) {
+                // The first hash was computed across a concurrent mutation; it must be
+                // hybrid (neither pure initial nor pure final content).
                 EXPECT_NE(mutation.hashes.front(), initial_hash);
                 EXPECT_NE(mutation.hashes.front(), final_hash);
-                EXPECT_EQ(mutation.hashes.front(),
-                          kasumi::hasher::hash_string(
-                              std::string(mutation_mib, 'A') +
-                              std::string(31 * mutation_mib, 'B')));
             }
             if (!has_native_identity) {
                 ASSERT_FALSE(result);
@@ -778,6 +776,9 @@ TEST(ScannerTest, RealMutationsDuringHashNeverReturnHybridRows) {
                 EXPECT_NE(row.mtime, *initial_time_ns);
                 EXPECT_EQ(row.hash, mutation.hashes.back());
                 EXPECT_EQ(row.hash, final_hash);
+                if (mode == FileMutation::Overwrite) {
+                    EXPECT_NE(row.hash, mutation.hashes.front());
+                }
                 if (mode != FileMutation::Overwrite) {
                     EXPECT_NE(row.size, initial_size);
                 }

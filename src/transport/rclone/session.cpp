@@ -366,7 +366,7 @@ void wait_for_drain(State& state) noexcept {
         return;
     }
     try {
-        state.drain_future.get();
+        static_cast<void>(state.drain_future.get());
     } catch (...) {
     }
 }

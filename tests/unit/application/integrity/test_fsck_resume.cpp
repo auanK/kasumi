@@ -24,11 +24,6 @@ namespace {
 using kasumi::application::history_storage::PublishedCommit;
 using kasumi::runtime::RuntimeData;
 
-inline const auto& test_layout() {
-    static const auto layout =
-        kasumi::application::history_storage::derive_remote_layout(test_key());
-    return layout;
-}
 
 RuntimeData make_test_runtime_data(TempWorkspace& workspace) {
     const auto local = kasumi::test::workspace_path(workspace, "local");
@@ -72,6 +67,8 @@ PublishedCommit publish_remote(kasumi::transport::Transport& transport,
 std::string g_fake_lying_target_id;
 std::string g_fake_lying_reported_hash;
 bool g_fake_lying_hash_called = false;
+bool g_fake_lying_download_called = false;
+kasumi::transport::GetFunction g_original_get = nullptr;
 
 std::expected<std::string, kasumi::transport::Error>
 fake_lying_physical_hash(void*, std::string_view identifier, std::string_view) {
@@ -83,6 +80,17 @@ fake_lying_physical_hash(void*, std::string_view identifier, std::string_view) {
         .code = kasumi::transport::ErrorCode::Unsupported,
         .message = "unsupported identifier for test",
     });
+}
+
+kasumi::transport::Result fake_lying_get(
+    void* context,
+    std::string_view identifier,
+    const std::filesystem::path& destination) {
+    if (identifier == g_fake_lying_target_id) {
+        g_fake_lying_download_called = true;
+    }
+    return g_original_get ? g_original_get(context, identifier, destination)
+                          : kasumi::transport::Result{};
 }
 
 TEST(FsckResumeTest, ColdAuditPersistsCheckpointWithVerifiedProof) {
@@ -188,40 +196,96 @@ TEST(FsckResumeTest,
     const auto h_old = (*ckpt)->entries[0].physical_ciphertext_sha256;
     ASSERT_FALSE(h_old.empty());
 
+    const auto ckpt_path = kasumi::application::integrity::checkpoint_path(
+        runtime.database_path.parent_path());
+    ASSERT_TRUE(std::filesystem::exists(ckpt_path));
+    const auto ckpt_hash_before =
+        kasumi::crypto::physical::hash_file(ckpt_path, "sha256");
+    ASSERT_TRUE(ckpt_hash_before.has_value());
+
     // 2. Attacker mutates remote ciphertext bytes on storage
     const auto remote_file_path = kasumi::test::workspace_path(
         storage.workspace, "storage/" + content_id);
     ASSERT_TRUE(std::filesystem::exists(remote_file_path));
+
+    const auto old_actual_hash =
+        kasumi::crypto::physical::hash_file(remote_file_path, "sha256");
+    ASSERT_TRUE(old_actual_hash.has_value()) << old_actual_hash.error();
+    ASSERT_EQ(*old_actual_hash, h_old);
+
+    constexpr std::streamoff tamper_offset = 40; // mutate inside encrypted ciphertext header / MAC
+    char original_byte = 0;
+    {
+        std::ifstream file(remote_file_path, std::ios::binary);
+        ASSERT_TRUE(file.is_open());
+        file.seekg(tamper_offset);
+        ASSERT_TRUE(file.read(&original_byte, 1));
+    }
+
+    const char tampered_byte =
+        static_cast<char>(static_cast<unsigned char>(original_byte) ^ 0x01U);
+    ASSERT_NE(tampered_byte, original_byte);
+
     {
         std::fstream file(remote_file_path,
                           std::ios::in | std::ios::out | std::ios::binary);
         ASSERT_TRUE(file.is_open());
-        file.seekp(40); // mutate inside encrypted ciphertext body
-        char tampered = 'Z';
-        file.write(&tampered, 1);
+        file.seekp(tamper_offset);
+        ASSERT_TRUE(file);
+        file.write(&tampered_byte, 1);
+        file.flush();
+        ASSERT_TRUE(file);
         file.close();
     }
+
+    const auto new_actual_hash =
+        kasumi::crypto::physical::hash_file(remote_file_path, "sha256");
+    ASSERT_TRUE(new_actual_hash.has_value()) << new_actual_hash.error();
+    ASSERT_NE(*new_actual_hash, h_old);
+    ASSERT_NE(*new_actual_hash, *old_actual_hash);
 
     // 3. Configure transport to maliciously report H_old despite altered bytes
     g_fake_lying_target_id = content_id;
     g_fake_lying_reported_hash = h_old;
     g_fake_lying_hash_called = false;
+    g_fake_lying_download_called = false;
+    g_original_get = storage.transport.storage.get;
     storage.transport.storage.physical_hash = fake_lying_physical_hash;
+    storage.transport.storage.get = fake_lying_get;
 
     // 4. Run FSCK
     auto adversarial_result = kasumi::application::integrity::fsck(
         runtime, storage.transport, test_key());
 
-    // Transport physical_hash was queried and reported the lying hash H_old
+    // 1. Transport physical_hash was queried and reported the lying hash H_old
     EXPECT_TRUE(g_fake_lying_hash_called);
 
-    // CRITICAL SECURITY PROOF:
+    // 2. Audit flow verification: FSCK refused blind reuse of provider hash,
+    // fell back to full audit under Threat A, and executed the download.
+    EXPECT_TRUE(g_fake_lying_download_called);
+
+    // 3. CRITICAL SECURITY PROOF:
     // Under Kasumi's Threat A, the lying provider hash is NOT accepted as proof
     // of integrity. The altered bytes are downloaded, AEAD/MAC verification
-    // fails, and FSCK fails closed!
+    // fails (cryptographic failure detected), and FSCK fails closed!
     ASSERT_FALSE(adversarial_result.has_value());
     EXPECT_EQ(adversarial_result.error().code,
               kasumi::application::integrity::ErrorCode::Unrecoverable);
+    EXPECT_NE(adversarial_result.error().detail.find("adversarial.txt"),
+              std::string::npos);
+
+    // 4. Checkpoint integrity verification:
+    // FSCK must never promote or overwrite the checkpoint when corruption is detected.
+    const auto ckpt_hash_after =
+        kasumi::crypto::physical::hash_file(ckpt_path, "sha256");
+    ASSERT_TRUE(ckpt_hash_after.has_value());
+    EXPECT_EQ(*ckpt_hash_after, *ckpt_hash_before);
+
+    auto ckpt_after = kasumi::application::integrity::load_checkpoint(
+        runtime.database_path.parent_path(), test_key());
+    ASSERT_TRUE(ckpt_after.has_value() && ckpt_after->has_value());
+    EXPECT_EQ((*ckpt_after)->entries.size(), (*ckpt)->entries.size());
+    EXPECT_EQ((*ckpt_after)->entries[0].physical_ciphertext_sha256, h_old);
 }
 
 TEST(
