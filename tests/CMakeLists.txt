@@ -90,11 +90,13 @@ kasumi_add_test_suite(
     SOURCES
         integration/sync/test_coordinator.cpp
         integration/sync/test_content_batch.cpp
+        integration/sync/test_journal_preparation.cpp
         integration/sync/test_publication.cpp
         integration/sync/test_reobservation_safeguards.cpp
     LIBRARIES
         kasumi_application
         kasumi_sqlite3
+        monocypher
 )
 
 kasumi_add_test_suite(

@@ -178,6 +178,32 @@ cmake --build build-bench --parallel
 
 Benchmark executables and scripts are located in `tests/operational/`.
 
+The journal E2E campaign uses the real CLI, official Publisher/Receiver profiles,
+physical SQLite databases, and real rclone local/cloud storage. Keep all output
+outside the repository; each run preserves its exclusive namespace and artifacts:
+
+```powershell
+python tests/operational/benchmark_journal_e2e.py --binary build-clang64-release/kasumi.exe --rclone-config C:/private/rclone.conf --output D:/kj --group-commit
+python tests/operational/test_journal_preparation_e2e.py --binary build-clang64-release/kasumi.exe --rclone "C:/Program Files/rclone/rclone.exe" --rclone-config C:/private/rclone.conf --output D:/kj
+```
+
+The preparation regression checks two file counts after verifying all ten real
+syncs. It measures the Started-to-FilesStaged interval, including both durable
+barriers, separately from later completion checkpoints.
+
+For deterministic abrupt-process recovery tests, use a **separate test build**:
+
+```powershell
+cmake -S . -B build-journal-fault -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DKASUMI_BUILD_JOURNAL_FAULT_TESTS=ON
+cmake --build build-journal-fault --target kasumi
+python tests/operational/test_journal_recovery_e2e.py --binary build-journal-fault/kasumi.exe --rclone "C:/Program Files/rclone/rclone.exe" --output D:/kj --expect-grouped
+```
+
+This runner creates its own rclone `type=local` configuration and does not read
+global credentials. Hooks terminate without destructors at observed transaction
+boundaries or inject persistence errors. They are compiled out unless explicitly
+enabled; production and performance builds must keep the option **OFF**.
+
 ### Remote Inspection Benchmark
 
 The `benchmark_remote_inspection.py` harness measures remote history inspection across multiple phases:

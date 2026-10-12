@@ -2,6 +2,7 @@
 
 #include "application/history_storage/publication.hpp"
 #include "core/transaction/codec.hpp"
+#include "journal_fault_test.hpp"
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
@@ -331,6 +332,8 @@ save_with_key(const Paths& paths,
             return std::unexpected(encoded.error());
         }
         payload = std::move(*encoded);
+        platform::perf_trace::count("journal serialized bytes total",
+                                    payload.size());
         platform::perf_trace::maximum(
             "journal record serialized bytes",
             static_cast<std::uint64_t>(payload.size()));
@@ -362,6 +365,8 @@ save_with_key(const Paths& paths,
                          reinterpret_cast<const std::uint8_t*>(payload.data()),
                          payload.size());
         platform::perf_trace::finish("journal encryption", encryption_trace);
+        platform::perf_trace::count("journal encrypted bytes total",
+                                    ciphertext.size());
         if (!payload.empty()) {
             crypto_wipe(payload.data(), payload.size());
         }
@@ -395,6 +400,8 @@ save_with_key(const Paths& paths,
                      static_cast<std::streamsize>(mac.size()));
         output.write(reinterpret_cast<const char*>(ciphertext.data()),
                      static_cast<std::streamsize>(ciphertext.size()));
+        if (journal_fault_test::fail("write", record))
+            output.setstate(std::ios::badbit);
         if (!output) {
             output.close();
             remove_regular_file(paths.temporary_path);
@@ -403,7 +410,12 @@ save_with_key(const Paths& paths,
             crypto_wipe(aad.data(), aad.size());
             return std::unexpected("failed to write temporary journal");
         }
+        // Logical bytes accepted by the stream, not physical device writes.
+        platform::perf_trace::count("journal written bytes total",
+                                    header_size + ciphertext.size());
         output.flush();
+        if (journal_fault_test::fail("flush", record))
+            output.setstate(std::ios::badbit);
         if (!output) {
             output.close();
             remove_regular_file(paths.temporary_path);
@@ -425,21 +437,34 @@ save_with_key(const Paths& paths,
         crypto_wipe(mac.data(), mac.size());
         crypto_wipe(aad.data(), aad.size());
 
-        auto synced = platform::durability::sync_file(paths.temporary_path);
+        auto synced =
+            journal_fault_test::fail("sync", record)
+                ? std::expected<void, std::string>{std::unexpected(
+                      "injected sync failure")}
+                : platform::durability::sync_file(paths.temporary_path);
         if (!synced) {
             remove_regular_file(paths.temporary_path);
             return synced;
         }
-        auto replaced = platform::durability::replace_atomically(
-            paths.temporary_path, paths.final_path);
+        auto replaced = journal_fault_test::fail("replace", record)
+                            ? std::expected<void, std::string>{std::unexpected(
+                                  "injected replace failure")}
+                            : platform::durability::replace_atomically(
+                                  paths.temporary_path, paths.final_path);
         if (!replaced) {
             remove_regular_file(paths.temporary_path);
             return replaced;
         }
         auto parent_synced =
-            platform::durability::sync_parent_directory(paths.final_path);
+            journal_fault_test::fail("parent-sync", record)
+                ? std::expected<void, std::string>{std::unexpected(
+                      "injected parent sync failure")}
+                : platform::durability::sync_parent_directory(paths.final_path);
         platform::perf_trace::finish("journal durable write",
                                      durable_write_trace);
+        if (parent_synced) {
+            platform::perf_trace::count("journal durable saves");
+        }
         return parent_synced;
     } catch (const std::exception& exception) {
         remove_regular_file(paths.temporary_path);
@@ -589,6 +614,7 @@ load_with_key(const Paths& paths, const crypto::Key& journal_key) {
         if (!semantic_validation) {
             return std::unexpected(semantic_validation.error());
         }
+        journal_fault_test::hit("loaded", &*decoded);
         return std::optional<transaction::Record>{std::move(*decoded)};
     } catch (const std::exception& exception) {
         wipe_sensitive(payload, plaintext, nonce, mac, aad);

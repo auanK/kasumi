@@ -12,6 +12,12 @@ endif()
 
 include(CTest)
 
+option(KASUMI_BUILD_JOURNAL_FAULT_TESTS
+    "Enable isolated journal crash/error injection (never for production)" OFF)
+if(KASUMI_BUILD_JOURNAL_FAULT_TESTS AND NOT BUILD_TESTING)
+    message(FATAL_ERROR "Journal fault injection requires BUILD_TESTING=ON")
+endif()
+
 option(
     KASUMI_BUILD_SYSTEM_TESTS
     "Build Kasumi system tests that require external executables"
@@ -499,6 +505,10 @@ target_include_directories(
     PRIVATE
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
 )
+
+if(KASUMI_BUILD_JOURNAL_FAULT_TESTS)
+    target_compile_definitions(kasumi_application PRIVATE KASUMI_JOURNAL_FAULT_TESTS)
+endif()
 
 target_link_libraries(kasumi_application
     PRIVATE

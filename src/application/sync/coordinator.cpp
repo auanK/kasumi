@@ -13,6 +13,7 @@
 #include "core/history.hpp"
 #include "core/reconciliation/plan.hpp"
 #include "core/transaction/types.hpp"
+#include "journal_fault_test.hpp"
 #include "platform/clock.hpp"
 #include "platform/durability.hpp"
 #include "platform/metadata.hpp"
@@ -372,6 +373,8 @@ save_record(const journal::Paths& paths,
     if (!saved) {
         return std::unexpected(journal_error(saved.error()));
     }
+    journal_fault_test::hit(
+        "saved", &record, static_cast<std::size_t>(record.phase));
     return {};
 }
 
@@ -1339,6 +1342,10 @@ execute(const runtime::RuntimeData& runtime_data,
         platform::perf_trace::count(
             detail::action_metrics[action_index(operation.action)]);
     }
+    const auto preparation_saves_before =
+        platform::perf_trace::get_count("journal durable saves");
+    const auto preparation_bytes_before =
+        platform::perf_trace::get_count("journal written bytes total");
     auto saved = detail::save_record(*paths, *record, key);
     if (!saved) {
         return std::unexpected(saved.error());
@@ -1370,19 +1377,25 @@ execute(const runtime::RuntimeData& runtime_data,
             return std::unexpected(mutation_error(prepared.error()));
         }
         record->progress[index] = *prepared;
-        if (is_logical_mutation(record->plan.operations[index].action) ||
-            !content_upload_required[index]) {
-            continue;
-        }
-        saved = detail::save_record(*paths, *record, key);
-        if (!saved) {
-            return std::unexpected(saved.error());
-        }
+        journal_fault_test::hit("prepared", &*record, index);
     }
-    record->phase = transaction::Phase::FilesStaged;
+    journal_fault_test::hit("before-FilesStaged", &*record);
+    // A resumed CommitPrepared record must keep its publication identity valid.
+    if (record->phase < transaction::Phase::FilesStaged) {
+        record->phase = transaction::Phase::FilesStaged;
+    }
     saved = detail::save_record(*paths, *record, key);
     if (!saved)
         return std::unexpected(saved.error());
+
+    platform::perf_trace::count(
+        "journal preparation durable saves",
+        platform::perf_trace::get_count("journal durable saves") -
+            preparation_saves_before);
+    platform::perf_trace::count(
+        "journal preparation written bytes",
+        platform::perf_trace::get_count("journal written bytes total") -
+            preparation_bytes_before);
 
     const auto rollback_terminal = [&]() {
         return detail::rollback_transaction(*paths,
@@ -1760,7 +1773,9 @@ execute(const runtime::RuntimeData& runtime_data,
     }
     platform::perf_trace::finish("content transfer wall",
                                  content_transfer_trace);
-    record->phase = transaction::Phase::LocalChangesApplied;
+    if (record->phase < transaction::Phase::LocalChangesApplied) {
+        record->phase = transaction::Phase::LocalChangesApplied;
+    }
     saved = detail::save_record(*paths, *record, key);
     if (!saved)
         return std::unexpected(saved.error());

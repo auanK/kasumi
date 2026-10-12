@@ -3,6 +3,7 @@
 #include "application/observation/state.hpp"
 #include "application/sync/coordinator.hpp"
 #include "application/sync/coordinator_detail.hpp"
+#include "application/sync/journal_fault_test.hpp"
 #include "application/sync/reobservation.hpp"
 #include "application/use_cases/context.hpp"
 #include "application/use_cases/error_mapping.hpp"
@@ -82,6 +83,9 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
         err.stage = SyncStage::Observing;
         return std::unexpected(err);
     }
+    sync::journal_fault_test::hit(
+        "recovery", nullptr, static_cast<std::size_t>(*recovery));
+    sync::journal_fault_test::hit("recovered");
 
     observation::LocalObservationSession observation_session;
     observation_session.database_path = context.runtime.database_path;
