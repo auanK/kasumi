@@ -42,6 +42,14 @@ METRICS = {
     "serialized_bytes": ("journal serialized bytes total", "calls"),
     "encrypted_bytes": ("journal encrypted bytes total", "calls"),
     "written_bytes": ("journal written bytes total", "calls"),
+    "framing_bytes": ("journal framing bytes total", "calls"),
+    "snapshot_bytes": ("journal snapshot bytes", "calls"),
+    "log_bytes": ("journal log bytes", "calls"),
+    "confirmation_bytes": ("journal confirmation bytes", "calls"),
+    "delta_calculation_us": ("journal delta calculation", "total_us"),
+    "replay_us": ("journal replay", "total_us"),
+    "clear_us": ("journal clear", "total_us"),
+    "retirement_proof_bytes": ("journal retirement proof bytes", "calls"),
     "record_bytes_max": ("journal record serialized bytes", "calls"),
     "serialization_us": ("journal serialization", "total_us"),
     "encryption_us": ("journal encryption", "total_us"),
@@ -138,6 +146,17 @@ def process_counters(process):
     if kernel.GetProcessTimes(int(process._handle), *(ctypes.byref(t) for t in times)):
         result["process_cpu_us"] = sum((t.dwHighDateTime << 32) | t.dwLowDateTime
                                        for t in times[2:]) // 10
+    class MemoryCounters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("page_faults", wintypes.DWORD)] + [
+            (name, ctypes.c_size_t) for name in (
+                "peak_working_set", "working_set", "peak_paged_pool", "paged_pool",
+                "peak_nonpaged_pool", "nonpaged_pool", "pagefile", "peak_pagefile")]
+    memory = MemoryCounters()
+    memory.cb = ctypes.sizeof(memory)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(MemoryCounters), wintypes.DWORD]
+    if psapi.GetProcessMemoryInfo(int(process._handle), ctypes.byref(memory), memory.cb):
+        result["peak_working_set_bytes"] = memory.peak_working_set
     return result
 
 
@@ -275,7 +294,7 @@ def measured_sync(args, trial, profile, operation, env, expected, profiles, cont
                 raise RuntimeError("missing successful performance trace")
             if result["saves"] != result["save_attempts"]:
                 raise RuntimeError("save attempts/completions mismatch")
-            if result["serialized_bytes"] != result["encrypted_bytes"] or result["written_bytes"] != result["serialized_bytes"] + 52 * result["saves"]:
+            if result["serialized_bytes"] != result["encrypted_bytes"] or result["written_bytes"] != result["serialized_bytes"] + result["framing_bytes"]:
                 raise RuntimeError("journal byte accounting mismatch")
         result["tree_integrity"] = verify_tree(trial / profile, expected)
         result["sqlite"] = verify_database(profiles / profile, len(expected))

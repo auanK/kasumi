@@ -91,6 +91,7 @@ kasumi_add_test_suite(
         integration/sync/test_coordinator.cpp
         integration/sync/test_content_batch.cpp
         integration/sync/test_journal_preparation.cpp
+        integration/sync/test_journal_incremental.cpp
         integration/sync/test_publication.cpp
         integration/sync/test_reobservation_safeguards.cpp
     LIBRARIES

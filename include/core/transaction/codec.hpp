@@ -14,10 +14,13 @@ namespace kasumi::transaction::codec {
 // Encoded bytes or failure description.
 using EncodeResult = std::expected<std::vector<std::byte>, std::string>;
 
-// Encodes and validates in v8 little-endian format with uint32_t strings.
+// Validates the current codec invariants and field limits without serializing.
+std::expected<void, std::string> validate(const Record& record);
+
+// Encodes and validates in v9 little-endian format with uint32_t strings.
 EncodeResult encode(const Record& record);
 
-// Accepts only v8 and rejects trailing bytes or invalid invariants.
+// Accepts only v9 and rejects trailing bytes or invalid invariants.
 std::expected<Record, std::string> decode(std::span<const std::byte> data);
 
 } // namespace kasumi::transaction::codec

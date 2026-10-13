@@ -158,6 +158,37 @@ replace_atomically(const std::filesystem::path& source,
     return {};
 }
 
+std::expected<void, std::string>
+retire_directory(const std::filesystem::path& source,
+                 const std::filesystem::path& target) {
+    if (source.empty() || target.empty() ||
+        source.parent_path().lexically_normal() !=
+            target.parent_path().lexically_normal())
+        return std::unexpected("retire_directory: physical siblings required");
+    auto parent = validate_parent(source, "retire_directory");
+    if (!parent)
+        return parent;
+    auto directory = validate_parent(source / ".", "retire_directory");
+    if (!directory)
+        return directory;
+    std::error_code error;
+    auto status = std::filesystem::symlink_status(target, error);
+    if ((error && !path_not_found(error)) ||
+        (!error && status.type() != std::filesystem::file_type::not_found))
+        return std::unexpected("retire_directory: target must be absent");
+#if defined(_WIN32)
+    if (!MoveFileExW(source.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH))
+        return std::unexpected(
+            native_error("retire_directory failed", GetLastError()));
+#else
+    error.clear();
+    std::filesystem::rename(source, target, error);
+    if (error)
+        return std::unexpected("retire_directory failed: " + error.message());
+#endif
+    return {};
+}
+
 std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
     if (path.empty()) {
         return std::unexpected("sync_file: path cannot be empty");

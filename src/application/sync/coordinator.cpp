@@ -230,12 +230,13 @@ std::expected<void, Error> remove_transaction_workspace(
 
 std::expected<void, Error> finish_transaction_cleanup(
     const journal::Paths& paths,
-    const std::optional<platform::Workspace>& workspace) {
+    const std::optional<platform::Workspace>& workspace,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
     auto removed = remove_transaction_workspace(workspace);
     if (!removed) {
         return std::unexpected(removed.error());
     }
-    auto cleared = journal::clear(paths);
+    auto cleared = journal::clear(paths, key);
     if (!cleared) {
         return std::unexpected(journal_error(cleared.error()));
     }
@@ -337,9 +338,10 @@ make_journal_paths(const runtime::RuntimeData& runtime_data) {
 std::expected<void, Error>
 save_record(const journal::Paths& paths,
             const transaction::Record& record,
-            std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+            journal::SaveMode mode) {
     const auto trace = platform::perf_trace::begin();
-    auto saved = journal::save(paths, record, key);
+    auto saved = journal::save(paths, record, key, mode);
     if (trace.active) {
         const auto elapsed =
             std::chrono::duration_cast<std::chrono::microseconds>(
@@ -683,11 +685,11 @@ rollback_transaction(const journal::Paths& paths,
         progress.state = transaction::OperationState::Pending;
         progress.had_original = false;
     }
-    auto saved = save_record(paths, record, key);
+    auto saved = save_record(paths, record, key, journal::SaveMode::Rollback);
     if (!saved) {
         return std::unexpected(saved.error());
     }
-    return finish_transaction_cleanup(paths, workspace);
+    return finish_transaction_cleanup(paths, workspace, key);
 }
 
 std::expected<void, Error>
@@ -1264,7 +1266,6 @@ execute(const runtime::RuntimeData& runtime_data,
     if (!paths) {
         return std::unexpected(paths.error());
     }
-    journal::discard_temporary(*paths);
     auto existing = journal::load(*paths, key);
     if (!existing) {
         return std::unexpected(detail::journal_error(existing.error()));
@@ -2079,8 +2080,8 @@ execute(const runtime::RuntimeData& runtime_data,
         saved = detail::save_record(*paths, *record, key);
         if (!saved)
             return std::unexpected(saved.error());
-        return detail::finish_transaction_cleanup(*paths,
-                                                  transaction_workspace);
+        return detail::finish_transaction_cleanup(
+            *paths, transaction_workspace, key);
     }
 
     if (!prepared_commit || !commit_publication.valid()) {
@@ -2386,7 +2387,8 @@ execute(const runtime::RuntimeData& runtime_data,
     saved = detail::save_record(*paths, *record, key);
     if (!saved)
         return std::unexpected(saved.error());
-    return detail::finish_transaction_cleanup(*paths, transaction_workspace);
+    return detail::finish_transaction_cleanup(
+        *paths, transaction_workspace, key);
 }
 
 } // namespace kasumi::application::sync::coordinator

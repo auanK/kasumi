@@ -1,5 +1,6 @@
 #include "mutation_detail.hpp"
 
+#include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 
 #include <algorithm>
@@ -56,6 +57,17 @@ read_status(const std::filesystem::path& path, std::size_t operation_index) {
 
 bool missing(std::filesystem::file_status status) noexcept {
     return status.type() == std::filesystem::file_type::not_found;
+}
+
+std::filesystem::path
+download_candidate_path(const std::filesystem::path& destination,
+                        const platform::Workspace& workspace,
+                        std::size_t operation_index) {
+    return platform::path::temporary_sibling_path(
+        destination,
+        ".",
+        ".kasumi-new-" + platform::path::to_utf8(workspace.root.filename()) +
+            "-" + std::to_string(operation_index));
 }
 
 std::expected<std::filesystem::path, MutationError>

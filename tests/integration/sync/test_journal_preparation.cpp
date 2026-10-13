@@ -180,13 +180,17 @@ TEST(JournalPreparationTest,
     const auto paths = sync::journal::make_paths(profile);
     ASSERT_TRUE(paths);
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    auto record =
+        sync::journal::create_record(0, 0, kasumi::make_sync_plan({}, 0));
+    ASSERT_TRUE(record);
+    ASSERT_TRUE(sync::journal::save(*paths, *record, key));
     auto journal_key =
         kasumi::crypto::derive_key(key, kasumi::crypto::KeyPurpose::Journal);
     std::array<std::uint8_t, 53> encrypted{};
     encrypted[0] = 'K';
     encrypted[1] = 'T';
     encrypted[2] = 'X';
-    encrypted[3] = '2';
+    encrypted[3] = '3';
     encrypted[4] = 1;
     const std::uint8_t invalid_payload = 255;
     crypto_aead_lock(encrypted.data() + 52,
@@ -197,13 +201,30 @@ TEST(JournalPreparationTest,
                      12,
                      &invalid_payload,
                      1);
-    crypto_wipe(journal_key.data(), journal_key.size());
     kasumi::test::write_binary(
         paths->final_path,
         std::vector<std::byte>{
             reinterpret_cast<const std::byte*>(encrypted.data()),
             reinterpret_cast<const std::byte*>(encrypted.data() +
                                                encrypted.size())});
+    const auto confirmation_path =
+        paths->final_path.parent_path() / "confirmed.enc";
+    auto confirmation = kasumi::test::read_binary(confirmation_path);
+    const auto hash =
+        kasumi::hasher::hash_bytes(encrypted.data(), encrypted.size());
+    std::copy(hash.begin(), hash.end(), confirmation.begin() + 4);
+    std::copy(hash.begin(), hash.end(), confirmation.begin() + 52);
+    auto* bytes = reinterpret_cast<std::uint8_t*>(confirmation.data());
+    crypto_aead_lock(nullptr,
+                     bytes + 108,
+                     journal_key.data(),
+                     bytes + 84,
+                     bytes,
+                     84,
+                     nullptr,
+                     0);
+    crypto_wipe(journal_key.data(), journal_key.size());
+    kasumi::test::write_binary(confirmation_path, confirmation);
     const auto before = kasumi::test::read_binary(paths->final_path);
     const auto loaded = sync::journal::load(*paths, key);
     ASSERT_FALSE(loaded);
@@ -221,6 +242,168 @@ TEST(JournalPreparationTest,
     EXPECT_EQ(kasumi::test::read_binary(paths->final_path), before);
     EXPECT_EQ(kasumi::test::read_text(local / "confirmed.txt"), "CONFIRMED");
     EXPECT_FALSE(std::filesystem::exists(runtime.database_path));
+}
+
+TEST(JournalPreparationTest, IncompleteInitializationRetainsTemporaryArtifact) {
+    auto owner = kasumi::test::make_temp_workspace("incomplete-initialization");
+    const auto profile = kasumi::test::workspace_path(owner, "profile");
+    const auto local = kasumi::test::workspace_path(owner, "local");
+    std::filesystem::create_directories(profile);
+    std::filesystem::create_directories(local);
+    auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths);
+    const std::vector<std::byte> partial{
+        std::byte{'K'}, std::byte{'T'}, std::byte{'X'}, std::byte{'3'}};
+    kasumi::test::write_binary(paths->temporary_path, partial);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    const kasumi::runtime::RuntimeData runtime{.local_dir = local,
+                                               .database_path =
+                                                   profile / "state.db",
+                                               .key_path = profile / "key.bin"};
+    kasumi::transport::Transport unavailable{};
+    EXPECT_FALSE(
+        sync::coordinator::recover_if_needed(runtime, unavailable, key));
+    ASSERT_TRUE(std::filesystem::exists(paths->temporary_path));
+    EXPECT_EQ(kasumi::test::read_binary(paths->temporary_path), partial);
+}
+
+TEST(JournalPreparationTest, RollbackRemovesInterruptedOwnedDownloadCandidate) {
+    auto owner =
+        kasumi::test::make_temp_workspace("interrupted-download-candidate");
+    const auto profile = kasumi::test::workspace_path(owner, "profile");
+    const auto local = kasumi::test::workspace_path(owner, "local");
+    std::filesystem::create_directories(profile);
+    std::filesystem::create_directories(local);
+    auto record = sync::journal::create_record(
+        0,
+        0,
+        kasumi::make_sync_plan(
+            {{.action = kasumi::Action::CreateLocalDirectory,
+              .path = "new-dir"},
+             {.action = kasumi::Action::Download,
+              .path = "new-dir/file",
+              .hash = kasumi::hash_hex(kasumi::hasher::hash_string("COMPLETE")),
+              .size = 8}},
+            0));
+    ASSERT_TRUE(record);
+    const kasumi::platform::Workspace workspace{profile / ".transactions" /
+                                                record->operation_id};
+    std::filesystem::create_directories(workspace.root);
+    record->phase = kasumi::transaction::Phase::FilesStaged;
+    record->progress[0].state = kasumi::transaction::OperationState::Applied;
+    record->progress[1].state =
+        kasumi::transaction::OperationState::BackupCreated;
+    auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    ASSERT_TRUE(sync::journal::save(*paths, *record, key));
+    std::filesystem::create_directory(local / "new-dir");
+    const auto candidate =
+        local / "new-dir" / (".file.kasumi-new-" + record->operation_id + "-1");
+    kasumi::test::write_text(candidate, "PARTIAL");
+    const kasumi::runtime::RuntimeData runtime{.local_dir = local,
+                                               .database_path =
+                                                   profile / "state.db",
+                                               .key_path = profile / "key.bin"};
+    kasumi::transport::Transport unavailable{};
+    auto recovered =
+        sync::coordinator::recover_if_needed(runtime, unavailable, key);
+    ASSERT_TRUE(recovered) << recovered.error().detail;
+    EXPECT_FALSE(std::filesystem::exists(local / "new-dir"));
+    EXPECT_FALSE(std::filesystem::exists(paths->final_path));
+}
+
+TEST(JournalPreparationTest, RollbackPreservesUnownedDownloadCandidate) {
+    auto owner =
+        kasumi::test::make_temp_workspace("interrupted-download-candidate");
+    const auto profile = kasumi::test::workspace_path(owner, "profile");
+    const auto local = kasumi::test::workspace_path(owner, "local");
+    std::filesystem::create_directories(profile);
+    std::filesystem::create_directories(local);
+    auto record = sync::journal::create_record(
+        0,
+        0,
+        kasumi::make_sync_plan(
+            {{.action = kasumi::Action::CreateLocalDirectory,
+              .path = "new-dir"},
+             {.action = kasumi::Action::Download,
+              .path = "new-dir/file",
+              .hash = kasumi::hash_hex(kasumi::hasher::hash_string("COMPLETE")),
+              .size = 8}},
+            0));
+    ASSERT_TRUE(record);
+    const kasumi::platform::Workspace workspace{profile / ".transactions" /
+                                                record->operation_id};
+    std::filesystem::create_directories(workspace.root);
+    record->phase = kasumi::transaction::Phase::FilesStaged;
+    record->progress[0].state = kasumi::transaction::OperationState::Applied;
+    record->progress[1].state =
+        kasumi::transaction::OperationState::BackupCreated;
+    auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    ASSERT_TRUE(sync::journal::save(*paths, *record, key));
+    std::filesystem::create_directory(local / "new-dir");
+    const auto candidate =
+        local / "new-dir" /
+        (".file.kasumi-new-" + record->operation_id + "-other");
+    kasumi::test::write_text(candidate, "PARTIAL");
+    const kasumi::runtime::RuntimeData runtime{.local_dir = local,
+                                               .database_path =
+                                                   profile / "state.db",
+                                               .key_path = profile / "key.bin"};
+    kasumi::transport::Transport unavailable{};
+    auto recovered =
+        sync::coordinator::recover_if_needed(runtime, unavailable, key);
+    ASSERT_FALSE(recovered);
+    EXPECT_EQ(kasumi::test::read_text(candidate), "PARTIAL");
+    EXPECT_TRUE(std::filesystem::exists(paths->final_path));
+}
+
+TEST(JournalPreparationTest, RollbackPreservesUnexpectedDownloadCandidateType) {
+    auto owner =
+        kasumi::test::make_temp_workspace("interrupted-download-candidate");
+    const auto profile = kasumi::test::workspace_path(owner, "profile");
+    const auto local = kasumi::test::workspace_path(owner, "local");
+    std::filesystem::create_directories(profile);
+    std::filesystem::create_directories(local);
+    auto record = sync::journal::create_record(
+        0,
+        0,
+        kasumi::make_sync_plan(
+            {{.action = kasumi::Action::CreateLocalDirectory,
+              .path = "new-dir"},
+             {.action = kasumi::Action::Download,
+              .path = "new-dir/file",
+              .hash = kasumi::hash_hex(kasumi::hasher::hash_string("COMPLETE")),
+              .size = 8}},
+            0));
+    ASSERT_TRUE(record);
+    const kasumi::platform::Workspace workspace{profile / ".transactions" /
+                                                record->operation_id};
+    std::filesystem::create_directories(workspace.root);
+    record->phase = kasumi::transaction::Phase::FilesStaged;
+    record->progress[0].state = kasumi::transaction::OperationState::Applied;
+    record->progress[1].state =
+        kasumi::transaction::OperationState::BackupCreated;
+    auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    ASSERT_TRUE(sync::journal::save(*paths, *record, key));
+    std::filesystem::create_directory(local / "new-dir");
+    const auto candidate =
+        local / "new-dir" / (".file.kasumi-new-" + record->operation_id + "-1");
+    std::filesystem::create_directory(candidate);
+    const kasumi::runtime::RuntimeData runtime{.local_dir = local,
+                                               .database_path =
+                                                   profile / "state.db",
+                                               .key_path = profile / "key.bin"};
+    kasumi::transport::Transport unavailable{};
+    auto recovered =
+        sync::coordinator::recover_if_needed(runtime, unavailable, key);
+    ASSERT_FALSE(recovered);
+    EXPECT_TRUE(std::filesystem::is_directory(candidate));
+    EXPECT_TRUE(std::filesystem::exists(paths->final_path));
 }
 
 } // namespace

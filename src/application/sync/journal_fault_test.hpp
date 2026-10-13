@@ -55,16 +55,19 @@ inline void hit(std::string_view point,
 #endif
 }
 
-inline bool fail(std::string_view point, const transaction::Record& record) {
+inline bool cleanup_fail(std::string_view point) {
 #ifdef KASUMI_JOURNAL_FAULT_TESTS
     const auto* failure = std::getenv("KASUMI_TEST_JOURNAL_FAIL");
-    return record.phase == transaction::Phase::FilesStaged && failure &&
-           point == failure;
+    return failure && point == failure;
 #else
     (void)point;
-    (void)record;
     return false;
 #endif
+}
+
+inline bool fail(std::string_view point, const transaction::Record& record) {
+    return record.phase == transaction::Phase::FilesStaged &&
+           cleanup_fail(point);
 }
 
 } // namespace kasumi::application::sync::journal_fault_test

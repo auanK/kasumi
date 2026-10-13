@@ -903,6 +903,44 @@ rollback_operation_impl(const Operation& operation,
     if (!workspace_valid)
         return std::unexpected(workspace_valid.error());
 
+    if (operation.action == Action::Download) {
+        auto destination =
+            resolve_local_path(local_root, operation.path, operation_index);
+        if (!destination)
+            return std::unexpected(destination.error());
+        const auto candidate = detail::download_candidate_path(
+            *destination, workspace, operation_index);
+        auto status = read_status(candidate, operation_index);
+        if (!status)
+            return std::unexpected(status.error());
+        if (!missing(*status)) {
+            if (std::filesystem::is_symlink(*status) ||
+                !std::filesystem::is_regular_file(*status)) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::DestinationConflict,
+                               "download candidate is not a regular file",
+                               candidate,
+                               operation_index));
+            }
+            std::error_code error;
+            if (!std::filesystem::remove(candidate, error) || error) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::LocalIo,
+                               error ? error.message()
+                                     : "failed to remove download candidate",
+                               candidate,
+                               operation_index));
+            }
+            auto synced =
+                platform::durability::sync_parent_directory(candidate);
+            if (!synced)
+                return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                                  synced.error(),
+                                                  candidate,
+                                                  operation_index));
+        }
+    }
+
     if (operation.action == Action::CreateLocalDirectory) {
         if (progress.had_original)
             return {};

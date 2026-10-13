@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import sqlite3
 import subprocess
 import uuid
@@ -49,7 +50,7 @@ def loaded(stderr):
 
 
 def case(args, config, name, point, mixed=False, failure=None, corruption=None):
-    trial = args.campaign / name
+    trial = args.campaign / f"case-{args.case_index:02d}"
     trial.mkdir()
     for profile in ("publisher", "receiver"):
         (trial / profile).mkdir()
@@ -116,8 +117,16 @@ def case(args, config, name, point, mixed=False, failure=None, corruption=None):
         assert record["exit_code"] == 86 and f"KASUMI_TEST_CRASH point={point}" in stderr, \
             "not a deterministic abrupt crash"
     journal = profiles / profile / "transaction.bin.enc"
-    assert journal.exists(), "recovery authority lost"
+    retired_crash = point == "retired" or point.startswith("cleanup-file/")
+    retirement_completion = retired_crash or point in ("clear-authorized", "cleanup-proof-removed")
+    if point == "cleanup-proof-removed":
+        retired_crash = True
+    authority = journal.with_name(journal.name + ".cleared") if retired_crash else journal
+    assert authority.exists(), "recovery authority lost"
+    shutil.copytree(authority, trial / "journal-after-crash")
+    snapshot = journal / "snapshot.enc"
     after_crash = tree(trial / profile)
+    sqlite_after_crash = database(profiles / profile)
     early = point in ("saved/0", "prepared/0", "prepared/3", "before-FilesStaged", "saved/1") or failure
     if early:
         assert after_crash == original, "preparation changed user data"
@@ -126,11 +135,11 @@ def case(args, config, name, point, mixed=False, failure=None, corruption=None):
     if mixed and point == "before-FilesStaged":
         assert backups, "fixture did not exercise durable original backups"
     if corruption == "truncated":
-        journal.write_bytes(journal.read_bytes()[:20])
+        snapshot.write_bytes(snapshot.read_bytes()[:20])
     elif corruption == "authentication":
-        data = bytearray(journal.read_bytes())
+        data = bytearray(snapshot.read_bytes())
         data[-1] ^= 1
-        journal.write_bytes(data)
+        snapshot.write_bytes(data)
     elif corruption in ("missing-backup", "corrupt-backup", "unused-missing-backup", "unused-corrupt-backup"):
         assert backups
         if corruption.startswith("unused-"):
@@ -151,17 +160,21 @@ def case(args, config, name, point, mixed=False, failure=None, corruption=None):
             assert selected_backup.read_bytes() == b"CORRUPT"
         bench.write_json(trial / "corruption-evidence.json", {
             "selected_backup": str(selected_backup), "kind": corruption})
-    preserved_journal = hashlib.sha256(journal.read_bytes()).hexdigest()
+    preserved_journal = tree(authority)
     recovered, _, recovery_stderr = sync(profile, "recovery", {
         "KASUMI_TEST_JOURNAL_OBSERVE": "1", "KASUMI_TEST_JOURNAL_CRASH": "recovered"})
     after_recovery = tree(trial / profile)
+    sqlite_after_recovery = database(profiles / profile)
     recovery_decision = None
-    state = None if corruption in ("truncated", "authentication") else loaded(recovery_stderr)
+    state = None if retirement_completion or corruption in ("truncated", "authentication", "incomplete-snapshot") else loaded(recovery_stderr)
+    if (point.startswith("append-") and point.endswith("/0")) or point == "before-confirmation/1":
+        assert state and state["phase"] == 0 and all(value == 0 for value in state["states"]), \
+            "unconfirmed append advanced the authoritative checkpoint"
     if mixed and state:
         assert set(state["actions"]) == {0, 1, 2, 4, 5, 6}, "fixture did not produce the required mixed plan"
-    if corruption in ("truncated", "authentication", "missing-backup", "corrupt-backup"):
+    if corruption in ("truncated", "authentication", "incomplete-snapshot", "missing-backup", "corrupt-backup"):
         assert recovered["exit_code"] not in (0, 2, 86), "corrupt authority accepted"
-        assert journal.exists() and hashlib.sha256(journal.read_bytes()).hexdigest() == preserved_journal
+        assert journal.exists() and tree(journal) == preserved_journal
         assert tree(trial / profile) == after_crash and database(profiles / profile) == accepted
     else:
         assert recovered["exit_code"] == 86 and "KASUMI_TEST_CRASH point=recovered" in recovery_stderr
@@ -171,15 +184,20 @@ def case(args, config, name, point, mixed=False, failure=None, corruption=None):
         resumable = int(decision[1]) == 3
         if resumable:
             assert state["phase"] <= 3 and all(action in (1, 3, 7, 8) for action in state["actions"])
-            assert journal.exists() and hashlib.sha256(journal.read_bytes()).hexdigest() == preserved_journal
+            assert journal.exists() and tree(journal) == preserved_journal
         else:
             assert not journal.exists(), "completed rollback/roll-forward left journal"
-        if state["phase"] <= 3:
+        if state and state["phase"] <= 3:
             assert tree(trial / profile) == original, "rollback changed confirmed or concurrent data"
             assert database(profiles / profile) == accepted
         if args.expect_grouped and early and failure != "parent-sync" and point != "saved/1":
             assert state["phase"] == 0 and all(s == 0 for s in state["states"]), \
                 "memory-only preparation became durable progress"
+        repeated, _, repeated_stderr = sync(profile, "repeated-recovery", {
+            "KASUMI_TEST_JOURNAL_OBSERVE": "1", "KASUMI_TEST_JOURNAL_CRASH": "recovered"})
+        assert repeated["exit_code"] == 86 and "KASUMI_TEST_CRASH point=recovered" in repeated_stderr
+        assert tree(trial / profile) == after_recovery
+        assert database(profiles / profile) == sqlite_after_recovery
         resumed, _, _ = sync(profile, "resumed")
         assert resumed["exit_code"] == 0, "normal restart did not finish"
         assert not journal.exists(), "resumed sync left recovery authority pending"
@@ -198,8 +216,12 @@ def case(args, config, name, point, mixed=False, failure=None, corruption=None):
             assert receiver["exit_code"] == 0
             assert tree(trial / "receiver") == original
             assert database(profiles / "receiver")["nodes"] == final["nodes"]
-    result = {"case": name, "point": point, "failure": failure, "corruption": corruption,
-              "persisted": state, "before": original, "after_crash": after_crash,
+    result = {"case": name, "trial_path": str(trial), "point": point, "failure": failure, "corruption": corruption,
+              "persisted": state, "journal_after_crash": preserved_journal,
+              "sqlite_before": accepted, "sqlite_after_crash": sqlite_after_crash,
+              "sqlite_after_recovery": sqlite_after_recovery,
+              "sqlite_after_restart": database(profiles / profile),
+              "before": original, "after_crash": after_crash,
               "after_recovery": after_recovery, "after_restart": tree(trial / profile),
               "recovery_decision": recovery_decision, "backup_count": len(backups),
               "interrupted_exit": record["exit_code"], "recovery_exit": recovered["exit_code"],
@@ -239,8 +261,23 @@ def main():
     cases += [("C10-" + corruption, "saved/1", True, None, corruption)
               for corruption in ("truncated", "authentication", "missing-backup", "corrupt-backup",
                                  "unused-missing-backup", "unused-corrupt-backup")]
+    cases += [("A-" + point, point + "/0", True, None, None)
+              for point in ("append-header", "append-payload", "append-flush", "append-close", "append-sync")]
+    cases += [("A-confirmation-" + point, point + "/1", True, None, None)
+              for point in ("before-confirmation", "after-confirmation", "confirmed")]
+    cases += [("A-local-" + str(index), "append-sync/" + str(index), True, None, None)
+              for index in (1, 4, 9)]
+    cases += [("D-initial-" + point.replace("/", "-"), point, False, None, "incomplete-snapshot")
+              for point in ("before-snapshot", "temporary-write/0", "temporary-sync/0",
+                            "before-snapshot-replace", "after-snapshot-replace")]
+    cases += [("B-" + failure, "", True, failure, None) for failure in ("close",)]
+    cases += [("cleanup-" + point, point, False, None, None) for point in ("before-clear", "retired")]
+    cases += [("cleanup-file-" + str(index), "cleanup-file/" + str(index), False, None, None)
+              for index in (0, 1)]
+    cases += [("cleanup-" + point, point, False, None, None)
+              for point in ("clear-authorized", "cleanup-proof-removed")]
     results = []
-    for name, point, mixed, failure, corruption in cases:
+    for args.case_index, (name, point, mixed, failure, corruption) in enumerate(cases):
         try:
             results.append(case(args, config, name, point, mixed, failure, corruption))
         except Exception as error:

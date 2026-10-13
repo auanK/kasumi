@@ -20,6 +20,11 @@ std::expected<void, std::string>
 replace_atomically(const std::filesystem::path& source,
                    const std::filesystem::path& target);
 
+// Renames a physical directory to an absent sibling; caller syncs its parent.
+std::expected<void, std::string>
+retire_directory(const std::filesystem::path& source,
+                 const std::filesystem::path& target);
+
 } // namespace kasumi::platform::durability
 
 #endif

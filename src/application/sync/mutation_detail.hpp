@@ -32,6 +32,11 @@ read_status(const std::filesystem::path& path, std::size_t operation_index);
 // Indicates that the file status represents a missing path.
 bool missing(std::filesystem::file_status status) noexcept;
 
+std::filesystem::path
+download_candidate_path(const std::filesystem::path& destination,
+                        const platform::Workspace& workspace,
+                        std::size_t operation_index);
+
 // Resolves a relative path without allowing escape from the root.
 std::expected<std::filesystem::path, MutationError>
 resolve_local_path(const std::filesystem::path& local_root,

@@ -3203,8 +3203,8 @@ TEST(SyncCoordinatorTest,
     // When commit verification finishes, sabotage temporary journal path so
     // journal save fails.
     state.on_commit_verified = [&]() {
-        std::filesystem::create_directories(profile /
-                                            "transaction.bin.enc.new");
+        std::filesystem::create_directories(profile / "transaction.bin.enc" /
+                                            "snapshot.enc.new");
     };
     auto storage = make_reobserve_transport(state);
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};

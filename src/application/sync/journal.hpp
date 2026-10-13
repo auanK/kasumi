@@ -14,8 +14,11 @@
 
 namespace kasumi::application::sync::journal {
 
-// Name of the persisted transaction journal.
+// Private directory for the current, incompatible journal format.
 inline constexpr std::string_view journal_file_name = "transaction.bin.enc";
+
+// Name of the incremental transaction log.
+inline constexpr std::string_view journal_log_file_name = "transaction.log.enc";
 
 // Suffix used during atomic writes.
 inline constexpr std::string_view temporary_suffix = ".new";
@@ -23,10 +26,11 @@ inline constexpr std::string_view temporary_suffix = ".new";
 // Defensive limit for decrypted payload.
 inline constexpr std::uint64_t maximum_payload_size = 64ULL * 1024ULL * 1024ULL;
 
-// Final and temporary paths for the journal.
+// Final, temporary, and log paths for the journal.
 struct Paths {
     std::filesystem::path final_path;
     std::filesystem::path temporary_path;
+    std::filesystem::path log_path;
 };
 
 // Resolves journal paths within the profile.
@@ -41,21 +45,25 @@ create_record(std::uint64_t local_generation,
               bool publication_required = true,
               std::string observed_head_id = {});
 
-// Persists the encrypted journal via atomic replacement.
+enum class SaveMode {
+    Advance,
+    Rollback
+};
+
+// Confirms an authenticated snapshot or incremental delta.
 std::expected<void, std::string>
 save(const Paths& paths,
      const transaction::Record& record,
-     std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+     SaveMode mode = SaveMode::Advance);
 
 // Loads and validates the journal, if present.
 std::expected<std::optional<transaction::Record>, std::string>
 load(const Paths& paths, std::span<const std::uint8_t, crypto::KEY_SIZE> key);
 
-// Removes final and temporary journal files.
-std::expected<void, std::string> clear(const Paths& paths);
-
-// Discards the temporary file without propagating failures.
-void discard_temporary(const Paths& paths) noexcept;
+// Durably retires the complete journal before physical cleanup.
+std::expected<void, std::string>
+clear(const Paths& paths, std::span<const std::uint8_t, crypto::KEY_SIZE> key);
 
 } // namespace kasumi::application::sync::journal
 

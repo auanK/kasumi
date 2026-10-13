@@ -204,6 +204,11 @@ global credentials. Hooks terminate without destructors at observed transaction
 boundaries or inject persistence errors. They are compiled out unless explicitly
 enabled; production and performance builds must keep the option **OFF**.
 
+The [current journal contract](architecture/transaction-journal.md) documents
+authenticated confirmation, retirement, rollback and format incompatibility.
+The process runner preserves journal artifacts and checks repeated recovery;
+these process exits do not simulate physical power loss.
+
 ### Remote Inspection Benchmark
 
 The `benchmark_remote_inspection.py` harness measures remote history inspection across multiple phases:
