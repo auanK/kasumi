@@ -12,6 +12,7 @@
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/clock.hpp"
+#include "platform/durability.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
@@ -1628,22 +1629,58 @@ TEST_F(JournalCpuFinalTest, TruncatedConfirmedLogCannotBeAppendedFromCache) {
 TEST_F(JournalCpuFinalTest,
        SnapshotReplacementWithUnchangedTipInvalidatesCache) {
     activate();
-    auto bytes = kasumi::test::read_binary(paths.final_path);
-    bytes.back() ^= std::byte{1};
-    kasumi::test::write_binary(paths.final_path, bytes);
-    std::filesystem::last_write_time(
-        paths.final_path,
-        std::filesystem::last_write_time(paths.final_path) +
-            std::chrono::seconds(1));
+    const auto original = kasumi::test::read_binary(paths.final_path);
+    const auto fingerprint =
+        kasumi::platform::regular_file_fingerprint(paths.final_path);
+    ASSERT_TRUE(fingerprint);
     const auto tip_path = paths.final_path.parent_path() / "confirmed.enc";
     const auto tip = kasumi::test::read_binary(tip_path);
     const auto log = kasumi::test::read_binary(paths.log_path);
+    auto bytes = original;
+    ASSERT_FALSE(bytes.empty());
+    bytes.back() ^= std::byte{1};
+    // A separate file guarantees replacement without relying on ChangeTime.
+    const auto replacement =
+        paths.final_path.parent_path() / "snapshot-replacement-test.tmp";
+    kasumi::test::write_binary(replacement, bytes);
+    ASSERT_FALSE(std::filesystem::equivalent(paths.final_path, replacement));
+    const auto replacement_fingerprint =
+        kasumi::platform::regular_file_fingerprint(replacement);
+    ASSERT_TRUE(replacement_fingerprint);
+    const auto identity = [](const kasumi::platform::FileFingerprint& value) {
+        return std::array{value.value[0], value.value[1], value.value[2]};
+    };
+    ASSERT_EQ(fingerprint->has_value(), replacement_fingerprint->has_value());
+    if (*fingerprint && *replacement_fingerprint) {
+        ASSERT_EQ((**fingerprint).kind, (**replacement_fingerprint).kind);
+        ASSERT_NE(identity(**fingerprint), identity(**replacement_fingerprint));
+    }
+    const auto replaced = kasumi::platform::durability::replace_atomically(
+        replacement, paths.final_path);
+    ASSERT_TRUE(replaced) << replaced.error();
+    ASSERT_FALSE(std::filesystem::exists(replacement));
+    ASSERT_EQ(std::filesystem::file_size(paths.final_path), original.size());
+    ASSERT_EQ(kasumi::test::read_binary(paths.final_path), bytes);
+    ASSERT_NE(bytes, original);
+    const auto replaced_fingerprint =
+        kasumi::platform::regular_file_fingerprint(paths.final_path);
+    ASSERT_TRUE(replaced_fingerprint);
+    ASSERT_EQ(fingerprint->has_value(), replaced_fingerprint->has_value());
+    if (*fingerprint && *replacement_fingerprint && *replaced_fingerprint) {
+        ASSERT_NE(identity(**fingerprint), identity(**replaced_fingerprint));
+        ASSERT_EQ(identity(**replacement_fingerprint),
+                  identity(**replaced_fingerprint));
+    }
+    ASSERT_EQ(kasumi::test::read_binary(tip_path), tip);
+    ASSERT_EQ(kasumi::test::read_binary(paths.log_path), log);
     record.progress[0].state = kasumi::transaction::OperationState::Applied;
     EXPECT_FALSE(sync::journal::save(
         paths, record, key, sync::journal::SaveMode::Advance, &session));
     EXPECT_FALSE(session.is_valid());
     EXPECT_EQ(kasumi::test::read_binary(tip_path), tip);
     EXPECT_EQ(kasumi::test::read_binary(paths.log_path), log);
+    EXPECT_EQ(kasumi::test::read_binary(paths.final_path), bytes);
+    EXPECT_FALSE(sync::journal::load(paths, key));
 }
 
 TEST_F(JournalCpuFinalTest, RetirementArtifactBlocksActiveSession) {
