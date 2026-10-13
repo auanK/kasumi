@@ -297,9 +297,12 @@ TEST(EpochCodecTest, RejectsInvalidFieldsAndQuantities) {
 
     value = representative_epoch();
     value.anchors.clear();
+    value.anchors.reserve(epoch::maximum_anchor_count + 1);
     for (std::size_t index = 0; index <= epoch::maximum_anchor_count; ++index) {
-        value.anchors.push_back(
-            Anchor{.commit_id = numbered_id(index), .height = index});
+        Anchor anchor;
+        anchor.commit_id = numbered_id(index);
+        anchor.height = static_cast<std::uint64_t>(index);
+        value.anchors.push_back(std::move(anchor));
     }
     expect_rejected(value, ErrorCode::LimitExceeded);
 

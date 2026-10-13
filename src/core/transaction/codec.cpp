@@ -31,7 +31,7 @@ bool valid_operation_strings(const kasumi::Operation& operation,
 
 } // namespace
 
-EncodeResult encode(const Record& record) {
+std::expected<void, std::string> validate(const Record& record) {
     if (!valid(record)) {
         return std::unexpected("invalid transaction record");
     }
@@ -58,6 +58,28 @@ EncodeResult encode(const Record& record) {
             }
         }
 
+        for (const auto* strings : {&record.parent_ids,
+                                    &record.observed_pending_paths,
+                                    &record.pending_paths}) {
+            for (const auto& value : *strings) {
+                if (!valid_string(value))
+                    return std::unexpected(
+                        "transaction string exceeds codec limit");
+            }
+        }
+        return {};
+    } catch (const std::exception& error) {
+        return std::unexpected(
+            std::string{"failed to validate transaction record: "} +
+            error.what());
+    }
+}
+
+EncodeResult encode(const Record& record) {
+    auto validation = validate(record);
+    if (!validation)
+        return std::unexpected(validation.error());
+    try {
         wire::Writer writer;
         wire::write<std::uint8_t>(writer, format_version);
         wire::write_string(writer, record.operation_id);
@@ -89,9 +111,6 @@ EncodeResult encode(const Record& record) {
         wire::write<std::uint32_t>(
             writer, static_cast<std::uint32_t>(record.parent_ids.size()));
         for (const auto& parent_id : record.parent_ids) {
-            if (!valid_string(parent_id)) {
-                return std::unexpected("parent ID exceeds codec limit");
-            }
             wire::write_string(writer, parent_id);
         }
 
@@ -145,7 +164,8 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
         auto storage = wire::read<std::uint64_t>(reader);
         const auto read_pending_paths = [&](auto& paths) {
             auto count = wire::read<std::uint32_t>(reader);
-            if (!count || *count > maximum_pending_path_count) {
+            if (!count || *count > maximum_pending_path_count ||
+                *count > reader.data.size() / sizeof(std::uint32_t)) {
                 return false;
             }
             paths.reserve(*count);
@@ -225,7 +245,9 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
         if (!count) {
             return std::unexpected("truncated at operation count");
         }
-        if (*count > maximum_operation_count) {
+        // Even an operation with empty strings occupies 32 wire bytes.
+        if (*count > maximum_operation_count ||
+            *count > reader.data.size() / 32) {
             return std::unexpected("operation count exceeds limit");
         }
 

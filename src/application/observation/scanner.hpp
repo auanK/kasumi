@@ -3,7 +3,6 @@
 
 #include "core/ignore.hpp"
 #include "core/node.hpp"
-#include "platform/file_fingerprint.hpp"
 #include "state_storage/database.hpp"
 
 #include <cstdint>
@@ -14,6 +13,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "application/observation/file_metadata.hpp"
 
 namespace kasumi::application::observation::scanner {
 
@@ -36,17 +37,6 @@ enum class ScanPolicy {
 struct ScanResult {
     Snapshot snapshot;
     std::vector<state_storage::FileCacheRow> cache;
-    // Sorted file references of observed directories.
-    std::vector<std::uint64_t> directory_file_references;
-    // Indicates that all directory file references were obtained.
-    bool directory_lineage_complete = false;
-};
-
-// Result of an isolated file observation.
-struct TargetedFileObservation {
-    NodeRow row;
-    // Present only when strong fingerprint allows safe reuse.
-    std::optional<state_storage::FileCacheRow> cache;
 };
 
 // Contextualized local scan failure.
@@ -57,9 +47,10 @@ struct ScanError {
     std::string detail;
 };
 
-// Function used to obtain a file fingerprint.
-using FingerprintQuery =
-    platform::FileFingerprintResult (*)(const std::filesystem::path&);
+// Function used to obtain file metadata and identity.
+using MetadataQuery =
+    std::expected<std::optional<cache::FileMetadata>, cache::FileMetadataError> (*)(
+        const std::filesystem::path&, std::string_view);
 
 // Formats a scan failure.
 std::string describe(const ScanError& error);
@@ -69,22 +60,15 @@ std::expected<ScanResult, ScanError> scan_result(
     const std::filesystem::path& local_root,
     std::span<const state_storage::FileCacheRow> previous_cache = {},
     ScanPolicy policy = ScanPolicy::FullHash,
-    FingerprintQuery fingerprint_query = platform::regular_file_fingerprint);
+    MetadataQuery metadata_query = cache::read_file_metadata);
 
 // Scans using the ignore rules selected by the current reconciliation.
 std::expected<ScanResult, ScanError>
 scan_result(const std::filesystem::path& local_root,
             std::span<const state_storage::FileCacheRow> previous_cache,
             ScanPolicy policy,
-            FingerprintQuery fingerprint_query,
+            MetadataQuery metadata_query,
             const kasumi::ignore::IgnoreList& ignore_list);
-
-// Observes a single safe relative path.
-std::expected<TargetedFileObservation, ScanError> observe_file(
-    const std::filesystem::path& local_root,
-    std::string_view relative_path,
-    std::optional<state_storage::FileCacheRow> cached = std::nullopt,
-    FingerprintQuery fingerprint_query = platform::regular_file_fingerprint);
 
 } // namespace kasumi::application::observation::scanner
 

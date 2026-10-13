@@ -60,6 +60,8 @@ kasumi_add_test_suite(
     SOURCES
         unit/application/observation/test_history.cpp
         unit/application/observation/test_scanner.cpp
+        unit/application/observation/test_cache_contract.cpp
+        unit/application/observation/test_file_metadata.cpp
         support/src/hash_mutation.cpp
     LIBRARIES
         kasumi_application
@@ -72,6 +74,7 @@ kasumi_add_test_suite(
     SOURCES
         unit/application/test_profile.cpp
         unit/application/test_execute.cpp
+        unit/application/test_plan_cache.cpp
         unit/application/test_concurrency.cpp
         unit/application/test_inspection.cpp
         unit/application/integrity/test_maintenance.cpp
@@ -87,10 +90,14 @@ kasumi_add_test_suite(
     SOURCES
         integration/sync/test_coordinator.cpp
         integration/sync/test_content_batch.cpp
+        integration/sync/test_journal_preparation.cpp
+        integration/sync/test_journal_incremental.cpp
         integration/sync/test_publication.cpp
+        integration/sync/test_reobservation_safeguards.cpp
     LIBRARIES
         kasumi_application
         kasumi_sqlite3
+        monocypher
 )
 
 kasumi_add_test_suite(
@@ -208,6 +215,15 @@ kasumi_add_test_suite(
         unit/core/primitives/test_node.cpp
         unit/core/primitives/test_operation.cpp
         unit/core/primitives/test_wire.cpp
+    LIBRARIES
+        kasumi_core
+)
+
+kasumi_add_test_suite(
+    kasumi_test_unit_core_ignore
+    "unit.core.ignore"
+    SOURCES
+        unit/core/ignore/test_ignore.cpp
     LIBRARIES
         kasumi_core
 )
@@ -408,6 +424,23 @@ target_link_libraries(
 )
 target_include_directories(
     kasumi_benchmark_sync_e2e
+    PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/include
+)
+
+add_executable(
+    kasumi_benchmark_ignore_perf
+    operational/benchmark_ignore_perf.cpp
+)
+target_link_libraries(
+    kasumi_benchmark_ignore_perf
+    PRIVATE
+    kasumi_core
+    kasumi_warnings
+)
+target_include_directories(
+    kasumi_benchmark_ignore_perf
     PRIVATE
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/include

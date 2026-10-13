@@ -1,8 +1,9 @@
 #include "application/observation/scanner.hpp"
 
+#include "application/observation/cache_contract.hpp"
+#include "application/observation/file_metadata.hpp"
 #include "core/ignore.hpp"
 #include "crypto/content.hpp"
-#include "platform/file_fingerprint.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
@@ -34,26 +35,11 @@ struct ScanFrame {
 
 struct ScanContext {
     ScanPolicy policy = ScanPolicy::FullHash;
-    FingerprintQuery fingerprint_query = platform::regular_file_fingerprint;
+    MetadataQuery metadata_query = cache::read_file_metadata;
     std::unordered_map<std::string_view, const state_storage::FileCacheRow*>
         previous;
     std::vector<state_storage::FileCacheRow> cache;
-    std::vector<std::uint64_t> directory_file_references;
-    bool directory_lineage_complete = true;
-    bool targeted = false;
 };
-
-void remember_directory(const std::filesystem::path& path,
-                        ScanContext& context) {
-    platform::perf_trace::count("local directory identity queries");
-    const auto reference = platform::directory_file_reference(path);
-    if (!reference || !*reference) {
-        context.directory_lineage_complete = false;
-        platform::perf_trace::count("local directory identity failures");
-        return;
-    }
-    context.directory_file_references.push_back(**reference);
-}
 
 ScanError scan_error(const std::filesystem::path& path,
                      std::string operation,
@@ -72,135 +58,128 @@ process_file(const std::filesystem::path& file_path,
              std::string relative,
              ScanContext& context) {
     NodeRow row{.path = std::move(relative)};
-    std::error_code error;
-    const auto modified = std::filesystem::last_write_time(file_path, error);
-    if (error) {
-        return std::unexpected(scan_error(file_path,
-                                          "read modification time",
-                                          error,
-                                          ScanErrorCode::Metadata));
+    const auto meta_result = context.metadata_query(file_path, row.path);
+    if (!meta_result) {
+        const auto& err = meta_result.error();
+        return std::unexpected(ScanError{
+            .code = err.code == cache::FileMetadataErrorCode::PermissionDenied
+                        ? ScanErrorCode::PermissionDenied
+                        : ScanErrorCode::Metadata,
+            .path = file_path,
+            .operation = "read metadata",
+            .detail = err.message});
     }
-    const auto canonical_mtime = platform::metadata::unix_nanoseconds(modified);
-    if (!canonical_mtime) {
-        return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                         file_path,
-                                         "convert modification time",
-                                         "timestamp is out of range"});
+    if (!meta_result->has_value()) {
+        return std::unexpected(ScanError{
+            .code = ScanErrorCode::Metadata,
+            .path = file_path,
+            .operation = "read metadata",
+            .detail = "entry is not an eligible regular file"});
     }
-    row.mtime = *canonical_mtime;
-    row.size = std::filesystem::file_size(file_path, error);
-    if (error) {
-        return std::unexpected(
-            scan_error(file_path, "read size", error, ScanErrorCode::Metadata));
-    }
+
+    auto current_meta = **meta_result;
+    row.size = current_meta.size;
+    row.mtime = current_meta.mtime_nanoseconds;
     platform::perf_trace::count("local regular files observed");
-    const auto fingerprint_trace = platform::perf_trace::begin();
-    auto fingerprint = context.fingerprint_query(file_path);
-    platform::perf_trace::finish("local fingerprint query wall",
-                                 fingerprint_trace);
-    platform::perf_trace::count("local fingerprint queries");
-    if (context.targeted)
-        platform::perf_trace::count("targeted fingerprint queries");
-    if (!fingerprint) {
-        return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                         file_path,
-                                         "get file identity",
-                                         fingerprint.error()});
-    }
-    if (!*fingerprint)
+
+    const bool identity_supported = current_meta.identity.has_value();
+    if (!identity_supported) {
         platform::perf_trace::count("local hash cache unsupported");
+    }
 
     const auto cached =
-        context.policy == ScanPolicy::ReuseStrongFingerprint && *fingerprint
+        context.policy == ScanPolicy::ReuseStrongFingerprint && identity_supported
             ? context.previous.find(row.path)
             : context.previous.end();
-    if (cached != context.previous.end() && cached->second->size == row.size &&
-        cached->second->fingerprint.kind == (**fingerprint).kind &&
-        cached->second->fingerprint.value == (**fingerprint).value) {
-        row.hash = cached->second->hash;
-        context.cache.push_back(*cached->second);
-        platform::perf_trace::count("local hash cache hits");
-    } else {
+
+    bool reused = false;
+    if (cached != context.previous.end()) {
+        const auto& cached_row = *cached->second;
+        const cache::FileMetadata cached_meta{
+            .path = cached_row.path,
+            .kind = cache::EntryKind::RegularFile,
+            .size = cached_row.size,
+            .mtime_nanoseconds = cached_row.mtime_nanoseconds,
+            .identity = cache::FileIdentity{
+                .volume = cached_row.volume,
+                .file_low = cached_row.file_low,
+                .file_high = cached_row.file_high},
+            .is_valid = true};
+
+        const auto decision =
+            cache::evaluate_cache_reuse(cached_meta, current_meta);
+        if (decision == cache::CacheReuseResult::Reusable) {
+            row.hash = cached_row.hash;
+            context.cache.push_back(cached_row);
+            platform::perf_trace::count("local hash cache hits");
+            reused = true;
+        }
+    }
+
+    if (!reused) {
         platform::perf_trace::count("local hash cache misses");
         std::expected<Hash, std::string> hash = std::unexpected("unhashed");
-        bool cache_allowed = fingerprint->has_value();
         bool stable = false;
-        auto observed_mtime = modified;
         for (int attempt = 0; attempt < 2; ++attempt) {
-            const auto before_fingerprint = fingerprint;
-            const auto before_size = row.size;
-            const auto before_mtime = observed_mtime;
+            const auto before_meta = current_meta;
             const auto hash_trace = platform::perf_trace::begin();
             hash = crypto::content::hash_file(file_path);
             platform::perf_trace::finish("local content hashing wall",
                                          hash_trace);
             platform::perf_trace::count("local hash file calls");
-            platform::perf_trace::count("local hash bytes", before_size);
-            if (context.targeted) {
-                platform::perf_trace::count("targeted hash calls");
-                platform::perf_trace::count("targeted hash bytes", before_size);
-            }
+            platform::perf_trace::count("local hash bytes", before_meta.size);
             if (!hash)
                 break;
-            std::error_code after_error;
-            const auto after_size =
-                std::filesystem::file_size(file_path, after_error);
-            if (after_error)
-                return std::unexpected(scan_error(file_path,
-                                                  "read size after hashing",
-                                                  after_error,
-                                                  ScanErrorCode::Metadata));
-            const auto after_mtime =
-                std::filesystem::last_write_time(file_path, after_error);
-            if (after_error)
-                return std::unexpected(
-                    scan_error(file_path,
-                               "read modification time after hashing",
-                               after_error,
-                               ScanErrorCode::Metadata));
-            const auto after_mtime_ns =
-                platform::metadata::unix_nanoseconds(after_mtime);
-            if (!after_mtime_ns) {
-                return std::unexpected(
-                    ScanError{ScanErrorCode::Metadata,
-                              file_path,
-                              "convert modification time after hashing",
-                              "timestamp is out of range"});
+
+            const auto after_result =
+                context.metadata_query(file_path, row.path);
+            if (!after_result) {
+                const auto& err = after_result.error();
+                return std::unexpected(ScanError{
+                    .code = err.code ==
+                                    cache::FileMetadataErrorCode::
+                                        PermissionDenied
+                                ? ScanErrorCode::PermissionDenied
+                                : ScanErrorCode::Metadata,
+                    .path = file_path,
+                    .operation = "read metadata after hashing",
+                    .detail = err.message});
             }
-            const auto after_fingerprint_trace = platform::perf_trace::begin();
-            auto after_fingerprint = context.fingerprint_query(file_path);
-            platform::perf_trace::finish("local fingerprint query wall",
-                                         after_fingerprint_trace);
-            platform::perf_trace::count("local fingerprint queries");
-            if (context.targeted)
-                platform::perf_trace::count("targeted fingerprint queries");
-            if (!after_fingerprint)
-                return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                                 file_path,
-                                                 "get identity after hash",
-                                                 after_fingerprint.error()});
-            if (!*after_fingerprint)
-                cache_allowed = false;
-            const bool same_fingerprint =
-                (!*before_fingerprint && !*after_fingerprint) ||
-                (*before_fingerprint && *after_fingerprint &&
-                 (**before_fingerprint).kind == (**after_fingerprint).kind &&
-                 (**before_fingerprint).value == (**after_fingerprint).value);
-            if (same_fingerprint &&
-                before_size == static_cast<std::uint64_t>(after_size) &&
-                before_mtime == after_mtime) {
+            if (!after_result->has_value()) {
+                return std::unexpected(ScanError{
+                    .code = ScanErrorCode::Metadata,
+                    .path = file_path,
+                    .operation = "read metadata after hashing",
+                    .detail = "file replaced or removed during hash"});
+            }
+            const auto after_meta = **after_result;
+
+            const bool same_identity =
+                (!before_meta.identity.has_value() &&
+                 !after_meta.identity.has_value()) ||
+                (before_meta.identity.has_value() &&
+                 after_meta.identity.has_value() &&
+                 *before_meta.identity == *after_meta.identity);
+            const bool same_size = before_meta.size == after_meta.size;
+            const bool same_mtime =
+                before_meta.mtime_nanoseconds == after_meta.mtime_nanoseconds;
+
+            if (same_identity && same_size && same_mtime) {
                 stable = true;
-                fingerprint = std::move(after_fingerprint);
+                current_meta = after_meta;
                 break;
             }
+
             platform::perf_trace::count("files changed during hash");
-            if (!*before_fingerprint || !*after_fingerprint)
+            if (!before_meta.identity.has_value() ||
+                !after_meta.identity.has_value()) {
                 break;
-            row.size = static_cast<std::uint64_t>(after_size);
-            row.mtime = *after_mtime_ns;
-            observed_mtime = after_mtime;
-            fingerprint = std::move(after_fingerprint);
+            }
+            current_meta = after_meta;
+            row.size = after_meta.size;
+            row.mtime = after_meta.mtime_nanoseconds;
         }
+
         if (!hash)
             return std::unexpected(ScanError{
                 ScanErrorCode::Io, file_path, "compute hash", hash.error()});
@@ -210,12 +189,16 @@ process_file(const std::filesystem::path& file_path,
                                              "compute hash",
                                              "file changed while being read"});
         row.hash = *hash;
-        if (cache_allowed && fingerprint && fingerprint->has_value()) {
+        if (current_meta.is_valid && current_meta.identity.has_value()) {
             context.cache.push_back(
-                state_storage::FileCacheRow{.path = row.path,
-                                            .hash = row.hash,
-                                            .size = row.size,
-                                            .fingerprint = **fingerprint});
+                state_storage::FileCacheRow{
+                    .path = row.path,
+                    .hash = row.hash,
+                    .size = current_meta.size,
+                    .mtime_nanoseconds = current_meta.mtime_nanoseconds,
+                    .volume = current_meta.identity->volume,
+                    .file_low = current_meta.identity->file_low,
+                    .file_high = current_meta.identity->file_high});
         }
     }
     return row;
@@ -232,26 +215,23 @@ std::expected<ScanResult, ScanError>
 scan_result(const std::filesystem::path& local_root,
             std::span<const state_storage::FileCacheRow> previous_cache,
             ScanPolicy policy,
-            FingerprintQuery fingerprint_query) {
+            MetadataQuery metadata_query) {
     const auto ignore_list = load_ignore_list(local_root / ".kasumiignore");
     return scan_result(
-        local_root, previous_cache, policy, fingerprint_query, ignore_list);
+        local_root, previous_cache, policy, metadata_query, ignore_list);
 }
 
 std::expected<ScanResult, ScanError>
 scan_result(const std::filesystem::path& local_root,
             std::span<const state_storage::FileCacheRow> previous_cache,
             ScanPolicy policy,
-            FingerprintQuery fingerprint_query,
+            MetadataQuery metadata_query,
             const IgnoreList& ignore_list) {
     const auto scan_trace = platform::perf_trace::begin();
     ScanContext context{.policy = policy,
-                        .fingerprint_query = fingerprint_query,
+                        .metadata_query = metadata_query,
                         .previous = {},
-                        .cache = {},
-                        .directory_file_references = {},
-                        .directory_lineage_complete = true,
-                        .targeted = false};
+                        .cache = {}};
     context.cache.reserve(previous_cache.size());
     context.previous.reserve(previous_cache.size());
     for (const auto& row : previous_cache)
@@ -274,23 +254,20 @@ scan_result(const std::filesystem::path& local_root,
         if (!row)
             return std::unexpected(row.error());
         ScanResult result{.snapshot = Snapshot{{std::move(*row)}},
-                          .cache = std::move(context.cache),
-                          .directory_file_references = {},
-                          .directory_lineage_complete = false};
+                          .cache = std::move(context.cache)};
         platform::perf_trace::finish("local filesystem scan wall", scan_trace);
         return result;
     }
 
     Snapshot snapshot;
     snapshot.rows.reserve(previous_cache.size() + 1);
-    remember_directory(local_root, context);
-    const auto modified = std::filesystem::last_write_time(local_root, error);
-    if (error)
-        return std::unexpected(scan_error(local_root,
+    const auto modified = platform::metadata::last_write_time(local_root);
+    if (!modified)
+        return std::unexpected(ScanError{ScanErrorCode::Metadata,
+                                          local_root,
                                           "read modification time",
-                                          error,
-                                          ScanErrorCode::Metadata));
-    const auto root_mtime = platform::metadata::unix_nanoseconds(modified);
+                                          modified.error()});
+    const auto root_mtime = platform::metadata::unix_nanoseconds(*modified);
     if (!root_mtime) {
         return std::unexpected(ScanError{ScanErrorCode::Metadata,
                                          local_root,
@@ -352,13 +329,13 @@ scan_result(const std::filesystem::path& local_root,
             snapshot.rows.push_back(std::move(*row));
             continue;
         }
-        const auto mtime = entry.last_write_time(error);
-        if (error)
-            return std::unexpected(scan_error(entry.path(),
+        const auto mtime = platform::metadata::last_write_time(entry.path());
+        if (!mtime)
+            return std::unexpected(ScanError{ScanErrorCode::Metadata,
+                                              entry.path(),
                                               "read modification time",
-                                              error,
-                                              ScanErrorCode::Metadata));
-        const auto mtime_ns = platform::metadata::unix_nanoseconds(mtime);
+                                              mtime.error()});
+        const auto mtime_ns = platform::metadata::unix_nanoseconds(*mtime);
         if (!mtime_ns) {
             return std::unexpected(ScanError{ScanErrorCode::Metadata,
                                              entry.path(),
@@ -367,7 +344,6 @@ scan_result(const std::filesystem::path& local_root,
         }
         snapshot.rows.push_back(
             {.path = relative, .mtime = *mtime_ns, .is_directory = true});
-        remember_directory(entry.path(), context);
         std::filesystem::directory_iterator nested(entry.path(), error);
         if (error)
             return std::unexpected(scan_error(
@@ -386,107 +362,9 @@ scan_result(const std::filesystem::path& local_root,
     }
     std::ranges::sort(
         context.cache, path_less, &state_storage::FileCacheRow::path);
-    std::sort(context.directory_file_references.begin(),
-              context.directory_file_references.end());
-    context.directory_file_references.erase(
-        std::unique(context.directory_file_references.begin(),
-                    context.directory_file_references.end()),
-        context.directory_file_references.end());
     platform::perf_trace::finish("local filesystem scan wall", scan_trace);
     return ScanResult{.snapshot = std::move(snapshot),
-                      .cache = std::move(context.cache),
-                      .directory_file_references =
-                          std::move(context.directory_file_references),
-                      .directory_lineage_complete =
-                          context.directory_lineage_complete};
-}
-
-std::expected<TargetedFileObservation, ScanError>
-observe_file(const std::filesystem::path& local_root,
-             std::string_view relative_path,
-             std::optional<state_storage::FileCacheRow> cached,
-             FingerprintQuery fingerprint_query) {
-    if (relative_path.empty() || relative_path.front() == '/' ||
-        relative_path.back() == '/') {
-        return std::unexpected(
-            ScanError{ScanErrorCode::Metadata,
-                      platform::path::from_utf8(relative_path),
-                      "observe targeted file",
-                      "invalid relative path"});
-    }
-
-    std::size_t comp_start = 0;
-    while (comp_start < relative_path.size()) {
-        const auto slash = relative_path.find('/', comp_start);
-        const auto component =
-            slash == std::string_view::npos
-                ? relative_path.substr(comp_start)
-                : relative_path.substr(comp_start, slash - comp_start);
-        if (!valid_logical_path_component(component)) {
-            return std::unexpected(
-                ScanError{ScanErrorCode::Metadata,
-                          platform::path::from_utf8(relative_path),
-                          "observe targeted file",
-                          "unsupported non-portable path component: '" +
-                              std::string(component) + "'"});
-        }
-        if (slash == std::string_view::npos) {
-            break;
-        }
-        comp_start = slash + 1;
-    }
-
-    const auto relative = platform::path::from_utf8(relative_path);
-    if (relative.is_absolute() || relative.has_root_name() ||
-        relative.has_root_directory() ||
-        std::ranges::find(relative, std::filesystem::path{".."}) !=
-            relative.end()) {
-        return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                         relative,
-                                         "observe targeted file",
-                                         "invalid relative path"});
-    }
-    const auto file_path = local_root / relative;
-    std::error_code error;
-    const auto status = std::filesystem::symlink_status(file_path, error);
-    if (error || std::filesystem::is_symlink(status) ||
-        !std::filesystem::is_regular_file(status)) {
-        return std::unexpected(scan_error(file_path,
-                                          "observe targeted file",
-                                          error,
-                                          ScanErrorCode::Metadata));
-    }
-    const auto ignore_list = load_ignore_list(local_root / ".kasumiignore");
-    const auto normalized = platform::path::to_logical_utf8(relative);
-    if (is_ignored(normalized, ignore_list, false)) {
-        return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                         file_path,
-                                         "observe targeted file",
-                                         "ignored file"});
-    }
-
-    std::vector<state_storage::FileCacheRow> previous;
-    if (cached) {
-        cached->path = normalized;
-        previous.push_back(*cached);
-    }
-    ScanContext context{.policy = ScanPolicy::ReuseStrongFingerprint,
-                        .fingerprint_query = fingerprint_query,
-                        .previous = {},
-                        .cache = {},
-                        .directory_file_references = {},
-                        .directory_lineage_complete = false,
-                        .targeted = true};
-    if (!previous.empty())
-        context.previous.emplace(previous.front().path, &previous.front());
-    auto row = process_file(file_path, normalized, context);
-    if (!row)
-        return std::unexpected(std::move(row.error()));
-    TargetedFileObservation result{.row = std::move(*row),
-                                   .cache = std::nullopt};
-    if (!context.cache.empty())
-        result.cache = std::move(context.cache.front());
-    return result;
+                      .cache = std::move(context.cache)};
 }
 
 } // namespace kasumi::application::observation::scanner

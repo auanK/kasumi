@@ -173,15 +173,15 @@ create_backup(const std::filesystem::path& source,
         return make_backup_durable(backup, operation_index);
     }
 
-    std::error_code error;
-    const auto source_mtime = std::filesystem::last_write_time(source, error);
-    if (error) {
+    const auto source_mtime = platform::metadata::last_write_time(source);
+    if (!source_mtime) {
         return std::unexpected(
             make_error(MutationErrorCode::LocalIo,
-                       "failed to read backup mtime: " + error.message(),
+                       "failed to read backup mtime: " + source_mtime.error(),
                        source,
                        operation_index));
     }
+    std::error_code error;
     if (!std::filesystem::copy_file(
             source, backup, std::filesystem::copy_options::none, error) ||
         error) {
@@ -210,7 +210,7 @@ create_backup(const std::filesystem::path& source,
     }
 
     auto backup_metadata =
-        platform::metadata::set_last_write_time(backup, source_mtime);
+        platform::metadata::set_last_write_time(backup, *source_mtime);
     if (!backup_metadata) {
         remove_temporary_file(backup);
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
@@ -445,13 +445,11 @@ restore_backup(const std::filesystem::path& backup,
     if (!valid_backup) {
         return std::unexpected(valid_backup.error());
     }
-    std::error_code backup_mtime_error;
-    const auto backup_mtime =
-        std::filesystem::last_write_time(backup, backup_mtime_error);
-    if (backup_mtime_error) {
+    const auto backup_mtime = platform::metadata::last_write_time(backup);
+    if (!backup_mtime) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
                                           "failed to read backup mtime: " +
-                                              backup_mtime_error.message(),
+                                              backup_mtime.error(),
                                           backup,
                                           operation_index));
     }
@@ -538,7 +536,7 @@ restore_backup(const std::filesystem::path& backup,
                                           operation_index));
     }
     auto destination_metadata =
-        platform::metadata::set_last_write_time(destination, backup_mtime);
+        platform::metadata::set_last_write_time(destination, *backup_mtime);
     if (!destination_metadata) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
                                           "failed to restore file mtime: " +
@@ -904,6 +902,44 @@ rollback_operation_impl(const Operation& operation,
     auto workspace_valid = validate_workspace(workspace, operation_index);
     if (!workspace_valid)
         return std::unexpected(workspace_valid.error());
+
+    if (operation.action == Action::Download) {
+        auto destination =
+            resolve_local_path(local_root, operation.path, operation_index);
+        if (!destination)
+            return std::unexpected(destination.error());
+        const auto candidate = detail::download_candidate_path(
+            *destination, workspace, operation_index);
+        auto status = read_status(candidate, operation_index);
+        if (!status)
+            return std::unexpected(status.error());
+        if (!missing(*status)) {
+            if (std::filesystem::is_symlink(*status) ||
+                !std::filesystem::is_regular_file(*status)) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::DestinationConflict,
+                               "download candidate is not a regular file",
+                               candidate,
+                               operation_index));
+            }
+            std::error_code error;
+            if (!std::filesystem::remove(candidate, error) || error) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::LocalIo,
+                               error ? error.message()
+                                     : "failed to remove download candidate",
+                               candidate,
+                               operation_index));
+            }
+            auto synced =
+                platform::durability::sync_parent_directory(candidate);
+            if (!synced)
+                return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                                  synced.error(),
+                                                  candidate,
+                                                  operation_index));
+        }
+    }
 
     if (operation.action == Action::CreateLocalDirectory) {
         if (progress.had_original)

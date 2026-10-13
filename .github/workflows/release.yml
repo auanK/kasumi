@@ -239,4 +239,4 @@ jobs:
             dist/kasumi-windows-x86_64.zip.sha256
             dist/SHA256SUMS.txt
           body_path: RELEASE_NOTES.md
-          prerelease: ${{ startsWith(github.ref, 'refs/tags/v0.') }}
+          prerelease: ${{ contains(github.ref_name, '-') }}

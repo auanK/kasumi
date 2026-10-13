@@ -10,9 +10,11 @@ Building Kasumi requires CMake 3.28+, Git, and a C++23 compiler:
 * **rclone**: Required for rclone-backed remote operation and for system tests that exercise the rclone transport. Not required for building or running local transport tests.
 
 Repository CI exercises:
-* Visual Studio 2022 / MSVC on Windows;
-* GCC 14 on Windows MSYS2 UCRT64;
-* GCC 14 on Linux.
+* Visual Studio 2022 / MSVC on Windows (Debug and Release);
+* GCC from the Windows MSYS2 UCRT64 environment (Debug and Release; tools verified under `/ucrt64/bin`);
+* Clang from the Windows MSYS2 CLANG64 environment (Debug and Release; tools verified under `/clang64/bin`);
+* GCC 14 on Ubuntu (Debug and Release);
+* Clang on Ubuntu (Debug and Release).
 
 ## C++ Formatting
 
@@ -32,6 +34,10 @@ The build generates `generated/cli/i18n_embedded.hpp` from `locales/en.json` and
 ## CMake Presets
 
 `CMakePresets.json` defines presets using the Ninja generator:
+
+On Windows, run preset commands from a Visual Studio 2022 developer shell for
+MSVC, or an MSYS2 UCRT64 shell with its GCC, CMake, and Ninja on `PATH`. Keep one
+compiler per build directory; choose a separate directory for another toolchain.
 
 ### Debug (with tests enabled)
 
@@ -76,6 +82,38 @@ ctest --test-dir build-msvc -C Debug --output-on-failure
 
 This configuration exercises the MSVC toolchain with multi-config build support. MSVC builds use the static C/C++ runtime (/MT in Release, /MTd in Debug).
 
+### Clang (Windows — MSYS2 CLANG64)
+
+From an MSYS2 CLANG64 shell with `mingw-w64-clang-x86_64-clang`, `mingw-w64-clang-x86_64-ninja`, `mingw-w64-clang-x86_64-cmake`, and `mingw-w64-clang-x86_64-python` installed:
+
+```bash
+# Debug build and test
+cmake -S . -B build-clang64-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+cmake --build build-clang64-debug
+ctest --test-dir build-clang64-debug --output-on-failure --parallel 2
+
+# Release build and test
+cmake -S . -B build-clang64-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build-clang64-release
+ctest --test-dir build-clang64-release --output-on-failure --parallel 2
+```
+
+### Clang (Ubuntu / Linux)
+
+On Ubuntu with `clang`, `cmake`, and `ninja-build` installed:
+
+```bash
+# Debug build and test
+cmake -S . -B build-clang-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DBUILD_TESTING=ON
+cmake --build build-clang-debug -j$(nproc)
+ctest --test-dir build-clang-debug --output-on-failure
+
+# Release build and test
+cmake -S . -B build-clang-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DBUILD_TESTING=ON
+cmake --build build-clang-release -j$(nproc)
+ctest --test-dir build-clang-release --output-on-failure
+```
+
 ---
 
 ## Test Execution and Filters
@@ -110,14 +148,12 @@ The `kasumi_architecture_dag` test validates internal architectural dependency r
 
 ## Operational Performance Trace
 
-Setting `KASUMI_PERF_TRACE=1` enables operational trace instrumentation:
-
-```powershell
-$env:KASUMI_PERF_TRACE="1"
-./build/kasumi.exe remote commits <profile>
-```
-
-Trace output is written to `stderr` and reports call counts and elapsed wall-clock microseconds for instrumented operations. Audit-style inspection commands may fetch and validate content objects rather than relying only on structural metadata.
+Use [performance tracing](troubleshooting.md#slow-synchronization-or-preview)
+for PowerShell, CMD, and POSIX command examples and interpretation of scanner,
+hash-cache, and remote-observation metrics. `KASUMI_PERF_TRACE=1` writes counters
+and accumulated wall-clock microseconds for instrumented operations to `stderr`.
+Audit-style inspection commands may fetch and validate content objects rather
+than relying only on structural metadata.
 
 ## Rclone System Tests
 
@@ -141,6 +177,37 @@ cmake --build build-bench --parallel
 ```
 
 Benchmark executables and scripts are located in `tests/operational/`.
+
+The journal E2E campaign uses the real CLI, official Publisher/Receiver profiles,
+physical SQLite databases, and real rclone local/cloud storage. Keep all output
+outside the repository; each run preserves its exclusive namespace and artifacts:
+
+```powershell
+python tests/operational/benchmark_journal_e2e.py --binary build-clang64-release/kasumi.exe --rclone-config C:/private/rclone.conf --output D:/kj --group-commit
+python tests/operational/test_journal_preparation_e2e.py --binary build-clang64-release/kasumi.exe --rclone "C:/Program Files/rclone/rclone.exe" --rclone-config C:/private/rclone.conf --output D:/kj
+```
+
+The preparation regression checks two file counts after verifying all ten real
+syncs. It measures the Started-to-FilesStaged interval, including both durable
+barriers, separately from later completion checkpoints.
+
+For deterministic abrupt-process recovery tests, use a **separate test build**:
+
+```powershell
+cmake -S . -B build-journal-fault -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DKASUMI_BUILD_JOURNAL_FAULT_TESTS=ON
+cmake --build build-journal-fault --target kasumi
+python tests/operational/test_journal_recovery_e2e.py --binary build-journal-fault/kasumi.exe --rclone "C:/Program Files/rclone/rclone.exe" --output D:/kj --expect-grouped
+```
+
+This runner creates its own rclone `type=local` configuration and does not read
+global credentials. Hooks terminate without destructors at observed transaction
+boundaries or inject persistence errors. They are compiled out unless explicitly
+enabled; production and performance builds must keep the option **OFF**.
+
+The [current journal contract](architecture/transaction-journal.md) documents
+authenticated confirmation, retirement, rollback and format incompatibility.
+The process runner preserves journal artifacts and checks repeated recovery;
+these process exits do not simulate physical power loss.
 
 ### Remote Inspection Benchmark
 

@@ -225,8 +225,10 @@ TEST(CliUpdateTest, ReleaseListingReadsAllPages) {
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 100);
     ASSERT_EQ(urls.size(), 2);
-    EXPECT_TRUE(urls[0].ends_with("page=1"));
-    EXPECT_TRUE(urls[1].ends_with("page=2"));
+    EXPECT_EQ(urls[0],
+              "https://api.github.com/repos/auanK/kasumi/releases?per_page=100&page=1");
+    EXPECT_EQ(urls[1],
+              "https://api.github.com/repos/auanK/kasumi/releases?per_page=100&page=2");
 }
 
 TEST(CliUpdateTest, IdentifiesRunningExecutableAndPlatformPackage) {

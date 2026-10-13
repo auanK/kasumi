@@ -8,6 +8,10 @@
 #include <mutex>
 #include <string>
 
+#ifndef _WIN32
+#include <sys/resource.h>
+#endif
+
 namespace kasumi::platform::perf_trace {
 namespace {
 
@@ -139,6 +143,34 @@ void report(std::string_view outcome) noexcept {
     if (!enabled())
         return;
     try {
+#ifndef _WIN32
+        // Self counters exclude the rclone child; collected before process
+        // exit.
+        struct rusage usage{};
+        if (::getrusage(RUSAGE_SELF, &usage) == 0) {
+            const auto user_us =
+                static_cast<std::uint64_t>(usage.ru_utime.tv_sec) *
+                    1'000'000ULL +
+                static_cast<std::uint64_t>(usage.ru_utime.tv_usec);
+            const auto system_us =
+                static_cast<std::uint64_t>(usage.ru_stime.tv_sec) *
+                    1'000'000ULL +
+                static_cast<std::uint64_t>(usage.ru_stime.tv_usec);
+            std::fprintf(stderr,
+                         "KASUMI_PROCESS_SELF user_us=%llu system_us=%llu "
+                         "max_rss_kib=%llu source=getrusage\n",
+                         static_cast<unsigned long long>(user_us),
+                         static_cast<unsigned long long>(system_us),
+                         static_cast<unsigned long long>(usage.ru_maxrss));
+            std::fprintf(stderr,
+                         "KASUMI_PROCESS_IO input_blocks=%llu "
+                         "output_blocks=%llu source=getrusage\n",
+                         static_cast<unsigned long long>(usage.ru_inblock),
+                         static_cast<unsigned long long>(usage.ru_oublock));
+        } else {
+            std::fprintf(stderr, "KASUMI_PROCESS_SELF error=getrusage\n");
+        }
+#endif
         std::lock_guard lock(metrics_mutex);
         for (const auto& [name, metric] : metrics) {
             const auto microseconds =

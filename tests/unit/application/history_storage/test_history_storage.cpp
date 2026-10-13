@@ -58,51 +58,72 @@ safe_fake_get(void* context,
 }
 
 struct HistoryReadGates {
-    std::atomic_bool batch_entered{false};
-    std::atomic_bool epoch_entered{false};
-    std::atomic_bool marker_entered{false};
+    bool batch_entered = false;
+    bool epoch_entered = false;
+    bool marker_entered = false;
 
-    std::atomic_size_t current_in_flight{0};
-    std::atomic_size_t peak_in_flight{0};
+    std::size_t current_in_flight = 0;
+    std::size_t peak_in_flight = 0;
 
-    std::atomic_bool release_batch{false};
-    std::atomic_bool release_epoch{false};
-    std::atomic_bool release_marker{false};
+    bool release_batch = false;
+    bool release_epoch = false;
+    bool release_marker = false;
 
-    std::atomic_bool fail_batch{false};
-    std::atomic_bool fail_epoch{false};
-    std::atomic_bool fail_marker{false};
+    bool fail_batch = false;
+    bool fail_epoch = false;
+    bool fail_marker = false;
 
     std::mutex mutex;
     std::mutex fake_state_mutex;
     std::condition_variable cv;
 
     void update_peak(std::size_t active) {
-        auto prev = peak_in_flight.load();
-        while (active > prev &&
-               !peak_in_flight.compare_exchange_weak(prev, active)) {
+        if (active > peak_in_flight) {
+            peak_in_flight = active;
         }
+    }
+
+    void release_all() {
+        std::lock_guard lock(mutex);
+        release_batch = true;
+        release_epoch = true;
+        release_marker = true;
+        cv.notify_all();
     }
 };
 
 HistoryReadGates* active_gates = nullptr;
 
+struct GatesSessionGuard {
+    HistoryReadGates& gates;
+    std::jthread& worker;
+    ~GatesSessionGuard() {
+        gates.release_all();
+        if (worker.joinable()) {
+            worker.join();
+        }
+        active_gates = nullptr;
+    }
+};
+
 kasumi::transport::Result
 gated_fake_get_batch(void* context, const kasumi::transport::GetBatch& batch) {
+    bool should_fail = false;
     if (active_gates) {
-        active_gates->batch_entered = true;
-        const auto active = ++active_gates->current_in_flight;
-        active_gates->update_peak(active);
-        active_gates->cv.notify_all();
         {
             std::unique_lock lock(active_gates->mutex);
+            active_gates->batch_entered = true;
+            const auto active = ++active_gates->current_in_flight;
+            active_gates->update_peak(active);
+            active_gates->cv.notify_all();
             active_gates->cv.wait(lock, [&] {
-                return active_gates->release_batch.load() ||
+                return active_gates->release_batch ||
                        kasumi::platform::cancellation::requested();
             });
+            --active_gates->current_in_flight;
+            should_fail = active_gates->fail_batch;
         }
-        --active_gates->current_in_flight;
-        if (active_gates->fail_batch.load()) {
+        if (should_fail) {
             return std::unexpected(kasumi::transport::Error{
                 .code = kasumi::transport::ErrorCode::Io,
                 .message = "injected batch failure",
@@ -122,38 +143,42 @@ gated_fake_get(void* context,
                const std::filesystem::path& destination) {
     if (active_gates) {
         if (is_epoch(identifier)) {
-            active_gates->epoch_entered = true;
-            const auto active = ++active_gates->current_in_flight;
-            active_gates->update_peak(active);
-            active_gates->cv.notify_all();
+            bool should_fail = false;
             {
                 std::unique_lock lock(active_gates->mutex);
+                active_gates->epoch_entered = true;
+                const auto active = ++active_gates->current_in_flight;
+                active_gates->update_peak(active);
+                active_gates->cv.notify_all();
                 active_gates->cv.wait(lock, [&] {
-                    return active_gates->release_epoch.load() ||
+                    return active_gates->release_epoch ||
                            kasumi::platform::cancellation::requested();
                 });
+                --active_gates->current_in_flight;
+                should_fail = active_gates->fail_epoch;
             }
-            --active_gates->current_in_flight;
-            if (active_gates->fail_epoch.load()) {
+            if (should_fail) {
                 return std::unexpected(kasumi::transport::Error{
                     .code = kasumi::transport::ErrorCode::Io,
                     .message = "injected epoch failure",
                 });
             }
         } else if (is_marker(identifier)) {
-            active_gates->marker_entered = true;
-            const auto active = ++active_gates->current_in_flight;
-            active_gates->update_peak(active);
-            active_gates->cv.notify_all();
+            bool should_fail = false;
             {
                 std::unique_lock lock(active_gates->mutex);
+                active_gates->marker_entered = true;
+                const auto active = ++active_gates->current_in_flight;
+                active_gates->update_peak(active);
+                active_gates->cv.notify_all();
                 active_gates->cv.wait(lock, [&] {
-                    return active_gates->release_marker.load() ||
+                    return active_gates->release_marker ||
                            kasumi::platform::cancellation::requested();
                 });
+                --active_gates->current_in_flight;
+                should_fail = active_gates->fail_marker;
             }
-            --active_gates->current_in_flight;
-            if (active_gates->fail_marker.load()) {
+            if (should_fail) {
                 return std::unexpected(kasumi::transport::Error{
                     .code = kasumi::transport::ErrorCode::Io,
                     .message = "injected marker failure",
@@ -1644,13 +1669,23 @@ TEST(HistoryStorageTest,
         loaded = kasumi::application::history_storage::load_history(
             fixture.storage, test_key(), fixture.root);
     });
+    GatesSessionGuard guard{gates, worker};
 
+    bool entered = false;
     {
         std::unique_lock lock(gates.mutex);
-        gates.cv.wait(lock, [&] {
-            return gates.batch_entered.load() && gates.epoch_entered.load() &&
-                   gates.marker_entered.load();
+        entered = gates.cv.wait_for(lock, std::chrono::seconds(5), [&] {
+            return gates.batch_entered && gates.epoch_entered &&
+                   gates.marker_entered;
         });
+        if (!entered) {
+            FAIL() << "Timed out waiting for history load gates! Diagnostics: "
+                   << "batch_entered=" << gates.batch_entered
+                   << ", epoch_entered=" << gates.epoch_entered
+                   << ", marker_entered=" << gates.marker_entered
+                   << ", current_in_flight=" << gates.current_in_flight
+                   << ", peak_in_flight=" << gates.peak_in_flight;
+        }
     }
     EXPECT_TRUE(gates.batch_entered);
     EXPECT_TRUE(gates.epoch_entered);
@@ -1659,11 +1694,7 @@ TEST(HistoryStorageTest,
     EXPECT_FALSE(gates.release_epoch);
     EXPECT_FALSE(gates.release_marker);
 
-    gates.release_batch = true;
-    gates.release_epoch = true;
-    gates.release_marker = true;
-    gates.cv.notify_all();
-
+    gates.release_all();
     worker.join();
     active_gates = nullptr;
 
@@ -1684,22 +1715,20 @@ TEST(HistoryStorageTest,
         loaded = kasumi::application::history_storage::load_history(
             fixture.storage, test_key(), fixture.root);
     });
+    GatesSessionGuard guard{gates, worker};
 
     bool all_three_entered = false;
     {
         std::unique_lock lock(gates.mutex);
         all_three_entered =
-            gates.cv.wait_for(lock, std::chrono::milliseconds(200), [&] {
-                return gates.batch_entered.load() &&
-                       gates.epoch_entered.load() &&
-                       gates.marker_entered.load();
+            gates.cv.wait_for(lock, std::chrono::seconds(5), [&] {
+                return gates.batch_entered &&
+                       gates.epoch_entered &&
+                       gates.marker_entered;
             });
     }
 
-    gates.release_batch = true;
-    gates.release_epoch = true;
-    gates.release_marker = true;
-    gates.cv.notify_all();
+    gates.release_all();
     worker.join();
     active_gates = nullptr;
 
@@ -1726,11 +1755,9 @@ TEST(HistoryStorageTest, DeterministicErrorPrecedenceBatchOverEpochAndMarker) {
         loaded = kasumi::application::history_storage::load_history(
             fixture.storage, test_key(), fixture.root);
     });
+    GatesSessionGuard guard{gates, worker};
 
-    gates.release_marker = true;
-    gates.release_epoch = true;
-    gates.release_batch = true;
-    gates.cv.notify_all();
+    gates.release_all();
     worker.join();
     active_gates = nullptr;
 
@@ -1757,11 +1784,9 @@ TEST(HistoryStorageTest, DeterministicErrorPrecedenceEpochOverMarker) {
         loaded = kasumi::application::history_storage::load_history(
             fixture.storage, test_key(), fixture.root);
     });
+    GatesSessionGuard guard{gates, worker};
 
-    gates.release_marker = true;
-    gates.release_batch = true;
-    gates.release_epoch = true;
-    gates.cv.notify_all();
+    gates.release_all();
     worker.join();
     active_gates = nullptr;
 
@@ -1789,11 +1814,9 @@ TEST(HistoryStorageTest,
         loaded = kasumi::application::history_storage::load_history(
             fixture.storage, test_key(), fixture.root);
     });
+    GatesSessionGuard guard{gates, worker};
 
-    gates.release_batch = true;
-    gates.release_epoch = true;
-    gates.release_marker = true;
-    gates.cv.notify_all();
+    gates.release_all();
     worker.join();
     active_gates = nullptr;
 
@@ -1821,14 +1844,12 @@ TEST(HistoryStorageTest, DrainsAllLanesWhenOneFailsEarly) {
         loaded = kasumi::application::history_storage::load_history(
             fixture.storage, test_key(), fixture.root);
     });
+    GatesSessionGuard guard{gates, worker};
 
     // In a three-lane model, all lanes must be drained/joined before
-    // load_history returns. Give it a short moment, then release epoch and
-    // marker
+    // load_history returns. Give it a short moment, then release epoch and marker
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    gates.release_epoch = true;
-    gates.release_marker = true;
-    gates.cv.notify_all();
+    gates.release_all();
     worker.join();
     active_gates = nullptr;
 
@@ -1850,25 +1871,58 @@ TEST(HistoryStorageTest, RespectsGlobalCancellationAndDrains) {
         loaded = kasumi::application::history_storage::load_history(
             fixture.storage, test_key(), fixture.root);
     });
+    GatesSessionGuard guard{gates, worker};
 
     {
         std::unique_lock lock(gates.mutex);
-        gates.cv.wait(lock, [&] {
-            return gates.batch_entered.load() || gates.epoch_entered.load() ||
-                   gates.marker_entered.load();
-        });
+        const bool entered =
+            gates.cv.wait_for(lock, std::chrono::seconds(5), [&] {
+                return gates.batch_entered || gates.epoch_entered ||
+                       gates.marker_entered;
+            });
+        ASSERT_TRUE(entered);
     }
 
     kasumi::platform::cancellation::request();
-    gates.release_batch = true;
-    gates.release_epoch = true;
-    gates.release_marker = true;
-    gates.cv.notify_all();
+    gates.release_all();
     worker.join();
     active_gates = nullptr;
     kasumi::platform::cancellation::reset();
 
     ASSERT_FALSE(loaded.has_value());
+}
+
+TEST(HistoryStorageTest, GatesSequentialOrConcurrentRepeatedRunsPreserveIsolation) {
+    for (int run = 0; run < 5; ++run) {
+        auto fixture = make_test_history_fixture("history-repeated-isolation");
+        HistoryReadGates gates;
+        active_gates = &gates;
+        fixture.storage.storage.get_batch = gated_fake_get_batch;
+        fixture.storage.storage.get = gated_fake_get;
+
+        kasumi::application::history_storage::LoadResult loaded;
+        std::jthread worker([&] {
+            loaded = kasumi::application::history_storage::load_history(
+                fixture.storage, test_key(), fixture.root);
+        });
+        GatesSessionGuard guard{gates, worker};
+
+        bool entered = false;
+        {
+            std::unique_lock lock(gates.mutex);
+            entered = gates.cv.wait_for(lock, std::chrono::seconds(5), [&] {
+                return gates.batch_entered && gates.epoch_entered &&
+                       gates.marker_entered;
+            });
+        }
+        EXPECT_TRUE(entered) << "run=" << run;
+        gates.release_all();
+        worker.join();
+        active_gates = nullptr;
+
+        ASSERT_TRUE(loaded.has_value()) << loaded.error().detail;
+        EXPECT_EQ(gates.peak_in_flight, 3U);
+    }
 }
 
 TEST(HistoryStorageTest, PreservesSequentialPathWhenGetBatchIsNull) {

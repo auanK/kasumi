@@ -59,7 +59,9 @@ std::expected<void, Error> remove_transaction_workspace(
 // Cleans up the journal and temporary workspace after completion.
 std::expected<void, Error>
 finish_transaction_cleanup(const journal::Paths& paths,
-                           const std::optional<platform::Workspace>& workspace);
+                           const std::optional<platform::Workspace>& workspace,
+                           std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                           journal::Session* session = nullptr);
 // Cleans up orphan workspaces without a matching transaction.
 std::expected<void, Error>
 cleanup_orphan_workspaces(const std::filesystem::path& profile);
@@ -70,7 +72,9 @@ make_journal_paths(const runtime::RuntimeData& runtime_data);
 std::expected<void, Error>
 save_record(const journal::Paths& paths,
             const transaction::Record& record,
-            std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+            journal::SaveMode mode = journal::SaveMode::Advance,
+            journal::Session* session = nullptr);
 
 // Reconstructs the genesis Epoch solely from durable journal fields.
 history_storage::epoch::Epoch genesis_epoch(const transaction::Record& record);
@@ -102,7 +106,8 @@ std::expected<void, Error>
 checkpoint_upload_batch(const journal::Paths& paths,
                         transaction::Record& record,
                         const mutation::StagedUploadBatch& batch,
-                        std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                        journal::Session* session = nullptr);
 
 // Rolls back the transaction and updates its persisted record.
 std::expected<void, Error>
@@ -110,7 +115,8 @@ rollback_transaction(const journal::Paths& paths,
                      transaction::Record& record,
                      const std::optional<platform::Workspace>& workspace,
                      const std::filesystem::path& local_root,
-                     std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                     journal::Session* session = nullptr);
 
 // Rolls back only mutations applied to the local directory.
 std::expected<void, Error>

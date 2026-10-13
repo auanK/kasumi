@@ -4,7 +4,6 @@
 #include "mutation_detail.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
-#include "platform/random.hpp"
 
 #include <limits>
 #include <optional>
@@ -456,15 +455,8 @@ apply_download(const Operation& operation,
                        operation_index));
     }
 
-    auto id = platform::random::hex_id();
-    if (!id) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          id.error(),
-                                          destination,
-                                          operation_index));
-    }
-    const auto candidate = platform::path::temporary_sibling_path(
-        destination, ".", ".kasumi-new-" + *id);
+    const auto candidate = detail::download_candidate_path(
+        destination, workspace, operation_index);
     auto candidate_status = read_status(candidate, operation_index);
     if (!candidate_status) {
         return std::unexpected(candidate_status.error());

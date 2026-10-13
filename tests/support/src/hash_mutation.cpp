@@ -3,6 +3,7 @@
 #include "platform/metadata.hpp"
 
 #include <blake3.h>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -52,6 +53,10 @@ void mutation_blake3_update(blake3_hasher* state,
 #define regular_file_fingerprint native_regular_file_fingerprint
 #include "../../../src/platform/file_fingerprint.cpp"
 #undef regular_file_fingerprint
+
+#define read_file_metadata native_read_file_metadata
+#include "../../../src/application/observation/file_metadata.cpp"
+#undef read_file_metadata
 
 namespace kasumi::crypto::content {
 std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
@@ -144,7 +149,8 @@ void print_file_evidence(const char* label, const std::filesystem::path& path) {
     std::cout
         << label << " size=" << std::filesystem::file_size(path)
         << " mtime_ticks="
-        << std::filesystem::last_write_time(path).time_since_epoch().count()
+        << static_cast<long long>(
+               std::filesystem::last_write_time(path).time_since_epoch().count())
         << " hash=" << hash_hex(independent_file_hash(path)) << " fingerprint=";
     if (!fingerprint)
         std::cout << "error:" << fingerprint.error();
@@ -167,3 +173,16 @@ regular_file_fingerprint(const std::filesystem::path& path) {
     return native_regular_file_fingerprint(path);
 }
 } // namespace kasumi::platform
+
+namespace kasumi::application::observation::cache {
+std::expected<std::optional<FileMetadata>, FileMetadataError>
+read_file_metadata(const std::filesystem::path& physical_path,
+                   std::string_view logical_path) {
+    auto result = native_read_file_metadata(physical_path, logical_path);
+    if (unavailable_fingerprint && *unavailable_fingerprint == physical_path &&
+        result && result->has_value()) {
+        (**result).identity = std::nullopt;
+    }
+    return result;
+}
+} // namespace kasumi::application::observation::cache

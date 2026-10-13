@@ -18,15 +18,7 @@
 namespace kasumi::application::history_storage::maintenance_protocol {
 namespace {
 
-constexpr std::string_view protocol_prefix = "history/gc/v1/";
-constexpr std::string_view barrier_identifier = "history/gc/v1/barrier";
-constexpr std::string_view writers_prefix = "history/gc/v1/writers";
-constexpr std::string_view probes_prefix = "history/gc/v1/probes";
-constexpr std::string_view quarantine_prefix = "history/gc/v1/quarantine/";
-constexpr std::string_view quarantine_content_prefix =
-    "history/gc/v1/quarantine/content/";
-constexpr std::string_view quarantine_commit_prefix =
-    "history/gc/v1/quarantine/commits/";
+
 constexpr std::string_view metadata_suffix = ".meta";
 constexpr std::string_view metadata_magic = "KGQ1\n";
 constexpr std::size_t maximum_marker_size = 512;
@@ -53,8 +45,18 @@ Error history_error(const history_storage::Error& source) {
 
 std::vector<std::uint8_t> payload(std::string_view kind,
                                   std::string_view token) {
-    const auto value =
-        "kasumi-gc-v1:" + std::string{kind} + ':' + std::string{token};
+    constexpr std::string_view prefix = "kasumi-gc-v1:";
+    const std::size_t max_allowed = std::string().max_size() - prefix.size() - 1;
+    if (kind.size() > max_allowed || token.size() > (max_allowed - kind.size())) {
+        return {};
+    }
+    const std::size_t total_size = prefix.size() + kind.size() + 1 + token.size();
+    std::string value;
+    value.reserve(total_size);
+    value.append(prefix);
+    value.append(kind);
+    value.push_back(':');
+    value.append(token);
     return {value.begin(), value.end()};
 }
 
@@ -1356,6 +1358,13 @@ authenticate_quarantine_metadata(
         .payload_sha256 = std::move(loaded->second),
         .ciphertext_sha256 = std::move(*ciphertext_hash),
     };
+}
+
+namespace testing {
+std::vector<std::uint8_t> format_payload(std::string_view kind,
+                                         std::string_view token) {
+    return payload(kind, token);
+}
 }
 
 } // namespace kasumi::application::history_storage::maintenance_protocol

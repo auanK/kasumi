@@ -353,6 +353,7 @@ run_capture(const std::vector<std::string>& arguments,
                          .error_output = std::move(error_output.value)};
 }
 
+#if !defined(_WIN32)
 std::expected<void, std::string>
 run_inherited(const std::vector<std::string>& arguments) {
     if (arguments.empty()) {
@@ -387,6 +388,7 @@ run_inherited(const std::vector<std::string>& arguments) {
     }
     return {};
 }
+#endif
 
 std::expected<std::string, std::string>
 read_limited_file(const std::filesystem::path& path, std::size_t limit) {
@@ -450,6 +452,7 @@ bool allowed_api_host(std::string_view host) {
     return host == "api.github.com";
 }
 
+#if !defined(_WIN32)
 std::optional<std::string> header_location(const std::filesystem::path& path) {
     auto headers = read_limited_file(path, 64U * 1024U);
     if (!headers) {
@@ -477,6 +480,7 @@ std::optional<std::string> header_location(const std::filesystem::path& path) {
     }
     return location;
 }
+#endif
 
 #if defined(_WIN32)
 
@@ -1362,9 +1366,13 @@ fetch_releases(const ApiGet& get) {
     constexpr std::size_t maximum_pages = 20;
     std::vector<Release> releases;
     for (std::size_t page = 1; page <= maximum_pages; ++page) {
-        const auto url = "https://api.github.com/repos/" +
-                         std::string{GITHUB_REPOSITORY} +
-                         "/releases?per_page=100&page=" + std::to_string(page);
+        const auto page_str = std::to_string(page);
+        std::string url;
+        url.reserve(29 + GITHUB_REPOSITORY.size() + 27 + page_str.size());
+        url.append("https://api.github.com/repos/");
+        url.append(GITHUB_REPOSITORY);
+        url.append("/releases?per_page=100&page=");
+        url.append(page_str);
         auto response = get(url, API_RESPONSE_LIMIT);
         if (!response) {
             return std::unexpected(response.error());
@@ -1545,9 +1553,15 @@ bool official_asset_url(std::string_view tag,
         name.find_first_of("/\\?#\r\n") != std::string_view::npos) {
         return false;
     }
-    return url == "https://github.com/" + std::string{GITHUB_REPOSITORY} +
-                      "/releases/download/" + std::string{tag} + "/" +
-                      std::string{name};
+    std::string expected_url;
+    expected_url.reserve(19 + GITHUB_REPOSITORY.size() + 19 + tag.size() + 1 + name.size());
+    expected_url.append("https://github.com/");
+    expected_url.append(GITHUB_REPOSITORY);
+    expected_url.append("/releases/download/");
+    expected_url.append(tag);
+    expected_url.push_back('/');
+    expected_url.append(name);
+    return url == expected_url;
 }
 
 namespace {
@@ -2208,11 +2222,9 @@ refetch_official_digest(const std::filesystem::path& archive,
     return verify_package_checksum(archive, checksum_file, package.archive);
 }
 
+#if !defined(_WIN32)
 std::optional<std::filesystem::path> find_program(std::string_view name) {
-#if defined(_WIN32)
-    (void)name;
-    return std::nullopt;
-#elif defined(__linux__)
+#if defined(__linux__)
     const auto resolved = resolve_linux_system_tool(name);
     return resolved ? std::optional<std::filesystem::path>{*resolved}
                     : std::nullopt;
@@ -2231,6 +2243,7 @@ std::optional<std::filesystem::path> find_program(std::string_view name) {
     return std::nullopt;
 #endif
 }
+#endif
 
 #if defined(__linux__)
 std::expected<std::string, std::string>
@@ -2453,18 +2466,13 @@ verify_package_checksum(const std::filesystem::path& archive,
 
 namespace {
 
+#if !defined(_WIN32)
 std::expected<void, std::string>
 install_with_elevation(const std::filesystem::path& executable,
                        const std::filesystem::path& archive,
                        std::string_view tag,
                        std::string_view language) {
-#if defined(_WIN32)
-    (void)executable;
-    (void)archive;
-    (void)tag;
-    (void)language;
-    return std::unexpected("Windows installation helper was not started");
-#elif defined(__linux__)
+#if defined(__linux__)
     const auto pkexec = find_program("pkexec");
     const auto sudo = find_program("sudo");
     const auto self = platform::path::to_utf8(executable);
@@ -2571,6 +2579,7 @@ install_with_elevation(const std::filesystem::path& executable,
                           std::string{language}});
 #endif
 }
+#endif
 
 #if defined(_WIN32)
 
@@ -3373,9 +3382,14 @@ InstallResult install_linux_handoff(const std::filesystem::path& archive,
         return std::unexpected(
             install_failure("invalid privileged update handoff"));
     }
-    const auto checksum_url =
-        "https://github.com/" + std::string{GITHUB_REPOSITORY} +
-        "/releases/download/" + std::string{tag} + "/" + package->checksum;
+    std::string checksum_url;
+    checksum_url.reserve(19 + GITHUB_REPOSITORY.size() + 19 + tag.size() + 1 + package->checksum.size());
+    checksum_url.append("https://github.com/");
+    checksum_url.append(GITHUB_REPOSITORY);
+    checksum_url.append("/releases/download/");
+    checksum_url.append(tag);
+    checksum_url.push_back('/');
+    checksum_url.append(package->checksum);
     if (!official_asset_url(tag, package->checksum, checksum_url)) {
         return std::unexpected(
             install_failure("official checksum URL is invalid"));

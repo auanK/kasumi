@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(kasumi VERSION 0.6.1 LANGUAGES C CXX)
+project(kasumi VERSION 0.7.0 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 23)
@@ -11,6 +11,12 @@ if(MSVC)
 endif()
 
 include(CTest)
+
+option(KASUMI_BUILD_JOURNAL_FAULT_TESTS
+    "Enable isolated journal crash/error injection (never for production)" OFF)
+if(KASUMI_BUILD_JOURNAL_FAULT_TESTS AND NOT BUILD_TESTING)
+    message(FATAL_ERROR "Journal fault injection requires BUILD_TESTING=ON")
+endif()
 
 option(
     KASUMI_BUILD_SYSTEM_TESTS
@@ -279,6 +285,14 @@ if(BUILD_TESTING)
         SYSTEM
     )
     fetchcontent_makeavailable(googletest)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        if(TARGET gtest)
+            target_compile_options(gtest PRIVATE -Wno-character-conversion)
+        endif()
+        if(TARGET gtest_main)
+            target_compile_options(gtest_main PRIVATE -Wno-character-conversion)
+        endif()
+    endif()
 endif()
 
 set(UTF8PROC_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
@@ -359,7 +373,6 @@ target_include_directories(monocypher PUBLIC ${monocypher_SOURCE_DIR}/src)
 add_library(kasumi_platform STATIC
     src/platform/cancellation.cpp
     src/platform/clock.cpp
-    src/platform/change_journal.cpp
     src/platform/durability.cpp
     src/platform/file_fingerprint.cpp
     src/platform/identity.cpp
@@ -454,8 +467,9 @@ add_library(kasumi_application STATIC
     src/application/history_storage/publication.cpp
     src/application/history_storage/cleanup.cpp
     src/application/history_storage/remote_layout.cpp
+    src/application/observation/cache_contract.cpp
+    src/application/observation/file_metadata.cpp
     src/application/observation/scanner.cpp
-    src/application/observation/patch.cpp
     src/application/observation/state.cpp
     src/application/observation/history.cpp
     src/application/sync/journal.cpp
@@ -491,6 +505,10 @@ target_include_directories(
     PRIVATE
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
 )
+
+if(KASUMI_BUILD_JOURNAL_FAULT_TESTS)
+    target_compile_definitions(kasumi_application PRIVATE KASUMI_JOURNAL_FAULT_TESTS)
+endif()
 
 target_link_libraries(kasumi_application
     PRIVATE
@@ -841,6 +859,8 @@ set_target_properties(${KASUMI_FIRST_PARTY_TARGETS} PROPERTIES POSITION_INDEPEND
 include(CheckIPOSupported)
 check_ipo_supported(RESULT ipo_supported)
 if(ipo_supported AND NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND WIN32))
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
     set_target_properties(${KASUMI_FIRST_PARTY_TARGETS} PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION TRUE
         INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE

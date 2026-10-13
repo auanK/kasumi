@@ -132,4 +132,4 @@ A Commit contains a canonical Snapshot together with its parent commit IDs, heig
 
 ## Accepted State and Observation
 
-SQLite `StoredState` persists an accepted Snapshot and its history reference, making it the [reconciliation base](local-state.md#sqlites-three-distinct-responsibilities) for the next run. The [Local Observation](local-observation.md) page owns scanning, file-hash reuse, Windows change-journal checkpoints, selective patching, and conservative fallback.
+SQLite `StoredState` persists an accepted Snapshot and its history reference, making it the [reconciliation base](local-state.md#sqlites-two-distinct-responsibilities) for the next run. The [Local Observation](local-observation.md) page owns uniform metadata scanning, persistent file-hash reuse, and full hashing.

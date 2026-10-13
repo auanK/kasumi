@@ -1,6 +1,7 @@
 #include "core/hasher.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/path.hpp"
+#include "platform/perf_trace.hpp"
 #include "state_storage/database.hpp"
 #include "state_storage/database_connection.hpp"
 
@@ -130,6 +131,113 @@ TEST(StateStorageDatabaseTest, InitializesFreshDatabaseIdempotently) {
     EXPECT_FALSE(*loaded);
 }
 
+TEST(StateStorageDatabaseTest,
+     CanonicalStateAndCacheDoNotRequireObservationTables) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-no-checkpoint");
+    const auto db = kasumi::test::workspace_path(workspace, "state.db");
+    ASSERT_TRUE(kasumi::state_storage::initialize(db));
+    const auto snapshot = make_snapshot("a.txt", "alpha", 9);
+    ASSERT_TRUE(kasumi::state_storage::save_state(
+        db,
+        kasumi::state_storage::StoredState{snapshot, 7, std::string(64, 'a')}));
+    execute_sql(
+        db,
+        "DROP TABLE IF EXISTS observation_checkpoint; DROP TABLE IF EXISTS "
+        "directory_lineage; DROP TABLE IF EXISTS directory_lineage_metadata;");
+    EXPECT_TRUE(kasumi::state_storage::initialize(db));
+    const auto loaded = kasumi::state_storage::load_state(db);
+    ASSERT_TRUE(loaded.has_value()) << loaded.error();
+    ASSERT_TRUE(loaded->has_value());
+    EXPECT_EQ((*loaded)->tree, snapshot);
+    EXPECT_EQ((*loaded)->height, 7U);
+    EXPECT_TRUE(kasumi::state_storage::load_file_cache(db).has_value());
+    EXPECT_TRUE(kasumi::state_storage::save_file_cache_delta(db, {}));
+}
+
+TEST(StateStorageDatabaseTest, LegacyObservationDataIsIgnoredAndPreserved) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-legacy-observation");
+    const auto db = kasumi::test::workspace_path(workspace, "state.db");
+    ASSERT_TRUE(kasumi::state_storage::initialize(db));
+    // Exact auxiliary tables from schema v1 before USN removal.
+    execute_sql(db, R"(
+        CREATE TABLE IF NOT EXISTS observation_checkpoint (
+            id INTEGER PRIMARY KEY CHECK(id = 1), kind INTEGER NOT NULL,
+            volume_serial TEXT NOT NULL, journal_id TEXT NOT NULL,
+            next_usn TEXT NOT NULL, root_file_reference TEXT NOT NULL,
+            tree_root_hash TEXT NOT NULL, row_count TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS directory_lineage_metadata (
+            id INTEGER PRIMARY KEY CHECK(id = 1), volume_serial TEXT NOT NULL,
+            journal_id TEXT NOT NULL, root_file_reference TEXT NOT NULL,
+            tree_root_hash TEXT NOT NULL, row_count TEXT NOT NULL,
+            directory_count TEXT NOT NULL,
+            lineage_complete INTEGER NOT NULL CHECK(lineage_complete IN (0, 1)));
+        CREATE TABLE IF NOT EXISTS directory_lineage (
+            file_reference TEXT PRIMARY KEY NOT NULL);
+        INSERT INTO observation_checkpoint VALUES
+            (1, 1, '11', '22', '33', '44',
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '3');
+        INSERT INTO directory_lineage_metadata VALUES
+            (1, '11', '22', '44',
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '3', '2', 1);
+        INSERT INTO directory_lineage VALUES ('44'), ('55');
+    )");
+    const auto snapshot = make_snapshot("docs/a.txt", "alpha", 9);
+    const kasumi::state_storage::StoredState expected{
+        .tree = snapshot,
+        .height = 7,
+        .commit_id = std::string(64, 'a'),
+        .ciphertext_id = std::string(64, 'b'),
+        .epoch_id = std::string(64, 'c'),
+        .epoch_sequence = 2,
+        .pending_materializations = {
+            *kasumi::find_row(snapshot, "docs/a.txt")}};
+    ASSERT_TRUE(kasumi::state_storage::save_state(db, expected));
+    const std::array rows{kasumi::state_storage::FileCacheRow{
+        .path = "docs/a.txt",
+        .hash = kasumi::hasher::hash_string("alpha"),
+        .size = 5,
+        .mtime_nanoseconds = 1000,
+        .volume = 1,
+        .file_low = 2,
+        .file_high = 3}};
+    ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(db, rows));
+    for (int execution = 0; execution < 2; ++execution) {
+        ASSERT_TRUE(kasumi::state_storage::initialize(db));
+        const auto loaded = kasumi::state_storage::load_state(db);
+        ASSERT_TRUE(loaded.has_value()) << loaded.error();
+        ASSERT_TRUE(loaded->has_value());
+        EXPECT_EQ((*loaded)->tree, expected.tree);
+        EXPECT_EQ((*loaded)->height, expected.height);
+        EXPECT_EQ((*loaded)->commit_id, expected.commit_id);
+        EXPECT_EQ((*loaded)->ciphertext_id, expected.ciphertext_id);
+        EXPECT_EQ((*loaded)->epoch_id, expected.epoch_id);
+        EXPECT_EQ((*loaded)->epoch_sequence, expected.epoch_sequence);
+        EXPECT_EQ((*loaded)->pending_materializations,
+                  expected.pending_materializations);
+        const auto cache = kasumi::state_storage::load_file_cache(db);
+        ASSERT_TRUE(cache.has_value());
+        ASSERT_EQ(cache->size(), 1U);
+        EXPECT_EQ(cache->front().hash, rows.front().hash);
+        ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(db, *cache));
+        // Even corrupt obsolete data must not participate in schema/state
+        // validation.
+        execute_sql(db,
+                    "UPDATE observation_checkpoint SET next_usn='obsolete';");
+    }
+    EXPECT_EQ(query_text(db, "SELECT next_usn FROM observation_checkpoint"),
+              std::vector<std::string>{"obsolete"});
+    EXPECT_EQ(query_text(db,
+                         "SELECT file_reference FROM directory_lineage ORDER "
+                         "BY file_reference"),
+              (std::vector<std::string>{"44", "55"}));
+    EXPECT_EQ(query_text(
+                  db, "SELECT directory_count FROM directory_lineage_metadata"),
+              std::vector<std::string>{"2"});
+    EXPECT_EQ(query_text(db, "PRAGMA user_version"),
+              std::vector<std::string>{"1"});
+}
 TEST(StateStorageDatabaseTest, FreshDatabaseCreatesInitialSchemaAndEmptyCache) {
     auto workspace = kasumi::test::make_temp_workspace("persistence-schema");
     const auto database_path =
@@ -143,12 +251,12 @@ TEST(StateStorageDatabaseTest, FreshDatabaseCreatesInitialSchemaAndEmptyCache) {
     EXPECT_TRUE(query_text(database_path,
                            "SELECT name FROM sqlite_master WHERE "
                            "name='observation_checkpoint'")
-                    .size() == 1);
+                    .empty());
     EXPECT_TRUE(
         query_text(
             database_path,
             "SELECT name FROM sqlite_master WHERE name='directory_lineage'")
-            .size() == 1);
+            .empty());
     EXPECT_EQ(query_text(database_path,
                          "SELECT name FROM sqlite_master WHERE "
                          "name='pending_materializations'")
@@ -312,9 +420,10 @@ TEST(StateStorageDatabaseTest, FileCacheDeltaIsNonAuthoritative) {
         .path = "a.txt",
         .hash = kasumi::hasher::hash_string("a"),
         .size = 1,
-        .fingerprint = {
-            .kind = kasumi::platform::FileFingerprintKind::PosixFileIdentity,
-            .value = {1, 2, 3, 4}}};
+        .mtime_nanoseconds = 1000,
+        .volume = 1,
+        .file_low = 2,
+        .file_high = 4};
     ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(
         database_path,
         std::span<const kasumi::state_storage::FileCacheRow>{&row, 1}));
@@ -322,7 +431,7 @@ TEST(StateStorageDatabaseTest, FileCacheDeltaIsNonAuthoritative) {
         kasumi::state_storage::load_file_cache(database_path);
     ASSERT_TRUE(loaded_cache.has_value());
     ASSERT_EQ(loaded_cache->size(), 1U);
-    EXPECT_EQ(loaded_cache->front().fingerprint.value[3], 4U);
+    EXPECT_EQ(loaded_cache->front().file_high, 4U);
     ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(
         database_path, std::span<const kasumi::state_storage::FileCacheRow>{}));
     const auto loaded_state = kasumi::state_storage::load_state(database_path);
@@ -391,96 +500,6 @@ TEST(StateStorageDatabaseTest, RejectsEpochSequenceWithoutEpochId) {
          .height = 1,
          .commit_id = std::string(64, 'a'),
          .epoch_sequence = 1}));
-}
-
-TEST(StateStorageDatabaseTest, ObservationCheckpointRoundTripsSeparately) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-checkpoint");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    const auto snapshot = make_snapshot("a.txt", "a", 20);
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        database_path,
-        {.tree = snapshot, .height = 1, .commit_id = std::string(64, 'a')}));
-
-    const kasumi::state_storage::ObservationCheckpoint expected{
-        .journal = {.kind =
-                        kasumi::platform::ChangeJournalKind::WindowsNtfsUsnV1,
-                    .volume_serial = 11,
-                    .journal_id = 22,
-                    .next_usn = 33,
-                    .root_file_reference = 44},
-        .tree_root_hash = snapshot.rows.front().hash,
-        .row_count = snapshot.rows.size(),
-        .directory_file_references = {},
-        .lineage_complete = false};
-    ASSERT_TRUE(kasumi::state_storage::save_observation_checkpoint(
-        database_path, expected));
-    const auto loaded =
-        kasumi::state_storage::load_observation_checkpoint(database_path);
-    ASSERT_TRUE(loaded.has_value() && *loaded);
-    EXPECT_EQ((*loaded)->journal.volume_serial, 11U);
-    EXPECT_EQ((*loaded)->journal.journal_id, 22U);
-    EXPECT_EQ((*loaded)->journal.next_usn, 33);
-    EXPECT_EQ((*loaded)->journal.root_file_reference, 44U);
-    EXPECT_EQ((*loaded)->tree_root_hash, expected.tree_root_hash);
-    EXPECT_EQ((*loaded)->row_count, expected.row_count);
-}
-
-TEST(StateStorageDatabaseTest, LineageRoundTrip) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-lineage-roundtrip");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    const auto snapshot = make_snapshot("a.txt", "a", 22);
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        database_path,
-        {.tree = snapshot, .height = 1, .commit_id = std::string(64, 'a')}));
-    const kasumi::state_storage::ObservationCheckpoint expected{
-        .journal = {.kind =
-                        kasumi::platform::ChangeJournalKind::WindowsNtfsUsnV1,
-                    .volume_serial = 11,
-                    .journal_id = 22,
-                    .next_usn = 33,
-                    .root_file_reference = 44},
-        .tree_root_hash = snapshot.rows.front().hash,
-        .row_count = snapshot.rows.size(),
-        .directory_file_references = {44, 55},
-        .lineage_complete = true};
-    ASSERT_TRUE(kasumi::state_storage::save_observation_checkpoint(
-        database_path, expected));
-    const auto loaded =
-        kasumi::state_storage::load_observation_checkpoint(database_path);
-    ASSERT_TRUE(loaded.has_value() && *loaded);
-    EXPECT_TRUE((*loaded)->lineage_complete);
-    EXPECT_EQ((*loaded)->directory_file_references,
-              (std::vector<std::uint64_t>{44, 55}));
-}
-
-TEST(StateStorageDatabaseTest,
-     InvalidObservationCheckpointIsRejectedWithoutAffectingState) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-checkpoint-corrupt");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    const auto snapshot = make_snapshot("a.txt", "a", 21);
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        database_path,
-        {.tree = snapshot, .height = 1, .commit_id = std::string(64, 'a')}));
-    execute_sql(database_path,
-                "INSERT INTO observation_checkpoint VALUES "
-                "(1, 99, '1', '2', '3', '4', 'not-a-hash', '1')");
-
-    const auto checkpoint =
-        kasumi::state_storage::load_observation_checkpoint(database_path);
-    EXPECT_FALSE(checkpoint.has_value());
-    const auto state = kasumi::state_storage::load_state(database_path);
-    ASSERT_TRUE(state.has_value() && *state);
-    EXPECT_EQ((*state)->height, 1U);
-    EXPECT_EQ((*state)->tree.rows.size(), snapshot.rows.size());
 }
 
 TEST(StateStorageDatabaseTest, MalformedFileCacheEntryIsDiscarded) {
@@ -1070,6 +1089,220 @@ TEST(StateStorageDatabaseTest, UnicodePathRoundTrip) {
         database_path, "SELECT value FROM metadata WHERE key='commit_id'");
     ASSERT_EQ(commit_rows.size(), 1U);
     EXPECT_EQ(commit_rows[0], commit_hash);
+}
+
+TEST(StateStorageDatabaseTest, UnifiedMetadataCachePersistenceFullFidelity) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-unified-metadata");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "state.db");
+    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+
+    const auto row = kasumi::state_storage::FileCacheRow{
+        .path = "photos/holiday.jpg",
+        .hash = kasumi::hasher::hash_string("blake3_payload_sample"),
+        .size = 1048576ULL,
+        .mtime_nanoseconds = -123456789LL,
+        .volume = 0xdeadbeefcafebabeULL,
+        .file_low = 0x0123456789abcdefULL,
+        .file_high = 0xfedcba9876543210ULL};
+
+    ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(
+        database_path,
+        std::span<const kasumi::state_storage::FileCacheRow>{&row, 1}));
+
+    const auto loaded = kasumi::state_storage::load_file_cache(database_path);
+    ASSERT_TRUE(loaded.has_value());
+    ASSERT_EQ(loaded->size(), 1U);
+    const auto& entry = loaded->front();
+    EXPECT_EQ(entry.path, "photos/holiday.jpg");
+    EXPECT_EQ(entry.hash, row.hash);
+    EXPECT_EQ(entry.size, 1048576ULL);
+    EXPECT_EQ(entry.mtime_nanoseconds, -123456789LL);
+    EXPECT_EQ(entry.volume, 0xdeadbeefcafebabeULL);
+    EXPECT_EQ(entry.file_low, 0x0123456789abcdefULL);
+    EXPECT_EQ(entry.file_high, 0xfedcba9876543210ULL);
+}
+
+TEST(StateStorageDatabaseTest, ExtremeTimestampsPreservedBitwise) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-extreme-timestamps");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "state.db");
+    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+
+    const std::vector<kasumi::state_storage::FileCacheRow> rows{
+        kasumi::state_storage::FileCacheRow{
+            .path = "max.bin",
+            .hash = kasumi::hasher::hash_string("max"),
+            .size = 10,
+            .mtime_nanoseconds = std::numeric_limits<std::int64_t>::max(),
+            .volume = 1,
+            .file_low = 2,
+            .file_high = 3},
+        kasumi::state_storage::FileCacheRow{
+            .path = "min.bin",
+            .hash = kasumi::hasher::hash_string("min"),
+            .size = 20,
+            .mtime_nanoseconds = std::numeric_limits<std::int64_t>::min(),
+            .volume = 4,
+            .file_low = 5,
+            .file_high = 6},
+        kasumi::state_storage::FileCacheRow{
+            .path = "zero.bin",
+            .hash = kasumi::hasher::hash_string("zero"),
+            .size = 30,
+            .mtime_nanoseconds = 0,
+            .volume = 7,
+            .file_low = 8,
+            .file_high = 9}};
+
+    ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(database_path, rows));
+    const auto loaded = kasumi::state_storage::load_file_cache(database_path);
+    ASSERT_TRUE(loaded.has_value());
+    ASSERT_EQ(loaded->size(), 3U);
+    EXPECT_EQ(loaded->at(0).mtime_nanoseconds, std::numeric_limits<std::int64_t>::max());
+    EXPECT_EQ(loaded->at(1).mtime_nanoseconds, std::numeric_limits<std::int64_t>::min());
+    EXPECT_EQ(loaded->at(2).mtime_nanoseconds, 0);
+}
+
+TEST(StateStorageDatabaseTest, LegacyEntriesAreIgnoredOnLoadAndPurgedOnDelta) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-legacy-migration");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "state.db");
+    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+
+    const std::string dummy_hash(64, '0');
+    execute_sql(database_path,
+        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
+        "VALUES ('legacy_win.txt', '" + dummy_hash + "', 100, 1, "
+        "'0000000000000001', '0000000000000002', '0000000000000003', '0000000000000004')");
+    execute_sql(database_path,
+        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
+        "VALUES ('legacy_posix.txt', '" + dummy_hash + "', 200, 2, "
+        "'0000000000000005', '0000000000000006', '0000000000000007', '0000000000000008')");
+
+    execute_sql(database_path,
+        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
+        "VALUES ('unified.txt', '" + dummy_hash + "', 300, 3, "
+        "'0000000000000009', '000000000000000a', '000000000000000b', '000000000000000c')");
+
+    const auto loaded = kasumi::state_storage::load_file_cache(database_path);
+    ASSERT_TRUE(loaded.has_value());
+    ASSERT_EQ(loaded->size(), 1U);
+    EXPECT_EQ(loaded->front().path, "unified.txt");
+
+    const auto new_row = kasumi::state_storage::FileCacheRow{
+        .path = "unified.txt",
+        .hash = kasumi::hasher::hash_string("unified"),
+        .size = 300,
+        .mtime_nanoseconds = 50,
+        .volume = 9,
+        .file_low = 10,
+        .file_high = 11};
+
+    ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(
+        database_path,
+        std::span<const kasumi::state_storage::FileCacheRow>{&new_row, 1}));
+
+    const auto remaining_legacy = query_text(
+        database_path, "SELECT path FROM file_cache WHERE fingerprint_kind != 3");
+    EXPECT_TRUE(remaining_legacy.empty());
+}
+
+TEST(StateStorageDatabaseTest, CorruptedCacheEntriesIgnoredFailClosed) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-corrupted-cache");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "state.db");
+    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+
+    const std::string dummy_hash(64, 'a');
+    execute_sql(database_path,
+        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
+        "VALUES ('bad_hex.txt', '" + dummy_hash + "', 10, 3, 'NOT_HEX_VALUE!!', '0', '0', '0')");
+    execute_sql(database_path,
+        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
+        "VALUES ('bad_hash.txt', 'short_hash', 10, 3, '0000000000000001', '0', '0', '0')");
+    execute_sql(database_path,
+        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
+        "VALUES ('neg_size.txt', '" + dummy_hash + "', -5, 3, '0000000000000001', '0', '0', '0')");
+
+    const auto loaded = kasumi::state_storage::load_file_cache(database_path);
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_TRUE(loaded->empty());
+}
+
+TEST(StateStorageDatabaseTest, UnchangedCacheDeltaAvoidsRedundantWrites) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-unchanged-delta");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "state.db");
+    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+
+    const auto row = kasumi::state_storage::FileCacheRow{
+        .path = "steady.txt",
+        .hash = kasumi::hasher::hash_string("steady"),
+        .size = 100,
+        .mtime_nanoseconds = 5000,
+        .volume = 1,
+        .file_low = 2,
+        .file_high = 3};
+
+    ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(
+        database_path,
+        std::span<const kasumi::state_storage::FileCacheRow>{&row, 1}));
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(
+        database_path,
+        std::span<const kasumi::state_storage::FileCacheRow>{&row, 1}));
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache unchanged"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache inserts"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache updates"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache deletes"), 0U);
+}
+
+TEST(StateStorageDatabaseTest, ObsoleteEntriesRemovedByDelta) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-obsolete-entries");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "state.db");
+    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+
+    const std::vector<kasumi::state_storage::FileCacheRow> initial{
+        kasumi::state_storage::FileCacheRow{
+            .path = "keep.txt",
+            .hash = kasumi::hasher::hash_string("keep"),
+            .size = 10,
+            .mtime_nanoseconds = 10,
+            .volume = 1,
+            .file_low = 1,
+            .file_high = 1},
+        kasumi::state_storage::FileCacheRow{
+            .path = "delete.txt",
+            .hash = kasumi::hasher::hash_string("delete"),
+            .size = 20,
+            .mtime_nanoseconds = 20,
+            .volume = 2,
+            .file_low = 2,
+            .file_high = 2}};
+
+    ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(database_path, initial));
+    ASSERT_EQ(kasumi::state_storage::load_file_cache(database_path)->size(), 2U);
+
+    const auto delta = std::span<const kasumi::state_storage::FileCacheRow>{
+        initial.data(), 1};
+    ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(database_path, delta));
+
+    const auto loaded = kasumi::state_storage::load_file_cache(database_path);
+    ASSERT_TRUE(loaded.has_value());
+    ASSERT_EQ(loaded->size(), 1U);
+    EXPECT_EQ(loaded->front().path, "keep.txt");
 }
 
 } // namespace

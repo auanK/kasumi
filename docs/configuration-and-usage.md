@@ -1,5 +1,15 @@
 # Configuration and Usage
 
+For a first profile and two-machine setup, follow [Getting Started](getting-started.md).
+This page is the command and configuration reference.
+
+- [Profile Setup](#profile-setup) and [Configuration File](#configuration-file)
+- [Core Commands](#core-commands) and [Updating Kasumi](#updating-kasumi)
+- [Remote Inspection](#remote-inspection)
+- [General Options](#general-options) and [Language Selection](#language-selection-i18n)
+- [Environment Variables](#automation--environment-variables) and [Exit Codes](#exit-codes)
+- [.kasumiignore](#kasumiignore) and [Synchronized Path Rules](#synchronized-path-rules)
+
 ## Profile Setup
 
 Launch the interactive configuration wizard:
@@ -58,7 +68,7 @@ New profiles default to a minimum retention depth of 5 commits and a minimum ret
 | `kasumi gc repair-quarantine <profile> --confirm-permanent-loss` | Removes eligible orphaned quarantine metadata whose payload is already missing; **does not restore content** |
 | `kasumi resolve-missing <profile>` | Explicitly resolves eligible pending missing remote payloads as logical deletions; **may publish permanent data loss** |
 
-* `status` and `sync --dry-run` are separate user-facing operations, but production dispatch runs both through the same planner and returns a `PlanReport`. Neither executes the plan, recovers an interrupted transaction, advances accepted state, or publishes remote history. They read local profile configuration and private state, acquire the local profile lock, and perform observations. Their result can become stale before a later sync. See [Preview and Status](architecture/planning-and-status.md).
+* `status` and `sync --dry-run` are separate user-facing operations, but production dispatch runs both through the same planner and returns a `PlanReport`. Neither executes the plan, recovers an interrupted transaction, advances accepted state, publishes remote history, or persists cache deltas. They read local profile configuration and private state, acquire the local profile lock, and perform observations (reusing valid strong fingerprints from the persistent local cache in read-only mode, and hashing new or modified files). Their result can become stale before a later sync. See [Preview and Status](architecture/planning-and-status.md).
 * **Plan Truncation & `--full`**: When a synchronization plan contains more than 10 items, Kasumi truncates output to display the first 5 and last 5 items, separated by an ellipsis line (`... (N more items) ...` / `... (mais N itens) ...`) to maintain clean terminal output. Pass `--full` to list all items without truncation (useful for inspection scripts, complete audits, or piping to log files).
 * `sync` applies local tree modifications, transfers content payloads, and publishes Commit and HEAD records. See [Synchronization](architecture/synchronization.md).
 * See [Updating Kasumi](#updating-kasumi) for update behavior, platform requirements, and compatibility notes.
@@ -74,7 +84,7 @@ Run the command with no command-specific arguments:
 kasumi update
 ```
 
-The command is available in official Windows and Linux x86_64 binaries starting with v0.6.0. Older binaries do not recognize it. Kasumi queries the official GitHub Releases API and selects the newest release on its supported channel: before a stable v1.0.0 release exists, this is the newest v0.x release, including prereleases; after a stable v1.0.0 or later exists, prereleases and v0.x releases are excluded.
+The command supports official Windows and Linux x86_64 binaries. Kasumi queries the official GitHub Releases API and selects the newest release on its supported channel: before a stable v1.0.0 release exists, this is the newest v0.x release, including prereleases; after a stable v1.0.0 or later exists, prereleases and v0.x releases are excluded.
 
 Kasumi downloads the platform archive and its published SHA-256 checksum, verifies the archive, then replaces only the Kasumi executable. It keeps the previous executable beside it as a `.kasumi-previous-*` recovery copy. If verification of the replacement fails, Kasumi attempts to restore that copy; this is not a universal rollback guarantee. The updater does not access profile data, configuration files, keys, or configured remote storage, and it does not migrate local data.
 
@@ -82,13 +92,13 @@ On Windows, Kasumi uses the built-in `tar` command and starts a helper that wait
 
 On Linux, `curl`, `tar`, and `sha256sum` must be available. Kasumi installs without root when the executable's directory is writable. If permissions deny replacement, it attempts `pkexec`; it falls back to `sudo` only when authentication through `pkexec` is unavailable and the terminal is interactive.
 
-Installations managed by a package manager must be updated through that manager. The v0.6.0 binary updater does not migrate the incompatible local SQLite databases or unfinished transaction journals from v0.5.5. Follow the [v0.6.0 upgrade notes](../CHANGELOG.md#upgrade-notes) before updating; older binaries cannot run `kasumi update` retroactively.
+Installations managed by a package manager must be updated through that manager. Review the [release notes](../RELEASE_NOTES.md#upgrade-notes) and any applicable migration requirements in the [changelog](../CHANGELOG.md), complete pending recovery, and back up your profile before replacing binaries. The updater does not migrate state.
 
 ### Partial Synchronization and Explicit Data-Loss Operations
 
 When `kasumi sync <profile>` succeeds with unresolved missing remote payloads, it records pending materializations and exits with status `2`. Treat this as **partial**, not full, synchronization. First restore the missing content from another client or independent backup, then synchronize again. Do not automatically convert status `2` into a deletion.
 
-`kasumi resolve-missing <profile>` is an explicit, potentially destructive resolution path: after validating the accepted state and current observations, it may publish logical deletions for eligible unresolved paths that have no local source. It is not a download/repair command. Use it only when losing those files is an informed decision.
+`kasumi resolve-missing <profile>` is an explicit, potentially destructive resolution path: it first recovers any pending synchronization transaction, then validates the accepted state and current observations and may publish logical deletions for eligible unresolved paths that have no local source. It is not a download/repair command. Use it only when losing those files is an informed decision.
 
 The two manual quarantine commands require the exact final argument `--confirm-permanent-loss`. `gc purge-quarantine` bypasses the ordinary age and reachability criteria used by normal GC, and can delete the only remaining encrypted copy of referenced content. `gc repair-quarantine` is restricted to cleanup of eligible metadata-only quarantine entries; it cannot recover the missing payload. Both require their own maintenance safety checks but are **not routine scheduled GC commands**. See [Garbage Collection](architecture/garbage-collection.md) and [Troubleshooting](troubleshooting.md).
 
@@ -97,7 +107,7 @@ The two manual quarantine commands require the exact final argument `--confirm-p
 Synchronization records transaction phase and operation progress in an encrypted and authenticated local transaction journal (`transaction.bin.enc` and `.transactions/<id>`).
 
 If synchronization is interrupted:
-* At the start of a subsequent synchronization or maintenance operation, Kasumi inspects the existing local transaction journal. Preview, Status, and remote inspection do not run this recovery path.
+* Sync, Fsck, ordinary GC, and `resolve-missing` inspect the existing local transaction journal before their own work. Preview, Status, remote inspection, and manual quarantine/writer maintenance do not run this recovery path.
 * Depending on the persisted phase and observed state, recovery may resume, rollback, or roll forward the transaction.
 * Conflicting or indeterminate publication states are reported as recovery errors rather than assumed successful.
 * Already present content objects may be reused when their identifiers and verification checks match the required content.
@@ -166,10 +176,23 @@ To add a custom community language catalog, place `<lang>.json` in `%APPDATA%/ka
 | `KASUMI_PASSWORD2` | Provides the Password Salt to the profile creation credential flow (minimum 16 characters) |
 | `KASUMI_CONTENT_CONCURRENCY` | Sets content-transfer concurrency. Default: 8. Positive values above 16 are capped at 16; invalid or zero values use the default |
 | `KASUMI_PERF_TRACE=1` | Writes operational trace metrics to `stderr` |
-| `KASUMI_PERF_TRACE_LIVE=1` | Emits live performance trace progress when tracing is enabled |
+| `KASUMI_PERF_TRACE_LIVE=1` | With tracing enabled, emits live fsck audit-completion and checkpoint-write counters to `stderr` |
 
 > [!NOTE]
 > Once a profile is created, the derived 32-byte master key is persisted locally in `profiles/<profile>/key.bin` using a reversible XOR mask and operating system filesystem permissions. For existing profiles, routine operations use the persisted `key.bin` when no explicit `KASUMI_MASTER_KEY` credential is supplied. `KASUMI_PASSWORD` and `KASUMI_PASSWORD2` are used by the profile-creation credential flow and are not re-verified during routine synchronization operations. For details on the security boundaries and key storage, see [Security Specification](security.md).
+
+## Exit Codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Successful operation |
+| `1` | Invalid invocation or hard failure, including transport, permissions, authentication, or profile-lock errors |
+| `2` | Partial synchronization: accepted metadata still has pending file materializations |
+| `130` | User cancellation handled by Kasumi (SIGINT/SIGTERM) |
+
+Treat code `2` as incomplete synchronization. Preserve pending paths, restore unavailable
+content, and retry; do not turn it automatically into deletions. See
+[Pending Materializations](troubleshooting.md#exit-code-2--pending-materializations).
 
 ## `.kasumiignore`
 

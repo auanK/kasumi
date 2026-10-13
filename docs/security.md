@@ -132,7 +132,7 @@ Epochs define authenticated retention horizons and boundary anchors. The writer/
 
 Internal routines reject symlinks and Windows reparse points inside private state directories. Writing configuration, master key, and journal files employs temporary files, filesystem flush (`fsync` / `FlushFileBuffers`), and atomic rename replacement.
 
-`db.sqlite` persists accepted history trees, Commit references, height metadata, and Epoch references. The local `inspection-history-v1.cache` can also contain decoded Commit trees and is authenticated but not encrypted. These local files rely on filesystem permissions and disk encryption for at-rest privacy. `transaction.bin.enc` records encrypted, authenticated mutation phases used by [interruption recovery](architecture/transactions-and-recovery.md). [Local Persistent State](architecture/local-state.md) distinguishes these authorities from caches and checkpoints.
+`db.sqlite` persists accepted history trees, Commit and Epoch references, pending materializations, and the file-hash cache (logical paths, hashes, sizes, timestamps, and native identities). It is not encrypted or authenticated as a whole. The local `inspection-history-v1.cache` can also contain decoded Commit trees and is authenticated but not encrypted. These local files rely on filesystem permissions and disk encryption for at-rest privacy. `transaction.bin.enc` records encrypted, authenticated mutation phases used by [interruption recovery](architecture/transactions-and-recovery.md). [Local Persistent State](architecture/local-state.md) distinguishes these authorities from caches and checkpoints.
 
 ## Remote Metadata Privacy
 

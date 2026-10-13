@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.7.0]
+
+### Added
+
+- Added native file metadata observation with Windows volume/full 128-bit file identity and Linux device/inode identity, explicit filesystem errors, and checked timestamp conversion.
+
+### Changed
+
+- Unified Windows and Linux local observation around one scanner. Each observation enumerates the current tree; normal sync reuses BLAKE3 hashes only when logical path, regular-file type, size, nanosecond mtime, and every native identity component match.
+- Persisted the uniform hash-cache representation in SQLite for reuse between executions, without a time-based expiration. Missing reliable identity forces hashing; `status` and `sync --dry-run` continue to use full hashing. Warm-cache synchronization still performs local enumeration and remote observation.
+- Expanded observation, persistence, destructive reobservation, and Windows privilege-isolation regressions across Debug/Release CI on MSVC 2022, MSYS2 UCRT64 GCC, and Ubuntu GCC 14. Windows GCC jobs verify that their tools come from the UCRT64 environment.
+- Stable release tags are no longer marked as prereleases solely for having major version zero; tags containing `-` are classified as prereleases.
+- Consolidated user documentation around a short README, a dedicated first-use tutorial, and the command reference.
+
+### Fixed
+
+- Verify destructive download, deletion, and conflict-rename targets by content independently of cached hashes. A mismatch invalidates the cache row and triggers safe reconciliation; unexpected disappearance, non-regular replacement, or an occupied destination fails closed.
+- Preserve cache invalidations and freshly reobserved fingerprints through finalization and across executions.
+- Correct Windows native timestamp reads, checked FILETIME conversion, 100-nanosecond timestamp equivalence, and timestamp preservation in synchronization and rollback backups.
+- Correct native metadata error handling and unsupported-file-identity fallback instead of accepting incomplete cache fingerprints.
+
+### Removed
+
+- Removed Windows NTFS USN Change Journal observation, its persisted observation checkpoints and directory-lineage machinery, and selective tree patching. The encrypted transaction journal used for interruption recovery remains in use.
+
+### Upgrade Notes
+
+- The uniform cache representation discards previous file-hash cache entries and rebuilds them during synchronization, so the first sync after upgrading may rehash all local files. This cache refresh does not require deleting `db.sqlite` or accepted history.
+
 ## [0.6.1]
 
 Kasumi - Multi-client bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.

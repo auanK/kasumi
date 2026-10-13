@@ -66,8 +66,11 @@ save_phase(const journal::Paths& paths,
 
 std::expected<RecoveryResult, Error>
 cleanup_completed(const journal::Paths& paths,
-                  const std::optional<platform::Workspace>& workspace) {
-    auto cleaned = detail::finish_transaction_cleanup(paths, workspace);
+                  const std::optional<platform::Workspace>& workspace,
+                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                  journal::Session* session = nullptr) {
+    auto cleaned =
+        detail::finish_transaction_cleanup(paths, workspace, key, session);
     if (!cleaned)
         return std::unexpected(cleaned.error());
     return RecoveryResult::RolledForward;
@@ -299,7 +302,7 @@ roll_forward_local_only(const journal::Paths& paths,
             return std::unexpected(saved.error());
         }
     }
-    return cleanup_completed(paths, workspace);
+    return cleanup_completed(paths, workspace, key);
 }
 
 bool has_pending_storage_repair(const transaction::Record& record) noexcept {
@@ -361,10 +364,10 @@ bool is_publication_transaction_resumable(
 
     // 1. Check TTL (24 hours) via last_write_time of the transaction record
     std::error_code ec;
-    const auto mtime = std::filesystem::last_write_time(paths.final_path, ec);
-    if (ec) {
+    const auto mtime = std::filesystem::last_write_time(
+        paths.final_path.parent_path() / "confirmed.enc", ec);
+    if (ec)
         return false;
-    }
     const auto age = std::chrono::file_clock::now() - mtime;
     if (age > detail::transaction_resumption_ttl) {
         return false;
@@ -816,7 +819,7 @@ roll_forward(const journal::Paths& paths,
             return std::unexpected(saved.error());
         }
     }
-    return cleanup_completed(paths, workspace);
+    return cleanup_completed(paths, workspace, key);
 }
 
 } // namespace
@@ -828,8 +831,8 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
     auto paths = detail::make_journal_paths(runtime_data);
     if (!paths)
         return std::unexpected(paths.error());
-    journal::discard_temporary(*paths);
-    auto record = journal::load(*paths, key);
+    journal::Session session;
+    auto record = journal::load(*paths, key, &session);
     if (!record)
         return std::unexpected(detail::journal_error(record.error()));
     if (!*record) {
@@ -849,7 +852,7 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
     if (!workspace)
         return std::unexpected(workspace.error());
     if ((*record)->phase == transaction::Phase::CleanupCompleted) {
-        return cleanup_completed(*paths, *workspace);
+        return cleanup_completed(*paths, *workspace, key, &session);
     }
 
     history_storage::maintenance_protocol::RegistrationState writer;
@@ -895,8 +898,11 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
                                         "; rollback failed: " +
                                         rolled.error().detail));
                             }
-                            if (auto saved =
-                                    detail::save_record(*paths, **record, key);
+                            if (auto saved = detail::save_record(
+                                    *paths,
+                                    **record,
+                                    key,
+                                    journal::SaveMode::Rollback);
                                 !saved) {
                                 return std::unexpected(saved.error());
                             }

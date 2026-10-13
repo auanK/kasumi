@@ -210,6 +210,11 @@ authenticate_quarantine_metadata(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const std::filesystem::path& workspace_root);
 
+namespace testing {
+std::vector<std::uint8_t> format_payload(std::string_view kind,
+                                         std::string_view token);
+}
+
 } // namespace kasumi::application::history_storage::maintenance_protocol
 
 #endif

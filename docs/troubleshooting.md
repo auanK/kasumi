@@ -36,13 +36,13 @@ Another Kasumi process is currently running on the same machine using the specif
 ## Interrupted Synchronization and Transaction Recovery
 
 ### Symptom
-At the start of `sync`, `fsck`, or `gc`, Kasumi may report a recovery conflict or indeterminate recovery diagnostic. The detail depends on the journal and observed remote state.
+At the start of `sync`, `fsck`, ordinary `gc`, or `resolve-missing`, Kasumi may report a recovery conflict or indeterminate recovery diagnostic. The detail depends on the journal and observed remote state.
 
 ### Likely Meaning
 A prior synchronization was interrupted before completion (due to network disconnection, power outage, process termination, or SIGINT). Kasumi detected the encrypted local transaction journal (`transaction.bin.enc` and `.transactions/<id>`).
 
 ### Safe Next Steps
-1. **Automatic Evaluation**: Kasumi evaluates the journal automatically whenever `kasumi sync`, `kasumi fsck`, or `kasumi gc` runs. (Read-only operations like `status` and `remote ...` do not run recovery.)
+1. **Automatic Evaluation**: Kasumi evaluates the journal before Sync, Fsck, ordinary GC, or `resolve-missing`. Read-only planners/inspection and manual quarantine/writer maintenance do not run recovery. Prefer `kasumi sync <profile>` to recover; `resolve-missing` additionally makes an explicit logical-deletion decision.
 2. Depending on the checkpointed transaction phase:
    * **Pre-publication interruptions**: Kasumi may roll back local mutations from staged backups or resume only when pinned inputs still match.
    * **Post-publication interruptions**: Kasumi verifies the published Commit and HEAD marker before advancing local state; contradictory state stops recovery.
@@ -190,6 +190,74 @@ The observed remote history is inconsistent with the client's locally accepted s
 ### Related Documentation
 * [Epochs & Retention Horizons](architecture/history-and-concurrency.md#epochs--retention-horizons)
 * [Remote History Inspection](architecture/remote-history-inspection.md)
+
+---
+
+## Slow Synchronization or Preview
+
+### Symptom
+
+A synchronization or preview spends a long time observing files, including when
+few files have changed.
+
+### Diagnose
+
+Every observation walks the local directory tree and reads metadata. A warm
+cache can avoid reading unchanged file content, but cannot skip enumeration or
+remote history observation. `status` and `sync --dry-run` deliberately use full
+hashing, so they do not measure normal sync's cache reuse.
+
+Enable `KASUMI_PERF_TRACE=1` for a normal sync you intend to apply. These examples
+write diagnostics to `kasumi-perf.log`; normal output remains on the terminal.
+Use your own profile name instead of `work`.
+
+PowerShell (restore the previous setting afterwards):
+
+```powershell
+$previousTrace = $env:KASUMI_PERF_TRACE
+try {
+    $env:KASUMI_PERF_TRACE = '1'
+    kasumi sync work 2> kasumi-perf.log
+} finally {
+    $env:KASUMI_PERF_TRACE = $previousTrace
+}
+```
+
+CMD (unset the diagnostic variable afterwards):
+
+```bat
+set "KASUMI_PERF_TRACE=1"
+kasumi sync work 2> kasumi-perf.log
+set "KASUMI_PERF_TRACE="
+```
+
+POSIX shells (the setting applies only to this command):
+
+```sh
+KASUMI_PERF_TRACE=1 kasumi sync work 2> kasumi-perf.log
+```
+
+Trace records begin with `KASUMI_PERF` and contain `name`, `calls`, and `total_us`.
+`calls` is the metric's counter (including byte counts for byte metrics);
+`total_us` is accumulated wall-clock microseconds, not CPU time. Instrumented
+stages can overlap, so do not sum them as total run duration.
+
+- Compare `local hash cache hits`, `local hash cache misses`, and
+  `local hash cache unsupported` across completed syncs. Fingerprint changes,
+  unsupported native identity, or a cold cache require content hashing.
+- Compare `local filesystem scan wall`, `local content hashing wall`, and
+  `local hash bytes` to distinguish enumeration/metadata cost from scanner
+  content reads. Directed destructive checks and other verification can still
+  read content separately.
+- Check `initial observation`, remote history/transport metrics, and
+  `transaction execution` for provider latency, history loading, or transfer cost.
+- `KASUMI_PERF_TRACE_LIVE=1` adds live fsck audit-completion and checkpoint-write
+  counters when tracing is enabled; it is not a live counter for every operation.
+
+For a read-only diagnostic, trace `kasumi status work`, accounting for its full
+content hashing. Trace output is diagnostic instrumentation, not a stable machine
+protocol. Check the command's [exit code](configuration-and-usage.md#exit-codes)
+as well as the timing report. See [Local Observation](architecture/local-observation.md).
 
 ---
 

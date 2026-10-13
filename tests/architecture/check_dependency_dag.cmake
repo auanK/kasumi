@@ -43,6 +43,12 @@ assert_no_includes(src/cli "core|runtime|transport")
 assert_no_includes(src/application/history_storage
                    "application/(coordination|observation|sync)")
 
+set(obsolete_observation "ChangeJournal|ObservationCheckpoint|DirectoryLineageView|LocalDeltaDisposition|ChangeEvidence|directory_file_reference|apply_local_delta|FSCTL_[A-Z_]*USN|USN_RECORD")
+assert_tree_excludes(src "${obsolete_observation}"
+                     "obsolete local observation dependency")
+assert_tree_excludes(include "${obsolete_observation}"
+                     "obsolete local observation interface")
+
 file(GLOB_RECURSE public_application_headers LIST_DIRECTORIES false
      RELATIVE "${PROJECT_SOURCE_DIR}/include/application"
      "${PROJECT_SOURCE_DIR}/include/application/*.hpp")

@@ -54,3 +54,54 @@ jobs:
       - name: Run Tests (Release)
         run: |
           ctest --test-dir build --output-on-failure
+
+  clang:
+    name: Clang 19
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CC: clang-19
+      CXX: clang++-19
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang-19 clang-tools-19 lld-19 libstdc++-14-dev git unzip
+
+      - name: Display tool versions
+        run: |
+          cmake --version
+          clang-19 --version
+          clang++-19 --version
+          clang-scan-deps-19 --version
+          command -v clang-scan-deps-19
+          ninja --version
+
+      - name: Verify C++23 std::expected toolchain support
+        run: |
+          echo '#include <expected>' > /tmp/check_expected.cpp
+          echo 'std::expected<int, int> f() { return 1; } int main() { return f().has_value() ? 0 : 1; }' >> /tmp/check_expected.cpp
+          clang++-19 -std=c++23 /tmp/check_expected.cpp -o /tmp/check_expected
+          /tmp/check_expected
+
+      - name: Build (Debug)
+        run: |
+          cmake -S . -B build-clang-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang-19 -DCMAKE_CXX_COMPILER=clang++-19 -DBUILD_TESTING=ON
+          cmake --build build-clang-debug -j$(nproc)
+
+      - name: Run Tests (Debug)
+        run: |
+          ctest --test-dir build-clang-debug --output-on-failure
+
+      - name: Build (Release)
+        run: |
+          cmake -S . -B build-clang-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-19 -DCMAKE_CXX_COMPILER=clang++-19 -DBUILD_TESTING=ON
+          cmake --build build-clang-release -j$(nproc)
+
+      - name: Run Tests (Release)
+        run: |
+          ctest --test-dir build-clang-release --output-on-failure

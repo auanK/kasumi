@@ -1,17 +1,21 @@
 #include "application/sync/reobservation.hpp"
 
+#include "application/observation/file_metadata.hpp"
 #include "application/observation/state.hpp"
 #include "application/sync/coordinator_detail.hpp"
 #include "application/sync/journal.hpp"
 #include "application/sync/mutation.hpp"
 #include "core/reconciliation/plan.hpp"
+#include "crypto/content.hpp"
 #include "crypto/key_derivation.hpp"
+#include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <cstddef>
 #include <exception>
+#include <filesystem>
 #include <string>
 #include <utility>
 #include <vector>
@@ -233,6 +237,125 @@ bool same_observation(const reconciliation::Input& left,
            same_storage(left.storage, right.storage);
 }
 
+std::expected<bool, coordinator::Error>
+verify_destructive_local_operations(
+    const runtime::RuntimeData& runtime_data,
+    reconciliation::Input& input,
+    const reconciliation::Result& result,
+    observation::LocalObservationSession* session) {
+    bool modified = false;
+    for (const auto& op : sync_plan_operations(result.plan)) {
+        if (op.action != Action::DeleteLocal &&
+            op.action != Action::Download &&
+            op.action != Action::RenameLocal) {
+            continue;
+        }
+
+        const auto verify_target = [&](const std::filesystem::path& rel_path,
+                                       bool is_destination)
+            -> std::expected<void, coordinator::Error> {
+            if (rel_path.empty()) {
+                return {};
+            }
+            const auto local_path = runtime_data.local_dir / rel_path;
+            const auto logical_path = platform::path::to_logical_utf8(rel_path);
+
+            auto pre_meta =
+                observation::cache::read_file_metadata(local_path, logical_path);
+            if (!pre_meta) {
+                if (pre_meta.error().code ==
+                    observation::cache::FileMetadataErrorCode::NotFound) {
+                    if (is_destination) {
+                        return {};
+                    }
+                    auto* local_row = find_row(input.local_tree, logical_path);
+                    if (local_row != nullptr) {
+                        return std::unexpected(detail::make_error(
+                            ErrorCode::ObservationFailure,
+                            "destructive target disappeared concurrently: " +
+                                local_path.string()));
+                    }
+                    if (op.action == Action::Download) {
+                        return {};
+                    }
+                    return std::unexpected(detail::make_error(
+                        ErrorCode::ObservationFailure,
+                        "destructive target missing from snapshot: " +
+                            local_path.string()));
+                }
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    "failed to read metadata for destructive target: " +
+                        pre_meta.error().message));
+            }
+
+            auto* local_row = find_row(input.local_tree, logical_path);
+            if (is_destination || local_row == nullptr) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    is_destination
+                        ? "rename destination already exists: " +
+                              local_path.string()
+                        : "destructive destination already exists: " +
+                              local_path.string()));
+            }
+
+            if (local_row->is_directory || !*pre_meta) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    "destructive target replaced by non-regular file: " +
+                        local_path.string()));
+            }
+
+            auto actual_hash = crypto::content::hash_file(local_path);
+            if (!actual_hash) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    "failed to compute hash for destructive target: " +
+                        local_path.string()));
+            }
+
+            auto post_meta =
+                observation::cache::read_file_metadata(local_path, logical_path);
+            if (!post_meta || !*post_meta ||
+                (*pre_meta)->size != (*post_meta)->size ||
+                (*pre_meta)->mtime_nanoseconds !=
+                    (*post_meta)->mtime_nanoseconds ||
+                (*pre_meta)->identity != (*post_meta)->identity) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    "file changed while being read"));
+            }
+
+            if (local_row->hash != *actual_hash) {
+                local_row->hash = *actual_hash;
+                local_row->size = (*post_meta)->size;
+                local_row->mtime = (*post_meta)->mtime_nanoseconds;
+                if (session != nullptr) {
+                    std::erase_if(session->cache, [&](const auto& row) {
+                        return row.path == logical_path;
+                    });
+                    session->cache_dirty = true;
+                }
+                modified = true;
+            }
+            return {};
+        };
+
+        auto verified_source = verify_target(op.path, false);
+        if (!verified_source) {
+            return std::unexpected(verified_source.error());
+        }
+        if (op.action == Action::RenameLocal && !op.alt_path.empty()) {
+            auto verified_dest = verify_target(op.alt_path, true);
+            if (!verified_dest) {
+                return std::unexpected(verified_dest.error());
+            }
+        }
+    }
+    return modified;
+}
+
 std::expected<StableExecution, coordinator::Error>
 stabilize(const runtime::RuntimeData& runtime_data,
           transport::Transport& storage,
@@ -270,6 +393,47 @@ stabilize(const runtime::RuntimeData& runtime_data,
     auto result = std::move(reconciliation_result);
     for (std::size_t attempt = 0; attempt < maximum_observation_attempts;
          ++attempt) {
+        std::size_t verification_pass = 0;
+        while (true) {
+            auto verification = verify_destructive_local_operations(
+                runtime_data, input, result, session);
+            if (!verification) {
+                return std::unexpected(verification.error());
+            }
+            if (!*verification) {
+                break;
+            }
+            ++verification_pass;
+            if (verification_pass >= maximum_observation_attempts) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ConcurrentModification,
+                    "state changed repeatedly before publication"));
+            }
+            auto recalculated = reconciliation::reconcile(input);
+            if (!recalculated) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure, recalculated.error().detail));
+            }
+            auto reobserved_availability = observe_content_availability(
+                input, *recalculated, storage, key, confirmed_missing);
+            if (!reobserved_availability) {
+                return std::unexpected(reobserved_availability.error());
+            }
+            recalculated = reconciliation::reconcile(input);
+            if (!recalculated) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure, recalculated.error().detail));
+            }
+            result = std::move(*recalculated);
+            if (!result.requires_publication &&
+                !result.requires_local_mutation &&
+                !result.requires_storage_repair &&
+                !result.requires_state_commit) {
+                return StableExecution{.input = std::move(input),
+                                       .result = std::move(result)};
+            }
+        }
+
         std::optional<platform::Workspace> workspace;
         if (!result.plan.operations.empty()) {
             auto staged =
