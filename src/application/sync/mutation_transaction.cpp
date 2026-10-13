@@ -4,6 +4,7 @@
 #include "platform/durability.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
+#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 
@@ -123,6 +124,7 @@ validate_backup(const std::filesystem::path& backup,
                                           backup,
                                           operation_index));
     }
+    platform::perf_trace::count("mutation backup hash calls");
     auto actual = file_hash(backup, operation_index);
     if (!actual) {
         return std::unexpected(actual.error());
@@ -387,6 +389,7 @@ current_file_hash(const std::filesystem::path& path,
                        path,
                        operation_index));
     }
+    platform::perf_trace::count("mutation destination hash calls");
     return file_hash(path, operation_index);
 }
 
@@ -440,7 +443,8 @@ std::expected<void, MutationError>
 restore_backup(const std::filesystem::path& backup,
                const std::filesystem::path& destination,
                std::string_view expected_hash,
-               std::size_t operation_index) {
+               std::size_t operation_index,
+               std::string_view expected_current_hash = {}) {
     auto valid_backup = validate_backup(backup, expected_hash, operation_index);
     if (!valid_backup) {
         return std::unexpected(valid_backup.error());
@@ -526,9 +530,42 @@ restore_backup(const std::filesystem::path& backup,
                                           candidate,
                                           operation_index));
     }
-    auto replaced =
-        platform::durability::replace_atomically(candidate, destination);
-    if (!replaced) {
+    auto current_status = read_status(destination, operation_index);
+    if (!current_status) {
+        remove_temporary_file(candidate);
+        return std::unexpected(current_status.error());
+    }
+    auto current =
+        current_file_hash(destination, *current_status, operation_index);
+    if (!current) {
+        remove_temporary_file(candidate);
+        return std::unexpected(current.error());
+    }
+    if (*current != expected_current_hash) {
+        remove_temporary_file(candidate);
+        return std::unexpected(
+            make_error(MutationErrorCode::DestinationConflict,
+                       "rollback destination changed while staging backup",
+                       destination,
+                       operation_index));
+    }
+    if (expected_current_hash.empty()) {
+        auto installed = platform::durability::install_without_overwrite(
+            candidate, destination);
+        if (!installed) {
+            remove_temporary_file(candidate);
+            return std::unexpected(
+                make_error(installed.error() == std::errc::file_exists
+                               ? MutationErrorCode::DestinationConflict
+                               : MutationErrorCode::LocalIo,
+                           "conditional rollback install failed: " +
+                               installed.error().message(),
+                           destination,
+                           operation_index));
+        }
+    } else if (auto replaced = platform::durability::replace_atomically(
+                   candidate, destination);
+               !replaced) {
         remove_temporary_file(candidate);
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
                                           replaced.error(),
@@ -662,12 +699,17 @@ rollback_file_operation(const Operation& operation,
                 return std::unexpected(actual.error());
             if (*actual == progress.previous_hash)
                 return {};
-            if (operation.action == Action::Download &&
+            if (progress.state == transaction::OperationState::Applied &&
+                operation.action == Action::Download &&
                 (actual->empty() || *actual == operation.hash)) {
-                return restore_backup(
-                    *backup, *path, progress.previous_hash, operation_index);
+                return restore_backup(*backup,
+                                      *path,
+                                      progress.previous_hash,
+                                      operation_index,
+                                      *actual);
             }
-            if (operation.action == Action::DeleteLocal && actual->empty()) {
+            if (progress.state == transaction::OperationState::Applied &&
+                operation.action == Action::DeleteLocal && actual->empty()) {
                 return restore_backup(
                     *backup, *path, progress.previous_hash, operation_index);
             }
@@ -677,13 +719,16 @@ rollback_file_operation(const Operation& operation,
                            *path,
                            operation_index));
         }
-        if (operation.action == Action::Download) {
+        if (operation.action == Action::Download ||
+            operation.action == Action::DeleteLocal) {
             auto actual = current_file_hash(*path, *status, operation_index);
             if (!actual)
                 return std::unexpected(actual.error());
             if (actual->empty())
                 return {};
-            if (*actual == operation.hash) {
+            if (progress.state == transaction::OperationState::Applied &&
+                operation.action == Action::Download &&
+                *actual == operation.hash) {
                 return remove_file_if_hash(
                     *path, operation.hash, operation_index);
             }
@@ -1015,6 +1060,97 @@ rollback_operation_impl(const Operation& operation,
 }
 
 } // namespace
+
+MutationResult detail::validate_prepared_operation(
+    const Operation& operation,
+    std::size_t operation_index,
+    const std::filesystem::path& destination,
+    const platform::Workspace& workspace,
+    const transaction::OperationProgress& progress) {
+    auto valid = validate_progress(operation, progress, operation_index);
+    if (!valid)
+        return valid;
+    if (operation_index == std::numeric_limits<std::size_t>::max() ||
+        (operation.action != Action::Download &&
+         operation.action != Action::DeleteLocal) ||
+        progress.state < transaction::OperationState::Prepared) {
+        return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
+                                          "destination lacks prepared progress",
+                                          destination,
+                                          operation_index));
+    }
+    auto workspace_valid = validate_workspace(workspace, operation_index);
+    if (!workspace_valid)
+        return workspace_valid;
+    auto backup =
+        backup_path(workspace, progress, destination, operation_index);
+    if (!backup)
+        return std::unexpected(backup.error());
+    auto backup_status = read_status(*backup, operation_index);
+    if (!backup_status)
+        return std::unexpected(backup_status.error());
+    if (progress.had_original &&
+        !std::filesystem::is_regular_file(*backup_status))
+        return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
+                                          "backup is missing or invalid",
+                                          *backup,
+                                          operation_index));
+    if (!progress.had_original && !missing(*backup_status))
+        return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
+                                          "absence progress contains a backup",
+                                          destination,
+                                          operation_index));
+    return {};
+}
+
+MutationResult detail::validate_prepared_destination(
+    const Operation& operation,
+    std::size_t operation_index,
+    const std::filesystem::path& destination,
+    const platform::Workspace& workspace,
+    const transaction::OperationProgress& progress) {
+    auto valid = validate_prepared_operation(
+        operation, operation_index, destination, workspace, progress);
+    if (!valid)
+        return valid;
+    if (progress.had_original) {
+        auto backup =
+            backup_path(workspace, progress, destination, operation_index);
+        if (!backup)
+            return std::unexpected(backup.error());
+        auto backup_valid =
+            validate_backup(*backup, progress.previous_hash, operation_index);
+        if (!backup_valid)
+            return backup_valid;
+    }
+    auto status = read_status(destination, operation_index);
+    if (!status)
+        return std::unexpected(status.error());
+    if (std::filesystem::is_symlink(*status))
+        return std::unexpected(
+            make_error(MutationErrorCode::UnsafePath,
+                       "prepared destination became a symlink",
+                       destination,
+                       operation_index));
+    auto actual = current_file_hash(destination, *status, operation_index);
+    if (!actual)
+        return std::unexpected(actual.error());
+    const auto expected =
+        progress.state == transaction::OperationState::Applied
+            ? (operation.action == Action::Download ? operation.hash
+                                                    : std::string{})
+            : progress.previous_hash;
+    if (*actual != expected) {
+        return std::unexpected(make_error(
+            MutationErrorCode::DestinationConflict,
+            expected.empty()  ? "destination created after preparation"
+            : actual->empty() ? "prepared destination is absent"
+                              : "destination differs from prepared state",
+            destination,
+            operation_index));
+    }
+    return {};
+}
 
 PreparationResult
 prepare_operation(const Operation& operation,

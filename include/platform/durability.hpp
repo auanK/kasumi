@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace kasumi::platform::durability {
 
@@ -19,6 +20,12 @@ sync_parent_directory(const std::filesystem::path& path);
 std::expected<void, std::string>
 replace_atomically(const std::filesystem::path& source,
                    const std::filesystem::path& target);
+
+// Moves a regular sibling file without replacing target; caller flushes data
+// before and its parent after. Failure never cleans up target.
+std::expected<void, std::error_code>
+install_without_overwrite(const std::filesystem::path& source,
+                          const std::filesystem::path& target);
 
 // Renames a physical directory to an absent sibling; caller syncs its parent.
 std::expected<void, std::string>

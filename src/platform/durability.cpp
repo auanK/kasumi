@@ -7,6 +7,11 @@
 #include <cstring>
 #include <system_error>
 
+#if defined(__linux__)
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#endif
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -155,6 +160,61 @@ replace_atomically(const std::filesystem::path& source,
                                std::to_string(error.value()) +
                                "): " + error.message());
     }
+#endif
+    return {};
+}
+
+std::expected<void, std::error_code>
+install_without_overwrite(const std::filesystem::path& source,
+                          const std::filesystem::path& target) {
+    if (source.empty() || target.empty() || source == target ||
+        source.parent_path().lexically_normal() !=
+            target.parent_path().lexically_normal()) {
+        return std::unexpected(
+            std::make_error_code(std::errc::invalid_argument));
+    }
+    std::error_code error;
+    const auto source_status = std::filesystem::symlink_status(source, error);
+    if (error)
+        return std::unexpected(error);
+    if (std::filesystem::is_symlink(source_status))
+        return std::unexpected(
+            std::make_error_code(std::errc::too_many_symbolic_link_levels));
+    if (!std::filesystem::is_regular_file(source_status))
+        return std::unexpected(
+            std::make_error_code(std::errc::invalid_argument));
+    const auto parent_status =
+        std::filesystem::symlink_status(source.parent_path(), error);
+    if (error)
+        return std::unexpected(error);
+    if (std::filesystem::is_symlink(parent_status))
+        return std::unexpected(
+            std::make_error_code(std::errc::too_many_symbolic_link_levels));
+    if (!std::filesystem::is_directory(parent_status))
+        return std::unexpected(
+            std::make_error_code(std::errc::invalid_argument));
+#if defined(_WIN32)
+    const auto attributes = GetFileAttributesW(source.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES)
+        return std::unexpected(std::error_code(static_cast<int>(GetLastError()),
+                                               std::system_category()));
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+        return std::unexpected(
+            std::make_error_code(std::errc::too_many_symbolic_link_levels));
+    if (!MoveFileExW(source.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH))
+        return std::unexpected(std::error_code(static_cast<int>(GetLastError()),
+                                               std::system_category()));
+#elif defined(__linux__) && defined(SYS_renameat2)
+    if (::syscall(SYS_renameat2,
+                  AT_FDCWD,
+                  source.c_str(),
+                  AT_FDCWD,
+                  target.c_str(),
+                  RENAME_NOREPLACE) != 0)
+        return std::unexpected(std::error_code(errno, std::generic_category()));
+#else
+    return std::unexpected(
+        std::make_error_code(std::errc::operation_not_supported));
 #endif
     return {};
 }

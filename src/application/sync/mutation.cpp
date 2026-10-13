@@ -2,6 +2,7 @@
 
 #include "crypto/content.hpp"
 #include "mutation_detail.hpp"
+#include "platform/durability.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 
@@ -406,6 +407,7 @@ apply_download(const Operation& operation,
                transport::Transport& storage,
                const platform::Workspace& workspace,
                std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+               const transaction::OperationProgress& progress,
                DownloadCacheMode download_cache) {
     auto expected_hash = hash_from_hex(operation.hash);
     if (!expected_hash) {
@@ -417,6 +419,10 @@ apply_download(const Operation& operation,
     const auto remote_identifier =
         crypto::content_identifier(key, *expected_hash);
 
+    auto prepared = detail::validate_prepared_operation(
+        operation, operation_index, destination, workspace, progress);
+    if (!prepared)
+        return prepared;
     auto destination_status = read_status(destination, operation_index);
     if (!destination_status) {
         return std::unexpected(destination_status.error());
@@ -428,9 +434,21 @@ apply_download(const Operation& operation,
                                           operation_index));
     }
     if (std::filesystem::is_regular_file(*destination_status)) {
-        auto verified =
-            verify_local_file(destination, operation, operation_index);
-        if (verified) {
+        if (progress.state == transaction::OperationState::Applied ||
+            progress.previous_hash == operation.hash) {
+            prepared = detail::validate_prepared_destination(
+                operation, operation_index, destination, workspace, progress);
+            if (!prepared)
+                return prepared;
+            std::error_code error;
+            const auto size = std::filesystem::file_size(destination, error);
+            if (error || size != operation.size)
+                return std::unexpected(make_error(
+                    MutationErrorCode::IntegrityMismatch,
+                    error ? error.message()
+                          : "file size does not match expected size",
+                    destination,
+                    operation_index));
             return {};
         }
     } else if (!missing(*destination_status)) {
@@ -559,6 +577,14 @@ apply_download(const Operation& operation,
             if (!downloaded) {
                 std::error_code cleanup_error;
                 std::filesystem::remove(encrypted, cleanup_error);
+                prepared = detail::validate_prepared_destination(
+                    operation,
+                    operation_index,
+                    destination,
+                    workspace,
+                    progress);
+                if (!prepared)
+                    return prepared;
                 return std::unexpected(
                     make_error(downloaded.error().code ==
                                        transport::ErrorCode::ObjectNotFound
@@ -628,7 +654,41 @@ apply_download(const Operation& operation,
         }
     }
 
-    auto replaced = replace_local_file(candidate, destination, operation_index);
+    // shortcut: hash/replace can race, use C/D for arbitrary writers.
+    prepared = detail::validate_prepared_destination(
+        operation, operation_index, destination, workspace, progress);
+    if (!prepared)
+        return prepared;
+    MutationResult replaced;
+    if (progress.had_original) {
+        replaced = replace_local_file(candidate, destination, operation_index);
+    } else {
+        auto synced = platform::durability::sync_file(candidate);
+        if (!synced)
+            return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                              synced.error(),
+                                              candidate,
+                                              operation_index));
+        auto installed = platform::durability::install_without_overwrite(
+            candidate, destination);
+        if (!installed) {
+            return std::unexpected(make_error(
+                installed.error() == std::errc::file_exists
+                    ? MutationErrorCode::DestinationConflict
+                : installed.error() == std::errc::too_many_symbolic_link_levels
+                    ? MutationErrorCode::UnsafePath
+                    : MutationErrorCode::LocalIo,
+                "conditional install failed: " + installed.error().message(),
+                destination,
+                operation_index));
+        }
+        synced = platform::durability::sync_parent_directory(destination);
+        if (!synced)
+            return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                              synced.error(),
+                                              destination,
+                                              operation_index));
+    }
     if (!replaced) {
         std::error_code candidate_cleanup_error;
         std::filesystem::remove(candidate, candidate_cleanup_error);
@@ -731,15 +791,18 @@ apply_operation(const Operation& operation,
                 transport::Transport& storage,
                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                 const platform::Workspace& workspace,
+                const transaction::OperationProgress& progress,
                 DownloadCacheMode download_cache) {
-    if (!is_valid_action(operation.action) || !has_safe_paths(operation)) {
-        return std::unexpected(
-            make_error(!is_valid_action(operation.action)
-                           ? MutationErrorCode::InvalidOperation
-                           : MutationErrorCode::UnsafePath,
-                       "invalid operation or path",
-                       operation.path,
-                       operation_index));
+    if (operation_index == std::numeric_limits<std::size_t>::max() ||
+        !is_valid_action(operation.action) || !has_safe_paths(operation)) {
+        return std::unexpected(make_error(
+            operation_index == std::numeric_limits<std::size_t>::max() ||
+                    !is_valid_action(operation.action)
+                ? MutationErrorCode::InvalidOperation
+                : MutationErrorCode::UnsafePath,
+            "invalid operation or path",
+            operation.path,
+            operation_index));
     }
 
     switch (operation.action) {
@@ -829,6 +892,7 @@ apply_operation(const Operation& operation,
                                   storage,
                                   workspace,
                                   key,
+                                  progress,
                                   download_cache);
         }
 
@@ -838,6 +902,11 @@ apply_operation(const Operation& operation,
             if (!path) {
                 return std::unexpected(path.error());
             }
+            auto prepared = detail::validate_prepared_destination(
+                operation, operation_index, *path, workspace, progress);
+            if (!prepared)
+                return prepared;
+            // shortcut: hash/remove can race, use C/D for arbitrary writers.
             auto status = read_status(*path, operation_index);
             if (!status) {
                 return std::unexpected(status.error());

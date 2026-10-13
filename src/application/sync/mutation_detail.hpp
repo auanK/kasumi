@@ -32,6 +32,22 @@ read_status(const std::filesystem::path& path, std::size_t operation_index);
 // Indicates that the file status represents a missing path.
 bool missing(std::filesystem::file_status status) noexcept;
 
+// Checks progress and workspace/backup structure without reading content.
+MutationResult
+validate_prepared_operation(const Operation& operation,
+                            std::size_t operation_index,
+                            const std::filesystem::path& destination,
+                            const platform::Workspace& workspace,
+                            const transaction::OperationProgress& progress);
+
+// Checks backup integrity and current authority before a download/delete effect.
+MutationResult
+validate_prepared_destination(const Operation& operation,
+                              std::size_t operation_index,
+                              const std::filesystem::path& destination,
+                              const platform::Workspace& workspace,
+                              const transaction::OperationProgress& progress);
+
 std::filesystem::path
 download_candidate_path(const std::filesystem::path& destination,
                         const platform::Workspace& workspace,

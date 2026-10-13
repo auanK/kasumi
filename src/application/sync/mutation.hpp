@@ -85,6 +85,7 @@ apply_operation(const Operation& operation,
                 transport::Transport& storage,
                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                 const platform::Workspace& workspace,
+                const transaction::OperationProgress& progress,
                 DownloadCacheMode download_cache = DownloadCacheMode::None);
 
 // Formats a mutation failure.

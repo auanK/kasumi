@@ -426,6 +426,13 @@ std::expected<void, Error> resume_pending_local_mutations(
         }
         if (record.progress[index].state ==
             transaction::OperationState::Pending) {
+            if (operation.action == Action::Download ||
+                operation.action == Action::DeleteLocal) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::RecoveryConflict,
+                    "unprepared destination cannot be authorized during replay",
+                    index));
+            }
             auto prepared = mutation::prepare_operation(operation,
                                                         index,
                                                         runtime_data.local_dir,
@@ -444,11 +451,19 @@ std::expected<void, Error> resume_pending_local_mutations(
                 return std::unexpected(saved.error());
             }
         }
-        auto applied = mutation::apply_operation(
-            operation, index, runtime_data.local_dir, storage, key, workspace);
+        auto applied = mutation::apply_operation(operation,
+                                                 index,
+                                                 runtime_data.local_dir,
+                                                 storage,
+                                                 key,
+                                                 workspace,
+                                                 record.progress[index]);
         if (!applied) {
             return std::unexpected(detail::make_error(
-                ErrorCode::MutationFailure,
+                applied.error().code ==
+                        mutation::MutationErrorCode::DestinationConflict
+                    ? ErrorCode::RecoveryConflict
+                    : ErrorCode::MutationFailure,
                 "failed to replay local mutation: " + applied.error().detail,
                 index));
         }

@@ -805,10 +805,15 @@ struct ContentWorkResult {
     std::optional<mutation::MutationError> error;
 };
 
+struct ContentWorkItem {
+    std::size_t index = 0;
+    transaction::OperationProgress progress;
+};
+
 struct ContentWindowState {
     std::mutex mutex;
     std::condition_variable_any changed;
-    std::vector<std::optional<std::size_t>> tasks;
+    std::vector<std::optional<ContentWorkItem>> tasks;
     std::vector<std::optional<ContentWorkResult>> completions;
     std::size_t in_flight = 0;
     std::size_t peak_in_flight = 0;
@@ -823,7 +828,7 @@ void run_content_worker(std::stop_token stop,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         const platform::Workspace& workspace) {
     while (!stop.stop_requested()) {
-        std::size_t index = 0;
+        ContentWorkItem task;
         {
             std::unique_lock lock(state.mutex);
             if (!state.changed.wait(lock, stop, [&] {
@@ -831,13 +836,14 @@ void run_content_worker(std::stop_token stop,
                 })) {
                 return;
             }
-            index = *state.tasks[slot];
+            task = std::move(*state.tasks[slot]);
             state.tasks[slot].reset();
             ++state.in_flight;
             state.peak_in_flight =
                 std::max(state.peak_in_flight, state.in_flight);
         }
 
+        const auto index = task.index;
         ContentWorkResult result{.index = index, .error = std::nullopt};
         try {
             auto applied =
@@ -846,7 +852,8 @@ void run_content_worker(std::stop_token stop,
                                           local_root,
                                           storage,
                                           key,
-                                          workspace);
+                                          workspace,
+                                          task.progress);
             if (!applied) {
                 result.error = applied.error();
             }
@@ -914,7 +921,8 @@ run_content_window(std::span<const std::size_t> indices,
     const auto admit = [&](std::size_t slot) {
         {
             std::lock_guard lock(state.mutex);
-            state.tasks[slot] = indices[next++];
+            const auto index = indices[next++];
+            state.tasks[slot] = ContentWorkItem{index, record.progress[index]};
             ++outstanding;
         }
         state.changed.notify_all();
@@ -1555,6 +1563,15 @@ execute(const runtime::RuntimeData& runtime_data,
     const auto fail_mutation = [&](std::size_t index,
                                    const mutation::MutationError& failure)
         -> std::expected<void, Error> {
+        if (failure.code == mutation::MutationErrorCode::DestinationConflict &&
+            (record->plan.operations[index].action == Action::Download ||
+             record->plan.operations[index].action == Action::DeleteLocal)) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::RecoveryConflict,
+                "prepared destination conflict; transaction retained: " +
+                    mutation::describe(failure),
+                index));
+        }
         if (failure.code == mutation::MutationErrorCode::RemoteContentMissing) {
             auto rolled = detail::rollback_transaction(*paths,
                                                        *record,
@@ -1672,6 +1689,7 @@ execute(const runtime::RuntimeData& runtime_data,
                                           storage,
                                           key,
                                           *workspace,
+                                          record->progress[first],
                                           download_cache);
             if (!applied) {
                 platform::perf_trace::finish("content transfer wall",
