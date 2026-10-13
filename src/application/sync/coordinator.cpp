@@ -228,15 +228,16 @@ std::expected<void, Error> remove_transaction_workspace(
     return {};
 }
 
-std::expected<void, Error> finish_transaction_cleanup(
-    const journal::Paths& paths,
-    const std::optional<platform::Workspace>& workspace,
-    std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+std::expected<void, Error>
+finish_transaction_cleanup(const journal::Paths& paths,
+                           const std::optional<platform::Workspace>& workspace,
+                           std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                           journal::Session* session) {
     auto removed = remove_transaction_workspace(workspace);
     if (!removed) {
         return std::unexpected(removed.error());
     }
-    auto cleared = journal::clear(paths, key);
+    auto cleared = journal::clear(paths, key, session);
     if (!cleared) {
         return std::unexpected(journal_error(cleared.error()));
     }
@@ -339,9 +340,10 @@ std::expected<void, Error>
 save_record(const journal::Paths& paths,
             const transaction::Record& record,
             std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-            journal::SaveMode mode) {
+            journal::SaveMode mode,
+            journal::Session* session) {
     const auto trace = platform::perf_trace::begin();
-    auto saved = journal::save(paths, record, key, mode);
+    auto saved = journal::save(paths, record, key, mode, session);
     if (trace.active) {
         const auto elapsed =
             std::chrono::duration_cast<std::chrono::microseconds>(
@@ -613,9 +615,11 @@ std::expected<void, Error>
 checkpoint_upload_batch(const journal::Paths& paths,
                         transaction::Record& record,
                         const mutation::StagedUploadBatch& batch,
-                        std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                        journal::Session* session) {
     auto checkpoint = make_upload_batch_checkpoint(record, batch);
-    auto saved = save_record(paths, checkpoint, key);
+    auto saved = save_record(
+        paths, checkpoint, key, journal::SaveMode::Advance, session);
     if (!saved) {
         return std::unexpected(saved.error());
     }
@@ -642,7 +646,8 @@ rollback_transaction(const journal::Paths& paths,
                      transaction::Record& record,
                      const std::optional<platform::Workspace>& workspace,
                      const std::filesystem::path& local_root,
-                     std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                     journal::Session* session) {
     if (has_local_rollback_work(record) && !workspace) {
         return std::unexpected(make_error(
             ErrorCode::RecoveryConflict,
@@ -685,11 +690,12 @@ rollback_transaction(const journal::Paths& paths,
         progress.state = transaction::OperationState::Pending;
         progress.had_original = false;
     }
-    auto saved = save_record(paths, record, key, journal::SaveMode::Rollback);
+    auto saved =
+        save_record(paths, record, key, journal::SaveMode::Rollback, session);
     if (!saved) {
         return std::unexpected(saved.error());
     }
-    return finish_transaction_cleanup(paths, workspace, key);
+    return finish_transaction_cleanup(paths, workspace, key, session);
 }
 
 std::expected<void, Error>
@@ -877,7 +883,8 @@ run_content_window(std::span<const std::size_t> indices,
                    const std::filesystem::path& local_root,
                    transport::Transport& storage,
                    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                   const platform::Workspace& workspace) {
+                   const platform::Workspace& workspace,
+                   journal::Session* session = nullptr) {
     const auto worker_count = std::min(parallelism, indices.size());
     ContentWindowState state;
     state.tasks.resize(worker_count);
@@ -954,7 +961,8 @@ run_content_window(std::span<const std::size_t> indices,
         } else {
             record.progress[result.index].state =
                 transaction::OperationState::Applied;
-            auto saved = detail::save_record(paths, record, key);
+            auto saved = detail::save_record(
+                paths, record, key, journal::SaveMode::Advance, session);
             if (!saved && !checkpoint_failure) {
                 checkpoint_failure = saved.error();
             }
@@ -1266,7 +1274,8 @@ execute(const runtime::RuntimeData& runtime_data,
     if (!paths) {
         return std::unexpected(paths.error());
     }
-    auto existing = journal::load(*paths, key);
+    journal::Session journal_session;
+    auto existing = journal::load(*paths, key, &journal_session);
     if (!existing) {
         return std::unexpected(detail::journal_error(existing.error()));
     }
@@ -1337,6 +1346,11 @@ execute(const runtime::RuntimeData& runtime_data,
         record_storage->pending_paths = std::move(pending_paths);
     }
     auto& record = record_storage;
+    const auto save_active_record = [&](journal::SaveMode mode =
+                                            journal::SaveMode::Advance) {
+        return detail::save_record(
+            *paths, *record, key, mode, &journal_session);
+    };
     const auto content_upload_required = required_content_uploads(
         observed_input, reconciliation_result, record->plan);
     for (const auto& operation : record->plan.operations) {
@@ -1347,7 +1361,7 @@ execute(const runtime::RuntimeData& runtime_data,
         platform::perf_trace::get_count("journal durable saves");
     const auto preparation_bytes_before =
         platform::perf_trace::get_count("journal written bytes total");
-    auto saved = detail::save_record(*paths, *record, key);
+    auto saved = save_active_record();
     if (!saved) {
         return std::unexpected(saved.error());
     }
@@ -1385,7 +1399,7 @@ execute(const runtime::RuntimeData& runtime_data,
     if (record->phase < transaction::Phase::FilesStaged) {
         record->phase = transaction::Phase::FilesStaged;
     }
-    saved = detail::save_record(*paths, *record, key);
+    saved = save_active_record();
     if (!saved)
         return std::unexpected(saved.error());
 
@@ -1403,7 +1417,8 @@ execute(const runtime::RuntimeData& runtime_data,
                                             *record,
                                             transaction_workspace,
                                             runtime_data.local_dir,
-                                            key);
+                                            key,
+                                            &journal_session);
     };
 
     std::optional<publication::PreparedCommit> prepared_commit;
@@ -1528,7 +1543,7 @@ execute(const runtime::RuntimeData& runtime_data,
         if (is_logical_mutation(record->plan.operations[index].action)) {
             return {};
         }
-        return detail::save_record(*paths, *record, key);
+        return save_active_record();
     };
 
     const auto has_applied_uploads = [&]() noexcept {
@@ -1619,7 +1634,8 @@ execute(const runtime::RuntimeData& runtime_data,
                         runtime_data.local_dir,
                         storage,
                         key,
-                        *workspace);
+                        *workspace,
+                        &journal_session);
                     if (!failure) {
                         platform::perf_trace::finish("content transfer wall",
                                                      content_transfer_trace);
@@ -1752,7 +1768,7 @@ execute(const runtime::RuntimeData& runtime_data,
 
             const auto checkpoint_trace = platform::perf_trace::begin();
             auto checkpointed = detail::checkpoint_upload_batch(
-                *paths, *record, *staged_batch, key);
+                *paths, *record, *staged_batch, key, &journal_session);
             platform::perf_trace::finish("batch checkpoint", checkpoint_trace);
 
             if (!checkpointed) {
@@ -1777,7 +1793,7 @@ execute(const runtime::RuntimeData& runtime_data,
     if (record->phase < transaction::Phase::LocalChangesApplied) {
         record->phase = transaction::Phase::LocalChangesApplied;
     }
-    saved = detail::save_record(*paths, *record, key);
+    saved = save_active_record();
     if (!saved)
         return std::unexpected(saved.error());
 
@@ -2073,15 +2089,15 @@ execute(const runtime::RuntimeData& runtime_data,
             return std::unexpected(database_error);
         }
         record->phase = transaction::Phase::DatabaseCommitted;
-        saved = detail::save_record(*paths, *record, key);
+        saved = save_active_record();
         if (!saved)
             return std::unexpected(saved.error());
         record->phase = transaction::Phase::CleanupCompleted;
-        saved = detail::save_record(*paths, *record, key);
+        saved = save_active_record();
         if (!saved)
             return std::unexpected(saved.error());
         return detail::finish_transaction_cleanup(
-            *paths, transaction_workspace, key);
+            *paths, transaction_workspace, key, &journal_session);
     }
 
     if (!prepared_commit || !commit_publication.valid()) {
@@ -2095,7 +2111,7 @@ execute(const runtime::RuntimeData& runtime_data,
     record->commit_id = prepared_commit->commit_id;
     record->parent_ids = prepared_commit->commit.parents;
     record->phase = transaction::Phase::CommitPrepared;
-    saved = detail::save_record(*paths, *record, key);
+    saved = save_active_record();
     if (!saved)
         return std::unexpected(saved.error());
 
@@ -2120,11 +2136,11 @@ execute(const runtime::RuntimeData& runtime_data,
     record->ciphertext_id = published->head.ciphertext_id;
     record->marker_id = published->marker_id;
     record->phase = transaction::Phase::CommitUploaded;
-    saved = detail::save_record(*paths, *record, key);
+    saved = save_active_record();
     if (!saved)
         return std::unexpected(saved.error());
     record->phase = transaction::Phase::CommitVerified;
-    saved = detail::save_record(*paths, *record, key);
+    saved = save_active_record();
     if (!saved)
         return std::unexpected(saved.error());
 
@@ -2154,7 +2170,7 @@ execute(const runtime::RuntimeData& runtime_data,
         }
     }
     record->phase = transaction::Phase::HeadPublished;
-    saved = detail::save_record(*paths, *record, key);
+    saved = save_active_record();
     if (!saved)
         return std::unexpected(saved.error());
 
@@ -2192,7 +2208,7 @@ execute(const runtime::RuntimeData& runtime_data,
         }
     }
     record->phase = transaction::Phase::HeadVerified;
-    saved = detail::save_record(*paths, *record, key);
+    saved = save_active_record();
     if (!saved)
         return std::unexpected(saved.error());
 
@@ -2206,7 +2222,7 @@ execute(const runtime::RuntimeData& runtime_data,
             return std::unexpected(epoch.error());
         }
         record->phase = transaction::Phase::EpochPrepared;
-        saved = detail::save_record(*paths, *record, key);
+        saved = save_active_record();
         if (!saved)
             return std::unexpected(saved.error());
 
@@ -2227,7 +2243,7 @@ execute(const runtime::RuntimeData& runtime_data,
             }
         }
         record->phase = transaction::Phase::EpochUploaded;
-        saved = detail::save_record(*paths, *record, key);
+        saved = save_active_record();
         if (!saved)
             return std::unexpected(saved.error());
 
@@ -2244,7 +2260,7 @@ execute(const runtime::RuntimeData& runtime_data,
                                        epoch_verified.error().detail));
         }
         record->phase = transaction::Phase::EpochVerified;
-        saved = detail::save_record(*paths, *record, key);
+        saved = save_active_record();
         if (!saved)
             return std::unexpected(saved.error());
         verified_new_epoch = epoch->reference;
@@ -2308,7 +2324,7 @@ execute(const runtime::RuntimeData& runtime_data,
                 }
 
                 record->phase = transaction::Phase::EpochUploaded;
-                saved = detail::save_record(*paths, *record, key);
+                saved = save_active_record();
                 if (!saved) {
                     return std::unexpected(saved.error());
                 }
@@ -2327,7 +2343,7 @@ execute(const runtime::RuntimeData& runtime_data,
                 }
 
                 record->phase = transaction::Phase::EpochVerified;
-                saved = detail::save_record(*paths, *record, key);
+                saved = save_active_record();
                 if (!saved) {
                     return std::unexpected(saved.error());
                 }
@@ -2363,7 +2379,7 @@ execute(const runtime::RuntimeData& runtime_data,
                                                   "failed to save state.db"));
     }
     record->phase = transaction::Phase::DatabaseCommitted;
-    saved = detail::save_record(*paths, *record, key);
+    saved = save_active_record();
     if (!saved)
         return std::unexpected(saved.error());
 
@@ -2384,11 +2400,11 @@ execute(const runtime::RuntimeData& runtime_data,
             post_prune.error(), "marker pruning"));
     }
     record->phase = transaction::Phase::CleanupCompleted;
-    saved = detail::save_record(*paths, *record, key);
+    saved = save_active_record();
     if (!saved)
         return std::unexpected(saved.error());
     return detail::finish_transaction_cleanup(
-        *paths, transaction_workspace, key);
+        *paths, transaction_workspace, key, &journal_session);
 }
 
 } // namespace kasumi::application::sync::coordinator

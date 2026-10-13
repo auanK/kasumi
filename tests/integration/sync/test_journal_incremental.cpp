@@ -258,7 +258,9 @@ TEST(JournalIncrementalRedTest,
         const auto paths = sync::journal::make_paths(profile);
         const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
 
-        sync::journal::save(*paths, *record, key);
+        const auto initial_save = sync::journal::save(*paths, *record, key);
+        EXPECT_TRUE(initial_save);
+        if (!initial_save) return std::uint64_t{0};
 
         kasumi::platform::perf_trace::force_enable(true);
         kasumi::platform::perf_trace::reset();
@@ -268,7 +270,12 @@ TEST(JournalIncrementalRedTest,
                 record->progress[b * batch_size + i].state =
                     kasumi::transaction::OperationState::Applied;
             }
-            sync::journal::save(*paths, *record, key);
+            const auto checkpoint = sync::journal::save(*paths, *record, key);
+            EXPECT_TRUE(checkpoint);
+            if (!checkpoint) {
+                kasumi::platform::perf_trace::force_enable(false);
+                return std::uint64_t{0};
+            }
         }
 
         const auto written = kasumi::platform::perf_trace::get_count(
@@ -1043,6 +1050,1003 @@ TEST_F(JournalCorrectionTest, PendingCountIsBoundedBeforeAllocation) {
     ASSERT_FALSE(loaded);
     EXPECT_NE(loaded.error().find("invalid pending_paths count"),
               std::string::npos);
+}
+
+// =============================================================================
+// PHASE 3.3B TEST SUITE — JOURNAL CPU & REPLAY OPTIMIZATION
+// =============================================================================
+
+TEST(JournalOptimizationTest, GroupA_CoordinatorDownloadReplayCountBounded) {
+    auto workspace = kasumi::test::make_temp_workspace("opt-33b-download-100");
+    const auto profile = kasumi::test::workspace_path(workspace, "profile");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto storage_dir = kasumi::test::workspace_path(workspace, "storage");
+    const auto staging = kasumi::test::workspace_path(workspace, "staging");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    ASSERT_TRUE(std::filesystem::create_directories(storage_dir));
+    ASSERT_TRUE(std::filesystem::create_directories(staging));
+
+    auto storage = kasumi::transport::open_transport(storage_dir.string());
+    ASSERT_TRUE(storage.has_value());
+    ASSERT_TRUE(kasumi::transport::initialize(*storage));
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    auto input = empty_publication_input();
+    const std::string content(1024, 'x');
+    const auto content_hash = kasumi::hasher::hash_string(content);
+    const auto staged_file = staging / "source.bin";
+    kasumi::test::write_text(staged_file, content);
+    add_storage_object(*storage, staged_file, content_hash);
+
+    constexpr std::size_t file_count = 100;
+    input.storage.tree.rows.push_back(
+        kasumi::NodeRow{.path = "", .is_directory = true});
+    for (std::size_t i = 0; i < file_count; ++i) {
+        input.storage.tree.rows.push_back(kasumi::NodeRow{
+            .path = "file_" + std::to_string(i) + ".txt",
+            .hash = content_hash,
+            .size = content.size(),
+            .mtime = 1000,
+            .is_directory = false,
+        });
+    }
+    kasumi::finalize_snapshot(input.storage.tree);
+    input.base_tree = kasumi::Snapshot{
+        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    kasumi::finalize_snapshot(input.base_tree);
+
+    const auto result = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+
+    auto runtime_data = make_runtime(profile, local, storage_dir);
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    const auto executed = kasumi::application::sync::coordinator::execute(
+        runtime_data, *storage, key, input, *result);
+    ASSERT_TRUE(executed.has_value()) << executed.error().detail;
+
+    const auto replay_count =
+        kasumi::platform::perf_trace::get_count("journal replay");
+    const auto replay_time_us =
+        kasumi::platform::perf_trace::get_time("journal replay");
+    const auto durable_saves =
+        kasumi::platform::perf_trace::get_count("journal durable saves");
+    kasumi::platform::perf_trace::force_enable(false);
+
+    std::cout << "[3.3B Group A] 100 downloads: " << durable_saves
+              << " durable saves, " << replay_count << " replays, "
+              << replay_time_us << " us replay time\n";
+
+    // 3.3B Invariant: Zero redundant replays during normal execution.
+    EXPECT_LE(replay_count, 2ULL);
+}
+
+TEST(JournalOptimizationTest, GroupA_SequentialCheckpointsReplayCountBounded) {
+    auto owner = kasumi::test::make_temp_workspace("opt-33b-seq-checkpoints");
+    const auto profile = kasumi::test::workspace_path(owner, "profile");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+
+    constexpr std::size_t op_count = 100;
+    std::vector<kasumi::Operation> operations;
+    operations.reserve(op_count);
+    const auto dummy_hash =
+        kasumi::hash_hex(kasumi::hasher::hash_string("PAYLOAD"));
+    for (std::size_t i = 0; i < op_count; ++i) {
+        operations.push_back(kasumi::Operation{
+            .action = kasumi::Action::Download,
+            .path = "file_" + std::to_string(i) + ".dat",
+            .hash = dummy_hash,
+            .size = 1024,
+        });
+    }
+
+    auto record = sync::journal::create_record(
+        0, 0, kasumi::make_sync_plan(operations, 0));
+    ASSERT_TRUE(record.has_value());
+
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    sync::journal::Session session;
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(session.is_valid());
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    for (std::size_t i = 0; i < op_count; ++i) {
+        record->progress[i].state =
+            kasumi::transaction::OperationState::Applied;
+        ASSERT_TRUE(sync::journal::save(
+            *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    }
+
+    const auto replay_count =
+        kasumi::platform::perf_trace::get_count("journal replay");
+    const auto replay_time_us =
+        kasumi::platform::perf_trace::get_time("journal replay");
+    kasumi::platform::perf_trace::force_enable(false);
+
+    std::cout << "[3.3B Group A Micro] 100 checkpoints: " << replay_count
+              << " replays, " << replay_time_us << " us\n";
+
+    EXPECT_EQ(replay_count, 0ULL);
+}
+
+TEST(JournalOptimizationTest,
+     GroupA_SingleCheckpointLatencyIndependentOfHistory) {
+    auto owner = kasumi::test::make_temp_workspace("opt-33b-latency-growth");
+    const auto profile = kasumi::test::workspace_path(owner, "profile");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+
+    constexpr std::size_t op_count = 200;
+    std::vector<kasumi::Operation> operations;
+    operations.reserve(op_count);
+    const auto dummy_hash =
+        kasumi::hash_hex(kasumi::hasher::hash_string("BENCH"));
+    for (std::size_t i = 0; i < op_count; ++i) {
+        operations.push_back(kasumi::Operation{
+            .action = kasumi::Action::Download,
+            .path = "file_" + std::to_string(i) + ".dat",
+            .hash = dummy_hash,
+            .size = 512,
+        });
+    }
+
+    auto record = sync::journal::create_record(
+        0, 0, kasumi::make_sync_plan(operations, 0));
+    ASSERT_TRUE(record.has_value());
+
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    sync::journal::Session session;
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    for (std::size_t i = 0; i < 10; ++i) {
+        record->progress[i].state =
+            kasumi::transaction::OperationState::Applied;
+        ASSERT_TRUE(sync::journal::save(
+            *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    }
+    const auto early_replays =
+        kasumi::platform::perf_trace::get_count("journal replay");
+
+    for (std::size_t i = 10; i < 190; ++i) {
+        record->progress[i].state =
+            kasumi::transaction::OperationState::Applied;
+        ASSERT_TRUE(sync::journal::save(
+            *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    }
+
+    kasumi::platform::perf_trace::reset();
+    for (std::size_t i = 190; i < 200; ++i) {
+        record->progress[i].state =
+            kasumi::transaction::OperationState::Applied;
+        ASSERT_TRUE(sync::journal::save(
+            *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    }
+    const auto late_replays =
+        kasumi::platform::perf_trace::get_count("journal replay");
+    kasumi::platform::perf_trace::force_enable(false);
+
+    EXPECT_EQ(early_replays, 0ULL);
+    EXPECT_EQ(late_replays, 0ULL);
+}
+
+TEST(JournalOptimizationTest, GroupB_SessionLifecycleTransitions) {
+    auto owner = kasumi::test::make_temp_workspace("opt-33b-lifecycle");
+    const auto profile = kasumi::test::workspace_path(owner, "profile");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+
+    std::vector<kasumi::Operation> operations{kasumi::Operation{
+        .action = kasumi::Action::Download,
+        .path = "doc.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("DATA")),
+        .size = 100,
+    }};
+    auto record = sync::journal::create_record(
+        0, 0, kasumi::make_sync_plan(operations, 0));
+    ASSERT_TRUE(record.has_value());
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    sync::journal::Session session;
+    EXPECT_EQ(session.status(), sync::journal::SessionState::Uninitialized);
+    EXPECT_FALSE(session.is_valid());
+
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_EQ(session.status(), sync::journal::SessionState::Confirmed);
+    EXPECT_TRUE(session.is_valid());
+    EXPECT_EQ(session.operation(), record->operation_id);
+    EXPECT_EQ(session.confirmed()->local_generation, 0ULL);
+    EXPECT_EQ(session.confirmed()->storage_generation, 0ULL);
+
+    record->progress[0].state = kasumi::transaction::OperationState::Applied;
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_EQ(session.status(), sync::journal::SessionState::Confirmed);
+    EXPECT_TRUE(session.is_valid());
+
+    record->phase = kasumi::transaction::Phase::Started;
+    record->progress[0].state = kasumi::transaction::OperationState::Pending;
+    record->progress[0].had_original = false;
+    record->progress[0].previous_hash.clear();
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Rollback, &session));
+    EXPECT_EQ(session.status(), sync::journal::SessionState::Confirmed);
+
+    ASSERT_TRUE(sync::journal::clear(*paths, key, &session));
+    EXPECT_EQ(session.status(), sync::journal::SessionState::Retired);
+    EXPECT_FALSE(session.is_valid());
+}
+
+TEST(JournalOptimizationTest, GroupC_IdentityMismatchRejection) {
+    auto owner =
+        kasumi::test::make_temp_workspace("opt-33b-identity-rejection");
+    const auto profile = kasumi::test::workspace_path(owner, "profile");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+
+    std::vector<kasumi::Operation> ops{kasumi::Operation{
+        .action = kasumi::Action::Download,
+        .path = "test.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("1")),
+        .size = 10,
+    }};
+    auto record =
+        sync::journal::create_record(0, 0, kasumi::make_sync_plan(ops, 0));
+    ASSERT_TRUE(record.has_value());
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    sync::journal::Session session;
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(session.is_valid());
+
+    auto tampered_record = *record;
+    tampered_record.operation_id = std::string(32, 'f');
+
+    auto saved = sync::journal::save(*paths,
+                                     tampered_record,
+                                     key,
+                                     sync::journal::SaveMode::Advance,
+                                     &session);
+    EXPECT_FALSE(saved);
+    EXPECT_EQ(session.status(), sync::journal::SessionState::Invalid);
+    EXPECT_FALSE(session.is_valid());
+}
+
+TEST(JournalOptimizationTest, GroupD_DiskAuthorityDivergenceFallback) {
+    auto owner = kasumi::test::make_temp_workspace("opt-33b-disk-divergence");
+    const auto profile = kasumi::test::workspace_path(owner, "profile");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+
+    std::vector<kasumi::Operation> ops{
+        kasumi::Operation{
+            .action = kasumi::Action::Download,
+            .path = "a.txt",
+            .hash = kasumi::hash_hex(kasumi::hasher::hash_string("1")),
+            .size = 10},
+        kasumi::Operation{
+            .action = kasumi::Action::Download,
+            .path = "b.txt",
+            .hash = kasumi::hash_hex(kasumi::hasher::hash_string("2")),
+            .size = 20},
+    };
+    auto record =
+        sync::journal::create_record(0, 0, kasumi::make_sync_plan(ops, 0));
+    ASSERT_TRUE(record.has_value());
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    sync::journal::Session session;
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+
+    record->progress[0].state = kasumi::transaction::OperationState::Applied;
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+
+    const auto tip_file = paths->final_path.parent_path() / "confirmed.enc";
+    ASSERT_TRUE(std::filesystem::exists(tip_file));
+    auto tip_bytes = kasumi::test::read_binary(tip_file);
+    tip_bytes.back() ^= std::byte{0xff};
+    kasumi::test::write_binary(tip_file, tip_bytes);
+
+    record->progress[1].state = kasumi::transaction::OperationState::Applied;
+    auto result = sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session);
+    EXPECT_FALSE(result);
+    EXPECT_EQ(session.status(), sync::journal::SessionState::Invalid);
+}
+
+TEST(JournalOptimizationTest, GroupE_IdempotentCheckpoints) {
+    auto owner = kasumi::test::make_temp_workspace("opt-33b-idempotent");
+    const auto profile = kasumi::test::workspace_path(owner, "profile");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+
+    std::vector<kasumi::Operation> ops{kasumi::Operation{
+        .action = kasumi::Action::Download,
+        .path = "same.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("0")),
+        .size = 1,
+    }};
+    auto record =
+        sync::journal::create_record(0, 0, kasumi::make_sync_plan(ops, 0));
+    ASSERT_TRUE(record.has_value());
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    sync::journal::Session session;
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+
+    const auto tip_bytes_before = session.confirmed_bytes();
+    const auto tip_count_before = session.confirmed_count();
+
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_TRUE(session.is_valid());
+    EXPECT_EQ(session.confirmed_bytes(), tip_bytes_before);
+    EXPECT_EQ(session.confirmed_count(), tip_count_before);
+}
+
+TEST(JournalOptimizationTest, GroupF_RollbackUpdatesSession) {
+    auto owner = kasumi::test::make_temp_workspace("opt-33b-rollback");
+    const auto profile = kasumi::test::workspace_path(owner, "profile");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+
+    std::vector<kasumi::Operation> ops{kasumi::Operation{
+        .action = kasumi::Action::Download,
+        .path = "rb.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("aaaa")),
+        .size = 50,
+    }};
+    auto record =
+        sync::journal::create_record(0, 0, kasumi::make_sync_plan(ops, 0));
+    ASSERT_TRUE(record.has_value());
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    sync::journal::Session session;
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+
+    record->phase = kasumi::transaction::Phase::FilesStaged;
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_EQ(session.confirmed()->phase,
+              kasumi::transaction::Phase::FilesStaged);
+
+    record->phase = kasumi::transaction::Phase::Started;
+    record->progress[0].state = kasumi::transaction::OperationState::Pending;
+    record->progress[0].had_original = false;
+    record->progress[0].previous_hash.clear();
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Rollback, &session));
+    EXPECT_TRUE(session.is_valid());
+    EXPECT_EQ(session.confirmed()->phase, kasumi::transaction::Phase::Started);
+}
+
+TEST(JournalOptimizationTest, GroupG_IndependentSessionsIsolation) {
+    auto owner1 = kasumi::test::make_temp_workspace("opt-33b-iso-1");
+    auto owner2 = kasumi::test::make_temp_workspace("opt-33b-iso-2");
+    const auto profile1 = kasumi::test::workspace_path(owner1, "profile");
+    const auto profile2 = kasumi::test::workspace_path(owner2, "profile");
+    ASSERT_TRUE(std::filesystem::create_directories(profile1));
+    ASSERT_TRUE(std::filesystem::create_directories(profile2));
+
+    const auto paths1 = sync::journal::make_paths(profile1);
+    const auto paths2 = sync::journal::make_paths(profile2);
+    ASSERT_TRUE(paths1.has_value());
+    ASSERT_TRUE(paths2.has_value());
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    std::vector<kasumi::Operation> ops1{kasumi::Operation{
+        .action = kasumi::Action::Download,
+        .path = "1.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("1")),
+        .size = 10}};
+    std::vector<kasumi::Operation> ops2{kasumi::Operation{
+        .action = kasumi::Action::Download,
+        .path = "2.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("2")),
+        .size = 20}};
+
+    auto rec1 =
+        sync::journal::create_record(0, 0, kasumi::make_sync_plan(ops1, 0));
+    auto rec2 =
+        sync::journal::create_record(0, 0, kasumi::make_sync_plan(ops2, 0));
+    ASSERT_TRUE(rec1.has_value());
+    ASSERT_TRUE(rec2.has_value());
+
+    sync::journal::Session session1;
+    sync::journal::Session session2;
+
+    ASSERT_TRUE(sync::journal::save(
+        *paths1, *rec1, key, sync::journal::SaveMode::Advance, &session1));
+    ASSERT_TRUE(sync::journal::save(
+        *paths2, *rec2, key, sync::journal::SaveMode::Advance, &session2));
+
+    EXPECT_NE(session1.operation(), session2.operation());
+
+    rec1->progress[0].state = kasumi::transaction::OperationState::Applied;
+    ASSERT_TRUE(sync::journal::save(
+        *paths1, *rec1, key, sync::journal::SaveMode::Advance, &session1));
+
+    EXPECT_EQ(session1.confirmed()->progress[0].state,
+              kasumi::transaction::OperationState::Applied);
+    EXPECT_EQ(session2.confirmed()->progress[0].state,
+              kasumi::transaction::OperationState::Pending);
+}
+
+TEST(JournalOptimizationTest, GroupH_RetirementLifecycle) {
+    auto owner = kasumi::test::make_temp_workspace("opt-33b-retire");
+    const auto profile = kasumi::test::workspace_path(owner, "profile");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+
+    std::vector<kasumi::Operation> ops{kasumi::Operation{
+        .action = kasumi::Action::Download,
+        .path = "r.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("r")),
+        .size = 5}};
+    auto record =
+        sync::journal::create_record(0, 0, kasumi::make_sync_plan(ops, 0));
+    ASSERT_TRUE(record.has_value());
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    sync::journal::Session session;
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_TRUE(session.is_valid());
+
+    ASSERT_TRUE(sync::journal::clear(*paths, key, &session));
+    EXPECT_EQ(session.status(), sync::journal::SessionState::Retired);
+    EXPECT_FALSE(session.is_valid());
+
+    auto save_after_retire = sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session);
+    EXPECT_FALSE(save_after_retire);
+}
+
+TEST(JournalOptimizationTest, GroupI_NullSessionCompatibility) {
+    auto owner = kasumi::test::make_temp_workspace("opt-33b-null-compat");
+    const auto profile = kasumi::test::workspace_path(owner, "profile");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+
+    std::vector<kasumi::Operation> ops{kasumi::Operation{
+        .action = kasumi::Action::Download,
+        .path = "c.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("c")),
+        .size = 12}};
+    auto record =
+        sync::journal::create_record(0, 0, kasumi::make_sync_plan(ops, 0));
+    ASSERT_TRUE(record.has_value());
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, nullptr));
+
+    record->progress[0].state = kasumi::transaction::OperationState::Applied;
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, nullptr));
+
+    auto loaded = sync::journal::load(*paths, key, nullptr);
+    ASSERT_TRUE(loaded.has_value());
+    ASSERT_TRUE(loaded->has_value());
+    EXPECT_EQ((*loaded)->progress[0].state,
+              kasumi::transaction::OperationState::Applied);
+
+    record->phase = kasumi::transaction::Phase::Started;
+    record->progress[0].state = kasumi::transaction::OperationState::Pending;
+    record->progress[0].had_original = false;
+    record->progress[0].previous_hash.clear();
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Rollback, nullptr));
+
+    ASSERT_TRUE(sync::journal::clear(*paths, key, nullptr));
+}
+
+class JournalCpuFinalTest : public JournalCorrectionTest {
+protected:
+    sync::journal::Session session;
+    void activate() {
+        auto loaded = sync::journal::load(paths, key, &session);
+        ASSERT_TRUE(loaded);
+        ASSERT_TRUE(session.is_valid());
+        record.phase = kasumi::transaction::Phase::FilesStaged;
+        ASSERT_TRUE(sync::journal::save(
+            paths, record, key, sync::journal::SaveMode::Advance, &session));
+    }
+};
+
+TEST_F(JournalCpuFinalTest,
+       ActiveSessionRejectsOversizedProgressStringBeforeWriting) {
+    activate();
+    const auto confirmed = kasumi::test::read_binary(
+        paths.final_path.parent_path() / "confirmed.enc");
+    const auto log = kasumi::test::read_binary(paths.log_path);
+    auto requested = record;
+    requested.progress[0].previous_hash.assign(4097, 'a');
+    ASSERT_FALSE(kasumi::transaction::codec::validate(requested));
+    EXPECT_FALSE(sync::journal::save(
+        paths, requested, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_FALSE(session.is_valid());
+    EXPECT_EQ(kasumi::test::read_binary(paths.final_path.parent_path() /
+                                        "confirmed.enc"),
+              confirmed);
+    EXPECT_EQ(kasumi::test::read_binary(paths.log_path), log);
+    expect_reload(record);
+}
+
+TEST_F(JournalCpuFinalTest, UnknownSaveModeInvalidatesActiveSession) {
+    activate();
+    EXPECT_FALSE(sync::journal::save(paths,
+                                     record,
+                                     key,
+                                     static_cast<sync::journal::SaveMode>(255),
+                                     &session));
+    EXPECT_FALSE(session.is_valid());
+    expect_reload(record);
+}
+
+TEST_F(JournalCpuFinalTest, TruncatedConfirmedLogCannotBeAppendedFromCache) {
+    activate();
+    const auto tip_path = paths.final_path.parent_path() / "confirmed.enc";
+    const auto tip = kasumi::test::read_binary(tip_path);
+    std::filesystem::resize_file(paths.log_path, 1);
+    const auto log = kasumi::test::read_binary(paths.log_path);
+    record.progress[0].state = kasumi::transaction::OperationState::Applied;
+    EXPECT_FALSE(sync::journal::save(
+        paths, record, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_FALSE(session.is_valid());
+    EXPECT_EQ(kasumi::test::read_binary(tip_path), tip);
+    EXPECT_EQ(kasumi::test::read_binary(paths.log_path), log);
+    EXPECT_FALSE(sync::journal::load(paths, key));
+}
+
+TEST_F(JournalCpuFinalTest,
+       SnapshotReplacementWithUnchangedTipInvalidatesCache) {
+    activate();
+    auto bytes = kasumi::test::read_binary(paths.final_path);
+    bytes.back() ^= std::byte{1};
+    kasumi::test::write_binary(paths.final_path, bytes);
+    std::filesystem::last_write_time(
+        paths.final_path,
+        std::filesystem::last_write_time(paths.final_path) +
+            std::chrono::seconds(1));
+    const auto tip_path = paths.final_path.parent_path() / "confirmed.enc";
+    const auto tip = kasumi::test::read_binary(tip_path);
+    const auto log = kasumi::test::read_binary(paths.log_path);
+    record.progress[0].state = kasumi::transaction::OperationState::Applied;
+    EXPECT_FALSE(sync::journal::save(
+        paths, record, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_FALSE(session.is_valid());
+    EXPECT_EQ(kasumi::test::read_binary(tip_path), tip);
+    EXPECT_EQ(kasumi::test::read_binary(paths.log_path), log);
+}
+
+TEST_F(JournalCpuFinalTest, RetirementArtifactBlocksActiveSession) {
+    activate();
+    kasumi::test::write_text(paths.final_path.parent_path() / "retired.enc",
+                             "incomplete retirement");
+    const auto tip_path = paths.final_path.parent_path() / "confirmed.enc";
+    const auto tip = kasumi::test::read_binary(tip_path);
+    record.progress[0].state = kasumi::transaction::OperationState::Applied;
+    EXPECT_FALSE(sync::journal::save(
+        paths, record, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_FALSE(session.is_valid());
+    EXPECT_EQ(kasumi::test::read_binary(tip_path), tip);
+}
+
+class JournalCpuInputTest : public JournalCpuFinalTest,
+                            public ::testing::WithParamInterface<std::string> {
+};
+
+TEST_P(JournalCpuInputTest, ActiveAndColdRejectSameInvalidRequest) {
+    activate();
+    const auto name = GetParam();
+    if (name == "ProgressRegression") {
+        record.progress[0].state = kasumi::transaction::OperationState::Applied;
+        ASSERT_TRUE(sync::journal::save(
+            paths, record, key, sync::journal::SaveMode::Advance, &session));
+    }
+    auto requested = record;
+    if (name == "ProgressTooShort")
+        requested.progress.pop_back();
+    else if (name == "ProgressTooLong")
+        requested.progress.push_back(requested.progress.back());
+    else if (name == "InvalidPhase")
+        requested.phase = static_cast<kasumi::transaction::Phase>(255);
+    else if (name == "InvalidProgress")
+        requested.progress[0].state =
+            static_cast<kasumi::transaction::OperationState>(255);
+    else if (name == "InvalidSlot")
+        requested.progress[0].backup_slot =
+            std::numeric_limits<std::uint32_t>::max();
+    else if (name == "InvalidIndexBounds")
+        requested.plan.offsets.back() =
+            std::numeric_limits<std::uint32_t>::max();
+    else if (name == "OversizedProgressString")
+        requested.progress[0].previous_hash.assign(4097, 'a');
+    else if (name == "OversizedPath")
+        requested.plan.operations[0].path = std::string(4097, 'a');
+    else if (name == "ChangedPath")
+        requested.plan.operations[0].path = "different";
+    else if (name == "ChangedAction")
+        requested.plan.operations[0].action = kasumi::Action::Upload;
+    else if (name == "ChangedHash")
+        requested.plan.operations[0].hash = "invalid-hash";
+    else if (name == "ChangedSize")
+        ++requested.plan.operations[0].size;
+    else if (name == "ChangedAlternatePath")
+        requested.plan.operations[0].alt_path = "other";
+    else if (name == "ChangedExclusiveDestination")
+        requested.plan.operations[0].exclusive_destination = true;
+    else if (name == "ChangedOperationId")
+        requested.operation_id.assign(32, 'f');
+    else if (name == "ChangedGenerations") {
+        requested.local_generation = 2;
+        requested.storage_generation = 2;
+        requested.plan.target_generation = 3;
+    } else if (name == "ChangedTargetGeneration")
+        ++requested.plan.target_generation;
+    else if (name == "ChangedObservedBase")
+        requested.observed_base_id.assign(64, 'a');
+    else if (name == "ChangedObservedHead")
+        requested.observed_head_id.assign(64, 'a');
+    else if (name == "ChangedPublicationRequirement")
+        requested.publication_required = false;
+    else if (name == "RequiredCommitMissing")
+        requested.phase = kasumi::transaction::Phase::CommitPrepared;
+    else if (name == "PublicationMismatch" || name == "OversizedMarker") {
+        requested.phase = kasumi::transaction::Phase::CommitUploaded;
+        requested.commit_id.assign(64, 'a');
+        requested.ciphertext_id.assign(64, 'b');
+        requested.parent_ids = {std::string(64, 'c')};
+        requested.marker_id = name == "OversizedMarker"
+                                  ? std::string(4097, 'x') + "/" +
+                                        requested.commit_id + "-" +
+                                        requested.ciphertext_id
+                                  : "wrong";
+    } else if (name == "DuplicateParents") {
+        requested.phase = kasumi::transaction::Phase::CommitPrepared;
+        requested.commit_id.assign(64, 'a');
+        requested.parent_ids = {std::string(64, 'b'), std::string(64, 'b')};
+    } else if (name == "InvalidPendingPaths")
+        requested.pending_paths = {"../escape"};
+    else if (name == "UnsortedPendingPaths")
+        requested.pending_paths = {"b", "a"};
+    else if (name == "InvalidEpoch")
+        requested.phase = kasumi::transaction::Phase::EpochPrepared;
+    else if (name == "PhaseRegression")
+        requested.phase = kasumi::transaction::Phase::Started;
+    else if (name == "ProgressRegression")
+        requested.progress[0].state =
+            kasumi::transaction::OperationState::Pending;
+    else
+        FAIL() << "unknown input case";
+    const auto snapshot = kasumi::test::read_binary(paths.final_path);
+    const auto log = kasumi::test::read_binary(paths.log_path);
+    const auto tip_path = paths.final_path.parent_path() / "confirmed.enc";
+    const auto tip = kasumi::test::read_binary(tip_path);
+    EXPECT_FALSE(sync::journal::save(
+        paths, requested, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_FALSE(session.is_valid());
+    EXPECT_FALSE(sync::journal::save(paths, requested, key));
+    EXPECT_EQ(kasumi::test::read_binary(paths.final_path), snapshot);
+    EXPECT_EQ(kasumi::test::read_binary(paths.log_path), log);
+    EXPECT_EQ(kasumi::test::read_binary(tip_path), tip);
+    expect_reload(record);
+}
+
+INSTANTIATE_TEST_SUITE_P(Validation,
+                         JournalCpuInputTest,
+                         ::testing::Values("ProgressTooShort",
+                                           "ProgressTooLong",
+                                           "InvalidPhase",
+                                           "InvalidProgress",
+                                           "InvalidSlot",
+                                           "InvalidIndexBounds",
+                                           "OversizedProgressString",
+                                           "OversizedPath",
+                                           "ChangedPath",
+                                           "ChangedAction",
+                                           "ChangedHash",
+                                           "ChangedSize",
+                                           "ChangedAlternatePath",
+                                           "ChangedExclusiveDestination",
+                                           "ChangedOperationId",
+                                           "ChangedGenerations",
+                                           "ChangedTargetGeneration",
+                                           "ChangedObservedBase",
+                                           "ChangedObservedHead",
+                                           "ChangedPublicationRequirement",
+                                           "RequiredCommitMissing",
+                                           "PublicationMismatch",
+                                           "OversizedMarker",
+                                           "DuplicateParents",
+                                           "InvalidPendingPaths",
+                                           "UnsortedPendingPaths",
+                                           "InvalidEpoch",
+                                           "PhaseRegression",
+                                           "ProgressRegression"),
+                         [](const auto& parameter_info) {
+                             return parameter_info.param;
+                         });
+
+TEST_F(JournalCpuFinalTest, ActiveSessionCannotMoveToAnotherProfile) {
+    activate();
+    const auto another = profile.parent_path() / "other-profile";
+    std::filesystem::create_directory(another);
+    auto other = sync::journal::make_paths(another);
+    ASSERT_TRUE(other);
+    EXPECT_FALSE(sync::journal::save(
+        *other, record, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_FALSE(session.is_valid());
+    EXPECT_FALSE(std::filesystem::exists(other->final_path.parent_path()));
+    expect_reload(record);
+}
+
+TEST_F(JournalCpuFinalTest,
+       ConfirmedCacheMovesOnlyChangedFieldsAndNoopPreservesState) {
+    activate();
+    const auto* plan = session.confirmed()->plan.operations.data();
+    const auto* progress = session.confirmed()->progress.data();
+    record.progress[1].state = kasumi::transaction::OperationState::Applied;
+    ASSERT_TRUE(sync::journal::save(
+        paths, record, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_EQ(session.confirmed()->plan.operations.data(), plan);
+    EXPECT_EQ(session.confirmed()->progress.data(), progress);
+    EXPECT_EQ(kasumi::transaction::codec::encode(*session.confirmed()),
+              kasumi::transaction::codec::encode(record));
+    const auto count = session.confirmed_count();
+    ASSERT_TRUE(sync::journal::save(
+        paths, record, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_EQ(session.confirmed_count(), count);
+    expect_reload(record);
+}
+
+TEST_F(JournalCpuFinalTest,
+       FailureAfterConfirmationInvalidatesCacheAndRetryDoesNotDuplicate) {
+    activate();
+    record.progress[0].state = kasumi::transaction::OperationState::Applied;
+#ifdef _WIN32
+    _putenv_s("KASUMI_TEST_JOURNAL_FAIL", "session-update");
+#else
+    setenv("KASUMI_TEST_JOURNAL_FAIL", "session-update", 1);
+#endif
+    auto saved = sync::journal::save(
+        paths, record, key, sync::journal::SaveMode::Advance, &session);
+#ifdef _WIN32
+    _putenv_s("KASUMI_TEST_JOURNAL_FAIL", "");
+#else
+    unsetenv("KASUMI_TEST_JOURNAL_FAIL");
+#endif
+    if (saved)
+        GTEST_SKIP() << "Requires dedicated fault build";
+    EXPECT_FALSE(session.is_valid());
+    expect_reload(record);
+    const auto log = kasumi::test::read_binary(paths.log_path);
+    const auto tip_path = paths.final_path.parent_path() / "confirmed.enc";
+    const auto tip = kasumi::test::read_binary(tip_path);
+    ASSERT_TRUE(sync::journal::save(
+        paths, record, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_EQ(kasumi::test::read_binary(paths.log_path), log);
+    EXPECT_EQ(kasumi::test::read_binary(tip_path), tip);
+    EXPECT_EQ(kasumi::transaction::codec::encode(*session.confirmed()),
+              kasumi::transaction::codec::encode(record));
+}
+
+TEST_F(JournalCpuFinalTest,
+       EveryActiveSessionDurabilityFailureRequiresAuthenticatedRetry) {
+    for (const auto* failure : {"write",
+                                "flush",
+                                "close",
+                                "sync",
+                                "replace",
+                                "parent-sync",
+                                "rollback-truncate"}) {
+        SCOPED_TRACE(failure);
+        activate();
+        auto requested = record;
+        requested.progress[0].state =
+            kasumi::transaction::OperationState::Applied;
+        if (std::string_view{failure} == "rollback-truncate") {
+            std::ofstream extra(paths.log_path,
+                                std::ios::binary | std::ios::app);
+            extra << "unconfirmed";
+        }
+#ifdef _WIN32
+        _putenv_s("KASUMI_TEST_JOURNAL_FAIL", failure);
+#else
+        setenv("KASUMI_TEST_JOURNAL_FAIL", failure, 1);
+#endif
+        auto saved = sync::journal::save(
+            paths, requested, key, sync::journal::SaveMode::Advance, &session);
+#ifdef _WIN32
+        _putenv_s("KASUMI_TEST_JOURNAL_FAIL", "");
+#else
+        unsetenv("KASUMI_TEST_JOURNAL_FAIL");
+#endif
+        if (saved)
+            GTEST_SKIP() << "Requires dedicated fault build";
+        EXPECT_FALSE(session.is_valid());
+        auto loaded = sync::journal::load(paths, key);
+        ASSERT_TRUE(loaded);
+        ASSERT_TRUE(*loaded);
+        EXPECT_TRUE(kasumi::transaction::codec::encode(**loaded) ==
+                        kasumi::transaction::codec::encode(record) ||
+                    kasumi::transaction::codec::encode(**loaded) ==
+                        kasumi::transaction::codec::encode(requested));
+        ASSERT_TRUE(sync::journal::save(
+            paths, requested, key, sync::journal::SaveMode::Advance, &session));
+        expect_reload(requested);
+        record = requested;
+        record.progress[0].state = kasumi::transaction::OperationState::Pending;
+        record.progress[1].state = kasumi::transaction::OperationState::Pending;
+        record.phase = kasumi::transaction::Phase::Started;
+        ASSERT_TRUE(sync::journal::save(
+            paths, record, key, sync::journal::SaveMode::Rollback, &session));
+    }
+}
+
+TEST_F(JournalCpuFinalTest,
+       SharedSessionRejectsConcurrentStaleRecordAndAcceptsMergedProgress) {
+    activate();
+    auto a = record;
+    auto b = record;
+    a.progress[0].state = kasumi::transaction::OperationState::Applied;
+    b.progress[1].state = kasumi::transaction::OperationState::Applied;
+    auto first = std::async(std::launch::async, [&] {
+        return sync::journal::save(
+            paths, a, key, sync::journal::SaveMode::Advance, &session);
+    });
+    auto second = std::async(std::launch::async, [&] {
+        return sync::journal::save(
+            paths, b, key, sync::journal::SaveMode::Advance, &session);
+    });
+    const bool first_ok = first.get().has_value();
+    const bool second_ok = second.get().has_value();
+    EXPECT_NE(first_ok, second_ok);
+    record.progress[0].state = record.progress[1].state =
+        kasumi::transaction::OperationState::Applied;
+    ASSERT_TRUE(sync::journal::save(
+        paths, record, key, sync::journal::SaveMode::Advance, &session));
+    expect_reload(record);
+}
+
+TEST_F(JournalCpuFinalTest,
+       RetiredSessionCannotBeResurrectedByLoadOrInvalidation) {
+    activate();
+    record.phase = kasumi::transaction::Phase::Started;
+    ASSERT_TRUE(sync::journal::save(
+        paths, record, key, sync::journal::SaveMode::Rollback, &session));
+    ASSERT_TRUE(sync::journal::clear(paths, key, &session));
+    session.invalidate();
+    EXPECT_EQ(session.status(), sync::journal::SessionState::Retired);
+    EXPECT_FALSE(sync::journal::load(paths, key, &session));
+    EXPECT_FALSE(sync::journal::save(
+        paths, record, key, sync::journal::SaveMode::Advance, &session));
+}
+
+TEST_F(JournalCpuFinalTest, OversizedDeltaIsRejectedBeforeConfirmation) {
+    activate();
+    auto requested = record;
+    for (std::size_t i = 0; i < 18000; ++i) {
+        auto prefix = std::to_string(i);
+        prefix.insert(0, 6 - prefix.size(), '0');
+        std::string path = prefix;
+        for (int component = 0; component < 15; ++component)
+            path += "/" + std::string(250, 'a');
+        requested.pending_paths.push_back(std::move(path));
+    }
+    ASSERT_TRUE(kasumi::transaction::codec::validate(requested));
+    const auto tip_path = paths.final_path.parent_path() / "confirmed.enc";
+    const auto tip = kasumi::test::read_binary(tip_path);
+    const auto log = kasumi::test::read_binary(paths.log_path);
+    EXPECT_FALSE(sync::journal::save(
+        paths, requested, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_FALSE(session.is_valid());
+    EXPECT_EQ(kasumi::test::read_binary(tip_path), tip);
+    EXPECT_EQ(kasumi::test::read_binary(paths.log_path), log);
+    expect_reload(record);
+}
+
+TEST_F(JournalCpuFinalTest,
+       WrongKeyAndOtherJournalPathsInvalidateWithoutWriting) {
+    activate();
+    auto wrong = key;
+    wrong[0] = 1;
+    EXPECT_FALSE(sync::journal::save(
+        paths, record, wrong, sync::journal::SaveMode::Advance, &session));
+    EXPECT_FALSE(session.is_valid());
+    expect_reload(record);
+    for (int index = 0; index < 3; ++index) {
+        activate();
+        auto changed = paths;
+        if (index == 0)
+            changed.final_path = profile / "foreign";
+        if (index == 1)
+            changed.temporary_path = profile / "foreign";
+        if (index == 2)
+            changed.log_path = profile / "foreign";
+        EXPECT_FALSE(sync::journal::save(
+            changed, record, key, sync::journal::SaveMode::Advance, &session));
+        EXPECT_FALSE(session.is_valid());
+        expect_reload(record);
+    }
+}
+
+TEST_F(JournalCpuFinalTest, RollbackWithSessionRoundTripsEveryMutableField) {
+    auto loaded = sync::journal::load(paths, key, &session);
+    ASSERT_TRUE(loaded);
+    record.phase = kasumi::transaction::Phase::EpochPrepared;
+    record.progress[0].state = record.progress[1].state =
+        kasumi::transaction::OperationState::Applied;
+    record.commit_id.assign(64, 'a');
+    record.ciphertext_id.assign(64, 'b');
+    record.parent_ids = {std::string(64, 'c')};
+    record.marker_id = kasumi::application::history_storage::marker_identifier(
+        {.commit_id = record.commit_id, .ciphertext_id = record.ciphertext_id});
+    record.epoch_vault_id.assign(64, 'd');
+    record.epoch_id.assign(64, 'e');
+    record.epoch_issued_at = 1;
+    record.epoch_min_history_depth = 1;
+    record.epoch_min_history_age_hours = 1;
+    record.observed_pending_paths = {"before"};
+    record.pending_paths = {"after"};
+    ASSERT_TRUE(sync::journal::save(
+        paths, record, key, sync::journal::SaveMode::Advance, &session));
+    record.phase = kasumi::transaction::Phase::Started;
+    record.commit_id.clear();
+    record.ciphertext_id.clear();
+    record.marker_id.clear();
+    record.parent_ids.clear();
+    record.epoch_vault_id.clear();
+    record.epoch_id.clear();
+    record.epoch_issued_at = 0;
+    record.epoch_min_history_depth = 0;
+    record.epoch_min_history_age_hours = 0;
+    record.observed_pending_paths.clear();
+    record.pending_paths.clear();
+    record.progress[0].state = record.progress[1].state =
+        kasumi::transaction::OperationState::Pending;
+    ASSERT_TRUE(sync::journal::save(
+        paths, record, key, sync::journal::SaveMode::Rollback, &session));
+    EXPECT_EQ(kasumi::transaction::codec::encode(*session.confirmed()),
+              kasumi::transaction::codec::encode(record));
+    expect_reload(record);
+}
+
+TEST_F(JournalCpuFinalTest, RequestedRecordCannotAliasOwnedConfirmedCache) {
+    activate();
+    const auto* aliased = session.confirmed();
+    ASSERT_NE(aliased, nullptr);
+    EXPECT_FALSE(sync::journal::save(
+        paths, *aliased, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_FALSE(session.is_valid());
+    expect_reload(record);
 }
 
 } // namespace

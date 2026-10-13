@@ -67,8 +67,10 @@ save_phase(const journal::Paths& paths,
 std::expected<RecoveryResult, Error>
 cleanup_completed(const journal::Paths& paths,
                   const std::optional<platform::Workspace>& workspace,
-                  std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
-    auto cleaned = detail::finish_transaction_cleanup(paths, workspace, key);
+                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                  journal::Session* session = nullptr) {
+    auto cleaned =
+        detail::finish_transaction_cleanup(paths, workspace, key, session);
     if (!cleaned)
         return std::unexpected(cleaned.error());
     return RecoveryResult::RolledForward;
@@ -829,7 +831,8 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
     auto paths = detail::make_journal_paths(runtime_data);
     if (!paths)
         return std::unexpected(paths.error());
-    auto record = journal::load(*paths, key);
+    journal::Session session;
+    auto record = journal::load(*paths, key, &session);
     if (!record)
         return std::unexpected(detail::journal_error(record.error()));
     if (!*record) {
@@ -849,7 +852,7 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
     if (!workspace)
         return std::unexpected(workspace.error());
     if ((*record)->phase == transaction::Phase::CleanupCompleted) {
-        return cleanup_completed(*paths, *workspace, key);
+        return cleanup_completed(*paths, *workspace, key, &session);
     }
 
     history_storage::maintenance_protocol::RegistrationState writer;

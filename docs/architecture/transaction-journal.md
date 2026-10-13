@@ -72,11 +72,32 @@ the same OS account.
 Logical writes are O(N + changed data), with 124 confirmation bytes per checkpoint
 in addition to the 88-byte delta header, plus one 124-byte retirement proof per
 transaction. Durable synchronization count is O(N).
-One replay costs O(snapshot size + confirmed log size + decoded state); publication
-metadata is validated without copying the operation plan. Every save still scans
-the supplied record and replays the preceding prefix, so N checkpoints retain
-O(N²) accumulated CPU work. This deliberately favors verified authority over a
-global cache; the reduced real CLI benchmark records that cost separately.
+One replay costs O(snapshot size + confirmed log size + decoded state). An owned
+Session caches a confirmed Record and Tip. Every save still performs the complete
+codec validation and immutable identity comparison: a mutable caller's Record
+cannot be trusted from an old pointer or fingerprint. Computing the delta scans
+progress once; advance monotonicity checks only its changed entries. These O(N)
+scans retain potential O(N²) accumulated CPU for N checkpoints.
+
+A normal confirmed session verifies every path, key identity, authenticated KTC3
+and artifact fingerprints/sizes before appending. Fingerprints use file ID and
+change time on Windows, device/inode/ctime on Linux. Unsupported identities use
+full authenticated replay. Discrepancies invalidate the cache and require replay;
+missing/truncated confirmed bytes fail closed. Checks occur before private-storage
+validation changes ACL/ctime itself. This detects known discrepancies under the
+profile lock and trusted owner model, not every hostile same-account alteration
+that preserves metadata or restores a complete older authority bundle.
+
+The delta owns its changed fields before confirmation. Persistence takes the
+previous Record by const reference and returns only confirmed Tip and changes.
+After confirmation, the same prepared changes used by replay are moved/swapped
+into the cached Record without allocating or copying the plan. Any post-confirmation
+failure invalidates the cache; durable authority remains and equal-state retry
+reauthenticates and syncs without duplicating sequence. Fresh initialization copies
+the Record once; load may copy once to give the caller a separate Record. Session
+internals are private and retirement cannot be reversed on that instance. The
+requested Record must be owned independently; aliasing the cached Record is
+rejected before invalidation can release its storage.
 
 Linux uses file and parent-directory fsync. Windows uses FlushFileBuffers and
 MoveFileEx with WRITE_THROUGH; its platform parent-directory sync is a no-op.
