@@ -6,6 +6,7 @@
 #include "application/sync/journal.hpp"
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_batch.hpp"
+#include "application/sync/mutation_detail.hpp"
 #include "application/sync/publication.hpp"
 #include "coordinator_detail.hpp"
 #include "platform/path.hpp"
@@ -416,6 +417,8 @@ std::expected<void, Error> resume_pending_local_mutations(
     const runtime::RuntimeData& runtime_data,
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+    const auto dependencies =
+        mutation::detail::destination_dependencies(record.plan.operations);
     for (std::size_t index = 0; index < record.plan.operations.size();
          ++index) {
         const auto& operation = record.plan.operations[index];
@@ -451,13 +454,23 @@ std::expected<void, Error> resume_pending_local_mutations(
                 return std::unexpected(saved.error());
             }
         }
-        auto applied = mutation::apply_operation(operation,
-                                                 index,
-                                                 runtime_data.local_dir,
-                                                 storage,
-                                                 key,
-                                                 workspace,
-                                                 record.progress[index]);
+        auto condition = mutation::detail::effective_destination(
+            record, index, dependencies);
+        if (!condition)
+            return std::unexpected(
+                detail::make_error(ErrorCode::RecoveryConflict,
+                                   mutation::describe(condition.error()),
+                                   index));
+        auto applied =
+            mutation::apply_operation(operation,
+                                      index,
+                                      runtime_data.local_dir,
+                                      storage,
+                                      key,
+                                      workspace,
+                                      record.progress[index],
+                                      mutation::DownloadCacheMode::None,
+                                      *condition ? &**condition : nullptr);
         if (!applied) {
             return std::unexpected(detail::make_error(
                 applied.error().code ==

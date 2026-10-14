@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 
 namespace kasumi::application::sync::mutation {
 
@@ -597,7 +598,8 @@ rollback_file_operation(const Operation& operation,
                         std::size_t operation_index,
                         const std::filesystem::path& local_root,
                         const platform::Workspace& workspace,
-                        const transaction::OperationProgress& progress) {
+                        const transaction::OperationProgress& progress,
+                        const DestinationPrecondition* condition) {
     auto path = resolve_local_path(local_root, operation.path, operation_index);
     if (!path) {
         return std::unexpected(path.error());
@@ -605,6 +607,16 @@ rollback_file_operation(const Operation& operation,
     auto backup = backup_path(workspace, progress, *path, operation_index);
     if (progress.had_original && !backup) {
         return std::unexpected(backup.error());
+    }
+    if (condition && condition->backup) {
+        auto transferred =
+            backup_path(workspace, *condition->backup, *path, operation_index);
+        if (!transferred)
+            return std::unexpected(transferred.error());
+        auto verified = validate_backup(
+            *transferred, condition->backup->previous_hash, operation_index);
+        if (!verified)
+            return verified;
     }
 
     if (operation.action == Action::RenameLocal) {
@@ -650,6 +662,15 @@ rollback_file_operation(const Operation& operation,
         if (!source_hash || !destination_hash) {
             return std::unexpected(!source_hash ? source_hash.error()
                                                 : destination_hash.error());
+        }
+        if (progress.state != transaction::OperationState::Applied &&
+            !(*source_hash == progress.previous_hash &&
+              destination_hash->empty())) {
+            return std::unexpected(
+                make_error(MutationErrorCode::DestinationConflict,
+                           "rename effect is not confirmed",
+                           operation.path,
+                           operation_index));
         }
         if (*source_hash == progress.previous_hash &&
             destination_hash->empty()) {
@@ -697,6 +718,10 @@ rollback_file_operation(const Operation& operation,
             auto actual = current_file_hash(*path, *status, operation_index);
             if (!actual)
                 return std::unexpected(actual.error());
+            if (condition && *actual == condition->hash &&
+                (progress.state != transaction::OperationState::Applied ||
+                 condition->backup))
+                return {};
             if (*actual == progress.previous_hash)
                 return {};
             if (progress.state == transaction::OperationState::Applied &&
@@ -724,6 +749,11 @@ rollback_file_operation(const Operation& operation,
             auto actual = current_file_hash(*path, *status, operation_index);
             if (!actual)
                 return std::unexpected(actual.error());
+            // A no-op download leaves the rename's file for its own rollback.
+            if (condition && *actual == condition->hash &&
+                (progress.state != transaction::OperationState::Applied ||
+                 condition->backup))
+                return {};
             if (actual->empty())
                 return {};
             if (progress.state == transaction::OperationState::Applied &&
@@ -927,7 +957,8 @@ rollback_operation_impl(const Operation& operation,
                         std::size_t operation_index,
                         const std::filesystem::path& local_root,
                         const platform::Workspace& workspace,
-                        const transaction::OperationProgress& progress) {
+                        const transaction::OperationProgress& progress,
+                        const DestinationPrecondition* condition) {
     if (operation_index == std::numeric_limits<std::size_t>::max() ||
         !is_valid_action(operation.action) || !has_safe_paths(operation)) {
         return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
@@ -1056,7 +1087,7 @@ rollback_operation_impl(const Operation& operation,
         return {};
     }
     return rollback_file_operation(
-        operation, operation_index, local_root, workspace, progress);
+        operation, operation_index, local_root, workspace, progress, condition);
 }
 
 } // namespace
@@ -1108,7 +1139,8 @@ MutationResult detail::validate_prepared_destination(
     std::size_t operation_index,
     const std::filesystem::path& destination,
     const platform::Workspace& workspace,
-    const transaction::OperationProgress& progress) {
+    const transaction::OperationProgress& progress,
+    const DestinationPrecondition* condition) {
     auto valid = validate_prepared_operation(
         operation, operation_index, destination, workspace, progress);
     if (!valid)
@@ -1122,6 +1154,16 @@ MutationResult detail::validate_prepared_destination(
             validate_backup(*backup, progress.previous_hash, operation_index);
         if (!backup_valid)
             return backup_valid;
+    }
+    if (condition && condition->backup) {
+        auto backup = backup_path(
+            workspace, *condition->backup, destination, operation_index);
+        if (!backup)
+            return std::unexpected(backup.error());
+        auto verified = validate_backup(
+            *backup, condition->backup->previous_hash, operation_index);
+        if (!verified)
+            return verified;
     }
     auto status = read_status(destination, operation_index);
     if (!status)
@@ -1139,7 +1181,7 @@ MutationResult detail::validate_prepared_destination(
         progress.state == transaction::OperationState::Applied
             ? (operation.action == Action::Download ? operation.hash
                                                     : std::string{})
-            : progress.previous_hash;
+            : (condition ? condition->hash : progress.previous_hash);
     if (*actual != expected) {
         return std::unexpected(make_error(
             MutationErrorCode::DestinationConflict,
@@ -1149,6 +1191,147 @@ MutationResult detail::validate_prepared_destination(
             destination,
             operation_index));
     }
+    return {};
+}
+
+std::vector<std::size_t>
+detail::destination_dependencies(std::span<const Operation> operations) {
+    const auto none = std::numeric_limits<std::size_t>::max();
+    std::vector<std::size_t> result(operations.size(), none);
+    std::unordered_map<std::filesystem::path, std::size_t> renamed;
+    for (std::size_t index = 0; index < operations.size(); ++index) {
+        const auto& operation = operations[index];
+        if (operation.action == Action::RenameLocal) {
+            renamed[operation.path] = index;
+            renamed[operation.alt_path] = index;
+        } else if (operation.action == Action::Download ||
+                   operation.action == Action::DeleteLocal) {
+            const auto found = renamed.find(operation.path);
+            if (found != renamed.end()) {
+                result[index] = found->second;
+                platform::perf_trace::count("destination dependency links");
+            }
+        }
+    }
+    platform::perf_trace::count("destination dependency entries",
+                                operations.size());
+    return result;
+}
+
+std::expected<std::optional<DestinationPrecondition>, MutationError>
+detail::effective_destination(const transaction::Record& record,
+                              std::size_t index,
+                              std::span<const std::size_t> dependencies) {
+    if (index >= record.plan.operations.size() ||
+        record.progress.size() != record.plan.operations.size() ||
+        dependencies.size() != record.plan.operations.size())
+        return std::unexpected(
+            make_error(MutationErrorCode::InvalidOperation,
+                       "invalid destination dependency index",
+                       {},
+                       index));
+    const auto preceding = dependencies[index];
+    if (preceding == std::numeric_limits<std::size_t>::max())
+        return std::nullopt;
+    const auto& operation = record.plan.operations[index];
+    if (preceding >= index)
+        return std::unexpected(
+            make_error(MutationErrorCode::InvalidOperation,
+                       "destination dependency is not earlier",
+                       operation.path,
+                       index));
+    const auto& rename = record.plan.operations[preceding];
+    const auto& previous = record.progress[preceding];
+    const auto& progress = record.progress[index];
+    auto valid = validate_progress(operation, progress, index);
+    if (!valid)
+        return std::unexpected(valid.error());
+    valid = validate_progress(rename, previous, preceding);
+    if (!valid)
+        return std::unexpected(valid.error());
+    if (rename.action != Action::RenameLocal ||
+        (operation.action != Action::Download &&
+         operation.action != Action::DeleteLocal) ||
+        previous.state != transaction::OperationState::Applied ||
+        !previous.had_original ||
+        (!rename.hash.empty() && rename.hash != previous.previous_hash))
+        return std::unexpected(
+            make_error(MutationErrorCode::DestinationConflict,
+                       "preceding original rename is not confirmed",
+                       operation.path,
+                       index));
+    const bool vacated = rename.path == operation.path;
+    const bool matches =
+        vacated ? progress.had_original &&
+                      progress.previous_hash == previous.previous_hash
+                : rename.alt_path == operation.path && !progress.had_original &&
+                      progress.previous_hash.empty();
+    if (!matches)
+        return std::unexpected(
+            make_error(MutationErrorCode::DestinationConflict,
+                       "rename does not match prepared destination",
+                       operation.path,
+                       index));
+    return DestinationPrecondition{
+        .hash = vacated ? std::string{} : previous.previous_hash,
+        .backup = vacated ? std::nullopt : std::optional{previous}};
+}
+
+MutationResult detail::validate_prepared_rename(
+    const Operation& operation,
+    std::size_t index,
+    const std::filesystem::path& source,
+    const std::filesystem::path& destination,
+    const platform::Workspace& workspace,
+    const transaction::OperationProgress& progress) {
+    // Legacy unprepared calls cannot confer authority on a following operation.
+    if (progress.state == transaction::OperationState::Pending &&
+        !progress.had_original && progress.previous_hash.empty())
+        return {};
+    auto valid = validate_progress(operation, progress, index);
+    if (!valid)
+        return valid;
+    if (!operation.hash.empty() && operation.hash != progress.previous_hash)
+        return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
+                                          "rename progress does not match plan",
+                                          operation.path,
+                                          index));
+    valid = validate_workspace(workspace, index);
+    if (!valid)
+        return valid;
+    if (progress.had_original) {
+        auto backup = backup_path(workspace, progress, source, index);
+        if (!backup)
+            return std::unexpected(backup.error());
+        valid = validate_backup(*backup, progress.previous_hash, index);
+        if (!valid)
+            return valid;
+    }
+    const auto source_status = read_status(source, index);
+    const auto destination_status = read_status(destination, index);
+    if (!source_status || !destination_status)
+        return std::unexpected(!source_status ? source_status.error()
+                                              : destination_status.error());
+    auto source_hash = current_file_hash(source, *source_status, index);
+    auto destination_hash =
+        current_file_hash(destination, *destination_status, index);
+    if (!source_hash || !destination_hash)
+        return std::unexpected(!source_hash ? source_hash.error()
+                                            : destination_hash.error());
+    const bool expect_destination =
+        !progress.had_original ||
+        progress.state == transaction::OperationState::Applied;
+    const bool matches = expect_destination
+                             ? source_hash->empty() &&
+                                   *destination_hash == progress.previous_hash
+                             : *source_hash == progress.previous_hash &&
+                                   destination_hash->empty();
+    if (!matches)
+        return std::unexpected(
+            make_error(MutationErrorCode::DestinationConflict,
+                       "rename differs from prepared state",
+                       operation.path,
+                       index));
     return {};
 }
 
@@ -1172,9 +1355,10 @@ rollback_operation(const Operation& operation,
                    std::size_t operation_index,
                    const std::filesystem::path& local_root,
                    const platform::Workspace& workspace,
-                   const transaction::OperationProgress& progress) {
+                   const transaction::OperationProgress& progress,
+                   const DestinationPrecondition* condition) {
     return rollback_operation_impl(
-        operation, operation_index, local_root, workspace, progress);
+        operation, operation_index, local_root, workspace, progress, condition);
 }
 
 } // namespace kasumi::application::sync::mutation

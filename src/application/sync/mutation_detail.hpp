@@ -13,6 +13,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace kasumi::application::sync::mutation::detail {
 
@@ -41,12 +42,31 @@ validate_prepared_operation(const Operation& operation,
                             const transaction::OperationProgress& progress);
 
 // Checks backup integrity and current authority before a download/delete effect.
+MutationResult validate_prepared_destination(
+    const Operation& operation,
+    std::size_t operation_index,
+    const std::filesystem::path& destination,
+    const platform::Workspace& workspace,
+    const transaction::OperationProgress& progress,
+    const DestinationPrecondition* condition = nullptr);
+
+// Indexes path transitions once; unrelated operations have no predecessor.
+std::vector<std::size_t>
+destination_dependencies(std::span<const Operation> operations);
+
+// Derives execution authority only from an earlier, confirmed original rename.
+std::expected<std::optional<DestinationPrecondition>, MutationError>
+effective_destination(const transaction::Record& record,
+                      std::size_t index,
+                      std::span<const std::size_t> dependencies);
+
 MutationResult
-validate_prepared_destination(const Operation& operation,
-                              std::size_t operation_index,
-                              const std::filesystem::path& destination,
-                              const platform::Workspace& workspace,
-                              const transaction::OperationProgress& progress);
+validate_prepared_rename(const Operation& operation,
+                         std::size_t index,
+                         const std::filesystem::path& source,
+                         const std::filesystem::path& destination,
+                         const platform::Workspace& workspace,
+                         const transaction::OperationProgress& progress);
 
 std::filesystem::path
 download_candidate_path(const std::filesystem::path& destination,

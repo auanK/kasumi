@@ -408,7 +408,8 @@ apply_download(const Operation& operation,
                const platform::Workspace& workspace,
                std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                const transaction::OperationProgress& progress,
-               DownloadCacheMode download_cache) {
+               DownloadCacheMode download_cache,
+               const DestinationPrecondition* condition) {
     auto expected_hash = hash_from_hex(operation.hash);
     if (!expected_hash) {
         return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
@@ -418,6 +419,8 @@ apply_download(const Operation& operation,
     }
     const auto remote_identifier =
         crypto::content_identifier(key, *expected_hash);
+    const std::string_view prepared_hash =
+        condition ? condition->hash : progress.previous_hash;
 
     auto prepared = detail::validate_prepared_operation(
         operation, operation_index, destination, workspace, progress);
@@ -435,9 +438,13 @@ apply_download(const Operation& operation,
     }
     if (std::filesystem::is_regular_file(*destination_status)) {
         if (progress.state == transaction::OperationState::Applied ||
-            progress.previous_hash == operation.hash) {
-            prepared = detail::validate_prepared_destination(
-                operation, operation_index, destination, workspace, progress);
+            prepared_hash == operation.hash) {
+            prepared = detail::validate_prepared_destination(operation,
+                                                             operation_index,
+                                                             destination,
+                                                             workspace,
+                                                             progress,
+                                                             condition);
             if (!prepared)
                 return prepared;
             std::error_code error;
@@ -577,12 +584,13 @@ apply_download(const Operation& operation,
             if (!downloaded) {
                 std::error_code cleanup_error;
                 std::filesystem::remove(encrypted, cleanup_error);
-                prepared = detail::validate_prepared_destination(
-                    operation,
-                    operation_index,
-                    destination,
-                    workspace,
-                    progress);
+                prepared =
+                    detail::validate_prepared_destination(operation,
+                                                          operation_index,
+                                                          destination,
+                                                          workspace,
+                                                          progress,
+                                                          condition);
                 if (!prepared)
                     return prepared;
                 return std::unexpected(
@@ -655,12 +663,16 @@ apply_download(const Operation& operation,
     }
 
     // shortcut: hash/replace can race, use C/D for arbitrary writers.
-    prepared = detail::validate_prepared_destination(
-        operation, operation_index, destination, workspace, progress);
+    prepared = detail::validate_prepared_destination(operation,
+                                                     operation_index,
+                                                     destination,
+                                                     workspace,
+                                                     progress,
+                                                     condition);
     if (!prepared)
         return prepared;
     MutationResult replaced;
-    if (progress.had_original) {
+    if (!prepared_hash.empty()) {
         replaced = replace_local_file(candidate, destination, operation_index);
     } else {
         auto synced = platform::durability::sync_file(candidate);
@@ -792,7 +804,8 @@ apply_operation(const Operation& operation,
                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                 const platform::Workspace& workspace,
                 const transaction::OperationProgress& progress,
-                DownloadCacheMode download_cache) {
+                DownloadCacheMode download_cache,
+                const DestinationPrecondition* condition) {
     if (operation_index == std::numeric_limits<std::size_t>::max() ||
         !is_valid_action(operation.action) || !has_safe_paths(operation)) {
         return std::unexpected(make_error(
@@ -817,6 +830,14 @@ apply_operation(const Operation& operation,
             if (!destination) {
                 return std::unexpected(destination.error());
             }
+            auto prepared = detail::validate_prepared_rename(operation,
+                                                             operation_index,
+                                                             *source,
+                                                             *destination,
+                                                             workspace,
+                                                             progress);
+            if (!prepared)
+                return prepared;
             return apply_rename(
                 operation, operation_index, *source, *destination);
         }
@@ -893,7 +914,8 @@ apply_operation(const Operation& operation,
                                   workspace,
                                   key,
                                   progress,
-                                  download_cache);
+                                  download_cache,
+                                  condition);
         }
 
         case Action::DeleteLocal: {
@@ -902,8 +924,13 @@ apply_operation(const Operation& operation,
             if (!path) {
                 return std::unexpected(path.error());
             }
-            auto prepared = detail::validate_prepared_destination(
-                operation, operation_index, *path, workspace, progress);
+            auto prepared =
+                detail::validate_prepared_destination(operation,
+                                                      operation_index,
+                                                      *path,
+                                                      workspace,
+                                                      progress,
+                                                      condition);
             if (!prepared)
                 return prepared;
             // shortcut: hash/remove can race, use C/D for arbitrary writers.

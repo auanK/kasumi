@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -50,6 +51,13 @@ using MutationResult = std::expected<void, MutationError>;
 using PreparationResult =
     std::expected<transaction::OperationProgress, MutationError>;
 
+// Execution state transferred by a confirmed rename; rollback keeps its
+// original progress.
+struct DestinationPrecondition {
+    std::string hash;
+    std::optional<transaction::OperationProgress> backup;
+};
+
 // Policy for reusing downloaded and verified content.
 enum class DownloadCacheMode {
     // Uses exclusive temporary files.
@@ -75,7 +83,8 @@ rollback_operation(const Operation& operation,
                    std::size_t operation_index,
                    const std::filesystem::path& local_root,
                    const platform::Workspace& workspace,
-                   const transaction::OperationProgress& progress);
+                   const transaction::OperationProgress& progress,
+                   const DestinationPrecondition* destination = nullptr);
 
 // Applies local effects or transfers and verifies the result.
 MutationResult
@@ -86,7 +95,8 @@ apply_operation(const Operation& operation,
                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                 const platform::Workspace& workspace,
                 const transaction::OperationProgress& progress,
-                DownloadCacheMode download_cache = DownloadCacheMode::None);
+                DownloadCacheMode download_cache = DownloadCacheMode::None,
+                const DestinationPrecondition* destination = nullptr);
 
 // Formats a mutation failure.
 std::string describe(const MutationError& error);

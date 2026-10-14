@@ -8,6 +8,7 @@
 #include "application/sync/metadata.hpp"
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_batch.hpp"
+#include "application/sync/mutation_detail.hpp"
 #include "application/sync/publication.hpp"
 #include "coordinator_detail.hpp"
 #include "core/history.hpp"
@@ -654,6 +655,8 @@ rollback_transaction(const journal::Paths& paths,
             "transaction workspace missing while local rollback is required"));
     }
     if (workspace) {
+        const auto dependencies =
+            mutation::detail::destination_dependencies(record.plan.operations);
         for (std::size_t index = record.plan.operations.size(); index > 0;
              --index) {
             const auto operation_index = index - 1;
@@ -661,12 +664,20 @@ rollback_transaction(const journal::Paths& paths,
             if (progress.state < transaction::OperationState::BackupCreated) {
                 continue;
             }
+            auto condition = mutation::detail::effective_destination(
+                record, operation_index, dependencies);
+            if (!condition)
+                return std::unexpected(
+                    make_error(ErrorCode::RecoveryConflict,
+                               mutation::describe(condition.error()),
+                               operation_index));
             auto rolled = mutation::rollback_operation(
                 record.plan.operations[operation_index],
                 operation_index,
                 local_root,
                 *workspace,
-                progress);
+                progress,
+                *condition ? &**condition : nullptr);
             if (!rolled) {
                 return std::unexpected(make_error(
                     ErrorCode::RecoveryConflict,
@@ -710,6 +721,8 @@ rollback_local_mutations(transaction::Record& record,
     if (!workspace) {
         return {};
     }
+    const auto dependencies =
+        mutation::detail::destination_dependencies(record.plan.operations);
     for (std::size_t index = record.plan.operations.size(); index > 0;
          --index) {
         const auto operation_index = index - 1;
@@ -719,12 +732,20 @@ rollback_local_mutations(transaction::Record& record,
                 transaction::OperationState::BackupCreated) {
             continue;
         }
+        auto condition = mutation::detail::effective_destination(
+            record, operation_index, dependencies);
+        if (!condition)
+            return std::unexpected(
+                make_error(ErrorCode::RecoveryConflict,
+                           mutation::describe(condition.error()),
+                           operation_index));
         auto rolled = mutation::rollback_operation(
             record.plan.operations[operation_index],
             operation_index,
             local_root,
             *workspace,
-            record.progress[operation_index]);
+            record.progress[operation_index],
+            *condition ? &**condition : nullptr);
         if (!rolled) {
             return std::unexpected(make_error(
                 ErrorCode::RecoveryConflict,
@@ -808,6 +829,7 @@ struct ContentWorkResult {
 struct ContentWorkItem {
     std::size_t index = 0;
     transaction::OperationProgress progress;
+    std::optional<mutation::DestinationPrecondition> destination;
 };
 
 struct ContentWindowState {
@@ -846,14 +868,16 @@ void run_content_worker(std::stop_token stop,
         const auto index = task.index;
         ContentWorkResult result{.index = index, .error = std::nullopt};
         try {
-            auto applied =
-                mutation::apply_operation(record.plan.operations[index],
-                                          index,
-                                          local_root,
-                                          storage,
-                                          key,
-                                          workspace,
-                                          task.progress);
+            auto applied = mutation::apply_operation(
+                record.plan.operations[index],
+                index,
+                local_root,
+                storage,
+                key,
+                workspace,
+                task.progress,
+                mutation::DownloadCacheMode::None,
+                task.destination ? &*task.destination : nullptr);
             if (!applied) {
                 result.error = applied.error();
             }
@@ -883,15 +907,18 @@ void run_content_worker(std::stop_token stop,
 
 std::expected<std::optional<std::pair<std::size_t, mutation::MutationError>>,
               Error>
-run_content_window(std::span<const std::size_t> indices,
-                   std::size_t parallelism,
-                   transaction::Record& record,
-                   const journal::Paths& paths,
-                   const std::filesystem::path& local_root,
-                   transport::Transport& storage,
-                   std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                   const platform::Workspace& workspace,
-                   journal::Session* session = nullptr) {
+run_content_window(
+    std::span<const std::size_t> indices,
+    std::size_t parallelism,
+    transaction::Record& record,
+    const journal::Paths& paths,
+    const std::filesystem::path& local_root,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const platform::Workspace& workspace,
+    std::span<const std::optional<mutation::DestinationPrecondition>>
+        destinations,
+    journal::Session* session = nullptr) {
     const auto worker_count = std::min(parallelism, indices.size());
     ContentWindowState state;
     state.tasks.resize(worker_count);
@@ -922,7 +949,8 @@ run_content_window(std::span<const std::size_t> indices,
         {
             std::lock_guard lock(state.mutex);
             const auto index = indices[next++];
-            state.tasks[slot] = ContentWorkItem{index, record.progress[index]};
+            state.tasks[slot] = ContentWorkItem{
+                index, record.progress[index], destinations[index]};
             ++outstanding;
         }
         state.changed.notify_all();
@@ -1611,6 +1639,22 @@ execute(const runtime::RuntimeData& runtime_data,
     };
 
     const auto parallelism = detail::content_concurrency();
+    const auto dependencies =
+        mutation::detail::destination_dependencies(record->plan.operations);
+    std::vector<std::optional<mutation::DestinationPrecondition>> destinations(
+        record->plan.operations.size());
+    const auto prepare_destination =
+        [&](std::size_t index) -> std::expected<void, Error> {
+        auto condition = mutation::detail::effective_destination(
+            *record, index, dependencies);
+        if (!condition)
+            return std::unexpected(
+                detail::make_error(ErrorCode::RecoveryConflict,
+                                   mutation::describe(condition.error()),
+                                   index));
+        destinations[index] = std::move(*condition);
+        return {};
+    };
     platform::perf_trace::maximum("configured content concurrency",
                                   parallelism);
     std::unordered_map<std::string, std::size_t> download_counts;
@@ -1626,6 +1670,8 @@ execute(const runtime::RuntimeData& runtime_data,
     for (std::size_t position = 0; position < apply_order.size();) {
         const auto first = apply_order[position];
         const auto& first_operation = record->plan.operations[first];
+        if (auto prepared = prepare_destination(first); !prepared)
+            return std::unexpected(prepared.error());
         if (first_operation.action == Action::Download) {
             const auto content_key = first_operation.hash + ':' +
                                      std::to_string(first_operation.size);
@@ -1642,6 +1688,10 @@ execute(const runtime::RuntimeData& runtime_data,
                     ++end;
                 }
                 if (end != position + 1) {
+                    for (std::size_t i = position + 1; i < end; ++i)
+                        if (auto prepared = prepare_destination(apply_order[i]);
+                            !prepared)
+                            return std::unexpected(prepared.error());
                     auto failure = run_content_window(
                         std::span<const std::size_t>{apply_order}.subspan(
                             position, end - position),
@@ -1652,6 +1702,7 @@ execute(const runtime::RuntimeData& runtime_data,
                         storage,
                         key,
                         *workspace,
+                        destinations,
                         &journal_session);
                     if (!failure) {
                         platform::perf_trace::finish("content transfer wall",
@@ -1682,15 +1733,16 @@ execute(const runtime::RuntimeData& runtime_data,
                             : mutation::DownloadCacheMode::Reuse;
                 }
             }
-            auto applied =
-                mutation::apply_operation(record->plan.operations[first],
-                                          first,
-                                          runtime_data.local_dir,
-                                          storage,
-                                          key,
-                                          *workspace,
-                                          record->progress[first],
-                                          download_cache);
+            auto applied = mutation::apply_operation(
+                record->plan.operations[first],
+                first,
+                runtime_data.local_dir,
+                storage,
+                key,
+                *workspace,
+                record->progress[first],
+                download_cache,
+                destinations[first] ? &*destinations[first] : nullptr);
             if (!applied) {
                 platform::perf_trace::finish("content transfer wall",
                                              content_transfer_trace);
