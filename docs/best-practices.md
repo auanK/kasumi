@@ -58,8 +58,8 @@ state or transaction evidence merely to make a failing synchronization proceed.
 Garbage collection (`kasumi gc <profile>`) reclaims remote storage occupied by unreachable objects, such as obsolete commit variants, history outside retained Epoch anchors, and unreferenced content payloads.
 
 * **GC is NOT Fsck**: Garbage collection manages reachability, retention, and quarantine; it does **not** perform Fsck-style cryptographic payload auditing. Depending on transport capabilities, quarantine staging may transfer encrypted candidate bytes through a local workspace to verify physical-byte preservation. Running GC does not prove payload integrity.
-* **GC is Operationally Expensive**: GC coordinates through a distributed remote maintenance barrier and validates provider visibility with temporary probe objects. Online collection takes **two complete, stable observations** of the physical namespace and history reachability. In large vaults or high-churn repositories, GC can take a significant amount of time and consumes substantial network I/O.
-* **Plan Dedicated Maintenance Windows**: GC should be scheduled during off-peak periods or low-activity windows. Do **not** run GC after every synchronization.
+* **GC is Operationally Expensive**: GC uses a cooperative remote maintenance barrier and temporary visibility probes; these are not distributed exclusion or provider-wide consistency proofs. Online collection takes **two complete, stable observations** of the physical namespace and history reachability. In large vaults or high-churn repositories, GC can take a significant amount of time and consumes substantial network I/O.
+* **Plan Dedicated Maintenance Windows**: Off-peak timing reduces load, but it is a heuristic. For the operational requirement, stop Sync activity on every client and serialize GC, purge, repair, and writer-marker maintenance across the vault; see [Garbage Collection Architecture](architecture/garbage-collection.md#operational-contract). Do **not** run GC after every synchronization.
 * **Frequency Guidelines (Heuristics)**:
   * **Low Churn (Personal Use)**: Monthly maintenance is generally sufficient.
   * **Moderate Churn (Small Teams / Multi-Machine)**: Weekly GC is a reasonable starting policy.
@@ -68,7 +68,7 @@ Garbage collection (`kasumi gc <profile>`) reclaims remote storage occupied by u
 * **Safety & Quarantine Retention**:
   * Newly identified unreachable candidates are staged into quarantine in bounded batches (up to 8 objects per batch), with physical SHA-256 verification before source removal.
   * Previously quarantined objects are **not** purged immediately on the next GC run. Purging requires at least **10 days of quarantine age** recorded in authenticated metadata, verified absence of the original, remaining unreachability, verified physical SHA-256, and active barrier ownership.
-  * If provider visibility cannot support safe online collection, GC may return `analysis_only`: no quarantine restore, candidate removal, or purge occurs. The maintenance barrier and visibility probe may already have been created and cleaned up remotely. Other safety failures can stop GC with an error.
+  * If the runtime visibility probe fails, GC may return `analysis_only`: no quarantine restore, candidate removal, or purge occurs. The maintenance barrier and probe may already have been created and cleaned up remotely. A passing probe tests only its own object and may not detect every incomplete listing; see the backend assumptions in [Garbage Collection Architecture](architecture/garbage-collection.md#operational-contract). Other safety failures can stop GC with an error.
 * **Do Not Manually Delete Remote Objects**: Never treat raw remote object listings (e.g., from cloud consoles or `rclone`) as deletion lists. Manual deletion can destroy active Epoch anchors or referenced content.
 
 For the protocol specification, see [Garbage Collection Architecture](architecture/garbage-collection.md).
@@ -153,12 +153,12 @@ These routines serve as practical starting points. Adjust intervals according to
 * **Synchronization**: Run `kasumi sync` regularly (e.g., every 1 to 4 hours via automated scheduler).
 * **Pre-Sync Checks**: Use `kasumi status` or `kasumi sync --dry-run` before applying unusually large changes.
 * **Integrity Audit**: Schedule `kasumi fsck` monthly.
-* **Garbage Collection**: Schedule `kasumi gc` weekly during off-hours maintenance windows.
+* **Garbage Collection**: Schedule `kasumi gc` weekly during off-hours maintenance windows. Frequency and timing are recommendations; maintenance exclusivity is required.
 
 ### High Churn / Large Vault
 * **Synchronization**: Run `kasumi sync` frequently (e.g., hourly or continuous automated triggers).
 * **Storage Monitoring**: Monitor storage usage with your backend/provider; use `kasumi remote summary` and `kasumi remote objects` to inspect history and object counts.
-* **Garbage Collection**: Reserve a dedicated weekly off-hours maintenance window for `kasumi gc`. If churn is high, increase frequency based on observed storage growth and measured GC duration.
+* **Garbage Collection**: Reserve a dedicated weekly off-hours maintenance window for `kasumi gc`. If churn is high, increase frequency based on observed storage growth and measured GC duration. Keep all Sync and maintenance processes stopped across clients while it runs.
 * **Integrity Audit**: Schedule `kasumi fsck` separately during dedicated off-hours maintenance windows.
 
 ## Things Not To Do

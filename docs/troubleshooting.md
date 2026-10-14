@@ -362,7 +362,7 @@ Kasumi's garbage collector enforces strict safety conditions before performing d
    ```bash
    kasumi remote health <profile>
    ```
-4. **Retry in a Quiet Maintenance Window**: Rerun `kasumi gc <profile>` during a low-activity window when no clients are synchronizing.
+4. **Retry Under the Operational Contract**: First stop Sync processes and maintenance commands on every client using the vault; then verify no remote process is still running. A quiet window reduces load but is only a heuristic. Run one maintenance command at a time across the vault.
 5. **Keep Normal GC Checks**: Retry normal `kasumi gc <profile>` after the marker is removed. Any other writer marker continues to block destructive GC.
 
 ### Related Documentation
@@ -435,7 +435,7 @@ The table below clarifies the purpose and operational behavior of Kasumi's diagn
 | `kasumi status <profile>` | Preview pending changes | No | No | Exclusive | Point-in-time observation |
 | `kasumi sync <profile> --dry-run` | Preview pending changes | No | No | Exclusive | Point-in-time observation |
 | `kasumi fsck <profile>` | Audit referenced payloads | Yes | Yes | Exclusive | Audit may overlap writers |
-| `kasumi gc <profile>` | Storage reclamation | No Fsck-style audit | Yes | Exclusive | Barrier blocks collection if any writer marker exists |
+| `kasumi gc <profile>` | Storage reclamation | No Fsck-style audit | Yes | Exclusive | Blocks when a writer marker is observed; provider visibility assumptions apply |
 | `kasumi gc remove-writer <profile> <writer-id>` | Remove one explicitly selected writer marker | No | No | Exclusive | Operator verifies liveness; other markers still block GC |
 | `kasumi remote health <profile>` | Operational diagnostic | No | No | None | Point-in-time observation |
 | `kasumi remote contents --audit <profile>` | Audit all physical payloads | Yes (all present) | No | None | Point-in-time observation |

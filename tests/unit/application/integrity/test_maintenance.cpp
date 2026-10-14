@@ -2756,6 +2756,27 @@ TEST_F(BarrierOwnershipTest, ReleaseDoesNotRemoveForeignBarrier) {
     EXPECT_TRUE(state->objects.contains(test_layout().barrier_identifier));
 }
 
+TEST(BarrierOwnershipControl, AmbiguousAppliedPutDoesNotAdmitWriter) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("barrier-ambiguous-put");
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    state->physical_hash_supported = true;
+    state->put_then_fail_identifier = test_layout().barrier_identifier;
+    state->put_then_fail_code = kasumi::transport::ErrorCode::Timeout;
+
+    const auto barrier = protocol::establish_barrier(
+        storage, test_layout(), kasumi::test::workspace_root(workspace));
+    ASSERT_FALSE(barrier.has_value());
+    EXPECT_TRUE(state->objects.contains(test_layout().barrier_identifier));
+
+    const auto writer = protocol::register_writer(
+        storage, test_layout(), kasumi::test::workspace_root(workspace));
+    EXPECT_FALSE(writer.has_value());
+    ASSERT_TRUE(state->objects.contains(test_layout().barrier_identifier));
+}
+
 TEST_F(BarrierOwnershipTest, ReleaseMissingBarrierSucceedsWithoutRemove) {
     state->objects.erase(test_layout().barrier_identifier);
     state->physical_hashes.erase(test_layout().barrier_identifier);

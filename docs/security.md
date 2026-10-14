@@ -123,7 +123,7 @@ Encrypted Commit → AEAD Auth → Topological Validation → HEAD Marker Valida
 
 The commit object is published and verified using the transport's physical-hash capability or readback fallback before its HEAD marker is published. HEAD markers are structurally validated and bind a commit ID to a ciphertext ID. The referenced commit variant is cryptographically authenticated before the marked commit participates in validated history.
 
-Epochs define authenticated retention horizons and boundary anchors. The writer/barrier protocol separately coordinates garbage collection with active synchronization work.
+Epochs define authenticated retention horizons and boundary anchors. The cooperative writer/barrier protocol checks for active synchronization work during garbage collection; it does not provide distributed exclusion between maintenance commands.
 
 ## Local Filesystem Isolation
 

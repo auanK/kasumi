@@ -257,6 +257,9 @@ struct FakeState {
     std::string fail_remove_identifier;
     std::string fail_get_identifier;
     std::string fail_put_identifier;
+    std::string put_then_fail_identifier;
+    kasumi::transport::ErrorCode put_then_fail_code =
+        kasumi::transport::ErrorCode::Io;
     std::string remove_then_fail_identifier;
     std::optional<kasumi::transport::ErrorCode> copy_failure_after_effect;
     std::string corrupt_get_identifier;
@@ -389,13 +392,14 @@ kasumi::transport::Result fake_put(void* context,
                                    std::string_view identifier) {
     auto* state = fake_state(context);
     const bool failed_target = identifier == state->fail_put_identifier;
+    const bool ambiguous_target = identifier == state->put_then_fail_identifier;
     const bool failed_commit = is_commit(identifier) && state->fail_commit_put;
     const bool failed_marker = is_marker(identifier) && state->fail_marker_put;
     const bool failed_quarantine_metadata =
         state->fail_quarantine_metadata_put && identifier.ends_with(".meta");
     if ((failed_commit && !state->persist_commit_on_put_failure) ||
         (failed_marker && !state->persist_marker_on_put_failure) ||
-        failed_quarantine_metadata || failed_target) {
+        failed_quarantine_metadata || (failed_target && !ambiguous_target)) {
         if (failed_target) {
             state->fail_put_identifier.clear();
         }
@@ -450,9 +454,14 @@ kasumi::transport::Result fake_put(void* context,
             state->objects[std::string{identifier}].size();
     }
     maybe_replace_barrier_after_quarantine_put(state, identifier, layout);
-    if (failed_commit || failed_marker) {
+    if (failed_commit || failed_marker || ambiguous_target) {
+        if (ambiguous_target) {
+            state->put_then_fail_identifier.clear();
+        }
         return std::unexpected(
-            kasumi::transport::Error{.code = kasumi::transport::ErrorCode::Io,
+            kasumi::transport::Error{.code = ambiguous_target
+                                                  ? state->put_then_fail_code
+                                                  : kasumi::transport::ErrorCode::Io,
                                      .message = "injected put failure"});
     }
     return {};
