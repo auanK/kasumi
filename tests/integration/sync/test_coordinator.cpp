@@ -9,6 +9,7 @@
 #include "application/sync/metadata.hpp"
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_detail.hpp"
+#include "application/sync/mutation_fault_test.hpp"
 #include "application/sync/publication.hpp"
 #include "application/sync/reobservation.hpp"
 #include "application/use_cases/context.hpp"
@@ -8801,14 +8802,31 @@ void run_p0_local_race(P0LocalAction action,
     record("base_commit", base->head.commit_id);
     record("remote_commit", published->head.commit_id);
 
+
     if (intervene) {
+        ASSERT_FALSE(executed.has_value());
+        EXPECT_EQ(bytes_at(target), user);
+        if (action == P0LocalAction::DeleteLocal &&
+            failure == P0LocalFailure::ContentGet) {
+            ASSERT_TRUE(live_journal->has_value());
+            const auto live_recovery =
+                sync::coordinator::recover_if_needed(runtime,
+                                                     context.storage,
+                                                     key);
+            ASSERT_FALSE(live_recovery.has_value());
+            EXPECT_EQ(live_recovery.error().code,
+                      sync::coordinator::ErrorCode::RecoveryConflict);
+            EXPECT_EQ(bytes_at(target), user);
+            const auto retained = sync::journal::load(*live_paths, key);
+            ASSERT_TRUE(retained.has_value() && *retained);
+            EXPECT_EQ((**retained).operation_id, staged_record.operation_id);
+            return;
+        }
+        ASSERT_FALSE(live_journal->has_value());
         const auto live_recovery =
             sync::coordinator::recover_if_needed(runtime, context.storage, key);
-        ASSERT_FALSE(live_recovery.has_value());
-        EXPECT_EQ(live_recovery.error().code,
-                  sync::coordinator::ErrorCode::RecoveryConflict);
-        EXPECT_EQ(bytes_at(target), user);
-        record("live_recovery_conflict", live_recovery.error().detail);
+        ASSERT_TRUE(live_recovery.has_value()) << live_recovery.error().detail;
+        EXPECT_EQ(*live_recovery, sync::coordinator::RecoveryResult::NoJournal);
         auto restart_runtime = make_runtime(
             checkpoint_profile, checkpoint_local, root / "storage");
         const auto recovered = sync::coordinator::recover_if_needed(
@@ -8817,7 +8835,7 @@ void run_p0_local_race(P0LocalAction action,
         EXPECT_EQ(recovered.error().code,
                   sync::coordinator::ErrorCode::RecoveryConflict);
         EXPECT_EQ(bytes_at(checkpoint_local / "file.txt"), user);
-        record("recovery_before_effect", recovered.error().detail);
+        record("crash_before_conflict_detection", recovered.error().detail);
         const auto restart_paths =
             sync::journal::make_paths(checkpoint_profile);
         ASSERT_TRUE(restart_paths.has_value());
@@ -8825,7 +8843,7 @@ void run_p0_local_race(P0LocalAction action,
         ASSERT_TRUE(retained.has_value());
         ASSERT_TRUE(retained->has_value());
         EXPECT_EQ((**retained).operation_id, staged_record.operation_id);
-        record("recovery_journal_retained", "true");
+        record("crash_journal_retained", "true");
     }
 
     if (intervene && executed && !user_preserved) {
@@ -8885,7 +8903,7 @@ void run_p0_local_race(P0LocalAction action,
             EXPECT_EQ(executed.error().detail,
                       "database_failure: failed to save state.db");
             EXPECT_EQ((**db_state).commit_id, base->head.commit_id);
-        } else {
+        } else if (!intervene) {
             ASSERT_TRUE(live_journal->has_value());
             EXPECT_EQ((**live_journal).phase,
                       kasumi::transaction::Phase::FilesStaged);
@@ -8895,12 +8913,37 @@ void run_p0_local_race(P0LocalAction action,
     }
     if (intervene) {
         ASSERT_FALSE(executed.has_value());
-        ASSERT_TRUE(live_journal->has_value());
-        EXPECT_EQ((**live_journal).operation_id, staged_record.operation_id);
+        EXPECT_FALSE(live_journal->has_value());
         EXPECT_TRUE(user_preserved)
             << "U lost after authenticated FilesStaged; backup=" << backup_bytes
             << "; final=" << final_bytes
             << "; sync=" << (executed ? "success" : executed.error().detail);
+        sqlite3* database = nullptr;
+        const auto opened =
+            sqlite3_open(runtime.database_path.string().c_str(), &database);
+        ASSERT_EQ(opened, SQLITE_OK);
+        EXPECT_EQ(sqlite3_exec(database,
+                               "DROP TRIGGER IF EXISTS p0_fail_state;"
+                               "DROP TRIGGER IF EXISTS p0_fail_state_update;",
+                               nullptr,
+                               nullptr,
+                               nullptr),
+                  SQLITE_OK);
+        EXPECT_EQ(sqlite3_close(database), SQLITE_OK);
+        auto retry_lock =
+            kasumi::platform::acquire_profile_lock(root / "profile-p0.lock");
+        ASSERT_TRUE(retry_lock.has_value()) << retry_lock.error();
+        context.profile_lock = *retry_lock;
+        const auto retried =
+            kasumi::application::detail::run_sync(context);
+        kasumi::platform::release_profile_lock(context.profile_lock);
+        ASSERT_TRUE(retried.has_value())
+            << "re-observation after detected conflict failed: "
+            << retried.error().detail;
+        const auto after_retry = sync::journal::load(*live_paths, key);
+        ASSERT_TRUE(after_retry.has_value()) << after_retry.error();
+        EXPECT_FALSE(after_retry->has_value());
+        record("retry_after_observed_change", "success");
     } else {
         if (failure == P0LocalFailure::None) {
             ASSERT_TRUE(executed.has_value()) << executed.error().detail;
@@ -9097,7 +9140,7 @@ TEST(P0MutationSafetyTest,
 }
 
 TEST(P0MutationSafetyTest,
-     PreparedProgressDoesNotAttributeCoincidentRemoteBytes) {
+     PreparedProgressRejectsChangedDestinationBeforeMutation) {
     namespace mutation = kasumi::application::sync::mutation;
     auto workspace = kasumi::test::make_temp_workspace("p0-unproven-remote");
     const auto root = kasumi::test::workspace_root(workspace);
@@ -9127,10 +9170,15 @@ TEST(P0MutationSafetyTest,
                   mutation::MutationErrorCode::DestinationConflict);
         const auto rolled = mutation::rollback_operation(
             operation, 0, local, transaction, *prepared);
-        ASSERT_FALSE(rolled.has_value());
-        EXPECT_EQ(rolled.error().code,
-                  mutation::MutationErrorCode::DestinationConflict);
-        EXPECT_EQ(kasumi::test::read_text(target), "REMOTE");
+        if (action == kasumi::Action::Download) {
+            ASSERT_TRUE(rolled.has_value()) << rolled.error().detail;
+            EXPECT_EQ(kasumi::test::read_text(target), "ORIGINAL");
+        } else {
+            ASSERT_FALSE(rolled.has_value());
+            EXPECT_EQ(rolled.error().code,
+                      mutation::MutationErrorCode::DestinationConflict);
+            EXPECT_EQ(kasumi::test::read_text(target), "REMOTE");
+        }
         EXPECT_EQ(kasumi::test::read_text(transaction.root / "0.backup"),
                   "ORIGINAL");
     }
@@ -9347,7 +9395,8 @@ TEST(P0MutationSafetyTest, BackupCorruptedDuringGetIsRejectedOnEveryAttempt) {
 
 void interrupt_p0_after_effect(const std::filesystem::path& root,
                                kasumi::Action action,
-                               bool had_original) {
+                               bool had_original,
+                               int crash_stage = 2) {
     namespace sync = kasumi::application::sync;
     const auto local = root / "local";
     const auto profile = root / "profile";
@@ -9381,13 +9430,38 @@ void interrupt_p0_after_effect(const std::filesystem::path& root,
     ASSERT_TRUE(storage.has_value());
     ASSERT_TRUE(kasumi::transport::initialize(*storage));
     add_storage_object(*storage, root / "source", hash);
-    ASSERT_TRUE(sync::mutation::apply_operation(
+    if (crash_stage == 1) {
+        kasumi::application::sync::mutation_fault_test::set_hook(
+            [](std::string_view point, const std::filesystem::path&) {
+                if (point == "before_download_replace")
+                    std::_Exit(87);
+            });
+    }
+    const auto applied = sync::mutation::apply_operation(
         record->plan.operations[0], 0, local, *storage, key, transaction,
-        record->progress[0]));
-    std::_Exit(86);
+        record->progress[0]);
+    ASSERT_TRUE(applied.has_value());
+    if (crash_stage == 3 || crash_stage == 4) {
+        record->progress[0].state =
+            kasumi::transaction::OperationState::Applied;
+        ASSERT_TRUE(sync::journal::save(*paths, *record, key));
+    }
+    if (crash_stage == 4) {
+        kasumi::application::sync::mutation_fault_test::set_hook(
+            [](std::string_view point, const std::filesystem::path&) {
+                if (point == "after_restore_complete")
+                    std::_Exit(90);
+            });
+        ASSERT_TRUE(sync::mutation::rollback_operation(
+            record->plan.operations[0], 0, local, transaction,
+            record->progress[0]));
+    }
+    std::_Exit(crash_stage == 3 ? 89 : 86);
 }
 
-void check_p0_interrupted_effect(kasumi::Action action, bool had_original) {
+void check_p0_interrupted_effect(kasumi::Action action,
+                                 bool had_original,
+                                 int crash_stage = 2) {
 #if GTEST_HAS_DEATH_TEST
     namespace sync = kasumi::application::sync;
     const auto* inherited = std::getenv("KASUMI_P0_CRASH_ROOT");
@@ -9398,8 +9472,13 @@ void check_p0_interrupted_effect(kasumi::Action action, bool had_original) {
                                : kasumi::test::workspace_root(workspace);
     auto environment = kasumi::test::scoped_environment_variable(
         "KASUMI_P0_CRASH_ROOT", kasumi::platform::path::to_utf8(root));
-    EXPECT_EXIT(interrupt_p0_after_effect(root, action, had_original),
-                ::testing::ExitedWithCode(86), "");
+    const int expected_exit = crash_stage == 1   ? 87
+                              : crash_stage == 3 ? 89
+                              : crash_stage == 4 ? 90
+                                                 : 86;
+    EXPECT_EXIT(interrupt_p0_after_effect(root, action, had_original,
+                                          crash_stage),
+                ::testing::ExitedWithCode(expected_exit), "");
     ASSERT_FALSE(::testing::Test::HasFailure());
     const auto runtime = make_runtime(root / "profile", root / "local",
                                       root / "storage");
@@ -9410,29 +9489,29 @@ void check_p0_interrupted_effect(kasumi::Action action, bool had_original) {
     ASSERT_TRUE(pending.has_value() && *pending);
     ASSERT_EQ((*pending)->phase, kasumi::transaction::Phase::FilesStaged);
     EXPECT_EQ((*pending)->progress[0].state,
-              kasumi::transaction::OperationState::BackupCreated);
+              crash_stage == 3 || crash_stage == 4
+                  ? kasumi::transaction::OperationState::Applied
+                  : kasumi::transaction::OperationState::BackupCreated);
     kasumi::transport::Transport unavailable;
     for (int attempt = 0; attempt < 2; ++attempt) {
         const auto recovered = sync::coordinator::recover_if_needed(
             runtime, unavailable, key);
-        ASSERT_FALSE(recovered.has_value());
-        EXPECT_EQ(recovered.error().code,
-                  sync::coordinator::ErrorCode::RecoveryConflict);
+        ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+        EXPECT_EQ(*recovered,
+                  attempt == 0
+                      ? sync::coordinator::RecoveryResult::RolledBack
+                      : sync::coordinator::RecoveryResult::NoJournal);
         const auto retained = sync::journal::load(*paths, key);
-        ASSERT_TRUE(retained.has_value() && *retained);
-        EXPECT_EQ((*retained)->operation_id, (*pending)->operation_id);
-        EXPECT_EQ((*retained)->progress[0].state,
-                  (*pending)->progress[0].state);
-        if (action == kasumi::Action::Download)
-            EXPECT_EQ(kasumi::test::read_text(root / "local/file.txt"), "REMOTE");
+        ASSERT_TRUE(retained.has_value()) << retained.error();
+        EXPECT_FALSE(retained->has_value());
+        if (had_original)
+            EXPECT_EQ(kasumi::test::read_text(root / "local/file.txt"),
+                      "ORIGINAL");
         else
             EXPECT_FALSE(std::filesystem::exists(root / "local/file.txt"));
         const auto backup = root / "profile/.transactions" /
                             (*pending)->operation_id / "0.backup";
-        if (had_original)
-            EXPECT_EQ(kasumi::test::read_text(backup), "ORIGINAL");
-        else
-            EXPECT_FALSE(std::filesystem::exists(backup));
+        EXPECT_FALSE(std::filesystem::exists(backup));
     }
 #else
     (void)action;
@@ -9441,22 +9520,240 @@ void check_p0_interrupted_effect(kasumi::Action action, bool had_original) {
 #endif
 }
 
-TEST(P0RecoveryWindowTest, DownloadExistingBeforeAppliedRetainsConflict) {
+TEST(P0RecoveryWindowTest,
+     DownloadExistingCrashAfterEffectBeforeAppliedRecovers) {
     check_p0_interrupted_effect(kasumi::Action::Download, true);
 }
 
-TEST(P0RecoveryWindowTest, DownloadAbsentBeforeAppliedRetainsConflict) {
+TEST(P0RecoveryWindowTest,
+     DownloadAbsentCrashAfterEffectBeforeAppliedRecovers) {
     check_p0_interrupted_effect(kasumi::Action::Download, false);
 }
 
-TEST(P0RecoveryWindowTest, DeleteBeforeAppliedRetainsConflict) {
+TEST(P0RecoveryWindowTest, DeleteCrashAfterEffectBeforeAppliedRecovers) {
     check_p0_interrupted_effect(kasumi::Action::DeleteLocal, true);
+}
+
+TEST(P0RecoveryWindowTest, CrashBeforeDownloadInstallRecoversOriginal) {
+    check_p0_interrupted_effect(kasumi::Action::Download, true, 1);
+}
+
+TEST(P0RecoveryWindowTest, CrashAfterAppliedCheckpointRecoversIdempotently) {
+    check_p0_interrupted_effect(kasumi::Action::Download, true, 3);
+}
+
+TEST(P0RecoveryWindowTest, CrashDuringRollbackRecoversIdempotently) {
+    check_p0_interrupted_effect(kasumi::Action::Download, true, 4);
+}
+
+#if defined(KASUMI_JOURNAL_FAULT_TESTS) && GTEST_HAS_DEATH_TEST
+void interrupt_after_conflict_reset_checkpoint(
+    const std::filesystem::path& root) {
+    namespace sync = kasumi::application::sync;
+    const auto profile = root / "profile";
+    const auto local = root / "local";
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    kasumi::test::write_text(local / "a.txt", "A-OLD");
+    kasumi::test::write_text(local / "c.txt", "C-OLD");
+    const auto plan = kasumi::make_sync_plan(
+        {kasumi::Operation{
+             .action = kasumi::Action::Download,
+             .path = "a.txt",
+             .hash = kasumi::hash_hex(kasumi::hasher::hash_string("A-REMOTE")),
+             .size = 8},
+         kasumi::Operation{
+             .action = kasumi::Action::Download,
+             .path = "c.txt",
+             .hash = kasumi::hash_hex(kasumi::hasher::hash_string("C-REMOTE")),
+             .size = 8}},
+        0);
+    auto record = sync::journal::create_record(
+        0, 0, plan, false, std::string(64, 'a'));
+    ASSERT_TRUE(record.has_value());
+    const kasumi::platform::Workspace transaction{
+        profile / ".transactions" / record->operation_id};
+    ASSERT_TRUE(std::filesystem::create_directories(transaction.root));
+    for (std::size_t index = 0; index < plan.operations.size(); ++index) {
+        const auto prepared = sync::mutation::prepare_operation(
+            plan.operations[index], index, local, transaction,
+            record->progress[index]);
+        ASSERT_TRUE(prepared.has_value());
+        record->progress[index] = *prepared;
+    }
+    record->phase = kasumi::transaction::Phase::FilesStaged;
+    record->progress[0].state = kasumi::transaction::OperationState::Applied;
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    ASSERT_TRUE(sync::journal::save(*paths, *record, key));
+
+    // The peer Download completed; the conflicting destination is user-owned.
+    kasumi::test::write_text(local / "a.txt", "A-REMOTE");
+    kasumi::test::write_text(local / "c.txt", "C-USER");
+    for (auto& progress : record->progress)
+        progress.state = kasumi::transaction::OperationState::Prepared;
+    const auto reset = sync::coordinator::detail::rollback_transaction(
+        *paths, *record, transaction, local, key);
+    ASSERT_TRUE(reset.has_value()) << reset.error().detail;
+    std::_Exit(0);
+}
+
+TEST(P0ConflictResolutionCrashTest,
+     ResetCheckpointSurvivesProcessExitBeforeCleanup) {
+    const auto* inherited = std::getenv("KASUMI_P0_CONFLICT_CRASH_ROOT");
+    auto workspace = inherited
+                         ? kasumi::test::TempWorkspace{
+                               nullptr, kasumi::test::remove_temp_workspace}
+                         : kasumi::test::make_temp_workspace(
+                               "p0-conflict-reset-crash");
+    const auto root = inherited
+                          ? kasumi::platform::path::from_utf8(inherited)
+                          : kasumi::test::workspace_root(workspace);
+    auto root_environment = kasumi::test::scoped_environment_variable(
+        "KASUMI_P0_CONFLICT_CRASH_ROOT",
+        kasumi::platform::path::to_utf8(root));
+    {
+        auto crash = kasumi::test::scoped_environment_variable(
+            "KASUMI_TEST_JOURNAL_CRASH", "rollback-reset-saved");
+        EXPECT_EXIT(interrupt_after_conflict_reset_checkpoint(root),
+                    ::testing::ExitedWithCode(86), "");
+    }
+    ASSERT_FALSE(::testing::Test::HasFailure());
+
+    namespace sync = kasumi::application::sync;
+    const auto profile = root / "profile";
+    const auto local = root / "local";
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    const auto pending = sync::journal::load(*paths, key);
+    ASSERT_TRUE(pending.has_value()) << pending.error();
+    ASSERT_TRUE(pending->has_value());
+    EXPECT_EQ((*pending)->phase, kasumi::transaction::Phase::Started);
+    for (const auto& progress : (*pending)->progress)
+        EXPECT_EQ(progress.state, kasumi::transaction::OperationState::Pending);
+    EXPECT_EQ(kasumi::test::read_text(local / "a.txt"), "A-REMOTE");
+    EXPECT_EQ(kasumi::test::read_text(local / "c.txt"), "C-USER");
+
+    kasumi::transport::Transport unavailable;
+    const auto recovered = sync::coordinator::recover_if_needed(
+        make_runtime(profile, local, root / "storage"), unavailable, key);
+    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+    EXPECT_EQ(*recovered, sync::coordinator::RecoveryResult::RolledBack);
+    EXPECT_EQ(kasumi::test::read_text(local / "a.txt"), "A-REMOTE");
+    EXPECT_EQ(kasumi::test::read_text(local / "c.txt"), "C-USER");
+    const auto again = sync::coordinator::recover_if_needed(
+        make_runtime(profile, local, root / "storage"), unavailable, key);
+    ASSERT_TRUE(again.has_value()) << again.error().detail;
+    EXPECT_EQ(*again, sync::coordinator::RecoveryResult::NoJournal);
+}
+#endif
+
+TEST(P0RecoveryWindowTest,
+     MatchingRemoteBytesBeforeAppliedAreAcceptedByContentEquivalence) {
+    namespace sync = kasumi::application::sync;
+    auto workspace =
+        kasumi::test::make_temp_workspace("p0-equivalent-before-applied");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto profile = root / "profile";
+    const auto local = root / "local";
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    const auto target = local / "file.txt";
+    kasumi::test::write_text(target, "ORIGINAL");
+    const auto remote_hash = kasumi::hasher::hash_string("REMOTE");
+    const kasumi::Operation operation{.action = kasumi::Action::Download,
+                                      .path = "file.txt",
+                                      .hash = kasumi::hash_hex(remote_hash),
+                                      .size = 6};
+    const auto plan = kasumi::make_sync_plan({operation}, 0);
+    auto record = sync::journal::create_record(
+        0, 0, plan, false, std::string(64, 'a'));
+    ASSERT_TRUE(record.has_value());
+    const kasumi::platform::Workspace transaction{
+        profile / ".transactions" / record->operation_id};
+    ASSERT_TRUE(std::filesystem::create_directories(transaction.root));
+    const auto prepared = sync::mutation::prepare_operation(
+        operation, 0, local, transaction, record->progress[0]);
+    ASSERT_TRUE(prepared.has_value());
+    record->progress[0] = *prepared;
+    record->phase = kasumi::transaction::Phase::FilesStaged;
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    ASSERT_TRUE(sync::journal::save(*paths, *record, key));
+
+    // Simulate equivalent bytes from an actor whose physical authorship is unknown.
+    kasumi::test::write_text(target, "REMOTE");
+    EXPECT_EQ(kasumi::test::read_text(transaction.root / "0.backup"),
+              "ORIGINAL");
+    kasumi::transport::Transport unavailable;
+    const auto recovered = sync::coordinator::recover_if_needed(
+        make_runtime(profile, local, root / "storage"), unavailable, key);
+    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+    EXPECT_EQ(*recovered, sync::coordinator::RecoveryResult::RolledBack);
+    EXPECT_EQ(kasumi::test::read_text(target), "ORIGINAL");
+    const auto pending = sync::journal::load(*paths, key);
+    ASSERT_TRUE(pending.has_value()) << pending.error();
+    EXPECT_FALSE(pending->has_value());
+}
+
+TEST(P0RecoveryWindowTest, UnexpectedBytesBeforeAppliedRemainARecoveryConflict) {
+    namespace sync = kasumi::application::sync;
+    auto workspace =
+        kasumi::test::make_temp_workspace("p0-unexpected-before-applied");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto profile = root / "profile";
+    const auto local = root / "local";
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    const auto target = local / "file.txt";
+    kasumi::test::write_text(target, "ORIGINAL");
+    const kasumi::Operation operation{
+        .action = kasumi::Action::Download,
+        .path = "file.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("REMOTE")),
+        .size = 6};
+    const auto plan = kasumi::make_sync_plan({operation}, 0);
+    auto record = sync::journal::create_record(
+        0, 0, plan, false, std::string(64, 'a'));
+    ASSERT_TRUE(record.has_value());
+    const kasumi::platform::Workspace transaction{
+        profile / ".transactions" / record->operation_id};
+    ASSERT_TRUE(std::filesystem::create_directories(transaction.root));
+    const auto prepared = sync::mutation::prepare_operation(
+        operation, 0, local, transaction, record->progress[0]);
+    ASSERT_TRUE(prepared.has_value());
+    record->progress[0] = *prepared;
+    record->phase = kasumi::transaction::Phase::FilesStaged;
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    ASSERT_TRUE(sync::journal::save(*paths, *record, key));
+
+    kasumi::test::write_text(target, "UNEXPECTED_USER_BYTES");
+    kasumi::transport::Transport unavailable;
+    const auto recovered = sync::coordinator::recover_if_needed(
+        make_runtime(profile, local, root / "storage"), unavailable, key);
+    ASSERT_FALSE(recovered.has_value());
+    EXPECT_EQ(recovered.error().code,
+              sync::coordinator::ErrorCode::RecoveryConflict);
+    EXPECT_EQ(kasumi::test::read_text(target), "UNEXPECTED_USER_BYTES");
+    EXPECT_EQ(kasumi::test::read_text(transaction.root / "0.backup"),
+              "ORIGINAL");
+    const auto pending = sync::journal::load(*paths, key);
+    ASSERT_TRUE(pending.has_value()) << pending.error();
+    ASSERT_TRUE(pending->has_value());
+    EXPECT_EQ((*pending)->progress[0].state,
+              kasumi::transaction::OperationState::BackupCreated);
 }
 
 void check_p0_plan_sequence(bool directory,
                             bool external_creation,
                             bool interrupt_get,
-                            bool retry = false) {
+                            bool retry = false,
+                            bool preceding_download = false) {
     namespace sync = kasumi::application::sync;
     auto workspace = kasumi::test::make_temp_workspace("p0-plan-sequence");
     const auto root = kasumi::test::workspace_root(workspace);
@@ -9509,6 +9806,12 @@ void check_p0_plan_sequence(bool directory,
     } else {
         row->hash = remote_hash;
         row->size = 4;
+        if (preceding_download) {
+            remote_tree.rows.push_back({.path = "aaa-before-conflict.txt",
+                                        .hash = remote_hash,
+                                        .size = 4,
+                                        .mtime = row->mtime});
+        }
     }
     kasumi::finalize_snapshot(remote_tree);
     const auto remote_commit = sync::publication::prepare_commit(
@@ -9534,6 +9837,20 @@ void check_p0_plan_sequence(bool directory,
     ASSERT_TRUE(input.has_value()) << input.error().detail;
     const auto result = kasumi::reconciliation::reconcile(*input);
     ASSERT_TRUE(result.has_value());
+    if (preceding_download) {
+        ASSERT_GE(result->plan.operations.size(), 4U);
+        EXPECT_EQ(result->plan.operations[0].action,
+                  kasumi::Action::RenameLocal);
+        EXPECT_EQ(result->plan.operations[1].action,
+                  kasumi::Action::Upload);
+        EXPECT_EQ(result->plan.operations[2].action,
+                  kasumi::Action::Download);
+        EXPECT_EQ(result->plan.operations[2].path,
+                  "aaa-before-conflict.txt");
+        EXPECT_EQ(result->plan.operations[3].action,
+                  kasumi::Action::Download);
+        EXPECT_EQ(result->plan.operations[3].path, "file.txt");
+    }
     const auto rename = std::ranges::find(result->plan.operations,
                                           kasumi::Action::RenameLocal,
                                           &kasumi::Operation::action);
@@ -9552,7 +9869,7 @@ void check_p0_plan_sequence(bool directory,
                       kasumi::transaction::OperationState::Applied);
         }
         EXPECT_EQ(kasumi::test::read_text(local / conflict), "B-V2");
-        if (external_creation)
+        if (external_creation && !preceding_download)
             kasumi::test::write_text(local / "file.txt", "USER");
         if (interrupt_get)
             return std::unexpected(kasumi::transport::Error{
@@ -9560,8 +9877,19 @@ void check_p0_plan_sequence(bool directory,
                 .message = "interruption after confirmed rename"});
         return {};
     };
+    if (preceding_download) {
+        kasumi::application::sync::mutation_fault_test::set_hook(
+            [&](std::string_view point, const std::filesystem::path& path) {
+                if (point == "before_download_install" &&
+                    path.filename() == "aaa-before-conflict.txt") {
+                    kasumi::test::write_text(local / "file.txt", "USER");
+                }
+            });
+    }
     const auto executed =
         sync::coordinator::execute(runtime, storage, key, *input, *result);
+    if (preceding_download)
+        kasumi::application::sync::mutation_fault_test::clear_hook();
     if (external_creation || interrupt_get) {
         ASSERT_FALSE(executed.has_value());
         EXPECT_TRUE(intercepted);
@@ -9578,16 +9906,33 @@ void check_p0_plan_sequence(bool directory,
         const auto recovered =
             sync::coordinator::recover_if_needed(runtime, storage, key);
         if (external_creation) {
-            ASSERT_FALSE(recovered.has_value());
-            EXPECT_EQ(recovered.error().code,
-                      sync::coordinator::ErrorCode::RecoveryConflict);
+            ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+            EXPECT_EQ(*recovered,
+                      sync::coordinator::RecoveryResult::NoJournal);
             EXPECT_EQ(kasumi::test::read_text(local / "file.txt"), "USER");
+            if (preceding_download) {
+                EXPECT_EQ(kasumi::test::read_text(
+                              local / "aaa-before-conflict.txt"),
+                          "A-V2");
+                const auto persisted =
+                    kasumi::state_storage::load_state(runtime.database_path);
+                ASSERT_TRUE(persisted.has_value() && *persisted);
+                EXPECT_EQ((**persisted).commit_id, base->head.commit_id);
+                const auto remote_after =
+                    kasumi::application::observation::collect_storage_state(
+                        storage, key, profile, false);
+                ASSERT_TRUE(remote_after.has_value())
+                    << remote_after.error();
+                ASSERT_EQ(remote_after->logical_heads.size(), 1U);
+                EXPECT_EQ(remote_after->logical_heads.front(),
+                          remote_commit->commit_id);
+            }
             EXPECT_EQ(kasumi::test::read_text(local / conflict), "B-V2");
-            EXPECT_TRUE(std::filesystem::exists(paths->final_path));
+            EXPECT_FALSE(std::filesystem::exists(paths->final_path));
         } else {
             ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
             EXPECT_EQ(*recovered,
-                      sync::coordinator::RecoveryResult::RolledBack);
+                      sync::coordinator::RecoveryResult::NoJournal);
             EXPECT_EQ(kasumi::test::read_text(local / "file.txt"), "B-V2");
             EXPECT_FALSE(std::filesystem::exists(local / conflict));
             EXPECT_FALSE(std::filesystem::exists(paths->final_path));
@@ -9614,6 +9959,10 @@ TEST(P0PlanSequenceTest, ConfirmedRenameThenDownloadPreservesBothVersions) {
 }
 TEST(P0PlanSequenceTest, UserCreationAfterConfirmedRenameIsPreserved) {
     check_p0_plan_sequence(false, true, false);
+}
+TEST(P0PlanSequenceTest,
+     CompletedDownloadAndRenameRemainAfterLaterDownloadConflict) {
+    check_p0_plan_sequence(false, true, false, false, true);
 }
 TEST(P0PlanSequenceTest, InterruptedDownloadReversesConfirmedRenameSafely) {
     check_p0_plan_sequence(false, false, true);
@@ -9704,7 +10053,7 @@ void check_p0_sequence_recovery(bool rename_confirmed,
     }
     const auto recovered = sync::coordinator::recover_if_needed(
         make_runtime(profile, local, root / "storage"), unavailable, key);
-    if (!rename_confirmed || (download_installed && !download_confirmed)) {
+    if (!rename_confirmed) {
         ASSERT_FALSE(recovered.has_value());
         EXPECT_EQ(recovered.error().code,
                   sync::coordinator::ErrorCode::RecoveryConflict);
@@ -9733,7 +10082,7 @@ TEST(P0PlanSequenceTest, RecoveryReversesConfirmedRenameBeforeDownload) {
 TEST(P0PlanSequenceTest, RecoveryRetainsAmbiguousRename) {
     check_p0_sequence_recovery(false, false, false);
 }
-TEST(P0PlanSequenceTest, RecoveryRetainsDownloadBeforeAppliedAfterRename) {
+TEST(P0PlanSequenceTest, RecoveryRollsBackDownloadBeforeAppliedAfterRename) {
     check_p0_sequence_recovery(true, true, false);
 }
 TEST(P0PlanSequenceTest, RollbackReversesConfirmedDownloadThenRename) {
@@ -9772,7 +10121,7 @@ TEST(P0PlanSequenceTest, PreparedRenameRejectsEditedSource) {
     EXPECT_EQ(kasumi::test::read_text(transaction.root / "0.backup"), "B-V2");
 }
 
-TEST(P0PlanSequenceTest, UnconfirmedRenameCannotBeReplayedOrRolledBackAsOwned) {
+TEST(P0PlanSequenceTest, UnconfirmedRenameCanBeReplayedAndRolledBack) {
     namespace mutation = kasumi::application::sync::mutation;
     auto workspace = kasumi::test::make_temp_workspace("p0-rename-ambiguous");
     const auto root = kasumi::test::workspace_root(workspace);
@@ -9793,16 +10142,17 @@ TEST(P0PlanSequenceTest, UnconfirmedRenameCannotBeReplayedOrRolledBackAsOwned) {
     ASSERT_TRUE(prepared.has_value());
     kasumi::transport::Transport unavailable;
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
-    ASSERT_TRUE(mutation::apply_operation(
-        operation, 0, local, unavailable, key, transaction, *prepared));
+    const auto first = mutation::apply_operation(
+        operation, 0, local, unavailable, key, transaction, *prepared);
+    ASSERT_TRUE(first.has_value()) << first.error().detail;
     const auto replayed = mutation::apply_operation(
         operation, 0, local, unavailable, key, transaction, *prepared);
-    EXPECT_FALSE(replayed.has_value());
+    EXPECT_TRUE(replayed.has_value()) << replayed.error().detail;
     const auto rolled = mutation::rollback_operation(
         operation, 0, local, transaction, *prepared);
-    EXPECT_FALSE(rolled.has_value());
-    EXPECT_FALSE(std::filesystem::exists(local / "file.txt"));
-    EXPECT_EQ(kasumi::test::read_text(local / "conflict.txt"), "B-V2");
+    ASSERT_TRUE(rolled.has_value()) << rolled.error().detail;
+    EXPECT_EQ(kasumi::test::read_text(local / "file.txt"), "B-V2");
+    EXPECT_FALSE(std::filesystem::exists(local / "conflict.txt"));
     EXPECT_EQ(kasumi::test::read_text(transaction.root / "0.backup"), "B-V2");
 }
 

@@ -1,7 +1,6 @@
 #include "core/ignore.hpp"
 
 #include <gtest/gtest.h>
-
 #include <string>
 #include <string_view>
 #include <vector>
@@ -25,6 +24,26 @@ TEST(IgnoreTest, ReservedInternalFilesAlwaysIgnored) {
     EXPECT_FALSE(is_reserved_internal("kasumi.db.bak"));
     EXPECT_FALSE(is_reserved_internal("other.db"));
     EXPECT_FALSE(is_reserved_internal("sub/kasumi.db"));
+}
+
+TEST(IgnoreTest, OnlyGeneratedKasumiArtifactsAreReserved) {
+    constexpr auto id = "0123456789abcdef0123456789abcdef";
+    EXPECT_TRUE(is_reserved_internal(
+        std::string("docs/file.txt.kasumi-custody-") + id + "-0"));
+    EXPECT_TRUE(is_reserved_internal(
+        std::string("nested\\file.txt.kasumi-rollback-candidate-") + id +
+        "-12"));
+    EXPECT_TRUE(
+        is_reserved_internal(std::string("file.kasumi-new-") + id + "-3"));
+
+    EXPECT_FALSE(is_reserved_internal(".kasumi-notes.md"));
+    EXPECT_FALSE(is_reserved_internal("my.kasumi-rollback-guide.txt"));
+    EXPECT_FALSE(
+        is_reserved_internal(std::string("file.kasumi-custody-") + id + "-x"));
+    EXPECT_FALSE(
+        is_reserved_internal("file.kasumi-custody-0123456789abcdef-0"));
+    EXPECT_FALSE(
+        is_reserved_internal("file.kasumi-unknown-" + std::string(id) + "-0"));
 }
 
 TEST(IgnoreTest, EmptyIgnoreListMatchesNothing) {
@@ -114,7 +133,8 @@ TEST(IgnoreTest, NegationAndRuleOrderPrecedence) {
     EXPECT_FALSE(is_ignored("subdir/important.log", list, false));
 
     // Order matters: later rule overrides earlier rule
-    const auto re_ignored = parse_ignore_rules("*.log\n!important.log\nimportant.log\n");
+    const auto re_ignored =
+        parse_ignore_rules("*.log\n!important.log\nimportant.log\n");
     EXPECT_TRUE(is_ignored("important.log", re_ignored, false));
 
     // Negation inside ignored directory
@@ -135,7 +155,8 @@ TEST(IgnoreTest, GlobPatternsQuestionMarkAndStar) {
 
     EXPECT_TRUE(is_ignored("foobar", list, false));
     EXPECT_TRUE(is_ignored("foo123bar", list, false));
-    EXPECT_FALSE(is_ignored("foo/bar", list, false)); // single * does not cross /
+    EXPECT_FALSE(
+        is_ignored("foo/bar", list, false)); // single * does not cross /
 }
 
 TEST(IgnoreTest, GlobDoubleStarMatchesAcrossSlashes) {
@@ -144,11 +165,13 @@ TEST(IgnoreTest, GlobDoubleStarMatchesAcrossSlashes) {
     EXPECT_TRUE(is_ignored("a/b", list, false));
     EXPECT_TRUE(is_ignored("a/x/b", list, false));
     EXPECT_TRUE(is_ignored("a/x/y/b", list, false));
-    EXPECT_FALSE(is_ignored("other/a/b", list, false)); // contains slash, anchored at start
+    EXPECT_FALSE(is_ignored(
+        "other/a/b", list, false)); // contains slash, anchored at start
 }
 
 TEST(IgnoreTest, UnicodeAndSpecialCharacters) {
-    const auto list = parse_ignore_rules("/Gravações de som/\n*.тест\nRelatório.docx\n");
+    const auto list =
+        parse_ignore_rules("/Gravações de som/\n*.тест\nRelatório.docx\n");
 
     EXPECT_TRUE(is_ignored("Gravações de som", list, true));
     EXPECT_TRUE(is_ignored("Gravações de som/áudio.wav", list, false));
@@ -163,13 +186,12 @@ TEST(IgnoreTest, UnicodeAndSpecialCharacters) {
 }
 
 TEST(IgnoreTest, ParsingBOMCommentsEscapingAndWhitespace) {
-    std::string content =
-        "\xEF\xBB\xBF# Comment at top with BOM\r\n"
-        "*.bak\r\n"
-        "\\#literal_hash.txt\r\n"
-        "\\!literal_exclamation.txt\r\n"
-        "trailing_spaces.txt   \r\n"
-        "escaped_space.txt\\ \r\n";
+    std::string content = "\xEF\xBB\xBF# Comment at top with BOM\r\n"
+                          "*.bak\r\n"
+                          "\\#literal_hash.txt\r\n"
+                          "\\!literal_exclamation.txt\r\n"
+                          "trailing_spaces.txt   \r\n"
+                          "escaped_space.txt\\ \r\n";
 
     const auto list = parse_ignore_rules(content);
     EXPECT_TRUE(is_ignored("file.bak", list, false));
@@ -255,5 +277,3 @@ TEST(IgnoreTest, DeepPathsBeyondStackBufferThreshold) {
 
 } // namespace
 } // namespace kasumi::ignore
-
-

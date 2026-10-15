@@ -55,6 +55,27 @@ A prior synchronization was interrupted before completion (due to network discon
 
 ---
 
+## Local File Changed During Synchronization
+
+### Symptom
+Sync stops with a concurrent-modification or destination-conflict error before completing a local Download, delete, rename, or conflict-resolution step.
+
+### Likely Meaning
+Kasumi observed a local path change before the operation's effect and refused the stale operation. It keeps completed peer file effects, clears their transaction progress durably, and asks the next Sync to reobserve and replan. Validation cannot be atomic with the following filesystem syscall, so an unrelated writer racing that final interval can still have its edit overwritten, removed, or moved.
+
+### Safe Next Steps
+1. Check the reported path and decide whether another editor or process is still changing it.
+2. Run `kasumi sync <profile>` again after that writer is done; the new run reobserves the local tree and plans from the current contents.
+3. If Kasumi leaves `transaction.bin.enc` after a recovery conflict, keep it and `.transactions/<id>` with its backups intact. Do not remove them manually; resolve the reported recovery condition first.
+
+Kasumi synchronizes files but does not retain every past version or replace an independent backup. Keep a separate backup of important data.
+
+### Related Documentation
+* [Synchronization Architecture](architecture/synchronization.md#execute-and-validate)
+* [Transactions and Recovery Architecture](architecture/transactions-and-recovery.md#local-mutation-contract-and-external-writers)
+
+---
+
 ## Exit Code 2 / Pending Materializations
 
 ### Symptom

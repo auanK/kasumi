@@ -706,6 +706,7 @@ rollback_transaction(const journal::Paths& paths,
     if (!saved) {
         return std::unexpected(saved.error());
     }
+    journal_fault_test::hit("rollback-reset-saved", &record);
     return finish_transaction_cleanup(paths, workspace, key, session);
 }
 
@@ -1583,20 +1584,44 @@ execute(const runtime::RuntimeData& runtime_data,
     };
 
     const auto has_applied_uploads = [&]() noexcept {
-        return std::ranges::any_of(record->progress, [](const auto& p) {
-            return p.state == transaction::OperationState::Applied;
-        });
+        for (std::size_t current = 0;
+             current < record->plan.operations.size();
+             ++current) {
+            if (record->plan.operations[current].action == Action::Upload &&
+                record->progress[current].state ==
+                    transaction::OperationState::Applied) {
+                return true;
+            }
+        }
+        return false;
     };
 
     const auto fail_mutation = [&](std::size_t index,
                                    const mutation::MutationError& failure)
         -> std::expected<void, Error> {
-        if (failure.code == mutation::MutationErrorCode::DestinationConflict &&
-            (record->plan.operations[index].action == Action::Download ||
-             record->plan.operations[index].action == Action::DeleteLocal)) {
+        if (failure.code == mutation::MutationErrorCode::DestinationConflict) {
+            // Keep completed peers; the next Sync reobserves the tree.
+            for (std::size_t current = 0;
+                 current < record->plan.operations.size();
+                 ++current) {
+                if (is_local_mutation(record->plan.operations[current].action)) {
+                    record->progress[current].state =
+                        transaction::OperationState::Prepared;
+                }
+            }
+            auto rolled = detail::rollback_transaction(*paths,
+                                                       *record,
+                                                       transaction_workspace,
+                                                       runtime_data.local_dir,
+                                                       key);
+            if (!rolled) {
+                return std::unexpected(rolled.error());
+            }
             return std::unexpected(detail::make_error(
-                ErrorCode::RecoveryConflict,
-                "prepared destination conflict; transaction retained: " +
+                ErrorCode::ConcurrentModification,
+                "local destination changed before mutation; completed local "
+                "effects were retained and the transaction was cleared; "
+                "reobserve and retry: " +
                     mutation::describe(failure),
                 index));
         }

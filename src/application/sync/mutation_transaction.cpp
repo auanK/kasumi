@@ -1,6 +1,7 @@
 #include "application/sync/mutation.hpp"
 #include "crypto/content.hpp"
 #include "mutation_detail.hpp"
+#include "mutation_fault_test.hpp"
 #include "platform/durability.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
@@ -19,11 +20,13 @@
 
 namespace kasumi::application::sync::mutation {
 
+using detail::make_custody_path;
 using detail::make_error;
 using detail::missing;
 using detail::read_status;
 using detail::remove_temporary_file;
 using detail::resolve_local_path;
+using detail::safe_remove_custody;
 
 namespace {
 
@@ -424,13 +427,14 @@ remove_file_if_hash(const std::filesystem::path& path,
                        path,
                        operation_index));
     }
+    mutation_fault_test::hit("before_remove_file_if_hash", path);
     std::error_code error;
     if (!std::filesystem::remove(path, error) || error) {
-        return std::unexpected(
-            make_error(MutationErrorCode::LocalIo,
-                       error ? error.message() : "file could not be removed",
-                       path,
-                       operation_index));
+        return std::unexpected(make_error(
+            MutationErrorCode::LocalIo,
+            error ? error.message() : "file disappeared during rollback",
+            path,
+            operation_index));
     }
     auto synced = platform::durability::sync_parent_directory(path);
     if (!synced) {
@@ -445,18 +449,19 @@ restore_backup(const std::filesystem::path& backup,
                const std::filesystem::path& destination,
                std::string_view expected_hash,
                std::size_t operation_index,
-               std::string_view expected_current_hash = {}) {
+               std::string_view expected_current_hash = {},
+               std::string_view transaction_id = {}) {
     auto valid_backup = validate_backup(backup, expected_hash, operation_index);
     if (!valid_backup) {
         return std::unexpected(valid_backup.error());
     }
     const auto backup_mtime = platform::metadata::last_write_time(backup);
     if (!backup_mtime) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "failed to read backup mtime: " +
-                                              backup_mtime.error(),
-                                          backup,
-                                          operation_index));
+        return std::unexpected(
+            make_error(MutationErrorCode::LocalIo,
+                       "failed to read backup mtime: " + backup_mtime.error(),
+                       backup,
+                       operation_index));
     }
     const auto parent = destination.parent_path();
     auto parent_status = read_status(parent, operation_index);
@@ -485,44 +490,30 @@ restore_backup(const std::filesystem::path& backup,
                        operation_index));
     }
 
-    auto id = platform::random::hex_id();
-    if (!id) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          id.error(),
-                                          destination,
-                                          operation_index));
-    }
-    const auto candidate = platform::path::temporary_sibling_path(
-        destination, ".", ".kasumi-rollback-" + *id);
+    const auto candidate = make_custody_path(
+        destination, transaction_id, operation_index, "rollback-candidate");
     auto candidate_status = read_status(candidate, operation_index);
     if (!candidate_status) {
         return std::unexpected(candidate_status.error());
     }
-    if (!missing(*candidate_status)) {
-        return std::unexpected(
-            make_error(MutationErrorCode::DestinationConflict,
-                       "restore candidate already exists",
-                       candidate,
-                       operation_index));
-    }
-
-    std::error_code error;
-    if (!std::filesystem::copy_file(
-            backup, candidate, std::filesystem::copy_options::none, error) ||
-        error) {
-        remove_temporary_file(candidate);
-        return std::unexpected(
-            make_error(MutationErrorCode::LocalIo,
-                       error ? error.message() : "failed to copy backup",
-                       candidate,
-                       operation_index));
+    if (missing(*candidate_status)) {
+        std::error_code error;
+        if (!std::filesystem::copy_file(
+                backup, candidate, std::filesystem::copy_options::none, error) ||
+            error) {
+            remove_temporary_file(candidate);
+            return std::unexpected(
+                make_error(MutationErrorCode::LocalIo,
+                           error ? error.message() : "failed to copy backup",
+                           candidate,
+                           operation_index));
+        }
+        mutation_fault_test::hit("after_rollback_candidate_copy", candidate);
     }
     auto candidate_valid =
         validate_backup(candidate, expected_hash, operation_index);
-    if (!candidate_valid) {
-        remove_temporary_file(candidate);
+    if (!candidate_valid)
         return std::unexpected(candidate_valid.error());
-    }
     auto synced = platform::durability::sync_file(candidate);
     if (!synced) {
         remove_temporary_file(candidate);
@@ -551,6 +542,7 @@ restore_backup(const std::filesystem::path& backup,
                        operation_index));
     }
     if (expected_current_hash.empty()) {
+        mutation_fault_test::hit("before_restore_install", destination);
         auto installed = platform::durability::install_without_overwrite(
             candidate, destination);
         if (!installed) {
@@ -564,14 +556,18 @@ restore_backup(const std::filesystem::path& backup,
                            destination,
                            operation_index));
         }
-    } else if (auto replaced = platform::durability::replace_atomically(
-                   candidate, destination);
-               !replaced) {
-        remove_temporary_file(candidate);
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          replaced.error(),
-                                          destination,
-                                          operation_index));
+    } else {
+        mutation_fault_test::hit("before_restore_replace", destination);
+        auto installed =
+            platform::durability::replace_atomically(candidate, destination);
+        if (!installed) {
+            remove_temporary_file(candidate);
+            return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                              "failed to replace rollback target: " +
+                                                  installed.error(),
+                                              destination,
+                                              operation_index));
+        }
     }
     auto destination_metadata =
         platform::metadata::set_last_write_time(destination, *backup_mtime);
@@ -590,6 +586,7 @@ restore_backup(const std::filesystem::path& backup,
                                           destination,
                                           operation_index));
     }
+    mutation_fault_test::hit("after_restore_complete", destination);
     return {};
 }
 
@@ -663,7 +660,10 @@ rollback_file_operation(const Operation& operation,
             return std::unexpected(!source_hash ? source_hash.error()
                                                 : destination_hash.error());
         }
+        const bool rename_applied = source_hash->empty() &&
+                                    *destination_hash == progress.previous_hash;
         if (progress.state != transaction::OperationState::Applied &&
+            !rename_applied &&
             !(*source_hash == progress.previous_hash &&
               destination_hash->empty())) {
             return std::unexpected(
@@ -683,16 +683,24 @@ rollback_file_operation(const Operation& operation,
         }
         if (source_hash->empty() &&
             *destination_hash == progress.previous_hash) {
-            auto restored = restore_backup(
-                *backup, *path, progress.previous_hash, operation_index);
+            auto restored = restore_backup(*backup,
+                                           *path,
+                                           progress.previous_hash,
+                                           operation_index,
+                                           {},
+                                           workspace.root.filename().string());
             if (!restored)
                 return restored;
             return remove_file_if_hash(
                 *destination, progress.previous_hash, operation_index);
         }
         if (source_hash->empty() && destination_hash->empty()) {
-            return restore_backup(
-                *backup, *path, progress.previous_hash, operation_index);
+            return restore_backup(*backup,
+                                  *path,
+                                  progress.previous_hash,
+                                  operation_index,
+                                  {},
+                                  workspace.root.filename().string());
         }
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,
@@ -714,29 +722,128 @@ rollback_file_operation(const Operation& operation,
 
     if (operation.action == Action::Download ||
         operation.action == Action::DeleteLocal) {
+        const auto tx_id = workspace.root.filename().string();
+        const auto download_custody =
+            make_custody_path(*path, tx_id, operation_index, "custody");
+        const auto delete_custody =
+            make_custody_path(*path, tx_id, operation_index, "custody-delete");
+        const auto active_custody = operation.action == Action::Download
+                                        ? download_custody
+                                        : delete_custody;
+        const auto validate_active_custody = [&]() -> MutationResult {
+            auto custody_status = read_status(active_custody, operation_index);
+            if (!custody_status)
+                return std::unexpected(custody_status.error());
+            if (missing(*custody_status))
+                return {};
+            if (std::filesystem::is_symlink(*custody_status) ||
+                !std::filesystem::is_regular_file(*custody_status)) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::DestinationConflict,
+                               "rollback custody is not a regular file",
+                               active_custody,
+                               operation_index));
+            }
+            auto actual = detail::file_hash(active_custody, operation_index);
+            if (!actual)
+                return std::unexpected(actual.error());
+            if (*actual != progress.previous_hash) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::DestinationConflict,
+                               "rollback custody content changed",
+                               active_custody,
+                               operation_index));
+            }
+            return {};
+        };
+        const auto cleanup_active_custody = [&]() -> MutationResult {
+            auto valid = validate_active_custody();
+            if (!valid)
+                return valid;
+            return safe_remove_custody(
+                active_custody, progress.previous_hash, operation_index);
+        };
+
         if (progress.had_original) {
             auto actual = current_file_hash(*path, *status, operation_index);
             if (!actual)
                 return std::unexpected(actual.error());
             if (condition && *actual == condition->hash &&
                 (progress.state != transaction::OperationState::Applied ||
-                 condition->backup))
+                 condition->backup)) {
+                auto cleaned = cleanup_active_custody();
+                if (!cleaned)
+                    return cleaned;
                 return {};
-            if (*actual == progress.previous_hash)
-                return {};
-            if (progress.state == transaction::OperationState::Applied &&
-                operation.action == Action::Download &&
-                (actual->empty() || *actual == operation.hash)) {
-                return restore_backup(*backup,
-                                      *path,
-                                      progress.previous_hash,
-                                      operation_index,
-                                      *actual);
             }
-            if (progress.state == transaction::OperationState::Applied &&
+            if (*actual == progress.previous_hash) {
+                auto cleaned = cleanup_active_custody();
+                if (!cleaned)
+                    return cleaned;
+                return {};
+            }
+            // Before Applied, matching bytes are equivalent, not proof of authorship.
+            if (operation.action == Action::Download &&
+                ((progress.state == transaction::OperationState::Applied &&
+                  (actual->empty() || *actual == operation.hash)) ||
+                 (progress.state != transaction::OperationState::Applied &&
+                  *actual == operation.hash))) {
+                auto valid_custody = validate_active_custody();
+                if (!valid_custody)
+                    return valid_custody;
+                auto restored = restore_backup(*backup,
+                                               *path,
+                                               progress.previous_hash,
+                                               operation_index,
+                                               *actual,
+                                               tx_id);
+                if (!restored) {
+                    return restored;
+                }
+                return cleanup_active_custody();
+            }
+            if (operation.action == Action::Download && actual->empty() &&
+                progress.state == transaction::OperationState::BackupCreated) {
+                auto valid_custody = validate_active_custody();
+                if (!valid_custody)
+                    return valid_custody;
+                auto custody_status =
+                    read_status(active_custody, operation_index);
+                if (!custody_status)
+                    return std::unexpected(custody_status.error());
+                if (missing(*custody_status)) {
+                    return std::unexpected(make_error(
+                        MutationErrorCode::DestinationConflict,
+                        "interrupted legacy download has no custody evidence",
+                        *path,
+                        operation_index));
+                }
+                auto restored = restore_backup(*backup,
+                                               *path,
+                                               progress.previous_hash,
+                                               operation_index,
+                                               {},
+                                               tx_id);
+                if (!restored)
+                    return restored;
+                return cleanup_active_custody();
+            }
+            if ((progress.state == transaction::OperationState::Applied ||
+                 progress.state == transaction::OperationState::BackupCreated) &&
                 operation.action == Action::DeleteLocal && actual->empty()) {
-                return restore_backup(
-                    *backup, *path, progress.previous_hash, operation_index);
+                auto valid_custody = validate_active_custody();
+                if (!valid_custody)
+                    return valid_custody;
+                auto restored = restore_backup(*backup,
+                                               *path,
+                                               progress.previous_hash,
+                                               operation_index,
+                                               {},
+                                               tx_id);
+                if (!restored) {
+                    return restored;
+                }
+                return cleanup_active_custody();
             }
             return std::unexpected(
                 make_error(MutationErrorCode::DestinationConflict,
@@ -756,7 +863,8 @@ rollback_file_operation(const Operation& operation,
                 return {};
             if (actual->empty())
                 return {};
-            if (progress.state == transaction::OperationState::Applied &&
+            if ((progress.state == transaction::OperationState::Applied ||
+                 progress.state == transaction::OperationState::BackupCreated) &&
                 operation.action == Action::Download &&
                 *actual == operation.hash) {
                 return remove_file_if_hash(
@@ -1318,14 +1426,17 @@ MutationResult detail::validate_prepared_rename(
     if (!source_hash || !destination_hash)
         return std::unexpected(!source_hash ? source_hash.error()
                                             : destination_hash.error());
-    const bool expect_destination =
-        !progress.had_original ||
-        progress.state == transaction::OperationState::Applied;
-    const bool matches = expect_destination
-                             ? source_hash->empty() &&
-                                   *destination_hash == progress.previous_hash
-                             : *source_hash == progress.previous_hash &&
-                                   destination_hash->empty();
+    const bool at_destination =
+        source_hash->empty() && *destination_hash == progress.previous_hash;
+    const bool at_source = *source_hash == progress.previous_hash &&
+                           destination_hash->empty();
+    const bool matches = progress.state == transaction::OperationState::Applied ||
+                                 !progress.had_original
+                             ? at_destination
+                             : at_source ||
+                                   (progress.state ==
+                                        transaction::OperationState::BackupCreated &&
+                                    at_destination);
     if (!matches)
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,

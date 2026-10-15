@@ -26,6 +26,22 @@ MutationError make_error(MutationErrorCode code,
 // Removes a temporary file without propagating failures.
 void remove_temporary_file(const std::filesystem::path& path) noexcept;
 
+// Removes a legacy custody file only when its content still matches the journal.
+MutationResult safe_remove_custody(const std::filesystem::path& custody,
+                                   std::string_view expected_hash,
+                                   std::size_t operation_index);
+
+// Constructs a deterministic, transaction-namespaced custody path.
+std::filesystem::path
+make_custody_path(const std::filesystem::path& destination,
+                  std::string_view transaction_id,
+                  std::size_t operation_index,
+                  std::string_view prefix = "custody");
+
+// Computes cryptographic hash of a file and formats as hex string.
+std::expected<std::string, MutationError>
+file_hash(const std::filesystem::path& path, std::size_t operation_index);
+
 // Reads path status and contextualizes any failure.
 std::expected<std::filesystem::file_status, MutationError>
 read_status(const std::filesystem::path& path, std::size_t operation_index);
@@ -41,7 +57,8 @@ validate_prepared_operation(const Operation& operation,
                             const platform::Workspace& workspace,
                             const transaction::OperationProgress& progress);
 
-// Checks backup integrity and current authority before a download/delete effect.
+// Checks backup integrity and current authority before a download/delete
+// effect.
 MutationResult validate_prepared_destination(
     const Operation& operation,
     std::size_t operation_index,

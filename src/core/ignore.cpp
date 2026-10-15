@@ -61,6 +61,49 @@ bool glob_matches(std::string_view pattern, std::string_view text) {
     return states[pattern.size()] != 0;
 }
 
+bool generated_internal_name(std::string_view name) noexcept {
+    const auto marker = name.rfind(".kasumi-");
+    if (marker == std::string_view::npos || marker == 0)
+        return false;
+
+    auto suffix = name.substr(marker + 8);
+    constexpr std::array kinds{
+        std::string_view{"custody-delete"},
+        std::string_view{"rollback-remove"},
+        std::string_view{"rollback-candidate"},
+        std::string_view{"rollback-custody"},
+        std::string_view{"custody"},
+        std::string_view{"new"},
+    };
+    bool known_kind = false;
+    for (const auto kind : kinds) {
+        if (suffix.starts_with(kind) && suffix.size() > kind.size() &&
+            suffix[kind.size()] == '-') {
+            suffix.remove_prefix(kind.size() + 1);
+            known_kind = true;
+            break;
+        }
+    }
+    if (!known_kind)
+        return false;
+
+    constexpr std::size_t transaction_id_size = 32;
+    if (suffix.size() <= transaction_id_size + 1 ||
+        suffix[transaction_id_size] != '-') {
+        return false;
+    }
+    for (const char character : suffix.substr(0, transaction_id_size)) {
+        if (!((character >= '0' && character <= '9') ||
+              (character >= 'a' && character <= 'f'))) {
+            return false;
+        }
+    }
+    const auto index = suffix.substr(transaction_id_size + 1);
+    return std::ranges::all_of(index, [](char character) {
+        return character >= '0' && character <= '9';
+    });
+}
+
 struct PathSlice {
     std::string_view text;
     bool is_directory = false;
@@ -197,7 +240,8 @@ void parse_rule_line(std::string line, IgnoreList& result) {
 }
 
 bool ignores(const IgnoreList& list, std::string_view path, bool is_directory) {
-    // Stack-allocated buffers for zero heap allocation for paths with depth <= 32
+    // Stack-allocated buffers for zero heap allocation for paths with depth <=
+    // 32
     std::array<PathSlice, 32> stack_prefixes{};
     std::array<PathSlice, 32> stack_components{};
     std::vector<PathSlice> heap_prefixes;
@@ -214,7 +258,8 @@ bool ignores(const IgnoreList& list, std::string_view path, bool is_directory) {
             (slash == std::string_view::npos) ? path.size() : slash;
         const bool comp_is_dir = (end < path.size()) || is_directory;
 
-        stack_components[count] = {path.substr(start, end - start), comp_is_dir};
+        stack_components[count] = {path.substr(start, end - start),
+                                   comp_is_dir};
         stack_prefixes[count] = {path.substr(0, end), comp_is_dir};
         ++count;
 
@@ -225,7 +270,8 @@ bool ignores(const IgnoreList& list, std::string_view path, bool is_directory) {
 
     if (start <= path.size() && count == stack_prefixes.size()) {
         // Fallback for paths deeper than 32 components
-        heap_components.assign(stack_components.begin(), stack_components.end());
+        heap_components.assign(stack_components.begin(),
+                               stack_components.end());
         heap_prefixes.assign(stack_prefixes.begin(), stack_prefixes.end());
         while (start <= path.size()) {
             const auto slash = path.find('/', start);
@@ -259,9 +305,15 @@ bool ignores(const IgnoreList& list, std::string_view path, bool is_directory) {
 } // namespace
 
 bool is_reserved_internal(std::string_view path) {
-    return path == "kasumi.db" || path == "kasumi.db-shm" ||
-           path == "kasumi.db-wal" || path == "kasumi.lock" ||
-           path == ".kasumi_sync_buffer";
+    if (path == "kasumi.db" || path == "kasumi.db-shm" ||
+        path == "kasumi.db-wal" || path == "kasumi.lock" ||
+        path == ".kasumi_sync_buffer") {
+        return true;
+    }
+    const auto slash = path.find_last_of("/\\");
+    const auto name =
+        slash == std::string_view::npos ? path : path.substr(slash + 1);
+    return generated_internal_name(name);
 }
 
 IgnoreList parse_ignore_rules(std::string_view content) {

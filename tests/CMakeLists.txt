@@ -94,11 +94,16 @@ kasumi_add_test_suite(
         integration/sync/test_journal_incremental.cpp
         integration/sync/test_publication.cpp
         integration/sync/test_reobservation_safeguards.cpp
+        integration/sync/test_toctou_p0.cpp
     LIBRARIES
         kasumi_application
         kasumi_sqlite3
         monocypher
 )
+if(KASUMI_BUILD_JOURNAL_FAULT_TESTS)
+    target_compile_definitions(
+        kasumi_test_integration_sync PRIVATE KASUMI_JOURNAL_FAULT_TESTS)
+endif()
 
 kasumi_add_test_suite(
     kasumi_test_e2e_local_sync
