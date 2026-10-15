@@ -1,5 +1,5 @@
-#ifndef KASUMI_GC_LIVE_PHASE11_SUPPORT_HPP
-#define KASUMI_GC_LIVE_PHASE11_SUPPORT_HPP
+#ifndef KASUMI_GC_LIVE_COPY_BENCHMARK_SUPPORT_HPP
+#define KASUMI_GC_LIVE_COPY_BENCHMARK_SUPPORT_HPP
 
 #include "crypto/physical_hash.hpp"
 #include "gc_live_preflight_support.hpp"
@@ -21,7 +21,7 @@
 #include <string_view>
 #include <vector>
 
-namespace kasumi::operational::phase11 {
+namespace kasumi::operational::gc_live_copy_benchmark {
 
 namespace transport = kasumi::transport;
 namespace preflight = kasumi::operational::gc_live_preflight;
@@ -59,7 +59,7 @@ capability_status_name(CapabilityStatus status) noexcept {
     return "UNKNOWN";
 }
 
-struct Phase11Config {
+struct GcLiveCopyBenchmarkConfig {
     std::string remote_parent;
     provider_target_config::LiveTargetAuthorization authorization;
     std::optional<std::filesystem::path> rclone_config = std::nullopt;
@@ -74,7 +74,7 @@ struct Phase11Config {
     std::chrono::milliseconds preflight_timeout = std::chrono::minutes{2};
 };
 
-struct Phase11RunReport {
+struct GcLiveCopyBenchmarkReport {
     int schema_version = 1;
     std::string namespace_path;
     std::string mode = "batch";
@@ -142,23 +142,23 @@ struct Phase11RunReport {
 };
 
 std::expected<std::string, std::string>
-generate_benchmark_child(std::string_view random_hex);
+generate_trial_child(std::string_view random_hex);
 
-// Phase 3 Capability Test
+// GC batch copy Capability Test
 CapabilityStatus
-run_capability_test(const Phase11Config& config,
-                    Phase11RunReport& report,
+check_copy_capability(const GcLiveCopyBenchmarkConfig& config,
+                    GcLiveCopyBenchmarkReport& report,
                     transport::Transport* parent_transport_override = nullptr,
                     transport::Transport* child_transport_override = nullptr);
 
-// Phase 4+ Benchmark Trial
-Phase11RunReport
-run_benchmark_trial(const Phase11Config& config,
+// Copy benchmark trial
+GcLiveCopyBenchmarkReport
+run_copy_benchmark(const GcLiveCopyBenchmarkConfig& config,
                     transport::Transport* parent_transport_override = nullptr,
                     transport::Transport* child_transport_override = nullptr);
 
-nlohmann::json to_json(const Phase11RunReport& report);
+nlohmann::json to_json(const GcLiveCopyBenchmarkReport& report);
 
-} // namespace kasumi::operational::phase11
+} // namespace kasumi::operational::gc_live_copy_benchmark
 
-#endif // KASUMI_GC_LIVE_PHASE11_SUPPORT_HPP
+#endif // KASUMI_GC_LIVE_COPY_BENCHMARK_SUPPORT_HPP

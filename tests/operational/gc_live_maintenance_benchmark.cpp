@@ -34,8 +34,8 @@
 #include <string_view>
 #include <vector>
 
-#ifndef KASUMI_PHASE18_BUILD_COMMIT
-#define KASUMI_PHASE18_BUILD_COMMIT "unknown"
+#ifndef KASUMI_GC_LIVE_MAINTENANCE_BENCHMARK_BUILD_COMMIT
+#define KASUMI_GC_LIVE_MAINTENANCE_BENCHMARK_BUILD_COMMIT "unknown"
 #endif
 
 namespace {
@@ -81,7 +81,7 @@ bool write_json(const std::filesystem::path& path, const Json& json) {
     return static_cast<bool>(out);
 }
 
-struct Phase20Asset {
+struct GcBenchmarkAsset {
     std::string id;
     std::filesystem::path encrypted_path;
     std::string ciphertext_sha256;
@@ -90,7 +90,7 @@ struct Phase20Asset {
     std::uint64_t ciphertext_size = 0;
 };
 
-std::optional<Phase20Asset>
+std::optional<GcBenchmarkAsset>
 prepare_asset(std::string_view run_id,
               std::string_view kind,
               std::size_t index,
@@ -143,7 +143,7 @@ prepare_asset(std::string_view run_id,
     std::filesystem::remove(plaintext_path, ec);
     if (!plain_hash || !encrypted_hash || ec)
         return std::nullopt;
-    return Phase20Asset{
+    return GcBenchmarkAsset{
         .id = kasumi::crypto::content_identifier(key, *plain_hash),
         .encrypted_path = encrypted_path,
         .ciphertext_sha256 = std::move(*encrypted_hash),
@@ -422,7 +422,7 @@ struct GcLiveOptions {
 
 void print_help() {
     std::cout
-        << "Usage: kasumi_gc_live_phase18 [options]\n\n"
+        << "Usage: kasumi_gc_live_maintenance_benchmark [options]\n\n"
         << "Options:\n"
         << "  --help, -h                  Show this help message\n"
         << "  --self-test                 Run internal sanity checks\n"
@@ -603,7 +603,7 @@ bool run_live_gc(const GcLiveOptions& options) {
     // 1. Prepare local live assets and tree
     std::cout << "[INFO] Preparing " << options.files
               << " protected assets locally...\n";
-    std::vector<Phase20Asset> live_assets;
+    std::vector<GcBenchmarkAsset> live_assets;
     std::vector<std::string> live_ids;
     std::map<std::string, std::pair<kasumi::Hash, std::uint64_t>> live_info;
     kasumi::Snapshot tree;
@@ -632,7 +632,7 @@ bool run_live_gc(const GcLiveOptions& options) {
     // 2. Prepare candidates locally
     std::cout << "[INFO] Preparing " << options.candidates
               << " candidate assets locally...\n";
-    std::vector<Phase20Asset> candidates;
+    std::vector<GcBenchmarkAsset> candidates;
     std::vector<std::string> candidate_ids;
     std::set<std::string> unique_ids(live_ids.begin(), live_ids.end());
     const auto cand_dir = artifacts / "prepared" / "candidates";
@@ -664,7 +664,7 @@ bool run_live_gc(const GcLiveOptions& options) {
     }
 
     // 4. Upload all content via batch put
-    std::vector<Phase20Asset*> all_content;
+    std::vector<GcBenchmarkAsset*> all_content;
     all_content.reserve(live_assets.size() + candidates.size());
     for (auto& asset : live_assets)
         all_content.push_back(&asset);
@@ -1048,7 +1048,7 @@ bool run_live_gc(const GcLiveOptions& options) {
     };
     if (options.young_quarantine_noop_runs > 0) {
         result["benchmark_kind"] = "young-quarantine-noop-baseline";
-        result["build_commit"] = KASUMI_PHASE18_BUILD_COMMIT;
+        result["build_commit"] = KASUMI_GC_LIVE_MAINTENANCE_BENCHMARK_BUILD_COMMIT;
         result["target_id"] = options.target_id.value_or("");
         result["transport_kind"] = "rclone";
         result["young_quarantine_noop_runs_requested"] =

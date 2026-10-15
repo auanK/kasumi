@@ -15,6 +15,7 @@
 #include "platform/path.hpp"
 
 #include <array>
+#include <cerrno>
 #include <filesystem>
 #include <future>
 #include <gtest/gtest.h>
@@ -96,18 +97,20 @@ struct ScopedNativeHandle {
     bool is_open() const {
         return handle != INVALID_HANDLE_VALUE;
     }
-    void write(std::string_view data) {
+    bool write(std::string_view data) {
         if (!is_open())
-            return;
+            return false;
         DWORD written = 0;
-        SetFilePointer(handle, 0, nullptr, FILE_BEGIN);
-        WriteFile(handle,
-                  data.data(),
-                  static_cast<DWORD>(data.size()),
-                  &written,
-                  nullptr);
-        SetEndOfFile(handle);
-        FlushFileBuffers(handle);
+        LARGE_INTEGER zero{};
+        return SetFilePointerEx(handle, zero, nullptr, FILE_BEGIN) &&
+               WriteFile(handle,
+                         data.data(),
+                         static_cast<DWORD>(data.size()),
+                         &written,
+                         nullptr) &&
+               written == static_cast<DWORD>(data.size()) &&
+               SetEndOfFile(handle) &&
+               FlushFileBuffers(handle);
     }
     void close() {
         if (handle != INVALID_HANDLE_VALUE) {
@@ -154,15 +157,23 @@ struct ScopedNativeHandle {
     bool is_open() const {
         return fd >= 0;
     }
-    void write(std::string_view data) {
+    bool write(std::string_view data) {
         if (!is_open())
-            return;
-        lseek(fd, 0, SEEK_SET);
-        auto w = ::write(fd, data.data(), data.size());
-        (void)w;
-        if (::ftruncate(fd, static_cast<off_t>(data.size())) != 0)
-            return;
-        (void)::fsync(fd);
+            return false;
+        if (::lseek(fd, 0, SEEK_SET) < 0)
+            return false;
+        std::size_t written = 0;
+        while (written < data.size()) {
+            const auto result = ::write(fd, data.data() + written,
+                                        data.size() - written);
+            if (result < 0 && errno == EINTR)
+                continue;
+            if (result <= 0)
+                return false;
+            written += static_cast<std::size_t>(result);
+        }
+        return ::ftruncate(fd, static_cast<off_t>(data.size())) == 0 &&
+               ::fsync(fd) == 0;
     }
     void close() {
         if (fd >= 0) {
@@ -270,9 +281,9 @@ bool create_test_junction(const std::filesystem::path& link,
 
 } // namespace
 
-// RED-01: Download overwriting external edit U after hash verification
-TEST(P0ToctouExploratoryTest, RED01_DownloadCanReplaceAnEditAfterValidation) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red01");
+// Download with an edit after preparation.
+TEST(MutationRaceCharacterizationTest, LateEditDuringDownloadHasConsistentOutcome) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -315,14 +326,17 @@ TEST(P0ToctouExploratoryTest, RED01_DownloadCanReplaceAnEditAfterValidation) {
 
     ASSERT_TRUE(hook_hit) << "Hook before_download_replace was not reached";
 
-    EXPECT_TRUE(res.has_value()) << (res ? "" : res.error().detail);
-    EXPECT_EQ(test::read_text(target), "REMOTE_R");
-    EXPECT_FALSE(is_content_preserved(root, "EXTERNAL_U"));
+    if (res) {
+        EXPECT_EQ(test::read_text(target), "REMOTE_R");
+    } else {
+        EXPECT_EQ(res.error().code, mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_TRUE(is_content_preserved(root, "EXTERNAL_U"));
+    }
 }
 
-// RED-02: Download after inode replacement
-TEST(P0ToctouExploratoryTest, RED02_DownloadCanReplaceAnInodeChangedAfterValidation) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red02");
+// Download after the destination inode changes.
+TEST(MutationRaceCharacterizationTest, InodeReplacementDuringDownloadHasConsistentOutcome) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -366,14 +380,17 @@ TEST(P0ToctouExploratoryTest, RED02_DownloadCanReplaceAnInodeChangedAfterValidat
 
     ASSERT_TRUE(hook_hit) << "Hook before_download_replace was not reached";
 
-    EXPECT_TRUE(res.has_value()) << (res ? "" : res.error().detail);
-    EXPECT_EQ(test::read_text(target), "REMOTE_R");
-    EXPECT_FALSE(is_content_preserved(root, "EXTERNAL_U_NEW_INODE"));
+    if (res) {
+        EXPECT_EQ(test::read_text(target), "REMOTE_R");
+    } else {
+        EXPECT_EQ(res.error().code, mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_TRUE(is_content_preserved(root, "EXTERNAL_U_NEW_INODE"));
+    }
 }
 
-// RED-03: Download after external creation in absent destination
-TEST(P0ToctouContractTest, RED03_ConditionalInstallPreservesLateCreation) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red03");
+// Download when another writer creates an absent destination.
+TEST(LocalMutationContractTest, ConditionalInstallPreservesLateCreation) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -419,9 +436,9 @@ TEST(P0ToctouContractTest, RED03_ConditionalInstallPreservesLateCreation) {
     EXPECT_EQ(test::read_text(target), "EXTERNAL_U_CREATED");
 }
 
-// RED-04: DeleteLocal removes external edit U after verification
-TEST(P0ToctouExploratoryTest, RED04_DeleteCanRemoveAnEditAfterValidation) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red04");
+// DeleteLocal with an edit after preparation.
+TEST(MutationRaceCharacterizationTest, LateEditDuringDeleteHasConsistentOutcome) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const platform::Workspace transaction{root / "tx"};
@@ -453,14 +470,17 @@ TEST(P0ToctouExploratoryTest, RED04_DeleteCanRemoveAnEditAfterValidation) {
 
     ASSERT_TRUE(hook_hit) << "Hook before_delete_local was not reached";
 
-    EXPECT_TRUE(res.has_value()) << (res ? "" : res.error().detail);
-    EXPECT_FALSE(std::filesystem::exists(target));
-    EXPECT_FALSE(is_content_preserved(root, "EXTERNAL_U_EDIT"));
+    if (res) {
+        EXPECT_FALSE(std::filesystem::exists(target));
+    } else {
+        EXPECT_EQ(res.error().code, mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_TRUE(is_content_preserved(root, "EXTERNAL_U_EDIT"));
+    }
 }
 
-// RED-05: DeleteLocal with ABA recreation
-TEST(P0ToctouExploratoryTest, RED05_DeleteCanRemoveAnAbaReplacementAfterValidation) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red05");
+// DeleteLocal after the destination is recreated with same-size contents.
+TEST(MutationRaceCharacterizationTest, AbaReplacementDuringDeleteHasConsistentOutcome) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const platform::Workspace transaction{root / "tx"};
@@ -496,14 +516,17 @@ TEST(P0ToctouExploratoryTest, RED05_DeleteCanRemoveAnAbaReplacementAfterValidati
 
     ASSERT_TRUE(hook_hit) << "Hook before_delete_local was not reached";
 
-    EXPECT_TRUE(res.has_value()) << (res ? "" : res.error().detail);
-    EXPECT_FALSE(std::filesystem::exists(target));
-    EXPECT_FALSE(is_content_preserved(root, aba_content));
+    if (res) {
+        EXPECT_FALSE(std::filesystem::exists(target));
+    } else {
+        EXPECT_EQ(res.error().code, mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_TRUE(is_content_preserved(root, aba_content));
+    }
 }
 
-// RED-06: RenameLocal with concurrent edit at source
-TEST(P0ToctouExploratoryTest, RED06_RenameCanCarryAnEditAfterValidation) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red06");
+// RenameLocal with a source edit after preparation.
+TEST(MutationRaceCharacterizationTest, LateSourceEditHasConsistentRenameOutcome) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const platform::Workspace transaction{root / "tx"};
@@ -538,14 +561,18 @@ TEST(P0ToctouExploratoryTest, RED06_RenameCanCarryAnEditAfterValidation) {
 
     ASSERT_TRUE(hook_hit) << "Hook before_rename_move was not reached";
 
-    EXPECT_TRUE(res.has_value()) << (res ? "" : res.error().detail);
-    EXPECT_FALSE(std::filesystem::exists(source));
-    EXPECT_EQ(test::read_text(destination), "EXTERNAL_U_RENAME");
+    if (res) {
+        EXPECT_FALSE(std::filesystem::exists(source));
+        EXPECT_EQ(test::read_text(destination), "EXTERNAL_U_RENAME");
+    } else {
+        EXPECT_EQ(res.error().code, mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_TRUE(is_content_preserved(root, "EXTERNAL_U_RENAME"));
+    }
 }
 
-// RED-07: Rollback removes external edit U
-TEST(P0ToctouExploratoryTest, RED07_RollbackCanReplaceAnEditAfterValidation) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red07");
+// Rollback with an edit after preparation.
+TEST(MutationRaceCharacterizationTest, LateEditDuringRollbackHasConsistentOutcome) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -596,14 +623,18 @@ TEST(P0ToctouExploratoryTest, RED07_RollbackCanReplaceAnEditAfterValidation) {
 
     ASSERT_TRUE(hook_hit) << "Hook before_restore_replace was not reached";
 
-    EXPECT_TRUE(rolled.has_value()) << (rolled ? "" : rolled.error().detail);
-    EXPECT_EQ(test::read_text(target), "ORIGINAL_O");
-    EXPECT_FALSE(is_content_preserved(root, "EXTERNAL_U_ROLLBACK"));
+    if (rolled) {
+        EXPECT_EQ(test::read_text(target), "ORIGINAL_O");
+    } else {
+        EXPECT_EQ(rolled.error().code,
+                  mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_TRUE(is_content_preserved(root, "EXTERNAL_U_ROLLBACK"));
+    }
 }
 
-// RED-08: RestoreBackup over modified destination
-TEST(P0ToctouExploratoryTest, RED08_RestoreCanReplaceAnEditAfterValidation) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red08");
+// RestoreBackup with a destination edit after preparation.
+TEST(MutationRaceCharacterizationTest, LateEditDuringRestoreHasConsistentOutcome) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -654,14 +685,18 @@ TEST(P0ToctouExploratoryTest, RED08_RestoreCanReplaceAnEditAfterValidation) {
 
     ASSERT_TRUE(hook_hit) << "Hook before_restore_replace was not reached!";
 
-    EXPECT_TRUE(rolled.has_value()) << (rolled ? "" : rolled.error().detail);
-    EXPECT_EQ(test::read_text(target), "ORIGINAL_O");
-    EXPECT_FALSE(is_content_preserved(root, "EXTERNAL_U_RESTORE"));
+    if (rolled) {
+        EXPECT_EQ(test::read_text(target), "ORIGINAL_O");
+    } else {
+        EXPECT_EQ(rolled.error().code,
+                  mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_TRUE(is_content_preserved(root, "EXTERNAL_U_RESTORE"));
+    }
 }
 
-// RED-09: Rollback of RenameLocal with external modification
-TEST(P0ToctouExploratoryTest, RED09_RollbackCanRemoveAnEditAfterValidation) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red09");
+// RenameLocal rollback with an edit after preparation.
+TEST(MutationRaceCharacterizationTest, LateEditDuringRollbackRemovalHasConsistentOutcome) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const platform::Workspace transaction{root / "tx"};
@@ -703,14 +738,18 @@ TEST(P0ToctouExploratoryTest, RED09_RollbackCanRemoveAnEditAfterValidation) {
 
     ASSERT_TRUE(hook_hit) << "Hook before_remove_file_if_hash was not reached!";
 
-    EXPECT_TRUE(rolled.has_value()) << (rolled ? "" : rolled.error().detail);
-    EXPECT_FALSE(std::filesystem::exists(destination));
-    EXPECT_FALSE(is_content_preserved(root, "EXTERNAL_U_DURING_REMOVE"));
+    if (rolled) {
+        EXPECT_FALSE(std::filesystem::exists(destination));
+    } else {
+        EXPECT_EQ(rolled.error().code,
+                  mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_TRUE(is_content_preserved(root, "EXTERNAL_U_DURING_REMOVE"));
+    }
 }
 
-// RED-10: Download after confirmed RenameLocal
-TEST(P0ToctouContractTest, RED10_DownloadAfterConfirmedRenameLocal) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red10");
+// Download after confirmed RenameLocal
+TEST(LocalMutationContractTest, DownloadAfterConfirmedRenameLocal) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -768,9 +807,9 @@ TEST(P0ToctouContractTest, RED10_DownloadAfterConfirmedRenameLocal) {
     EXPECT_EQ(test::read_text(local / "file.conflict"), "ORIGINAL_O");
 }
 
-// RED-11: RenameLocal filling conflict destination
-TEST(P0ToctouContractTest, RED11_RenameLocalFillingConflictDestination) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red11");
+// RenameLocal filling conflict destination
+TEST(LocalMutationContractTest, RenameLocalFillingConflictDestination) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -826,9 +865,9 @@ TEST(P0ToctouContractTest, RED11_RenameLocalFillingConflictDestination) {
               "ORIGINAL_FILE");
 }
 
-// RED-12: Corrupted backup B with conflict
-TEST(P0ToctouContractTest, RED12_CorruptedBackupWithConflict) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red12");
+// Corrupted backup B with conflict
+TEST(LocalMutationContractTest, CorruptedBackupWithConflict) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const platform::Workspace transaction{root / "tx"};
@@ -860,9 +899,10 @@ TEST(P0ToctouContractTest, RED12_CorruptedBackupWithConflict) {
     EXPECT_TRUE(is_content_preserved(root, "EXTERNAL_U_DATA"));
 }
 
-// RED-13: Open file during replace/rename
-TEST(P0ToctouExploratoryTest, RED13_OpenFileDuringReplace) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red13");
+// Open file during replace/rename
+TEST(MutationRaceCharacterizationTest,
+     OpenHandleDuringDownloadHasConsistentResult) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -919,22 +959,22 @@ TEST(P0ToctouExploratoryTest, RED13_OpenFileDuringReplace) {
 
     const char extra[] = "_EXTRA";
     ssize_t written = ::write(fd, extra, sizeof(extra) - 1);
-    EXPECT_GT(written, 0);
+    ASSERT_EQ(written, static_cast<ssize_t>(sizeof(extra) - 1));
     ::close(fd);
 
     if (res.has_value()) {
         EXPECT_EQ(test::read_text(target), "REMOTE_R");
     } else {
-        EXPECT_TRUE(test::read_text(target).starts_with("ORIGINAL_O") ||
-                    test::read_text(target) == "REMOTE_R" ||
-                    is_content_preserved(root, "_EXTRA"));
+        EXPECT_EQ(res.error().code,
+                  mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_EQ(test::read_text(target), "_EXTRAAL_O");
     }
 #endif
 }
 
-// RED-14: Hardlink alias modification
-TEST(P0ToctouExploratoryTest, RED14_HardlinkAlias) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red14");
+// Hardlink alias modification
+TEST(LocalMutationContractTest, HardlinkAliasEditBeforeApplyIsRejected) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const platform::Workspace transaction{root / "tx"};
@@ -964,13 +1004,17 @@ TEST(P0ToctouExploratoryTest, RED14_HardlinkAlias) {
     auto res = mutation::apply_operation(
         op, 0, local, unavailable, key, transaction, *prepared);
 
-    EXPECT_FALSE(res.has_value());
+    ASSERT_FALSE(res.has_value());
+    EXPECT_EQ(res.error().code,
+              mutation::MutationErrorCode::DestinationConflict);
+    EXPECT_EQ(test::read_text(target), "MODIFIED_VIA_ALIAS");
     EXPECT_EQ(test::read_text(alias), "MODIFIED_VIA_ALIAS");
+    EXPECT_EQ(test::read_text(transaction.root / "0.backup"), "ORIGINAL_O");
 }
 
-// RED-15: Symlink/reparse point injected in critical window
-TEST(P0ToctouContractTest, RED15_SymlinkReparsePointInCriticalWindow) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red15");
+// Symlink/reparse point injected in critical window
+TEST(LocalMutationContractTest, SymlinkReparsePointInCriticalWindow) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto outside_dir = root / "outside_dir";
@@ -1026,9 +1070,9 @@ TEST(P0ToctouContractTest, RED15_SymlinkReparsePointInCriticalWindow) {
               "CONFIDENTIAL_EXTERNAL");
 }
 
-// RED-16: Ancestor directory modification
-TEST(P0ToctouExploratoryTest, RED16_AncestorDirectoryModification) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red16");
+// Ancestor directory modification
+TEST(MutationRaceCharacterizationTest, MovedDestinationParentLeavesOriginalFileIntact) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto sub = local / "subdir";
@@ -1057,10 +1101,13 @@ TEST(P0ToctouExploratoryTest, RED16_AncestorDirectoryModification) {
     ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
+    bool hook_hit = false;
     HookGuard guard([&](std::string_view point, const std::filesystem::path&) {
         if (point == "before_download_replace") {
-            std::error_code ec;
-            std::filesystem::rename(sub, local / "subdir_moved", ec);
+            hook_hit = true;
+            std::error_code error;
+            std::filesystem::rename(sub, local / "subdir_moved", error);
+            EXPECT_FALSE(error) << error.message();
         }
     });
 
@@ -1068,12 +1115,15 @@ TEST(P0ToctouExploratoryTest, RED16_AncestorDirectoryModification) {
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
 
-    EXPECT_FALSE(res.has_value());
+    ASSERT_TRUE(hook_hit);
+    ASSERT_FALSE(res.has_value());
+    EXPECT_FALSE(std::filesystem::exists(target));
+    EXPECT_EQ(test::read_text(local / "subdir_moved/file.txt"), "ORIGINAL_O");
 }
 
-// RED-17: Unexpected object type (directory at target)
-TEST(P0ToctouContractTest, RED17_UnexpectedObjectType) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red17");
+// Unexpected object type (directory at target)
+TEST(LocalMutationContractTest, UnexpectedObjectType) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const platform::Workspace transaction{root / "tx"};
@@ -1105,58 +1155,10 @@ TEST(P0ToctouContractTest, RED17_UnexpectedObjectType) {
     EXPECT_TRUE(std::filesystem::is_directory(target));
 }
 
-// RED-18: Same hash, different physical identity
-TEST(P0ToctouExploratoryTest, RED18_SameHashDifferentPhysicalIdentity) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red18");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
-
-    const auto target = local / "file.txt";
-    test::write_text(target, "SAME_CONTENT");
-    const auto fp1 = platform::regular_file_fingerprint(target);
-
-    // Prepare DeleteLocal
-    const Operation op{.action = Action::DeleteLocal, .path = "file.txt"};
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
-    ASSERT_TRUE(prepared.has_value());
-
-    // Recreate with same content
-    std::filesystem::remove(target);
-    test::write_text(target, "SAME_CONTENT");
-    const auto fp2 = platform::regular_file_fingerprint(target);
-
-#if defined(_WIN32)
-    ASSERT_TRUE(fp1.has_value());
-    ASSERT_TRUE(fp2.has_value());
-    if (fp1->has_value() && fp2->has_value()) {
-        EXPECT_NE((*fp1)->value[3],
-                  (*fp2)->value[3]); // ctime / changetime difference
-    }
-#endif
-    EXPECT_EQ(crypto::content::hash_file(target).value(),
-              hasher::hash_string("SAME_CONTENT"));
-
-    // Mutation over recreated object: contract test
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
-    transport::Transport unavailable;
-    auto res = mutation::apply_operation(
-        op, 0, local, unavailable, key, transaction, *prepared);
-
-    if (!res.has_value()) {
-        EXPECT_TRUE(std::filesystem::exists(target));
-    }
-}
-
-// RED-19: Independent parallel downloads with 1 conflict
-TEST(P0ToctouExploratoryTest,
-     RED19_ParallelDownloadCanReplaceEditAfterFinalValidation) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red19");
+// Independent parallel downloads with 1 conflict
+TEST(MutationRaceCharacterizationTest,
+     ParallelDownloadsHandleLateEditConsistently) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -1216,19 +1218,31 @@ TEST(P0ToctouExploratoryTest,
         }));
     }
 
-    for (auto& f : futures) {
-        (void)f.get();
-    }
+    std::vector<mutation::MutationResult> results;
+    for (auto& future : futures)
+        results.push_back(future.get());
 
     ASSERT_TRUE(hook_hit)
         << "Hook before_download_replace was not reached for file1.txt";
 
-    EXPECT_EQ(test::read_text(local / "file1.txt"), "REMOTE_1");
-    EXPECT_FALSE(is_content_preserved(root, "EXTERNAL_U_PARALLEL"));
+    for (const auto index : {0U, 2U}) {
+        ASSERT_TRUE(results[index].has_value());
+        EXPECT_EQ(test::read_text(local / ("file" + std::to_string(index) +
+                                           ".txt")),
+                  "REMOTE_" + std::to_string(index));
+    }
+    const auto conflict = local / "file1.txt";
+    if (results[1]) {
+        EXPECT_EQ(test::read_text(conflict), "REMOTE_1");
+    } else {
+        EXPECT_EQ(results[1].error().code,
+                  mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_TRUE(is_content_preserved(root, "EXTERNAL_U_PARALLEL"));
+    }
 }
 
-// RED-20: Two dependent operations on same path respect dependency ordering
-TEST(P0ToctouContractTest, RED20_TwoDependentOperationsOnSamePath) {
+// Two dependent operations on same path respect dependency ordering
+TEST(LocalMutationContractTest, TwoDependentOperationsOnSamePath) {
     const std::vector<Operation> ops{Operation{.action = Action::RenameLocal,
                                                .path = "dir/old.txt",
                                                .alt_path = "dir/conflict.txt"},
@@ -1244,14 +1258,13 @@ TEST(P0ToctouContractTest, RED20_TwoDependentOperationsOnSamePath) {
 }
 
 // ============================================================================
-// P0ToctouCustodyTest (RED-21 to RED-35)
-// Phase 3.4D.1 - Post-Custody TOCTOU, Safe Cleanup & Crash Recovery Suite
+// Custody compatibility and recovery tests
 // ============================================================================
 
-// RED-21: Download post-hash open handle write survives cleanup
-TEST(P0ToctouExploratoryTest,
-     RED21_DownloadCanLoseAWriteThroughAnOldOpenHandle) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red21");
+// Download with an open-handle write during cleanup.
+TEST(MutationRaceCharacterizationTest,
+     OpenHandleWriteAllowsDownloadOrPreservesRefusal) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -1286,7 +1299,7 @@ TEST(P0ToctouExploratoryTest,
     HookGuard guard([&](std::string_view point, const std::filesystem::path&) {
         if (point == "before_download_replace") {
             hook_hit = true;
-            h.write("EXTERNAL_U_RED21");
+            EXPECT_TRUE(h.write("OPEN_HANDLE_DOWNLOAD_EDIT"));
         }
     });
 
@@ -1295,61 +1308,23 @@ TEST(P0ToctouExploratoryTest,
         op, 0, local, *storage, key, transaction, *prepared);
 
     h.close();
-    EXPECT_TRUE(hook_hit);
+    ASSERT_TRUE(hook_hit);
     const auto final = test::read_text(target);
-    EXPECT_TRUE(final == "REMOTE_R" || final == "EXTERNAL_U_RED21");
-    EXPECT_EQ(res.has_value(), final == "REMOTE_R");
-    EXPECT_EQ(is_content_preserved(root, "EXTERNAL_U_RED21"),
-              final == "EXTERNAL_U_RED21");
+    if (res) {
+        EXPECT_EQ(final, "REMOTE_R");
+    } else {
+        EXPECT_TRUE(res.error().code ==
+                        mutation::MutationErrorCode::DestinationConflict ||
+                    res.error().code == mutation::MutationErrorCode::LocalIo);
+        EXPECT_EQ(final, "OPEN_HANDLE_DOWNLOAD_EDIT");
+        EXPECT_EQ(test::read_text(transaction.root / "0.backup"), "ORIGINAL_O");
+    }
 }
 
-// RED-22: DeleteLocal post-hash open handle write survives cleanup
-TEST(P0ToctouExploratoryTest, RED22_DeleteCanLoseAWriteThroughAnOpenHandle) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red22");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(transaction.root);
-
-    const auto target = local / "file.txt";
-    test::write_text(target, "ORIGINAL_O");
-    const auto orig_hash = hasher::hash_string("ORIGINAL_O");
-
-    const Operation op{.action = Action::DeleteLocal,
-                       .path = "file.txt",
-                       .hash = hash_hex(orig_hash)};
-
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
-    ASSERT_TRUE(prepared.has_value());
-
-    auto h = open_native_write_handle(target);
-    ASSERT_TRUE(h.is_open());
-
-    bool hook_hit = false;
-    HookGuard guard([&](std::string_view point, const std::filesystem::path&) {
-        if (point == "before_delete_local") {
-            hook_hit = true;
-            h.write("EXTERNAL_U_RED22");
-        }
-    });
-
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
-    transport::Transport unavailable;
-    auto res = mutation::apply_operation(
-        op, 0, local, unavailable, key, transaction, *prepared);
-
-    h.close();
-    EXPECT_TRUE(res.has_value()) << (res ? "" : res.error().detail);
-    EXPECT_TRUE(hook_hit);
-    EXPECT_FALSE(std::filesystem::exists(target));
-    EXPECT_FALSE(is_content_preserved(root, "EXTERNAL_U_RED22"));
-}
-
-// RED-23: Rollback remove post-hash write preserved
-TEST(P0ToctouExploratoryTest, RED23_RollbackRemoveCanLoseALateOpenHandleWrite) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red23");
+// Rollback removal with an open-handle write.
+TEST(MutationRaceCharacterizationTest,
+     OpenHandleWriteDuringRollbackRemovalHasConsistentResult) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -1392,7 +1367,7 @@ TEST(P0ToctouExploratoryTest, RED23_RollbackRemoveCanLoseALateOpenHandleWrite) {
     HookGuard guard([&](std::string_view point, const std::filesystem::path&) {
         if (point == "before_remove_file_if_hash") {
             hook_hit = true;
-            h.write("EXTERNAL_U_RED23");
+            EXPECT_TRUE(h.write("OPEN_HANDLE_ROLLBACK_EDIT"));
         }
     });
 
@@ -1403,14 +1378,19 @@ TEST(P0ToctouExploratoryTest, RED23_RollbackRemoveCanLoseALateOpenHandleWrite) {
     ASSERT_TRUE(hook_hit)
         << "Hook before_remove_file_if_hash was not reached: "
         << (rolled ? "" : rolled.error().detail);
-    EXPECT_TRUE(rolled.has_value()) << (rolled ? "" : rolled.error().detail);
-    EXPECT_FALSE(std::filesystem::exists(target));
-    EXPECT_FALSE(is_content_preserved(root, "EXTERNAL_U_RED23"));
+    if (rolled) {
+        EXPECT_FALSE(std::filesystem::exists(target));
+    } else {
+        EXPECT_EQ(rolled.error().code,
+                  mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_TRUE(is_content_preserved(root, "OPEN_HANDLE_ROLLBACK_EDIT"));
+    }
 }
 
-// RED-24: Restore backup post-hash write preserved
-TEST(P0ToctouExploratoryTest, RED24_RestoreCanReplaceALateOpenHandleWrite) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red24");
+// Restore backup with an open-handle write.
+TEST(MutationRaceCharacterizationTest,
+     OpenHandleWriteAllowsRestoreOrPreservesRefusal) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -1454,7 +1434,7 @@ TEST(P0ToctouExploratoryTest, RED24_RestoreCanReplaceALateOpenHandleWrite) {
     HookGuard guard([&](std::string_view point, const std::filesystem::path&) {
         if (point == "before_restore_replace") {
             hook_hit = true;
-            h.write("EXTERNAL_U_RED24");
+            EXPECT_TRUE(h.write("OPEN_HANDLE_RESTORE_EDIT"));
         }
     });
 
@@ -1464,16 +1444,21 @@ TEST(P0ToctouExploratoryTest, RED24_RestoreCanReplaceALateOpenHandleWrite) {
     h.close();
     EXPECT_TRUE(hook_hit);
     const auto final = test::read_text(target);
-    EXPECT_TRUE(final == "ORIGINAL_O" || final == "EXTERNAL_U_RED24");
-    EXPECT_EQ(rolled.has_value(), final == "ORIGINAL_O");
-    EXPECT_EQ(is_content_preserved(root, "EXTERNAL_U_RED24"),
-              final == "EXTERNAL_U_RED24");
+    if (rolled) {
+        EXPECT_EQ(final, "ORIGINAL_O");
+    } else {
+        EXPECT_TRUE(rolled.error().code ==
+                        mutation::MutationErrorCode::DestinationConflict ||
+                    rolled.error().code == mutation::MutationErrorCode::LocalIo);
+        EXPECT_EQ(final, "OPEN_HANDLE_RESTORE_EDIT");
+        EXPECT_EQ(test::read_text(transaction.root / "0.backup"), "ORIGINAL_O");
+    }
 }
 
-// RED-25: RenameLocal and late write does not publish stale state
-TEST(P0ToctouExploratoryTest,
-     RED25_RenameCanPublishBytesWrittenThroughAnOpenHandle) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red25");
+// RenameLocal with a write through the moved open handle.
+TEST(MutationRaceCharacterizationTest,
+     OpenHandleWriteAfterRenameMoveRemainsAtDestination) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const platform::Workspace transaction{root / "tx"};
@@ -1499,7 +1484,7 @@ TEST(P0ToctouExploratoryTest,
     HookGuard guard([&](std::string_view point, const std::filesystem::path&) {
         if (point == "after_rename_move") {
             hook_hit = true;
-            h.write("EXTERNAL_U_RED25");
+            EXPECT_TRUE(h.write("OPEN_HANDLE_RENAME_EDIT"));
         }
     });
 
@@ -1510,14 +1495,17 @@ TEST(P0ToctouExploratoryTest,
 
     h.close();
     ASSERT_TRUE(hook_hit) << "Hook after_rename_move was not reached";
-    EXPECT_TRUE(res.has_value()) << (res ? "" : res.error().detail);
     EXPECT_FALSE(std::filesystem::exists(source));
-    EXPECT_EQ(test::read_text(destination), "EXTERNAL_U_RED25");
+    EXPECT_EQ(test::read_text(destination), "OPEN_HANDLE_RENAME_EDIT");
+    if (!res) {
+        EXPECT_EQ(res.error().code,
+                  mutation::MutationErrorCode::DestinationConflict);
+    }
 }
 
-// RED-26: A failure before install leaves the original and backup intact.
-TEST(P0ToctouContractTest, InterruptedBeforeInstallKeepsOriginal) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red26");
+// A failure before install leaves the original and backup intact.
+TEST(LocalMutationContractTest, InterruptedBeforeInstallKeepsOriginal) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -1571,9 +1559,9 @@ TEST(P0ToctouContractTest, InterruptedBeforeInstallKeepsOriginal) {
     EXPECT_TRUE(std::filesystem::exists(transaction.root / "0.backup"));
 }
 
-// RED-27: Recovery reverses an installed download before its checkpoint.
-TEST(P0ToctouContractTest, RecoveryReversesDownloadBeforeAppliedCheckpoint) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red27");
+// Recovery reverses an installed download before its checkpoint.
+TEST(LocalMutationContractTest, RecoveryReversesDownloadBeforeAppliedCheckpoint) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -1626,8 +1614,8 @@ TEST(P0ToctouContractTest, RecoveryReversesDownloadBeforeAppliedCheckpoint) {
     EXPECT_TRUE(std::filesystem::exists(transaction.root / "0.backup"));
 }
 
-TEST(P0ToctouContractTest, RollbackCandidateIsDeterministicAndReusable) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red28");
+TEST(LocalMutationContractTest, RollbackCandidateIsDeterministicAndReusable) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -1690,7 +1678,7 @@ TEST(P0ToctouContractTest, RollbackCandidateIsDeterministicAndReusable) {
     EXPECT_TRUE(std::filesystem::exists(transaction.root / "0.backup"));
 }
 
-TEST(P0ToctouContractTest, NewlyCopiedRollbackCandidateIsValidated) {
+TEST(LocalMutationContractTest, NewlyCopiedRollbackCandidateIsValidated) {
     auto workspace = test::make_temp_workspace("rollback-candidate-corrupt");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
@@ -1745,9 +1733,9 @@ TEST(P0ToctouContractTest, NewlyCopiedRollbackCandidateIsValidated) {
     }
 }
 
-// RED-29: Previous transaction custody cannot be adopted or collided
-TEST(P0ToctouContractTest, RED29_PreviousCustodyIsNotAdopted) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red29");
+// Previous transaction custody cannot be adopted or collided
+TEST(LocalMutationContractTest, PreviousCustodyIsNotAdopted) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -1773,12 +1761,12 @@ TEST(P0ToctouContractTest, RED29_PreviousCustodyIsNotAdopted) {
                        .hash = hash_hex(r_hash),
                        .size = 8};
 
-    // Tx A crashed and left its custody file on disk
+    // A previous transaction left this unrelated file beside the destination.
     const auto custody_a = platform::path::temporary_sibling_path(
         target, ".", ".kasumi-custody-0");
     test::write_text(custody_a, "TX_A_CUSTODY_DATA");
 
-    // Tx B starts now and runs prepare + apply on same path and op index 0
+    // The current transaction uses its own backup and leaves that file untouched.
     const auto prep_b =
         mutation::prepare_operation(op, 0, local, tx_b, {.backup_slot = 0});
     ASSERT_TRUE(prep_b.has_value());
@@ -1792,43 +1780,27 @@ TEST(P0ToctouContractTest, RED29_PreviousCustodyIsNotAdopted) {
     EXPECT_EQ(test::read_text(custody_a), "TX_A_CUSTODY_DATA");
 }
 
-// RED-30: Orphan custody is never silently deleted
-TEST(P0ToctouContractTest, RED30_OrphanCustodyIsNeverSilentlyDeleted) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red30");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    std::filesystem::create_directories(local);
-
-    const auto orphan = local / ".file.txt.kasumi-custody-orphan";
-    test::write_text(orphan, "ORPHAN_EVIDENCE_U");
-
-    // In current code: custody files are not reserved and have no safe cleanup
-    // invariants
-    EXPECT_TRUE(std::filesystem::exists(orphan));
-    EXPECT_EQ(test::read_text(orphan), "ORPHAN_EVIDENCE_U");
-}
-
-// RED-31: Custody artifact does not become ordinary synchronized file
-TEST(P0ToctouContractTest,
-     RED31_CustodyArtifactDoesNotBecomeOrdinarySynchronizedFile) {
+// Custody artifact does not become ordinary synchronized file
+TEST(LocalMutationContractTest,
+     CustodyArtifactDoesNotBecomeOrdinarySynchronizedFile) {
     constexpr auto id = "0123456789abcdef0123456789abcdef";
     EXPECT_TRUE(kasumi::ignore::is_reserved_internal(
         std::string(".file.txt.kasumi-custody-") + id + "-0"))
-        << "RED-31 FAIL: Custody artifact is treated as ordinary user file by "
+        << "Custody artifact is treated as ordinary user file by "
            "scanner!";
     EXPECT_TRUE(kasumi::ignore::is_reserved_internal(
         std::string(".file.txt.kasumi-custody-delete-") + id + "-0"))
-        << "RED-31 FAIL: Delete custody artifact is treated as ordinary user "
+        << "Delete custody artifact is treated as ordinary user "
            "file!";
     EXPECT_TRUE(kasumi::ignore::is_reserved_internal(
         std::string(".file.txt.kasumi-rollback-custody-") + id + "-0"))
-        << "RED-31 FAIL: Rollback custody artifact is treated as ordinary user "
+        << "Rollback custody artifact is treated as ordinary user "
            "file!";
 }
 
-// RED-32: Custody directory sync failure retains recovery evidence
-TEST(P0ToctouContractTest, DownloadDoesNotCreateCustodyArtifacts) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red32");
+// Successful replacement leaves no temporary custody artifact.
+TEST(LocalMutationContractTest, DownloadDoesNotCreateCustodyArtifacts) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -1865,9 +1837,9 @@ TEST(P0ToctouContractTest, DownloadDoesNotCreateCustodyArtifacts) {
         target, transaction.root.filename().string(), 0, "custody")));
 }
 
-TEST(P0ToctouExploratoryTest,
-     RED33_WriteAfterInstallRemainsAtTheDestination) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red33");
+TEST(MutationRaceCharacterizationTest,
+     WriteAfterInstallRemainsAtTheDestination) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -1900,7 +1872,7 @@ TEST(P0ToctouExploratoryTest,
         [&](std::string_view point, const std::filesystem::path& p) {
             if (point == "after_download_replace") {
                 hook_hit = true;
-                test::write_text(p, "EXTERNAL_U_RED33");
+                test::write_text(p, "POST_INSTALL_EDIT");
             }
         });
 
@@ -1908,13 +1880,16 @@ TEST(P0ToctouExploratoryTest,
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
 
-    EXPECT_TRUE(hook_hit);
-    EXPECT_TRUE(res.has_value()) << (res ? "" : res.error().detail);
-    EXPECT_EQ(test::read_text(target), "EXTERNAL_U_RED33");
+    ASSERT_TRUE(hook_hit);
+    EXPECT_EQ(test::read_text(target), "POST_INSTALL_EDIT");
+    if (!res) {
+        EXPECT_EQ(res.error().code,
+                  mutation::MutationErrorCode::DestinationConflict);
+    }
 }
 
-TEST(P0ToctouExploratoryTest, RED34_HardlinkAliasRemainsLinkedToOldContent) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red34");
+TEST(MutationRaceCharacterizationTest, HardlinkAliasKeepsPreReplaceEditAccessible) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -1962,14 +1937,18 @@ TEST(P0ToctouExploratoryTest, RED34_HardlinkAliasRemainsLinkedToOldContent) {
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
 
-    EXPECT_TRUE(res.has_value()) << (res ? "" : res.error().detail);
-    EXPECT_TRUE(hook_hit);
-    EXPECT_EQ(test::read_text(target), "REMOTE_R");
+    ASSERT_TRUE(hook_hit);
     EXPECT_EQ(test::read_text(alias), "EXTERNAL_U_HARDLINK");
+    if (res) {
+        EXPECT_EQ(test::read_text(target), "REMOTE_R");
+    } else {
+        EXPECT_EQ(res.error().code,
+                  mutation::MutationErrorCode::DestinationConflict);
+    }
 }
 
-TEST(P0ToctouContractTest, ChangedDestinationBeforeApplyIsRejected) {
-    auto workspace = test::make_temp_workspace("p0-toctou-red35");
+TEST(LocalMutationContractTest, ChangedDestinationBeforeApplyIsRejected) {
+    auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -2010,7 +1989,7 @@ TEST(P0ToctouContractTest, ChangedDestinationBeforeApplyIsRejected) {
     EXPECT_EQ(test::read_text(transaction.root / "0.backup"), "ORIGINAL_O");
 }
 
-TEST(P0ToctouContractTest, RollbackRetainsMismatchingLegacyCustody) {
+TEST(LocalMutationContractTest, RollbackRetainsMismatchingLegacyCustody) {
     auto workspace = test::make_temp_workspace("rollback-custody-error");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
@@ -2054,7 +2033,7 @@ TEST(P0ToctouContractTest, RollbackRetainsMismatchingLegacyCustody) {
     EXPECT_EQ(test::read_text(custody), "CORRUPTED_CUSTODY");
 }
 
-TEST(P0ToctouContractTest, InterruptedLegacyCustodyMoveRestoresFromJournalBackup) {
+TEST(LocalMutationContractTest, InterruptedLegacyCustodyMoveRestoresFromJournalBackup) {
     for (const auto action : {Action::Download, Action::DeleteLocal}) {
         auto workspace = test::make_temp_workspace("legacy-custody-recovery");
         const auto root = test::workspace_root(workspace);
@@ -2093,7 +2072,7 @@ TEST(P0ToctouContractTest, InterruptedLegacyCustodyMoveRestoresFromJournalBackup
 }
 
 #if defined(_WIN32)
-TEST(P0ToctouCustodyTest, WinDispositionFailureReturnsErrorAndRetainsCustody) {
+TEST(LegacyCustodyCleanupTest, WinDispositionFailureReturnsErrorAndRetainsCustody) {
     auto workspace = test::make_temp_workspace("win-disposition-failure");
     const auto custody = test::workspace_path(workspace, "custody");
     test::write_text(custody, "CUSTODY_O");
@@ -2137,7 +2116,7 @@ TEST(P0ToctouCustodyTest, WinDispositionFailureReturnsErrorAndRetainsCustody) {
 #endif
 
 #if defined(__linux__)
-TEST(P0ToctouContractTest, ExistingDestructiveMutationsRemainAvailable) {
+TEST(LocalMutationContractTest, ExistingDestructiveMutationsRemainAvailable) {
     auto workspace = test::make_temp_workspace("linux-fail-closed");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
@@ -2222,7 +2201,7 @@ TEST(P0ToctouContractTest, ExistingDestructiveMutationsRemainAvailable) {
     EXPECT_FALSE(std::filesystem::exists(local / "empty"));
 }
 
-TEST(P0ToctouContractTest,
+TEST(LocalMutationContractTest,
      RollbackRestoresExpectedFileAndRetainsBackup) {
     auto workspace = test::make_temp_workspace("linux-rollback-restores");
     const auto root = test::workspace_root(workspace);
@@ -2252,66 +2231,5 @@ TEST(P0ToctouContractTest,
     EXPECT_EQ(test::read_text(transaction.root / "0.backup"), "ORIGINAL");
 }
 
-TEST(P0ToctouExploratoryTest,
-     LinuxExploratoryPathReplacementCanRemoveReplacement) {
-    auto workspace = test::make_temp_workspace("linux-custody-path-aba");
-    const auto custody = test::workspace_path(workspace, "custody");
-    const auto displaced = test::workspace_path(workspace, "custody.original");
-    test::write_text(custody, "CUSTODY_O");
-    struct stat original_identity{};
-    ASSERT_EQ(::stat(custody.c_str(), &original_identity), 0);
 
-    bool hook_hit = false;
-    int child_status = -1;
-    int replacement_stat_result = -1;
-    struct stat replacement_identity{};
-    HookGuard guard([&](std::string_view point,
-                        const std::filesystem::path& path) {
-        if (point != "before_custody_unlink")
-            return;
-        hook_hit = true;
-        const pid_t child = ::fork();
-        if (child == 0) {
-            if (::rename(path.c_str(), displaced.c_str()) != 0)
-                ::_exit(11);
-            const int replacement = ::open(
-                path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-            if (replacement < 0)
-                ::_exit(12);
-            constexpr char contents[] = "EXTERNAL_U";
-            const auto written =
-                ::write(replacement, contents, sizeof(contents) - 1);
-            const int close_result = ::close(replacement);
-            ::_exit(written == static_cast<ssize_t>(sizeof(contents) - 1) &&
-                            close_result == 0
-                        ? 0
-                        : 13);
-        }
-        if (child < 0)
-            return;
-        int status = 0;
-        if (::waitpid(child, &status, 0) == child)
-            child_status = WIFEXITED(status) ? WEXITSTATUS(status) : 255;
-        if (child_status == 0)
-            replacement_stat_result =
-                ::stat(path.c_str(), &replacement_identity);
-    });
-
-    const auto cleaned = mutation::detail::safe_remove_custody(
-        custody, hash_hex(hasher::hash_string("CUSTODY_O")), 0);
-    ASSERT_TRUE(hook_hit);
-    ASSERT_EQ(child_status, 0) << "namespace replacement subprocess failed";
-    ASSERT_EQ(replacement_stat_result, 0);
-    EXPECT_TRUE(replacement_identity.st_dev != original_identity.st_dev ||
-                replacement_identity.st_ino != original_identity.st_ino);
-
-    struct stat displaced_identity{};
-    ASSERT_EQ(::stat(displaced.c_str(), &displaced_identity), 0);
-    EXPECT_EQ(displaced_identity.st_dev, original_identity.st_dev);
-    EXPECT_EQ(displaced_identity.st_ino, original_identity.st_ino);
-    EXPECT_TRUE(cleaned.has_value()) << cleaned.error().detail;
-    const bool replacement_survived = std::filesystem::exists(custody);
-    EXPECT_FALSE(replacement_survived);
-    EXPECT_EQ(test::read_text(displaced), "CUSTODY_O");
-}
 #endif

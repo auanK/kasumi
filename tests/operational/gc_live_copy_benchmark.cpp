@@ -1,4 +1,4 @@
-#include "gc_live_phase11_support.hpp"
+#include "gc_live_copy_benchmark_support.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -13,7 +13,7 @@
 
 namespace {
 
-namespace phase11 = kasumi::operational::phase11;
+namespace gc_live_copy_benchmark = kasumi::operational::gc_live_copy_benchmark;
 
 struct CliArgs {
     std::optional<std::filesystem::path> provider_config;
@@ -21,7 +21,7 @@ struct CliArgs {
     std::optional<std::filesystem::path> rclone_config;
     std::filesystem::path output;
     std::filesystem::path scratch;
-    phase11::BenchmarkMode mode = phase11::BenchmarkMode::Batch;
+    gc_live_copy_benchmark::BenchmarkMode mode = gc_live_copy_benchmark::BenchmarkMode::Batch;
     std::size_t candidate_count = 8;
     std::size_t payload_bytes = 4096;
     bool capability_test = false;
@@ -30,8 +30,8 @@ struct CliArgs {
 };
 
 void print_usage(std::ostream& out) {
-    out << "Usage: kasumi_gc_live_phase11 [options]\n\n"
-        << "Phase 11 Controlled Live Remote GC Batch Gain Benchmark\n\n"
+    out << "Usage: kasumi_gc_live_copy_benchmark [options]\n\n"
+        << "Live Remote GC Batch Copy Benchmark\n\n"
         << "Options:\n"
         << "  --config <path>                         Live target "
            "configuration\n"
@@ -45,7 +45,7 @@ void print_usage(std::ostream& out) {
            "(default: 8)\n"
         << "  --payload-bytes <bytes>                 Payload bytes per object "
            "(default: 4096)\n"
-        << "  --capability-test                       Run Phase 3 batch "
+        << "  --capability-test                       Run GC batch copy "
            "capability test only\n"
         << "  --execute-live                          Required authorization "
            "gate for live operations\n"
@@ -90,9 +90,9 @@ std::optional<CliArgs> parse_args(std::span<std::string_view> args) {
             if (++i >= args.size())
                 return std::nullopt;
             if (args[i] == "individual") {
-                result.mode = phase11::BenchmarkMode::Individual;
+                result.mode = gc_live_copy_benchmark::BenchmarkMode::Individual;
             } else if (args[i] == "batch") {
-                result.mode = phase11::BenchmarkMode::Batch;
+                result.mode = gc_live_copy_benchmark::BenchmarkMode::Batch;
             } else {
                 std::cerr << "Invalid mode: " << args[i] << '\n';
                 return std::nullopt;
@@ -136,8 +136,8 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    auto selected = phase11::provider_target_config::resolve_target(
-        phase11::provider_target_config::TargetSelectionArguments{
+    auto selected = gc_live_copy_benchmark::provider_target_config::resolve_target(
+        gc_live_copy_benchmark::provider_target_config::TargetSelectionArguments{
             .target_kind = "rclone",
             .config_path = parsed->provider_config,
             .target_id = parsed->target_id,
@@ -149,14 +149,14 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    phase11::Phase11Config config{
+    gc_live_copy_benchmark::GcLiveCopyBenchmarkConfig config{
         .remote_parent = (*selected)->authorized_parent,
         .authorization = {.authorized_parent = (*selected)->authorized_parent},
         .rclone_config = parsed->rclone_config,
         .output_path = parsed->output,
         .local_scratch =
             parsed->scratch.empty()
-                ? (std::filesystem::current_path() / "phase11_scratch")
+                ? (std::filesystem::current_path() / "gc_live_copy_benchmark_scratch")
                 : parsed->scratch,
         .execute_live = parsed->execute_live,
         .candidate_count = parsed->candidate_count,
@@ -167,12 +167,12 @@ int main(int argc, char** argv) {
         .preflight_timeout = std::chrono::minutes{2}};
 
     if (parsed->capability_test) {
-        std::cout << "Running Phase 3 Capability Test against "
+        std::cout << "Running GC batch copy capability test against "
                   << config.remote_parent << "...\n";
-        phase11::Phase11RunReport report;
-        const auto status = phase11::run_capability_test(config, report);
+        gc_live_copy_benchmark::GcLiveCopyBenchmarkReport report;
+        const auto status = gc_live_copy_benchmark::check_copy_capability(config, report);
         std::cout << "Capability test status: "
-                  << phase11::capability_status_name(status) << '\n';
+                  << gc_live_copy_benchmark::capability_status_name(status) << '\n';
         std::cout << "Report status: " << report.status << '\n';
         if (!report.error_message.empty()) {
             std::cout << "Error: " << report.error_message << '\n';
@@ -180,19 +180,19 @@ int main(int argc, char** argv) {
         std::cout << "Wall clock: " << report.timings_ms.total_wall_ms
                   << " ms\n";
         std::cout << "RC requests: " << report.rc_requests.total << '\n';
-        return (status == phase11::CapabilityStatus::Supported ||
-                status == phase11::CapabilityStatus::Unsupported)
+        return (status == gc_live_copy_benchmark::CapabilityStatus::Supported ||
+                status == gc_live_copy_benchmark::CapabilityStatus::Unsupported)
                    ? 0
                    : 1;
     }
 
-    std::cout << "Running Phase 11 Benchmark Trial: N="
+    std::cout << "Running GC Live Copy Benchmark Trial: N="
               << config.candidate_count
-              << ", mode=" << phase11::mode_name(config.mode)
+              << ", mode=" << gc_live_copy_benchmark::mode_name(config.mode)
               << ", payload=" << config.payload_bytes << " bytes against "
               << config.remote_parent << "...\n";
 
-    const auto report = phase11::run_benchmark_trial(config);
+    const auto report = gc_live_copy_benchmark::run_copy_benchmark(config);
     std::cout << "Trial status: " << report.status << '\n';
     if (!report.error_message.empty()) {
         std::cout << "Error: " << report.error_message << '\n';

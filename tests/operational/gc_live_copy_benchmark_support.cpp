@@ -1,4 +1,4 @@
-#include "gc_live_phase11_support.hpp"
+#include "gc_live_copy_benchmark_support.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -7,7 +7,7 @@
 #include <system_error>
 #include <thread>
 
-namespace kasumi::operational::phase11 {
+namespace kasumi::operational::gc_live_copy_benchmark {
 
 namespace {
 
@@ -68,7 +68,7 @@ double elapsed_ms(std::chrono::steady_clock::time_point start,
 } // namespace
 
 std::expected<std::string, std::string>
-generate_benchmark_child(std::string_view random_hex) {
+generate_trial_child(std::string_view random_hex) {
     if (random_hex.size() != 32) {
         return std::unexpected("namespace nonce must be 128-bit lowercase hex");
     }
@@ -83,8 +83,8 @@ generate_benchmark_child(std::string_view random_hex) {
 }
 
 CapabilityStatus
-run_capability_test(const Phase11Config& config,
-                    Phase11RunReport& report,
+check_copy_capability(const GcLiveCopyBenchmarkConfig& config,
+                    GcLiveCopyBenchmarkReport& report,
                     transport::Transport* parent_transport_override,
                     transport::Transport* child_transport_override) {
     report.schema_version = 1;
@@ -127,7 +127,7 @@ run_capability_test(const Phase11Config& config,
             report.error_message = "could not generate random nonce";
             return CapabilityStatus::Failed;
         }
-        auto generated = generate_benchmark_child(*nonce);
+        auto generated = generate_trial_child(*nonce);
         if (!generated) {
             report.status = "FAIL";
             report.error_message = generated.error();
@@ -501,11 +501,11 @@ run_capability_test(const Phase11Config& config,
     return outcome;
 }
 
-Phase11RunReport
-run_benchmark_trial(const Phase11Config& config,
+GcLiveCopyBenchmarkReport
+run_copy_benchmark(const GcLiveCopyBenchmarkConfig& config,
                     transport::Transport* parent_transport_override,
                     transport::Transport* child_transport_override) {
-    Phase11RunReport report;
+    GcLiveCopyBenchmarkReport report;
     report.schema_version = 1;
     report.mode = std::string{mode_name(config.mode)};
     report.candidate_count = config.candidate_count;
@@ -546,7 +546,7 @@ run_benchmark_trial(const Phase11Config& config,
             report.error_message = "could not generate random nonce";
             return report;
         }
-        auto generated = generate_benchmark_child(*nonce);
+        auto generated = generate_trial_child(*nonce);
         if (!generated) {
             report.status = "FAIL";
             report.error_message = generated.error();
@@ -930,7 +930,7 @@ run_benchmark_trial(const Phase11Config& config,
     return report;
 }
 
-nlohmann::json to_json(const Phase11RunReport& report) {
+nlohmann::json to_json(const GcLiveCopyBenchmarkReport& report) {
     nlohmann::json root{
         {"schema_version", report.schema_version},
         {"namespace", report.namespace_path},
@@ -993,4 +993,4 @@ nlohmann::json to_json(const Phase11RunReport& report) {
     return root;
 }
 
-} // namespace kasumi::operational::phase11
+} // namespace kasumi::operational::gc_live_copy_benchmark

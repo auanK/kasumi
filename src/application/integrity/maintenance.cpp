@@ -1900,9 +1900,9 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                         });
                     }
 
-                    // Phase 1: prepare source hashes serially.
+                    // Prepare source hashes serially.
                     {
-                        BatchPhaseTraceGuard phase1_guard{
+                        BatchPhaseTraceGuard prepare_hashes_guard{
                             "gc.batch_prepare_duration_us",
                             platform::perf_trace::begin()};
                         std::vector<CandidateItem*> to_batch_copy;
@@ -2129,9 +2129,9 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                         }
                     }
 
-                    // Phase 2: Batch Verification of Native Copies
+                    // Verify native copies in batches.
                     {
-                        BatchPhaseTraceGuard phase2_guard{
+                        BatchPhaseTraceGuard batch_verification_guard{
                             "gc.batch_verify_duration_us",
                             platform::perf_trace::begin()};
                         std::vector<CandidateItem*> to_batch_verify;
@@ -2285,9 +2285,9 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                         }
                     }
 
-                    // Phase 3: Metadata Publication and Removal
+                    // Publish metadata and remove original candidates.
                     {
-                        BatchPhaseTraceGuard phase3_guard{
+                        BatchPhaseTraceGuard metadata_removal_guard{
                             "gc.batch_publish_remove_duration_us",
                             platform::perf_trace::begin()};
                         const auto post_copy_barrier_trace =

@@ -94,7 +94,7 @@ kasumi_add_test_suite(
         integration/sync/test_journal_incremental.cpp
         integration/sync/test_publication.cpp
         integration/sync/test_reobservation_safeguards.cpp
-        integration/sync/test_toctou_p0.cpp
+        integration/sync/test_mutation_contracts.cpp
     LIBRARIES
         kasumi_application
         kasumi_sqlite3
@@ -271,8 +271,8 @@ kasumi_add_test_suite(
     "operational.gc_live_runner"
     SOURCES
         unit/operational/test_gc_live_runner.cpp
-        unit/operational/test_gc_live_phase11.cpp
-        operational/gc_live_phase11_support.cpp
+        unit/operational/test_gc_live_authorization.cpp
+        operational/gc_live_copy_benchmark_support.cpp
         operational/gc_live_runner_support.cpp
         operational/gc_live_preflight_support.cpp
         operational/remote_copy_smoke_support.cpp

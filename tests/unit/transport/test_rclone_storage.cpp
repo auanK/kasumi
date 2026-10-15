@@ -2313,10 +2313,10 @@ TEST(GcLivePreflightRcTest, FsinfoFailureMalformedAndTimeoutFailClosed) {
 }
 
 // ============================================================================
-// Phase 10B RC Telemetry Tests
+// Retry and request telemetry tests
 // ============================================================================
 
-TEST(RcloneRcTelemetryTest, ScenarioIRcRetryCountsEachAttempt) {
+TEST(RcloneRequestTelemetryTest, RetryTelemetryCountsEveryAttempt) {
     RcServerState remote;
     std::atomic_int attempt_count = 0;
     remote.server.Post(
@@ -2365,7 +2365,7 @@ TEST(RcloneRcTelemetryTest, ScenarioIRcRetryCountsEachAttempt) {
     kasumi::platform::perf_trace::force_enable(false);
 }
 
-TEST(RcloneRcTelemetryTest, ScenarioJFailureBeforeRcSend) {
+TEST(RcloneRequestTelemetryTest, RequestPreflightFailureEmitsNoRequestTelemetry) {
     kasumi::transport::rclone_detail::State state;
     state.port = 12345;
     state.base_url = "/rc";
@@ -2395,7 +2395,7 @@ TEST(RcloneRcTelemetryTest, ScenarioJFailureBeforeRcSend) {
     kasumi::platform::perf_trace::force_enable(false);
 }
 
-TEST(RcloneRcTelemetryTest, ScenarioKRcTelemetryDisabled) {
+TEST(RcloneRequestTelemetryTest, DisabledTracingEmitsNoRequestTelemetry) {
     RcServerState remote;
     remote.server.Post(
         "/rc/operations/hashsumfile",
@@ -2430,7 +2430,7 @@ TEST(RcloneRcTelemetryTest, ScenarioKRcTelemetryDisabled) {
         kasumi::platform::perf_trace::get_count("rc.http_requests_failed"), 0U);
 }
 
-TEST(RcloneRcTelemetryTest, ScenarioRcEndpointsAndControlBytes) {
+TEST(RcloneRequestTelemetryTest, RcEndpointsAcceptControlCharacters) {
     RcServerState remote;
     remote.server.Post(
         "/rc/operations/stat",

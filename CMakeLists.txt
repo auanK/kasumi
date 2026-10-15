@@ -761,15 +761,15 @@ if(KASUMI_BUILD_GC_LIVE_BENCHMARK)
     )
 
     add_executable(
-        kasumi_gc_live_phase11
-        tests/operational/gc_live_phase11.cpp
-        tests/operational/gc_live_phase11_support.cpp
+        kasumi_gc_live_copy_benchmark
+        tests/operational/gc_live_copy_benchmark.cpp
+        tests/operational/gc_live_copy_benchmark_support.cpp
         tests/operational/gc_live_runner_support.cpp
         tests/operational/gc_live_preflight_support.cpp
         tests/operational/remote_copy_smoke_support.cpp
     )
     target_link_libraries(
-        kasumi_gc_live_phase11
+        kasumi_gc_live_copy_benchmark
         PRIVATE
         kasumi_application
         kasumi_transport
@@ -781,7 +781,7 @@ if(KASUMI_BUILD_GC_LIVE_BENCHMARK)
         kasumi_warnings
     )
     target_include_directories(
-        kasumi_gc_live_phase11
+        kasumi_gc_live_copy_benchmark
         PRIVATE
         ${PROJECT_SOURCE_DIR}/src
         ${PROJECT_SOURCE_DIR}/include
@@ -790,15 +790,15 @@ if(KASUMI_BUILD_GC_LIVE_BENCHMARK)
     execute_process(
         COMMAND git rev-parse --short HEAD
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-        OUTPUT_VARIABLE KASUMI_PHASE18_BUILD_COMMIT
+        OUTPUT_VARIABLE KASUMI_GC_LIVE_MAINTENANCE_BENCHMARK_BUILD_COMMIT
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
     add_executable(
-        kasumi_gc_live_phase18
-        tests/operational/gc_live_phase18.cpp
+        kasumi_gc_live_maintenance_benchmark
+        tests/operational/gc_live_maintenance_benchmark.cpp
     )
     target_link_libraries(
-        kasumi_gc_live_phase18
+        kasumi_gc_live_maintenance_benchmark
         PRIVATE
         kasumi_application
         kasumi_transport
@@ -810,12 +810,12 @@ if(KASUMI_BUILD_GC_LIVE_BENCHMARK)
         kasumi_warnings
     )
     target_compile_definitions(
-        kasumi_gc_live_phase18
+        kasumi_gc_live_maintenance_benchmark
         PRIVATE
-        KASUMI_PHASE18_BUILD_COMMIT="${KASUMI_PHASE18_BUILD_COMMIT}"
+        KASUMI_GC_LIVE_MAINTENANCE_BENCHMARK_BUILD_COMMIT="${KASUMI_GC_LIVE_MAINTENANCE_BENCHMARK_BUILD_COMMIT}"
     )
     target_include_directories(
-        kasumi_gc_live_phase18
+        kasumi_gc_live_maintenance_benchmark
         PRIVATE
         ${PROJECT_SOURCE_DIR}/src
         ${PROJECT_SOURCE_DIR}/include

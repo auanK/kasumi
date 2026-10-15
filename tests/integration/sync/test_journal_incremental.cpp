@@ -140,7 +140,7 @@ void run_download_sync(std::size_t file_count,
 // RED A: Demonstrates that in 3.2A, total journal bytes grow quadratically
 // O(N^2) across scales (100, 200, 400 files), whereas GREEN must achieve
 // approximately linear growth.
-TEST(JournalIncrementalRedTest, GrowthAcrossFileScalesIsLinearNotQuadratic) {
+TEST(JournalIncrementalCheckpointTest, GrowthAcrossFileScalesIsLinearNotQuadratic) {
     std::uint64_t bytes_100 = 0;
     std::uint64_t saves_100 = 0;
     run_download_sync(100, bytes_100, saves_100);
@@ -176,7 +176,7 @@ TEST(JournalIncrementalRedTest, GrowthAcrossFileScalesIsLinearNotQuadratic) {
 // RED B: Demonstrates that completing a single operation currently rewrites the
 // entire plan (~50 KB for 400 operations) instead of an O(1) small delta (< 1
 // KB).
-TEST(JournalIncrementalRedTest, SingleOperationCompletionCostIsO1) {
+TEST(JournalIncrementalCheckpointTest, SingleOperationCompletionCostIsO1) {
     auto owner =
         kasumi::test::make_temp_workspace("single-completion-cost-test");
     const auto profile = kasumi::test::workspace_path(owner, "profile");
@@ -231,7 +231,7 @@ TEST(JournalIncrementalRedTest, SingleOperationCompletionCostIsO1) {
 // RED C: Demonstrates that upload batch checkpointing currently rewrites the
 // full plan on every batch, causing superlinear total bytes as batch count
 // grows.
-TEST(JournalIncrementalRedTest,
+TEST(JournalIncrementalCheckpointTest,
      UploadBatchCheckpointCostScalesLinearlyWithBatchCount) {
     auto run_batch_test = [](std::size_t batch_count,
                              std::size_t batch_size) -> std::uint64_t {
@@ -306,7 +306,7 @@ TEST(JournalIncrementalRedTest,
 }
 
 // RED D: Verifies incremental recovery correctness and security invariants.
-TEST(JournalIncrementalRedTest, IncrementalRecoveryStateReconstruction) {
+TEST(JournalIncrementalCheckpointTest, IncrementalRecoveryStateReconstruction) {
     auto owner =
         kasumi::test::make_temp_workspace("recovery-reconstruction-test");
     const auto profile = kasumi::test::workspace_path(owner, "profile");
@@ -1054,10 +1054,10 @@ TEST_F(JournalCorrectionTest, PendingCountIsBoundedBeforeAllocation) {
 }
 
 // =============================================================================
-// PHASE 3.3B TEST SUITE — JOURNAL CPU & REPLAY OPTIMIZATION
+// Journal checkpoint and replay performance tests
 // =============================================================================
 
-TEST(JournalOptimizationTest, GroupA_CoordinatorDownloadReplayCountBounded) {
+TEST(JournalSessionOptimizationTest, CoordinatorDownloadReplayCountBounded) {
     auto workspace = kasumi::test::make_temp_workspace("opt-33b-download-100");
     const auto profile = kasumi::test::workspace_path(workspace, "profile");
     const auto local = kasumi::test::workspace_path(workspace, "local");
@@ -1124,7 +1124,7 @@ TEST(JournalOptimizationTest, GroupA_CoordinatorDownloadReplayCountBounded) {
     EXPECT_LE(replay_count, 2ULL);
 }
 
-TEST(JournalOptimizationTest, GroupA_SequentialCheckpointsReplayCountBounded) {
+TEST(JournalSessionOptimizationTest, SequentialCheckpointsReplayCountBounded) {
     auto owner = kasumi::test::make_temp_workspace("opt-33b-seq-checkpoints");
     const auto profile = kasumi::test::workspace_path(owner, "profile");
     ASSERT_TRUE(std::filesystem::create_directories(profile));
@@ -1178,8 +1178,8 @@ TEST(JournalOptimizationTest, GroupA_SequentialCheckpointsReplayCountBounded) {
     EXPECT_EQ(replay_count, 0ULL);
 }
 
-TEST(JournalOptimizationTest,
-     GroupA_SingleCheckpointLatencyIndependentOfHistory) {
+TEST(JournalSessionOptimizationTest,
+     SingleCheckpointLatencyIndependentOfHistory) {
     auto owner = kasumi::test::make_temp_workspace("opt-33b-latency-growth");
     const auto profile = kasumi::test::workspace_path(owner, "profile");
     ASSERT_TRUE(std::filesystem::create_directories(profile));
@@ -1244,7 +1244,7 @@ TEST(JournalOptimizationTest,
     EXPECT_EQ(late_replays, 0ULL);
 }
 
-TEST(JournalOptimizationTest, GroupB_SessionLifecycleTransitions) {
+TEST(JournalSessionOptimizationTest, SessionLifecycleTransitions) {
     auto owner = kasumi::test::make_temp_workspace("opt-33b-lifecycle");
     const auto profile = kasumi::test::workspace_path(owner, "profile");
     ASSERT_TRUE(std::filesystem::create_directories(profile));
@@ -1293,7 +1293,7 @@ TEST(JournalOptimizationTest, GroupB_SessionLifecycleTransitions) {
     EXPECT_FALSE(session.is_valid());
 }
 
-TEST(JournalOptimizationTest, GroupC_IdentityMismatchRejection) {
+TEST(JournalSessionOptimizationTest, IdentityMismatchRejection) {
     auto owner =
         kasumi::test::make_temp_workspace("opt-33b-identity-rejection");
     const auto profile = kasumi::test::workspace_path(owner, "profile");
@@ -1330,7 +1330,7 @@ TEST(JournalOptimizationTest, GroupC_IdentityMismatchRejection) {
     EXPECT_FALSE(session.is_valid());
 }
 
-TEST(JournalOptimizationTest, GroupD_DiskAuthorityDivergenceFallback) {
+TEST(JournalSessionOptimizationTest, DiskAuthorityDivergenceFallback) {
     auto owner = kasumi::test::make_temp_workspace("opt-33b-disk-divergence");
     const auto profile = kasumi::test::workspace_path(owner, "profile");
     ASSERT_TRUE(std::filesystem::create_directories(profile));
@@ -1375,7 +1375,7 @@ TEST(JournalOptimizationTest, GroupD_DiskAuthorityDivergenceFallback) {
     EXPECT_EQ(session.status(), sync::journal::SessionState::Invalid);
 }
 
-TEST(JournalOptimizationTest, GroupE_IdempotentCheckpoints) {
+TEST(JournalSessionOptimizationTest, IdempotentCheckpoints) {
     auto owner = kasumi::test::make_temp_workspace("opt-33b-idempotent");
     const auto profile = kasumi::test::workspace_path(owner, "profile");
     ASSERT_TRUE(std::filesystem::create_directories(profile));
@@ -1407,7 +1407,7 @@ TEST(JournalOptimizationTest, GroupE_IdempotentCheckpoints) {
     EXPECT_EQ(session.confirmed_count(), tip_count_before);
 }
 
-TEST(JournalOptimizationTest, GroupF_RollbackUpdatesSession) {
+TEST(JournalSessionOptimizationTest, RollbackUpdatesSession) {
     auto owner = kasumi::test::make_temp_workspace("opt-33b-rollback");
     const auto profile = kasumi::test::workspace_path(owner, "profile");
     ASSERT_TRUE(std::filesystem::create_directories(profile));
@@ -1445,7 +1445,7 @@ TEST(JournalOptimizationTest, GroupF_RollbackUpdatesSession) {
     EXPECT_EQ(session.confirmed()->phase, kasumi::transaction::Phase::Started);
 }
 
-TEST(JournalOptimizationTest, GroupG_IndependentSessionsIsolation) {
+TEST(JournalSessionOptimizationTest, IndependentSessionsIsolation) {
     auto owner1 = kasumi::test::make_temp_workspace("opt-33b-iso-1");
     auto owner2 = kasumi::test::make_temp_workspace("opt-33b-iso-2");
     const auto profile1 = kasumi::test::workspace_path(owner1, "profile");
@@ -1497,7 +1497,7 @@ TEST(JournalOptimizationTest, GroupG_IndependentSessionsIsolation) {
               kasumi::transaction::OperationState::Pending);
 }
 
-TEST(JournalOptimizationTest, GroupH_RetirementLifecycle) {
+TEST(JournalSessionOptimizationTest, RetirementLifecycle) {
     auto owner = kasumi::test::make_temp_workspace("opt-33b-retire");
     const auto profile = kasumi::test::workspace_path(owner, "profile");
     ASSERT_TRUE(std::filesystem::create_directories(profile));
@@ -1528,7 +1528,7 @@ TEST(JournalOptimizationTest, GroupH_RetirementLifecycle) {
     EXPECT_FALSE(save_after_retire);
 }
 
-TEST(JournalOptimizationTest, GroupI_NullSessionCompatibility) {
+TEST(JournalSessionOptimizationTest, NullSessionCompatibility) {
     auto owner = kasumi::test::make_temp_workspace("opt-33b-null-compat");
     const auto profile = kasumi::test::workspace_path(owner, "profile");
     ASSERT_TRUE(std::filesystem::create_directories(profile));
@@ -1568,7 +1568,7 @@ TEST(JournalOptimizationTest, GroupI_NullSessionCompatibility) {
     ASSERT_TRUE(sync::journal::clear(*paths, key, nullptr));
 }
 
-class JournalCpuFinalTest : public JournalCorrectionTest {
+class JournalSessionDurabilityTest : public JournalCorrectionTest {
 protected:
     sync::journal::Session session;
     void activate() {
@@ -1581,7 +1581,7 @@ protected:
     }
 };
 
-TEST_F(JournalCpuFinalTest,
+TEST_F(JournalSessionDurabilityTest,
        ActiveSessionRejectsOversizedProgressStringBeforeWriting) {
     activate();
     const auto confirmed = kasumi::test::read_binary(
@@ -1600,7 +1600,7 @@ TEST_F(JournalCpuFinalTest,
     expect_reload(record);
 }
 
-TEST_F(JournalCpuFinalTest, UnknownSaveModeInvalidatesActiveSession) {
+TEST_F(JournalSessionDurabilityTest, UnknownSaveModeInvalidatesActiveSession) {
     activate();
     EXPECT_FALSE(sync::journal::save(paths,
                                      record,
@@ -1611,7 +1611,7 @@ TEST_F(JournalCpuFinalTest, UnknownSaveModeInvalidatesActiveSession) {
     expect_reload(record);
 }
 
-TEST_F(JournalCpuFinalTest, TruncatedConfirmedLogCannotBeAppendedFromCache) {
+TEST_F(JournalSessionDurabilityTest, TruncatedConfirmedLogCannotBeAppendedFromCache) {
     activate();
     const auto tip_path = paths.final_path.parent_path() / "confirmed.enc";
     const auto tip = kasumi::test::read_binary(tip_path);
@@ -1626,7 +1626,7 @@ TEST_F(JournalCpuFinalTest, TruncatedConfirmedLogCannotBeAppendedFromCache) {
     EXPECT_FALSE(sync::journal::load(paths, key));
 }
 
-TEST_F(JournalCpuFinalTest,
+TEST_F(JournalSessionDurabilityTest,
        SnapshotReplacementWithUnchangedTipInvalidatesCache) {
     activate();
     const auto original = kasumi::test::read_binary(paths.final_path);
@@ -1683,7 +1683,7 @@ TEST_F(JournalCpuFinalTest,
     EXPECT_FALSE(sync::journal::load(paths, key));
 }
 
-TEST_F(JournalCpuFinalTest, RetirementArtifactBlocksActiveSession) {
+TEST_F(JournalSessionDurabilityTest, RetirementArtifactBlocksActiveSession) {
     activate();
     kasumi::test::write_text(paths.final_path.parent_path() / "retired.enc",
                              "incomplete retirement");
@@ -1696,11 +1696,11 @@ TEST_F(JournalCpuFinalTest, RetirementArtifactBlocksActiveSession) {
     EXPECT_EQ(kasumi::test::read_binary(tip_path), tip);
 }
 
-class JournalCpuInputTest : public JournalCpuFinalTest,
+class JournalInputValidationTest : public JournalSessionDurabilityTest,
                             public ::testing::WithParamInterface<std::string> {
 };
 
-TEST_P(JournalCpuInputTest, ActiveAndColdRejectSameInvalidRequest) {
+TEST_P(JournalInputValidationTest, ActiveAndColdRejectSameInvalidRequest) {
     activate();
     const auto name = GetParam();
     if (name == "ProgressRegression") {
@@ -1798,7 +1798,7 @@ TEST_P(JournalCpuInputTest, ActiveAndColdRejectSameInvalidRequest) {
 }
 
 INSTANTIATE_TEST_SUITE_P(Validation,
-                         JournalCpuInputTest,
+                         JournalInputValidationTest,
                          ::testing::Values("ProgressTooShort",
                                            "ProgressTooLong",
                                            "InvalidPhase",
@@ -1832,7 +1832,7 @@ INSTANTIATE_TEST_SUITE_P(Validation,
                              return parameter_info.param;
                          });
 
-TEST_F(JournalCpuFinalTest, ActiveSessionCannotMoveToAnotherProfile) {
+TEST_F(JournalSessionDurabilityTest, ActiveSessionCannotMoveToAnotherProfile) {
     activate();
     const auto another = profile.parent_path() / "other-profile";
     std::filesystem::create_directory(another);
@@ -1845,7 +1845,7 @@ TEST_F(JournalCpuFinalTest, ActiveSessionCannotMoveToAnotherProfile) {
     expect_reload(record);
 }
 
-TEST_F(JournalCpuFinalTest,
+TEST_F(JournalSessionDurabilityTest,
        ConfirmedCacheMovesOnlyChangedFieldsAndNoopPreservesState) {
     activate();
     const auto* plan = session.confirmed()->plan.operations.data();
@@ -1864,7 +1864,7 @@ TEST_F(JournalCpuFinalTest,
     expect_reload(record);
 }
 
-TEST_F(JournalCpuFinalTest,
+TEST_F(JournalSessionDurabilityTest,
        FailureAfterConfirmationInvalidatesCacheAndRetryDoesNotDuplicate) {
     activate();
     record.progress[0].state = kasumi::transaction::OperationState::Applied;
@@ -1895,7 +1895,7 @@ TEST_F(JournalCpuFinalTest,
               kasumi::transaction::codec::encode(record));
 }
 
-TEST_F(JournalCpuFinalTest,
+TEST_F(JournalSessionDurabilityTest,
        EveryActiveSessionDurabilityFailureRequiresAuthenticatedRetry) {
     for (const auto* failure : {"write",
                                 "flush",
@@ -1948,7 +1948,7 @@ TEST_F(JournalCpuFinalTest,
     }
 }
 
-TEST_F(JournalCpuFinalTest,
+TEST_F(JournalSessionDurabilityTest,
        SharedSessionRejectsConcurrentStaleRecordAndAcceptsMergedProgress) {
     activate();
     auto a = record;
@@ -1973,7 +1973,7 @@ TEST_F(JournalCpuFinalTest,
     expect_reload(record);
 }
 
-TEST_F(JournalCpuFinalTest,
+TEST_F(JournalSessionDurabilityTest,
        RetiredSessionCannotBeResurrectedByLoadOrInvalidation) {
     activate();
     record.phase = kasumi::transaction::Phase::Started;
@@ -1987,7 +1987,7 @@ TEST_F(JournalCpuFinalTest,
         paths, record, key, sync::journal::SaveMode::Advance, &session));
 }
 
-TEST_F(JournalCpuFinalTest, OversizedDeltaIsRejectedBeforeConfirmation) {
+TEST_F(JournalSessionDurabilityTest, OversizedDeltaIsRejectedBeforeConfirmation) {
     activate();
     auto requested = record;
     for (std::size_t i = 0; i < 18000; ++i) {
@@ -2010,7 +2010,7 @@ TEST_F(JournalCpuFinalTest, OversizedDeltaIsRejectedBeforeConfirmation) {
     expect_reload(record);
 }
 
-TEST_F(JournalCpuFinalTest,
+TEST_F(JournalSessionDurabilityTest,
        WrongKeyAndOtherJournalPathsInvalidateWithoutWriting) {
     activate();
     auto wrong = key;
@@ -2035,7 +2035,7 @@ TEST_F(JournalCpuFinalTest,
     }
 }
 
-TEST_F(JournalCpuFinalTest, RollbackWithSessionRoundTripsEveryMutableField) {
+TEST_F(JournalSessionDurabilityTest, RollbackWithSessionRoundTripsEveryMutableField) {
     auto loaded = sync::journal::load(paths, key, &session);
     ASSERT_TRUE(loaded);
     record.phase = kasumi::transaction::Phase::EpochPrepared;
@@ -2076,7 +2076,7 @@ TEST_F(JournalCpuFinalTest, RollbackWithSessionRoundTripsEveryMutableField) {
     expect_reload(record);
 }
 
-TEST_F(JournalCpuFinalTest, RequestedRecordCannotAliasOwnedConfirmedCache) {
+TEST_F(JournalSessionDurabilityTest, RequestedRecordCannotAliasOwnedConfirmedCache) {
     activate();
     const auto* aliased = session.confirmed();
     ASSERT_NE(aliased, nullptr);

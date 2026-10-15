@@ -117,7 +117,7 @@ void finish_cleanup(ProviderTarget& target,
 int main(int argc, char** argv) {
     auto local_parent = std::filesystem::temp_directory_path();
     auto output_path = std::filesystem::current_path() /
-                       "benchmark-results/phase41-multi-backend-certification/"
+                       "benchmark-results/baseline_report-multi-backend-certification/"
                        "local-certification.json";
     std::vector<std::string_view> arguments;
     arguments.reserve(static_cast<std::size_t>(argc));
@@ -225,7 +225,7 @@ int main(int argc, char** argv) {
             output_path =
                 std::filesystem::current_path() /
                 std::filesystem::path{
-                    "benchmark-results/phase41-multi-backend-certification/"} /
+                    "benchmark-results/baseline_report-multi-backend-certification/"} /
                 (target->provider_id + "-certification.json");
         }
     } else {

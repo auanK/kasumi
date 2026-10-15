@@ -249,7 +249,7 @@ TEST(GcLiveRunnerOwnershipTest, MarkerReadbackMismatchStopsBeforeScenario) {
 }
 
 // F. scenario setup failure
-TEST(GcLiveRunnerScenarioTest, ScenarioSetupFailureStopsBeforeGc) {
+TEST(GcLiveRunnerTest, SetupFailureStopsBeforeGarbageCollection) {
     FakeHarness harness{"scenario-fail"};
     auto parent = harness.make_parent_transport();
     auto child = harness.make_child_transport();
@@ -284,7 +284,7 @@ TEST(GcLiveRunnerInventoryTest, PreInventoryMismatchStopsBeforeGc) {
     EXPECT_EQ(report.cleanup.result, "preserved");
 }
 
-// RNG failure fails closed before initialize (Passo 5 / Phase 5D.2)
+// RNG failure fails closed before initialization.
 TEST(GcLiveRunnerRngTest, OwnerTokenRngFailureFailsClosed) {
     FakeHarness harness{"rng-fail"};
     auto parent = harness.make_parent_transport();
@@ -323,7 +323,7 @@ TEST(GcLiveRunnerRngTest, OwnerTokenRngFailureFailsClosed) {
 
 // H. Happy path: Real GC, metrics, invariants, cleanup
 TEST(GcLiveRunnerHappyPathTest,
-     FullExecutionSucceedsWithRealGcAndPhase3Metrics) {
+     FullExecutionSucceedsWithRealGcAndReportsMetrics) {
     kasumi::platform::perf_trace::force_enable(true);
     kasumi::platform::perf_trace::reset();
 
@@ -458,7 +458,7 @@ TEST(GcLiveRunnerCleanupTest,
     EXPECT_EQ(cleanup_result.result, "refused");
 }
 
-// M. Evidence preservation is default (Passo 6)
+// Evidence preservation is the default.
 TEST(GcLiveRunnerFailureTest, GcFailurePreservesEvidenceByDefault) {
     FakeHarness harness{"evidence-default"};
     auto options = harness.make_options();
@@ -498,7 +498,7 @@ TEST(GcLiveRunnerFailureTest, GcFailurePreservesEvidenceByDefault) {
         report.scenario.candidate_identifier));
 }
 
-// N. Unknown residue retains owner marker (Passo 7 / Phase 5D.2)
+// Unknown residue retains the owner marker.
 TEST(GcLiveRunnerResidueTest, UnknownResidueInChildRetainsOwnerMarker) {
     FakeHarness harness{"residue-retains-marker"};
     auto options = harness.make_options();
@@ -543,7 +543,7 @@ TEST(GcLiveRunnerResidueTest, UnknownResidueInChildRetainsOwnerMarker) {
         report.scenario.quarantine_identifier));
 }
 
-// O. Partial target cleanup retains owner marker (Passo 7)
+// Partial target cleanup retains the owner marker.
 TEST(GcLiveRunnerCleanupTest, PartialTargetCleanupRetainsOwnerMarker) {
     FakeHarness harness{"partial-cleanup"};
     auto child_storage = harness.make_child_storage();
@@ -564,7 +564,7 @@ TEST(GcLiveRunnerCleanupTest, PartialTargetCleanupRetainsOwnerMarker) {
     EXPECT_TRUE(harness.child_state->objects.contains("owner.marker"));
 }
 
-// P. Successful cleanup removes owner marker last (Passo 15)
+// Successful cleanup removes the owner marker last.
 TEST(GcLiveRunnerCleanupTest, SuccessfulCleanupRemovesOwnerMarkerLast) {
     FakeHarness harness{"cleanup-order"};
     auto options = harness.make_options();
@@ -604,7 +604,7 @@ TEST(GcLiveRunnerCleanupTest, SuccessfulCleanupRemovesOwnerMarkerLast) {
     EXPECT_GT(removal_order.size(), 1U);
 }
 
-// RED Test for Passo 3: Native get_batch receives correct context
+// Native get_batch receives the expected context.
 struct NativeBatchState {
     static constexpr std::uint32_t kMagic = 0x54415453; // "STAT"
     std::uint32_t magic = kMagic;
@@ -687,7 +687,7 @@ TEST(VaultTransportAdapterTest, NativeGetBatchReceivesCorrectContext) {
     EXPECT_EQ(raw_state->get_batch_calls, 1U);
 }
 
-// Passo 12: PutBatch delegates and protects owner marker
+// PutBatch delegates and protects the owner marker.
 TEST(VaultTransportAdapterTest, PutBatchDelegatesAndProtectsMarker) {
     auto* raw_state = new NativeBatchState{};
     transport::Transport base_transport{
@@ -769,7 +769,7 @@ TEST(VaultTransportAdapterTest, PutBatchDelegatesAndProtectsMarker) {
     EXPECT_EQ(res_marker.error().code, transport::ErrorCode::InvalidIdentifier);
 }
 
-// Passo 9: Fallback when base get_batch is null
+// Batch-get falls back when the base callback is missing.
 TEST(VaultTransportAdapterTest, GetBatchFallbackWhenBaseNull) {
     auto* raw_state = new NativeBatchState{};
     transport::Transport base_transport{
@@ -834,7 +834,7 @@ TEST(VaultTransportAdapterTest, GetBatchFallbackWhenBaseNull) {
     EXPECT_EQ(raw_state->last_identifier, "fallback_obj.bin");
 }
 
-// Passo 11: PhysicalHashBatch delegates and protects owner marker
+// PhysicalHashBatch delegates and protects the owner marker.
 TEST(VaultTransportAdapterTest, PhysicalHashBatchDelegatesAndProtectsMarker) {
     auto* raw_state = new NativeBatchState{};
     transport::Transport base_transport{
@@ -923,7 +923,7 @@ TEST(VaultTransportAdapterTest, PhysicalHashBatchDelegatesAndProtectsMarker) {
     EXPECT_EQ(res_marker.error().code, transport::ErrorCode::ObjectNotFound);
 }
 
-// Passo 10: ControlReadBatch filters hidden marker from listings and presences
+// ControlReadBatch filters the hidden marker from listings and presences.
 TEST(VaultTransportAdapterTest, ControlReadBatchFiltersHiddenMarker) {
     auto* raw_state = new NativeBatchState{};
     transport::Transport base_transport{
@@ -995,7 +995,7 @@ TEST(VaultTransportAdapterTest, ControlReadBatchFiltersHiddenMarker) {
     EXPECT_EQ(resp->presences[1], transport::Presence::Absent);
 }
 
-// Passo 14: Regressão contra futuras capabilities copiadas cegamente
+// Copied capabilities retain the ownership marker protections.
 TEST(VaultTransportAdapterTest, NoCallbacksDirectlyCopiedFromBase) {
     auto dummy_init = [](void*) -> transport::Result {
         return {};
@@ -1096,7 +1096,7 @@ TEST(VaultTransportAdapterTest, NoCallbacksDirectlyCopiedFromBase) {
     EXPECT_NE(vault.storage.remove, base_transport.storage.remove);
 }
 
-// Passo 16: Error code real do integrity::garbage_collect preservado
+// Preserve the error code returned by integrity::garbage_collect.
 TEST(GcLiveRunnerDiagnosisTest, PreservesRealIntegrityErrorCode) {
     FakeHarness harness{"error-code-preservation"};
     auto options = harness.make_options();
@@ -1133,7 +1133,7 @@ TEST(GcLiveRunnerDiagnosisTest, PreservesRealIntegrityErrorCode) {
               "simulated remote connection reset");
 }
 
-// Passo 18: Métricas capturadas mesmo em failure path
+// Capture metrics on failure paths.
 TEST(GcLiveRunnerDiagnosisTest, CapturesMetricsOnFailurePath) {
     FakeHarness harness{"metrics-failure"};
     auto options = harness.make_options();
@@ -1163,7 +1163,7 @@ TEST(GcLiveRunnerDiagnosisTest, CapturesMetricsOnFailurePath) {
     EXPECT_EQ(report.metrics.verified_copy_native_copy_successes, 1U);
 }
 
-// Passo 20: Teste integrado offline com base native-capable
+// Exercise the integrated offline path with a native-capable base.
 TEST(GcLiveRunnerIntegratedTest, FullExecutionWithNativeBatchStorage) {
     FakeHarness harness{"integrated-native-batch"};
     auto options = harness.make_options();
@@ -1250,7 +1250,7 @@ TEST(GcLiveRunnerIntegratedTest, FullExecutionWithNativeBatchStorage) {
     EXPECT_EQ(requested_metadata, expected_metadata);
 }
 
-// RED 1: Real Fallback Executes When Forced
+// Forced fallback mode executes the copy path
 TEST(GcLiveRunnerFallbackTest, RealFallbackExecutesWhenForced) {
     FakeHarness harness{"real-fallback"};
     auto options = harness.make_options();
@@ -1374,7 +1374,7 @@ TEST(GcLiveRunnerFallbackTest, RealFallbackExecutesWhenForced) {
     EXPECT_EQ(report.cleanup.result, "removed");
 }
 
-// RED 2: Native Copy Remains Functional
+// Native copy mode remains functional
 TEST(GcLiveRunnerNativeTest, NativeCopyRemainsFunctional) {
     FakeHarness harness{"native-remains-native"};
     auto options = harness.make_options();
@@ -1418,8 +1418,8 @@ TEST(GcLiveRunnerNativeTest, NativeCopyRemainsFunctional) {
     EXPECT_EQ(report.cleanup.result, "removed");
 }
 
-// RED 3: Mesma Key e Payload produzem mesmo candidate identifier entre modos
-TEST(GcLiveRunnerScenarioTest, IdenticalScenarioBetweenCopyModes) {
+// Both copy modes produce the same candidate identifier for the same key and payload
+TEST(GcLiveRunnerTest, CopyModesProduceEquivalentResults) {
     const auto key = test_key();
     constexpr std::size_t payload_bytes = 4096;
 
@@ -1704,7 +1704,7 @@ TEST(GcLiveCliPathTest, PreparesValidPathsAndCreatesScratch) {
     EXPECT_TRUE(std::filesystem::is_directory(res->scratch_root));
 }
 
-// Phase 8.1: Full GC stage telemetry export
+// Full GC stage telemetry export
 TEST(GcLiveRunnerTelemetryTest, ExportsAllPreexistingGcStageTimers) {
     FakeHarness harness{"stage-telemetry"};
     auto options = harness.make_options();
@@ -1744,7 +1744,7 @@ TEST(GcLiveRunnerTelemetryTest, ExportsAllPreexistingGcStageTimers) {
     // Final stage timer
     EXPECT_TRUE(bench.contains("gc_barrier_release_us"));
 
-    // Existing fields from Phase 6 preserved
+    // Existing telemetry fields remain present.
     EXPECT_TRUE(bench.contains("gc_total_us"));
     EXPECT_TRUE(bench.contains("process_wall_ms"));
     EXPECT_TRUE(bench.contains("verified_copy_source_physical_hash_us"));

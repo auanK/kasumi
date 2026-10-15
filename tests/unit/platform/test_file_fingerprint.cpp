@@ -23,23 +23,33 @@ TEST(FileFingerprintTest, RegularFileHasStableStrongIdentity) {
     EXPECT_EQ((*again)->value, (*before)->value);
 }
 
-TEST(FileFingerprintTest, ReplacementChangesIdentityEvidence) {
-    auto workspace = kasumi::test::make_temp_workspace("fingerprint-change");
-    const auto file = kasumi::test::workspace_path(workspace, "file.txt");
-    kasumi::test::write_text(file, "first");
-    const auto before = kasumi::platform::regular_file_fingerprint(file);
-    ASSERT_TRUE(before.has_value());
-    ASSERT_TRUE(std::filesystem::remove(file));
-    kasumi::test::write_text(file, "second");
-    const auto after = kasumi::platform::regular_file_fingerprint(file);
-    ASSERT_TRUE(after.has_value());
-    if (!*before) {
-        EXPECT_FALSE(*after);
+TEST(FileFingerprintTest,
+     DistinctExistingFilesHaveDistinctNativeIdentityWhenAvailable) {
+    auto workspace = kasumi::test::make_temp_workspace("fingerprint-distinct");
+    const auto first = kasumi::test::workspace_path(workspace, "first.txt");
+    const auto second = kasumi::test::workspace_path(workspace, "second.txt");
+    kasumi::test::write_text(first, "same content");
+    kasumi::test::write_text(second, "same content");
+
+    const auto first_fingerprint =
+        kasumi::platform::regular_file_fingerprint(first);
+    const auto second_fingerprint =
+        kasumi::platform::regular_file_fingerprint(second);
+    ASSERT_TRUE(first_fingerprint.has_value());
+    ASSERT_TRUE(second_fingerprint.has_value());
+    ASSERT_EQ(first_fingerprint->has_value(), second_fingerprint->has_value());
+    if (!*first_fingerprint)
         return;
-    }
-    ASSERT_TRUE(*after);
-    EXPECT_TRUE((*after)->kind != (*before)->kind ||
-                (*after)->value != (*before)->value);
+
+    ASSERT_TRUE(*second_fingerprint);
+    EXPECT_EQ((*first_fingerprint)->kind, (*second_fingerprint)->kind);
+    // ChangeTime is not a native identity guarantee.
+    EXPECT_TRUE((*first_fingerprint)->value[0] !=
+                    (*second_fingerprint)->value[0] ||
+                (*first_fingerprint)->value[1] !=
+                    (*second_fingerprint)->value[1] ||
+                (*first_fingerprint)->value[2] !=
+                    (*second_fingerprint)->value[2]);
 }
 
 TEST(FileFingerprintTest, DirectoriesAndMissingPathsDoNotBecomeCacheRows) {

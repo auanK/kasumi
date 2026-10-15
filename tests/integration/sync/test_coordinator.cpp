@@ -8485,20 +8485,20 @@ TEST(SyncCoordinatorTest, ConcurrentAddedFileDoesNotAbortSyncAndIsPreserved) {
     EXPECT_EQ(kasumi::test::read_text(local / "screenshot.png"), "image-bytes");
 }
 
-enum class P0LocalAction {
+enum class SyncMutationAction {
     DownloadExisting,
     DownloadAbsent,
     DeleteLocal
 };
-enum class P0LocalFailure {
+enum class SyncMutationFailure {
     None,
     ContentGet,
     Database
 };
 
-void run_p0_local_race(P0LocalAction action,
+void run_sync_mutation_interruption(SyncMutationAction action,
                        bool intervene,
-                       P0LocalFailure failure = P0LocalFailure::None,
+                       SyncMutationFailure failure = SyncMutationFailure::None,
                        bool equal_size = false) {
     namespace sync = kasumi::application::sync;
     const std::string original = "ORIGINAL-CONTENT";
@@ -8516,9 +8516,9 @@ void run_p0_local_race(P0LocalAction action,
         ASSERT_EQ(original.size(), user.size());
         ASSERT_EQ(original.size(), remote.size());
     }
-    const bool had_original = action != P0LocalAction::DownloadAbsent;
-    const bool deleting = action == P0LocalAction::DeleteLocal;
-    auto workspace = kasumi::test::make_temp_workspace("p0-local-race");
+    const bool had_original = action != SyncMutationAction::DownloadAbsent;
+    const bool deleting = action == SyncMutationAction::DeleteLocal;
+    auto workspace = kasumi::test::make_temp_workspace("sync-mutation-interruption");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto profile = root / "profile";
     const auto local = root / "local";
@@ -8684,12 +8684,12 @@ void run_p0_local_race(P0LocalAction action,
             checkpoint_confirmed = true;
         };
         check();
-        if (!checkpoint_confirmed || failure == P0LocalFailure::ContentGet) {
+        if (!checkpoint_confirmed || failure == SyncMutationFailure::ContentGet) {
             return std::unexpected(kasumi::transport::Error{
                 .code = kasumi::transport::ErrorCode::Io,
-                .message = "controlled P0-01 GET failure after intervention"});
+                .message = "controlled content download failure after intervention"});
         }
-        if (failure == P0LocalFailure::Database) {
+        if (failure == SyncMutationFailure::Database) {
             sqlite3* database = nullptr;
             const auto opened =
                 sqlite3_open(runtime.database_path.string().c_str(), &database);
@@ -8697,12 +8697,12 @@ void run_p0_local_race(P0LocalAction action,
                 opened == SQLITE_OK
                     ? sqlite3_exec(
                           database,
-                          "CREATE TRIGGER p0_fail_state BEFORE INSERT ON nodes "
-                          "BEGIN SELECT RAISE(ABORT, 'controlled P0-01 DB "
+                          "CREATE TRIGGER test_fail_state BEFORE INSERT ON nodes "
+                          "BEGIN SELECT RAISE(ABORT, 'controlled database "
                           "failure'); END;"
-                          "CREATE TRIGGER p0_fail_state_update BEFORE UPDATE "
+                          "CREATE TRIGGER test_fail_state_update BEFORE UPDATE "
                           "ON nodes "
-                          "BEGIN SELECT RAISE(ABORT, 'controlled P0-01 DB "
+                          "BEGIN SELECT RAISE(ABORT, 'controlled database "
                           "failure'); END;",
                           nullptr,
                           nullptr,
@@ -8720,7 +8720,7 @@ void run_p0_local_race(P0LocalAction action,
     context.key = key;
     context.storage = std::move(storage);
     auto profile_lock =
-        kasumi::platform::acquire_profile_lock(root / "profile-p0.lock");
+        kasumi::platform::acquire_profile_lock(root / "profile-sync.lock");
     ASSERT_TRUE(profile_lock.has_value()) << profile_lock.error();
     context.profile_lock = *profile_lock;
     const auto executed = kasumi::application::detail::run_sync(context);
@@ -8806,8 +8806,8 @@ void run_p0_local_race(P0LocalAction action,
     if (intervene) {
         ASSERT_FALSE(executed.has_value());
         EXPECT_EQ(bytes_at(target), user);
-        if (action == P0LocalAction::DeleteLocal &&
-            failure == P0LocalFailure::ContentGet) {
+        if (action == SyncMutationAction::DeleteLocal &&
+            failure == SyncMutationFailure::ContentGet) {
             ASSERT_TRUE(live_journal->has_value());
             const auto live_recovery =
                 sync::coordinator::recover_if_needed(runtime,
@@ -8873,7 +8873,8 @@ void run_p0_local_race(P0LocalAction action,
 
     // Synthetic artifacts are optional; live roots alone determine
     // preservation.
-    if (const auto* evidence_root = std::getenv("KASUMI_P0_EVIDENCE_DIR")) {
+    if (const auto* evidence_root =
+            std::getenv("KASUMI_SYNC_MUTATION_EVIDENCE_DIR")) {
         // Short paths keep Windows evidence copies below native path limits.
         const auto evidence =
             std::filesystem::path{evidence_root} / root.filename();
@@ -8897,9 +8898,9 @@ void run_p0_local_race(P0LocalAction action,
                                  object_manifest);
         record("evidence_directory", kasumi::platform::path::to_utf8(evidence));
     }
-    if (failure != P0LocalFailure::None) {
+    if (failure != SyncMutationFailure::None) {
         ASSERT_FALSE(executed.has_value());
-        if (failure == P0LocalFailure::Database && !intervene) {
+        if (failure == SyncMutationFailure::Database && !intervene) {
             EXPECT_EQ(executed.error().detail,
                       "database_failure: failed to save state.db");
             EXPECT_EQ((**db_state).commit_id, base->head.commit_id);
@@ -8923,15 +8924,15 @@ void run_p0_local_race(P0LocalAction action,
             sqlite3_open(runtime.database_path.string().c_str(), &database);
         ASSERT_EQ(opened, SQLITE_OK);
         EXPECT_EQ(sqlite3_exec(database,
-                               "DROP TRIGGER IF EXISTS p0_fail_state;"
-                               "DROP TRIGGER IF EXISTS p0_fail_state_update;",
+                               "DROP TRIGGER IF EXISTS test_fail_state;"
+                               "DROP TRIGGER IF EXISTS test_fail_state_update;",
                                nullptr,
                                nullptr,
                                nullptr),
                   SQLITE_OK);
         EXPECT_EQ(sqlite3_close(database), SQLITE_OK);
         auto retry_lock =
-            kasumi::platform::acquire_profile_lock(root / "profile-p0.lock");
+            kasumi::platform::acquire_profile_lock(root / "profile-sync.lock");
         ASSERT_TRUE(retry_lock.has_value()) << retry_lock.error();
         context.profile_lock = *retry_lock;
         const auto retried =
@@ -8945,7 +8946,7 @@ void run_p0_local_race(P0LocalAction action,
         EXPECT_FALSE(after_retry->has_value());
         record("retry_after_observed_change", "success");
     } else {
-        if (failure == P0LocalFailure::None) {
+        if (failure == SyncMutationFailure::None) {
             ASSERT_TRUE(executed.has_value()) << executed.error().detail;
             EXPECT_EQ(final_bytes, deleting ? "<absent>" : remote);
         } else {
@@ -8954,76 +8955,76 @@ void run_p0_local_race(P0LocalAction action,
     }
 }
 
-TEST(P0LocalRaceTest, RED01DownloadPreservesLateExternalEdit) {
-    run_p0_local_race(P0LocalAction::DownloadExisting, true);
+TEST(SyncMutationRaceTest, DownloadPreservesLateExternalEdit) {
+    run_sync_mutation_interruption(SyncMutationAction::DownloadExisting, true);
 }
 
-TEST(P0LocalRaceTest, RED01DownloadPreservesEqualSizeExternalEdit) {
-    run_p0_local_race(
-        P0LocalAction::DownloadExisting, true, P0LocalFailure::None, true);
+TEST(SyncMutationRaceTest, DownloadPreservesEqualSizeExternalEdit) {
+    run_sync_mutation_interruption(
+        SyncMutationAction::DownloadExisting, true, SyncMutationFailure::None, true);
 }
 
-TEST(P0LocalRaceTest, RED02DownloadPreservesLateExternalCreation) {
-    run_p0_local_race(P0LocalAction::DownloadAbsent, true);
+TEST(SyncMutationRaceTest, DownloadPreservesLateExternalCreation) {
+    run_sync_mutation_interruption(SyncMutationAction::DownloadAbsent, true);
 }
 
-TEST(P0LocalRaceTest, RED03DeleteLocalPreservesLateExternalEdit) {
-    run_p0_local_race(P0LocalAction::DeleteLocal, true);
+TEST(SyncMutationRaceTest, DeleteLocalPreservesLateExternalEdit) {
+    run_sync_mutation_interruption(SyncMutationAction::DeleteLocal, true);
 }
 
-TEST(P0LocalRaceTest, RED04DownloadDatabaseFailurePreservesExternalEdit) {
-    run_p0_local_race(
-        P0LocalAction::DownloadExisting, true, P0LocalFailure::Database);
+TEST(SyncMutationRaceTest, DownloadDatabaseFailurePreservesExternalEdit) {
+    run_sync_mutation_interruption(
+        SyncMutationAction::DownloadExisting, true, SyncMutationFailure::Database);
 }
 
-TEST(P0LocalRaceTest, RED04DeleteLocalDatabaseFailurePreservesExternalEdit) {
-    run_p0_local_race(
-        P0LocalAction::DeleteLocal, true, P0LocalFailure::Database);
+TEST(SyncMutationRaceTest, DeleteLocalDatabaseFailurePreservesExternalEdit) {
+    run_sync_mutation_interruption(
+        SyncMutationAction::DeleteLocal, true, SyncMutationFailure::Database);
 }
 
-TEST(P0LocalRaceTest,
+TEST(SyncMutationRaceTest,
      DownloadFailureBeforeReplacePreservesExternalEditAndJournal) {
-    run_p0_local_race(
-        P0LocalAction::DownloadExisting, true, P0LocalFailure::ContentGet);
+    run_sync_mutation_interruption(
+        SyncMutationAction::DownloadExisting, true, SyncMutationFailure::ContentGet);
 }
 
-TEST(P0LocalRaceTest,
+TEST(SyncMutationRaceTest,
      DownloadFailureBeforeInstallPreservesExternalCreationAndJournal) {
-    run_p0_local_race(
-        P0LocalAction::DownloadAbsent, true, P0LocalFailure::ContentGet);
+    run_sync_mutation_interruption(
+        SyncMutationAction::DownloadAbsent, true, SyncMutationFailure::ContentGet);
 }
 
-TEST(P0LocalRaceTest,
+TEST(SyncMutationRaceTest,
      AuxiliaryDownloadFailureBeforeDeletePreservesExternalEditAndJournal) {
-    run_p0_local_race(
-        P0LocalAction::DeleteLocal, true, P0LocalFailure::ContentGet);
+    run_sync_mutation_interruption(
+        SyncMutationAction::DeleteLocal, true, SyncMutationFailure::ContentGet);
 }
 
-TEST(P0LocalRaceTest, ControlDownloadExisting) {
-    run_p0_local_race(P0LocalAction::DownloadExisting, false);
+TEST(SyncMutationRaceTest, DownloadExistingFile) {
+    run_sync_mutation_interruption(SyncMutationAction::DownloadExisting, false);
 }
 
-TEST(P0LocalRaceTest, ControlDownloadAbsent) {
-    run_p0_local_race(P0LocalAction::DownloadAbsent, false);
+TEST(SyncMutationRaceTest, DownloadAbsentFile) {
+    run_sync_mutation_interruption(SyncMutationAction::DownloadAbsent, false);
 }
 
-TEST(P0LocalRaceTest, ControlDeleteLocal) {
-    run_p0_local_race(P0LocalAction::DeleteLocal, false);
+TEST(SyncMutationRaceTest, DeletePlannedFile) {
+    run_sync_mutation_interruption(SyncMutationAction::DeleteLocal, false);
 }
 
-TEST(P0LocalRaceTest, ControlDownloadRollback) {
-    run_p0_local_race(
-        P0LocalAction::DownloadExisting, false, P0LocalFailure::Database);
+TEST(SyncMutationRaceTest, DownloadRollbackRestoresOriginal) {
+    run_sync_mutation_interruption(
+        SyncMutationAction::DownloadExisting, false, SyncMutationFailure::Database);
 }
 
-TEST(P0LocalRaceTest, ControlDeleteLocalRollback) {
-    run_p0_local_race(
-        P0LocalAction::DeleteLocal, false, P0LocalFailure::Database);
+TEST(SyncMutationRaceTest, DeletePlannedFileRollback) {
+    run_sync_mutation_interruption(
+        SyncMutationAction::DeleteLocal, false, SyncMutationFailure::Database);
 }
 
-TEST(P0LocalRaceTest, ControlDownloadAlreadyRemoteDoesNotFetchContent) {
+TEST(SyncMutationRaceTest, AlreadySynchronizedDownloadSkipsContentFetch) {
     namespace mutation = kasumi::application::sync::mutation;
-    auto workspace = kasumi::test::make_temp_workspace("p0-already-remote");
+    auto workspace = kasumi::test::make_temp_workspace("download-already-remote");
     const auto root = kasumi::test::workspace_root(workspace);
     const std::string remote = "REMOTE-EXPECTED-CONTENT";
     const auto hash = kasumi::hash_hex(kasumi::hasher::hash_string(remote));
@@ -9046,9 +9047,9 @@ TEST(P0LocalRaceTest, ControlDownloadAlreadyRemoteDoesNotFetchContent) {
         root / "file.txt", hash, remote.size()));
 }
 
-TEST(P0MutationSafetyTest, ConditionalInstallRejectsCreationAfterAbsenceCheck) {
+TEST(MutationSafetyTest, ConditionalInstallRejectsCreationAfterAbsenceCheck) {
     auto workspace =
-        kasumi::test::make_temp_workspace("p0-conditional-install");
+        kasumi::test::make_temp_workspace("conditional-download-install");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto candidate = root / "candidate";
     const auto target = root / "target";
@@ -9065,8 +9066,8 @@ TEST(P0MutationSafetyTest, ConditionalInstallRejectsCreationAfterAbsenceCheck) {
     EXPECT_EQ(kasumi::test::read_text(candidate), "REMOTE");
 }
 
-TEST(P0MutationSafetyTest, ConditionalInstallMovesToAbsentDestination) {
-    auto workspace = kasumi::test::make_temp_workspace("p0-conditional-normal");
+TEST(MutationSafetyTest, ConditionalInstallMovesToAbsentDestination) {
+    auto workspace = kasumi::test::make_temp_workspace("conditional-download-normal");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto candidate = root / "candidate";
     const auto target = root / "target";
@@ -9079,8 +9080,8 @@ TEST(P0MutationSafetyTest, ConditionalInstallMovesToAbsentDestination) {
     EXPECT_FALSE(std::filesystem::exists(candidate));
 }
 
-TEST(P0MutationSafetyTest, ConditionalInstallErrorsNeverRemoveDestination) {
-    auto workspace = kasumi::test::make_temp_workspace("p0-conditional-errors");
+TEST(MutationSafetyTest, ConditionalInstallErrorsNeverRemoveDestination) {
+    auto workspace = kasumi::test::make_temp_workspace("conditional-download-errors");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto candidate = root / "candidate";
     const auto target = root / "target";
@@ -9095,9 +9096,9 @@ TEST(P0MutationSafetyTest, ConditionalInstallErrorsNeverRemoveDestination) {
     EXPECT_TRUE(std::filesystem::is_directory(candidate));
 }
 
-TEST(P0MutationSafetyTest,
+TEST(MutationSafetyTest,
      ConditionalInstallRejectsDirectoryAndSymlinkTargets) {
-    auto workspace = kasumi::test::make_temp_workspace("p0-conditional-types");
+    auto workspace = kasumi::test::make_temp_workspace("conditional-download-types");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto candidate = root / "candidate";
     kasumi::test::write_text(candidate, "REMOTE");
@@ -9139,10 +9140,10 @@ TEST(P0MutationSafetyTest,
     EXPECT_EQ(kasumi::test::read_text(candidate), "REMOTE");
 }
 
-TEST(P0MutationSafetyTest,
+TEST(MutationSafetyTest,
      PreparedProgressRejectsChangedDestinationBeforeMutation) {
     namespace mutation = kasumi::application::sync::mutation;
-    auto workspace = kasumi::test::make_temp_workspace("p0-unproven-remote");
+    auto workspace = kasumi::test::make_temp_workspace("unproven-remote-state");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto local = root / "local";
     const kasumi::platform::Workspace transaction{root / "transaction"};
@@ -9184,9 +9185,9 @@ TEST(P0MutationSafetyTest,
     }
 }
 
-TEST(P0MutationSafetyTest, InvalidProgressAndUnobservedAbsenceAreRejected) {
+TEST(MutationSafetyTest, InvalidProgressAndUnobservedAbsenceAreRejected) {
     namespace mutation = kasumi::application::sync::mutation;
-    auto workspace = kasumi::test::make_temp_workspace("p0-invalid-progress");
+    auto workspace = kasumi::test::make_temp_workspace("invalid-operation-progress");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto target = root / "file.txt";
     const kasumi::platform::Workspace transaction{root};
@@ -9216,9 +9217,9 @@ TEST(P0MutationSafetyTest, InvalidProgressAndUnobservedAbsenceAreRejected) {
     EXPECT_EQ(kasumi::test::read_text(root / "0.backup"), "ORIGINAL");
 }
 
-TEST(P0MutationSafetyTest, HashReadFailureDoesNotAuthorizeDeletion) {
+TEST(MutationSafetyTest, HashReadFailureDoesNotAuthorizeDeletion) {
     namespace mutation = kasumi::application::sync::mutation;
-    auto workspace = kasumi::test::make_temp_workspace("p0-hash-read-failure");
+    auto workspace = kasumi::test::make_temp_workspace("mutation-hash-read-failure");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto target = root / "file.txt";
     const kasumi::platform::Workspace transaction{root};
@@ -9259,9 +9260,9 @@ TEST(P0MutationSafetyTest, HashReadFailureDoesNotAuthorizeDeletion) {
     EXPECT_EQ(kasumi::test::read_text(target), "ORIGINAL");
 }
 
-TEST(P0MutationSafetyTest, AppliedDownloadRollbackPreservesLateUserEdit) {
+TEST(MutationSafetyTest, AppliedDownloadRollbackPreservesLateUserEdit) {
     namespace mutation = kasumi::application::sync::mutation;
-    auto workspace = kasumi::test::make_temp_workspace("p0-applied-rollback");
+    auto workspace = kasumi::test::make_temp_workspace("applied-download-rollback");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto local = root / "local";
     const kasumi::platform::Workspace transaction{root / "transaction"};
@@ -9299,9 +9300,9 @@ TEST(P0MutationSafetyTest, AppliedDownloadRollbackPreservesLateUserEdit) {
               "ORIGINAL");
 }
 
-void check_p0_download_hash_counts(bool had_original, bool already_remote) {
+void check_download_hash_counts(bool had_original, bool already_remote) {
     namespace mutation = kasumi::application::sync::mutation;
-    auto workspace = kasumi::test::make_temp_workspace("p0-hash-counts");
+    auto workspace = kasumi::test::make_temp_workspace("download-hash-counts");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto local = root / "local";
     const kasumi::platform::Workspace transaction{root / "transaction"};
@@ -9340,21 +9341,21 @@ void check_p0_download_hash_counts(bool had_original, bool already_remote) {
     EXPECT_EQ(kasumi::test::read_text(local / "file.txt"), "REMOTE");
 }
 
-TEST(P0MutationCostTest, ReplacementValidatesBackupAndDestinationOnce) {
-    check_p0_download_hash_counts(true, false);
+TEST(MutationPerformanceTest, ReplacementValidatesBackupAndDestinationOnce) {
+    check_download_hash_counts(true, false);
 }
 
-TEST(P0MutationCostTest, NewDownloadDoesNotHashMissingFiles) {
-    check_p0_download_hash_counts(false, false);
+TEST(MutationPerformanceTest, NewDownloadDoesNotHashMissingFiles) {
+    check_download_hash_counts(false, false);
 }
 
-TEST(P0MutationCostTest, PreparedRemoteContentRemainsIdempotent) {
-    check_p0_download_hash_counts(true, true);
+TEST(MutationPerformanceTest, PreparedRemoteContentRemainsIdempotent) {
+    check_download_hash_counts(true, true);
 }
 
-TEST(P0MutationSafetyTest, BackupCorruptedDuringGetIsRejectedOnEveryAttempt) {
+TEST(MutationSafetyTest, BackupCorruptedDuringGetIsRejectedOnEveryAttempt) {
     namespace mutation = kasumi::application::sync::mutation;
-    auto workspace = kasumi::test::make_temp_workspace("p0-corrupt-backup");
+    auto workspace = kasumi::test::make_temp_workspace("corrupt-backup-during-download");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto local = root / "local";
     const kasumi::platform::Workspace transaction{root / "transaction"};
@@ -9393,7 +9394,7 @@ TEST(P0MutationSafetyTest, BackupCorruptedDuringGetIsRejectedOnEveryAttempt) {
     }
 }
 
-void interrupt_p0_after_effect(const std::filesystem::path& root,
+void interrupt_after_mutation_effect(const std::filesystem::path& root,
                                kasumi::Action action,
                                bool had_original,
                                int crash_stage = 2) {
@@ -9459,24 +9460,24 @@ void interrupt_p0_after_effect(const std::filesystem::path& root,
     std::_Exit(crash_stage == 3 ? 89 : 86);
 }
 
-void check_p0_interrupted_effect(kasumi::Action action,
+void check_interrupted_mutation_effect(kasumi::Action action,
                                  bool had_original,
                                  int crash_stage = 2) {
 #if GTEST_HAS_DEATH_TEST
     namespace sync = kasumi::application::sync;
-    const auto* inherited = std::getenv("KASUMI_P0_CRASH_ROOT");
+    const auto* inherited = std::getenv("KASUMI_MUTATION_CRASH_ROOT");
     auto workspace = inherited
         ? kasumi::test::TempWorkspace{nullptr, kasumi::test::remove_temp_workspace}
-        : kasumi::test::make_temp_workspace("p0-process-crash");
+        : kasumi::test::make_temp_workspace("mutation-process-crash");
     const auto root = inherited ? kasumi::platform::path::from_utf8(inherited)
                                : kasumi::test::workspace_root(workspace);
     auto environment = kasumi::test::scoped_environment_variable(
-        "KASUMI_P0_CRASH_ROOT", kasumi::platform::path::to_utf8(root));
+        "KASUMI_MUTATION_CRASH_ROOT", kasumi::platform::path::to_utf8(root));
     const int expected_exit = crash_stage == 1   ? 87
                               : crash_stage == 3 ? 89
                               : crash_stage == 4 ? 90
                                                  : 86;
-    EXPECT_EXIT(interrupt_p0_after_effect(root, action, had_original,
+    EXPECT_EXIT(interrupt_after_mutation_effect(root, action, had_original,
                                           crash_stage),
                 ::testing::ExitedWithCode(expected_exit), "");
     ASSERT_FALSE(::testing::Test::HasFailure());
@@ -9520,30 +9521,30 @@ void check_p0_interrupted_effect(kasumi::Action action,
 #endif
 }
 
-TEST(P0RecoveryWindowTest,
+TEST(MutationRecoveryTest,
      DownloadExistingCrashAfterEffectBeforeAppliedRecovers) {
-    check_p0_interrupted_effect(kasumi::Action::Download, true);
+    check_interrupted_mutation_effect(kasumi::Action::Download, true);
 }
 
-TEST(P0RecoveryWindowTest,
+TEST(MutationRecoveryTest,
      DownloadAbsentCrashAfterEffectBeforeAppliedRecovers) {
-    check_p0_interrupted_effect(kasumi::Action::Download, false);
+    check_interrupted_mutation_effect(kasumi::Action::Download, false);
 }
 
-TEST(P0RecoveryWindowTest, DeleteCrashAfterEffectBeforeAppliedRecovers) {
-    check_p0_interrupted_effect(kasumi::Action::DeleteLocal, true);
+TEST(MutationRecoveryTest, DeleteCrashAfterEffectBeforeAppliedRecovers) {
+    check_interrupted_mutation_effect(kasumi::Action::DeleteLocal, true);
 }
 
-TEST(P0RecoveryWindowTest, CrashBeforeDownloadInstallRecoversOriginal) {
-    check_p0_interrupted_effect(kasumi::Action::Download, true, 1);
+TEST(MutationRecoveryTest, CrashBeforeDownloadInstallRecoversOriginal) {
+    check_interrupted_mutation_effect(kasumi::Action::Download, true, 1);
 }
 
-TEST(P0RecoveryWindowTest, CrashAfterAppliedCheckpointRecoversIdempotently) {
-    check_p0_interrupted_effect(kasumi::Action::Download, true, 3);
+TEST(MutationRecoveryTest, CrashAfterAppliedCheckpointRecoversIdempotently) {
+    check_interrupted_mutation_effect(kasumi::Action::Download, true, 3);
 }
 
-TEST(P0RecoveryWindowTest, CrashDuringRollbackRecoversIdempotently) {
-    check_p0_interrupted_effect(kasumi::Action::Download, true, 4);
+TEST(MutationRecoveryTest, CrashDuringRollbackRecoversIdempotently) {
+    check_interrupted_mutation_effect(kasumi::Action::Download, true, 4);
 }
 
 #if defined(KASUMI_JOURNAL_FAULT_TESTS) && GTEST_HAS_DEATH_TEST
@@ -9599,19 +9600,19 @@ void interrupt_after_conflict_reset_checkpoint(
     std::_Exit(0);
 }
 
-TEST(P0ConflictResolutionCrashTest,
+TEST(ConflictResolutionRecoveryTest,
      ResetCheckpointSurvivesProcessExitBeforeCleanup) {
-    const auto* inherited = std::getenv("KASUMI_P0_CONFLICT_CRASH_ROOT");
+    const auto* inherited = std::getenv("KASUMI_CONFLICT_CRASH_ROOT");
     auto workspace = inherited
                          ? kasumi::test::TempWorkspace{
                                nullptr, kasumi::test::remove_temp_workspace}
                          : kasumi::test::make_temp_workspace(
-                               "p0-conflict-reset-crash");
+                               "conflict-reset-crash");
     const auto root = inherited
                           ? kasumi::platform::path::from_utf8(inherited)
                           : kasumi::test::workspace_root(workspace);
     auto root_environment = kasumi::test::scoped_environment_variable(
-        "KASUMI_P0_CONFLICT_CRASH_ROOT",
+        "KASUMI_CONFLICT_CRASH_ROOT",
         kasumi::platform::path::to_utf8(root));
     {
         auto crash = kasumi::test::scoped_environment_variable(
@@ -9650,11 +9651,11 @@ TEST(P0ConflictResolutionCrashTest,
 }
 #endif
 
-TEST(P0RecoveryWindowTest,
+TEST(MutationRecoveryTest,
      MatchingRemoteBytesBeforeAppliedAreAcceptedByContentEquivalence) {
     namespace sync = kasumi::application::sync;
     auto workspace =
-        kasumi::test::make_temp_workspace("p0-equivalent-before-applied");
+        kasumi::test::make_temp_workspace("equivalent-content-before-applied");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto profile = root / "profile";
     const auto local = root / "local";
@@ -9699,10 +9700,10 @@ TEST(P0RecoveryWindowTest,
     EXPECT_FALSE(pending->has_value());
 }
 
-TEST(P0RecoveryWindowTest, UnexpectedBytesBeforeAppliedRemainARecoveryConflict) {
+TEST(MutationRecoveryTest, UnexpectedBytesBeforeAppliedRemainARecoveryConflict) {
     namespace sync = kasumi::application::sync;
     auto workspace =
-        kasumi::test::make_temp_workspace("p0-unexpected-before-applied");
+        kasumi::test::make_temp_workspace("unexpected-content-before-applied");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto profile = root / "profile";
     const auto local = root / "local";
@@ -9749,13 +9750,13 @@ TEST(P0RecoveryWindowTest, UnexpectedBytesBeforeAppliedRemainARecoveryConflict) 
               kasumi::transaction::OperationState::BackupCreated);
 }
 
-void check_p0_plan_sequence(bool directory,
+void check_mutation_plan_sequence(bool directory,
                             bool external_creation,
                             bool interrupt_get,
                             bool retry = false,
                             bool preceding_download = false) {
     namespace sync = kasumi::application::sync;
-    auto workspace = kasumi::test::make_temp_workspace("p0-plan-sequence");
+    auto workspace = kasumi::test::make_temp_workspace("mutation-plan-sequence");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto profile = root / "profile";
     const auto local = root / "local";
@@ -9954,31 +9955,31 @@ void check_p0_plan_sequence(bool directory,
     EXPECT_EQ(stored_conflict->hash, kasumi::hasher::hash_string("B-V2"));
 }
 
-TEST(P0PlanSequenceTest, ConfirmedRenameThenDownloadPreservesBothVersions) {
-    check_p0_plan_sequence(false, false, false);
+TEST(MutationPlanSequenceTest, ConfirmedRenameThenDownloadPreservesBothVersions) {
+    check_mutation_plan_sequence(false, false, false);
 }
-TEST(P0PlanSequenceTest, UserCreationAfterConfirmedRenameIsPreserved) {
-    check_p0_plan_sequence(false, true, false);
+TEST(MutationPlanSequenceTest, UserCreationAfterConfirmedRenameIsPreserved) {
+    check_mutation_plan_sequence(false, true, false);
 }
-TEST(P0PlanSequenceTest,
+TEST(MutationPlanSequenceTest,
      CompletedDownloadAndRenameRemainAfterLaterDownloadConflict) {
-    check_p0_plan_sequence(false, true, false, false, true);
+    check_mutation_plan_sequence(false, true, false, false, true);
 }
-TEST(P0PlanSequenceTest, InterruptedDownloadReversesConfirmedRenameSafely) {
-    check_p0_plan_sequence(false, false, true);
+TEST(MutationPlanSequenceTest, InterruptedDownloadReversesConfirmedRenameSafely) {
+    check_mutation_plan_sequence(false, false, true);
 }
-TEST(P0PlanSequenceTest, FileDirectoryTransformationPreservesBothVersions) {
-    check_p0_plan_sequence(true, false, false);
+TEST(MutationPlanSequenceTest, FileDirectoryTransformationPreservesBothVersions) {
+    check_mutation_plan_sequence(true, false, false);
 }
-TEST(P0PlanSequenceTest, RetryUsesConfirmedRenameAndOriginalPreparedProgress) {
-    check_p0_plan_sequence(false, false, true, true);
+TEST(MutationPlanSequenceTest, RetryUsesConfirmedRenameAndOriginalPreparedProgress) {
+    check_mutation_plan_sequence(false, false, true, true);
 }
 
-void check_p0_sequence_recovery(bool rename_confirmed,
+void check_mutation_sequence_recovery(bool rename_confirmed,
                                 bool download_installed,
                                 bool download_confirmed) {
     namespace sync = kasumi::application::sync;
-    auto workspace = kasumi::test::make_temp_workspace("p0-sequence-recovery");
+    auto workspace = kasumi::test::make_temp_workspace("mutation-sequence-recovery");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto profile = root / "profile";
     const auto local = root / "local";
@@ -10076,22 +10077,22 @@ void check_p0_sequence_recovery(bool rename_confirmed,
     }
 }
 
-TEST(P0PlanSequenceTest, RecoveryReversesConfirmedRenameBeforeDownload) {
-    check_p0_sequence_recovery(true, false, false);
+TEST(MutationPlanSequenceTest, RecoveryReversesConfirmedRenameBeforeDownload) {
+    check_mutation_sequence_recovery(true, false, false);
 }
-TEST(P0PlanSequenceTest, RecoveryRetainsAmbiguousRename) {
-    check_p0_sequence_recovery(false, false, false);
+TEST(MutationPlanSequenceTest, RecoveryRetainsAmbiguousRename) {
+    check_mutation_sequence_recovery(false, false, false);
 }
-TEST(P0PlanSequenceTest, RecoveryRollsBackDownloadBeforeAppliedAfterRename) {
-    check_p0_sequence_recovery(true, true, false);
+TEST(MutationPlanSequenceTest, RecoveryRollsBackDownloadBeforeAppliedAfterRename) {
+    check_mutation_sequence_recovery(true, true, false);
 }
-TEST(P0PlanSequenceTest, RollbackReversesConfirmedDownloadThenRename) {
-    check_p0_sequence_recovery(true, true, true);
+TEST(MutationPlanSequenceTest, RollbackReversesConfirmedDownloadThenRename) {
+    check_mutation_sequence_recovery(true, true, true);
 }
 
-TEST(P0PlanSequenceTest, PreparedRenameRejectsEditedSource) {
+TEST(MutationPlanSequenceTest, PreparedRenameRejectsEditedSource) {
     namespace mutation = kasumi::application::sync::mutation;
-    auto workspace = kasumi::test::make_temp_workspace("p0-rename-source-edit");
+    auto workspace = kasumi::test::make_temp_workspace("rename-source-edit");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto local = root / "local";
     const kasumi::platform::Workspace transaction{root / "transaction"};
@@ -10121,9 +10122,9 @@ TEST(P0PlanSequenceTest, PreparedRenameRejectsEditedSource) {
     EXPECT_EQ(kasumi::test::read_text(transaction.root / "0.backup"), "B-V2");
 }
 
-TEST(P0PlanSequenceTest, UnconfirmedRenameCanBeReplayedAndRolledBack) {
+TEST(MutationPlanSequenceTest, UnconfirmedRenameCanBeReplayedAndRolledBack) {
     namespace mutation = kasumi::application::sync::mutation;
-    auto workspace = kasumi::test::make_temp_workspace("p0-rename-ambiguous");
+    auto workspace = kasumi::test::make_temp_workspace("ambiguous-rename-recovery");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto local = root / "local";
     const kasumi::platform::Workspace transaction{root / "transaction"};
@@ -10156,9 +10157,9 @@ TEST(P0PlanSequenceTest, UnconfirmedRenameCanBeReplayedAndRolledBack) {
     EXPECT_EQ(kasumi::test::read_text(transaction.root / "0.backup"), "B-V2");
 }
 
-TEST(P0PlanSequenceTest, CorruptedTransferredBackupNeverDeletesRenamedVersion) {
+TEST(MutationPlanSequenceTest, CorruptedTransferredBackupNeverDeletesRenamedVersion) {
     namespace sync = kasumi::application::sync;
-    auto workspace = kasumi::test::make_temp_workspace("p0-transferred-backup");
+    auto workspace = kasumi::test::make_temp_workspace("transferred-backup-validation");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto local = root / "local";
     const auto profile = root / "profile";
@@ -10236,9 +10237,9 @@ TEST(P0PlanSequenceTest, CorruptedTransferredBackupNeverDeletesRenamedVersion) {
     EXPECT_FALSE(std::filesystem::exists(local / "file.txt"));
 }
 
-TEST(P0MutationSafetyTest, RecoveryDoesNotPrepareAnUnknownDestinationOnRetry) {
+TEST(MutationSafetyTest, RecoveryDoesNotPrepareAnUnknownDestinationOnRetry) {
     namespace sync = kasumi::application::sync;
-    auto workspace = kasumi::test::make_temp_workspace("p0-pending-recovery");
+    auto workspace = kasumi::test::make_temp_workspace("pending-mutation-recovery");
     const auto root = kasumi::test::workspace_root(workspace);
     const auto profile = root / "profile";
     const auto local = root / "local";

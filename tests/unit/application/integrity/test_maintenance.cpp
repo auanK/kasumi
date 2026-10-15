@@ -245,7 +245,7 @@ void replace_fake_object(FakeState& state, const std::string& identifier) {
         kasumi::crypto::physical::sha256_finish(hash);
 }
 
-TEST(ManualPurgeBoundaryRed, BarrierReplacementBeforeFirstDeletionStopsPurge) {
+TEST(ManualPurgeTest, BarrierReplacementBeforeFirstDeletionStopsPurge) {
     ManualPurgeFixture fixture{"manual-barrier-before", 2};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 2U);
@@ -279,7 +279,7 @@ TEST(ManualPurgeBoundaryRed, BarrierReplacementBeforeFirstDeletionStopsPurge) {
     }
 }
 
-TEST(ManualPurgeBoundaryRed, BarrierReplacementBetweenEntriesStopsPurge) {
+TEST(ManualPurgeTest, BarrierReplacementBetweenEntriesStopsPurge) {
     ManualPurgeFixture fixture{"manual-barrier-between", 2};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 2U);
@@ -328,7 +328,7 @@ TEST(ManualPurgeBoundaryRed, BarrierReplacementBetweenEntriesStopsPurge) {
     }
 }
 
-TEST(ManualPurgeBoundaryRed, BackendWithoutOnlineConsistencyBlocksDeletion) {
+TEST(ManualPurgeTest, BackendWithoutOnlineConsistencyBlocksDeletion) {
     ManualPurgeFixture fixture{"manual-probe-false", 2};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 2U);
@@ -342,7 +342,7 @@ TEST(ManualPurgeBoundaryRed, BackendWithoutOnlineConsistencyBlocksDeletion) {
     EXPECT_EQ(fixture.state->objects, before);
 }
 
-TEST(ManualPurgeBoundaryRed, BackendProbeTransportErrorBlocksDeletion) {
+TEST(ManualPurgeTest, BackendProbeTransportErrorBlocksDeletion) {
     ManualPurgeFixture fixture{"manual-probe-error", 2};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 2U);
@@ -356,7 +356,7 @@ TEST(ManualPurgeBoundaryRed, BackendProbeTransportErrorBlocksDeletion) {
     EXPECT_EQ(fixture.state->objects, before);
 }
 
-TEST(ManualPurgeBoundaryRed, NewlyAppearingEntryDoesNotExpandSelection) {
+TEST(ManualPurgeTest, NewlyAppearingEntryDoesNotExpandSelection) {
     ManualPurgeFixture fixture{"manual-new-entry", 3};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 3U);
@@ -388,7 +388,7 @@ TEST(ManualPurgeBoundaryRed, NewlyAppearingEntryDoesNotExpandSelection) {
     EXPECT_TRUE(fixture.state->objects.contains(late.metadata_identifier));
 }
 
-TEST(ManualPurgeBoundaryRed, ReplacedMetadataAfterSelectionFailsClosed) {
+TEST(ManualPurgeTest, ReplacedMetadataAfterSelectionFailsClosed) {
     ManualPurgeFixture fixture{"manual-replace-metadata", 2};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 2U);
@@ -410,7 +410,7 @@ TEST(ManualPurgeBoundaryRed, ReplacedMetadataAfterSelectionFailsClosed) {
     EXPECT_EQ(fixture.selected_removals(), 0U);
 }
 
-TEST(ManualPurgeBoundaryRed, ReplacedPayloadAfterVerificationFailsClosed) {
+TEST(ManualPurgeTest, ReplacedPayloadAfterVerificationFailsClosed) {
     ManualPurgeFixture fixture{"manual-replace-payload", 2};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 2U);
@@ -437,7 +437,7 @@ TEST(ManualPurgeBoundaryRed, ReplacedPayloadAfterVerificationFailsClosed) {
     EXPECT_EQ(fixture.selected_removals(), 0U);
 }
 
-TEST(ManualPurgeBoundaryRed, OriginalReappearanceBeforeDeletionFailsClosed) {
+TEST(ManualPurgeTest, OriginalReappearanceBeforeDeletionFailsClosed) {
     ManualPurgeFixture fixture{"manual-original-reappears", 2};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 2U);
@@ -462,7 +462,7 @@ TEST(ManualPurgeBoundaryRed, OriginalReappearanceBeforeDeletionFailsClosed) {
     EXPECT_EQ(fixture.selected_removals(), 0U);
 }
 
-TEST(ManualPurgeBoundaryRed, LateInvalidEntryBlocksEveryDeletion) {
+TEST(ManualPurgeTest, LateInvalidEntryBlocksEveryDeletion) {
     ManualPurgeFixture fixture{"manual-invalid-late", 3};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 3U);
@@ -482,7 +482,7 @@ TEST(ManualPurgeBoundaryRed, LateInvalidEntryBlocksEveryDeletion) {
     EXPECT_EQ(fixture.state->objects, before);
 }
 
-TEST(ManualPurgeBoundaryRed, ValidInventoryPurgesOnlyCapturedEntries) {
+TEST(ManualPurgeTest, ValidInventoryPurgesOnlyCapturedEntries) {
     ManualPurgeFixture fixture{"manual-valid-three", 3};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 3U);
@@ -498,7 +498,7 @@ TEST(ManualPurgeBoundaryRed, ValidInventoryPurgesOnlyCapturedEntries) {
     EXPECT_EQ(fixture.selected_removals(), fixture.entries.size() * 2);
 }
 
-TEST(ManualPurgeBoundaryRed, EmptyQuarantineReturnsZero) {
+TEST(ManualPurgeTest, EmptyQuarantineReturnsZero) {
     ManualPurgeFixture fixture{"manual-empty-noop", 0};
     fixture.prepare();
     const auto before = fixture.state->objects;
@@ -523,7 +523,7 @@ struct ResetManualPurgeCancellation {
     }
 };
 
-TEST(ManualPurgeBoundaryRed,
+TEST(ManualPurgeTest,
      FirstRemovalFailureKeepsAuthenticatedPairForRetry) {
     ManualPurgeFixture fixture{"manual-first-remove-fails", 2};
     fixture.prepare();
@@ -553,7 +553,7 @@ TEST(ManualPurgeBoundaryRed,
     EXPECT_EQ(*retry, fixture.entries.size());
 }
 
-TEST(ManualPurgeBoundaryRed,
+TEST(ManualPurgeTest,
      AmbiguousFirstRemovalRetainsMetadataAndBlocksBlindRetry) {
     ManualPurgeFixture fixture{"manual-ambiguous-first", 2};
     fixture.prepare();
@@ -585,7 +585,7 @@ TEST(ManualPurgeBoundaryRed,
     EXPECT_EQ(fixture.state->objects, partial);
 }
 
-TEST(ManualPurgeBoundaryRed, SecondRemovalFailureLeavesClassifiableMetadata) {
+TEST(ManualPurgeTest, SecondRemovalFailureLeavesClassifiableMetadata) {
     ManualPurgeFixture fixture{"manual-second-remove-fails", 2};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 2U);
@@ -618,7 +618,7 @@ TEST(ManualPurgeBoundaryRed, SecondRemovalFailureLeavesClassifiableMetadata) {
     EXPECT_EQ(fixture.state->objects, partial);
 }
 
-TEST(ManualPurgeBoundaryRed,
+TEST(ManualPurgeTest,
      CancellationBetweenPayloadAndMetadataKeepsEvidence) {
     ResetManualPurgeCancellation guard;
     kasumi::platform::cancellation::reset();
@@ -653,7 +653,7 @@ TEST(ManualPurgeBoundaryRed,
     EXPECT_EQ(fixture.state->objects, partial);
 }
 
-TEST(ManualPurgeBoundaryRed, CancellationBetweenEntriesAllowsScopedRetry) {
+TEST(ManualPurgeTest, CancellationBetweenEntriesAllowsScopedRetry) {
     ResetManualPurgeCancellation guard;
     kasumi::platform::cancellation::reset();
     ManualPurgeFixture fixture{"manual-cancel-between-entries", 2};
@@ -745,7 +745,7 @@ TEST(ManualPurgeFakeTransportTest, InjectionHooksAndProbeFailuresAreReachable) {
     EXPECT_EQ(failed.error().code, protocol::ErrorCode::TransportFailure);
 }
 
-TEST(ManualPurgeBoundaryRed, ActiveWriterBlocksManualDeletion) {
+TEST(ManualPurgeTest, ActiveWriterBlocksManualDeletion) {
     ManualPurgeFixture fixture{"manual-active-writer", 1};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 1U);
@@ -765,7 +765,7 @@ TEST(ManualPurgeBoundaryRed, ActiveWriterBlocksManualDeletion) {
     ASSERT_TRUE(protocol::release_registration(*writer));
 }
 
-TEST(ManualPurgeBoundaryRed, AbandonedWriterBlocksManualDeletion) {
+TEST(ManualPurgeTest, AbandonedWriterBlocksManualDeletion) {
     ManualPurgeFixture fixture{"manual-abandoned-writer", 1};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 1U);
@@ -780,7 +780,7 @@ TEST(ManualPurgeBoundaryRed, AbandonedWriterBlocksManualDeletion) {
     EXPECT_EQ(fixture.state->objects, before);
 }
 
-TEST(ManualPurgeBoundaryRed, ExistingBarrierIsNeverOverwritten) {
+TEST(ManualPurgeTest, ExistingBarrierIsNeverOverwritten) {
     ManualPurgeFixture fixture{"manual-existing-barrier", 1};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 1U);
@@ -799,7 +799,7 @@ TEST(ManualPurgeBoundaryRed, ExistingBarrierIsNeverOverwritten) {
     ASSERT_TRUE(protocol::release_registration(*barrier));
 }
 
-TEST(ManualPurgeBoundaryRed, MalformedQuarantineNameNeverBecomesTarget) {
+TEST(ManualPurgeTest, MalformedQuarantineNameNeverBecomesTarget) {
     ManualPurgeFixture fixture{"manual-malformed-name", 1};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 1U);
@@ -819,7 +819,7 @@ TEST(ManualPurgeBoundaryRed, MalformedQuarantineNameNeverBecomesTarget) {
     EXPECT_EQ(fixture.state->objects, before);
 }
 
-TEST(ManualPurgeBoundaryRed, RetryWithMetadataOnlyPairFailsClosed) {
+TEST(ManualPurgeTest, RetryWithMetadataOnlyPairFailsClosed) {
     ManualPurgeFixture fixture{"manual-metadata-only-retry", 2};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 2U);
@@ -842,7 +842,7 @@ TEST(ManualPurgeBoundaryRed, RetryWithMetadataOnlyPairFailsClosed) {
     EXPECT_EQ(fixture.state->objects, before);
 }
 
-TEST(ManualPurgeBoundaryRed, RetryWithPayloadOnlyPairFailsClosed) {
+TEST(ManualPurgeTest, RetryWithPayloadOnlyPairFailsClosed) {
     ManualPurgeFixture fixture{"manual-payload-only-retry", 2};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 2U);
@@ -866,7 +866,7 @@ TEST(ManualPurgeBoundaryRed, RetryWithPayloadOnlyPairFailsClosed) {
     EXPECT_EQ(fixture.state->objects, before);
 }
 
-TEST(ManualPurgeBoundaryRed,
+TEST(ManualPurgeTest,
      BarrierReleaseFailurePropagatesErrorAndDoesNotReportSuccess) {
     ManualPurgeFixture fixture{"manual-barrier-release-fail", 2};
     fixture.prepare();
@@ -891,7 +891,7 @@ TEST(ManualPurgeBoundaryRed,
         fixture.storage, test_layout().barrier_identifier, Presence::Present);
 }
 
-TEST(ManualPurgeBoundaryRed, SuccessfulPurgeCleansUpOwnedBarrier) {
+TEST(ManualPurgeTest, SuccessfulPurgeCleansUpOwnedBarrier) {
     ManualPurgeFixture fixture{"manual-barrier-cleanup-success", 2};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 2U);
@@ -903,7 +903,7 @@ TEST(ManualPurgeBoundaryRed, SuccessfulPurgeCleansUpOwnedBarrier) {
         fixture.storage, test_layout().barrier_identifier, Presence::Absent);
 }
 
-TEST(ManualPurgeBoundaryRed, FailedPurgeCleansUpOwnedBarrier) {
+TEST(ManualPurgeTest, FailedPurgeCleansUpOwnedBarrier) {
     ManualPurgeFixture fixture{"manual-barrier-cleanup-failed-purge", 2};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 2U);
@@ -917,7 +917,7 @@ TEST(ManualPurgeBoundaryRed, FailedPurgeCleansUpOwnedBarrier) {
         fixture.storage, test_layout().barrier_identifier, Presence::Absent);
 }
 
-TEST(ManualPurgeBoundaryRed,
+TEST(ManualPurgeTest,
      AmbiguousPayloadRemovalReportsCompletedCountAndUncertainMutation) {
     ManualPurgeFixture fixture{"manual-ambiguous-report", 2};
     fixture.prepare();
@@ -936,7 +936,7 @@ TEST(ManualPurgeBoundaryRed,
               std::string::npos);
 }
 
-TEST(ManualPurgeBoundaryRed,
+TEST(ManualPurgeTest,
      MetadataRemovalFailureReportsIncompletePairAndAccurateCount) {
     ManualPurgeFixture fixture{"manual-metadata-fail-count", 2};
     fixture.prepare();
@@ -957,7 +957,7 @@ TEST(ManualPurgeBoundaryRed,
 }
 
 TEST(
-    ManualPurgeBoundaryRed,
+    ManualPurgeTest,
     PurgeFailureWithBarrierReleaseFailureReportsOriginalErrorAndIdentifiesBarrierCleanupFailure) {
     ManualPurgeFixture fixture{"manual-purge-dual-fail", 2};
     fixture.prepare();
@@ -1004,7 +1004,7 @@ struct ManualRepairFixture : ManualPurgeFixture {
     }
 };
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      InterruptedPurgeRecoveryRemovesAuthenticatedMetadataRemnant) {
     ManualRepairFixture fixture{"repair-interrupted-purge", 1};
     fixture.prepare();
@@ -1021,7 +1021,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
         fixture.storage, entry.quarantine_identifier, Presence::Absent);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      RecoveredInventoryUnblocksNormalGarbageCollection) {
     ManualRepairFixture fixture{"repair-unblocks-gc", 1};
     fixture.prepare();
@@ -1050,7 +1050,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      RepairIsIdempotentAndSecondRunReportsZero) {
     ManualRepairFixture fixture{"repair-idempotent", 1};
     fixture.prepare();
@@ -1066,7 +1066,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
     EXPECT_EQ(*second, 0U);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed, HealthyPairsPreservedByteForByte) {
+TEST(QuarantineRepairTest, HealthyPairsPreservedByteForByte) {
     ManualRepairFixture fixture{"repair-healthy-preserved", 2};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 2U);
@@ -1090,7 +1090,7 @@ TEST(ManualQuarantineRepairBoundaryRed, HealthyPairsPreservedByteForByte) {
               healthy_metadata);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      PayloadOnlyObjectPreservedAndNeverTreatedAsRepairCandidate) {
     ManualRepairFixture fixture{"repair-payload-only", 2};
     fixture.prepare();
@@ -1111,7 +1111,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
                     Presence::Present);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      TamperedMetadataFailsAuthenticationWithZeroDeletions) {
     ManualRepairFixture fixture{"repair-tampered-meta", 1};
     fixture.prepare();
@@ -1128,7 +1128,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
                     Presence::Present);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      WrongVaultKeyFailsAuthenticationWithZeroDeletions) {
     ManualRepairFixture fixture{"repair-wrong-key", 1};
     fixture.prepare();
@@ -1174,7 +1174,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
     expect_presence(fixture.storage, foreign_metadata_id, Presence::Present);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      MalformedOrForeignPathsNeverDeletedOutsideNamespace) {
     ManualRepairFixture fixture{"repair-foreign-paths", 1};
     fixture.prepare();
@@ -1194,7 +1194,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
     EXPECT_EQ(fixture.state->objects, before);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed, EpochAndHistoryObjectsRemainUnchanged) {
+TEST(QuarantineRepairTest, EpochAndHistoryObjectsRemainUnchanged) {
     ManualRepairFixture fixture{"repair-history-preserved", 1};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 1U);
@@ -1215,7 +1215,7 @@ TEST(ManualQuarantineRepairBoundaryRed, EpochAndHistoryObjectsRemainUnchanged) {
     }
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      MixedInventoryValidatesAllBeforeFirstDeletion) {
     ManualRepairFixture fixture{"repair-mixed-inventory", 4};
     fixture.prepare();
@@ -1247,7 +1247,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
                     Presence::Present);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed, LateInvalidEntryBlocksEveryDeletion) {
+TEST(QuarantineRepairTest, LateInvalidEntryBlocksEveryDeletion) {
     ManualRepairFixture fixture{"repair-late-invalid", 2};
     fixture.prepare();
     ASSERT_EQ(fixture.entries.size(), 2U);
@@ -1268,7 +1268,7 @@ TEST(ManualQuarantineRepairBoundaryRed, LateInvalidEntryBlocksEveryDeletion) {
                     Presence::Present);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      NewMetadataAppearingAfterCaptureCannotExpandAuthority) {
     ManualRepairFixture fixture{"repair-new-meta-after-capture", 3};
     fixture.prepare();
@@ -1306,7 +1306,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
         fixture.storage, late.metadata_identifier, Presence::Present);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      PayloadReappearingBeforeDeletionAbortsOperation) {
     ManualRepairFixture fixture{"repair-payload-reappears", 1};
     fixture.prepare();
@@ -1332,7 +1332,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
                     Presence::Present);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      OriginalObjectReappearingAbortsUnderConservativePolicy) {
     ManualRepairFixture fixture{"repair-original-reappears", 1};
     fixture.prepare();
@@ -1349,7 +1349,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
                     Presence::Present);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      MetadataReplacedAfterAuthenticationAbortsDeletion) {
     ManualRepairFixture fixture{"repair-metadata-replaced", 1};
     fixture.prepare();
@@ -1377,7 +1377,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
                     Presence::Present);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      MetadataReplacedWithEquivalentCiphertextAbortsDeletion) {
     ManualRepairFixture fixture{"repair-meta-equiv-replaced", 1};
     fixture.prepare();
@@ -1431,7 +1431,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
         fixture.storage, entry.metadata_identifier, Presence::Present);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      CryptographicallyInvalidHealthyPairBlocksRepairAsIntegrityFailure) {
     ManualRepairFixture fixture{"repair-invalid-healthy", 2};
     fixture.prepare();
@@ -1453,7 +1453,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
                     Presence::Present);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      CryptographicallyInvalidHealthyPairWithoutRepairCandidatesFailsClosed) {
     ManualRepairFixture fixture{"repair-invalid-healthy-no-candidates", 1};
     fixture.prepare();
@@ -1476,7 +1476,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
         fixture.storage, test_layout().barrier_identifier, Presence::Absent);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      BarrierReplacedStopsWithoutDeletingReplacementBarrier) {
     ManualRepairFixture fixture{"repair-barrier-replaced", 1};
     fixture.prepare();
@@ -1505,7 +1505,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
                     Presence::Present);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      WriterPresentOrBackendProbeFailureProducesZeroDeletions) {
     {
         ManualRepairFixture fixture{"repair-writer-present", 1};
@@ -1543,7 +1543,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
     }
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      DefiniteRemovalFailureReportsExplicitErrorAndLeavesRemainingState) {
     ManualRepairFixture fixture{"repair-remove-fail", 1};
     fixture.prepare();
@@ -1564,7 +1564,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
                     Presence::Present);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      AmbiguousRemovalResultStopsAndBlocksBlindRetry) {
     ManualRepairFixture fixture{"repair-ambiguous-stop", 2};
     fixture.prepare();
@@ -1584,7 +1584,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
                     Presence::Present);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      CancellationBetweenEntriesPreservesCompletedAndUntouched) {
     ResetManualPurgeCancellation reset_cancel;
     ManualRepairFixture fixture{"repair-cancel-between", 2};
@@ -1613,7 +1613,7 @@ TEST(ManualQuarantineRepairBoundaryRed,
                     Presence::Present);
 }
 
-TEST(ManualQuarantineRepairBoundaryRed,
+TEST(QuarantineRepairTest,
      EmptyHealthyQuarantineReturnsSuccessWithZeroRepairs) {
     ManualRepairFixture fixture{"repair-empty-zero", 0};
     fixture.prepare();
@@ -4116,7 +4116,7 @@ TEST(IntegrityMaintenanceTest,
 }
 
 // ============================================================================
-// Phase 10: Batch Garbage Collection Tests (Scenarios A through K)
+// Batch garbage collection behavior and performance tests
 // ============================================================================
 
 TEST(IntegrityMaintenanceTest, GarbageCollectionBatchMeasurementScale) {
@@ -4169,7 +4169,7 @@ TEST(IntegrityMaintenanceTest, GarbageCollectionBatchMeasurementScale) {
         EXPECT_EQ(state->orphan_payload_get_count, 0U);
         EXPECT_EQ(state->quarantine_payload_put_count, 0U);
 
-        std::cout << "PHASE10_BATCH_SCALE N=" << count << " batches=" << batches
+        std::cout << "GC_BATCH_SCALE N=" << count << " batches=" << batches
                   << " copy_count=" << state->copy_count
                   << " physical_hash_batch_count="
                   << state->physical_hash_batch_count
@@ -4185,8 +4185,8 @@ TEST(IntegrityMaintenanceTest, GarbageCollectionBatchMeasurementScale) {
     }
 }
 
-TEST(IntegrityMaintenanceTest, BatchGcScenarioAZeroCandidates) {
-    auto workspace = kasumi::test::make_temp_workspace("gc-batch-a-zero");
+TEST(IntegrityMaintenanceTest, BatchGcWithNoCandidatesDoesNoWork) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-batch-zero-candidates");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
@@ -4213,7 +4213,7 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioAZeroCandidates) {
     EXPECT_EQ(state->remove_count, 2U);
 }
 
-TEST(IntegrityMaintenanceTest, BatchGcScenarioBOneCandidate) {
+TEST(IntegrityMaintenanceTest, BatchGcWithOneCandidateUsesOneBatch) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-b-one");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4242,7 +4242,7 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioBOneCandidate) {
     expect_presence(transport, *q_id, Presence::Present);
 }
 
-TEST(IntegrityMaintenanceTest, BatchGcScenarioCTenCandidatesBoundedBatches) {
+TEST(IntegrityMaintenanceTest, BatchGcWithTenCandidatesUsesBoundedBatches) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-c-ten");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4310,7 +4310,7 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioCTenCandidatesBoundedBatches) {
     EXPECT_EQ(state->quarantine_metadata_put_count, 10U);
 }
 
-TEST(IntegrityMaintenanceTest, BatchGcScenarioDOneHundredCandidatesScale) {
+TEST(IntegrityMaintenanceTest, BatchGcWithOneHundredCandidatesScales) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-d-hundred");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4342,7 +4342,7 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioDOneHundredCandidatesScale) {
     }
 }
 
-TEST(IntegrityMaintenanceTest, BatchGcScenarioEBatchSupportedReducesCalls) {
+TEST(IntegrityMaintenanceTest, BatchGcUsesSupportedBatchVerification) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-e-reduction");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4369,7 +4369,7 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioEBatchSupportedReducesCalls) {
     EXPECT_EQ(state->physical_hash_count, 59U);
 }
 
-TEST(IntegrityMaintenanceTest, BatchGcScenarioFBatchUnsupportedFallback) {
+TEST(IntegrityMaintenanceTest, BatchGcFallsBackWithoutBatchVerification) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-f-fallback");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4401,7 +4401,7 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioFBatchUnsupportedFallback) {
     }
 }
 
-TEST(IntegrityMaintenanceTest, BatchGcScenarioGBatchPartialCorruptedResult) {
+TEST(IntegrityMaintenanceTest, BatchGcRejectsPartiallyCorruptedReport) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-g-corrupted");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4432,7 +4432,7 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioGBatchPartialCorruptedResult) {
     expect_presence(transport, orphans[1], Presence::Present);
 }
 
-TEST(IntegrityMaintenanceTest, BatchGcScenarioHIntermediateCandidateFailure) {
+TEST(IntegrityMaintenanceTest, BatchGcStopsAfterIntermediateCandidateFailure) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-h-interm");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4465,7 +4465,7 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioHIntermediateCandidateFailure) {
     expect_presence(transport, orphans[2], Presence::Present);
 }
 
-TEST(IntegrityMaintenanceTest, BatchGcScenarioIBarrierLossBeforeRemoval) {
+TEST(IntegrityMaintenanceTest, BatchGcStopsWhenBarrierIsLost) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-i-barrier");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4488,7 +4488,7 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioIBarrierLossBeforeRemoval) {
     expect_presence(transport, orphan, Presence::Present);
 }
 
-TEST(IntegrityMaintenanceTest, BatchGcScenarioJInterruptionRecovery) {
+TEST(IntegrityMaintenanceTest, BatchGcResumesAfterInterruption) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-j-interrupt");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4517,7 +4517,7 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioJInterruptionRecovery) {
 }
 
 TEST(IntegrityMaintenanceTest,
-     BatchGcScenarioKConcurrentChangeBetweenObservations) {
+     BatchGcRejectsConcurrentChange) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-k-concurrent");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4558,7 +4558,7 @@ TEST(IntegrityMaintenanceTest,
     EXPECT_EQ(state->copy_count, 0U);
 }
 
-TEST(IntegrityMaintenanceTest, BatchGcScenarioLRejectsEmptyBatchReport) {
+TEST(IntegrityMaintenanceTest, BatchGcRejectsEmptyBatchReport) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-l-empty");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4590,7 +4590,7 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioLRejectsEmptyBatchReport) {
 }
 
 TEST(IntegrityMaintenanceTest,
-     BatchGcScenarioMRejectsOmittedCandidateFromBatchReport) {
+     BatchGcRejectsOmittedCandidate) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-m-omitted");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4622,7 +4622,7 @@ TEST(IntegrityMaintenanceTest,
 }
 
 TEST(IntegrityMaintenanceTest,
-     BatchGcScenarioNRejectsUnexpectedIdentifierInBatchReport) {
+     BatchGcRejectsUnexpectedIdentifier) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-n-unexpected");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4662,7 +4662,7 @@ TEST(IntegrityMaintenanceTest,
 }
 
 TEST(IntegrityMaintenanceTest,
-     BatchGcScenarioORejectsCrossCategoryDuplicateInBatchReport) {
+     BatchGcRejectsCrossCategoryDuplicate) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-o-crossdup");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4702,7 +4702,7 @@ TEST(IntegrityMaintenanceTest,
 }
 
 TEST(IntegrityMaintenanceTest,
-     BatchGcScenarioPRejectsContradictoryMatchedAndMismatched) {
+     BatchGcRejectsContradictoryVerificationResults) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-p-contra");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4741,7 +4741,7 @@ TEST(IntegrityMaintenanceTest,
     expect_presence(transport, orphan1, Presence::Present);
 }
 
-TEST(IntegrityMaintenanceTest, BatchGcScenarioQDestinationMissingFailsSafely) {
+TEST(IntegrityMaintenanceTest, BatchGcFailsWhenDestinationIsMissing) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-q-missing");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4770,7 +4770,7 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioQDestinationMissingFailsSafely) {
     expect_presence(transport, orphan1, Presence::Present);
 }
 
-TEST(IntegrityMaintenanceTest, BatchGcScenarioRIndividualErrorFailsSafely) {
+TEST(IntegrityMaintenanceTest, BatchGcPropagatesIndividualRemovalFailure) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-r-error");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4800,7 +4800,7 @@ TEST(IntegrityMaintenanceTest, BatchGcScenarioRIndividualErrorFailsSafely) {
 }
 
 TEST(IntegrityMaintenanceTest,
-     BatchGcScenarioSGlobalBatchFailureAbortsFailClosed) {
+     BatchGcStopsOnGlobalBatchFailure) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-s-failure");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4831,7 +4831,7 @@ TEST(IntegrityMaintenanceTest,
 }
 
 TEST(IntegrityMaintenanceTest,
-     BatchGcScenarioTPositiveVerificationConfirmsAllAndQuarantines) {
+     BatchGcQuarantinesOnlyVerifiedCandidates) {
     auto workspace = kasumi::test::make_temp_workspace("gc-batch-t-positive");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -4910,7 +4910,7 @@ TEST(IntegrityMaintenanceTest,
     // Batch verification was not preferred because 3 < 6
     EXPECT_EQ(state->physical_hash_batch_count, 0U);
     // Individual physical hash should be called for each destination candidate
-    // in Phase 2
+    // Hash each destination candidate individually.
     EXPECT_EQ(kasumi::platform::perf_trace::get_count(
                   "gc.individual_destination_hash_attempts"),
               3U);
@@ -5260,10 +5260,10 @@ TEST(IntegrityMaintenanceTest, MultipleCommitsPreserveBatchDuringGc) {
 }
 
 // ============================================================================
-// Phase 10B Telemetry Tests
+// Garbage collection telemetry tests
 // ============================================================================
 
-TEST(IntegrityMaintenanceTelemetryTest, ScenarioANZeroCandidates) {
+TEST(GarbageCollectionTelemetryTest, NoCandidatesProduceZeroWorkTelemetry) {
     auto workspace = kasumi::test::make_temp_workspace("gc-telem-a-zero");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -5338,7 +5338,7 @@ TEST(IntegrityMaintenanceTelemetryTest, ScenarioANZeroCandidates) {
     kasumi::platform::perf_trace::force_enable(false);
 }
 
-TEST(IntegrityMaintenanceTelemetryTest, ScenarioBOneCandidate) {
+TEST(GarbageCollectionTelemetryTest, OneCandidateReportsSingleItemWork) {
     auto workspace = kasumi::test::make_temp_workspace("gc-telem-b-one");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -5393,7 +5393,7 @@ TEST(IntegrityMaintenanceTelemetryTest, ScenarioBOneCandidate) {
     kasumi::platform::perf_trace::force_enable(false);
 }
 
-TEST(IntegrityMaintenanceTelemetryTest, ScenarioCSixCandidatesThreshold) {
+TEST(GarbageCollectionTelemetryTest, SixCandidatesUseThresholdBatchVerification) {
     auto workspace = kasumi::test::make_temp_workspace("gc-telem-c-six");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -5461,7 +5461,7 @@ TEST(IntegrityMaintenanceTelemetryTest, ScenarioCSixCandidatesThreshold) {
     kasumi::platform::perf_trace::force_enable(false);
 }
 
-TEST(IntegrityMaintenanceTelemetryTest, ScenarioDEightCandidatesFullBatch) {
+TEST(GarbageCollectionTelemetryTest, EightCandidatesFillOneBatch) {
     auto workspace = kasumi::test::make_temp_workspace("gc-telem-d-eight");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -5514,8 +5514,8 @@ TEST(IntegrityMaintenanceTelemetryTest, ScenarioDEightCandidatesFullBatch) {
     kasumi::platform::perf_trace::force_enable(false);
 }
 
-TEST(IntegrityMaintenanceTelemetryTest,
-     ScenarioETenCandidatesDecompositionAndTail) {
+TEST(GarbageCollectionTelemetryTest,
+     TenCandidatesUseTwoBatchesAndTail) {
     auto workspace = kasumi::test::make_temp_workspace("gc-telem-e-ten");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -5569,7 +5569,7 @@ TEST(IntegrityMaintenanceTelemetryTest,
     kasumi::platform::perf_trace::force_enable(false);
 }
 
-TEST(IntegrityMaintenanceTelemetryTest, ScenarioFOneHundredCandidatesScale) {
+TEST(GarbageCollectionTelemetryTest, OneHundredCandidatesScaleAcrossBatches) {
     auto workspace = kasumi::test::make_temp_workspace("gc-telem-f-hundred");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -5609,7 +5609,7 @@ TEST(IntegrityMaintenanceTelemetryTest, ScenarioFOneHundredCandidatesScale) {
     kasumi::platform::perf_trace::force_enable(false);
 }
 
-TEST(IntegrityMaintenanceTelemetryTest, ScenarioGBatchUnsupportedFallback) {
+TEST(GarbageCollectionTelemetryTest, UnsupportedBatchVerificationUsesFallback) {
     auto workspace =
         kasumi::test::make_temp_workspace("gc-telem-g-unsupported");
     FakeState* state = nullptr;
@@ -5664,7 +5664,7 @@ TEST(IntegrityMaintenanceTelemetryTest, ScenarioGBatchUnsupportedFallback) {
     kasumi::platform::perf_trace::force_enable(false);
 }
 
-TEST(IntegrityMaintenanceTelemetryTest, ScenarioHFailureAbortsBeforeRemoval) {
+TEST(GarbageCollectionTelemetryTest, VerificationFailureAbortsBeforeRemoval) {
     auto workspace = kasumi::test::make_temp_workspace("gc-telem-h-failure");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -5715,7 +5715,7 @@ TEST(IntegrityMaintenanceTelemetryTest, ScenarioHFailureAbortsBeforeRemoval) {
     kasumi::platform::perf_trace::force_enable(false);
 }
 
-TEST(IntegrityMaintenanceTelemetryTest, ScenarioKTelemetryDisabled) {
+TEST(GarbageCollectionTelemetryTest, DisabledTracingEmitsNoGcTelemetry) {
     auto workspace = kasumi::test::make_temp_workspace("gc-telem-k-disabled");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
@@ -5747,7 +5747,7 @@ TEST(IntegrityMaintenanceTelemetryTest, ScenarioKTelemetryDisabled) {
               0U);
 }
 
-TEST(IntegrityMaintenanceTelemetryTest, ScenarioLConcurrency) {
+TEST(GarbageCollectionTelemetryTest, ConcurrentRunsKeepTelemetryScoped) {
     kasumi::platform::perf_trace::force_enable(true);
     kasumi::platform::perf_trace::reset();
 
@@ -5787,7 +5787,7 @@ TEST(IntegrityMaintenanceTelemetryTest, ScenarioLConcurrency) {
     kasumi::platform::perf_trace::force_enable(false);
 }
 
-TEST(IntegrityMaintenanceTelemetryTest, ScenarioMInterruption) {
+TEST(GarbageCollectionTelemetryTest, InterruptedRunReportsPartialTelemetry) {
     auto workspace =
         kasumi::test::make_temp_workspace("gc-telem-m-interruption");
     FakeState* state = nullptr;
@@ -5804,7 +5804,7 @@ TEST(IntegrityMaintenanceTelemetryTest, ScenarioMInterruption) {
     const auto orphan =
         put_content(transport, workspace, "orphan-0", "orphan-0");
 
-    // Fail remove of candidate to simulate interruption during phase 3
+    // Fail candidate removal to simulate an interrupted collection.
     state->fail_remove_identifier = orphan;
 
     kasumi::platform::perf_trace::force_enable(true);
@@ -5829,8 +5829,8 @@ TEST(IntegrityMaintenanceTelemetryTest, ScenarioMInterruption) {
     kasumi::platform::perf_trace::force_enable(false);
 }
 
-TEST(IntegrityMaintenancePhase14Scenarios, Scenario1HistoricalContentRetained) {
-    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen1");
+TEST(IntegrityMaintenanceTest, HistoricalContentRemainsReachable) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-historical-content");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
@@ -5868,8 +5868,8 @@ TEST(IntegrityMaintenancePhase14Scenarios, Scenario1HistoricalContentRetained) {
     expect_presence(transport, id_orphan, Presence::Absent);
 }
 
-TEST(IntegrityMaintenancePhase14Scenarios, Scenario2SharedBranch) {
-    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen2");
+TEST(IntegrityMaintenanceTest, SharedBranchKeepsSharedContentReachable) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-shared-branch");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
@@ -5940,8 +5940,8 @@ TEST(IntegrityMaintenancePhase14Scenarios, Scenario2SharedBranch) {
     expect_presence(transport, id_orphan, Presence::Absent);
 }
 
-TEST(IntegrityMaintenancePhase14Scenarios, Scenario3ContentReturn) {
-    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen3");
+TEST(IntegrityMaintenanceTest, ReturnedContentRemainsReachable) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-content-return");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
@@ -5984,8 +5984,8 @@ TEST(IntegrityMaintenancePhase14Scenarios, Scenario3ContentReturn) {
     expect_presence(transport, id_orphan, Presence::Absent);
 }
 
-TEST(IntegrityMaintenancePhase14Scenarios, Scenario4Merge) {
-    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen4");
+TEST(IntegrityMaintenanceTest, MergeKeepsParentContentReachable) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-merge-parents");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
@@ -6069,8 +6069,8 @@ TEST(IntegrityMaintenancePhase14Scenarios, Scenario4Merge) {
     expect_presence(transport, id_orphan, Presence::Absent);
 }
 
-TEST(IntegrityMaintenancePhase14Scenarios, Scenario5EpochRetention) {
-    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen5");
+TEST(IntegrityMaintenanceTest, EpochRetentionKeepsRequiredContentReachable) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-epoch-retention");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
@@ -6134,9 +6134,9 @@ TEST(IntegrityMaintenancePhase14Scenarios, Scenario5EpochRetention) {
     expect_presence(transport, id_orphan, Presence::Absent);
 }
 
-TEST(IntegrityMaintenancePhase14Scenarios,
-     Scenario6AlterationBetweenObservations) {
-    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen6");
+TEST(IntegrityMaintenanceTest,
+     ChangeBetweenObservationsStopsCollection) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-change-between-observations");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
@@ -6170,9 +6170,9 @@ TEST(IntegrityMaintenancePhase14Scenarios,
     expect_presence(transport, id_orphan, Presence::Present);
 }
 
-TEST(IntegrityMaintenancePhase14Scenarios,
-     Scenario7AlterationBeforeFinalListing) {
-    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen7");
+TEST(IntegrityMaintenanceTest,
+     ChangeBeforeFinalListingStopsCollection) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-change-before-final-listing");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
@@ -6202,9 +6202,9 @@ TEST(IntegrityMaintenancePhase14Scenarios,
     expect_presence(transport, id_orphan, Presence::Present);
 }
 
-TEST(IntegrityMaintenancePhase14Scenarios,
-     Scenario8IoErrorAndIncompleteListing) {
-    auto workspace = kasumi::test::make_temp_workspace("gc-phase14-scen8");
+TEST(IntegrityMaintenanceTest,
+     ListingAndIoErrorsStopCollection) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-listing-and-io-errors");
     FakeState* state = nullptr;
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));

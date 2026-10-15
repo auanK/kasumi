@@ -723,7 +723,7 @@ RunnerReport run(const RunnerOptions& options,
         parent_storage = &*owned_parent_storage;
     }
 
-    // Phase 5B / 5C Preflight Gate
+    // Verify the child storage before initialization.
     preflight::PreInitializeObservation pre_obs;
     if (!parent_transport_override) {
         // Real live preflight probe
@@ -827,7 +827,7 @@ RunnerReport run(const RunnerOptions& options,
     }
     auto& child_storage = *child_storage_ptr;
 
-    // Initialize child using Phase 5B gate
+    // Initialize the child after preflight.
     auto init_result = preflight::initialize_child(child_storage, pre_obs);
     if (!init_result) {
         report.status = "FAILED";
@@ -836,7 +836,7 @@ RunnerReport run(const RunnerOptions& options,
         return report;
     }
 
-    // Post-initialize observation using Phase 5B gate
+    // Verify the child remains empty after initialization.
     auto post_obs = preflight::observe_post_initialize(child_storage);
     auto post_disposition = preflight::classify_post_initialize(post_obs);
     report.post_initialize = preflight::to_json(post_obs, post_disposition);
@@ -861,7 +861,7 @@ RunnerReport run(const RunnerOptions& options,
         return report;
     }
 
-    // Establish ownership marker using Phase 5B gate
+    // Establish the ownership marker after the empty-state check.
     auto marker_res = preflight::establish_ownership_marker(
         child_storage, post_obs, owner_token, marker_src, marker_readback);
 
@@ -1138,7 +1138,7 @@ RunnerReport run(const RunnerOptions& options,
     }
     report.inventory_after = std::move(*inv_after);
 
-    // Post-GC Invariant Verification (Passo 9)
+    // Verify post-GC invariants.
     std::set<std::string> post_ids;
     for (const auto& item : report.inventory_after.vault_objects) {
         post_ids.insert(item.identifier);
@@ -1222,7 +1222,7 @@ RunnerReport run(const RunnerOptions& options,
     }
     report.stage_reached = LiveGcStage::PostInventoryVerified;
 
-    // Pre-cleanup Audit (Passo 7 & 8):
+    // Audit preserved metadata before cleanup.
     // Invariant: While any un-enumerated object or residue exists in child
     // storage, owner.marker MUST NOT be removed!
     bool unallowed_residue_detected = false;

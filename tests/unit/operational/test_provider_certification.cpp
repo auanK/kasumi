@@ -315,16 +315,16 @@ TEST(ProviderCertificationMatrixTest,
 }
 
 TEST(ProviderCertificationMatrixTest,
-     Phase41ReportsRemainReadableWithNewRowsAbsent) {
-    Report phase41{.provider_id = "google-drive", .transport = "Rclone"};
-    phase41.cleanup = "CLEANED";
-    phase41.scenarios = {
+     ReportsRemainReadableWithoutNewRows) {
+    Report baseline_report{.provider_id = "google-drive", .transport = "Rclone"};
+    baseline_report.cleanup = "CLEANED";
+    baseline_report.scenarios = {
         {.name = "transport-round-trip", .status = ScenarioStatus::Pass},
         {.name = "bootstrap-publish", .status = ScenarioStatus::Pass},
         {.name = "gc-lifecycle", .status = ScenarioStatus::NotRun},
         {.name = "cleanup", .status = ScenarioStatus::Pass},
     };
-    phase41.status = derive_status(phase41);
+    baseline_report.status = derive_status(baseline_report);
 
     Report expanded{.provider_id = "local-filesystem", .transport = "Local"};
     expanded.cleanup = "CLEANED";
@@ -338,7 +338,7 @@ TEST(ProviderCertificationMatrixTest,
     };
     expanded.status = derive_status(expanded);
 
-    const auto matrix = aggregate_reports({phase41, expanded});
+    const auto matrix = aggregate_reports({baseline_report, expanded});
     ASSERT_EQ(matrix["status"].get<std::string>(), "PASS");
     const auto find = [&](std::string_view name) {
         return std::ranges::find_if(matrix["scenarios"], [&](const auto& row) {

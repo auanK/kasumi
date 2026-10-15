@@ -534,7 +534,7 @@ TrialMetrics run_trial_serie_b(std::size_t H, std::size_t rep) {
     return m;
 }
 
-// Phase 17: valid production Epochs with a fixed recent window and physical
+// Valid production Epochs with a fixed recent window and physical
 // history that grows independently of that window.
 TrialMetrics run_trial_retention(std::size_t P,
                                  std::size_t recent_per_head,
@@ -546,7 +546,7 @@ TrialMetrics run_trial_retention(std::size_t P,
 
     if (branch_count == 0 || P <= branch_count ||
         (P - 1) / branch_count < recent_per_head + 5) {
-        std::cerr << "invalid Phase 17 retention fixture dimensions\n";
+        std::cerr << "invalid retention fixture dimensions\n";
         std::abort();
     }
 
@@ -556,7 +556,7 @@ TrialMetrics run_trial_retention(std::size_t P,
     m.rep = rep;
 
     auto workspace = kasumi::test::make_temp_workspace(
-        "gc-phase17-P" + std::to_string(P) + "-recent" +
+        "gc-retention-trial-P" + std::to_string(P) + "-recent" +
         std::to_string(recent_per_head) + "-branches" +
         std::to_string(branch_count) + "-r" + std::to_string(rep));
     FakeState* state = nullptr;
@@ -576,7 +576,7 @@ TrialMetrics run_trial_retention(std::size_t P,
     const auto plain_file =
         kasumi::test::workspace_path(workspace, "temp.plain");
     const auto enc_file = kasumi::test::workspace_path(workspace, "temp.enc");
-    constexpr std::string_view content = "phase17-shared-retained-content";
+    constexpr std::string_view content = "retention-trial-shared-retained-content";
     put_content_fast(transport, plain_file, enc_file, content, key);
 
     Snapshot tree{.rows = {
@@ -717,7 +717,7 @@ TrialMetrics run_trial_retention(std::size_t P,
         std::chrono::duration_cast<std::chrono::microseconds>(end - start)
             .count());
     if (!collected) {
-        std::cerr << "Phase 17 full GC failed: "
+        std::cerr << "Retention trial full GC failed: "
                   << kasumi::application::integrity::describe(collected.error())
                   << '\n';
         std::abort();
@@ -726,7 +726,7 @@ TrialMetrics run_trial_retention(std::size_t P,
     if (collected->candidate_objects != expected_candidates ||
         collected->quarantined_objects != expected_candidates ||
         collected->restored_objects != 0 || collected->purged_objects != 0) {
-        std::cerr << "Phase 17 candidate mismatch: expected "
+        std::cerr << "Retention trial candidate mismatch: expected "
                   << expected_candidates << ", got "
                   << collected->candidate_objects << "/"
                   << collected->quarantined_objects << '\n';
@@ -997,7 +997,7 @@ int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
 
     std::filesystem::path output_file =
-        "build-msys2-ucrt64/phase17/gc_scale_profile.json";
+        "build-msys2-ucrt64/retention-trial/gc_scale_profile.json";
     std::string run_series = "all";
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
@@ -1101,7 +1101,7 @@ int main(int argc, char** argv) {
             {"R4_P1000_two_heads", 1000, 6, 2, 5},
             {"R5_P1000_recent100", 1000, 100, 1, 5},
         };
-        std::cout << "=== PHASE 17: EPOCH RETENTION (REAL FULL GC + FAKE "
+        std::cout << "=== EPOCH RETENTION (REAL FULL GC + FAKE "
                      "TRANSPORT) ===\n";
         for (const auto& profile : profiles) {
             if (run_series == "R100" && profile.physical_commits != 100) {
