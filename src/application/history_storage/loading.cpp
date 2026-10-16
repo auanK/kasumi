@@ -1068,39 +1068,23 @@ LoadResult load_impl(transport::Transport& storage,
                           "Epoch anchor is not reachable from a history head"));
             }
         }
-    } else if (cached_anchor && scoped) {
-        if (!scoped_anchor_referenced) {
-            // Without proven linkage, retries loading without trusting the
-            // anchor.
-            return load_impl(storage,
-                             key,
-                             workspace_root,
-                             std::nullopt,
-                             nullptr,
-                             true,
-                             trusted_marker_identifiers);
-        }
-        loaded.emplace(
-            cached_anchor->commit_id,
-            history::LoadedCommit{
-                .id = cached_anchor->commit_id,
-                .commit = history::Commit{.height = cached_anchor->height,
-                                          .parents = {},
-                                          .tree = cached_anchor->tree}});
     } else if (cached_anchor) {
-        const auto physical_anchor =
-            inventory->commit_variants.find(cached_anchor->commit_id);
-        const auto anchor_markers =
-            marker_candidates.find(cached_anchor->commit_id);
-        bool anchored = physical_anchor != inventory->commit_variants.end() &&
-                        !physical_anchor->second.empty();
-        if (anchored && anchor_markers != marker_candidates.end()) {
-            anchored = std::ranges::any_of(
-                anchor_markers->second, [&](const auto& reference) {
-                    return std::ranges::find(physical_anchor->second,
-                                             reference) !=
-                           physical_anchor->second.end();
-                });
+        bool anchored = scoped_anchor_referenced;
+        if (!scoped) {
+            const auto physical_anchor =
+                inventory->commit_variants.find(cached_anchor->commit_id);
+            const auto anchor_markers =
+                marker_candidates.find(cached_anchor->commit_id);
+            anchored = physical_anchor != inventory->commit_variants.end() &&
+                       !physical_anchor->second.empty();
+            if (anchored && anchor_markers != marker_candidates.end()) {
+                anchored = std::ranges::any_of(
+                    anchor_markers->second, [&](const auto& reference) {
+                        return std::ranges::find(physical_anchor->second,
+                                                 reference) !=
+                               physical_anchor->second.end();
+                    });
+            }
         }
         std::set<std::string> descendants{cached_anchor->commit_id};
         while (anchored && descendants.size() <= loaded.size()) {
@@ -1118,10 +1102,16 @@ LoadResult load_impl(transport::Transport& storage,
                 break;
             }
         }
-        anchored = anchored && descendants.size() == loaded.size() + 1;
-        if (!anchored) {
-            return load_impl(
-                storage, key, workspace_root, identifiers, nullptr, scoped);
+        if (!anchored || descendants.size() != loaded.size() + 1) {
+            // Without proven linkage, retries loading without trusting the
+            // anchor.
+            return load_impl(storage,
+                             key,
+                             workspace_root,
+                             scoped ? std::nullopt : identifiers,
+                             nullptr,
+                             scoped,
+                             trusted_marker_identifiers);
         }
         loaded.emplace(
             cached_anchor->commit_id,

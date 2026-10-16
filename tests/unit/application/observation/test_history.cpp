@@ -1299,6 +1299,32 @@ TEST(HistoryObservationTest, AnchoredMultiHeadLoadsOnlyBranchesAfterAnchor) {
     EXPECT_TRUE(kasumi::find_row(observed->effective_tree, "right.txt"));
 }
 
+TEST(
+    HistoryObservationTest,
+    ScopedObservationFallsBackWhenConcurrentSiblingHeadCoexistsWithCachedAnchor) {
+    auto storage = make_fake_storage();
+    const auto base = make_commit(0, {}, make_tree({}));
+    const auto base_published = publish(storage, base);
+    const auto left =
+        make_commit(1, {commit_id(base)}, make_tree({{"left.txt", "left"}}));
+    const auto right =
+        make_commit(1, {commit_id(base)}, make_tree({{"right.txt", "right"}}));
+    const auto left_published = publish(storage, left);
+    publish(storage, right);
+    storage.state->objects.erase(marker_path(base_published.head));
+    const kasumi::application::history_storage::KnownHistoryAnchor anchor{
+        .commit_id = commit_id(left), .height = 1, .tree = left.tree};
+    const std::array trusted_markers{marker_path(left_published.head)};
+
+    auto observed =
+        observe(storage, false, &anchor, nullptr, trusted_markers);
+    ASSERT_TRUE(observed.has_value()) << observed.error().detail;
+    EXPECT_EQ(observed->logical_heads.size(), 2);
+    EXPECT_TRUE(kasumi::find_row(observed->effective_tree, "left.txt"));
+    EXPECT_TRUE(kasumi::find_row(observed->effective_tree, "right.txt"));
+}
+
+
 TEST(HistoryObservationTest, MissingAnchoredCommitFailsClosed) {
     auto storage = make_fake_storage();
     const auto commit =
