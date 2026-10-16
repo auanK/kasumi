@@ -1,8 +1,10 @@
 #include "application/profile.hpp"
 #include "core/history.hpp"
+#include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "runtime/paths.hpp"
 #include "runtime/profile.hpp"
+#include "state_storage/database.hpp"
 
 #include <filesystem>
 #include <gtest/gtest.h>
@@ -41,6 +43,10 @@ TEST(ApplicationProfileTest, ListMissingConfigIsEmptyAndCreateListsProfile) {
     EXPECT_EQ(listed->front().name, "main");
     EXPECT_TRUE(std::filesystem::exists(
         kasumi::test::workspace_path(workspace, "app/profiles/main/key.bin")));
+    const auto paths = kasumi::runtime::resolve_profile_paths(
+        environment.app_data_dir, "main");
+    ASSERT_TRUE(paths.has_value());
+    EXPECT_TRUE(kasumi::state_storage::validate(paths->database_path));
 }
 
 TEST(ApplicationProfileTest, RejectsDuplicateNames) {
@@ -67,6 +73,59 @@ TEST(ApplicationProfileTest, RejectsDuplicateNames) {
                   .error()
                   .code,
               kasumi::application::ProfileErrorCode::InvalidName);
+}
+
+TEST(ApplicationProfileTest,
+     UnsupportedConfigFieldsAreRejectedWithoutOverwritingThem) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("application-profile-unknown-config");
+    const ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "app")};
+    std::filesystem::create_directories(environment.app_data_dir);
+    const auto config = environment.app_data_dir / "config.toml";
+    const std::string original =
+        "format_version = 99\n"
+        "[profiles.existing]\n"
+        "local_dir = '/tmp/existing'\n"
+        "remote_dir = '/tmp/remote'\n"
+        "min_history_depth = 5\n"
+        "min_history_age_hours = 6\n"
+        "future_option = true\n";
+    kasumi::test::write_text(config, original);
+
+    const auto result = kasumi::application::create_profile(
+        environment,
+        Profile{"new",
+                kasumi::test::workspace_path(workspace, "local"),
+                kasumi::test::workspace_path(workspace, "remote").string()},
+        key());
+
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(kasumi::test::read_text(config), original);
+    EXPECT_FALSE(std::filesystem::exists(
+        kasumi::test::workspace_path(workspace, "app/profiles/new")));
+}
+
+TEST(ApplicationProfileTest, UnknownProfileFieldsAreRejectedOnLoad) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("application-profile-unknown-field");
+    const ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "app")};
+    std::filesystem::create_directories(environment.app_data_dir);
+    const auto config = environment.app_data_dir / "config.toml";
+    kasumi::test::write_text(
+        config,
+        "[profiles.demo]\n"
+        "local_dir = '/tmp/local'\n"
+        "remote_dir = '/tmp/remote'\n"
+        "min_history_depth = 5\n"
+        "min_history_age_hours = 6\n"
+        "future_option = true\n");
+
+    const auto result =
+        kasumi::runtime::load_profiles(config);
+
+    EXPECT_FALSE(result.has_value());
 }
 
 TEST(ApplicationProfileTest, RejectsRelativeLocalAndStoragePaths) {

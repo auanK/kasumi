@@ -226,8 +226,7 @@ ReachabilityResult inventory_impl(
         }
     }
     for (const auto& identifier : listed->identifiers) {
-        if (identifier.starts_with(layout.heads_prefix) ||
-            identifier.starts_with("history/heads/")) {
+        if (identifier.starts_with(layout.heads_prefix)) {
             const auto parsed = parse_marker_object(layout, identifier);
             if (!parsed) {
                 result.unknown_history_objects.push_back(identifier);

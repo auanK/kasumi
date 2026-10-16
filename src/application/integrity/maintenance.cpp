@@ -473,6 +473,7 @@ const history_storage::maintenance_protocol::QuarantineEntry* find_quarantined(
 
 std::expected<void, Error> restore_quarantined_object(
     transport::Transport& storage,
+    const history_storage::RemoteLayout& layout,
     const history_storage::maintenance_protocol::QuarantineEntry& entry,
     const std::filesystem::path& workspace_root,
     history_storage::maintenance_protocol::RegistrationState& barrier) {
@@ -483,6 +484,7 @@ std::expected<void, Error> restore_quarantined_object(
     }
     auto copied = history_storage::maintenance_protocol::copy_verified(
         storage,
+        layout,
         entry.quarantine_identifier,
         entry.original_identifier,
         workspace_root);
@@ -525,7 +527,7 @@ std::expected<std::size_t, Error> restore_reachable_quarantine(
         }
         if (!std::ranges::binary_search(*listing, original)) {
             auto restored_object = restore_quarantined_object(
-                storage, *quarantined, workspace_root, barrier);
+                storage, layout, *quarantined, workspace_root, barrier);
             if (!restored_object) {
                 return std::unexpected(restored_object.error());
             }
@@ -563,7 +565,7 @@ std::expected<std::size_t, Error> restore_reachable_quarantine(
                 continue;
             }
             auto restored_object = restore_quarantined_object(
-                storage, entry, workspace_root, barrier);
+                storage, layout, entry, workspace_root, barrier);
             if (!restored_object) {
                 return std::unexpected(restored_object.error());
             }
@@ -597,7 +599,7 @@ std::expected<std::size_t, Error> restore_reachable_quarantine(
                 continue;
             }
             auto restored_object = restore_quarantined_object(
-                storage, *quarantined, workspace_root, barrier);
+                storage, layout, *quarantined, workspace_root, barrier);
             if (!restored_object) {
                 return std::unexpected(restored_object.error());
             }
@@ -2064,6 +2066,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                         history_storage::maintenance_protocol::
                                             copy_verified_via_workspace(
                                                 storage,
+                                                layout,
                                                 item->source_identifier,
                                                 item->quarantine_identifier,
                                                 workspace_root);
@@ -2115,6 +2118,7 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                                 history_storage::maintenance_protocol::
                                     copy_verified_via_workspace(
                                         storage,
+                                        layout,
                                         item->source_identifier,
                                         item->quarantine_identifier,
                                         workspace_root);

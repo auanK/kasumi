@@ -8,22 +8,16 @@
 namespace kasumi::ignore {
 namespace {
 
-TEST(IgnoreTest, ReservedInternalFilesAlwaysIgnored) {
+TEST(IgnoreTest, ReservedInternalFilesRemainExcluded) {
     const IgnoreList empty_list{};
-    EXPECT_TRUE(is_reserved_internal("kasumi.db"));
-    EXPECT_TRUE(is_reserved_internal("kasumi.db-shm"));
-    EXPECT_TRUE(is_reserved_internal("kasumi.db-wal"));
-    EXPECT_TRUE(is_reserved_internal("kasumi.lock"));
-    EXPECT_TRUE(is_reserved_internal(".kasumi_sync_buffer"));
-
-    EXPECT_TRUE(is_ignored("kasumi.db", empty_list, false));
-    EXPECT_TRUE(is_ignored("kasumi.lock", empty_list, false));
-    EXPECT_TRUE(is_ignored(".kasumi_sync_buffer", empty_list, false));
-
-    // Non-reserved paths
-    EXPECT_FALSE(is_reserved_internal("kasumi.db.bak"));
-    EXPECT_FALSE(is_reserved_internal("other.db"));
-    EXPECT_FALSE(is_reserved_internal("sub/kasumi.db"));
+    for (const auto path : {"kasumi.db",
+                            "kasumi.db-shm",
+                            "kasumi.db-wal",
+                            "kasumi.lock",
+                            ".kasumi_sync_buffer"}) {
+        EXPECT_TRUE(is_reserved_internal(path));
+        EXPECT_TRUE(is_ignored(path, empty_list, false));
+    }
 }
 
 TEST(IgnoreTest, OnlyGeneratedKasumiArtifactsAreReserved) {

@@ -14,6 +14,12 @@
 
 namespace {
 
+const auto& test_layout() {
+    static const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    return layout;
+}
+
 void reset_remote_counts(FakeState& state) {
     state.list_count = 0;
     state.get_count = 0;
@@ -357,7 +363,7 @@ TEST(HistoryStorageTest, AmbiguousCommitAndHeadPutsRollForwardWithoutRetry) {
     reset_remote_counts(*state);
     auto marker =
         kasumi::application::history_storage::publish_head_marker_scoped(
-            storage, object->head, root);
+            storage, test_layout(), object->head, root);
     ASSERT_TRUE(marker.has_value()) << marker.error().detail;
     EXPECT_EQ(state->marker_put_count, 1U);
     EXPECT_EQ(state->physical_hash_count, 1U);
@@ -407,13 +413,17 @@ TEST(HistoryStorageTest, StrongPhysicalHashAvoidsCommitAndHeadReadback) {
 
     auto marker =
         kasumi::application::history_storage::publish_head_marker_scoped(
-            storage, object->head, root);
+            storage, test_layout(), object->head, root);
     ASSERT_TRUE(marker.has_value()) << marker.error().detail;
     EXPECT_EQ(state->list_count, 0U);
     reset_remote_counts(*state);
     auto head_verified =
         kasumi::application::history_storage::verify_head_marker(
-            storage, object->head, root, marker->physical_hash);
+            storage,
+            test_layout(),
+            object->head,
+            root,
+            marker->physical_hash);
     ASSERT_TRUE(head_verified.has_value()) << head_verified.error().detail;
     EXPECT_EQ(state->physical_hash_count, 1U);
     EXPECT_EQ(state->marker_get_count, 0U);
@@ -470,7 +480,7 @@ TEST(HistoryStorageTest, PhysicalHashMismatchFailsCommitAndHeadVerification) {
     ASSERT_TRUE(object.has_value());
     auto marker =
         kasumi::application::history_storage::publish_head_marker_scoped(
-            storage, object->head, root);
+            storage, test_layout(), object->head, root);
     ASSERT_TRUE(marker.has_value());
 
     state->physical_hash_mismatch = true;
@@ -488,7 +498,11 @@ TEST(HistoryStorageTest, PhysicalHashMismatchFailsCommitAndHeadVerification) {
         kasumi::application::history_storage::ErrorCode::VerificationFailure);
     const auto head_verified =
         kasumi::application::history_storage::verify_head_marker(
-            storage, object->head, root, marker->physical_hash);
+            storage,
+            test_layout(),
+            object->head,
+            root,
+            marker->physical_hash);
     ASSERT_FALSE(head_verified.has_value());
     EXPECT_EQ(
         head_verified.error().code,
@@ -512,7 +526,7 @@ TEST(HistoryStorageTest,
     ASSERT_TRUE(object.has_value());
     auto marker =
         kasumi::application::history_storage::publish_head_marker_scoped(
-            storage, object->head, root);
+            storage, test_layout(), object->head, root);
     ASSERT_TRUE(marker.has_value());
 
     state->physical_hash_failure = kasumi::transport::ErrorCode::Io;
@@ -534,7 +548,11 @@ TEST(HistoryStorageTest,
     reset_remote_counts(*state);
     const auto head_verified =
         kasumi::application::history_storage::verify_head_marker(
-            storage, object->head, root, marker->physical_hash);
+            storage,
+            test_layout(),
+            object->head,
+            root,
+            marker->physical_hash);
     ASSERT_FALSE(head_verified.has_value());
     EXPECT_EQ(
         head_verified.error().code,
@@ -1564,6 +1582,7 @@ TEST(HistoryStorageTest, EmptyMarkerRemovalDoesNotList) {
 
     const auto result =
         kasumi::application::history_storage::remove_marker_variants(transport,
+                                                                     test_layout(),
                                                                      {});
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->removed, 0U);

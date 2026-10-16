@@ -188,7 +188,8 @@ bool encoded_size_matches(std::uint64_t plaintext_size,
 std::optional<EncryptionResult>
 encrypt_file_with_key(const std::filesystem::path& input_path,
                       const std::filesystem::path& output_path,
-                      const Key& key) {
+                      const Key& key,
+                      std::string* error_detail) {
     std::array<std::uint8_t, NONCE_SIZE> base_nonce{};
     std::array<std::uint8_t, NONCE_SIZE> chunk_nonce{};
     std::array<std::uint8_t, MAC_SIZE> header_mac{};
@@ -201,32 +202,45 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
 
         std::ifstream input(input_path, std::ios::binary | std::ios::ate);
         if (!input) {
+            if (error_detail)
+                *error_detail = "opening plaintext input failed";
             return std::nullopt;
         }
 
         const auto end_position = input.tellg();
         if (end_position < std::streampos{0}) {
+            if (error_detail)
+                *error_detail = "reading plaintext size failed";
             return std::nullopt;
         }
 
         const auto stream_size = static_cast<std::streamoff>(end_position);
         if (stream_size < 0) {
+            if (error_detail)
+                *error_detail = "reading plaintext size failed";
             return std::nullopt;
         }
         const auto input_size = static_cast<std::uintmax_t>(stream_size);
         if (input_size > static_cast<std::uintmax_t>(
                              std::numeric_limits<std::uint64_t>::max())) {
+            if (error_detail)
+                *error_detail = "plaintext size is unsupported";
             return std::nullopt;
         }
         const auto plaintext_size = static_cast<std::uint64_t>(input_size);
 
         input.seekg(0, std::ios::beg);
         if (!input) {
+            if (error_detail)
+                *error_detail = "seeking plaintext input failed";
             return std::nullopt;
         }
 
         auto random_result = platform::random::fill_bytes(base_nonce);
         if (!random_result) {
+            if (error_detail)
+                *error_detail = "generating encryption nonce failed: " +
+                                random_result.error();
             wipe_encrypt_buffers(base_nonce,
                                  chunk_nonce,
                                  header_mac,
@@ -243,7 +257,11 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
         plain_buffer.resize(CHUNK_SIZE);
         cipher_buffer.resize(CHUNK_SIZE);
 
-        if (!platform::private_storage::create_file(output_path)) {
+        auto created = platform::private_storage::create_file(output_path);
+        if (!created) {
+            if (error_detail)
+                *error_detail = "creating ciphertext output failed: " +
+                                created.error();
             wipe_encrypt_buffers(base_nonce,
                                  chunk_nonce,
                                  header_mac,
@@ -254,6 +272,8 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
         }
         std::ofstream output(output_path, std::ios::binary | std::ios::trunc);
         if (!output) {
+            if (error_detail)
+                *error_detail = "opening ciphertext output failed";
             cleanup_encryption_failure(output,
                                        output_path,
                                        base_nonce,
@@ -276,6 +296,8 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
         };
         if (!write(header.data(), header.size()) ||
             !write(header_mac.data(), header_mac.size())) {
+            if (error_detail)
+                *error_detail = "writing ciphertext header failed";
             cleanup_encryption_failure(output,
                                        output_path,
                                        base_nonce,
@@ -300,6 +322,8 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
                        static_cast<std::streamsize>(chunk_size));
             if (input.gcount() != static_cast<std::streamsize>(chunk_size) ||
                 input.bad()) {
+                if (error_detail)
+                    *error_detail = "reading plaintext chunk failed";
                 cleanup_encryption_failure(output,
                                            output_path,
                                            base_nonce,
@@ -328,6 +352,8 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
 
             if (!write(mac.data(), mac.size()) ||
                 !write(cipher_buffer.data(), chunk_size)) {
+                if (error_detail)
+                    *error_detail = "writing encrypted chunk failed";
                 cleanup_encryption_failure(output,
                                            output_path,
                                            base_nonce,
@@ -344,6 +370,8 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
         }
 
         if (total_read != plaintext_size) {
+            if (error_detail)
+                *error_detail = "plaintext size changed during encryption";
             cleanup_encryption_failure(output,
                                        output_path,
                                        base_nonce,
@@ -358,6 +386,8 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
         char trailing = 0;
         input.read(&trailing, 1);
         if (input.gcount() != 0 || input.bad()) {
+            if (error_detail)
+                *error_detail = "checking plaintext end failed";
             cleanup_encryption_failure(output,
                                        output_path,
                                        base_nonce,
@@ -372,6 +402,8 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
         input.clear();
         input.close();
         if (input.fail()) {
+            if (error_detail)
+                *error_detail = "closing plaintext input failed";
             cleanup_encryption_failure(output,
                                        output_path,
                                        base_nonce,
@@ -385,6 +417,8 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
 
         output.flush();
         if (!output) {
+            if (error_detail)
+                *error_detail = "flushing ciphertext output failed";
             cleanup_encryption_failure(output,
                                        output_path,
                                        base_nonce,
@@ -398,6 +432,8 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
 
         output.close();
         if (output.fail()) {
+            if (error_detail)
+                *error_detail = "closing ciphertext output failed";
             remove_partial_output(output_path);
             wipe_encrypt_buffers(base_nonce,
                                  chunk_nonce,
@@ -422,7 +458,21 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
                              plain_buffer,
                              cipher_buffer);
         return result;
+    } catch (const std::exception& exception) {
+        if (error_detail)
+            *error_detail = std::string{"encryption operation failed: "} +
+                            exception.what();
+        remove_partial_output(output_path);
+        wipe_encrypt_buffers(base_nonce,
+                             chunk_nonce,
+                             header_mac,
+                             mac,
+                             plain_buffer,
+                             cipher_buffer);
+        return std::nullopt;
     } catch (...) {
+        if (error_detail)
+            *error_detail = "encryption operation failed with an unknown error";
         remove_partial_output(output_path);
         wipe_encrypt_buffers(base_nonce,
                              chunk_nonce,
@@ -438,12 +488,13 @@ std::optional<EncryptionResult>
 encrypt_file_with_hashes(const std::filesystem::path& input_path,
                          const std::filesystem::path& output_path,
                          std::span<const std::uint8_t, KEY_SIZE> master_key,
-                         FilePurpose purpose) {
+                         FilePurpose purpose,
+                         std::string* error_detail) {
     auto key =
         derive_key(master_key,
                    purpose == FilePurpose::Content ? KeyPurpose::Content
                                                    : KeyPurpose::History);
-    auto result = encrypt_file_with_key(input_path, output_path, key);
+    auto result = encrypt_file_with_key(input_path, output_path, key, error_detail);
     crypto_wipe(key.data(), key.size());
     return result;
 }

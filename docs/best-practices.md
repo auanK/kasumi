@@ -126,8 +126,9 @@ Kasumi follows a strict pre-1.0 release policy:
 
 * **Review Release Compatibility**: Read release notes and compatibility information before replacing binaries.
 * **Pre-1.0 Compatibility Boundary**: Before version 1.0, internal persisted formats (such as local SQLite database schemas, transaction journals, or internal protocol layouts) are **not** guaranteed to remain compatible across releases.
+* **No Cross-Version Contract**: Kasumi 0.x does not guarantee profile, configuration, remote-vault, downgrade, or client-to-client compatibility across releases. A newer version may require a new profile, configuration, or remote namespace; reconstruct state only from independently preserved data.
 * **Complete In-Flight Operations**: Complete active synchronizations and transaction recovery before replacing binaries. Never delete transaction journals to bypass recovery.
-* **No Automatic Migration Machinery**: Kasumi does not provide automatic migration scripts or legacy compatibility readers for incompatible persisted formats.
+* **No Automatic Migration**: Kasumi does not convert incompatible persisted formats. Preserve the old profile and vault data; do not delete them just because the current executable rejects them.
 
 ## Automation
 

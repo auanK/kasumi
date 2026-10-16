@@ -21,22 +21,6 @@ bool valid_hex_hash(std::string_view value) noexcept {
 
 } // namespace
 
-RemoteLayout default_remote_layout() {
-    return RemoteLayout{
-        .history_prefix = "history/",
-        .commits_prefix = "history/commits/",
-        .heads_prefix = "history/heads/",
-        .epochs_prefix = "history/epochs/v1/",
-        .gc_prefix = "history/gc/v1/",
-        .barrier_identifier = "history/gc/v1/barrier",
-        .writers_prefix = "history/gc/v1/writers/",
-        .probes_prefix = "history/gc/v1/probes/",
-        .quarantine_prefix = "history/gc/v1/quarantine/",
-        .quarantine_content_prefix = "history/gc/v1/quarantine/content/",
-        .quarantine_commits_prefix = "history/gc/v1/quarantine/commits/",
-    };
-}
-
 RemoteLayout derive_remote_layout(
     std::span<const std::uint8_t, crypto::KEY_SIZE> master_key) {
     const auto history_hash =

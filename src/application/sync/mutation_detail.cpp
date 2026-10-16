@@ -2,8 +2,6 @@
 
 #include "core/hasher.hpp"
 #include "crypto/content.hpp"
-#include "mutation_fault_test.hpp"
-#include "platform/durability.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 
@@ -11,14 +9,6 @@
 #include <iterator>
 #include <system_error>
 #include <utility>
-#include <vector>
-
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#endif
 
 namespace kasumi::application::sync::mutation::detail {
 
@@ -32,158 +22,13 @@ bool path_not_found(const std::error_code& error) noexcept {
 } // namespace
 
 std::filesystem::path
-make_custody_path(const std::filesystem::path& destination,
-                  std::string_view transaction_id,
-                  std::size_t operation_index,
-                  std::string_view prefix) {
-    const std::string suffix = std::string(".kasumi-") + std::string(prefix) +
-                               "-" + std::string(transaction_id) + "-" +
+rollback_candidate_path(const std::filesystem::path& destination,
+                        std::string_view transaction_id,
+                        std::size_t operation_index) {
+    const std::string suffix = ".kasumi-rollback-candidate-" +
+                               std::string(transaction_id) + "-" +
                                std::to_string(operation_index);
     return platform::path::temporary_sibling_path(destination, ".", suffix);
-}
-
-MutationResult safe_remove_custody(const std::filesystem::path& custody,
-                                   std::string_view expected_hash,
-                                   std::size_t operation_index) {
-#if defined(_WIN32)
-    HANDLE h = CreateFileW(custody.c_str(),
-                           GENERIC_READ | DELETE,
-                           0, // Exclusive access (dwShareMode = 0)
-                           nullptr,
-                           OPEN_EXISTING,
-                           FILE_FLAG_BACKUP_SEMANTICS,
-                           nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        const DWORD error = GetLastError();
-        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
-            return {};
-        }
-        const auto code =
-            error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION
-                ? MutationErrorCode::DestinationConflict
-                : MutationErrorCode::LocalIo;
-        return std::unexpected(make_error(
-            code,
-            "CreateFileW for custody cleanup failed (Win32 error " +
-                std::to_string(error) +
-                "): " + std::system_category().message(static_cast<int>(error)),
-            custody,
-            operation_index));
-    }
-
-    BY_HANDLE_FILE_INFORMATION info{};
-    if (!GetFileInformationByHandle(h, &info)) {
-        const DWORD error = GetLastError();
-        CloseHandle(h);
-        return std::unexpected(make_error(
-            MutationErrorCode::LocalIo,
-            "GetFileInformationByHandle failed (Win32 error " +
-                std::to_string(error) +
-                "): " + std::system_category().message(static_cast<int>(error)),
-            custody,
-            operation_index));
-    }
-
-    if (info.nNumberOfLinks > 1) {
-        CloseHandle(h);
-        return std::unexpected(
-            make_error(MutationErrorCode::DestinationConflict,
-                       "custody file has multiple hard links",
-                       custody,
-                       operation_index));
-    }
-
-    auto hash_res = crypto::content::hash_file_handle(h);
-    if (!hash_res) {
-        CloseHandle(h);
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          hash_res.error(),
-                                          custody,
-                                          operation_index));
-    }
-    std::string current_hash = hash_hex(*hash_res);
-
-    if (current_hash != expected_hash) {
-        CloseHandle(h);
-        return std::unexpected(make_error(
-            MutationErrorCode::DestinationConflict,
-            "custody file content was externally modified before cleanup",
-            custody,
-            operation_index));
-    }
-
-    FILE_DISPOSITION_INFO disposition{TRUE};
-    if (!SetFileInformationByHandle(
-            h, FileDispositionInfo, &disposition, sizeof(disposition))) {
-        const DWORD error = GetLastError();
-        CloseHandle(h);
-        const auto code =
-            error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION
-                ? MutationErrorCode::DestinationConflict
-                : MutationErrorCode::LocalIo;
-        return std::unexpected(make_error(
-            code,
-            "SetFileInformationByHandle(FileDispositionInfo) failed "
-            "(Win32 error " +
-                std::to_string(error) +
-                "): " + std::system_category().message(static_cast<int>(error)),
-            custody,
-            operation_index));
-    }
-    if (!CloseHandle(h)) {
-        const DWORD error = GetLastError();
-        return std::unexpected(make_error(
-            MutationErrorCode::LocalIo,
-            "CloseHandle after custody disposition failed (Win32 error " +
-                std::to_string(error) +
-                "): " + std::system_category().message(static_cast<int>(error)),
-            custody,
-            operation_index));
-    }
-    return {};
-#else
-    auto status = read_status(custody, operation_index);
-    if (!status)
-        return std::unexpected(status.error());
-    if (missing(*status))
-        return {};
-    if (std::filesystem::is_symlink(*status) ||
-        !std::filesystem::is_regular_file(*status)) {
-        return std::unexpected(make_error(
-            MutationErrorCode::DestinationConflict,
-            "custody path is not a regular file",
-            custody,
-            operation_index));
-    }
-    auto current_hash = file_hash(custody, operation_index);
-    if (!current_hash) {
-        return std::unexpected(current_hash.error());
-    }
-    if (*current_hash != expected_hash) {
-        return std::unexpected(make_error(
-            MutationErrorCode::DestinationConflict,
-            "custody file content was externally modified before cleanup",
-            custody,
-            operation_index));
-    }
-    std::error_code ec;
-    mutation_fault_test::hit("before_custody_unlink", custody);
-    if (!std::filesystem::remove(custody, ec) || ec) {
-        return std::unexpected(make_error(
-            MutationErrorCode::LocalIo,
-            ec ? "failed to remove custody file: " + ec.message()
-               : "custody file disappeared during cleanup",
-            custody,
-            operation_index));
-    }
-    auto synced = platform::durability::sync_parent_directory(custody);
-    if (!synced)
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          synced.error(),
-                                          custody,
-                                          operation_index));
-    return {};
-#endif
 }
 
 MutationError make_error(MutationErrorCode code,
@@ -379,12 +224,14 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
     }
 
     const auto encryption_trace = platform::perf_trace::begin();
-    auto encrypted_file =
-        crypto::encrypt_file_with_hashes(source, destination, key);
+    std::string encryption_error;
+    auto encrypted_file = crypto::encrypt_file_with_hashes(
+        source, destination, key, crypto::FilePurpose::Content, &encryption_error);
     platform::perf_trace::finish("content encryption", encryption_trace);
     if (!encrypted_file) {
         return std::unexpected(make_error(MutationErrorCode::CryptoFailure,
-                                          "failed to encrypt source for upload",
+                                          "failed to encrypt source for upload: " +
+                                              encryption_error,
                                           source,
                                           operation_index));
     }

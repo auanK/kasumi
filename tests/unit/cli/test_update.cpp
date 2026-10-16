@@ -159,22 +159,22 @@ TEST(CliUpdateTest, ParsesOnlyTheExpectedSha256AndArchiveEntries) {
 
 TEST(CliUpdateTest, RejectsForeignAssetUrlsAndParsesGitHubReleaseResponses) {
     EXPECT_TRUE(kasumi::cli::update::official_asset_url(
-        "v0.7.0",
+        "v1.2.3",
         "kasumi-windows-x86_64.zip",
-        "https://github.com/auanK/kasumi/releases/download/v0.7.0/"
+        "https://github.com/auanK/kasumi/releases/download/v1.2.3/"
         "kasumi-windows-x86_64.zip"));
     EXPECT_FALSE(kasumi::cli::update::official_asset_url(
-        "v0.7.0",
+        "v1.2.3",
         "kasumi-windows-x86_64.zip",
         "https://evil.example/kasumi-windows-x86_64.zip"));
     const auto parsed = kasumi::cli::update::parse_releases_json(R"json([
-      {"tag_name":"v0.7.0","draft":false,"prerelease":true,
+      {"tag_name":"v1.2.3","draft":false,"prerelease":true,
        "assets":[{"name":"kasumi-linux-x86_64.tar.gz",
-        "browser_download_url":"https://github.com/auanK/kasumi/releases/download/v0.7.0/kasumi-linux-x86_64.tar.gz"}]}
+        "browser_download_url":"https://github.com/auanK/kasumi/releases/download/v1.2.3/kasumi-linux-x86_64.tar.gz"}]}
     ])json");
     ASSERT_TRUE(parsed.has_value());
     ASSERT_EQ(parsed->size(), 1);
-    EXPECT_EQ((*parsed)[0].tag, "v0.7.0");
+    EXPECT_EQ((*parsed)[0].tag, "v1.2.3");
     EXPECT_EQ((*parsed)[0].assets.size(), 1);
 }
 

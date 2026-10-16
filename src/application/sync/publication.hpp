@@ -105,10 +105,6 @@ publish_head_marker(transport::Transport& storage,
                     const history_storage::RemoteLayout& layout,
                     const history_storage::HeadReference& reference,
                     const std::filesystem::path& workspace_root);
-PublishHeadResult
-publish_head_marker(transport::Transport& storage,
-                    const history_storage::HeadReference& reference,
-                    const std::filesystem::path& workspace_root);
 
 // Confirms integrity of the published marker.
 std::expected<void, Error>
@@ -117,20 +113,11 @@ verify_head_marker(transport::Transport& storage,
                    const history_storage::HeadReference& reference,
                    const std::filesystem::path& workspace_root,
                    std::string_view local_physical_hash = {});
-std::expected<void, Error>
-verify_head_marker(transport::Transport& storage,
-                   const history_storage::HeadReference& reference,
-                   const std::filesystem::path& workspace_root,
-                   std::string_view local_physical_hash = {});
 
 // Inspects the current state of a marker.
 HeadMarkerInspection
 inspect_head_marker(transport::Transport& storage,
                     const history_storage::RemoteLayout& layout,
-                    const history_storage::HeadReference& reference,
-                    const std::filesystem::path& workspace_root);
-HeadMarkerInspection
-inspect_head_marker(transport::Transport& storage,
                     const history_storage::HeadReference& reference,
                     const std::filesystem::path& workspace_root);
 
@@ -158,10 +145,6 @@ PruneMarkersResult prune_current_ancestral_markers(
 PruneMarkersResult prune_observed_parent_markers(
     transport::Transport& storage,
     const history_storage::RemoteLayout& layout,
-    std::span<const std::string> parent_ids,
-    std::span<const std::string> observed_marker_identifiers);
-PruneMarkersResult prune_observed_parent_markers(
-    transport::Transport& storage,
     std::span<const std::string> parent_ids,
     std::span<const std::string> observed_marker_identifiers);
 

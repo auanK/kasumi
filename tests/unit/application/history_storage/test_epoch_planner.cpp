@@ -123,7 +123,7 @@ TEST(EpochPlannerTest, AgeStillRequired) {
     ASSERT_FALSE(result.has_value());
 }
 
-TEST(EpochPlannerTest, LegacyZeroTimestampIsNotAncient) {
+TEST(EpochPlannerTest, ZeroTimestampPreventsUnsafeAgePruning) {
     const std::vector<LoadedCommit> commits{
         make_loaded('a', 0, 0),
         make_loaded('b', 1, 100, {make_id('a')}),

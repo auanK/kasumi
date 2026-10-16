@@ -43,6 +43,9 @@ void setup_test_profile(const TempWorkspace& workspace, int file_count = 5) {
         "[profiles.demo]\nlocal_dir = '" + local.string() + "'\n"
         "remote_dir = '" + remote.string() + "'\n"
         "min_history_depth = 5\nmin_history_age_hours = 6\n");
+    std::filesystem::create_directories(app / "profiles" / "demo");
+    ASSERT_TRUE(kasumi::state_storage::initialize(
+        app / "profiles" / "demo" / "db.sqlite"));
 
     for (int i = 1; i <= file_count; ++i) {
         kasumi::test::write_text(
@@ -69,10 +72,6 @@ std::size_t count_files_recursively(const std::filesystem::path& dir) {
     }
     return count;
 }
-
-// ============================================================================
-// RED Test Suite: Proving Unnecessary Hashing in Status and Sync --dry-run
-// ============================================================================
 
 TEST(PlanCacheObservationTest, StatusReusesStrongFingerprintsOnWarmNoOp) {
     auto workspace = kasumi::test::make_temp_workspace("plan-cache-status-noop");
@@ -211,34 +210,28 @@ TEST(PlanCacheObservationTest, ModifiedFileRehashesOnlyModifiedEntry) {
     EXPECT_EQ(hash_calls, 1U);
 }
 
-TEST(PlanCacheObservationTest, MissingDatabaseSafelyFallsBackToFullHash) {
+TEST(PlanCacheObservationTest, MissingDatabaseIsRejectedWithoutRecreation) {
     auto workspace = kasumi::test::make_temp_workspace("plan-cache-no-db");
     setup_test_profile(workspace, 3);
     init_transport(workspace);
 
     const auto app = kasumi::test::workspace_path(workspace, "app");
+    const auto db_path = app / "profiles" / "demo" / "db.sqlite";
     const ExecutionEnvironment env{app};
     const Credentials creds{test_key()};
+    ASSERT_TRUE(std::filesystem::remove(db_path));
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    const auto remote_before = kasumi::test::snapshot_tree(remote);
 
-    // Without initial sync, db.sqlite does not exist yet
     kasumi::platform::perf_trace::force_enable(true);
     kasumi::platform::perf_trace::reset();
 
     auto status_res = kasumi::application::execute({Request{Operation::Status, "demo"}, creds, env});
-    ASSERT_TRUE(status_res.has_value());
-
-    const auto& report = std::get<PlanReport>(status_res->data);
-    // All 3 files must be planned for upload
-    EXPECT_EQ(report.action_counts[static_cast<std::size_t>(PlanAction::Upload)], 3U);
-
-    const auto hits = kasumi::platform::perf_trace::get_count("local hash cache hits");
-    const auto hash_calls = kasumi::platform::perf_trace::get_count("local hash file calls");
+    EXPECT_FALSE(status_res.has_value());
+    EXPECT_FALSE(std::filesystem::exists(db_path));
+    EXPECT_EQ(kasumi::test::snapshot_tree(remote), remote_before);
 
     kasumi::platform::perf_trace::force_enable(false);
-
-    // Fallback: 0 hits, all 3 files hashed
-    EXPECT_EQ(hits, 0U);
-    EXPECT_EQ(hash_calls, 3U);
 }
 
 TEST(PlanCacheObservationTest, PlanEquivalenceBetweenCacheAndFullHash) {

@@ -21,10 +21,6 @@
 namespace kasumi::application::history_storage::detail {
 
 // Format and defensive limits for remote history.
-inline constexpr std::string_view commit_prefix = "history/commits/";
-inline constexpr std::string_view heads_prefix = "history/heads/";
-inline constexpr std::string_view commit_suffix = ".kcom";
-inline constexpr std::string_view head_suffix = ".head";
 inline constexpr std::size_t marker_size = 69;
 inline constexpr std::size_t maximum_history_object_count = 8192;
 inline constexpr std::size_t maximum_ciphertext_variants_per_commit = 64;
@@ -41,7 +37,7 @@ using ObjectMap = std::map<std::string, std::vector<HeadReference>>;
 
 // History objects classified by commit.
 struct HistoryInventory {
-    // Identifiers found under history/ (sorted and unique).
+    // Identifiers found in the selected keyed namespace (sorted and unique).
     std::vector<std::string> identifiers;
     ObjectMap commit_variants;
     ObjectMap marker_variants;
@@ -67,10 +63,6 @@ Error history_error(const history::Error& source);
 
 // Validates a canonical hexadecimal identifier.
 bool valid_hex_id(std::string_view id) noexcept;
-// Builds the remote identifier for a commit variant.
-std::string commit_object(const HeadReference& reference);
-// Extracts a reference from a commit identifier.
-std::optional<HeadReference> parse_commit_object(std::string_view identifier);
 // Sorts and removes duplicate references.
 void sort_unique(std::vector<HeadReference>& references);
 
@@ -78,22 +70,16 @@ void sort_unique(std::vector<HeadReference>& references);
 std::expected<HistoryInventory, Error>
 build_history_inventory(transport::Transport& storage,
                         const RemoteLayout& layout);
-std::expected<HistoryInventory, Error>
-build_history_inventory(transport::Transport& storage);
 
 // Classifies an already observed remote listing.
 std::expected<HistoryInventory, Error>
 build_history_inventory(std::span<const std::string> identifiers,
                         const RemoteLayout& layout);
-std::expected<HistoryInventory, Error>
-build_history_inventory(std::span<const std::string> identifiers);
 
 // Computes new objects required by the publication.
 PublicationDelta publication_delta(const HistoryInventory& inventory,
                                    const HeadReference& reference,
                                    const RemoteLayout& layout);
-PublicationDelta publication_delta(const HistoryInventory& inventory,
-                                   const HeadReference& reference);
 
 // Rejects publications exceeding defensive limits.
 std::expected<void, Error>
@@ -137,10 +123,6 @@ download_commit_candidate(transport::Transport& storage,
                           const RemoteLayout& layout,
                           const HeadReference& reference,
                           const std::filesystem::path& destination);
-std::expected<void, Error>
-download_commit_candidate(transport::Transport& storage,
-                          const HeadReference& reference,
-                          const std::filesystem::path& destination);
 
 // Observed state of a marker.
 enum class MarkerState {
@@ -153,11 +135,6 @@ enum class MarkerState {
 std::expected<MarkerState, Error>
 inspect_marker(transport::Transport& storage,
                const RemoteLayout& layout,
-               const HeadReference& reference,
-               const std::filesystem::path& workspace,
-               std::size_t& sequence);
-std::expected<MarkerState, Error>
-inspect_marker(transport::Transport& storage,
                const HeadReference& reference,
                const std::filesystem::path& workspace,
                std::size_t& sequence);

@@ -6,6 +6,7 @@
 #include "platform/perf_trace.hpp"
 #include "platform/profile_lock.hpp"
 #include "runtime/resolver.hpp"
+#include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 
 #include <utility>
@@ -67,6 +68,19 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         });
     }
     output.profile_lock = *profile_lock;
+    if (!state_storage::validate(runtime_data->database_path)) {
+        platform::perf_trace::finish("operation preparation",
+                                     preparation_trace);
+        wipe_operation(output);
+        return std::unexpected(Error{
+            .operation = operation,
+            .code = ErrorCode::RuntimeFailure,
+            .detail = "profile state database is missing, corrupt, or "
+                      "uses an unsupported schema; existing data was "
+                      "left untouched",
+            .runtime = output.summary,
+        });
+    }
     auto key = resolve_key_into(operation,
                                 input.credentials,
                                 *runtime_data,

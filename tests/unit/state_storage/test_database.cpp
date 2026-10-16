@@ -155,12 +155,12 @@ TEST(StateStorageDatabaseTest,
     EXPECT_TRUE(kasumi::state_storage::save_file_cache_delta(db, {}));
 }
 
-TEST(StateStorageDatabaseTest, LegacyObservationDataIsIgnoredAndPreserved) {
+TEST(StateStorageDatabaseTest, UnknownAuxiliaryTablesAreIgnoredAndPreserved) {
     auto workspace =
-        kasumi::test::make_temp_workspace("persistence-legacy-observation");
+        kasumi::test::make_temp_workspace("persistence-unknown-auxiliary");
     const auto db = kasumi::test::workspace_path(workspace, "state.db");
     ASSERT_TRUE(kasumi::state_storage::initialize(db));
-    // Exact auxiliary tables from schema v1 before USN removal.
+    // Unrecognized auxiliary tables remain outside the current schema contract.
     execute_sql(db, R"(
         CREATE TABLE IF NOT EXISTS observation_checkpoint (
             id INTEGER PRIMARY KEY CHECK(id = 1), kind INTEGER NOT NULL,
@@ -653,6 +653,59 @@ TEST(StateStorageDatabaseTest, RejectsMalformedSchema) {
               std::vector<std::string>{"nodes"});
 }
 
+TEST(StateStorageDatabaseTest,
+     RejectsExistingUnversionedDatabaseAndPreservesItsTables) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-unversioned-existing");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "state.db");
+    execute_sql(database_path,
+                "CREATE TABLE prior_state (value TEXT); "
+                "INSERT INTO prior_state VALUES ('keep');",
+                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
+
+    EXPECT_FALSE(kasumi::state_storage::initialize(database_path));
+    EXPECT_EQ(query_text(database_path, "SELECT value FROM prior_state"),
+              std::vector<std::string>{"keep"});
+    EXPECT_TRUE(query_text(database_path,
+                           "SELECT name FROM sqlite_master WHERE name='nodes'")
+                    .empty());
+    EXPECT_EQ(query_text(database_path, "PRAGMA user_version"),
+              std::vector<std::string>{"0"});
+}
+
+TEST(StateStorageDatabaseTest,
+     RejectsExistingEmptyDatabaseInsteadOfInitializingIt) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-empty-existing");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "state.db");
+    execute_sql(database_path,
+                "SELECT 1;",
+                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
+
+    EXPECT_FALSE(kasumi::state_storage::initialize(database_path));
+    EXPECT_TRUE(query_text(database_path,
+                           "SELECT name FROM sqlite_master WHERE name='nodes'")
+                    .empty());
+    EXPECT_EQ(query_text(database_path, "PRAGMA user_version"),
+              std::vector<std::string>{"0"});
+}
+
+TEST(StateStorageDatabaseTest, ValidationRequiresCurrentExistingSchema) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-validate-current");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "state.db");
+    EXPECT_FALSE(kasumi::state_storage::validate(database_path));
+    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    EXPECT_TRUE(kasumi::state_storage::validate(database_path));
+    execute_sql(database_path, "PRAGMA user_version = 99");
+    EXPECT_FALSE(kasumi::state_storage::validate(database_path));
+    EXPECT_EQ(query_text(database_path, "PRAGMA user_version"),
+              std::vector<std::string>{"99"});
+}
+
 TEST(StateStorageDatabaseTest, CorruptHashReturnsControlledError) {
     auto workspace =
         kasumi::test::make_temp_workspace("persistence-corrupt-hash");
@@ -758,7 +811,7 @@ TEST(StateStorageDatabaseTest, SaveStateCanonicalizesMetadata) {
          .commit_id = std::string(64, 'a')}));
     execute_sql(database_path,
                 "INSERT INTO metadata (key, value) "
-                "VALUES ('unknown_key', 'legacy')");
+                "VALUES ('unknown_key', 'unrecognized')");
 
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
@@ -1166,9 +1219,9 @@ TEST(StateStorageDatabaseTest, ExtremeTimestampsPreservedBitwise) {
     EXPECT_EQ(loaded->at(2).mtime_nanoseconds, 0);
 }
 
-TEST(StateStorageDatabaseTest, LegacyEntriesAreIgnoredOnLoadAndPurgedOnDelta) {
+TEST(StateStorageDatabaseTest, UnknownFingerprintKindsAreIgnoredAndPreserved) {
     auto workspace =
-        kasumi::test::make_temp_workspace("persistence-legacy-migration");
+        kasumi::test::make_temp_workspace("persistence-unknown-fingerprints");
     const auto database_path =
         kasumi::test::workspace_path(workspace, "state.db");
     ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
@@ -1176,11 +1229,11 @@ TEST(StateStorageDatabaseTest, LegacyEntriesAreIgnoredOnLoadAndPurgedOnDelta) {
     const std::string dummy_hash(64, '0');
     execute_sql(database_path,
         "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
-        "VALUES ('legacy_win.txt', '" + dummy_hash + "', 100, 1, "
+        "VALUES ('platform_kind_one.txt', '" + dummy_hash + "', 100, 1, "
         "'0000000000000001', '0000000000000002', '0000000000000003', '0000000000000004')");
     execute_sql(database_path,
         "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
-        "VALUES ('legacy_posix.txt', '" + dummy_hash + "', 200, 2, "
+        "VALUES ('platform_kind_two.txt', '" + dummy_hash + "', 200, 2, "
         "'0000000000000005', '0000000000000006', '0000000000000007', '0000000000000008')");
 
     execute_sql(database_path,
@@ -1206,9 +1259,12 @@ TEST(StateStorageDatabaseTest, LegacyEntriesAreIgnoredOnLoadAndPurgedOnDelta) {
         database_path,
         std::span<const kasumi::state_storage::FileCacheRow>{&new_row, 1}));
 
-    const auto remaining_legacy = query_text(
-        database_path, "SELECT path FROM file_cache WHERE fingerprint_kind != 3");
-    EXPECT_TRUE(remaining_legacy.empty());
+    const auto remaining_unknown = query_text(
+        database_path,
+        "SELECT path FROM file_cache WHERE fingerprint_kind != 3 ORDER BY path");
+    EXPECT_EQ(remaining_unknown,
+              (std::vector<std::string>{"platform_kind_one.txt",
+                                        "platform_kind_two.txt"}));
 }
 
 TEST(StateStorageDatabaseTest, CorruptedCacheEntriesIgnoredFailClosed) {

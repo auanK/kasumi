@@ -26,17 +26,11 @@ MutationError make_error(MutationErrorCode code,
 // Removes a temporary file without propagating failures.
 void remove_temporary_file(const std::filesystem::path& path) noexcept;
 
-// Removes a legacy custody file only when its content still matches the journal.
-MutationResult safe_remove_custody(const std::filesystem::path& custody,
-                                   std::string_view expected_hash,
-                                   std::size_t operation_index);
-
-// Constructs a deterministic, transaction-namespaced custody path.
+// Constructs the deterministic, transaction-namespaced rollback candidate.
 std::filesystem::path
-make_custody_path(const std::filesystem::path& destination,
-                  std::string_view transaction_id,
-                  std::size_t operation_index,
-                  std::string_view prefix = "custody");
+rollback_candidate_path(const std::filesystem::path& destination,
+                        std::string_view transaction_id,
+                        std::size_t operation_index);
 
 // Computes cryptographic hash of a file and formats as hex string.
 std::expected<std::string, MutationError>

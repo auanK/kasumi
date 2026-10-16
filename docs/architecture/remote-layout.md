@@ -15,7 +15,7 @@ The production remote layout is derived from the 32-byte vault master key. `name
   <history-ns>/<gc-ns>/<version-ns>/<quarantine-ns>/<commits-ns>/<commit-id>/<ciphertext-id>[.meta]
 ```
 
-Commit variants, physical markers, Epoch objects, writer/probe objects, and ordinary content IDs are extensionless. `.meta` is used for quarantine metadata. `default_remote_layout()` and some legacy path recognition remain in code, but key-derived `RemoteLayout` is passed through production sync, inspection, and maintenance flows. Literal protocol labels and the old filename extensions do not describe current publications.
+Commit variants, physical markers, Epoch objects, writer/probe objects, and ordinary content IDs are extensionless. `.meta` is used for quarantine metadata. Only the key-derived `RemoteLayout` is read and written by current application flows. Former fixed `history/...` paths are not parsed, migrated, or deleted. Unrecognized remote objects are left untouched; when an older vault cannot be safely interpreted, use independently preserved data and a new profile or namespace rather than expecting automatic conversion. Literal protocol labels and old filename extensions do not describe current publications.
 
 ## Identities and Visibility
 

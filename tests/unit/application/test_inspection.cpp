@@ -961,8 +961,11 @@ TEST(ApplicationInspectionTest,
 
     const auto config_path = environment.app_data_dir / "config.toml";
     const auto key_path = environment.app_data_dir / "profiles/demo/key.bin";
+    const auto database_path =
+        environment.app_data_dir / "profiles/demo/db.sqlite";
     const auto config_before = kasumi::test::read_binary(config_path);
     const auto key_before = kasumi::test::read_binary(key_path);
+    const auto database_before = kasumi::test::read_binary(database_path);
     const auto published =
         publish(fixture, make_commit(0, {}, "file.txt", "contents").value());
     const auto before = kasumi::transport::list(fixture.transport);
@@ -983,9 +986,8 @@ TEST(ApplicationInspectionTest,
     EXPECT_EQ(*before, *after);
     EXPECT_EQ(kasumi::test::read_binary(config_path), config_before);
     EXPECT_EQ(kasumi::test::read_binary(key_path), key_before);
+    EXPECT_EQ(kasumi::test::read_binary(database_path), database_before);
     EXPECT_FALSE(std::filesystem::exists(local));
-    EXPECT_FALSE(std::filesystem::exists(environment.app_data_dir /
-                                         "profiles/demo/db.sqlite"));
 }
 
 TEST(ApplicationInspectionTest, ReportsAuthenticatedHeadMetadataAndStatistics) {
@@ -1098,11 +1100,14 @@ TEST(ApplicationInspectionTest, UsesPersistedKeyFromProfileCreatedNormally) {
         environment, profile, MasterKeyHex{key_hex()}));
     const auto key_path =
         kasumi::test::workspace_path(workspace, "app/profiles/demo/key.bin");
+    const auto database_path =
+        kasumi::test::workspace_path(workspace, "app/profiles/demo/db.sqlite");
     ASSERT_TRUE(std::filesystem::exists(key_path));
     const auto config_path =
         kasumi::test::workspace_path(workspace, "app/config.toml");
     const auto key_before = kasumi::test::read_binary(key_path);
     const auto config_before = kasumi::test::read_binary(config_path);
+    const auto database_before = kasumi::test::read_binary(database_path);
 
     const auto published =
         publish(fixture, make_commit(0, {}, "file.txt", "contents").value());
@@ -1127,9 +1132,8 @@ TEST(ApplicationInspectionTest, UsesPersistedKeyFromProfileCreatedNormally) {
     EXPECT_EQ(*before, *after);
     EXPECT_EQ(kasumi::test::read_binary(key_path), key_before);
     EXPECT_EQ(kasumi::test::read_binary(config_path), config_before);
+    EXPECT_EQ(kasumi::test::read_binary(database_path), database_before);
     EXPECT_FALSE(std::filesystem::exists(local));
-    EXPECT_FALSE(std::filesystem::exists(kasumi::test::workspace_path(
-        workspace, "app/profiles/demo/db.sqlite")));
 }
 
 TEST(ApplicationInspectionTest, MissingCredentialIsReportedExplicitly) {

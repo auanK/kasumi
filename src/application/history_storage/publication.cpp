@@ -532,14 +532,6 @@ publish_head_marker(transport::Transport& storage,
 }
 
 PublishHeadResult
-publish_head_marker(transport::Transport& storage,
-                    const HeadReference& reference,
-                    const std::filesystem::path& workspace_root) {
-    return publish_head_marker(
-        storage, default_remote_layout(), reference, workspace_root);
-}
-
-PublishHeadResult
 publish_head_marker_scoped(transport::Transport& storage,
                            const RemoteLayout& layout,
                            const HeadReference& reference,
@@ -551,14 +543,6 @@ publish_head_marker_scoped(transport::Transport& storage,
         return std::unexpected(
             detail::error(ErrorCode::LimitExceeded, "allocation failed"));
     }
-}
-
-PublishHeadResult
-publish_head_marker_scoped(transport::Transport& storage,
-                           const HeadReference& reference,
-                           const std::filesystem::path& workspace_root) {
-    return publish_head_marker_scoped(
-        storage, default_remote_layout(), reference, workspace_root);
 }
 
 std::expected<void, Error>
@@ -576,18 +560,6 @@ verify_head_marker(transport::Transport& storage,
     }
 }
 
-std::expected<void, Error>
-verify_head_marker(transport::Transport& storage,
-                   const HeadReference& reference,
-                   const std::filesystem::path& workspace_root,
-                   std::string_view local_physical_hash) {
-    return verify_head_marker(storage,
-                              default_remote_layout(),
-                              reference,
-                              workspace_root,
-                              local_physical_hash);
-}
-
 HeadMarkerInspection
 inspect_head_marker(transport::Transport& storage,
                     const RemoteLayout& layout,
@@ -602,21 +574,9 @@ inspect_head_marker(transport::Transport& storage,
     }
 }
 
-HeadMarkerInspection
-inspect_head_marker(transport::Transport& storage,
-                    const HeadReference& reference,
-                    const std::filesystem::path& workspace_root) {
-    return inspect_head_marker(
-        storage, default_remote_layout(), reference, workspace_root);
-}
-
 std::string marker_identifier(const RemoteLayout& layout,
                               const HeadReference& reference) {
     return marker_object(layout, reference);
-}
-
-std::string marker_identifier(const HeadReference& reference) {
-    return marker_object(default_remote_layout(), reference);
 }
 
 std::expected<std::vector<std::string>, Error>
@@ -651,11 +611,6 @@ list_remote_head_commit_ids(transport::Transport& storage,
     std::ranges::sort(heads);
     heads.erase(std::ranges::unique(heads).begin(), heads.end());
     return heads;
-}
-
-std::expected<std::vector<std::string>, Error>
-list_remote_head_commit_ids(transport::Transport& storage) {
-    return list_remote_head_commit_ids(storage, default_remote_layout());
 }
 
 } // namespace kasumi::application::history_storage

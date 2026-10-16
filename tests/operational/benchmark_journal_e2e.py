@@ -77,7 +77,7 @@ def file_path(index):
 
 
 def payload(index, revision):
-    return hashlib.shake_256(f"kasumi-journal-070:{index}:{revision}".encode()).digest(1024)
+    return hashlib.shake_256(f"kasumi-journal-benchmark:{index}:{revision}".encode()).digest(1024)
 
 
 def manifest(count, updated=False):
@@ -324,7 +324,7 @@ def trial_run(args, backend, count, repetition, config):
         (trial / name).mkdir()
     target = (f"kasumi:audit/{args.campaign.name}/n{count}/trial{repetition:02d}" if backend == "remote"
               else local_target(trial / "storage"))
-    if backend == "remote" and not re.fullmatch(r"kasumi:audit/journal-070-(?:group-)?[0-9a-f]{32}/n\d+/trial\d+", target):
+    if backend == "remote" and not re.fullmatch(r"kasumi:audit/journal-benchmark-(?:group-)?[0-9a-f]{32}/n\d+/trial\d+", target):
         raise RuntimeError("unsafe remote namespace")
     env = environment(trial, config, not args.trace_off)
     write_json(trial / "ownership.json", {"campaign": args.campaign.name, "target": target,
@@ -397,7 +397,7 @@ def main():
     parser.add_argument("--files", type=int, nargs="+", default=[100, 500, 1000, 2000])
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--trace-off", action="store_true", help="separate overhead control only")
-    parser.add_argument("--group-commit", action="store_true", help="use a fresh journal-070-group namespace")
+    parser.add_argument("--group-commit", action="store_true", help="use a fresh grouped benchmark namespace")
     parser.add_argument("--self-check", action="store_true")
     args = parser.parse_args()
     if args.self_check:
@@ -409,7 +409,7 @@ def main():
     source_config = args.rclone_config.resolve(strict=True)
     repository = Path(__file__).resolve().parents[2]
     args.campaign = args.output.resolve() / (
-        ("journal-070-group-" if args.group_commit else "journal-070-") + uuid.uuid4().hex)
+        ("journal-benchmark-group-" if args.group_commit else "journal-benchmark-") + uuid.uuid4().hex)
     if args.campaign.is_relative_to(repository):
         parser.error("campaign artifacts must be outside the repository")
     longest_staging_path = (args.campaign / "remote" / f"n{max(args.files)}" / "trial01" /

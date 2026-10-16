@@ -20,13 +20,12 @@
 
 namespace kasumi::application::sync::mutation {
 
-using detail::make_custody_path;
 using detail::make_error;
 using detail::missing;
+using detail::rollback_candidate_path;
 using detail::read_status;
 using detail::remove_temporary_file;
 using detail::resolve_local_path;
-using detail::safe_remove_custody;
 
 namespace {
 
@@ -490,8 +489,8 @@ restore_backup(const std::filesystem::path& backup,
                        operation_index));
     }
 
-    const auto candidate = make_custody_path(
-        destination, transaction_id, operation_index, "rollback-candidate");
+    const auto candidate = rollback_candidate_path(
+        destination, transaction_id, operation_index);
     auto candidate_status = read_status(candidate, operation_index);
     if (!candidate_status) {
         return std::unexpected(candidate_status.error());
@@ -723,46 +722,6 @@ rollback_file_operation(const Operation& operation,
     if (operation.action == Action::Download ||
         operation.action == Action::DeleteLocal) {
         const auto tx_id = workspace.root.filename().string();
-        const auto download_custody =
-            make_custody_path(*path, tx_id, operation_index, "custody");
-        const auto delete_custody =
-            make_custody_path(*path, tx_id, operation_index, "custody-delete");
-        const auto active_custody = operation.action == Action::Download
-                                        ? download_custody
-                                        : delete_custody;
-        const auto validate_active_custody = [&]() -> MutationResult {
-            auto custody_status = read_status(active_custody, operation_index);
-            if (!custody_status)
-                return std::unexpected(custody_status.error());
-            if (missing(*custody_status))
-                return {};
-            if (std::filesystem::is_symlink(*custody_status) ||
-                !std::filesystem::is_regular_file(*custody_status)) {
-                return std::unexpected(
-                    make_error(MutationErrorCode::DestinationConflict,
-                               "rollback custody is not a regular file",
-                               active_custody,
-                               operation_index));
-            }
-            auto actual = detail::file_hash(active_custody, operation_index);
-            if (!actual)
-                return std::unexpected(actual.error());
-            if (*actual != progress.previous_hash) {
-                return std::unexpected(
-                    make_error(MutationErrorCode::DestinationConflict,
-                               "rollback custody content changed",
-                               active_custody,
-                               operation_index));
-            }
-            return {};
-        };
-        const auto cleanup_active_custody = [&]() -> MutationResult {
-            auto valid = validate_active_custody();
-            if (!valid)
-                return valid;
-            return safe_remove_custody(
-                active_custody, progress.previous_hash, operation_index);
-        };
 
         if (progress.had_original) {
             auto actual = current_file_hash(*path, *status, operation_index);
@@ -770,80 +729,32 @@ rollback_file_operation(const Operation& operation,
                 return std::unexpected(actual.error());
             if (condition && *actual == condition->hash &&
                 (progress.state != transaction::OperationState::Applied ||
-                 condition->backup)) {
-                auto cleaned = cleanup_active_custody();
-                if (!cleaned)
-                    return cleaned;
+                 condition->backup))
                 return {};
-            }
-            if (*actual == progress.previous_hash) {
-                auto cleaned = cleanup_active_custody();
-                if (!cleaned)
-                    return cleaned;
+            if (*actual == progress.previous_hash)
                 return {};
-            }
             // Before Applied, matching bytes are equivalent, not proof of authorship.
             if (operation.action == Action::Download &&
                 ((progress.state == transaction::OperationState::Applied &&
                   (actual->empty() || *actual == operation.hash)) ||
                  (progress.state != transaction::OperationState::Applied &&
                   *actual == operation.hash))) {
-                auto valid_custody = validate_active_custody();
-                if (!valid_custody)
-                    return valid_custody;
-                auto restored = restore_backup(*backup,
-                                               *path,
-                                               progress.previous_hash,
-                                               operation_index,
-                                               *actual,
-                                               tx_id);
-                if (!restored) {
-                    return restored;
-                }
-                return cleanup_active_custody();
-            }
-            if (operation.action == Action::Download && actual->empty() &&
-                progress.state == transaction::OperationState::BackupCreated) {
-                auto valid_custody = validate_active_custody();
-                if (!valid_custody)
-                    return valid_custody;
-                auto custody_status =
-                    read_status(active_custody, operation_index);
-                if (!custody_status)
-                    return std::unexpected(custody_status.error());
-                if (missing(*custody_status)) {
-                    return std::unexpected(make_error(
-                        MutationErrorCode::DestinationConflict,
-                        "interrupted legacy download has no custody evidence",
-                        *path,
-                        operation_index));
-                }
-                auto restored = restore_backup(*backup,
-                                               *path,
-                                               progress.previous_hash,
-                                               operation_index,
-                                               {},
-                                               tx_id);
-                if (!restored)
-                    return restored;
-                return cleanup_active_custody();
+                return restore_backup(*backup,
+                                      *path,
+                                      progress.previous_hash,
+                                      operation_index,
+                                      *actual,
+                                      tx_id);
             }
             if ((progress.state == transaction::OperationState::Applied ||
                  progress.state == transaction::OperationState::BackupCreated) &&
                 operation.action == Action::DeleteLocal && actual->empty()) {
-                auto valid_custody = validate_active_custody();
-                if (!valid_custody)
-                    return valid_custody;
-                auto restored = restore_backup(*backup,
-                                               *path,
-                                               progress.previous_hash,
-                                               operation_index,
-                                               {},
-                                               tx_id);
-                if (!restored) {
-                    return restored;
-                }
-                return cleanup_active_custody();
+                return restore_backup(*backup,
+                                      *path,
+                                      progress.previous_hash,
+                                      operation_index,
+                                      {},
+                                      tx_id);
             }
             return std::unexpected(
                 make_error(MutationErrorCode::DestinationConflict,
@@ -1392,7 +1303,7 @@ MutationResult detail::validate_prepared_rename(
     const std::filesystem::path& destination,
     const platform::Workspace& workspace,
     const transaction::OperationProgress& progress) {
-    // Legacy unprepared calls cannot confer authority on a following operation.
+    // An unprepared pending operation has no authority over a following path.
     if (progress.state == transaction::OperationState::Pending &&
         !progress.had_original && progress.previous_hash.empty())
         return {};

@@ -5,6 +5,11 @@ its own local folder and profile; the shared destination stores encrypted object
 not a browsable copy of your files. For exact command syntax and options, use
 [Configuration and Usage](configuration-and-usage.md).
 
+Use the same Kasumi release on every client. The 0.x series does not guarantee
+that different releases can share profiles or synchronize with one another.
+A later 0.x release may require a new profile or remote namespace; it will not
+migrate old data automatically.
+
 ## 1. Obtain Kasumi
 
 Official [GitHub Releases](https://github.com/auanK/kasumi/releases) provide:

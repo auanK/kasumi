@@ -40,6 +40,9 @@ struct FileCacheRow {
 // Creates or validates the canonical database schema.
 bool initialize(const std::filesystem::path& database_path);
 
+// Validates an existing canonical schema without creating or modifying it.
+bool validate(const std::filesystem::path& database_path);
+
 // Loads the state or returns nullopt when it does not exist yet.
 std::expected<std::optional<StoredState>, std::string>
 load_state(const std::filesystem::path& database_path);

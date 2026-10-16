@@ -116,23 +116,27 @@ TEST(EpochCodecTest, RoundTripsCanonicalAndAuthenticatedFormats) {
 }
 
 TEST(EpochCodecTest, UsesImmutableCanonicalObjectNames) {
-    const auto sealed =
-        epoch::seal(representative_epoch(), epoch_test_key()).value();
-    const auto object = epoch::object_identifier(sealed.reference);
+    const auto key = epoch_test_key();
+    const auto layout = history_storage::derive_remote_layout(key);
+    const auto sealed = epoch::seal(representative_epoch(), key).value();
+    const auto object = epoch::object_identifier(layout, sealed.reference);
     ASSERT_TRUE(object.has_value());
-    EXPECT_EQ(*object,
-              "history/epochs/v1/00000000000000000002-" +
-                  sealed.reference.epoch_id);
+    EXPECT_EQ(*object, layout.epochs_prefix +
+                           "00000000000000000002-" +
+                           sealed.reference.epoch_id);
 
-    const auto parsed = epoch::parse_object_identifier(*object);
+    const auto parsed = epoch::parse_object_identifier(layout, *object);
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(*parsed, sealed.reference);
 
     auto malformed = *object;
-    malformed[std::string_view{"history/epochs/v1/"}.size()] = 'x';
-    EXPECT_FALSE(epoch::parse_object_identifier(malformed).has_value());
-    EXPECT_FALSE(epoch::parse_object_identifier("epoch/current").has_value());
-    EXPECT_FALSE(epoch::object_identifier({.sequence = 1, .epoch_id = "bad"})
+    malformed[layout.epochs_prefix.size()] = 'x';
+    EXPECT_FALSE(
+        epoch::parse_object_identifier(layout, malformed).has_value());
+    EXPECT_FALSE(epoch::parse_object_identifier(layout, "epoch/current")
+                     .has_value());
+    EXPECT_FALSE(epoch::object_identifier(
+                     layout, {.sequence = 1, .epoch_id = "bad"})
                      .has_value());
 }
 

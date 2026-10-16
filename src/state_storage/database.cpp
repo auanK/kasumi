@@ -123,8 +123,10 @@ template <std::size_t Size>
 bool has_columns(sqlite3* database,
                  std::string_view table,
                  const std::array<ColumnDefinition, Size>& expected) {
-    auto query = require_statement(sqlite::prepare(
-        database, "PRAGMA table_xinfo(" + std::string{table} + ")"));
+    std::string pragma{"PRAGMA table_xinfo("};
+    pragma.append(table);
+    pragma.push_back(')');
+    auto query = require_statement(sqlite::prepare(database, pragma));
     std::array<bool, Size> seen{};
     std::size_t count = 0;
     while (require_step(query)) {
@@ -476,8 +478,6 @@ std::vector<FileCacheRow> read_cache_rows(sqlite3* database) {
 void write_cache_delta(sqlite3* database,
                        const std::vector<FileCacheRow>& previous,
                        std::span<const FileCacheRow> current) {
-    require(sqlite::execute(
-        database, "DELETE FROM file_cache WHERE fingerprint_kind != 3"));
     auto upsert = require_statement(sqlite::prepare(
         database,
         "INSERT INTO file_cache "
@@ -532,17 +532,18 @@ void write_cache_delta(sqlite3* database,
 bool initialize(const std::filesystem::path& database_path) {
     try {
         std::error_code status_error;
-        if (std::filesystem::exists(database_path, status_error)) {
-            auto secured =
-                platform::private_storage::protect_file(database_path);
-            if (!secured) {
+        const bool database_existed =
+            std::filesystem::exists(database_path, status_error);
+        if (database_existed) {
+            if (!validate(database_path)) {
                 return false;
             }
         } else if (status_error) {
             return false;
         }
         auto opened = detail::open_state_database_readwrite(database_path,
-                                                            /*create=*/true);
+                                                            /*create=*/
+                                                                !database_existed);
         if (!opened) {
             return false;
         }
@@ -559,6 +560,9 @@ bool initialize(const std::filesystem::path& database_path) {
         const auto metadata = object_kind(opened->get(), "metadata");
         if (version == 0 && nodes == ObjectKind::Missing &&
             metadata == ObjectKind::Missing) {
+            if (database_existed) {
+                return false;
+            }
             create_schema(opened->get());
             require(sqlite::execute(opened->get(), "PRAGMA user_version = 1"));
         } else if (version != schema_version) {
@@ -583,6 +587,16 @@ bool initialize(const std::filesystem::path& database_path) {
             }
         }
         return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool validate(const std::filesystem::path& database_path) {
+    try {
+        auto opened = detail::open_state_database_readonly(database_path);
+        return opened && read_schema_version(opened->get()) == schema_version &&
+               has_expected_schema(opened->get());
     } catch (const std::exception&) {
         return false;
     }

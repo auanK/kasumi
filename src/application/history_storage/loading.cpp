@@ -160,14 +160,6 @@ download_commit_candidate(transport::Transport& storage,
     return {};
 }
 
-std::expected<void, Error>
-download_commit_candidate(transport::Transport& storage,
-                          const HeadReference& reference,
-                          const std::filesystem::path& destination) {
-    return download_commit_candidate(
-        storage, default_remote_layout(), reference, destination);
-}
-
 std::expected<MarkerState, Error>
 inspect_marker(transport::Transport& storage,
                const RemoteLayout& layout,
@@ -211,15 +203,6 @@ inspect_marker(transport::Transport& storage,
     }
     platform::perf_trace::count("marker.invalid_count", 1);
     return MarkerState::Invalid;
-}
-
-std::expected<MarkerState, Error>
-inspect_marker(transport::Transport& storage,
-               const HeadReference& reference,
-               const std::filesystem::path& workspace,
-               std::size_t& sequence) {
-    return inspect_marker(
-        storage, default_remote_layout(), reference, workspace, sequence);
 }
 
 std::expected<bool, Error> ciphertext_matches(const std::filesystem::path& path,

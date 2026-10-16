@@ -221,7 +221,13 @@ endif()
 
 set(KASUMI_EXTRA_SOURCES)
 if(WIN32)
-    list(APPEND KASUMI_EXTRA_SOURCES src/platform/windows/kasumi.rc)
+    configure_file(src/platform/windows/kasumi.rc.in
+                   "${CMAKE_CURRENT_BINARY_DIR}/kasumi.rc" @ONLY)
+    configure_file(src/platform/windows/long_path_aware.manifest
+                   "${CMAKE_CURRENT_BINARY_DIR}/long_path_aware.manifest" COPYONLY)
+    configure_file(src/platform/windows/long_path_aware.rc.in
+                   "${CMAKE_CURRENT_BINARY_DIR}/long_path_aware.rc" COPYONLY)
+    list(APPEND KASUMI_EXTRA_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/kasumi.rc")
 endif()
 
 add_executable(kasumi src/main.cpp ${KASUMI_EXTRA_SOURCES})
@@ -389,6 +395,10 @@ target_include_directories(
     PUBLIC
     include
 )
+
+if(BUILD_TESTING)
+    target_compile_definitions(kasumi_platform PRIVATE KASUMI_WORKSPACE_FAULT_TESTS)
+endif()
 
 target_link_libraries(
     kasumi_platform
@@ -663,6 +673,9 @@ target_link_libraries(
     kasumi_release_optimizations
     kasumi_hardening
 )
+if(MSVC)
+    target_link_options(kasumi PRIVATE /MANIFEST:NO)
+endif()
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
     target_link_options(kasumi PRIVATE

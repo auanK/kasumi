@@ -30,13 +30,18 @@ The release workflow classifies `v0.7.0` as stable; tags containing `-` are prer
 
 ## Upgrade Notes
 
-The first sync after upgrading may rehash all local files because the uniform
-cache replaces previous cache entries. Let synchronization rebuild this cache;
-do not delete `db.sqlite` or accepted history.
+Kasumi is pre-1.0. No compatibility, migration, downgrade, or cross-version
+client synchronization is guaranteed between 0.x releases. A newer release may
+require a new profile, configuration, or remote namespace. Reconstruct state
+only from files and credentials preserved independently; do not treat the
+synchronized vault as a backup.
 
-Follow the [upgrade precautions](https://github.com/auanK/kasumi/blob/v0.7.0/docs/best-practices.md#upgrading-kasumi): complete
-pending recovery and preserve independent backups and credentials before replacing
-the executable. `kasumi update` replaces only the binary; it does not migrate state.
+The binary updater replaces only the executable and does not migrate profile,
+database, journal, credential, or remote data. Before changing versions, finish
+pending recovery where the current executable supports it and preserve the old
+profile, configuration, credentials, local files, and remote data independently.
+Do not delete incompatible state or assume that downgrading will work. See the
+[pre-1.0 precautions](https://github.com/auanK/kasumi/blob/v0.7.0/docs/best-practices.md#upgrading-kasumi).
 
 ## Downloads
 

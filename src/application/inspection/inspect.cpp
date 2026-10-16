@@ -1293,46 +1293,34 @@ RemoteObjectInfo classify_object(const history_storage::RemoteLayout& layout,
     } else if (history_storage::parse_commit_object(layout, id)) {
         result.category = RemoteObjectCategory::CommitVariant;
         result.structurally_valid = true;
-    } else if (id.starts_with(layout.heads_prefix) ||
-               id.starts_with("history/heads/")) {
+    } else if (id.starts_with(layout.heads_prefix)) {
         result.category = RemoteObjectCategory::HeadMarker;
         result.structurally_valid =
             history_storage::parse_marker_object(layout, id).has_value();
-    } else if (id.starts_with(layout.epochs_prefix) ||
-               id.starts_with("history/epochs/v1/")) {
+    } else if (id.starts_with(layout.epochs_prefix)) {
         result.category = RemoteObjectCategory::Epoch;
         result.structurally_valid =
             history_storage::epoch::parse_object_identifier(layout, id)
                 .has_value();
-    } else if (id == layout.barrier_identifier ||
-               id == "history/gc/v1/barrier" || id == "history/gc/barrier") {
+    } else if (id == layout.barrier_identifier) {
         result.category = RemoteObjectCategory::Barrier;
         result.structurally_valid = true;
         result.relation = "maintenance barrier";
-    } else if (id.starts_with(layout.writers_prefix) ||
-               id.starts_with("history/gc/v1/writers/") ||
-               id.starts_with("history/gc/writers/")) {
+    } else if (id.starts_with(layout.writers_prefix)) {
         result.category = RemoteObjectCategory::Writer;
         result.structurally_valid = valid_writer(layout, id);
         result.relation = "blocks maintenance while present";
-    } else if ((id.starts_with(layout.quarantine_prefix) ||
-                id.starts_with("history/gc/v1/quarantine/") ||
-                id.starts_with("history/gc/quarantine/")) &&
+    } else if (id.starts_with(layout.quarantine_prefix) &&
                id.ends_with(".meta")) {
         result.category = RemoteObjectCategory::RetentionMetadata;
         result.structurally_valid = true;
-    } else if (id.starts_with(layout.quarantine_prefix) ||
-               id.starts_with("history/gc/v1/quarantine/") ||
-               id.starts_with("history/gc/quarantine/")) {
+    } else if (id.starts_with(layout.quarantine_prefix)) {
         result.category = RemoteObjectCategory::Quarantine;
         result.structurally_valid = true;
-    } else if (id.starts_with(layout.probes_prefix) ||
-               id.starts_with("history/gc/v1/probes/") ||
-               id.starts_with("history/gc/probes/")) {
+    } else if (id.starts_with(layout.probes_prefix)) {
         result.category = RemoteObjectCategory::Protocol;
         result.structurally_valid = true;
-    } else if (id.starts_with(layout.gc_prefix) ||
-               id.starts_with("history/gc/")) {
+    } else if (id.starts_with(layout.gc_prefix)) {
         result.category = RemoteObjectCategory::Protocol;
     }
     return result;
@@ -1504,6 +1492,7 @@ content_reachability(
 }
 
 RemoteOrphansReport make_orphans_report(
+    const history_storage::RemoteLayout& layout,
     const history_storage::ReachabilityInventory& history_inventory,
     const history_storage::ContentReachabilityInventory& content_inventory) {
     RemoteOrphansReport report;
@@ -1512,7 +1501,7 @@ RemoteOrphansReport make_orphans_report(
         if (marker.state == history_storage::ReachabilityMarkerState::Valid &&
             marker.reference) {
             marked_variants.insert(
-                history_storage::detail::commit_object(*marker.reference));
+                history_storage::commit_object(layout, *marker.reference));
         }
     }
     for (const auto& commit : history_inventory.commits) {
@@ -1586,15 +1575,9 @@ make_writers_report(const history_storage::RemoteLayout& layout,
     RemoteWritersReport report;
     report.barrier_present =
         std::ranges::find(identifiers, layout.barrier_identifier) !=
-            identifiers.end() ||
-        std::ranges::find(identifiers, "history/gc/v1/barrier") !=
-            identifiers.end() ||
-        std::ranges::find(identifiers, "history/gc/barrier") !=
             identifiers.end();
     for (const auto& identifier : identifiers) {
-        if (!identifier.starts_with(layout.writers_prefix) &&
-            !identifier.starts_with("history/gc/v1/writers/") &&
-            !identifier.starts_with("history/gc/writers/")) {
+        if (!identifier.starts_with(layout.writers_prefix)) {
             continue;
         }
         const auto state = valid_writer(layout, identifier)
@@ -1605,21 +1588,11 @@ make_writers_report(const history_storage::RemoteLayout& layout,
             RemoteWriterInfo{.identifier = identifier, .state = state});
     }
     for (const auto& identifier : identifiers) {
-        const bool is_gc = identifier.starts_with(layout.gc_prefix) ||
-                           identifier.starts_with("history/gc/v1/") ||
-                           identifier.starts_with("history/gc/");
+        const bool is_gc = identifier.starts_with(layout.gc_prefix);
         if (is_gc && identifier != layout.barrier_identifier &&
-            identifier != "history/gc/v1/barrier" &&
-            identifier != "history/gc/barrier" &&
             !identifier.starts_with(layout.writers_prefix) &&
-            !identifier.starts_with("history/gc/v1/writers/") &&
-            !identifier.starts_with("history/gc/writers/") &&
             !identifier.starts_with(layout.probes_prefix) &&
-            !identifier.starts_with("history/gc/v1/probes/") &&
-            !identifier.starts_with("history/gc/probes/") &&
-            !identifier.starts_with(layout.quarantine_prefix) &&
-            !identifier.starts_with("history/gc/v1/quarantine/") &&
-            !identifier.starts_with("history/gc/quarantine/")) {
+            !identifier.starts_with(layout.quarantine_prefix)) {
             report.protocol_consistent = false;
         }
     }
@@ -1705,7 +1678,8 @@ make_health_report(InspectionContext& context,
     const auto objects = make_objects_report(context.layout, identifiers);
     const auto writers = make_writers_report(context.layout, identifiers);
     const auto orphans =
-        make_orphans_report(*history_inventory, *content_inventory);
+        make_orphans_report(
+            context.layout, *history_inventory, *content_inventory);
 
     RemoteHealthReport report{
         .marker_count = markers.markers.size(),
@@ -1791,7 +1765,8 @@ inspect_physical(InspectionContext& context, InspectionOperation operation) {
         }
         return InspectionResponse{
             .operation = operation,
-            .payload = make_orphans_report(*history_inventory, *contents)};
+            .payload = make_orphans_report(
+                context.layout, *history_inventory, *contents)};
     }
     if (operation == InspectionOperation::RemoteQuarantine) {
         auto report = make_quarantine_report(context, operation);

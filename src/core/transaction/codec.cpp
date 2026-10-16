@@ -152,7 +152,7 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
 
         auto version = wire::read<std::uint8_t>(reader);
         if (!version || *version != format_version) {
-            return std::unexpected("invalid or legacy format version");
+            return std::unexpected("unsupported journal format version");
         }
 
         auto id = wire::read_string(reader, maximum_string_size);

@@ -103,17 +103,6 @@ publish_head_marker(transport::Transport& storage,
     return std::move(*published);
 }
 
-PublishHeadResult
-publish_head_marker(transport::Transport& storage,
-                    const history_storage::HeadReference& reference,
-                    const std::filesystem::path& workspace_root) {
-    return sync::publication::publish_head_marker(
-        storage,
-        history_storage::default_remote_layout(),
-        reference,
-        workspace_root);
-}
-
 PrepareResult
 prepare_commit(Snapshot tree,
                bool history_present,
@@ -221,19 +210,6 @@ verify_head_marker(transport::Transport& storage,
     return {};
 }
 
-std::expected<void, Error>
-verify_head_marker(transport::Transport& storage,
-                   const history_storage::HeadReference& reference,
-                   const std::filesystem::path& workspace_root,
-                   std::string_view local_physical_hash) {
-    return sync::publication::verify_head_marker(
-        storage,
-        history_storage::default_remote_layout(),
-        reference,
-        workspace_root,
-        local_physical_hash);
-}
-
 HeadMarkerInspection
 inspect_head_marker(transport::Transport& storage,
                     const history_storage::RemoteLayout& layout,
@@ -245,17 +221,6 @@ inspect_head_marker(transport::Transport& storage,
         return std::unexpected(storage_error(inspected.error()));
     }
     return std::move(*inspected);
-}
-
-HeadMarkerInspection
-inspect_head_marker(transport::Transport& storage,
-                    const history_storage::HeadReference& reference,
-                    const std::filesystem::path& workspace_root) {
-    return sync::publication::inspect_head_marker(
-        storage,
-        history_storage::default_remote_layout(),
-        reference,
-        workspace_root);
 }
 
 PublishResult
@@ -371,17 +336,6 @@ PruneMarkersResult prune_observed_parent_markers(
         return std::unexpected(storage_error(removed.error()));
     }
     return PruneResult{.removed_markers = removed->removed};
-}
-
-PruneMarkersResult prune_observed_parent_markers(
-    transport::Transport& storage,
-    std::span<const std::string> parent_ids,
-    std::span<const std::string> observed_marker_identifiers) {
-    return prune_observed_parent_markers(
-        storage,
-        history_storage::default_remote_layout(),
-        parent_ids,
-        observed_marker_identifiers);
 }
 
 } // namespace kasumi::application::sync::publication

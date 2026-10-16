@@ -62,9 +62,6 @@ using ExecutionProgress =
 // Callback type for receiving execution progress updates.
 using ProgressCallback = std::function<void(const ExecutionProgress&)>;
 
-// Backward-compatible alias for synchronization progress updates.
-using SyncProgressCallback = ProgressCallback;
-
 // Inputs required for an execution.
 struct ExecutionInput {
     Request request;

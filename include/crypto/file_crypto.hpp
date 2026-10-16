@@ -43,7 +43,8 @@ std::optional<EncryptionResult>
 encrypt_file_with_hashes(const std::filesystem::path& input_path,
                          const std::filesystem::path& output_path,
                          std::span<const std::uint8_t, KEY_SIZE> master_key,
-                         FilePurpose purpose = FilePurpose::Content);
+                         FilePurpose purpose = FilePurpose::Content,
+                         std::string* error_detail = nullptr);
 
 // Encrypts with chunk-level authentication; removes partial output on failure.
 bool encrypt_file(const std::filesystem::path& input_path,

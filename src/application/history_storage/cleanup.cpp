@@ -99,25 +99,11 @@ remove_marker_variants(transport::Transport& storage,
 
 RemoveMarkersResult
 remove_marker_variants(transport::Transport& storage,
-                       std::span<const std::string> commit_ids) {
-    return remove_marker_variants(storage, default_remote_layout(), commit_ids);
-}
-
-RemoveMarkersResult
-remove_marker_variants(transport::Transport& storage,
                        const RemoteLayout& layout,
                        std::span<const std::string> commit_ids,
                        std::span<const std::string> identifiers) {
     return remove_marker_variants_impl(
         storage, layout, commit_ids, identifiers);
-}
-
-RemoveMarkersResult
-remove_marker_variants(transport::Transport& storage,
-                       std::span<const std::string> commit_ids,
-                       std::span<const std::string> identifiers) {
-    return remove_marker_variants(
-        storage, default_remote_layout(), commit_ids, identifiers);
 }
 
 } // namespace kasumi::application::history_storage

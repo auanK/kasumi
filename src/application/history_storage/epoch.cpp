@@ -146,8 +146,7 @@ std::expected<EpochInventory, Error> discover_epoch_inventory(
     std::vector<std::string> identifiers;
     if (known_identifiers) {
         for (const auto& identifier : *known_identifiers) {
-            if (identifier.starts_with(layout.epochs_prefix) ||
-                identifier.starts_with("history/epochs/v1/")) {
+            if (identifier.starts_with(layout.epochs_prefix)) {
                 identifiers.push_back(identifier);
             }
         }
@@ -624,11 +623,6 @@ object_identifier(const RemoteLayout& layout, const Reference& reference) {
     return epoch_object(layout, reference.sequence, reference.epoch_id);
 }
 
-std::expected<std::string, Error>
-object_identifier(const Reference& reference) {
-    return object_identifier(default_remote_layout(), reference);
-}
-
 std::expected<Reference, Error>
 parse_object_identifier(const RemoteLayout& layout,
                         std::string_view identifier) {
@@ -639,11 +633,6 @@ parse_object_identifier(const RemoteLayout& layout,
     }
     return Reference{.sequence = parsed->sequence,
                      .epoch_id = std::move(parsed->epoch_id)};
-}
-
-std::expected<Reference, Error>
-parse_object_identifier(std::string_view identifier) {
-    return parse_object_identifier(default_remote_layout(), identifier);
 }
 
 std::expected<VerifiedEpoch, Error>
@@ -737,13 +726,6 @@ publish(transport::Transport& storage,
         const std::filesystem::path& workspace_root) {
     return publish(
         storage, derive_remote_layout(master_key), sealed, workspace_root);
-}
-
-std::expected<void, Error>
-publish(transport::Transport& storage,
-        const SealedEpoch& sealed,
-        const std::filesystem::path& workspace_root) {
-    return publish(storage, default_remote_layout(), sealed, workspace_root);
 }
 
 std::expected<void, Error>

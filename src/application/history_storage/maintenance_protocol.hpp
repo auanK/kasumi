@@ -57,23 +57,16 @@ release_registration(RegistrationState& registration);
 RegistrationResult register_writer(transport::Transport& storage,
                                    const RemoteLayout& layout,
                                    const std::filesystem::path& workspace_root);
-RegistrationResult register_writer(transport::Transport& storage,
-                                   const std::filesystem::path& workspace_root);
 
 // Publishes the barrier preventing new writers.
 RegistrationResult
 establish_barrier(transport::Transport& storage,
                   const RemoteLayout& layout,
                   const std::filesystem::path& workspace_root);
-RegistrationResult
-establish_barrier(transport::Transport& storage,
-                  const std::filesystem::path& workspace_root);
 
 // Lists active writers; any abandoned marker continues to block GC.
 std::expected<std::vector<std::string>, Error>
 active_writers(transport::Transport& storage, const RemoteLayout& layout);
-std::expected<std::vector<std::string>, Error>
-active_writers(transport::Transport& storage);
 
 // Removes only the explicitly selected writer marker after verifying it is
 // listed and present in this vault's keyed writer namespace.
@@ -86,9 +79,6 @@ std::expected<void, Error> remove_writer(transport::Transport& storage,
 std::expected<bool, Error>
 supports_online_collection(transport::Transport& storage,
                            const RemoteLayout& layout,
-                           const std::filesystem::path& workspace_root);
-std::expected<bool, Error>
-supports_online_collection(transport::Transport& storage,
                            const std::filesystem::path& workspace_root);
 
 struct QuarantineEntry {
@@ -105,24 +95,17 @@ struct PreparedQuarantineMetadata {
     std::string expected_physical_sha256;
 };
 
-inline constexpr std::string_view epoch_namespace_prefix = "history/epochs/v1/";
-
 bool is_epoch_object(const RemoteLayout& layout,
                      std::string_view identifier) noexcept;
-
-bool is_epoch_object(std::string_view identifier) noexcept;
 
 // Identifies objects reserved for the protocol, outside logical history.
 bool is_control_object(const RemoteLayout& layout,
                        std::string_view identifier) noexcept;
-bool is_control_object(std::string_view identifier) noexcept;
 
 // Builds the deterministic quarantine destination for content or commit.
 std::optional<std::string>
 quarantine_identifier(const RemoteLayout& layout,
                       std::string_view original_identifier);
-std::optional<std::string>
-quarantine_identifier(std::string_view original_identifier);
 
 // Inventories and authenticates metadata present in quarantine.
 std::expected<std::vector<QuarantineEntry>, Error>
@@ -171,6 +154,7 @@ verify_destination_via_workspace(transport::Transport& storage,
 // Copies bytes via local workspace download and upload, validating hash.
 std::expected<std::string, Error>
 copy_verified_via_workspace(transport::Transport& storage,
+                            const RemoteLayout& layout,
                             std::string_view source_identifier,
                             std::string_view destination_identifier,
                             const std::filesystem::path& workspace_root);
@@ -178,6 +162,7 @@ copy_verified_via_workspace(transport::Transport& storage,
 // Copies bytes, validates destination SHA-256, and returns the hash.
 std::expected<std::string, Error>
 copy_verified(transport::Transport& storage,
+              const RemoteLayout& layout,
               std::string_view source_identifier,
               std::string_view destination_identifier,
               const std::filesystem::path& workspace_root);

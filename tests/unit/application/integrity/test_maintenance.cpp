@@ -2128,7 +2128,8 @@ TEST(IntegrityMaintenanceTest,
         kasumi::test::workspace_root(storage.workspace));
     ASSERT_TRUE(quarantine.has_value()) << quarantine.error().detail;
     EXPECT_TRUE(std::ranges::none_of(*quarantine, [](const auto& entry) {
-        return protocol::is_epoch_object(entry.original_identifier);
+        return protocol::is_epoch_object(test_layout(),
+                                         entry.original_identifier);
     }));
 
     const auto repeated = kasumi::application::integrity::garbage_collect(
@@ -2146,27 +2147,33 @@ TEST(IntegrityMaintenanceTest,
     ASSERT_TRUE(checked.has_value()) << checked.error().detail;
 }
 
-TEST(IntegrityMaintenanceTest, EpochNamespaceIsBlockedAtTheCopyBoundary) {
+TEST(IntegrityMaintenanceTest, KeyedEpochNamespaceIsBlockedAtCopyBoundary) {
     auto storage = make_local_storage();
-    const std::string malformed = "history/epochs/v1/garbage";
-    const std::string valid_shape = "history/epochs/v1/00000000000000000000-" +
-                                    std::string(64, 'a') + ".epoch";
+    const auto& layout = test_layout();
+    const std::string malformed = layout.epochs_prefix + "garbage";
+    const std::string valid_shape =
+        layout.epochs_prefix + "00000000000000000000-" + std::string(64, 'a');
 
-    EXPECT_TRUE(protocol::is_epoch_object(malformed));
-    EXPECT_TRUE(protocol::is_epoch_object(valid_shape));
-    EXPECT_FALSE(protocol::is_epoch_object("history/epoch/v1/garbage"));
-    EXPECT_FALSE(protocol::quarantine_identifier(malformed).has_value());
+    EXPECT_TRUE(protocol::is_epoch_object(layout, malformed));
+    EXPECT_TRUE(protocol::is_epoch_object(layout, valid_shape));
+    EXPECT_FALSE(protocol::is_epoch_object(
+        layout, "history/epochs/v1/00000000000000000000-" +
+                    std::string(64, 'a')));
+    EXPECT_FALSE(
+        protocol::quarantine_identifier(layout, malformed).has_value());
 
     const auto into_quarantine = protocol::copy_verified(
         storage.transport,
+        layout,
         malformed,
-        "history/gc/v1/quarantine/content/" + std::string(64, 'a'),
+        layout.quarantine_content_prefix + std::string(64, 'a'),
         kasumi::test::workspace_root(storage.workspace));
     ASSERT_FALSE(into_quarantine.has_value());
     EXPECT_EQ(into_quarantine.error().code, protocol::ErrorCode::Blocked);
 
     const auto from_quarantine = protocol::copy_verified(
         storage.transport,
+        layout,
         std::string(64, 'a'),
         malformed,
         kasumi::test::workspace_root(storage.workspace));
@@ -2190,6 +2197,7 @@ TEST(IntegrityMaintenanceTest,
 
     const auto copied =
         protocol::copy_verified(transport,
+                                test_layout(),
                                 source,
                                 destination,
                                 kasumi::test::workspace_root(workspace));
@@ -2228,6 +2236,7 @@ TEST(IntegrityMaintenanceTest,
 
     const auto copied =
         protocol::copy_verified(transport,
+                                test_layout(),
                                 source,
                                 destination,
                                 kasumi::test::workspace_root(workspace));
@@ -2278,6 +2287,7 @@ TEST(IntegrityMaintenanceTest,
 
         const auto copied =
             protocol::copy_verified(transport,
+                                    test_layout(),
                                     source,
                                     destination,
                                     kasumi::test::workspace_root(workspace));
@@ -2829,7 +2839,7 @@ TEST(IntegrityMaintenanceTest, WriterPhysicalHashSuccessAvoidsReadback) {
     state->physical_hash_supported = true;
 
     auto writer = protocol::register_writer(
-        transport, kasumi::test::workspace_root(workspace));
+        transport, test_layout(), kasumi::test::workspace_root(workspace));
     ASSERT_TRUE(writer.has_value()) << writer.error().detail;
     EXPECT_EQ(state->put_count, 1U);
     EXPECT_EQ(state->physical_hash_count, 1U);
@@ -2846,7 +2856,7 @@ TEST(IntegrityMaintenanceTest, WriterPhysicalHashMismatchFailsWithoutReadback) {
     state->physical_hash_mismatch = true;
 
     const auto writer = protocol::register_writer(
-        transport, kasumi::test::workspace_root(workspace));
+        transport, test_layout(), kasumi::test::workspace_root(workspace));
     ASSERT_FALSE(writer.has_value());
     EXPECT_EQ(writer.error().code, protocol::ErrorCode::VerificationFailure);
     EXPECT_EQ(state->physical_hash_count, 1U);
@@ -2861,7 +2871,7 @@ TEST(IntegrityMaintenanceTest,
     ASSERT_TRUE(kasumi::transport::initialize(transport));
 
     auto writer = protocol::register_writer(
-        transport, kasumi::test::workspace_root(workspace));
+        transport, test_layout(), kasumi::test::workspace_root(workspace));
     ASSERT_TRUE(writer.has_value()) << writer.error().detail;
     EXPECT_EQ(state->physical_hash_count, 1U);
     EXPECT_EQ(state->get_count, 1U);
@@ -2878,7 +2888,7 @@ TEST(IntegrityMaintenanceTest,
     state->physical_hash_failure = kasumi::transport::ErrorCode::Io;
 
     const auto writer = protocol::register_writer(
-        transport, kasumi::test::workspace_root(workspace));
+        transport, test_layout(), kasumi::test::workspace_root(workspace));
     ASSERT_FALSE(writer.has_value());
     EXPECT_EQ(writer.error().code, protocol::ErrorCode::TransportFailure);
     EXPECT_EQ(state->physical_hash_count, 1U);
@@ -2895,7 +2905,7 @@ TEST(IntegrityMaintenanceTest,
     state->publish_barrier_after_writer_list = true;
 
     const auto writer = protocol::register_writer(
-        transport, kasumi::test::workspace_root(workspace));
+        transport, test_layout(), kasumi::test::workspace_root(workspace));
     ASSERT_FALSE(writer.has_value());
     EXPECT_EQ(writer.error().code, protocol::ErrorCode::Blocked);
     EXPECT_EQ(state->control_read_batch_count, 1U);
@@ -2909,11 +2919,11 @@ TEST(IntegrityMaintenanceTest, WriterAdmissionAllowsSecondWriter) {
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
     state->control_read_batch_supported = true;
-    state->objects
-        ["history/gc/v1/writers/11111111111111111111111111111111.writer"] = {};
+    state->objects[test_layout().writers_prefix +
+                   "/11111111111111111111111111111111.writer"] = {};
 
     auto writer = protocol::register_writer(
-        transport, kasumi::test::workspace_root(workspace));
+        transport, test_layout(), kasumi::test::workspace_root(workspace));
     ASSERT_TRUE(writer.has_value()) << writer.error().detail;
     EXPECT_EQ(state->control_read_batch_count, 1U);
     EXPECT_EQ(state->list_count, 1U);
@@ -2931,7 +2941,7 @@ TEST(IntegrityMaintenanceTest, WriterAdmissionBatchRejectsMissingWriter) {
     state->hide_writer_listing = true;
 
     const auto writer = protocol::register_writer(
-        transport, kasumi::test::workspace_root(workspace));
+        transport, test_layout(), kasumi::test::workspace_root(workspace));
     ASSERT_FALSE(writer.has_value());
     EXPECT_EQ(writer.error().code, protocol::ErrorCode::BackendUnsafe);
     EXPECT_EQ(state->control_read_batch_count, 1U);
@@ -2946,10 +2956,10 @@ TEST(IntegrityMaintenanceTest, WriterAdmissionBlocksPresentBarrier) {
     auto transport = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(transport));
     state->control_read_batch_supported = true;
-    state->objects["history/gc/v1/barrier"] = {};
+    state->objects[test_layout().barrier_identifier] = {};
 
     const auto writer = protocol::register_writer(
-        transport, kasumi::test::workspace_root(workspace));
+        transport, test_layout(), kasumi::test::workspace_root(workspace));
     ASSERT_FALSE(writer.has_value());
     EXPECT_EQ(writer.error().code, protocol::ErrorCode::Blocked);
     EXPECT_EQ(state->control_read_batch_count, 1U);
@@ -2960,15 +2970,18 @@ TEST(IntegrityMaintenanceTest, WriterAdmissionBlocksPresentBarrier) {
 TEST(IntegrityMaintenanceTest, WriterAdmissionResumesAfterBarrierRelease) {
     auto storage = make_local_storage();
     const auto root = kasumi::test::workspace_root(storage.workspace);
-    auto barrier = protocol::establish_barrier(storage.transport, root);
+    auto barrier =
+        protocol::establish_barrier(storage.transport, test_layout(), root);
     ASSERT_TRUE(barrier.has_value()) << barrier.error().detail;
 
-    const auto blocked = protocol::register_writer(storage.transport, root);
+    const auto blocked =
+        protocol::register_writer(storage.transport, test_layout(), root);
     ASSERT_FALSE(blocked.has_value());
     EXPECT_EQ(blocked.error().code, protocol::ErrorCode::Blocked);
 
     ASSERT_TRUE(protocol::release_registration(*barrier));
-    auto writer = protocol::register_writer(storage.transport, root);
+    auto writer =
+        protocol::register_writer(storage.transport, test_layout(), root);
     ASSERT_TRUE(writer.has_value()) << writer.error().detail;
     ASSERT_TRUE(protocol::release_registration(*writer));
 }
@@ -2984,7 +2997,7 @@ TEST(IntegrityMaintenanceTest,
     state->publish_barrier_after_writer_list = true;
 
     const auto writer = protocol::register_writer(
-        transport, kasumi::test::workspace_root(workspace));
+        transport, test_layout(), kasumi::test::workspace_root(workspace));
     ASSERT_FALSE(writer.has_value());
     EXPECT_EQ(writer.error().code, protocol::ErrorCode::Blocked);
     EXPECT_EQ(state->control_read_batch_count, 1U);
@@ -3003,7 +3016,7 @@ TEST(IntegrityMaintenanceTest,
     state->fail_writer_list = true;
 
     const auto writer = protocol::register_writer(
-        transport, kasumi::test::workspace_root(workspace));
+        transport, test_layout(), kasumi::test::workspace_root(workspace));
     ASSERT_FALSE(writer.has_value());
     EXPECT_EQ(writer.error().code, protocol::ErrorCode::TransportFailure);
     EXPECT_EQ(state->control_read_batch_count, 1U);
@@ -3021,7 +3034,7 @@ TEST(IntegrityMaintenanceTest, WriterAdmissionBarrierFailureFailsClosed) {
     state->fail_barrier_presence = true;
 
     const auto writer = protocol::register_writer(
-        transport, kasumi::test::workspace_root(workspace));
+        transport, test_layout(), kasumi::test::workspace_root(workspace));
     ASSERT_FALSE(writer.has_value());
     EXPECT_EQ(writer.error().code, protocol::ErrorCode::TransportFailure);
     EXPECT_EQ(state->control_read_batch_count, 1U);
@@ -3038,7 +3051,7 @@ TEST(IntegrityMaintenanceTest, WriterAdmissionBatchFailureDoesNotRetryReads) {
     state->control_read_batch_failure = kasumi::transport::ErrorCode::Io;
 
     const auto writer = protocol::register_writer(
-        transport, kasumi::test::workspace_root(workspace));
+        transport, test_layout(), kasumi::test::workspace_root(workspace));
     ASSERT_FALSE(writer.has_value());
     EXPECT_EQ(writer.error().code, protocol::ErrorCode::TransportFailure);
     EXPECT_EQ(state->control_read_batch_count, 1U);
@@ -3288,7 +3301,7 @@ TEST(IntegrityMaintenanceTest, UnknownControlObjectFailsClosed) {
         kasumi::test::workspace_path(storage.workspace, "unknown.control");
     kasumi::test::write_text(unknown, "unknown");
     ASSERT_TRUE(kasumi::transport::put(
-        storage.transport, unknown, "history/gc/v1/unknown"));
+        storage.transport, unknown, test_layout().writers_prefix + "unknown"));
 
     const auto collected = kasumi::application::integrity::garbage_collect(
         runtime, storage.transport, test_key());

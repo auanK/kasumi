@@ -92,7 +92,7 @@ On Windows, Kasumi uses the built-in `tar` command and starts a helper that wait
 
 On Linux, `curl`, `tar`, and `sha256sum` must be available. Kasumi installs without root when the executable's directory is writable. If permissions deny replacement, it attempts `pkexec`; it falls back to `sudo` only when authentication through `pkexec` is unavailable and the terminal is interactive.
 
-Installations managed by a package manager must be updated through that manager. Review the [release notes](../RELEASE_NOTES.md#upgrade-notes) and any applicable migration requirements in the [changelog](../CHANGELOG.md), complete pending recovery, and back up your profile before replacing binaries. The updater does not migrate state.
+Installations managed by a package manager must be updated through that manager. Kasumi 0.x releases do not guarantee profile, configuration, database, journal, remote-format, downgrade, or cross-version client compatibility. A newer release may require a new profile or remote namespace; it does not convert old state. Preserve your profile, credentials, local data, and remote data independently before changing versions. The updater changes only the executable.
 
 ### Partial Synchronization and Explicit Data-Loss Operations
 
@@ -214,7 +214,7 @@ cache/
 * Lines starting with `#` are comments.
 
 Symlinks inside the synchronization root are not traversed.
-The legacy internal names `kasumi.db`, `kasumi.db-shm`, `kasumi.db-wal`, `kasumi.lock`, and `.kasumi_sync_buffer` are always ignored. The `.kasumiignore` file itself can be synchronized; changes to its local or authenticated remote version can change the effective projection used for a run. See [Local Observation](architecture/local-observation.md).
+Reserved private files at the synchronization root and generated transaction artifacts are excluded from synchronization. Generated artifacts use their exact current naming pattern. The `.kasumiignore` file itself can be synchronized; changes to its local or authenticated remote version can change the effective projection used for a run. See [Local Observation](architecture/local-observation.md).
 
 ## Synchronized Path Rules
 

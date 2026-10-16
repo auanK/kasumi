@@ -126,8 +126,10 @@ TEST(RemoteHeadsContractTest,
 
     const auto config_path = environment.app_data_dir / "config.toml";
     const auto key_path = environment.app_data_dir / "profiles/demo/key.bin";
+    const auto database_path = environment.app_data_dir / "profiles/demo/db.sqlite";
     const auto config_before = kasumi::test::read_binary(config_path);
     const auto key_before = kasumi::test::read_binary(key_path);
+    const auto database_before = kasumi::test::read_binary(database_path);
     const auto published =
         publish(remote, make_commit(0, {}, "file.txt", "contents").value());
     ASSERT_FALSE(published.head.commit_id.empty());
@@ -154,9 +156,8 @@ TEST(RemoteHeadsContractTest,
     EXPECT_EQ(*before, *after);
     EXPECT_EQ(kasumi::test::read_binary(config_path), config_before);
     EXPECT_EQ(kasumi::test::read_binary(key_path), key_before);
+    EXPECT_EQ(kasumi::test::read_binary(database_path), database_before);
     EXPECT_FALSE(std::filesystem::exists(local));
-    EXPECT_FALSE(std::filesystem::exists(environment.app_data_dir /
-                                         "profiles/demo/db.sqlite"));
 }
 
 TEST(RemoteHeadsContractTest,
@@ -195,8 +196,10 @@ TEST(RemoteHeadsContractTest,
 
     const auto config_path = environment.app_data_dir / "config.toml";
     const auto key_path = environment.app_data_dir / "profiles/demo/key.bin";
+    const auto database_path = environment.app_data_dir / "profiles/demo/db.sqlite";
     const auto config_before = kasumi::test::read_binary(config_path);
     const auto key_before = kasumi::test::read_binary(key_path);
+    const auto database_before = kasumi::test::read_binary(database_path);
     const auto published =
         publish(remote, make_commit(0, {}, "file.txt", "contents").value());
     ASSERT_FALSE(published.head.commit_id.empty());
@@ -241,9 +244,8 @@ TEST(RemoteHeadsContractTest,
     EXPECT_EQ(*before, *after);
     EXPECT_EQ(kasumi::test::read_binary(config_path), config_before);
     EXPECT_EQ(kasumi::test::read_binary(key_path), key_before);
+    EXPECT_EQ(kasumi::test::read_binary(database_path), database_before);
     EXPECT_FALSE(std::filesystem::exists(local));
-    EXPECT_FALSE(std::filesystem::exists(environment.app_data_dir /
-                                         "profiles/demo/db.sqlite"));
 }
 
 TEST(RemoteHeadsContractTest,
@@ -282,8 +284,10 @@ TEST(RemoteHeadsContractTest,
 
     const auto config_path = environment.app_data_dir / "config.toml";
     const auto key_path = environment.app_data_dir / "profiles/demo/key.bin";
+    const auto database_path = environment.app_data_dir / "profiles/demo/db.sqlite";
     const auto config_before = kasumi::test::read_binary(config_path);
     const auto key_before = kasumi::test::read_binary(key_path);
+    const auto database_before = kasumi::test::read_binary(database_path);
     const auto c0 =
         publish(remote, make_commit(0, {}, "c0.txt", "zero").value());
     const auto c1 = publish(
@@ -316,9 +320,8 @@ TEST(RemoteHeadsContractTest,
     EXPECT_EQ(*before, *after);
     EXPECT_EQ(kasumi::test::read_binary(config_path), config_before);
     EXPECT_EQ(kasumi::test::read_binary(key_path), key_before);
+    EXPECT_EQ(kasumi::test::read_binary(database_path), database_before);
     EXPECT_FALSE(std::filesystem::exists(local));
-    EXPECT_FALSE(std::filesystem::exists(environment.app_data_dir /
-                                         "profiles/demo/db.sqlite"));
 }
 
 TEST(RemoteHeadsContractTest,
@@ -356,8 +359,10 @@ TEST(RemoteHeadsContractTest,
 
     const auto config_path = environment.app_data_dir / "config.toml";
     const auto key_path = environment.app_data_dir / "profiles/demo/key.bin";
+    const auto database_path = environment.app_data_dir / "profiles/demo/db.sqlite";
     const auto config_before = kasumi::test::read_binary(config_path);
     const auto key_before = kasumi::test::read_binary(key_path);
+    const auto database_before = kasumi::test::read_binary(database_path);
     const auto remote_commit =
         make_commit(0, {}, "file.txt", "contents").value();
     const auto published = publish(remote, remote_commit);
@@ -567,9 +572,8 @@ TEST(RemoteHeadsContractTest,
     EXPECT_EQ(remote_bytes_after, remote_bytes_before);
     EXPECT_EQ(kasumi::test::read_binary(config_path), config_before);
     EXPECT_EQ(kasumi::test::read_binary(key_path), key_before);
+    EXPECT_EQ(kasumi::test::read_binary(database_path), database_before);
     EXPECT_FALSE(std::filesystem::exists(local));
-    EXPECT_FALSE(std::filesystem::exists(environment.app_data_dir /
-                                         "profiles/demo/db.sqlite"));
 }
 
 } // namespace

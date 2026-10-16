@@ -1,9 +1,8 @@
 # Incremental transaction journal
 
-The corrected 0.7.0 journal is incompatible with every preceding development
-journal format. There is one supported format, with no legacy reader, migration,
-fallback or downgrade. An incompatible journal stops recovery and retains its
-artifacts.
+The current journal format is incompatible with other journal formats. There is
+one supported format, with no legacy reader, migration, fallback, or downgrade.
+An incompatible journal stops recovery and retains its artifacts.
 
 The profile's private `transaction.bin.enc` directory contains:
 
@@ -112,5 +111,5 @@ authenticated operation ID as their basename. Apply rejects existing candidates.
 Rollback removes only this exact regular file, even if interrupted decrypt left
 partial bytes; unexpected types/symlinks fail and similar names are untouched.
 Pending/Prepared states do not authorize deletion. Parent removal is synced.
-No recursive user-directory removal, wildcard matching or legacy random-name
-compatibility is allowed. This retains the trusted-owner/process-lock boundary.
+No recursive user-directory removal, wildcard matching, or alternate random-name
+cleanup is allowed. This retains the trusted-owner/process-lock boundary.

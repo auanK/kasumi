@@ -1,6 +1,5 @@
 #include "core/hasher.hpp"
 #include "crypto/content.hpp"
-#include "crypto/content_test.hpp"
 #include "crypto/file_crypto.hpp"
 #include "crypto/key_derivation.hpp"
 #include "crypto/physical_hash.hpp"
@@ -15,119 +14,7 @@
 #include <string>
 #include <vector>
 
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#endif
-
 namespace {
-
-#if defined(_WIN32)
-struct HandleReadState {
-    unsigned calls = 0;
-    unsigned fail_on_call = 0;
-    bool fail_seek = false;
-};
-
-thread_local HandleReadState* active_handle_read_state = nullptr;
-
-BOOL WINAPI test_set_file_pointer(HANDLE handle,
-                                  LARGE_INTEGER distance,
-                                  PLARGE_INTEGER position,
-                                  DWORD method) {
-    if (active_handle_read_state && active_handle_read_state->fail_seek) {
-        SetLastError(ERROR_INVALID_HANDLE);
-        return FALSE;
-    }
-    return ::SetFilePointerEx(handle, distance, position, method);
-}
-
-BOOL WINAPI test_read_file(HANDLE handle,
-                           LPVOID buffer,
-                           DWORD bytes_to_read,
-                           LPDWORD bytes_read,
-                           LPOVERLAPPED overlapped) {
-    if (active_handle_read_state &&
-        ++active_handle_read_state->calls ==
-            active_handle_read_state->fail_on_call) {
-        SetLastError(ERROR_READ_FAULT);
-        return FALSE;
-    }
-    return ::ReadFile(handle, buffer, bytes_to_read, bytes_read, overlapped);
-}
-#endif
-
-#if defined(_WIN32)
-TEST(CryptoContentTest, NativeHashReadsTheWholeFileAndPreservesPosition) {
-    auto workspace = kasumi::test::make_temp_workspace("native-content-hash");
-    std::vector<std::byte> payload(2U * 64U * 1024U + 19U);
-    for (std::size_t index = 0; index < payload.size(); ++index)
-        payload[index] = static_cast<std::byte>(index % 239U);
-    const auto file = kasumi::test::workspace_path(workspace, "payload.bin");
-    kasumi::test::write_binary(file, payload);
-    const auto expected =
-        kasumi::hasher::hash_bytes(payload.data(), payload.size());
-
-#if defined(_WIN32)
-    HANDLE handle = CreateFileW(file.c_str(),
-                                GENERIC_READ,
-                                FILE_SHARE_READ,
-                                nullptr,
-                                OPEN_EXISTING,
-                                FILE_ATTRIBUTE_NORMAL,
-                                nullptr);
-    ASSERT_NE(handle, INVALID_HANDLE_VALUE);
-    LARGE_INTEGER initial{};
-    initial.QuadPart = 7;
-    ASSERT_TRUE(SetFilePointerEx(handle, initial, nullptr, FILE_BEGIN));
-    const auto actual = kasumi::crypto::content::hash_file_handle(handle);
-    LARGE_INTEGER position{};
-    EXPECT_TRUE(
-        SetFilePointerEx(handle, LARGE_INTEGER{}, &position, FILE_CURRENT));
-    CloseHandle(handle);
-    ASSERT_TRUE(actual.has_value());
-    EXPECT_EQ(*actual, expected);
-    EXPECT_EQ(position.QuadPart, 7);
-#endif
-}
-
-TEST(CryptoContentTest, NativeHandleHashRejectsSeekAndMidReadFailures) {
-    auto workspace = kasumi::test::make_temp_workspace("native-content-errors");
-    std::vector<std::byte> payload(2U * 64U * 1024U + 19U, std::byte{0x5a});
-    const auto file = kasumi::test::workspace_path(workspace, "payload.bin");
-    kasumi::test::write_binary(file, payload);
-    HANDLE handle = CreateFileW(file.c_str(),
-                                GENERIC_READ,
-                                FILE_SHARE_READ,
-                                nullptr,
-                                OPEN_EXISTING,
-                                FILE_ATTRIBUTE_NORMAL,
-                                nullptr);
-    ASSERT_NE(handle, INVALID_HANDLE_VALUE);
-
-    HandleReadState state{.fail_seek = true};
-    active_handle_read_state = &state;
-    const auto seek_failure =
-        kasumi::crypto::content::test::hash_file_handle_with_syscalls(
-            handle, {.seek = &test_set_file_pointer, .read = &test_read_file});
-    active_handle_read_state = nullptr;
-    ASSERT_FALSE(seek_failure.has_value());
-    EXPECT_NE(seek_failure.error().find("SetFilePointerEx failed"),
-              std::string::npos);
-
-    state = {.fail_on_call = 2};
-    active_handle_read_state = &state;
-    const auto read_failure =
-        kasumi::crypto::content::test::hash_file_handle_with_syscalls(
-            handle, {.seek = &test_set_file_pointer, .read = &test_read_file});
-    active_handle_read_state = nullptr;
-    CloseHandle(handle);
-    ASSERT_FALSE(read_failure.has_value());
-    EXPECT_NE(read_failure.error().find("ReadFile failed"), std::string::npos);
-}
-#endif
 
 TEST(CryptoContentTest, HashesAnEmptyFile) {
     auto workspace = kasumi::test::make_temp_workspace("content-empty");

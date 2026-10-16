@@ -76,6 +76,30 @@ Kasumi synchronizes files but does not retain every past version or replace an i
 
 ---
 
+## Windows Path Exceeds the Supported Limit
+
+### Symptom
+Sync reports that Windows rejected a path and recommends enabling long-path
+support or shortening the profile path.
+
+### Likely Meaning
+Windows long-path support is disabled for the system. Kasumi's Windows
+executable opts in, but Windows also requires the `LongPathsEnabled` system
+setting for paths longer than the legacy 260-character limit.
+
+### Safe Next Steps
+1. Enable Windows long-path support through your system's policy or ask your
+   administrator to enable it, then restart Kasumi.
+2. If that setting cannot be changed, move the profile and synchronized folder
+   to shorter parent paths.
+3. Run Sync again. If Kasumi retained a transaction journal after reporting a
+   recovery conflict, preserve it and its backups until recovery succeeds.
+
+### Related Documentation
+* [Configuration and Usage](configuration-and-usage.md)
+
+---
+
 ## Exit Code 2 / Pending Materializations
 
 ### Symptom

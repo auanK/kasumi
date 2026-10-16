@@ -26,34 +26,15 @@ bool valid_hex_id(std::string_view id) noexcept {
     return history::valid_commit_id(id);
 }
 
-std::string commit_object(const HeadReference& reference) {
-    return commit_object(default_remote_layout(), reference);
-}
-
 } // namespace kasumi::application::history_storage::detail
 
 namespace kasumi::application::history_storage {
-
-std::string marker_object(const HeadReference& reference) {
-    return marker_object(default_remote_layout(), reference);
-}
-
 } // namespace kasumi::application::history_storage
 
 namespace kasumi::application::history_storage::detail {
-
-std::optional<HeadReference> parse_commit_object(std::string_view identifier) {
-    return parse_commit_object(default_remote_layout(), identifier);
-}
-
 } // namespace kasumi::application::history_storage::detail
 
 namespace kasumi::application::history_storage {
-
-std::optional<HeadReference> parse_marker_object(std::string_view identifier) {
-    return parse_marker_object(default_remote_layout(), identifier);
-}
-
 } // namespace kasumi::application::history_storage
 
 namespace kasumi::application::history_storage::detail {
@@ -75,11 +56,6 @@ build_history_inventory(transport::Transport& storage,
     }
 
     return build_history_inventory(*listing, layout);
-}
-
-std::expected<HistoryInventory, Error>
-build_history_inventory(transport::Transport& storage) {
-    return build_history_inventory(storage, default_remote_layout());
 }
 
 std::expected<HistoryInventory, Error>
@@ -130,11 +106,6 @@ build_history_inventory(std::span<const std::string> identifiers,
     return inventory;
 }
 
-std::expected<HistoryInventory, Error>
-build_history_inventory(std::span<const std::string> identifiers) {
-    return build_history_inventory(identifiers, default_remote_layout());
-}
-
 PublicationDelta publication_delta(const HistoryInventory& inventory,
                                    const HeadReference& reference,
                                    const RemoteLayout& layout) {
@@ -149,11 +120,6 @@ PublicationDelta publication_delta(const HistoryInventory& inventory,
             adds_marker_object &&
             !inventory.marker_variants.contains(reference.commit_id),
     };
-}
-
-PublicationDelta publication_delta(const HistoryInventory& inventory,
-                                   const HeadReference& reference) {
-    return publication_delta(inventory, reference, default_remote_layout());
 }
 
 std::expected<void, Error>

@@ -115,42 +115,66 @@ load_profiles(const std::filesystem::path& config_path) {
                             std::string(error.description())});
     }
 
-    std::vector<ProfileData> result;
-    if (auto* profiles = config["profiles"].as_table()) {
-        for (const auto& [key, value] : *profiles) {
-            if (auto* prof = value.as_table()) {
-                const auto local = (*prof)["local_dir"].value<std::string>();
-                const auto remote = (*prof)["remote_dir"].value<std::string>();
+    if (config.empty()) {
+        return std::vector<ProfileData>{};
+    }
 
-                if (local && remote) {
-                    ProfileData pd{std::string(key.str()),
-                                   platform::path::from_utf8(*local),
-                                   *remote};
-                    auto min_depth =
-                        read_retention_value(*prof, "min_history_depth");
-                    if (!min_depth) {
-                        return std::unexpected(min_depth.error());
-                    }
-                    auto min_age =
-                        read_retention_value(*prof, "min_history_age_hours");
-                    if (!min_age) {
-                        return std::unexpected(min_age.error());
-                    }
-                    pd.min_history_depth = *min_depth;
-                    pd.min_history_age_hours = *min_age;
-                    result.push_back(std::move(pd));
-                } else {
-                    return std::unexpected(Error{
-                        .code = ErrorCode::ProfileInvalid,
-                        .detail =
-                            "profile must have 'local_dir' and 'remote_dir'"});
-                }
-            } else {
-                return std::unexpected(
-                    Error{.code = ErrorCode::ProfileInvalid,
-                          .detail = "profile has invalid format"});
+    for (const auto& [name, _] : config) {
+        if (name != "profiles") {
+            return std::unexpected(
+                Error{.code = ErrorCode::ConfigInvalid,
+                      .detail = "unsupported top-level configuration field: " +
+                                std::string{name.str()}});
+        }
+    }
+
+    auto* profiles = config["profiles"].as_table();
+    if (profiles == nullptr) {
+        return std::unexpected(
+            Error{.code = ErrorCode::ConfigInvalid,
+                  .detail = "configuration must contain a profiles table"});
+    }
+
+    std::vector<ProfileData> result;
+    for (const auto& [key, value] : *profiles) {
+        auto* prof = value.as_table();
+        if (prof == nullptr) {
+            return std::unexpected(
+                Error{.code = ErrorCode::ProfileInvalid,
+                      .detail = "profile has invalid format"});
+        }
+        for (const auto& [field, _] : *prof) {
+            if (field != "local_dir" && field != "remote_dir" &&
+                field != "min_history_depth" &&
+                field != "min_history_age_hours") {
+                return std::unexpected(Error{
+                    .code = ErrorCode::ProfileInvalid,
+                    .detail = "unsupported profile field: " +
+                              std::string{field.str()}});
             }
         }
+        const auto local = (*prof)["local_dir"].value<std::string>();
+        const auto remote = (*prof)["remote_dir"].value<std::string>();
+        if (!local || !remote) {
+            return std::unexpected(Error{
+                .code = ErrorCode::ProfileInvalid,
+                .detail = "profile must have 'local_dir' and 'remote_dir'"});
+        }
+
+        ProfileData pd{std::string(key.str()),
+                       platform::path::from_utf8(*local),
+                       *remote};
+        auto min_depth = read_retention_value(*prof, "min_history_depth");
+        if (!min_depth) {
+            return std::unexpected(min_depth.error());
+        }
+        auto min_age = read_retention_value(*prof, "min_history_age_hours");
+        if (!min_age) {
+            return std::unexpected(min_age.error());
+        }
+        pd.min_history_depth = *min_depth;
+        pd.min_history_age_hours = *min_age;
+        result.push_back(std::move(pd));
     }
     return result;
 }

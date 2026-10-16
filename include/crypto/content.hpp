@@ -15,11 +15,6 @@ namespace kasumi::crypto::content {
 // Computes the BLAKE3 hash of the bytes accessible at the path.
 std::expected<Hash, std::string> hash_file(const std::filesystem::path& path);
 
-// Computes the BLAKE3 hash of bytes accessible through an open Windows handle.
-#if defined(_WIN32)
-std::expected<Hash, std::string> hash_file_handle(void* handle);
-#endif
-
 // Verifies hash and optional size; rejects the path if it is a symbolic link.
 std::expected<void, std::string>
 verify_file(const std::filesystem::path& path,

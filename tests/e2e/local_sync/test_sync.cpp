@@ -5,6 +5,8 @@
 #include "application/profile.hpp"
 #include "application/sync/journal.hpp"
 #include "core/reconciliation/plan.hpp"
+#include "crypto/content.hpp"
+#include "crypto/file_crypto.hpp"
 #include "crypto/key_derivation.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/hash_mutation.hpp"
@@ -22,6 +24,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <initializer_list>
 #include <optional>
@@ -31,6 +34,13 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -90,6 +100,35 @@ Client make_client(Scenario& scenario, std::string name) {
 
     Client result{std::move(name), ExecutionEnvironment{app_data}, local};
     auto created = kasumi::application::create_profile(
+        client_environment(result),
+        Profile{.name = client_name(result),
+                .local_dir = client_local_dir(result),
+                .remote_dir = kasumi::platform::path::to_utf8(remote)},
+        MasterKeyHex{std::string{key_hex}});
+    if (!created) {
+        throw std::runtime_error("could not create E2E profile: " +
+                                 created.error().detail);
+    }
+    return result;
+}
+
+Client make_client_at_root_length(Scenario& scenario,
+                                  std::string name,
+                                  std::size_t root_length) {
+    const auto& workspace = std::get<0>(scenario);
+    const auto& remote = std::get<1>(scenario);
+    const auto base = kasumi::test::workspace_root(workspace);
+    const auto base_length = base.native().size();
+    const auto filler_length =
+        base_length < root_length ? root_length - base_length - 1 : 1;
+    const auto root = base / std::string(filler_length, 'r');
+    const auto app_data = root / "appdata" / "kasumi";
+    const auto local = root / "local";
+    make_directory(app_data);
+    make_directory(local);
+
+    Client result{std::move(name), ExecutionEnvironment{app_data}, local};
+    const auto created = kasumi::application::create_profile(
         client_environment(result),
         Profile{.name = client_name(result),
                 .local_dir = client_local_dir(result),
@@ -270,6 +309,26 @@ void expect_file(const Client& client,
         client_local_dir(client) / kasumi::platform::path::from_utf8(path);
     ASSERT_TRUE(std::filesystem::is_regular_file(file));
     EXPECT_EQ(kasumi::test::read_text(file), contents);
+}
+
+void write_deterministic_payload(const std::filesystem::path& path,
+                                 unsigned version) {
+    constexpr std::size_t payload_size = 100U * 1024U * 1024U;
+    constexpr std::size_t block_size = 1024U * 1024U;
+    std::vector<char> block(block_size);
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(output.is_open());
+    for (std::size_t offset = 0; offset < payload_size; offset += block_size) {
+        for (std::size_t index = 0; index < block_size; ++index) {
+            block[index] = static_cast<char>(
+                (index + offset + static_cast<std::size_t>(version) * 31U) %
+                251U);
+        }
+        output.write(block.data(), static_cast<std::streamsize>(block.size()));
+        ASSERT_TRUE(output.good());
+    }
+    output.close();
+    ASSERT_TRUE(output.good());
 }
 
 void expect_absent(const Client& client, std::string_view path) {
@@ -993,6 +1052,143 @@ TEST(H3LocalSyncTest, EquivalentFileMtimeDriftSucceedsWithoutPublication) {
     EXPECT_EQ(after_ignore->size, original_size);
     EXPECT_FALSE(after->has_conflicts);
     expect_fixed_point(scenario, client);
+}
+
+TEST(H3LocalSyncTest, UploadsFromLongRootPath) {
+    auto scenario = make_scenario();
+    const auto client = make_client_at_root_length(scenario, "smoke", 101);
+
+    const auto source = client_local_dir(client) / "hello.txt";
+    constexpr std::string_view contents = "long path upload content";
+    kasumi::test::write_text(source, contents);
+    const auto profile = client_environment(client).app_data_dir / "profiles" /
+                         "smoke";
+    const auto staged = profile / ".transactions" / std::string(32, 'a') /
+                        "upload-batches" / "0" / std::string(64, 'b');
+    SCOPED_TRACE("source path characters=" +
+                 std::to_string(source.native().size()) +
+                 ", staged path characters=" +
+                 std::to_string(staged.native().size()));
+    EXPECT_GE(source.native().size(), 117U);
+    EXPECT_EQ(staged.native().size(), 260U);
+
+    const auto synchronized = sync(client);
+#if defined(_WIN32)
+    DWORD enabled = 0;
+    DWORD enabled_size = sizeof(enabled);
+    const auto long_paths_result = RegGetValueW(
+        HKEY_LOCAL_MACHINE,
+        L"SYSTEM\\CurrentControlSet\\Control\\FileSystem",
+        L"LongPathsEnabled",
+        RRF_RT_REG_DWORD,
+        nullptr,
+        &enabled,
+        &enabled_size);
+    const bool long_paths_enabled =
+        long_paths_result == ERROR_SUCCESS && enabled != 0;
+    if (!long_paths_enabled) {
+        ASSERT_FALSE(synchronized.has_value());
+        EXPECT_NE(synchronized.error().find("enable Windows long-path support"),
+                  std::string::npos);
+        EXPECT_EQ(kasumi::test::read_text(source), contents);
+        auto unchanged_remote = remote(scenario);
+        ASSERT_TRUE(unchanged_remote.has_value())
+            << unchanged_remote.error();
+        EXPECT_TRUE(unchanged_remote->effective_tree.rows.empty());
+        return;
+    }
+#endif
+    ASSERT_TRUE(synchronized.has_value())
+        << (synchronized ? "" : synchronized.error());
+    auto observed = remote(scenario);
+    ASSERT_TRUE(observed.has_value()) << observed.error();
+    const auto* row = kasumi::find_row(observed->effective_tree, "hello.txt");
+    ASSERT_NE(row, nullptr);
+    EXPECT_EQ(row->size, contents.size());
+}
+
+TEST(H3LocalSyncTest, UploadsBeforeWindowsLegacyPathLimit) {
+    auto scenario = make_scenario();
+    const auto client = make_client_at_root_length(scenario, "smoke", 100);
+    const auto source = client_local_dir(client) / "hello.txt";
+    constexpr std::string_view contents = "near limit upload content";
+    kasumi::test::write_text(source, contents);
+    const auto long_name = std::string(128, 'n') + ".txt";
+    kasumi::test::write_text(client_local_dir(client) / long_name, "name");
+    kasumi::test::write_text(client_local_dir(client) / "nested" / "deep" /
+                                 "file.txt",
+                             "nested");
+    const auto unicode_path = kasumi::platform::path::from_utf8(
+        "pasta-日本/usuário-☁.txt");
+    kasumi::test::write_text(client_local_dir(client) / unicode_path, "unicode");
+    const auto staged =
+        client_environment(client).app_data_dir / "profiles" / "smoke" /
+        ".transactions" / std::string(32, 'a') / "upload-batches" / "0" /
+        std::string(64, 'b');
+    EXPECT_EQ(staged.native().size(), 259U);
+
+    ASSERT_TRUE(sync_succeeds(client));
+    auto observed = remote(scenario);
+    ASSERT_TRUE(observed.has_value()) << observed.error();
+    const auto* row = kasumi::find_row(observed->effective_tree, "hello.txt");
+    ASSERT_NE(row, nullptr);
+    EXPECT_EQ(row->size, contents.size());
+    EXPECT_NE(kasumi::find_row(observed->effective_tree, long_name), nullptr);
+    EXPECT_NE(kasumi::find_row(observed->effective_tree, "nested/deep/file.txt"),
+              nullptr);
+    EXPECT_NE(kasumi::find_row(observed->effective_tree,
+                               "pasta-日本/usuário-☁.txt"),
+              nullptr);
+}
+
+TEST(H3LocalSyncTest, HundredMiBContentRoundTripAndLocalSync) {
+    auto scenario = make_scenario();
+    const auto first = make_client_at_root_length(scenario, "a", 104);
+    const auto second = make_client_at_root_length(scenario, "b", 104);
+    const auto payload = client_local_dir(first) / "large.bin";
+    const auto scratch = kasumi::test::workspace_path(
+        std::get<0>(scenario), "large-file-crypto");
+    make_directory(scratch);
+    const auto encrypted = scratch / "large.enc";
+    const auto decrypted = scratch / "large.dec";
+    const auto key = decode_key();
+
+    write_deterministic_payload(payload, 1);
+    const auto original_hash = kasumi::crypto::content::hash_file(payload);
+    ASSERT_TRUE(original_hash.has_value());
+    ASSERT_TRUE(kasumi::crypto::encrypt_file(payload, encrypted, key));
+    ASSERT_TRUE(kasumi::crypto::decrypt_file(encrypted, decrypted, key));
+    const auto decrypted_hash = kasumi::crypto::content::hash_file(decrypted);
+    ASSERT_TRUE(decrypted_hash.has_value());
+    EXPECT_EQ(*decrypted_hash, *original_hash);
+
+    ASSERT_TRUE(sync_succeeds(first));
+    auto initial_remote = remote(scenario);
+    ASSERT_TRUE(initial_remote.has_value()) << initial_remote.error();
+    const auto* initial_row =
+        kasumi::find_row(initial_remote->effective_tree, "large.bin");
+    ASSERT_NE(initial_row, nullptr);
+    EXPECT_EQ(initial_row->size, 100U * 1024U * 1024U);
+    EXPECT_EQ(initial_row->hash, *original_hash);
+
+    write_deterministic_payload(payload, 2);
+    const auto updated_hash = kasumi::crypto::content::hash_file(payload);
+    ASSERT_TRUE(updated_hash.has_value());
+    ASSERT_NE(*updated_hash, *original_hash);
+    ASSERT_TRUE(sync_succeeds(first));
+    ASSERT_TRUE(sync_succeeds(second));
+    const auto materialized_hash =
+        kasumi::crypto::content::hash_file(client_local_dir(second) /
+                                           "large.bin");
+    ASSERT_TRUE(materialized_hash.has_value());
+    EXPECT_EQ(*materialized_hash, *updated_hash);
+    auto updated_remote = remote(scenario);
+    ASSERT_TRUE(updated_remote.has_value()) << updated_remote.error();
+    const auto* updated_row =
+        kasumi::find_row(updated_remote->effective_tree, "large.bin");
+    ASSERT_NE(updated_row, nullptr);
+    EXPECT_EQ(updated_row->hash, *updated_hash);
+    EXPECT_EQ(updated_row->size, 100U * 1024U * 1024U);
 }
 
 TEST(ScannerPropagationTest, HybridObservationFailsBeforeRemoteMutation) {

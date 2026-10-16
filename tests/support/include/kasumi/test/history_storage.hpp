@@ -332,22 +332,19 @@ FakeState* fake_state(void* context) {
 bool is_commit(std::string_view identifier) {
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(test_key());
-    return identifier.starts_with("history/commits/") ||
-           identifier.starts_with(layout.commits_prefix);
+    return identifier.starts_with(layout.commits_prefix);
 }
 
 bool is_marker(std::string_view identifier) {
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(test_key());
-    return identifier.starts_with("history/heads/") ||
-           identifier.starts_with(layout.heads_prefix);
+    return identifier.starts_with(layout.heads_prefix);
 }
 
 bool is_epoch(std::string_view identifier) {
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(test_key());
-    return identifier.starts_with("history/epochs/") ||
-           identifier.starts_with(layout.epochs_prefix);
+    return identifier.starts_with(layout.epochs_prefix);
 }
 
 void replace_barrier_contents(FakeState* state, std::string_view identifier) {
@@ -365,8 +362,7 @@ void maybe_replace_barrier_after_quarantine_put(
     std::string_view identifier,
     const kasumi::application::history_storage::RemoteLayout& layout) {
     if (!state->replace_barrier_after_quarantine_put ||
-        (!identifier.starts_with("history/gc/v1/quarantine/") &&
-         !identifier.starts_with(layout.quarantine_prefix))) {
+        !identifier.starts_with(layout.quarantine_prefix)) {
         return;
     }
     state->replace_barrier_after_quarantine_put = false;
@@ -697,11 +693,13 @@ kasumi::transport::Result fake_get(void* context,
 kasumi::transport::PresenceResult fake_presence(void* context,
                                                 std::string_view identifier) {
     auto* state = fake_state(context);
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
     ++state->presence_count;
     if (state->on_operation) {
         state->on_operation(*state, "presence", identifier);
     }
-    if (state->fail_barrier_presence && identifier == "history/gc/v1/barrier") {
+    if (state->fail_barrier_presence && identifier == layout.barrier_identifier) {
         return std::unexpected(kasumi::transport::Error{
             .code = kasumi::transport::ErrorCode::Io,
             .message = "injected barrier presence failure"});
@@ -814,7 +812,6 @@ kasumi::transport::ListingResult fake_list_prefix(void* context,
     }
     if (state->publish_barrier_after_writer_list && is_writers) {
         state->objects[test_layout.barrier_identifier] = {};
-        state->objects["history/gc/v1/barrier"] = {};
     }
     if (state->replace_barrier_after_writer_list && is_writers) {
         state->replace_barrier_after_writer_list = false;

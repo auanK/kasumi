@@ -6,6 +6,7 @@
 #include "runtime/paths.hpp"
 #include "runtime/profile.hpp"
 #include "runtime/vault.hpp"
+#include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 
 #include <algorithm>
@@ -164,6 +165,13 @@ create_profile(const ExecutionEnvironment& environment,
             return std::unexpected(
                 ProfileError{.code = ProfileErrorCode::StorageFailure,
                              .detail = "failed to save vault"});
+        }
+
+        if (!state_storage::initialize(paths_res->database_path)) {
+            (void)runtime::remove_profile_directory(*paths_res);
+            return std::unexpected(ProfileError{
+                .code = ProfileErrorCode::StorageFailure,
+                .detail = "failed to initialize profile database"});
         }
 
         profiles.push_back(runtime::ProfileData{profile.name,

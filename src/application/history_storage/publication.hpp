@@ -92,19 +92,11 @@ publish_head_marker(transport::Transport& storage,
                     const RemoteLayout& layout,
                     const HeadReference& reference,
                     const std::filesystem::path& workspace_root);
-PublishHeadResult
-publish_head_marker(transport::Transport& storage,
-                    const HeadReference& reference,
-                    const std::filesystem::path& workspace_root);
 
 // Publishes the marker without inventorying the entire remote storage.
 PublishHeadResult
 publish_head_marker_scoped(transport::Transport& storage,
                            const RemoteLayout& layout,
-                           const HeadReference& reference,
-                           const std::filesystem::path& workspace_root);
-PublishHeadResult
-publish_head_marker_scoped(transport::Transport& storage,
                            const HeadReference& reference,
                            const std::filesystem::path& workspace_root);
 
@@ -115,11 +107,6 @@ verify_head_marker(transport::Transport& storage,
                    const HeadReference& reference,
                    const std::filesystem::path& workspace_root,
                    std::string_view local_physical_hash = {});
-std::expected<void, Error>
-verify_head_marker(transport::Transport& storage,
-                   const HeadReference& reference,
-                   const std::filesystem::path& workspace_root,
-                   std::string_view local_physical_hash = {});
 
 // Classifies presence and validity of the marker.
 HeadMarkerInspection
@@ -127,22 +114,15 @@ inspect_head_marker(transport::Transport& storage,
                     const RemoteLayout& layout,
                     const HeadReference& reference,
                     const std::filesystem::path& workspace_root);
-HeadMarkerInspection
-inspect_head_marker(transport::Transport& storage,
-                    const HeadReference& reference,
-                    const std::filesystem::path& workspace_root);
 
 // Builds the remote identifier for the marker.
 std::string marker_identifier(const RemoteLayout& layout,
                               const HeadReference& reference);
-std::string marker_identifier(const HeadReference& reference);
 
 // Queries remote head commit identifiers from storage.
 std::expected<std::vector<std::string>, Error>
 list_remote_head_commit_ids(transport::Transport& storage,
                             const RemoteLayout& layout);
-std::expected<std::vector<std::string>, Error>
-list_remote_head_commit_ids(transport::Transport& storage);
 
 } // namespace kasumi::application::history_storage
 

@@ -10,6 +10,7 @@
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_detail.hpp"
 #include "application/sync/mutation_fault_test.hpp"
+#include "platform/workspace_fault_test.hpp"
 #include "application/sync/publication.hpp"
 #include "application/sync/reobservation.hpp"
 #include "application/use_cases/context.hpp"
@@ -74,6 +75,13 @@ std::expected<Response, Error> run_sync(OperationContext& context);
 }
 
 namespace {
+
+const auto& test_remote_layout() {
+    static const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    static const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key);
+    return layout;
+}
 
 kasumi::TimestampNs timestamp_ns(std::chrono::nanoseconds ns) {
     return ns.count();
@@ -600,9 +608,12 @@ reobserve_list_prefix(void* context, std::string_view prefix) {
             --state->remaining_mutations;
             mutation = state->next_value++;
         }
-        const bool is_heads = prefix == "history/heads" ||
-                              (prefix.find('/') != std::string_view::npos &&
-                               prefix.find('/') == prefix.rfind('/'));
+        const auto& layout = test_remote_layout();
+        const auto heads_prefix = layout.heads_prefix.ends_with('/')
+                                      ? layout.heads_prefix.substr(
+                                            0, layout.heads_prefix.size() - 1)
+                                      : layout.heads_prefix;
+        const bool is_heads = prefix == heads_prefix;
         if (is_heads && state->require_local_change_overlap &&
             !state->condition.wait_for(lock, std::chrono::seconds{30}, [&] {
                 return state->local_change_observed;
@@ -946,10 +957,8 @@ ambiguous_list_prefix(void* context, std::string_view prefix) {
             .code = kasumi::transport::ErrorCode::Io,
             .message = "injected reachability inspection failure"});
     }
-    const bool is_epoch = prefix == "history/epochs/v1" ||
-                          prefix == "history/epochs" ||
-                          (!state->epoch_listing_prefix.empty() &&
-                           prefix == state->epoch_listing_prefix);
+    const bool is_epoch = !state->epoch_listing_prefix.empty() &&
+                          prefix == state->epoch_listing_prefix;
     if (is_epoch && state->scripted_epoch_listing_index <
                         state->scripted_epoch_listings.size()) {
         return state
@@ -3183,8 +3192,7 @@ TEST(SyncCoordinatorTest, CommitVerificationFailurePreventsHeadPublication) {
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(key);
     EXPECT_TRUE(std::ranges::none_of(*listing, [&](const auto& id) {
-        return id.starts_with(layout.heads_prefix) ||
-               id.starts_with("history/heads/");
+        return id.starts_with(layout.heads_prefix);
     }));
 
     // Local state database was not created.
@@ -3249,8 +3257,7 @@ TEST(SyncCoordinatorTest,
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(key);
     EXPECT_TRUE(std::ranges::none_of(*listing, [&](const auto& id) {
-        return id.starts_with(layout.heads_prefix) ||
-               id.starts_with("history/heads/");
+        return id.starts_with(layout.heads_prefix);
     }));
 
     // Local state database was not created.
@@ -3309,9 +3316,7 @@ TEST(SyncCoordinatorTest, AmbiguousCommitUploadAbsentPreventsHeadPublication) {
         kasumi::application::history_storage::derive_remote_layout(key);
     EXPECT_TRUE(std::ranges::none_of(*listing, [&](const auto& id) {
         return id.starts_with(layout.heads_prefix) ||
-               id.starts_with(layout.commits_prefix) ||
-               id.starts_with("history/heads/") ||
-               id.starts_with("history/commits/");
+               id.starts_with(layout.commits_prefix);
     }));
 
     // Local state database was not created.
@@ -4361,12 +4366,17 @@ TEST(ReobservationTest, DetectsNewCiphertextVariantForTheSameLogicalHead) {
     auto right = left;
     left.storage.logical_heads = {std::string(64, 'a')};
     right.storage.logical_heads = left.storage.logical_heads;
-    left.storage.marked_head_identifiers = {"history/heads/" +
-                                            std::string(64, 'a') + "-" +
-                                            std::string(64, 'b') + ".head"};
-    right.storage.marked_head_identifiers = {"history/heads/" +
-                                             std::string(64, 'a') + "-" +
-                                             std::string(64, 'c') + ".head"};
+    const auto& layout = test_remote_layout();
+    left.storage.marked_head_identifiers = {
+        kasumi::application::history_storage::marker_identifier(
+            layout,
+            {.commit_id = std::string(64, 'a'),
+             .ciphertext_id = std::string(64, 'b')})};
+    right.storage.marked_head_identifiers = {
+        kasumi::application::history_storage::marker_identifier(
+            layout,
+            {.commit_id = std::string(64, 'a'),
+             .ciphertext_id = std::string(64, 'c')})};
 
     EXPECT_FALSE(
         kasumi::application::sync::coordinator::reobservation::same_observation(
@@ -6116,12 +6126,17 @@ TEST(SyncCoordinatorTest, ObservedParentCleanupPreservesConcurrentHeads) {
     const kasumi::application::history_storage::HeadReference ancestral{
         .commit_id = std::string(64, 'e'),
         .ciphertext_id = std::string(64, 'f')};
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key);
     const auto parent_marker =
-        kasumi::application::history_storage::marker_identifier(parent);
+        kasumi::application::history_storage::marker_identifier(layout, parent);
     const auto concurrent_marker =
-        kasumi::application::history_storage::marker_identifier(concurrent);
+        kasumi::application::history_storage::marker_identifier(layout,
+                                                                 concurrent);
     const auto ancestral_marker =
-        kasumi::application::history_storage::marker_identifier(ancestral);
+        kasumi::application::history_storage::marker_identifier(layout,
+                                                                 ancestral);
     state->objects[parent_marker] = {1};
     state->objects[concurrent_marker] = {2};
     state->objects[ancestral_marker] = {3};
@@ -6132,7 +6147,7 @@ TEST(SyncCoordinatorTest, ObservedParentCleanupPreservesConcurrentHeads) {
 
     const auto pruned =
         kasumi::application::sync::publication::prune_observed_parent_markers(
-            storage, observed_cleanup_ids, observed_marker_ids);
+            storage, layout, observed_cleanup_ids, observed_marker_ids);
 
     ASSERT_TRUE(pruned.has_value()) << pruned.error().detail;
     EXPECT_EQ(pruned->removed_markers, 2);
@@ -11462,10 +11477,11 @@ TEST(SyncCoordinatorTest,
     record->phase = kasumi::transaction::Phase::CleanupCompleted;
     record->commit_id = std::string(64, 'a');
     record->ciphertext_id = std::string(64, 'b');
+    std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
     record->marker_id = kasumi::application::history_storage::marker_identifier(
+        kasumi::application::history_storage::derive_remote_layout(key),
         {.commit_id = record->commit_id,
          .ciphertext_id = record->ciphertext_id});
-    std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
     static_cast<void>(set_test_genesis_epoch(*record, key));
     ASSERT_TRUE(kasumi::application::sync::journal::save(*paths, *record, key));
 
@@ -11642,10 +11658,20 @@ TEST(SyncCoordinatorTest, TransientOrphanSharingViolationIsRetried) {
                                     FILE_ATTRIBUTE_NORMAL,
                                     nullptr);
     ASSERT_NE(handle, INVALID_HANDLE_VALUE);
-    std::thread release_handle([handle] {
-        std::this_thread::sleep_for(std::chrono::milliseconds{15});
-        CloseHandle(handle);
-    });
+    std::size_t retries = 0;
+    std::error_code first_retry_error;
+    HANDLE held_handle = handle;
+    bool released = false;
+    kasumi::platform::workspace_fault_test::set_retry_hook(
+        [&](const std::filesystem::path&, std::size_t attempt,
+            std::error_code error) {
+            ++retries;
+            first_retry_error = error;
+            if (attempt == 0) {
+                released = CloseHandle(held_handle) != 0;
+                held_handle = INVALID_HANDLE_VALUE;
+            }
+        });
     const auto runtime_data = make_runtime(
         profile, local, kasumi::test::workspace_path(workspace, "storage"));
     kasumi::transport::Transport unavailable{};
@@ -11653,9 +11679,15 @@ TEST(SyncCoordinatorTest, TransientOrphanSharingViolationIsRetried) {
     const auto recovered =
         kasumi::application::sync::coordinator::recover_if_needed(
             runtime_data, unavailable, key);
-    release_handle.join();
+    kasumi::platform::workspace_fault_test::clear_retry_hook();
+    if (held_handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(held_handle);
+    }
 
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+    EXPECT_EQ(retries, 1U);
+    EXPECT_EQ(first_retry_error.value(), ERROR_SHARING_VIOLATION);
+    EXPECT_TRUE(released);
     EXPECT_FALSE(std::filesystem::exists(orphan));
 #endif
 }

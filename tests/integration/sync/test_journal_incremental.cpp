@@ -1,4 +1,5 @@
 #include "application/history_storage/publication.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "application/sync/coordinator.hpp"
 #include "application/sync/coordinator_detail.hpp"
 #include "application/sync/journal.hpp"
@@ -32,6 +33,11 @@
 namespace {
 
 namespace sync = kasumi::application::sync;
+
+const auto marker_layout = [] {
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    return kasumi::application::history_storage::derive_remote_layout(key);
+}();
 
 kasumi::runtime::RuntimeData
 make_runtime(const std::filesystem::path& profile,
@@ -617,6 +623,7 @@ TEST_F(JournalCorrectionTest, RollbackRoundTripsEveryField) {
     record.commit_id = std::string(64, 'a');
     record.ciphertext_id = std::string(64, 'b');
     record.marker_id = kasumi::application::history_storage::marker_identifier(
+        marker_layout,
         {.commit_id = record.commit_id, .ciphertext_id = record.ciphertext_id});
     record.parent_ids = {std::string(64, 'c')};
     record.epoch_vault_id = std::string(64, 'd');
@@ -1528,8 +1535,8 @@ TEST(JournalSessionOptimizationTest, RetirementLifecycle) {
     EXPECT_FALSE(save_after_retire);
 }
 
-TEST(JournalSessionOptimizationTest, NullSessionCompatibility) {
-    auto owner = kasumi::test::make_temp_workspace("opt-33b-null-compat");
+TEST(JournalSessionOptimizationTest, NullSessionUsesPersistedAuthority) {
+    auto owner = kasumi::test::make_temp_workspace("journal-null-session");
     const auto profile = kasumi::test::workspace_path(owner, "profile");
     ASSERT_TRUE(std::filesystem::create_directories(profile));
 
@@ -2045,6 +2052,7 @@ TEST_F(JournalSessionDurabilityTest, RollbackWithSessionRoundTripsEveryMutableFi
     record.ciphertext_id.assign(64, 'b');
     record.parent_ids = {std::string(64, 'c')};
     record.marker_id = kasumi::application::history_storage::marker_identifier(
+        marker_layout,
         {.commit_id = record.commit_id, .ciphertext_id = record.ciphertext_id});
     record.epoch_vault_id.assign(64, 'd');
     record.epoch_id.assign(64, 'e');

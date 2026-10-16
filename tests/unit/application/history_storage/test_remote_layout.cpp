@@ -104,17 +104,6 @@ TEST(RemoteLayoutTest, MarkerObjectRoundTrip) {
     EXPECT_EQ(parsed->commit_id, ref.commit_id);
     EXPECT_EQ(parsed->ciphertext_id, ref.ciphertext_id);
 
-    const auto default_layout = default_remote_layout();
-    const auto default_obj = marker_object(default_layout, ref);
-    EXPECT_EQ(default_obj,
-              default_layout.heads_prefix + ref.commit_id + "-" +
-                  ref.ciphertext_id);
-    const auto default_parsed =
-        parse_marker_object(default_layout, default_obj);
-    ASSERT_TRUE(default_parsed.has_value());
-    EXPECT_EQ(default_parsed->commit_id, ref.commit_id);
-    EXPECT_EQ(default_parsed->ciphertext_id, ref.ciphertext_id);
-
     // Rejection tests
     EXPECT_FALSE(parse_marker_object(layout, "invalid-marker").has_value());
     EXPECT_FALSE(parse_marker_object(layout, obj + "-extra").has_value());
@@ -139,17 +128,6 @@ TEST(RemoteLayoutTest, CommitObjectRoundTrip) {
     EXPECT_EQ(parsed->commit_id, ref.commit_id);
     EXPECT_EQ(parsed->ciphertext_id, ref.ciphertext_id);
 
-    const auto default_layout = default_remote_layout();
-    const auto default_obj = commit_object(default_layout, ref);
-    EXPECT_EQ(default_obj,
-              default_layout.commits_prefix + ref.commit_id + "/" +
-                  ref.ciphertext_id);
-    const auto default_parsed =
-        parse_commit_object(default_layout, default_obj);
-    ASSERT_TRUE(default_parsed.has_value());
-    EXPECT_EQ(default_parsed->commit_id, ref.commit_id);
-    EXPECT_EQ(default_parsed->ciphertext_id, ref.ciphertext_id);
-
     EXPECT_FALSE(parse_commit_object(layout, "invalid").has_value());
     EXPECT_FALSE(parse_commit_object(layout, obj + "/extra").has_value());
     const auto layout_b = derive_remote_layout(TEST_KEY_B);
@@ -169,16 +147,6 @@ TEST(RemoteLayoutTest, EpochObjectRoundTrip) {
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(parsed->sequence, seq);
     EXPECT_EQ(parsed->epoch_id, epoch_id);
-
-    const auto default_layout = default_remote_layout();
-    const auto default_obj = epoch_object(default_layout, seq, epoch_id);
-    EXPECT_EQ(default_obj,
-              default_layout.epochs_prefix + "00000000000000000042-" +
-                  epoch_id);
-    const auto default_parsed = parse_epoch_object(default_layout, default_obj);
-    ASSERT_TRUE(default_parsed.has_value());
-    EXPECT_EQ(default_parsed->sequence, seq);
-    EXPECT_EQ(default_parsed->epoch_id, epoch_id);
 
     EXPECT_FALSE(parse_epoch_object(layout, "invalid").has_value());
     EXPECT_FALSE(parse_epoch_object(layout, obj + "-extra").has_value());

@@ -46,12 +46,6 @@ inline std::strong_ordering operator<=>(const HeadReference& left,
 // Validates both hexadecimal identifiers.
 bool valid(const HeadReference& reference) noexcept;
 
-// Builds the remote identifier for a marker.
-std::string marker_object(const HeadReference& reference);
-
-// Extracts a reference from a marker identifier.
-std::optional<HeadReference> parse_marker_object(std::string_view identifier);
-
 // Possible failures in history storage.
 enum class ErrorCode {
     InvalidInput,
@@ -199,18 +193,11 @@ RemoveMarkersResult
 remove_marker_variants(transport::Transport& storage,
                        const RemoteLayout& layout,
                        std::span<const std::string> commit_ids);
-RemoveMarkersResult
-remove_marker_variants(transport::Transport& storage,
-                       std::span<const std::string> commit_ids);
 
 // Removes variants using an already observed listing.
 RemoveMarkersResult
 remove_marker_variants(transport::Transport& storage,
                        const RemoteLayout& layout,
-                       std::span<const std::string> commit_ids,
-                       std::span<const std::string> identifiers);
-RemoveMarkersResult
-remove_marker_variants(transport::Transport& storage,
                        std::span<const std::string> commit_ids,
                        std::span<const std::string> identifiers);
 

@@ -1258,7 +1258,7 @@ TEST(LocalMutationContractTest, TwoDependentOperationsOnSamePath) {
 }
 
 // ============================================================================
-// Custody compatibility and recovery tests
+// Current mutation recovery and race tests
 // ============================================================================
 
 // Download with an open-handle write during cleanup.
@@ -1651,8 +1651,8 @@ TEST(LocalMutationContractTest, RollbackCandidateIsDeterministicAndReusable) {
     auto progress = *prepared;
     progress.state = transaction::OperationState::Applied;
 
-    const auto candidate = mutation::detail::make_custody_path(
-        target, transaction.root.filename().string(), 0, "rollback-candidate");
+    const auto candidate = mutation::detail::rollback_candidate_path(
+        target, transaction.root.filename().string(), 0);
     test::write_text(candidate, "CORRUPTED_CANDIDATE");
     const auto rejected =
         mutation::rollback_operation(op, 0, local, transaction, progress);
@@ -1733,17 +1733,15 @@ TEST(LocalMutationContractTest, NewlyCopiedRollbackCandidateIsValidated) {
     }
 }
 
-// Previous transaction custody cannot be adopted or collided
-TEST(LocalMutationContractTest, PreviousCustodyIsNotAdopted) {
+// Unknown artifacts from earlier builds remain untouched.
+TEST(LocalMutationContractTest, UnknownReservedArtifactIsNotAdoptedByDownload) {
     auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
-    const platform::Workspace tx_a{root / "tx_a"};
     const platform::Workspace tx_b{root / "tx_b"};
     std::filesystem::create_directories(local);
     std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(tx_a.root);
     std::filesystem::create_directories(tx_b.root);
 
     const auto target = local / "file.txt";
@@ -1762,9 +1760,9 @@ TEST(LocalMutationContractTest, PreviousCustodyIsNotAdopted) {
                        .size = 8};
 
     // A previous transaction left this unrelated file beside the destination.
-    const auto custody_a = platform::path::temporary_sibling_path(
+    const auto artifact = platform::path::temporary_sibling_path(
         target, ".", ".kasumi-custody-0");
-    test::write_text(custody_a, "TX_A_CUSTODY_DATA");
+    test::write_text(artifact, "UNKNOWN_ARTIFACT_DATA");
 
     // The current transaction uses its own backup and leaves that file untouched.
     const auto prep_b =
@@ -1777,64 +1775,24 @@ TEST(LocalMutationContractTest, PreviousCustodyIsNotAdopted) {
 
     EXPECT_TRUE(res_b.has_value()) << (res_b ? "" : res_b.error().detail);
     EXPECT_EQ(test::read_text(target), "REMOTE_R");
-    EXPECT_EQ(test::read_text(custody_a), "TX_A_CUSTODY_DATA");
+    EXPECT_EQ(test::read_text(artifact), "UNKNOWN_ARTIFACT_DATA");
 }
 
-// Custody artifact does not become ordinary synchronized file
-TEST(LocalMutationContractTest,
-     CustodyArtifactDoesNotBecomeOrdinarySynchronizedFile) {
+// Previously generated internal artifacts stay out of the synchronized tree.
+TEST(LocalMutationContractTest, FormerMutationArtifactsRemainReserved) {
     constexpr auto id = "0123456789abcdef0123456789abcdef";
     EXPECT_TRUE(kasumi::ignore::is_reserved_internal(
         std::string(".file.txt.kasumi-custody-") + id + "-0"))
-        << "Custody artifact is treated as ordinary user file by "
+        << "Former mutation artifact is treated as ordinary user file by "
            "scanner!";
     EXPECT_TRUE(kasumi::ignore::is_reserved_internal(
         std::string(".file.txt.kasumi-custody-delete-") + id + "-0"))
-        << "Delete custody artifact is treated as ordinary user "
+        << "Former delete artifact is treated as ordinary user "
            "file!";
     EXPECT_TRUE(kasumi::ignore::is_reserved_internal(
         std::string(".file.txt.kasumi-rollback-custody-") + id + "-0"))
         << "Rollback custody artifact is treated as ordinary user "
            "file!";
-}
-
-// Successful replacement leaves no temporary custody artifact.
-TEST(LocalMutationContractTest, DownloadDoesNotCreateCustodyArtifacts) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
-
-    const auto target = local / "file.txt";
-    test::write_text(target, "ORIGINAL_O");
-    test::write_text(root / "remote_src", "REMOTE_R");
-    const auto r_hash = hasher::hash_string("REMOTE_R");
-
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
-
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
-    ASSERT_TRUE(prepared.has_value());
-
-    auto storage = transport::open_transport(storage_dir.string());
-    ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
-    stage_remote_object(*storage, root / "remote_src", r_hash);
-
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
-    auto res = mutation::apply_operation(
-        op, 0, local, *storage, key, transaction, *prepared);
-    ASSERT_TRUE(res.has_value()) << res.error().detail;
-    EXPECT_EQ(test::read_text(target), "REMOTE_R");
-    EXPECT_FALSE(std::filesystem::exists(mutation::detail::make_custody_path(
-        target, transaction.root.filename().string(), 0, "custody")));
 }
 
 TEST(MutationRaceCharacterizationTest,
@@ -1989,8 +1947,8 @@ TEST(LocalMutationContractTest, ChangedDestinationBeforeApplyIsRejected) {
     EXPECT_EQ(test::read_text(transaction.root / "0.backup"), "ORIGINAL_O");
 }
 
-TEST(LocalMutationContractTest, RollbackRetainsMismatchingLegacyCustody) {
-    auto workspace = test::make_temp_workspace("rollback-custody-error");
+TEST(LocalMutationContractTest, RollbackLeavesUnknownArtifactUntouched) {
+    auto workspace = test::make_temp_workspace("rollback-unknown-artifact");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
@@ -2018,102 +1976,18 @@ TEST(LocalMutationContractTest, RollbackRetainsMismatchingLegacyCustody) {
     ASSERT_TRUE(mutation::apply_operation(
         operation, 0, local, *storage, key, transaction, *prepared));
 
-    const auto custody = mutation::detail::make_custody_path(
-        target, transaction.root.filename().string(), 0, "custody");
-    test::write_text(custody, "CORRUPTED_CUSTODY");
+    const auto artifact = platform::path::temporary_sibling_path(
+        target, ".", ".kasumi-custody-0");
+    test::write_text(artifact, "UNKNOWN_ARTIFACT_DATA");
     auto applied = *prepared;
     applied.state = kasumi::transaction::OperationState::Applied;
     const auto rolled =
         mutation::rollback_operation(operation, 0, local, transaction, applied);
 
-    ASSERT_FALSE(rolled.has_value());
-    EXPECT_EQ(rolled.error().code,
-              mutation::MutationErrorCode::DestinationConflict);
-    EXPECT_EQ(test::read_text(target), "REMOTE_R");
-    EXPECT_EQ(test::read_text(custody), "CORRUPTED_CUSTODY");
+    ASSERT_TRUE(rolled.has_value()) << rolled.error().detail;
+    EXPECT_EQ(test::read_text(target), "ORIGINAL_O");
+    EXPECT_EQ(test::read_text(artifact), "UNKNOWN_ARTIFACT_DATA");
 }
-
-TEST(LocalMutationContractTest, InterruptedLegacyCustodyMoveRestoresFromJournalBackup) {
-    for (const auto action : {Action::Download, Action::DeleteLocal}) {
-        auto workspace = test::make_temp_workspace("legacy-custody-recovery");
-        const auto root = test::workspace_root(workspace);
-        const auto local = root / "local";
-        const platform::Workspace transaction{root / "tx"};
-        ASSERT_TRUE(std::filesystem::create_directories(local));
-        ASSERT_TRUE(std::filesystem::create_directories(transaction.root));
-        const auto target = local / "file.txt";
-        test::write_text(target, "ORIGINAL_O");
-        const Operation operation{
-            .action = action,
-            .path = "file.txt",
-            .hash = action == Action::Download
-                        ? hash_hex(hasher::hash_string("REMOTE_R"))
-                        : std::string{},
-            .size = action == Action::Download ? 8U : 0U};
-        const auto prepared = mutation::prepare_operation(
-            operation, 0, local, transaction, {.backup_slot = 0});
-        ASSERT_TRUE(prepared.has_value());
-
-        const auto custody = mutation::detail::make_custody_path(
-            target,
-            transaction.root.filename().string(),
-            0,
-            action == Action::Download ? "custody" : "custody-delete");
-        test::write_text(custody, "ORIGINAL_O");
-        ASSERT_TRUE(std::filesystem::remove(target));
-
-        const auto recovered = mutation::rollback_operation(
-            operation, 0, local, transaction, *prepared);
-        ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-        EXPECT_EQ(test::read_text(target), "ORIGINAL_O");
-        EXPECT_FALSE(std::filesystem::exists(custody));
-        EXPECT_TRUE(std::filesystem::exists(transaction.root / "0.backup"));
-    }
-}
-
-#if defined(_WIN32)
-TEST(LegacyCustodyCleanupTest, WinDispositionFailureReturnsErrorAndRetainsCustody) {
-    auto workspace = test::make_temp_workspace("win-disposition-failure");
-    const auto custody = test::workspace_path(workspace, "custody");
-    test::write_text(custody, "CUSTODY_O");
-    ASSERT_TRUE(SetFileAttributesW(custody.c_str(), FILE_ATTRIBUTE_READONLY));
-
-    ScopedNativeHandle handle{CreateFileW(custody.c_str(),
-                                          GENERIC_READ | DELETE,
-                                          0,
-                                          nullptr,
-                                          OPEN_EXISTING,
-                                          FILE_FLAG_BACKUP_SEMANTICS,
-                                          nullptr)};
-    ASSERT_NE(handle.handle, INVALID_HANDLE_VALUE)
-        << "CreateFileW failed with " << GetLastError();
-    FILE_DISPOSITION_INFO disposition{TRUE};
-    SetLastError(ERROR_SUCCESS);
-    const BOOL disposition_result = SetFileInformationByHandle(
-        handle.handle, FileDispositionInfo, &disposition, sizeof(disposition));
-    const DWORD disposition_error = GetLastError();
-    ASSERT_FALSE(disposition_result)
-        << "read-only custody did not reproduce disposition failure";
-    handle.close();
-    ASSERT_FALSE(handle.is_open());
-
-    const auto cleaned = mutation::detail::safe_remove_custody(
-        custody, hash_hex(hasher::hash_string("CUSTODY_O")), 0);
-    EXPECT_FALSE(cleaned.has_value());
-    if (!cleaned) {
-        EXPECT_EQ(cleaned.error().code, mutation::MutationErrorCode::LocalIo);
-        EXPECT_NE(cleaned.error().detail.find("SetFileInformationByHandle"),
-                  std::string::npos);
-        EXPECT_NE(
-            cleaned.error().detail.find(std::to_string(disposition_error)),
-            std::string::npos);
-    }
-    EXPECT_TRUE(std::filesystem::exists(custody));
-    EXPECT_EQ(test::read_text(custody), "CUSTODY_O");
-    EXPECT_NE(disposition_error, ERROR_SUCCESS);
-    SetFileAttributesW(custody.c_str(), FILE_ATTRIBUTE_NORMAL);
-}
-#endif
 
 #if defined(__linux__)
 TEST(LocalMutationContractTest, ExistingDestructiveMutationsRemainAvailable) {

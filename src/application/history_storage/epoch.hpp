@@ -129,13 +129,10 @@ open(std::span<const std::uint8_t> bytes,
 
 std::expected<std::string, Error> object_identifier(const RemoteLayout& layout,
                                                     const Reference& reference);
-std::expected<std::string, Error> object_identifier(const Reference& reference);
 
 std::expected<Reference, Error>
 parse_object_identifier(const RemoteLayout& layout,
                         std::string_view identifier);
-std::expected<Reference, Error>
-parse_object_identifier(std::string_view identifier);
 
 // Validates a contiguous authenticated chain, rejects forks/gaps, and returns
 // the latest Epoch.
@@ -152,9 +149,6 @@ publish(transport::Transport& storage,
         std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
         const SealedEpoch& sealed,
         const std::filesystem::path& workspace_root);
-std::expected<void, Error> publish(transport::Transport& storage,
-                                   const SealedEpoch& sealed,
-                                   const std::filesystem::path& workspace_root);
 
 // Downloads, authenticates, and compares the remote object against the expected
 // Epoch.

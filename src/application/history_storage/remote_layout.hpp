@@ -27,8 +27,6 @@ struct RemoteLayout {
     std::string quarantine_commits_prefix;
 };
 
-RemoteLayout default_remote_layout();
-
 RemoteLayout derive_remote_layout(
     std::span<const std::uint8_t, crypto::KEY_SIZE> master_key);
 

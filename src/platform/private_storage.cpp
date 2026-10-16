@@ -405,7 +405,20 @@ create_file(const std::filesystem::path& path) {
                                   FILE_ATTRIBUTE_NORMAL,
                                   nullptr);
     if (file == INVALID_HANDLE_VALUE) {
-        const auto error = windows_error("CreateFileW failed", GetLastError());
+        const auto code = GetLastError();
+        auto detail = "CreateFileW failed for '" +
+                      platform::path::to_utf8(path) + "' (Win32 error " +
+                      std::to_string(code) + ")";
+        if (code == ERROR_PATH_NOT_FOUND && path.native().size() >= MAX_PATH &&
+            GetFileAttributesW(path.parent_path().c_str()) !=
+                INVALID_FILE_ATTRIBUTES) {
+            detail =
+                "Windows rejected a " +
+                std::to_string(path.native().size()) +
+                "-character path although its parent exists; enable Windows "
+                "long-path support or shorten the profile path";
+        }
+        const auto error = windows_error(detail, code);
         LocalFree(*descriptor);
         return std::unexpected(error);
     }

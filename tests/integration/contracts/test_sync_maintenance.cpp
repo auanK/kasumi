@@ -279,6 +279,7 @@ TEST(ApplicationMaintenanceContract, StateOnlySyncCreatesOnlyLocalState) {
         environment.app_data_dir, "demo");
     ASSERT_TRUE(paths.has_value());
     ASSERT_TRUE(std::filesystem::remove(paths->database_path));
+    ASSERT_TRUE(kasumi::state_storage::initialize(paths->database_path));
 
     ASSERT_TRUE(
         kasumi::application::execute(request(Operation::Sync, environment)));
@@ -401,6 +402,7 @@ TEST(ApplicationMaintenanceContract,
         environment.app_data_dir, "demo");
     ASSERT_TRUE(paths.has_value());
     ASSERT_TRUE(std::filesystem::remove(paths->database_path));
+    ASSERT_TRUE(kasumi::state_storage::initialize(paths->database_path));
     auto opened = kasumi::transport::open_transport(profile.remote_dir);
     ASSERT_TRUE(opened.has_value());
     auto& storage = *opened;
@@ -424,7 +426,10 @@ TEST(ApplicationMaintenanceContract,
         kasumi::application::execute(request(Operation::Sync, environment));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, kasumi::application::ErrorCode::PlanFailure);
-    EXPECT_FALSE(std::filesystem::exists(paths->database_path));
+    ASSERT_TRUE(kasumi::state_storage::validate(paths->database_path));
+    const auto state = kasumi::state_storage::load_state(paths->database_path);
+    ASSERT_TRUE(state.has_value());
+    EXPECT_FALSE(state->has_value());
     EXPECT_FALSE(
         std::filesystem::exists(paths->profile_dir / "transaction.bin.enc"));
 }

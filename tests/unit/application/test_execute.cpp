@@ -4,6 +4,7 @@
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/profile_lock.hpp"
+#include "state_storage/database.hpp"
 
 #include <algorithm>
 #include <array>
@@ -33,6 +34,8 @@ MasterKeyHex key() {
 void write_profile(const TempWorkspace& workspace) {
     std::filesystem::create_directories(
         kasumi::test::workspace_path(workspace, "app"));
+    std::filesystem::create_directories(
+        kasumi::test::workspace_path(workspace, "app/profiles/demo"));
     kasumi::test::write_text(
         kasumi::test::workspace_path(workspace, "app/config.toml"),
         "[profiles.demo]\nlocal_dir = '" +
@@ -40,6 +43,8 @@ void write_profile(const TempWorkspace& workspace) {
             "'\nremote_dir = '" +
             kasumi::test::workspace_path(workspace, "remote").string() +
             "'\nmin_history_depth = 5\nmin_history_age_hours = 6\n");
+    ASSERT_TRUE(kasumi::state_storage::initialize(
+        kasumi::test::workspace_path(workspace, "app/profiles/demo/db.sqlite")));
 }
 
 RuntimeSummary summary() {
@@ -125,6 +130,26 @@ TEST(ApplicationExecuteTest, ValidKeyCanReachReadOnlyApplicationBoundary) {
          ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")}});
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->operation, Operation::Preview);
+}
+
+TEST(ApplicationExecuteTest,
+     MissingProfileDatabaseIsRejectedWithoutReinitialization) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("application-execute-missing-db");
+    write_profile(workspace);
+    const auto database =
+        kasumi::test::workspace_path(workspace, "app/profiles/demo/db.sqlite");
+    ASSERT_TRUE(std::filesystem::remove(database));
+
+    const auto result = kasumi::application::execute(
+        {Request{Operation::Sync, "demo"},
+         Credentials{key()},
+         ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")}});
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(result.error().detail.find("profile state database"),
+              std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(database));
 }
 
 TEST(ApplicationExecuteTest,

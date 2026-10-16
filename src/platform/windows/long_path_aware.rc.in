@@ -1,0 +1,2 @@
+#include <winresrc.h>
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "long_path_aware.manifest"

@@ -28,6 +28,14 @@ function(kasumi_add_test_suite target label)
 
     target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/src)
 
+    if(WIN32)
+        target_sources(${target} PRIVATE
+            "${PROJECT_BINARY_DIR}/long_path_aware.rc")
+        if(MSVC)
+            target_link_options(${target} PRIVATE /MANIFEST:NO)
+        endif()
+    endif()
+
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
         target_link_options(${target} PRIVATE -static-libgcc -static-libstdc++ -Wl,--allow-multiple-definition)
     endif()
@@ -104,6 +112,7 @@ if(KASUMI_BUILD_JOURNAL_FAULT_TESTS)
     target_compile_definitions(
         kasumi_test_integration_sync PRIVATE KASUMI_JOURNAL_FAULT_TESTS)
 endif()
+target_compile_definitions(kasumi_test_integration_sync PRIVATE KASUMI_WORKSPACE_FAULT_TESTS)
 
 kasumi_add_test_suite(
     kasumi_test_e2e_local_sync

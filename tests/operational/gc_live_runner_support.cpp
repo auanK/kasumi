@@ -420,6 +420,7 @@ setup_scenario(transport::Transport& vault_storage,
     }
     auto restore_copy = kasumi::application::history_storage::
         maintenance_protocol::copy_verified(vault_storage,
+                                            layout,
                                             result.reachable_content_id,
                                             *restore_q_id,
                                             scratch_root);

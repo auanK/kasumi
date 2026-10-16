@@ -264,9 +264,7 @@ std::optional<std::string>
 quarantine_from_metadata(const RemoteLayout& layout,
                          std::string_view identifier) {
     const bool is_quarantine =
-        identifier.starts_with(layout.quarantine_prefix) ||
-        identifier.starts_with("history/gc/v1/quarantine/") ||
-        identifier.starts_with("history/gc/quarantine/");
+        identifier.starts_with(layout.quarantine_prefix);
     if (!is_quarantine || !identifier.ends_with(metadata_suffix)) {
         return std::nullopt;
     }
@@ -601,12 +599,6 @@ register_writer(transport::Transport& storage,
 }
 
 RegistrationResult
-register_writer(transport::Transport& storage,
-                const std::filesystem::path& workspace_root) {
-    return register_writer(storage, default_remote_layout(), workspace_root);
-}
-
-RegistrationResult
 establish_barrier(transport::Transport& storage,
                   const RemoteLayout& layout,
                   const std::filesystem::path& workspace_root) {
@@ -633,12 +625,6 @@ establish_barrier(transport::Transport& storage,
                              .verify_owner = true};
 }
 
-RegistrationResult
-establish_barrier(transport::Transport& storage,
-                  const std::filesystem::path& workspace_root) {
-    return establish_barrier(storage, default_remote_layout(), workspace_root);
-}
-
 std::expected<std::vector<std::string>, Error>
 active_writers(transport::Transport& storage, const RemoteLayout& layout) {
     const auto writers_dir =
@@ -659,11 +645,6 @@ active_writers(transport::Transport& storage, const RemoteLayout& layout) {
         result.push_back(layout.writers_prefix + name);
     }
     return result;
-}
-
-std::expected<std::vector<std::string>, Error>
-active_writers(transport::Transport& storage) {
-    return active_writers(storage, default_remote_layout());
 }
 
 std::expected<void, Error> remove_writer(transport::Transport& storage,
@@ -790,20 +771,9 @@ supports_online_collection(transport::Transport& storage,
     return true;
 }
 
-std::expected<bool, Error>
-supports_online_collection(transport::Transport& storage,
-                           const std::filesystem::path& workspace_root) {
-    return supports_online_collection(
-        storage, default_remote_layout(), workspace_root);
-}
-
 bool is_epoch_object(const RemoteLayout& layout,
                      std::string_view identifier) noexcept {
     return identifier.starts_with(layout.epochs_prefix);
-}
-
-bool is_epoch_object(std::string_view identifier) noexcept {
-    return identifier.starts_with(epoch_namespace_prefix);
 }
 
 bool is_control_object(const RemoteLayout& layout,
@@ -811,21 +781,10 @@ bool is_control_object(const RemoteLayout& layout,
     return history_storage::is_control_object(layout, identifier);
 }
 
-bool is_control_object(std::string_view identifier) noexcept {
-    return history_storage::is_control_object(default_remote_layout(),
-                                              identifier);
-}
-
 std::optional<std::string>
 quarantine_identifier(const RemoteLayout& layout,
                       std::string_view original_identifier) {
     return history_storage::quarantine_identifier(layout, original_identifier);
-}
-
-std::optional<std::string>
-quarantine_identifier(std::string_view original_identifier) {
-    return history_storage::quarantine_identifier(default_remote_layout(),
-                                                  original_identifier);
 }
 
 namespace {
@@ -854,20 +813,12 @@ std::expected<std::vector<QuarantineEntry>, Error> inventory_quarantine_impl(
     for (const auto& identifier : listing_span) {
         if (!history_storage::is_control_object(layout, identifier) ||
             identifier == layout.barrier_identifier ||
-            identifier == "history/gc/v1/barrier" ||
-            identifier == "history/gc/barrier" ||
             identifier.starts_with(layout.writers_prefix) ||
-            identifier.starts_with("history/gc/v1/writers/") ||
-            identifier.starts_with("history/gc/writers/") ||
-            identifier.starts_with(layout.probes_prefix) ||
-            identifier.starts_with("history/gc/v1/probes/") ||
-            identifier.starts_with("history/gc/probes/")) {
+            identifier.starts_with(layout.probes_prefix)) {
             continue;
         }
         const bool is_quarantine =
-            identifier.starts_with(layout.quarantine_prefix) ||
-            identifier.starts_with("history/gc/v1/quarantine/") ||
-            identifier.starts_with("history/gc/quarantine/");
+            identifier.starts_with(layout.quarantine_prefix);
         if (!is_quarantine) {
             return std::unexpected(
                 error(ErrorCode::InvalidControlObject,
@@ -1075,11 +1026,12 @@ verify_destination_via_workspace(transport::Transport& storage,
 
 std::expected<std::string, Error>
 copy_verified_via_workspace(transport::Transport& storage,
+                            const RemoteLayout& layout,
                             std::string_view source_identifier,
                             std::string_view destination_identifier,
                             const std::filesystem::path& workspace_root) {
-    if (is_epoch_object(source_identifier) ||
-        is_epoch_object(destination_identifier)) {
+    if (is_epoch_object(layout, source_identifier) ||
+        is_epoch_object(layout, destination_identifier)) {
         return std::unexpected(
             error(ErrorCode::Blocked,
                   "epoch objects cannot be copied by collection"));
@@ -1138,11 +1090,12 @@ copy_verified_via_workspace(transport::Transport& storage,
 
 std::expected<std::string, Error>
 copy_verified(transport::Transport& storage,
+              const RemoteLayout& layout,
               std::string_view source_identifier,
               std::string_view destination_identifier,
               const std::filesystem::path& workspace_root) {
-    if (is_epoch_object(source_identifier) ||
-        is_epoch_object(destination_identifier)) {
+    if (is_epoch_object(layout, source_identifier) ||
+        is_epoch_object(layout, destination_identifier)) {
         return std::unexpected(
             error(ErrorCode::Blocked,
                   "epoch objects cannot be copied by collection"));
@@ -1207,7 +1160,7 @@ copy_verified(transport::Transport& storage,
     }
 
     return copy_verified_via_workspace(
-        storage, source_identifier, destination_identifier, workspace_root);
+        storage, layout, source_identifier, destination_identifier, workspace_root);
 }
 
 std::expected<QuarantineRepairClassification, Error>
@@ -1226,21 +1179,13 @@ classify_quarantine_for_repair(transport::Transport& storage,
     for (const auto& identifier : *listed) {
         if (!history_storage::is_control_object(layout, identifier) ||
             identifier == layout.barrier_identifier ||
-            identifier == "history/gc/v1/barrier" ||
-            identifier == "history/gc/barrier" ||
             identifier.starts_with(layout.writers_prefix) ||
-            identifier.starts_with("history/gc/v1/writers/") ||
-            identifier.starts_with("history/gc/writers/") ||
-            identifier.starts_with(layout.probes_prefix) ||
-            identifier.starts_with("history/gc/v1/probes/") ||
-            identifier.starts_with("history/gc/probes/")) {
+            identifier.starts_with(layout.probes_prefix)) {
             continue;
         }
 
         const bool is_quarantine =
-            identifier.starts_with(layout.quarantine_prefix) ||
-            identifier.starts_with("history/gc/v1/quarantine/") ||
-            identifier.starts_with("history/gc/quarantine/");
+            identifier.starts_with(layout.quarantine_prefix);
         if (!is_quarantine) {
             classification.invalid_identifiers.push_back(identifier);
             continue;

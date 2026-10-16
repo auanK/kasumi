@@ -4,6 +4,7 @@
 #include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
+#include "workspace_fault_test.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -362,6 +363,7 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
         if (!retryable_lock(error) || attempt + 1 == maximum_attempts) {
             break;
         }
+        workspace_fault_test::before_retry(workspace.root, attempt, error);
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
 #else
