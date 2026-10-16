@@ -159,6 +159,25 @@ InstallResult install_linux_handoff(const std::filesystem::path& archive,
 #endif
 
 #if defined(_WIN32)
+enum class WindowsInstallationWritableState {
+    Writable,
+    PermissionDenied,
+    OtherFailure
+};
+
+struct WindowsInstallationWritableResult {
+    WindowsInstallationWritableState state =
+        WindowsInstallationWritableState::OtherFailure;
+    std::string detail;
+};
+
+using WindowsIdentifierGenerator =
+    std::function<std::expected<std::string, std::string>()>;
+
+WindowsInstallationWritableResult check_windows_installation_writable(
+    const std::filesystem::path& target,
+    const WindowsIdentifierGenerator& id_generator = {});
+
 struct WindowsFileIdentity {
     std::uint64_t volume_serial = 0;
     std::array<std::uint8_t, 16> file_id{};

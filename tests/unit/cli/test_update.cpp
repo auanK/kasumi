@@ -16,6 +16,10 @@
 #if !defined(_WIN32)
 #include <sys/stat.h>
 #include <unistd.h>
+#else
+#include <aclapi.h>
+#include <sddl.h>
+#include <windows.h>
 #endif
 
 TEST(CliUpdateTest, ParsesTheSinglePublicUpdateCommand) {
@@ -226,9 +230,11 @@ TEST(CliUpdateTest, ReleaseListingReadsAllPages) {
     EXPECT_EQ(result->size(), 100);
     ASSERT_EQ(urls.size(), 2);
     EXPECT_EQ(urls[0],
-              "https://api.github.com/repos/auanK/kasumi/releases?per_page=100&page=1");
+              "https://api.github.com/repos/auanK/kasumi/"
+              "releases?per_page=100&page=1");
     EXPECT_EQ(urls[1],
-              "https://api.github.com/repos/auanK/kasumi/releases?per_page=100&page=2");
+              "https://api.github.com/repos/auanK/kasumi/"
+              "releases?per_page=100&page=2");
 }
 
 TEST(CliUpdateTest, IdentifiesRunningExecutableAndPlatformPackage) {
@@ -1136,5 +1142,197 @@ TEST(CliUpdateTest, WindowsInternalArgumentsRoundTripUnicodePaths) {
     const auto decoded = windows_decode_arguments(command_line);
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(*decoded, arguments);
+}
+
+TEST(CliUpdateTest, WindowsPreflightAllowsWritableUserInstallationDirectory) {
+    using namespace kasumi::cli::update;
+    auto workspace =
+        kasumi::test::make_temp_workspace("update-windows-writable");
+    const auto target = kasumi::test::workspace_path(workspace, "kasumi.exe");
+    {
+        std::ofstream output(target, std::ios::binary);
+        output << "executable";
+    }
+
+    const auto result = check_windows_installation_writable(target);
+    EXPECT_EQ(result.state, WindowsInstallationWritableState::Writable);
+    EXPECT_TRUE(result.detail.empty());
+
+    for (const auto& entry :
+         std::filesystem::directory_iterator(workspace->root)) {
+        EXPECT_NE(entry.path().filename().string().find(".kasumi-probe-"), 0U);
+    }
+}
+
+TEST(CliUpdateTest,
+     WindowsPreflightRejectsProtectedInstallationDirectoryWithoutAdmin) {
+    using namespace kasumi::cli::update;
+    auto workspace =
+        kasumi::test::make_temp_workspace("update-windows-protected");
+    const auto target = kasumi::test::workspace_path(workspace, "kasumi.exe");
+    {
+        std::ofstream output(target, std::ios::binary);
+        output << "executable";
+    }
+
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    const BOOL parsed = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        L"D:P(D;;GA;;;WD)", SDDL_REVISION_1, &descriptor, nullptr);
+    ASSERT_TRUE(parsed && descriptor != nullptr);
+
+    BOOL dacl_present = FALSE;
+    BOOL dacl_defaulted = FALSE;
+    PACL dacl = nullptr;
+    GetSecurityDescriptorDacl(
+        descriptor, &dacl_present, &dacl, &dacl_defaulted);
+
+    auto path_wide = workspace->root.wstring();
+    const auto set_result = SetNamedSecurityInfoW(
+        path_wide.data(),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr,
+        nullptr,
+        dacl,
+        nullptr);
+    LocalFree(descriptor);
+    ASSERT_EQ(set_result, ERROR_SUCCESS);
+
+    const auto result = check_windows_installation_writable(target);
+    EXPECT_EQ(result.state, WindowsInstallationWritableState::PermissionDenied);
+    EXPECT_FALSE(result.detail.empty());
+
+    SetNamedSecurityInfoW(path_wide.data(),
+                          SE_FILE_OBJECT,
+                          DACL_SECURITY_INFORMATION |
+                              UNPROTECTED_DACL_SECURITY_INFORMATION,
+                          nullptr,
+                          nullptr,
+                          nullptr,
+                          nullptr);
+}
+
+TEST(CliUpdateTest,
+     WindowsPreflightDistinguishesOtherFailuresFromPermissionDenied) {
+    using namespace kasumi::cli::update;
+    auto workspace =
+        kasumi::test::make_temp_workspace("update-windows-other-err");
+    const auto target = kasumi::test::workspace_path(workspace, "kasumi.exe");
+
+    const auto id_failure = check_windows_installation_writable(
+        target, []() -> std::expected<std::string, std::string> {
+            return std::unexpected("simulated entropy failure");
+        });
+    EXPECT_EQ(id_failure.state, WindowsInstallationWritableState::OtherFailure);
+    EXPECT_NE(id_failure.state,
+              WindowsInstallationWritableState::PermissionDenied);
+    EXPECT_NE(id_failure.detail.find("simulated entropy failure"),
+              std::string::npos);
+
+    const auto non_existent_target =
+        workspace->root / "does_not_exist_subfolder_12345" / "kasumi.exe";
+    const auto path_failure =
+        check_windows_installation_writable(non_existent_target);
+    EXPECT_EQ(path_failure.state,
+              WindowsInstallationWritableState::OtherFailure);
+    EXPECT_NE(path_failure.state,
+              WindowsInstallationWritableState::PermissionDenied);
+    EXPECT_FALSE(path_failure.detail.empty());
+}
+
+TEST(CliUpdateTest,
+     WindowsPreflightSuccessDoesNotPreventProtectedExecutableFailClosed) {
+    using namespace kasumi::cli::update;
+    auto workspace = kasumi::test::make_temp_workspace("update-windows-c");
+    const auto target = kasumi::test::workspace_path(workspace, "kasumi.exe");
+    const auto prepared =
+        kasumi::test::workspace_path(workspace, "prepared.exe");
+    {
+        std::ofstream output(target, std::ios::binary);
+        output << "original executable";
+    }
+    {
+        std::ofstream output(prepared, std::ios::binary);
+        output << "new executable";
+    }
+
+    const auto preflight = check_windows_installation_writable(target);
+    EXPECT_EQ(preflight.state, WindowsInstallationWritableState::Writable);
+
+    const auto digest = sha256_file(prepared);
+    ASSERT_TRUE(digest);
+
+    InstallHooks hooks;
+    hooks.replace_atomically =
+        [](const auto&, const auto&) -> std::expected<void, std::string> {
+        return std::unexpected(
+            "replace_atomically failed (native_code=5): Access is denied.");
+    };
+
+    const auto result =
+        install_prepared_executable(prepared, target, *digest, &hooks);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().kind, InstallFailure::Kind::PermissionDenied);
+
+    std::ifstream input(target, std::ios::binary);
+    const std::string body{std::istreambuf_iterator<char>{input},
+                           std::istreambuf_iterator<char>{}};
+    EXPECT_EQ(body, "original executable");
+
+    for (const auto& entry :
+         std::filesystem::directory_iterator(workspace->root)) {
+        const auto name = entry.path().filename().string();
+        EXPECT_EQ(name.find(".kasumi-update-"), std::string::npos);
+        EXPECT_EQ(name.find(".kasumi-previous-"), std::string::npos);
+    }
+}
+
+TEST(CliUpdateTest,
+     WindowsPermissionRevocationDuringReplacementRollsBackSafely) {
+    using namespace kasumi::cli::update;
+    auto workspace = kasumi::test::make_temp_workspace("update-windows-e");
+    const auto target = kasumi::test::workspace_path(workspace, "kasumi.exe");
+    const auto prepared =
+        kasumi::test::workspace_path(workspace, "prepared.exe");
+    {
+        std::ofstream output(target, std::ios::binary);
+        output << "original production executable";
+    }
+    {
+        std::ofstream output(prepared, std::ios::binary);
+        output << "new production executable";
+    }
+
+    const auto preflight = check_windows_installation_writable(target);
+    EXPECT_EQ(preflight.state, WindowsInstallationWritableState::Writable);
+
+    InstallHooks hooks;
+    hooks.replace_atomically =
+        [](const auto&, const auto&) -> std::expected<void, std::string> {
+        return std::unexpected(
+            "replace_atomically failed (native_code=5): Permission revoked.");
+    };
+
+    const auto digest = sha256_file(prepared);
+    ASSERT_TRUE(digest);
+
+    const auto result =
+        install_prepared_executable(prepared, target, *digest, &hooks);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().kind, InstallFailure::Kind::PermissionDenied);
+
+    std::ifstream input(target, std::ios::binary);
+    const std::string body{std::istreambuf_iterator<char>{input},
+                           std::istreambuf_iterator<char>{}};
+    EXPECT_EQ(body, "original production executable");
+
+    for (const auto& entry :
+         std::filesystem::directory_iterator(workspace->root)) {
+        const auto name = entry.path().filename().string();
+        EXPECT_EQ(name.find(".kasumi-update-"), std::string::npos);
+        EXPECT_EQ(name.find(".kasumi-previous-"), std::string::npos);
+        EXPECT_EQ(name.find(".kasumi-probe-"), std::string::npos);
+    }
 }
 #endif

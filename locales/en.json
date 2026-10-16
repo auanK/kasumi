@@ -11,7 +11,7 @@
     "handoff_started": "Update handoff started. The helper will finish after Kasumi exits.",
     "already_current": "[OK] Kasumi is already up to date.",
     "completed": "[OK] Updated to v{}.",
-    "admin_required": "Administrator privileges required.",
+    "admin_required": "Administrator privileges required. Run as administrator to update.",
     "request_permission": "Requesting permission...",
     "elevation_unavailable": "Could not request installation privileges: {}",
     "managed_installation": "This installation is managed by {}. Use that package manager to update Kasumi.",

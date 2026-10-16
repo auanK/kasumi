@@ -17,7 +17,6 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <limits>
 #include <nlohmann/json.hpp>
 #include <print>
 #include <reproc++/run.hpp>
@@ -1554,7 +1553,8 @@ bool official_asset_url(std::string_view tag,
         return false;
     }
     std::string expected_url;
-    expected_url.reserve(19 + GITHUB_REPOSITORY.size() + 19 + tag.size() + 1 + name.size());
+    expected_url.reserve(19 + GITHUB_REPOSITORY.size() + 19 + tag.size() + 1 +
+                         name.size());
     expected_url.append("https://github.com/");
     expected_url.append(GITHUB_REPOSITORY);
     expected_url.append("/releases/download/");
@@ -1978,66 +1978,6 @@ validate_windows_workspace_acl_impl(const std::filesystem::path& root) {
         !has_admin_read || (!current_is_owner && !current_is_admin)) {
         return std::unexpected("update workspace ACL does not preserve owner "
                                "privacy and administrator read access");
-    }
-    return {};
-}
-
-std::expected<void, std::string>
-grant_windows_admin_process_query_access(HANDLE process) {
-    PACL old_acl = nullptr;
-    PSECURITY_DESCRIPTOR descriptor = nullptr;
-    const auto query = GetSecurityInfo(process,
-                                       SE_KERNEL_OBJECT,
-                                       DACL_SECURITY_INFORMATION,
-                                       nullptr,
-                                       nullptr,
-                                       &old_acl,
-                                       nullptr,
-                                       &descriptor);
-    if (query != ERROR_SUCCESS || descriptor == nullptr || old_acl == nullptr) {
-        if (descriptor != nullptr) {
-            LocalFree(descriptor);
-        }
-        return std::unexpected(
-            "could not inspect installer process permissions");
-    }
-    alignas(DWORD) std::array<std::byte, SECURITY_MAX_SID_SIZE> admin_sid{};
-    DWORD sid_size = static_cast<DWORD>(admin_sid.size());
-    if (!CreateWellKnownSid(WinBuiltinAdministratorsSid,
-                            nullptr,
-                            admin_sid.data(),
-                            &sid_size)) {
-        LocalFree(descriptor);
-        return std::unexpected("could not identify Windows administrators");
-    }
-    EXPLICIT_ACCESSW access{};
-    access.grfAccessPermissions =
-        PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
-    access.grfAccessMode = GRANT_ACCESS;
-    access.grfInheritance = NO_INHERITANCE;
-    access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
-    access.Trustee.TrusteeType = TRUSTEE_IS_GROUP;
-    access.Trustee.ptstrName = reinterpret_cast<LPWSTR>(admin_sid.data());
-    PACL new_acl = nullptr;
-    const auto merged = SetEntriesInAclW(1, &access, old_acl, &new_acl);
-    LocalFree(descriptor);
-    if (merged != ERROR_SUCCESS || new_acl == nullptr) {
-        if (new_acl != nullptr) {
-            LocalFree(new_acl);
-        }
-        return std::unexpected(
-            "could not grant administrator query access to installer process");
-    }
-    const auto updated = SetSecurityInfo(process,
-                                         SE_KERNEL_OBJECT,
-                                         DACL_SECURITY_INFORMATION,
-                                         nullptr,
-                                         nullptr,
-                                         new_acl,
-                                         nullptr);
-    LocalFree(new_acl);
-    if (updated != ERROR_SUCCESS) {
-        return std::unexpected("could not secure installer process handoff");
     }
     return {};
 }
@@ -2797,81 +2737,6 @@ bool is_kasumi_executable(const std::filesystem::path& path) {
            matches(L"OriginalFilename", L"kasumi.exe");
 }
 
-std::optional<std::wstring>
-kasumi_product_version(const std::filesystem::path& path) {
-    DWORD ignored = 0;
-    const DWORD size = GetFileVersionInfoSizeW(path.c_str(), &ignored);
-    if (size == 0 || size > 1024U * 1024U) {
-        return std::nullopt;
-    }
-    std::vector<std::byte> data(size);
-    if (!GetFileVersionInfoW(path.c_str(), 0, size, data.data())) {
-        return std::nullopt;
-    }
-    void* value = nullptr;
-    UINT length = 0;
-    if (!VerQueryValueW(data.data(),
-                        L"\\StringFileInfo\\040904b0\\ProductVersion",
-                        &value,
-                        &length) ||
-        value == nullptr || length <= 1) {
-        return std::nullopt;
-    }
-    return std::wstring{static_cast<const wchar_t*>(value), length - 1};
-}
-
-std::expected<void, std::string>
-launch_elevated_windows(const std::filesystem::path& helper,
-                        const std::filesystem::path& archive,
-                        std::string_view version,
-                        std::string_view language,
-                        DWORD original_process_id,
-                        const WindowsFileIdentity& target_identity) {
-    auto version_w = widen_ascii(version);
-    auto language_w = widen_ascii(language);
-    const auto identity_w = widen_ascii(windows_identity_text(target_identity));
-    if (!version_w || !language_w || !identity_w) {
-        return std::unexpected("invalid installer handoff arguments");
-    }
-    const auto parameters =
-        join_windows_arguments({L"--kasumi-update-elevated",
-                                archive.wstring(),
-                                *version_w,
-                                *language_w,
-                                std::to_wstring(GetCurrentProcessId()),
-                                std::to_wstring(original_process_id),
-                                *identity_w});
-    SHELLEXECUTEINFOW info{};
-    info.cbSize = sizeof(info);
-    info.fMask =
-        SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_NO_CONSOLE;
-    info.lpVerb = L"runas";
-    info.lpFile = helper.c_str();
-    info.lpParameters = parameters.c_str();
-    info.nShow = SW_SHOWNORMAL;
-    if (!ShellExecuteExW(&info)) {
-        const DWORD error = GetLastError();
-        if (error == ERROR_CANCELLED) {
-            return std::unexpected("administrator authorization was cancelled");
-        }
-        return std::unexpected(
-            "could not request Windows administrator privileges");
-    }
-    if (info.hProcess == nullptr) {
-        return std::unexpected(
-            "elevated installer did not return a process handle");
-    }
-    const DWORD wait = WaitForSingleObject(info.hProcess, INFINITE);
-    DWORD exit_code = 1;
-    const bool queried = wait == WAIT_OBJECT_0 &&
-                         GetExitCodeProcess(info.hProcess, &exit_code) != 0;
-    CloseHandle(info.hProcess);
-    if (!queried || exit_code != 0) {
-        return std::unexpected("elevated installer failed");
-    }
-    return {};
-}
-
 std::expected<void, std::string>
 start_windows_helper(const std::filesystem::path& executable,
                      const std::filesystem::path& archive,
@@ -2881,11 +2746,6 @@ start_windows_helper(const std::filesystem::path& executable,
     auto id = new_identifier();
     if (!id) {
         return std::unexpected(id.error());
-    }
-    auto process_acl =
-        grant_windows_admin_process_query_access(GetCurrentProcess());
-    if (!process_acl) {
-        return std::unexpected(process_acl.error());
     }
     std::error_code error;
     const auto helper =
@@ -2955,143 +2815,6 @@ start_windows_helper(const std::filesystem::path& executable,
     return std::unexpected("Windows replacement helper did not initialize");
 }
 
-int run_windows_elevated_helper(int argc, char* argv[]) {
-    if (argc != 8 || argv[2] == nullptr || argv[3] == nullptr ||
-        argv[4] == nullptr || argv[5] == nullptr || argv[6] == nullptr ||
-        argv[7] == nullptr) {
-        return report_failure("invalid installer handoff");
-    }
-    select_helper_language(argv[4]);
-    DWORD helper_id = 0;
-    DWORD original_id = 0;
-    const auto [helper_end, helper_error] = std::from_chars(
-        argv[5], argv[5] + std::char_traits<char>::length(argv[5]), helper_id);
-    const auto [original_end, original_error] =
-        std::from_chars(argv[6],
-                        argv[6] + std::char_traits<char>::length(argv[6]),
-                        original_id);
-    const auto expected_identity = parse_windows_identity(argv[7]);
-    if (helper_error != std::errc{} || *helper_end != '\0' ||
-        original_error != std::errc{} || *original_end != '\0' ||
-        !expected_identity || !windows_parent_process_id(helper_id) ||
-        windows_parent_process_id(helper_id) != original_id) {
-        return report_failure("invalid installer process association");
-    }
-    HANDLE helper_handle = nullptr;
-    const auto parent_path = windows_process_path(helper_id, helper_handle);
-    ScopedWindowsHandle keep_helper{helper_handle};
-    const auto helper_path = current_executable_path();
-    std::error_code parent_error;
-    const bool trusted_parent =
-        parent_path && helper_path &&
-        std::filesystem::equivalent(*parent_path, *helper_path, parent_error) &&
-        !parent_error && windows_entry_is_not_reparse_point(*helper_path) &&
-        is_kasumi_executable(*helper_path);
-    if (!trusted_parent) {
-        return report_failure("elevated installer was not started by Kasumi");
-    }
-    HANDLE original_handle = nullptr;
-    const auto target_value =
-        windows_process_path(original_id, original_handle);
-    ScopedWindowsHandle keep_original{original_handle};
-    if (!target_value || !windows_path_has_no_reparse_points(*target_value) ||
-        !windows_file_identity_matches(*target_value, *expected_identity) ||
-        target_value->filename() != platform::path::from_utf8("kasumi.exe")) {
-        return report_failure(
-            "original installation identity changed during update handoff");
-    }
-    const auto target = *target_value;
-    const auto archive = platform::path::from_utf8(argv[2]);
-    const std::string_view version{argv[3]};
-    if (!parse_version(version)) {
-        return report_failure("invalid installer release version");
-    }
-    const auto package = package_names_for_this_platform();
-    if (!package) {
-        return report_failure(
-            "this operating system or architecture is unsupported");
-    }
-    const auto root = archive.parent_path();
-    auto valid_root = validate_staging_root(root);
-    std::error_code error;
-    const auto archive_size = std::filesystem::file_size(archive, error);
-    if (!valid_root ||
-        archive.filename() != platform::path::from_utf8(package->archive) ||
-        !is_regular_file_without_redirect(archive) || error ||
-        archive_size == 0 || archive_size > PACKAGE_LIMIT ||
-        !windows_entry_is_not_reparse_point(root) ||
-        !windows_file_identity(archive)) {
-        return report_failure(
-            "update package is outside its protected staging directory");
-    }
-    std::string manager;
-    if (package_managed_installation(target, manager)) {
-        return report_failure(
-            i18n::format(i18n::Key::UpdateManagedInstallation, manager));
-    }
-    const auto target_version = kasumi_product_version(target);
-    std::optional<std::wstring> helper_version;
-    helper_version = kasumi_product_version(*helper_path);
-    if (!is_regular_file_without_redirect(target) ||
-        !is_kasumi_executable(target) || !target_version || !helper_version ||
-        *target_version != *helper_version) {
-        return report_failure("installation destination is invalid");
-    }
-    auto workspace = platform::create_workspace("update-elevated");
-    if (!workspace) {
-        return report_failure(workspace.error());
-    }
-    struct WorkspaceCleanup {
-        platform::Workspace value;
-        ~WorkspaceCleanup() {
-            platform::cleanup_workspace(value);
-        }
-    } cleanup{.value = *workspace};
-    auto digest =
-        refetch_official_digest(archive, version, *package, *workspace);
-    if (!digest) {
-        return report_failure(digest.error());
-    }
-    const auto trusted_archive =
-        platform::workspace_file(*workspace, package->archive);
-    if (trusted_archive.empty() ||
-        !std::filesystem::copy_file(archive,
-                                    trusted_archive,
-                                    std::filesystem::copy_options::none,
-                                    error) ||
-        error) {
-        return report_failure("could not copy update package into a private "
-                              "administrator workspace");
-    }
-    const auto prepared = prepare_verified_package(
-        trusted_archive, *digest, *package, *workspace);
-    if (!prepared) {
-        return report_failure(prepared.error());
-    }
-    if (!windows_path_has_no_reparse_points(target) ||
-        !windows_file_identity_matches(target, *expected_identity)) {
-        return report_failure(
-            "installation destination changed before replacement");
-    }
-    InstallHooks target_identity_hook;
-    target_identity_hook.validate_target =
-        [expected = *expected_identity](const std::filesystem::path& candidate)
-        -> std::expected<void, std::string> {
-        if (!windows_path_has_no_reparse_points(candidate) ||
-            !windows_file_identity_matches(candidate, expected)) {
-            return std::unexpected(
-                "installation destination changed before replacement");
-        }
-        return {};
-    };
-    const auto installed = install_prepared_executable(
-        prepared->path, target, prepared->sha256, &target_identity_hook);
-    if (!installed) {
-        return report_failure(installed.error().detail);
-    }
-    return 0;
-}
-
 int run_windows_wait_helper(int argc, char* argv[]) {
     if (argc != 7 || argv[2] == nullptr || argv[3] == nullptr ||
         argv[4] == nullptr || argv[5] == nullptr || argv[6] == nullptr) {
@@ -3141,11 +2864,6 @@ int run_windows_wait_helper(int argc, char* argv[]) {
         !windows_entry_is_not_reparse_point(root) ||
         !windows_file_identity(archive)) {
         return report_failure("update staging directory is invalid");
-    }
-    auto process_acl =
-        grant_windows_admin_process_query_access(GetCurrentProcess());
-    if (!process_acl) {
-        return report_failure(process_acl.error());
     }
     const auto ready = root / platform::path::from_utf8("helper-ready");
     {
@@ -3203,29 +2921,11 @@ int run_windows_wait_helper(int argc, char* argv[]) {
         prepared->path, target, prepared->sha256, &target_identity_hook);
     platform::cleanup_workspace(
         platform::Workspace{.root = prepared->path.parent_path()});
-    const InstallAction elevate = [&]() -> InstallResult {
-        std::println("{}", i18n::tr(i18n::Key::UpdateAdminRequired));
-        std::println("{}", i18n::tr(i18n::Key::UpdateRequestPermission));
-        auto elevated = launch_elevated_windows(*helper,
-                                                archive,
-                                                version,
-                                                language_code(),
-                                                parent_id,
-                                                *expected_identity);
-        if (!elevated) {
-            return std::unexpected(
-                InstallFailure{.kind = InstallFailure::Kind::Other,
-                               .detail = elevated.error()});
+    if (!installed) {
+        if (installed.error().kind == InstallFailure::Kind::PermissionDenied) {
+            return report_failure(i18n::tr(i18n::Key::UpdateAdminRequired));
         }
-        return {};
-    };
-    auto result = install_once_then_elevate(
-        [&]() -> InstallResult {
-            return std::move(installed);
-        },
-        elevate);
-    if (!result) {
-        return report_failure(result.error().detail);
+        return report_failure(installed.error().detail);
     }
     const auto installed_version = parse_version(version);
     if (!installed_version) {
@@ -3383,7 +3083,8 @@ InstallResult install_linux_handoff(const std::filesystem::path& archive,
             install_failure("invalid privileged update handoff"));
     }
     std::string checksum_url;
-    checksum_url.reserve(19 + GITHUB_REPOSITORY.size() + 19 + tag.size() + 1 + package->checksum.size());
+    checksum_url.reserve(19 + GITHUB_REPOSITORY.size() + 19 + tag.size() + 1 +
+                         package->checksum.size());
     checksum_url.append("https://github.com/");
     checksum_url.append(GITHUB_REPOSITORY);
     checksum_url.append("/releases/download/");
@@ -3536,6 +3237,13 @@ int run_public_update(bool allow_elevation = true) {
         return report_failure(
             "could not identify the running installation file");
     }
+    const auto writable = check_windows_installation_writable(*executable);
+    if (writable.state == WindowsInstallationWritableState::PermissionDenied) {
+        return report_failure(i18n::tr(i18n::Key::UpdateAdminRequired));
+    }
+    if (writable.state != WindowsInstallationWritableState::Writable) {
+        return report_failure(writable.detail);
+    }
 #else
     if (executable->filename() != platform::path::from_utf8("kasumi")) {
         return report_failure("installation destination is not kasumi");
@@ -3682,6 +3390,42 @@ int run_public_update(bool allow_elevation = true) {
 } // namespace
 
 #if defined(_WIN32)
+WindowsInstallationWritableResult check_windows_installation_writable(
+    const std::filesystem::path& target,
+    const WindowsIdentifierGenerator& id_generator) {
+    auto id = id_generator ? id_generator() : new_identifier();
+    if (!id) {
+        return WindowsInstallationWritableResult{
+            .state = WindowsInstallationWritableState::OtherFailure,
+            .detail = "could not generate probe identifier: " + id.error()};
+    }
+    const auto probe = target.parent_path() /
+                       platform::path::from_utf8(".kasumi-probe-" + *id);
+    HANDLE handle =
+        CreateFileW(probe.c_str(),
+                    GENERIC_WRITE | DELETE,
+                    0,
+                    nullptr,
+                    CREATE_NEW,
+                    FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE,
+                    nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        const DWORD error = GetLastError();
+        if (error == ERROR_ACCESS_DENIED || error == ERROR_PRIVILEGE_NOT_HELD) {
+            return WindowsInstallationWritableResult{
+                .state = WindowsInstallationWritableState::PermissionDenied,
+                .detail = "access denied to installation directory"};
+        }
+        return WindowsInstallationWritableResult{
+            .state = WindowsInstallationWritableState::OtherFailure,
+            .detail = "probe creation failed: " +
+                      std::system_category().message(static_cast<int>(error))};
+    }
+    CloseHandle(handle);
+    return WindowsInstallationWritableResult{
+        .state = WindowsInstallationWritableState::Writable, .detail = {}};
+}
+
 std::expected<void, std::string>
 grant_windows_admin_read_access(const std::filesystem::path& root) {
     PACL dacl = nullptr;
@@ -3922,10 +3666,6 @@ int run(int argc, char* argv[]) {
         if (internal_mode == "--kasumi-update-helper") {
             return run_windows_wait_helper(static_cast<int>(utf8_argv.size()),
                                            utf8_argv.data());
-        }
-        if (internal_mode == "--kasumi-update-elevated") {
-            return run_windows_elevated_helper(
-                static_cast<int>(utf8_argv.size()), utf8_argv.data());
         }
         return report_failure("unknown internal update mode");
     }

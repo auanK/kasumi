@@ -11,7 +11,7 @@
     "handoff_started": "Transferência da atualização iniciada. O auxiliar concluirá após o Kasumi encerrar.",
     "already_current": "[OK] O Kasumi já está atualizado.",
     "completed": "[OK] Atualizado para v{}.",
-    "admin_required": "São necessárias permissões de administrador.",
+    "admin_required": "São necessárias permissões de administrador. Execute como administrador para atualizar.",
     "request_permission": "Solicitando autorização...",
     "elevation_unavailable": "Não foi possível solicitar privilégios para instalação: {}",
     "managed_installation": "Esta instalação é gerenciada por {}. Use esse gerenciador para atualizar o Kasumi.",
