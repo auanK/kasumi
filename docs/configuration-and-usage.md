@@ -42,6 +42,14 @@ Profiles are stored in `config.toml` within Kasumi's data directory.
 * **Windows**: `%APPDATA%/kasumi`
 * **Linux**: `$XDG_CONFIG_HOME/kasumi` or `$HOME/.config/kasumi`
 
+If these environment paths are unavailable, the fallback is `.kasumi_data` in
+the current directory. Private profile state lives under `profiles/<name>/`.
+On Windows, prefer short synchronized and profile paths when long-path policy
+is disabled. Internal staging paths can exceed the source path length even when
+the source opens successfully; the embedded `longPathAware` manifest also needs
+the host's `LongPathsEnabled` policy for long Win32 paths. See
+[path diagnostics](troubleshooting.md#windows-path-exceeds-the-supported-limit).
+
 ```toml
 [profiles.my-profile]
 local_dir = "D:/Documents"
@@ -50,7 +58,7 @@ min_history_depth = 5
 min_history_age_hours = 6
 ```
 
-New profiles default to a minimum retention depth of 5 commits and a minimum retention age of 6 hours. Manual editing of `config.toml` allows adjusting both values using positive integers. The local profile policy is used when planning or publishing retention state. Published authenticated Epochs carry the retention policy and anchors used by the remote history and maintenance protocol.
+New profiles default to a minimum retention depth of 5 commits and a minimum retention age of 6 hours. Manual editing of `config.toml` allows adjusting both values using positive integers; runtime operations limit depth to 4096. Unknown fields and missing required profile values are rejected rather than migrated. The local profile policy is used when planning or publishing retention state. Published authenticated Epochs carry the retention policy and anchors used by the remote history and maintenance protocol.
 
 ## Core Commands
 
@@ -68,7 +76,7 @@ New profiles default to a minimum retention depth of 5 commits and a minimum ret
 | `kasumi gc repair-quarantine <profile> --confirm-permanent-loss` | Removes eligible orphaned quarantine metadata whose payload is already missing; **does not restore content** |
 | `kasumi resolve-missing <profile>` | Explicitly resolves eligible pending missing remote payloads as logical deletions; **may publish permanent data loss** |
 
-* `status` and `sync --dry-run` are separate user-facing operations, but production dispatch runs both through the same planner and returns a `PlanReport`. Neither executes the plan, recovers an interrupted transaction, advances accepted state, publishes remote history, or persists cache deltas. They read local profile configuration and private state, acquire the local profile lock, and perform observations (reusing valid strong fingerprints from the persistent local cache in read-only mode, and hashing new or modified files). Their result can become stale before a later sync. See [Preview and Status](architecture/planning-and-status.md).
+* `status` and `sync --dry-run` dispatch through the same planner and return a `PlanReport`. Both enumerate the managed tree and read metadata, reusing persisted BLAKE3 hashes only when path, regular-file type, size, nanosecond mtime, and native identity match. Cache misses, changed files, and insufficient identity require content hashing; an effective ignore projection differing from local rules uses full hashing. Neither executes the plan, recovers a transaction, advances accepted state, publishes history, or saves cache deltas. They acquire the local profile lock; private-path permission normalization can still occur. A later Sync reobserves and independently verifies destructive local targets. See [Preview and Status](architecture/planning-and-status.md).
 * **Plan Truncation & `--full`**: When a synchronization plan contains more than 10 items, Kasumi truncates output to display the first 5 and last 5 items, separated by an ellipsis line (`... (N more items) ...` / `... (mais N itens) ...`) to maintain clean terminal output. Pass `--full` to list all items without truncation (useful for inspection scripts, complete audits, or piping to log files).
 * `sync` applies local tree modifications, transfers content payloads, and publishes Commit and HEAD records. See [Synchronization](architecture/synchronization.md).
 * See [Updating Kasumi](#updating-kasumi) for update behavior, platform requirements, and compatibility notes.
@@ -88,11 +96,15 @@ The command supports official Windows and Linux x86_64 binaries. Kasumi queries 
 
 Kasumi downloads the platform archive and its published SHA-256 checksum, verifies the archive, then replaces only the Kasumi executable. It keeps the previous executable beside it as a `.kasumi-previous-*` recovery copy. If verification of the replacement fails, Kasumi attempts to restore that copy; this is not a universal rollback guarantee. The updater does not access profile data, configuration files, keys, or configured remote storage, and it does not migrate local data.
 
-On Windows, Kasumi uses the built-in `tar` command and starts a helper that waits for the original process to exit before replacing the executable. The helper requests UAC elevation if installation permissions require it; it completes the update after the original process exits.
+On Windows, Kasumi uses the built-in `tar` command and starts a helper that waits for the original process to exit before replacing the executable. If installation permissions require administrator privileges and the current process lacks them, the updater cancels and instructs the user to run as administrator; it completes the update directly when permissions are sufficient.
 
 On Linux, `curl`, `tar`, and `sha256sum` must be available. Kasumi installs without root when the executable's directory is writable. If permissions deny replacement, it attempts `pkexec`; it falls back to `sudo` only when authentication through `pkexec` is unavailable and the terminal is interactive.
 
-Installations managed by a package manager must be updated through that manager. Kasumi 0.x releases do not guarantee profile, configuration, database, journal, remote-format, downgrade, or cross-version client compatibility. A newer release may require a new profile or remote namespace; it does not convert old state. Preserve your profile, credentials, local data, and remote data independently before changing versions. The updater changes only the executable.
+Installations managed by a package manager must be updated through that manager.
+Kasumi provides no backward compatibility between 0.x releases and no automatic
+migration of configuration, SQLite, journals, or remote formats. The updater
+changes only the executable. Preserve incompatible state and read
+[Upgrading Kasumi](best-practices.md#upgrading-kasumi) before replacing binaries.
 
 ### Partial Synchronization and Explicit Data-Loss Operations
 
@@ -104,7 +116,11 @@ The two manual quarantine commands require the exact final argument `--confirm-p
 
 ### Interruption and Recovery
 
-Synchronization records transaction phase and operation progress in an encrypted and authenticated local transaction journal (`transaction.bin.enc` and `.transactions/<id>`).
+Synchronization records phase and progress in the private `transaction.bin.enc/`
+journal directory: `snapshot.enc`, `transaction.log.enc`, `confirmed.enc`, and,
+during retirement, `retired.enc`. `.transactions/<id>/` separately holds staging
+and backups; these workspace files are not uniformly encrypted. Preserve both
+directories when recovery fails. See the [journal format](architecture/transaction-journal.md).
 
 If synchronization is interrupted:
 * Sync, Fsck, ordinary GC, and `resolve-missing` inspect the existing local transaction journal before their own work. Preview, Status, remote inspection, and manual quarantine/writer maintenance do not run this recovery path.

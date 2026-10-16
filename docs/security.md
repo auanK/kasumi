@@ -36,7 +36,7 @@ The threat model distinguishes three threat scenarios:
 ## Key Derivation & Local Persistence
 
 > [!WARNING]
-> The Password and Password Salt are used exclusively during profile creation or import to derive the master key.
+> The Password and Password Salt are used exclusively during profile creation to derive the master key.
 > The persisted file `key.bin` uses a reversible XOR mask and OS filesystem permissions; it is **not** password-encrypted at rest.
 > An attacker who can read `key.bin` can recover the master key directly without breaking Argon2id.
 
@@ -53,7 +53,7 @@ Password + Password Salt
 * **Password**: Minimum 12 characters.
 * **Password Salt**: Minimum 16 characters. A reproducible, user-provided passphrase that serves as the cryptographic salt for Argon2id key derivation (not an automatically generated or stored random salt). Machines that derive the same vault master key from Password and Password Salt must use the same two inputs. A machine may instead be provisioned with the same 32-byte master key directly.
 * **Argon2id Parameters**: 64 MiB memory (65,536 1-KiB blocks), 3 passes, 1 lane. The Argon2 work area is wiped before release; ephemeral password, salt, and master-key temporary buffers in memory are wiped at defined cleanup points using `crypto_wipe`.
-* **Derivation Scope**: Argon2id is used to derive the 32-byte master key from Password and Password Salt inputs during profile creation or import through that path. Once `key.bin` is generated, routine operations (`kasumi sync`, `kasumi status`, etc.) load the master key directly from `key.bin` and do not require or verify the password.
+* **Derivation Scope**: Argon2id is used to derive the 32-byte master key from Password and Password Salt inputs during profile creation through that path. Once `key.bin` is generated, routine operations (`kasumi sync`, `kasumi status`, etc.) load the master key directly from `key.bin` and do not require or verify the password.
 
 ### Local Key Storage & Masking
 
@@ -132,7 +132,16 @@ Epochs define authenticated retention horizons and boundary anchors. The coopera
 
 Internal routines reject symlinks and Windows reparse points inside private state directories. Writing configuration, master key, and journal files employs temporary files, filesystem flush (`fsync` / `FlushFileBuffers`), and atomic rename replacement.
 
-`db.sqlite` persists accepted history trees, Commit and Epoch references, pending materializations, and the file-hash cache (logical paths, hashes, sizes, timestamps, and native identities). It is not encrypted or authenticated as a whole. The local `inspection-history-v1.cache` can also contain decoded Commit trees and is authenticated but not encrypted. These local files rely on filesystem permissions and disk encryption for at-rest privacy. `transaction.bin.enc` records encrypted, authenticated mutation phases used by [interruption recovery](architecture/transactions-and-recovery.md). [Local Persistent State](architecture/local-state.md) distinguishes these authorities from caches and checkpoints.
+`db.sqlite` persists accepted history trees, Commit and Epoch references, pending materializations, and the file-hash cache (logical paths, hashes, sizes, timestamps, and native identities). It is not encrypted or authenticated as a whole. The local `inspection-history-v1.cache` can also contain decoded Commit trees and is authenticated but not encrypted. These local files rely on filesystem permissions and disk encryption for at-rest privacy. The `transaction.bin.enc/` directory contains encrypted journal snapshot/deltas and authenticated confirmation/retirement records used by [interruption recovery](architecture/transactions-and-recovery.md). Staging and plaintext backups under `.transactions/<id>/` are not uniformly encrypted. [Local Persistent State](architecture/local-state.md) distinguishes these authorities from caches and checkpoints.
+
+Hash-cache fingerprint equality is a metadata optimization, not a proof of
+unchanged bytes. Sync independently hashes destructive targets, but its final
+validation and filesystem syscall are separate: an external same-user writer
+can still race that interval, including during rollback. Kasumi supplies no
+atomic filesystem snapshot or universal external-write protection. Local journal
+durability depends on OS/filesystem/hardware persistence behavior and cannot
+detect restoration of a complete older valid authority bundle. Preserve
+independent backups; retention and GC can permanently remove the last vault copy.
 
 ## Remote Metadata Privacy
 

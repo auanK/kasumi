@@ -2,6 +2,13 @@
 
 `kasumi sync <profile>` prepares the [runtime](application-and-runtime.md), recovers a pending [transaction](transactions-and-recovery.md), then collects local disk, accepted `StoredState`, and authenticated remote history. Local scan and remote observation can overlap. Remote history resolution produces an effective remote tree; [reconciliation](reconciliation.md) creates a candidate shared tree, an ordered `SyncPlan`, and flags for physical repair, local mutation, publication, or accepted-state commit.
 
+Scoped remote observation may use the accepted Commit as a `cached_anchor` only
+after proving ancestry linkage for all loaded branches. A concurrent sibling
+head need not descend from that anchor, even if its marker remains visible;
+loading then retries without the cached anchor to recover the common ancestry.
+The resulting authenticated multi-head history is reconciled and can produce a
+multi-parent merge Commit. See [History and Concurrency](history-and-concurrency.md#cached-anchors-and-scoped-observation).
+
 Sync registers a remote writer when active work is needed, including publication, repair, local mutation, or state commit. Writer markers admit multiple clients concurrently while blocking [GC](garbage-collection.md) from starting destructive maintenance. If initial history is absent, sync initializes the remote transport before publication. A true no-op may update the local file-hash cache without creating a new Commit.
 
 ## Stabilize Before Effects

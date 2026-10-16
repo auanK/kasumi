@@ -11,4 +11,13 @@
 
 The synchronized tree is not intentionally mutated. Read-only resolution and private-path protection may still normalize local permissions; acquiring the lock can create/update its local lock file. The command reads `config.toml`, `key.bin` or an explicit key, SQLite state, the local tree, and remote history/content presence. A pending Sync transaction remains pending. It may affect what the plan can observe or make a later Sync recover first.
 
+Every scan still enumerates the managed tree and reads metadata. Cached hash
+reuse requires matching path, type, size, nanosecond mtime, and reliable native
+identity; otherwise the file is hashed. A differing authenticated ignore
+projection uses `FullHash`. Session cache changes remain in memory and are
+discarded on return. Preview/Status do not perform Sync's independent destructive
+target checks because they apply no mutations. The accepted history anchor is a
+separate optimization: [all observed branches must link to it](history-and-concurrency.md#cached-anchors-and-scoped-observation),
+or loading retries without that anchor before resolution.
+
 Invalid profile/key/transport, an inaccessible or invalid local tree, malformed accepted state, missing remote history for a persisted base, authentication/continuity failure, or reconciliation error is returned at preparation, observing, or calculating stage rather than repaired by the planner. The report is a **point-in-time observation**, not a reservation: local or remote state can change before a later Sync, which reobserves and may choose a different plan. `status` is a direct status query; `sync --dry-run` previews the actions that a Sync would currently plan. They share computation, not a guarantee of identical future effects. See [Synchronization](synchronization.md) for the executing path.

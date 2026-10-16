@@ -39,7 +39,10 @@ Another Kasumi process is currently running on the same machine using the specif
 At the start of `sync`, `fsck`, ordinary `gc`, or `resolve-missing`, Kasumi may report a recovery conflict or indeterminate recovery diagnostic. The detail depends on the journal and observed remote state.
 
 ### Likely Meaning
-A prior synchronization was interrupted before completion (due to network disconnection, power outage, process termination, or SIGINT). Kasumi detected the encrypted local transaction journal (`transaction.bin.enc` and `.transactions/<id>`).
+A prior synchronization was interrupted before completion. Kasumi detected the
+authenticated `transaction.bin.enc/` journal directory. Its snapshot, delta log,
+confirmation, and retirement proof are distinct from the staging and backups in
+`.transactions/<id>/`; preserve the complete evidence if recovery fails.
 
 ### Safe Next Steps
 1. **Automatic Evaluation**: Kasumi evaluates the journal before Sync, Fsck, ordinary GC, or `resolve-missing`. Read-only planners/inspection and manual quarantine/writer maintenance do not run recovery. Prefer `kasumi sync <profile>` to recover; `resolve-missing` additionally makes an explicit logical-deletion decision.
@@ -83,20 +86,27 @@ Sync reports that Windows rejected a path and recommends enabling long-path
 support or shortening the profile path.
 
 ### Likely Meaning
-Windows long-path support is disabled for the system. Kasumi's Windows
-executable opts in, but Windows also requires the `LongPathsEnabled` system
-setting for paths longer than the legacy 260-character limit.
+The host may still enforce legacy Win32 path limits. Kasumi embeds a
+`longPathAware` manifest, but long Win32 paths also require the Windows
+`LongPathsEnabled` policy. The manifest alone does not remove every filesystem
+or API limit. An upload can fail on an internal staging path even when its source
+path is short enough: `.transactions/<id>/upload-batches/<batch>/<content-id>`
+adds directories and identifiers beneath the private profile.
 
 ### Safe Next Steps
-1. Enable Windows long-path support through your system's policy or ask your
-   administrator to enable it, then restart Kasumi.
-2. If that setting cannot be changed, move the profile and synchronized folder
-   to shorter parent paths.
+1. Read the rejected path's reported length and operation. Short paths work
+   without changing global Windows policy; using shorter parent paths for the
+   synchronized folder and private profile may avoid the limit. Preserve the
+   complete profile and recovery state before changing paths.
+2. If long paths are needed, ask your administrator about enabling
+   `LongPathsEnabled`, then restart Kasumi. Host policy, filesystem component
+   limits, and the APIs used by external tools still apply.
 3. Run Sync again. If Kasumi retained a transaction journal after reporting a
    recovery conflict, preserve it and its backups until recovery succeeds.
 
 ### Related Documentation
 * [Configuration and Usage](configuration-and-usage.md)
+* [Microsoft's Win32 path-length contract](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation)
 
 ---
 
@@ -249,8 +259,10 @@ few files have changed.
 
 Every observation walks the local directory tree and reads metadata. A warm
 cache can avoid reading unchanged file content, but cannot skip enumeration or
-remote history observation. `status` and `sync --dry-run` deliberately use full
-hashing, so they do not measure normal sync's cache reuse.
+remote history observation. `status` and `sync --dry-run` also reuse matching
+strong fingerprints, but never save cache deltas. New or changed files,
+insufficient native identity, and cache misses require hashing. An authenticated
+ignore projection differing from local rules uses full hashing.
 
 Enable `KASUMI_PERF_TRACE=1` for a normal sync you intend to apply. These examples
 write diagnostics to `kasumi-perf.log`; normal output remains on the terminal.
@@ -299,8 +311,8 @@ stages can overlap, so do not sum them as total run duration.
 - `KASUMI_PERF_TRACE_LIVE=1` adds live fsck audit-completion and checkpoint-write
   counters when tracing is enabled; it is not a live counter for every operation.
 
-For a read-only diagnostic, trace `kasumi status work`, accounting for its full
-content hashing. Trace output is diagnostic instrumentation, not a stable machine
+For a read-only diagnostic, trace `kasumi status work`, accounting for cache
+misses and any required full hashing. Trace output is diagnostic instrumentation, not a stable machine
 protocol. Check the command's [exit code](configuration-and-usage.md#exit-codes)
 as well as the timing report. See [Local Observation](architecture/local-observation.md).
 
@@ -487,6 +499,15 @@ The table below clarifies the purpose and operational behavior of Kasumi's diagn
 | `kasumi remote summary <profile>` | Overview of vault state | No | No | None | Point-in-time observation |
 
 The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck and GC run pending Sync transaction recovery first, which may change local files or complete remote publication. Manual writer removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit itself does not intentionally modify remote objects. GC may transfer encrypted candidate bytes through a local workspace for quarantine verification without performing Fsck's plaintext audit.
+
+Fsck counts distinct payloads referenced by the effective current tree; physical
+content inspection can include retained historical versions. Neither count is
+the total number of protocol objects. `remote summary` missing/orphan counters
+can also reflect the initial observation before the private history cache adds
+older Commits; use `remote contents`, `remote health`, and `remote orphans` for
+their respective inventories. A cached head can display zero parents/time in
+`remote heads` without being genesis; `remote commit <profile> <id>` inspects
+complete retained metadata. See [History Inspection](architecture/remote-history-inspection.md).
 
 * Use **`status`** to see what will change locally and remotely.
 * Use **`remote health`** for an operational diagnostic without Fsck's payload audit.

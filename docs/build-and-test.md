@@ -7,6 +7,7 @@ Building Kasumi requires CMake 3.28+, Git, and a C++23 compiler:
 * **CMake**: Version 3.28 or later.
 * **Git**: Used for dependency retrieval during the build.
 * **Ninja**: The provided CMake presets use Ninja.
+* **Python 3**: Required to generate the embedded locale header and run repository scripts.
 * **rclone**: Required for rclone-backed remote operation and for system tests that exercise the rclone transport. Not required for building or running local transport tests.
 
 Repository CI exercises:
@@ -15,6 +16,20 @@ Repository CI exercises:
 * Clang from the Windows MSYS2 CLANG64 environment (Debug and Release; tools verified under `/clang64/bin`);
 * GCC 14 on Ubuntu (Debug and Release);
 * Clang on Ubuntu (Debug and Release).
+
+This lists workflow coverage, not the result for an arbitrary commit. Consult
+the Actions runs for the exact SHA; operational provider validation is recorded
+separately in [Provider Certification](provider-certification.md).
+
+### Windows Long Paths
+
+CMake embeds `src/platform/windows/long_path_aware.manifest` into the CLI and
+Windows test executables. Its `longPathAware` declaration opts the process in;
+the host must also permit long Win32 paths through `LongPathsEnabled`. A source
+path can fit while an internal staging path exceeds the host limit. Short build,
+workspace, and profile roots remain useful when that policy is disabled; changing
+the Registry is not required for short-path operation. See
+[Windows path diagnostics](troubleshooting.md#windows-path-exceeds-the-supported-limit).
 
 ## C++ Formatting
 

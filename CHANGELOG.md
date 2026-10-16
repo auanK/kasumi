@@ -2,32 +2,57 @@
 
 ## [0.7.0]
 
+### Highlights
+
+- Strengthened bidirectional Windows/Linux synchronization, concurrent-history observation, local mutation checks, and recovery of interrupted operations.
+- Replaced full-record journal rewrites with an incremental authenticated journal and validated confirmed-session cache.
+- Unified local scanning and persistent BLAKE3 hash reuse across Sync, Preview, and Status.
+
 ### Added
 
-- Added native file metadata observation with Windows volume/full 128-bit file identity and Linux device/inode identity, explicit filesystem errors, and checked timestamp conversion.
+- Native metadata observation with Windows volume/full 128-bit file identity and Linux device/inode identity, explicit filesystem errors, and checked nanosecond timestamp conversion.
+- Incremental journal snapshots and chained encrypted deltas, authenticated confirmation of the durable log prefix, and authenticated retirement for restart-safe cleanup. Incompatible, truncated, or contradictory confirmed state stops recovery and retains evidence.
+- Journal preparation batching, confirmed Record/Tip caching with artifact and key checks, deterministic fault injection in separate test builds, and operational preparation/recovery benchmarks.
+- Windows `longPathAware` manifests for the CLI and test executables, plus diagnostics identifying rejected internal staging paths and their lengths.
 
 ### Changed
 
-- Unified Windows and Linux local observation around one scanner. Each observation enumerates the current tree; normal sync reuses BLAKE3 hashes only when logical path, regular-file type, size, nanosecond mtime, and every native identity component match.
-- Persisted the uniform hash-cache representation in SQLite for reuse between executions, without a time-based expiration. Missing reliable identity forces hashing; `status` and `sync --dry-run` continue to use full hashing. Warm-cache synchronization still performs local enumeration and remote observation.
-- Expanded observation, persistence, destructive reobservation, and Windows privilege-isolation regressions across Debug/Release CI on MSVC 2022, MSYS2 UCRT64 GCC, and Ubuntu GCC 14. Windows GCC jobs verify that their tools come from the UCRT64 environment.
-- Stable release tags are no longer marked as prereleases solely for having major version zero; tags containing `-` are classified as prereleases.
-- Consolidated user documentation around a short README, a dedicated first-use tutorial, and the command reference.
+- Windows and Linux use one scanner. Every observation enumerates the managed tree and reads metadata; hash reuse requires matching logical path, regular-file type, size, nanosecond mtime, and every native identity component.
+- SQLite persists the uniform hash-cache representation without time-based expiration. `status` and `sync --dry-run` reuse eligible fingerprints read-only, hash cache misses or unreliable identities, and never save cache deltas. A differing authenticated ignore projection uses full hashing; a warm cache does not skip enumeration or remote observation.
+- Existing profile configuration and SQLite state are validated before application operations open transport. Unknown profile fields, missing required values, and missing/corrupt/incompatible databases are rejected without migration, recreation, or accepted-base reset.
+- Optimized ignore-rule matching and added regressions for anchored and wildcard patterns.
+- Expanded Debug/Release CI to five toolchains: MSVC 2022, MSYS2 UCRT64 GCC, MSYS2 Clang64, Ubuntu GCC 14, and Ubuntu Clang 19; Windows MSYS2 jobs verify tool paths. Cleaned up test/benchmark namespaces and development-phase identifiers.
+- Stable tags are no longer classified as prereleases solely for having major version zero; tags containing `-` are prereleases. Windows version resources derive from CMake's project version.
+- Consolidated user guides, architecture, maintenance safety limits, and release documentation around the current implementation.
+- Simplified Windows self-update permissions: replaced internal UAC helper elevation (`runas`, process ACL manipulation, nested helper processes) with a direct write-permission check. Non-elevated sessions fail fast with an explicit administrator requirement, while elevated or user-writable sessions install directly.
 
 ### Fixed
 
-- Verify destructive download, deletion, and conflict-rename targets by content independently of cached hashes. A mismatch invalidates the cache row and triggers safe reconciliation; unexpected disappearance, non-regular replacement, or an occupied destination fails closed.
-- Preserve cache invalidations and freshly reobserved fingerprints through finalization and across executions.
-- Correct Windows native timestamp reads, checked FILETIME conversion, 100-nanosecond timestamp equivalence, and timestamp preservation in synchronization and rollback backups.
-- Correct native metadata error handling and unsupported-file-identity fallback instead of accepting incomplete cache fingerprints.
+- Scoped history observation now verifies ancestry linkage across all loaded branches before trusting `cached_anchor`. Concurrent sibling HEADs invalidate the shortcut and trigger loading without that anchor, restoring the common ancestry needed for reconciliation. Includes the regression discovered during real Google Drive validation (`DEFECT-P36-01`).
+- Destructive download, deletion, and conflict-rename targets are verified by content independently of cached hashes. A mismatch invalidates the cache row and triggers reconciliation; unexpected disappearance, non-regular replacement, or an occupied destination fails closed.
+- Preserved cache invalidations and freshly reobserved fingerprints through finalization and across executions, including observations following confirmed local renames.
+- Restored normal Linux local mutations and hardened verified staging, no-overwrite installation/rename, backup restoration, and rollback after interruptions. Detected pre-effect destination conflicts preserve completed peer effects for a fresh Sync; ambiguous recovery retains the journal and required backups.
+- Hardened Commit/HEAD publication and recovery checks around confirmed local progress. Commit upload alone is not publication; exact marker/Commit/Epoch and accepted-state contradictions stop recovery rather than silently selecting rollback or success.
+- Corrected Windows native timestamp reads, checked FILETIME conversion, 100-nanosecond timestamp equivalence, and timestamp preservation in synchronization and rollback backups.
+- Corrected native metadata error handling and unsupported-identity fallback. Reworked the file-identity regression to avoid assuming that a filesystem cannot immediately reuse an identifier, and made the Windows sharing-violation retry regression deterministic.
 
 ### Removed
 
-- Removed Windows NTFS USN Change Journal observation, its persisted observation checkpoints and directory-lineage machinery, and selective tree patching. The encrypted transaction journal used for interruption recovery remains in use.
+- Windows NTFS USN Change Journal scanning, observation checkpoints, directory-lineage machinery, and selective tree patching. The authenticated **transaction journal** remains in use.
+- Obsolete fixed remote-layout readers/helpers, former custody-artifact replay/cleanup, and unused APIs/tests tied to those implementations. Unknown objects and unsupported custody artifacts are preserved rather than adopted or deleted.
+- Windows self-update UAC elevation helper mode (`--kasumi-update-elevated`), `launch_elevated_windows`, and process query-access grants.
 
-### Upgrade Notes
+### Breaking Changes
 
-- The uniform cache representation discards previous file-hash cache entries and rebuilds them during synchronization, so the first sync after upgrading may rehash all local files. This cache refresh does not require deleting `db.sqlite` or accepted history.
+- Kasumi provides **no backward compatibility between 0.x releases**. There is no automatic SQLite, journal, configuration, credential, or remote-format migration, no cross-version client interoperability contract, and no supported downgrade procedure.
+- Current SQLite validation, fingerprint encoding, journal codec/envelopes, and key-derived remote layout must not be treated as an in-place upgrade path from older releases. The updater replaces only the executable. Preserve incompatible state and independent copies of files/credentials; do not delete `db.sqlite` or recovery evidence to force synchronization. See [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi).
+
+### Validation
+
+- Stabilization records include complete Debug regression runs on five local toolchains, with platform/privilege-dependent skips. Hosted Ubuntu and Windows CI passed for the corrected commit `e1a0ce3`, including Debug/Release builds and tests on all five configured toolchains; run links are recorded in [Provider Certification](docs/provider-certification.md#source-and-build-identity).
+- Real Google Drive/rclone validation used Windows 11 and Ubuntu WSL2/ext4, independent profiles, bidirectional changes, 1/10/100 MiB files and a 100 MiB update, conflicts, simultaneous publication, abrupt process/transport failure, reconnection/recovery, payload audits, and a 100-file workload. The interrupted large-file scenario used 10 MiB. Cross-client BLAKE3 and SHA-256 matched after convergence.
+- GC blocked observed abandoned writers, then completed after verified manual marker removal with zero candidates and zero purged objects. No eligible-object purge or quarantine repair/restoration was established by that run.
+- [Provider Certification](docs/provider-certification.md#google-drive-operational-validation--070) distinguishes initial source, post-fix binaries, hosted CI, historical backend results, and the limits of the operational evidence. This preparation record does not declare an RC or release published.
 
 ## [0.6.1]
 

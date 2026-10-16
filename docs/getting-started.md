@@ -5,10 +5,9 @@ its own local folder and profile; the shared destination stores encrypted object
 not a browsable copy of your files. For exact command syntax and options, use
 [Configuration and Usage](configuration-and-usage.md).
 
-Use the same Kasumi release on every client. The 0.x series does not guarantee
-that different releases can share profiles or synchronize with one another.
-A later 0.x release may require a new profile or remote namespace; it will not
-migrate old data automatically.
+Use the same Kasumi release on every client. Kasumi provides no backward
+compatibility between 0.x releases and no automatic migration; see the
+[upgrade precautions](best-practices.md#upgrading-kasumi) before reusing existing data.
 
 ## 1. Obtain Kasumi
 
@@ -56,7 +55,7 @@ provenance attestations for both archives and the consolidated checksum list.
 
 ### Build from Source
 
-Install CMake 3.28+, Git, Ninja, and a C++23 compiler. On Windows, use a Visual
+Install CMake 3.28+, Git, Ninja, Python 3, and a C++23 compiler. On Windows, use a Visual
 Studio 2022 developer shell or an MSYS2 UCRT64 toolchain environment. On Linux,
 repository CI uses GCC 14. From the repository root:
 
@@ -67,6 +66,14 @@ cmake --build --preset default
 
 The executable is `build/kasumi.exe` on Windows or `build/kasumi` on Linux.
 See [Build and Test](build-and-test.md) for toolchain setup and tests.
+
+### Windows Path Lengths
+
+Kasumi embeds a `longPathAware` manifest. Long Win32 paths also depend on the
+host's `LongPathsEnabled` policy; short paths work without changing that policy.
+Keep synchronized and private profile paths short when long paths are disabled:
+internal staging adds directories and identifiers beyond the source path's length.
+See [Windows path diagnostics](troubleshooting.md#windows-path-exceeds-the-supported-limit).
 
 ## 2. Choose Shared Storage
 

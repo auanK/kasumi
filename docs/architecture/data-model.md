@@ -29,9 +29,9 @@ Its canonical representation follows this structure:
 Snapshot.rows
 ├── ""
 ├── "Documents"
-├── "Documents/a.txt"
 ├── "Documents/Projects"
-└── "Documents/Projects/b.txt"
+├── "Documents/Projects/b.txt"
+└── "Documents/a.txt"
 ```
 
 `Snapshot.rows` is stored in memory as a flat, contiguous, path-based, and canonically ordered array (`std::vector<NodeRow>`). Hierarchical relationships are derived purely from relative paths; operations traverse the tree without allocating pointer-linked node graphs in memory.
@@ -55,7 +55,7 @@ Each `NodeRow` describes an individual file or directory:
 
 Before reconciliation or publication, snapshot validation verifies:
 1. Canonical root row presence, empty path `""`, and directory flag;
-2. Strict canonical lexicographical ordering and exact path uniqueness;
+2. Strict component-wise lexicographical ordering and exact path uniqueness;
 3. Explicit parent directory row existence for every file and subdirectory;
 4. Portable logical path component validation (see [Synchronized Path Rules](../configuration-and-usage.md#synchronized-path-rules));
 5. Portable Unicode case-key uniqueness preventing case-equivalent path collisions within the snapshot.

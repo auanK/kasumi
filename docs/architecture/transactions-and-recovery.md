@@ -1,6 +1,6 @@
 # Transactions and Recovery
 
-Sync durably records a transaction before applying its [SyncPlan](synchronization.md). The encrypted, authenticated `transaction.bin.enc` is recovery authority for **this in-progress Sync**, not a remote transaction or a replacement for the accepted [StoredState](local-state.md). Its record pins the observed local base Commit ID/height, remote generation and head or parent IDs, old/new pending-materialization paths, immutable plan, per-operation progress, whether publication is required, and later Commit/Ciphertext/HEAD/Epoch references. `.transactions/<id>` holds staging and pre-mutation backups. [Remote Layout and Publication](remote-layout.md) owns object identities and verification methods.
+Sync durably records a transaction before applying its [SyncPlan](synchronization.md). The private `transaction.bin.enc/` directory is recovery authority for **this in-progress Sync**, separate from the accepted [StoredState](local-state.md). Its [authenticated journal](transaction-journal.md) consists of an immutable `snapshot.enc`, deltas in `transaction.log.enc`, `confirmed.enc` selecting the durable prefix, and a `retired.enc` proof during cleanup. The confirmed record pins the observed local base Commit ID/height, remote generation and head or parent IDs, old/new pending-materialization paths, immutable plan, per-operation progress, publication requirement, and later Commit/Ciphertext/HEAD/Epoch references. `.transactions/<id>/` holds staging and pre-mutation backups, which are not uniformly encrypted. [Remote Layout and Publication](remote-layout.md) owns object identities and verification methods.
 
 ```text
 old StoredState + durable journal → staged/applied plan → verified Commit
@@ -26,7 +26,7 @@ The phase is the **last saved checkpoint**, not proof that a following filesyste
 | `EpochUploaded` | Genesis or pruning Epoch may be on remote storage; verification/chain acceptance may be incomplete. | Authenticate the exact Epoch and continuity; genesis can be retried/verified. Missing or divergent pruning Epoch is a conflict, and unreadable remote state remains indeterminate. |
 | `EpochVerified` | The required new Epoch was authenticated, but SQLite may still be old or its write may have completed before this phase advanced. | Compare SQLite with old or intended target, reject a third state or Epoch regression, then commit/confirm the new accepted base. |
 | `DatabaseCommitted` | New `StoredState` is intended to be durable; marker pruning and local cleanup may still be pending. | Recheck SQLite against authenticated Commit and pending intent, prune eligible ancestral markers for publishing Sync, then continue cleanup. No rollback of accepted publication. |
-| `CleanupCompleted` | Marker processing is checkpointed; the workspace or journal file may still exist. | Remove the transaction workspace **before** clearing the journal. A cleanup failure keeps the journal for another cleanup attempt. |
+| `CleanupCompleted` | Marker processing is checkpointed; the workspace or journal directory may still exist. | Remove the transaction workspace **before** authenticated journal retirement/clear. A cleanup failure keeps recovery evidence for another attempt. |
 
 Normal publication verifies the encrypted Commit object **before** publishing HEAD. A Commit upload or successful PUT response alone cannot establish that HEAD is visible. After `HeadPublished`, recovery requires a valid exact marker and authenticated reachable Commit with the recorded parents and Ciphertext ID. It resolves intended pending-materialization paths against that Commit and checks old/target SQLite state before accepting the new base. Transport uncertainty yields `RecoveryIndeterminate`; a contradictory marker, Commit, Epoch, or SQLite state yields `RecoveryConflict`. Remote operations are inspected/verified rather than assumed successful or blindly repeated.
 
@@ -43,7 +43,18 @@ For **pre-publication publishing** transactions (`Started` through `CommitPrepar
 
 A **local-only** transaction (`publication_required=false`) pins exactly one observed remote logical head and publishes no new Commit/HEAD/Epoch. Normal Sync validates the materialized tree against that head before saving SQLite. Recovery may resume unfinished storage-repair uploads and local operations, but it only accepts a target already durably committed in SQLite; if SQLite still matches the old base it rolls back, and if it matches neither old nor target it fails as a conflict. Pending materializations remain explicit logical files awaiting safe local materialization or repair, not silent deletions.
 
-At the start of Sync, Fsck, ordinary GC, or `resolve-missing`, recovery discards an abandoned temporary journal file, loads and authenticates the final journal, and cleans orphan transaction workspaces only when no active journal exists. Invalid/authentication-failed journals or unsafe/missing required backups stop recovery. Remote-writing recovery re-registers a writer and respects the GC barrier; failure to gain admission stops rather than bypasses GC. After verified rollback or roll-forward, workspace deletion and journal removal are durable cleanup steps; a failed step is reported for the next attempt. Preview, Status, `remote ...`, and manual quarantine/writer maintenance do **not** enter this recovery path.
+At the start of Sync, Fsck, ordinary GC, or `resolve-missing`, recovery loads the
+authenticated journal authority and completes authenticated retirement when
+applicable. Only confirmed log bytes govern replay; unconfirmed tails and `.new`
+output are not recovery authority. Orphan transaction workspaces are cleaned only
+when no active journal remains. Invalid journals or unsafe/missing required
+backups stop recovery. Remote-writing recovery re-registers a writer and respects
+the GC barrier; failure to gain admission stops rather than bypasses GC. After
+verified rollback or roll-forward, workspace deletion and authenticated journal
+retirement are durable cleanup steps; failures retain evidence for the next
+attempt. Preview, Status, `remote ...`, and manual quarantine/writer maintenance
+do **not** enter this recovery path. See the [journal contract](transaction-journal.md)
+for confirmation, cache validation, retirement, and durability limits.
 
 ## Local mutation contract and external writers
 
@@ -53,6 +64,6 @@ Linux supports normal local Sync mutations. A Download verifies the staged plain
 
 These checks detect changes observed before an operation's final validation. Validation and the following filesystem syscall are separate: an unrelated process can still change a file or namespace in that interval, and an already-open handle can continue writing after a rename. Kasumi does not claim to preserve arbitrary external edits made in that race window; such an edit can be overwritten, removed, or moved by the operation. The same limitation applies to rollback. Atomic replacement prevents a partial candidate from appearing at the destination, but it does not make validation conditional on object identity. This contract accepts that residual risk for ordinary local filesystem use.
 
-If a destination conflict is detected before that operation has an effect, Sync keeps completed peer file effects on disk, clears their progress and the transaction journal durably, and returns a concurrent-modification error so the next Sync reobserves and replans. It does not retry the stale plan in place. Other transfer and mutation failures use the established rollback/resume path; if rollback or recovery is ambiguous, the journal and required backups remain. Journal encoding is unchanged; progress continues to use the existing operation states.
+If a destination conflict is detected before that operation has an effect, Sync keeps completed peer file effects on disk, clears their progress and the transaction journal durably, and returns a concurrent-modification error so the next Sync reobserves and replans. It does not retry the stale plan in place. Other transfer and mutation failures use the established rollback/resume path; if rollback or recovery is ambiguous, the journal and required backups remain. Progress uses the operation states above.
 
 After a crash between a filesystem effect and its next progress checkpoint, recovery uses the authenticated plan, exact expected content, and verified backup to decide whether the effect can be reversed. For a Download still recorded as `BackupCreated`, a destination matching the planned remote hash is accepted by content equivalence and rolled back from the verified backup; the hash does not prove that Kasumi installed those bytes. Content matching neither the prepared original nor the planned remote file is an unknown conflict and is preserved with the journal for diagnosis. Do not remove a retained journal, transaction workspace, backup, or custody file manually.

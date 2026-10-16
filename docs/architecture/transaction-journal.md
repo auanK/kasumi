@@ -29,8 +29,11 @@ retains that unconfirmed tail; a verified retry must truncate and sync it before
 appending. This distinction does not determine whether those extra bytes came
 from an interrupted writer or deliberate tampering.
 
-There is no session cache. Every save reconstructs authenticated persisted state;
-failed sync never means that bytes are absent. An equal-state retry re-establishes
+An owned `Session` caches the last confirmed Record and Tip in memory. Persisted,
+authenticated snapshot, log prefix, and confirmation remain authoritative; the
+cache is used only while its validation checks hold, otherwise load/save replays
+persisted state. A failed durability sync never means that bytes are absent.
+An equal-state retry re-establishes
 durability without adding another sequence number. Concurrent calls serialize;
 stale checkpoints that regress phase or progress are rejected. The Coordinator's
 profile lock provides process ownership. `SaveMode::Rollback` explicitly permits

@@ -7,6 +7,6 @@ The two maintenance commands have different lifecycles and verification targets:
 | Operation | Architectural flow |
 |---|---|
 | [`fsck`](fsck.md) | Recover a pending Sync transaction; authenticate history/namespace; audit **every referenced content payload** with AEAD, logical hash, and size; retain only private checkpoint metadata. No GC mutation. |
-| [`gc`](garbage-collection.md) | Recover a pending Sync transaction; establish a writer-excluding barrier and provider visibility; validate stable reachability including Epoch anchors; restore, quarantine, or eventually purge physical objects. No full Fsck payload audit. |
+| [`gc`](garbage-collection.md) | Recover a pending Sync transaction; publish a cooperative barrier, check observed writers and probe visibility; validate stable reachability including Epoch anchors; restore, quarantine, or eventually purge physical objects. Sync must be stopped and maintenance serialized across clients; barrier/probe checks do not prove distributed exclusion or provider-wide consistency. No full Fsck payload audit. |
 
 [Remote Inspection](remote-inspection.md) exposes logical, physical, and maintenance diagnostics without entering either maintenance flow. In particular, [`remote health`](remote-maintenance-inspection.md) is a diagnostic composition and [`remote contents --audit`](remote-content-inspection.md) is a payload inspection report, not Fsck.

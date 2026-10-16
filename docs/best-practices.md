@@ -35,9 +35,13 @@ Kasumi provides non-mutating preview commands to inspect synchronization plans b
 
 For internal planning details, see [Preview and Status](architecture/planning-and-status.md).
 
-Both previews hash local file content in full. Normal sync can reuse persisted
-hashes when the complete fingerprint matches, but it still walks the local tree
-and observes remote history. Diagnose slow runs with
+Both previews enumerate the managed tree and read metadata, reusing persisted
+BLAKE3 hashes only when the complete native fingerprint matches. Cache misses,
+changed files, or insufficient identity require content hashing. An effective
+ignore projection that differs from local rules uses full hashing. Preview and
+Status never save cache deltas; Sync saves them on successful finalization and
+independently verifies destructive local targets by content. These checks do not
+provide an atomic filesystem snapshot. Diagnose slow runs with
 [performance tracing](troubleshooting.md#slow-synchronization-or-preview).
 
 ## Backups
@@ -125,10 +129,10 @@ local account: same-user processes can access its private state. See
 Kasumi follows a strict pre-1.0 release policy:
 
 * **Review Release Compatibility**: Read release notes and compatibility information before replacing binaries.
-* **Pre-1.0 Compatibility Boundary**: Before version 1.0, internal persisted formats (such as local SQLite database schemas, transaction journals, or internal protocol layouts) are **not** guaranteed to remain compatible across releases.
-* **No Cross-Version Contract**: Kasumi 0.x does not guarantee profile, configuration, remote-vault, downgrade, or client-to-client compatibility across releases. A newer version may require a new profile, configuration, or remote namespace; reconstruct state only from independently preserved data.
+* **No Backward Compatibility**: Kasumi provides no backward compatibility between 0.x releases. Internal formats can change, and existing profiles may be incompatible. Clients on different releases have no interoperability contract; use the same release on every client. Downgrade is not a supported recovery procedure.
 * **Complete In-Flight Operations**: Complete active synchronizations and transaction recovery before replacing binaries. Never delete transaction journals to bypass recovery.
-* **No Automatic Migration**: Kasumi does not convert incompatible persisted formats. Preserve the old profile and vault data; do not delete them just because the current executable rejects them.
+* **No Automatic Migration**: Kasumi does not migrate old SQLite databases, journals, configuration, credentials, or remote formats, and does not reinterpret old remote layouts. Preserve the old executable, complete profile, credentials, local files, and remote data independently. Do not delete `db.sqlite`, the accepted base, or recovery evidence to force initialization. A new profile or namespace may be necessary; there is no supported in-place migration procedure.
+* **Executable Update Only**: `kasumi update` replaces only the executable. It neither makes existing data compatible nor validates interoperability with other clients; see [Updating Kasumi](configuration-and-usage.md#updating-kasumi).
 
 ## Automation
 

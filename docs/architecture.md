@@ -22,6 +22,7 @@ CLI/profile → local observation + authenticated remote history + StoredState
 | What does `sync --dry-run`/Preview or `status` observe and report? | [Preview and Status](architecture/planning-and-status.md) |
 | How does `sync` stabilize, execute, and publish? | [Synchronization](architecture/synchronization.md) |
 | What do transaction phases mean, and how does interruption recovery decide? | [Transactions and Recovery](architecture/transactions-and-recovery.md) |
+| Which journal bytes are confirmed, cached, replayed, or retired? | [Incremental Transaction Journal](architecture/transaction-journal.md) |
 | How does `fsck` audit structure and every referenced payload? | [Fsck](architecture/fsck.md) |
 | When can `gc` quarantine, restore, or purge safely? | [Garbage Collection](architecture/garbage-collection.md) |
 | How are Commit DAGs, logical heads, merge bases, Epochs, and retention resolved? | [History and Concurrency](architecture/history-and-concurrency.md) |

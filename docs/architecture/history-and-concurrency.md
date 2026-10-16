@@ -46,6 +46,31 @@ Commit publication does not require an exclusive global synchronization lock tha
 
 ## Merge Base & Three-Way Reconciler
 
+### Cached anchors and scoped observation
+
+The client's accepted Commit can supply a `cached_anchor`: its already accepted
+Snapshot and height bound history loading without rereading that tree's entire
+ancestry. Scoped observation limits remote discovery to the HEADs and ancestry
+needed for the current view; it still authenticates newly loaded history.
+An unchanged accepted Epoch permits considering the shortcut. A changed Epoch
+uses its authenticated retention frontier instead.
+
+The cached anchor is usable only when the loaded graph proves linkage back to
+that anchor for every loaded branch. Seeing the anchor's own physical marker is
+insufficient. If A and B publish sibling commits from P, A's cached commit is not
+an ancestor of B's commit. Truncating at A would hide the common ancestry needed
+to resolve the siblings. When linkage cannot be established, loading retries
+without the cached anchor, obtaining the complete ancestry needed by the retained
+history view. This fallback applies to scoped observation as well as full
+inventory loading; it does not treat the siblings as corruption or serialize
+their publishers.
+
+The authenticated branches are then resolved by the merge-base rules below.
+This history frontier is distinct from the file-hash cache and the private
+complete-history inspection cache; neither can bypass ancestry validation.
+
+### Selecting the merge base
+
 When a client observes multiple concurrent heads (`CA` and `CB`), it traverses ancestry to determine their merge base:
 
 1. Compute common ancestors of all active logical heads;
