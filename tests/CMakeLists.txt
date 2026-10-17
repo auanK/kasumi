@@ -112,6 +112,15 @@ kasumi_add_test_suite(
 )
 
 kasumi_add_test_suite(
+    kasumi_test_unit_gc_content_removal
+    "unit.application.integrity.gc_content_removal"
+    SOURCES
+        unit/application/integrity/test_gc_content_removal.cpp
+    LIBRARIES
+        kasumi_application
+)
+
+kasumi_add_test_suite(
     kasumi_test_integration_sync
     "integration.sync"
     SOURCES

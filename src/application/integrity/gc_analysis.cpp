@@ -94,11 +94,60 @@ std::expected<void, Error> release_barrier(protocol::RegistrationState& barrier)
     return {};
 }
 
-} // namespace
+constexpr GcContentRemovalErrorCode to_removal_code(GcAnalysisErrorCode code) noexcept {
+    switch (code) {
+    case GcAnalysisErrorCode::Preconditions: return GcContentRemovalErrorCode::Preconditions;
+    case GcAnalysisErrorCode::BarrierAcquisition: return GcContentRemovalErrorCode::BarrierAcquisition;
+    case GcAnalysisErrorCode::WriterPresent: return GcContentRemovalErrorCode::WriterPresent;
+    case GcAnalysisErrorCode::OwnershipLost: return GcContentRemovalErrorCode::OwnershipLost;
+    case GcAnalysisErrorCode::Observation: return GcContentRemovalErrorCode::Observation;
+    case GcAnalysisErrorCode::SnapshotChanged: return GcContentRemovalErrorCode::SnapshotChanged;
+    case GcAnalysisErrorCode::BarrierRelease: return GcContentRemovalErrorCode::BarrierRelease;
+    case GcAnalysisErrorCode::Cancelled: return GcContentRemovalErrorCode::Cancelled;
+    }
+    return GcContentRemovalErrorCode::Preconditions;
+}
 
-Analysis analyze_gc_under_barrier(transport::Transport& storage,
-                                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                                  const std::filesystem::path& workspace_root) {
+using RemovalFailure = GcContentRemovalErrorCode;
+
+GcContentRemovalError content_removal_failure(
+    RemovalFailure code,
+    Error cause,
+    std::size_t removed = 0,
+    std::size_t absent = 0,
+    bool uncertain = false) {
+    return {
+        .code = code,
+        .cause = std::move(cause),
+        .cleanup_error = std::nullopt,
+        .removed_content = removed,
+        .already_absent = absent,
+        .uncertain_mutation = uncertain,
+    };
+}
+
+GcContentRemovalError content_removal_cancelled(
+    std::size_t removed = 0,
+    std::size_t absent = 0) {
+    return content_removal_failure(
+        RemovalFailure::Cancelled,
+        {.code = ErrorCode::ConcurrentChange,
+         .detail = "GC content removal cancelled",
+         .object_identifier = std::nullopt},
+        removed,
+        absent);
+}
+
+struct StableGcObservation {
+    protocol::RegistrationState barrier;
+    history_storage::RemoteLayout layout;
+    GcSnapshot snapshot;
+};
+
+std::expected<StableGcObservation, GcAnalysisError>
+acquire_and_observe_gc(transport::Transport& storage,
+                       std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                       const std::filesystem::path& workspace_root) {
     std::error_code error;
     if (!transport::valid(storage) || workspace_root.empty() ||
         !std::filesystem::is_directory(workspace_root, error)) {
@@ -155,14 +204,166 @@ Analysis analyze_gc_under_barrier(transport::Transport& storage,
         return std::move(*second);
     }();
 
-    auto cleanup = release_barrier(*barrier);
     if (!observed) {
+        auto cleanup = release_barrier(*barrier);
         if (!cleanup) observed.error().cleanup_error = std::move(cleanup.error());
-        return observed;
+        return std::unexpected(std::move(observed.error()));
     }
-    if (!cleanup) return std::unexpected(failure(Failure::BarrierRelease, std::move(cleanup.error())));
+
+    return StableGcObservation{
+        .barrier = std::move(*barrier),
+        .layout = layout,
+        .snapshot = std::move(*observed),
+    };
+}
+
+} // namespace
+
+Analysis analyze_gc_under_barrier(transport::Transport& storage,
+                                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                                  const std::filesystem::path& workspace_root) {
+    auto session = acquire_and_observe_gc(storage, key, workspace_root);
+    if (!session) {
+        return std::unexpected(std::move(session.error()));
+    }
+
+    auto cleanup = release_barrier(session->barrier);
+    if (!cleanup) {
+        return std::unexpected(failure(Failure::BarrierRelease, std::move(cleanup.error())));
+    }
     if (platform::cancellation::requested()) return std::unexpected(cancelled());
-    return observed;
+    return std::move(session->snapshot);
+}
+
+std::expected<GcContentRemovalResult, GcContentRemovalError>
+remove_orphan_content_under_barrier(
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const std::filesystem::path& workspace_root) {
+    auto session = acquire_and_observe_gc(storage, key, workspace_root);
+    if (!session) {
+        auto& err = session.error();
+        return std::unexpected(GcContentRemovalError{
+            .code = to_removal_code(err.code),
+            .cause = std::move(err.cause),
+            .cleanup_error = std::move(err.cleanup_error),
+            .removed_content = 0,
+            .already_absent = 0,
+            .uncertain_mutation = false,
+        });
+    }
+
+    GcContentRemovalResult result;
+    for (const auto& candidate : session->snapshot.candidates) {
+        if (candidate.kind == GcCandidateKind::Content) {
+            ++result.content_candidates;
+        } else if (candidate.kind == GcCandidateKind::CommitVariant) {
+            ++result.pending_commit_variants;
+        }
+    }
+
+    std::optional<GcContentRemovalError> removal_failure;
+
+    for (const auto& candidate : session->snapshot.candidates) {
+        if (candidate.kind != GcCandidateKind::Content) {
+            continue;
+        }
+
+        if (platform::cancellation::requested()) {
+            removal_failure = content_removal_cancelled(result.removed_content, result.already_absent);
+            break;
+        }
+
+        if (auto owner = check_owner(session->barrier); !owner) {
+            removal_failure = content_removal_failure(
+                RemovalFailure::OwnershipLost,
+                std::move(owner.error().cause),
+                result.removed_content,
+                result.already_absent);
+            break;
+        }
+
+        if (auto writers = check_writers(storage, session->layout, Failure::OwnershipLost); !writers) {
+            removal_failure = content_removal_failure(
+                writers.error().code == Failure::WriterPresent
+                    ? RemovalFailure::WriterPresent
+                    : RemovalFailure::OwnershipLost,
+                std::move(writers.error().cause),
+                result.removed_content,
+                result.already_absent);
+            break;
+        }
+
+        auto pres = transport::presence(storage, candidate.identifier);
+        if (!pres) {
+            removal_failure = content_removal_failure(
+                RemovalFailure::Observation,
+                transport_error(pres.error(), candidate.identifier),
+                result.removed_content,
+                result.already_absent);
+            break;
+        }
+
+        if (*pres == transport::Presence::Absent) {
+            ++result.already_absent;
+            continue;
+        }
+
+        auto rem = storage.storage.remove(storage.state.get(), candidate.identifier);
+        if (rem.has_value()) {
+            if (*rem == transport::Removal::Removed) {
+                ++result.removed_content;
+            } else if (*rem == transport::Removal::AlreadyAbsent) {
+                ++result.already_absent;
+            }
+        } else {
+            auto primary_cause = transport_error(rem.error(), candidate.identifier);
+            if (platform::cancellation::requested()) {
+                removal_failure = GcContentRemovalError{
+                    .code = RemovalFailure::Cancelled,
+                    .cause = std::move(primary_cause),
+                    .cleanup_error = std::nullopt,
+                    .removed_content = result.removed_content,
+                    .already_absent = result.already_absent,
+                    .uncertain_mutation = true,
+                };
+                break;
+            }
+            removal_failure = content_removal_failure(
+                RemovalFailure::RemovalFailure,
+                std::move(primary_cause),
+                result.removed_content,
+                result.already_absent,
+                true);
+            break;
+        }
+    }
+
+    if (!removal_failure && platform::cancellation::requested()) {
+        removal_failure = content_removal_cancelled(result.removed_content, result.already_absent);
+    }
+
+    auto cleanup = release_barrier(session->barrier);
+    if (removal_failure) {
+        if (!cleanup) {
+            removal_failure->cleanup_error = std::move(cleanup.error());
+        }
+        return std::unexpected(std::move(*removal_failure));
+    }
+
+    if (!cleanup) {
+        return std::unexpected(content_removal_failure(
+            RemovalFailure::BarrierRelease,
+            std::move(cleanup.error()),
+            result.removed_content,
+            result.already_absent));
+    }
+
+    if (platform::cancellation::requested()) {
+        return std::unexpected(content_removal_cancelled(result.removed_content, result.already_absent));
+    }
+
+    return result;
 }
 
 } // namespace kasumi::application::integrity

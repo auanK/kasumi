@@ -114,6 +114,43 @@ analyze_gc_under_barrier(transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         const std::filesystem::path& workspace_root);
 
+struct GcContentRemovalResult {
+    std::size_t content_candidates = 0;
+    std::size_t removed_content = 0;
+    std::size_t already_absent = 0;
+    std::size_t pending_commit_variants = 0;
+
+    bool operator==(const GcContentRemovalResult&) const = default;
+};
+
+enum class GcContentRemovalErrorCode {
+    Preconditions,
+    BarrierAcquisition,
+    WriterPresent,
+    OwnershipLost,
+    Observation,
+    SnapshotChanged,
+    RemovalFailure,
+    BarrierRelease,
+    Cancelled
+};
+
+struct GcContentRemovalError {
+    GcContentRemovalErrorCode code = GcContentRemovalErrorCode::Preconditions;
+    Error cause;
+    std::optional<Error> cleanup_error;
+    std::size_t removed_content = 0;
+    std::size_t already_absent = 0;
+    bool uncertain_mutation = false;
+};
+
+// Removes eligible orphan Content objects directly within an active maintenance barrier session.
+std::expected<GcContentRemovalResult, GcContentRemovalError>
+remove_orphan_content_under_barrier(
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const std::filesystem::path& workspace_root);
+
 // Audits the history and reachable content objects.
 std::expected<FsckResult, Error>
 fsck(const runtime::RuntimeData& runtime_data,
