@@ -93,6 +93,15 @@ kasumi_add_test_suite(
 )
 
 kasumi_add_test_suite(
+    kasumi_test_unit_gc_snapshot
+    "unit.application.integrity.gc_snapshot"
+    SOURCES
+        unit/application/integrity/test_gc_snapshot.cpp
+    LIBRARIES
+        kasumi_application
+)
+
+kasumi_add_test_suite(
     kasumi_test_integration_sync
     "integration.sync"
     SOURCES

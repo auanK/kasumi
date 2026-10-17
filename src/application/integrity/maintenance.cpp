@@ -1824,4 +1824,234 @@ bool same_gc_candidates(std::span<const GcCandidate> left,
     return std::ranges::equal(left, right);
 }
 
+std::expected<GcSnapshot, Error>
+collect_gc_snapshot(transport::Transport& storage,
+                    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                    const std::filesystem::path& workspace_root) {
+    if (!transport::valid(storage)) {
+        return std::unexpected(
+            make_error(ErrorCode::InvalidInput, "invalid storage transport"));
+    }
+    std::error_code ws_err;
+    if (workspace_root.empty() || !std::filesystem::exists(workspace_root, ws_err)) {
+        return std::unexpected(make_error(
+            ErrorCode::WorkspaceFailure, "invalid or non-existent workspace root"));
+    }
+
+    auto listing = transport::list(storage);
+    if (!listing) {
+        return std::unexpected(transport_error(listing.error()));
+    }
+    for (const auto& identifier : *listing) {
+        if (identifier.empty()) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "storage listing contains empty identifier"));
+        }
+    }
+    std::ranges::sort(*listing);
+    listing->erase(std::ranges::unique(*listing).begin(), listing->end());
+
+    auto history = history_storage::inventory_reachability(
+        storage, key, *listing, workspace_root);
+    if (!history) {
+        return std::unexpected(history_storage_error(history.error()));
+    }
+
+    if (history->logical_heads.empty()) {
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure, "remote history absent"));
+    }
+    if (!history->unknown_history_objects.empty()) {
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure,
+                       list_detail("unknown history objects: ",
+                                   history->unknown_history_objects)));
+    }
+    if (!history->missing_parent_ids.empty()) {
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure,
+                       list_detail("commits pais ausentes: ",
+                                   history->missing_parent_ids)));
+    }
+    if (!history->invalid_parent_ids.empty()) {
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure,
+                       list_detail("invalid parent commits: ",
+                                   history->invalid_parent_ids)));
+    }
+
+    std::vector<std::string> invalid_markers;
+    for (const auto& marker : history->markers) {
+        if (marker.state != history_storage::ReachabilityMarkerState::Valid) {
+            invalid_markers.push_back(marker.identifier);
+        }
+    }
+    if (!invalid_markers.empty()) {
+        std::ranges::sort(invalid_markers);
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure,
+                       list_detail("invalid or unstable head markers: ",
+                                   invalid_markers)));
+    }
+
+    std::vector<std::string> invalid_commits;
+    for (const auto& commit : history->commits) {
+        if (!commit.valid &&
+            std::ranges::any_of(commit.variants, [](const auto& variant) {
+                return !variant.identifier.empty();
+            })) {
+            invalid_commits.push_back(commit.commit_id);
+        }
+    }
+    if (!invalid_commits.empty()) {
+        std::ranges::sort(invalid_commits);
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure,
+                       list_detail("invalid commits: ", invalid_commits)));
+    }
+
+    std::vector<std::string> invalid_variants;
+    for (const auto& commit : history->commits) {
+        for (const auto& variant : commit.variants) {
+            if (variant.state ==
+                    history_storage::detail::VariantState::InvalidCiphertext ||
+                variant.state ==
+                    history_storage::detail::VariantState::InvalidCommit) {
+                invalid_variants.push_back(
+                    variant.identifier.empty() ? commit.commit_id : variant.identifier);
+            }
+        }
+    }
+    if (!invalid_variants.empty()) {
+        std::ranges::sort(invalid_variants);
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure,
+                       list_detail("invalid commit variants: ", invalid_variants)));
+    }
+
+    auto content = history_storage::inventory_content_reachability(
+        storage, key, *listing, *history, workspace_root, false);
+    if (!content) {
+        return std::unexpected(history_storage_error(content.error()));
+    }
+
+    if (!content->unknown_storage_objects.empty()) {
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure,
+                       list_detail("unknown physical identifiers: ",
+                                   content->unknown_storage_objects)));
+    }
+
+    std::vector<std::string> damaged;
+    for (const auto& entry : content->contents) {
+        if (entry.reachable &&
+            entry.state != history_storage::ContentObjectState::Present) {
+            damaged.push_back(entry.content_id);
+        }
+    }
+    if (!damaged.empty()) {
+        std::ranges::sort(damaged);
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure,
+                       list_detail("reachable contents missing or corrupted: ",
+                                   damaged)));
+    }
+
+    GcSnapshot snapshot;
+    snapshot.logical_heads = history->logical_heads;
+    std::ranges::sort(snapshot.logical_heads);
+    snapshot.logical_heads.erase(
+        std::ranges::unique(snapshot.logical_heads).begin(),
+        snapshot.logical_heads.end());
+
+    snapshot.reachable_commits = history->reachable_commits;
+    std::ranges::sort(snapshot.reachable_commits);
+    snapshot.reachable_commits.erase(
+        std::ranges::unique(snapshot.reachable_commits).begin(),
+        snapshot.reachable_commits.end());
+
+    snapshot.reachable_content = content->reachable_content_ids;
+    std::ranges::sort(snapshot.reachable_content);
+    snapshot.reachable_content.erase(
+        std::ranges::unique(snapshot.reachable_content).begin(),
+        snapshot.reachable_content.end());
+
+    snapshot.physical_namespace = std::move(*listing);
+
+    const auto layout = history_storage::derive_remote_layout(key);
+    std::vector<std::string> marked_commits;
+    for (const auto& marker : history->markers) {
+        if (marker.state != history_storage::ReachabilityMarkerState::Valid ||
+            !marker.reference) {
+            continue;
+        }
+        marked_commits.push_back(marker.reference->commit_id);
+        snapshot.required_commit_objects.push_back(
+            history_storage::commit_object(layout, *marker.reference));
+    }
+    std::ranges::sort(marked_commits);
+    marked_commits.erase(std::ranges::unique(marked_commits).begin(),
+                         marked_commits.end());
+
+    for (const auto& commit : history->commits) {
+        if (!commit.reachable ||
+            std::ranges::binary_search(marked_commits, commit.commit_id)) {
+            continue;
+        }
+        const auto variant =
+            std::ranges::find_if(commit.variants, [](const auto& candidate) {
+                return !candidate.identifier.empty() &&
+                       candidate.state ==
+                           history_storage::detail::VariantState::Valid;
+            });
+        if (variant != commit.variants.end()) {
+            snapshot.required_commit_objects.push_back(variant->identifier);
+        } else {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "reachable commit has no valid physical variant: " +
+                    commit.commit_id));
+        }
+    }
+    std::ranges::sort(snapshot.required_commit_objects);
+    snapshot.required_commit_objects.erase(
+        std::ranges::unique(snapshot.required_commit_objects).begin(),
+        snapshot.required_commit_objects.end());
+
+    std::vector<std::string> dispensable_variants;
+    for (const auto& commit : history->commits) {
+        for (const auto& variant : commit.variants) {
+            if (!variant.identifier.empty() &&
+                !std::ranges::binary_search(snapshot.required_commit_objects,
+                                            variant.identifier)) {
+                dispensable_variants.push_back(variant.identifier);
+            }
+        }
+    }
+    std::ranges::sort(dispensable_variants);
+    dispensable_variants.erase(
+        std::ranges::unique(dispensable_variants).begin(),
+        dispensable_variants.end());
+
+    auto selected_candidates = select_gc_candidates(
+        dispensable_variants, content->orphan_content_ids);
+    if (!selected_candidates) {
+        return std::unexpected(selected_candidates.error());
+    }
+    snapshot.candidates = std::move(*selected_candidates);
+
+    return snapshot;
+}
+
+bool same_gc_snapshot(const GcSnapshot& left,
+                      const GcSnapshot& right) noexcept {
+    return left.logical_heads == right.logical_heads &&
+           left.reachable_commits == right.reachable_commits &&
+           left.required_commit_objects == right.required_commit_objects &&
+           left.reachable_content == right.reachable_content &&
+           left.physical_namespace == right.physical_namespace &&
+           same_gc_candidates(left.candidates, right.candidates);
+}
+
 } // namespace kasumi::application::integrity

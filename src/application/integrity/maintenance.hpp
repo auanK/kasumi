@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <filesystem>
 #include <functional>
 #include <optional>
 #include <span>
@@ -66,6 +67,28 @@ select_gc_candidates(std::span<const std::string> commit_variant_ids,
 
 bool same_gc_candidates(std::span<const GcCandidate> left,
                         std::span<const GcCandidate> right) noexcept;
+
+// Explicit observation snapshot for garbage collection decision-making.
+struct GcSnapshot {
+    std::vector<std::string> logical_heads;
+    std::vector<std::string> reachable_commits;
+    std::vector<std::string> required_commit_objects;
+    std::vector<std::string> reachable_content;
+    std::vector<std::string> physical_namespace;
+    std::vector<GcCandidate> candidates;
+
+    bool operator==(const GcSnapshot&) const = default;
+};
+
+// Reconstructs and validates a reachability snapshot from authenticated inventories.
+std::expected<GcSnapshot, Error>
+collect_gc_snapshot(transport::Transport& storage,
+                    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                    const std::filesystem::path& workspace_root);
+
+// Compares all relevant security fields of two snapshots for equivalence.
+bool same_gc_snapshot(const GcSnapshot& left,
+                      const GcSnapshot& right) noexcept;
 
 // Counts produced by recoverable garbage collection.
 struct GarbageCollectResult {
