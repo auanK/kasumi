@@ -76,14 +76,19 @@ std::expected<Response, Error> run_maintenance(OperationContext& context,
         return std::unexpected(maintenance_error(
             context.operation, collected.error(), context.summary));
     }
-    return Response{.operation = context.operation,
-                    .runtime = context.summary,
-                    .data = GarbageCollectCompleted{
-                        .candidate_objects = collected->candidate_objects,
-                        .quarantined_objects = collected->quarantined_objects,
-                        .restored_objects = collected->restored_objects,
-                        .purged_objects = collected->purged_objects,
-                        .analysis_only = collected->analysis_only}};
+    return Response{
+        .operation = context.operation,
+        .runtime = context.summary,
+        .data = GarbageCollectCompleted{
+            .candidate_objects = collected->candidate_objects,
+            .content_candidate_objects = collected->content_candidate_objects,
+            .commit_variant_candidate_objects =
+                collected->commit_variant_candidate_objects,
+            .directly_removed_objects = collected->directly_removed_objects,
+            .quarantined_objects = collected->quarantined_objects,
+            .restored_objects = collected->restored_objects,
+            .purged_objects = collected->purged_objects,
+            .analysis_only = collected->analysis_only}};
 }
 
 } // namespace

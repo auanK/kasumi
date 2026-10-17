@@ -105,6 +105,32 @@ PublishedCommit publish_remote(kasumi::transport::Transport& transport,
     return published ? *published : PublishedCommit{};
 }
 
+std::string make_orphan_variant(kasumi::transport::Transport& transport,
+                                TempWorkspace& workspace,
+                                std::string_view name = "orphan") {
+    const auto commit =
+        make_commit(0, {}, std::string{name} + ".txt", name).value();
+    const auto pub = publish_remote(transport, workspace, commit);
+    EXPECT_EQ(
+        kasumi::transport::remove(transport, marker_path(pub.head)).value(),
+        kasumi::transport::Removal::Removed);
+    return object_path(pub.head);
+}
+
+std::vector<std::string>
+make_orphan_variants(kasumi::transport::Transport& transport,
+                     TempWorkspace& workspace,
+                     std::size_t count,
+                     std::string_view prefix = "orphan") {
+    std::vector<std::string> candidates;
+    candidates.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        candidates.push_back(make_orphan_variant(
+            transport, workspace, std::string{prefix} + "-" + std::to_string(i)));
+    }
+    return candidates;
+}
+
 void expect_presence(kasumi::transport::Transport& transport,
                      std::string_view identifier,
                      Presence expected) {
@@ -159,8 +185,16 @@ struct IntegratedGcFixture {
         reachable_marker = marker_path(published.head);
         for (std::size_t index = 0; index < candidate_count; ++index) {
             const auto suffix = "orphan-" + std::to_string(index);
-            candidates.push_back(
-                put_content(storage, workspace, suffix, suffix));
+            const auto orphan_commit =
+                make_commit(0, {}, suffix + ".txt", suffix).value();
+            const auto orphan_published =
+                publish_remote(storage, workspace, orphan_commit);
+            EXPECT_EQ(
+                kasumi::transport::remove(storage,
+                                          marker_path(orphan_published.head))
+                    .value(),
+                kasumi::transport::Removal::Removed);
+            candidates.push_back(object_path(orphan_published.head));
         }
         std::ranges::sort(candidates);
         for (const auto& candidate : candidates) {
@@ -1719,9 +1753,9 @@ void expect_integrated_copy_case(IntegratedCopyPath path,
     EXPECT_EQ(fixture.state->copy_count,
               native_copy_attempted ? candidate_count : 0U);
     EXPECT_EQ(fixture.state->orphan_payload_get_count,
-              client_fallback ? candidate_count : 0U);
+              2U * candidate_count + (client_fallback ? candidate_count : 0U));
     EXPECT_EQ(fixture.state->orphan_payload_get_bytes,
-              client_fallback ? candidate_bytes : 0U);
+              2U * candidate_bytes + (client_fallback ? candidate_bytes : 0U));
     EXPECT_EQ(fixture.state->quarantine_payload_put_count,
               client_fallback ? candidate_count : 0U);
     EXPECT_EQ(fixture.state->quarantine_payload_put_bytes,
@@ -1782,6 +1816,7 @@ void expect_integrated_failure(IntegratedFailure failure,
         case IntegratedFailure::FallbackGet:
             fixture.state->copy_supported = false;
             fixture.state->fail_get_identifier = source;
+            fixture.state->fail_get_identifier_after_count = 2;
             break;
         case IntegratedFailure::FallbackPut:
             fixture.state->copy_supported = false;
@@ -1823,9 +1858,9 @@ void expect_integrated_failure(IntegratedFailure failure,
     const auto source_bytes = fixture.initial_objects.at(source).size();
     EXPECT_EQ(fixture.state->copy_count, source_hash_failed ? 0U : 1U);
     EXPECT_EQ(fixture.state->orphan_payload_get_count,
-              fallback_read_failed || fallback_put_failed ? 1U : 0U);
+              2U + (fallback_read_failed || fallback_put_failed ? 1U : 0U));
     EXPECT_EQ(fixture.state->orphan_payload_get_bytes,
-              fallback_put_failed ? source_bytes : 0U);
+              2U * source_bytes + (fallback_put_failed ? source_bytes : 0U));
     if (fallback_read_failed) {
         EXPECT_TRUE(fixture.state->fail_get_identifier.empty());
     }
@@ -1973,7 +2008,9 @@ TEST(IntegrityMaintenanceTest,
     const auto beta_content =
         put_content(storage.transport, storage.workspace, "beta", "beta");
 
-    const auto orphan = make_commit(0, {}, "old.txt", "old").value();
+    const auto orphan =
+        make_commit(1, {alpha_published.head.commit_id}, "alpha.txt", "alpha")
+            .value();
     const auto orphan_published =
         publish_remote(storage.transport, storage.workspace, orphan);
     ASSERT_EQ(kasumi::transport::remove(storage.transport,
@@ -1995,7 +2032,10 @@ TEST(IntegrityMaintenanceTest,
         runtime, storage.transport, test_key());
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
     EXPECT_EQ(collected->candidate_objects, 3U);
-    EXPECT_EQ(collected->quarantined_objects, 3U);
+    EXPECT_EQ(collected->content_candidate_objects, 2U);
+    EXPECT_EQ(collected->commit_variant_candidate_objects, 1U);
+    EXPECT_EQ(collected->directly_removed_objects, 2U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
     EXPECT_EQ(collected->restored_objects, 0U);
     EXPECT_EQ(collected->purged_objects, 0U);
     EXPECT_FALSE(collected->analysis_only);
@@ -2013,20 +2053,14 @@ TEST(IntegrityMaintenanceTest,
                     object_path(orphan_published.head),
                     Presence::Absent);
     expect_presence(
-        storage.transport, orphan_content_quarantine, Presence::Present);
+        storage.transport, orphan_content_quarantine, Presence::Absent);
     expect_presence(
         storage.transport,
         protocol::quarantine_identifier(test_layout(), loose_content).value(),
-        Presence::Present);
+        Presence::Absent);
     expect_presence(
         storage.transport, orphan_commit_quarantine, Presence::Present);
 
-    ASSERT_TRUE(protocol::record_quarantine(
-        storage.transport,
-        orphan_content_quarantine,
-        0,
-        test_key(),
-        kasumi::test::workspace_root(storage.workspace)));
     ASSERT_TRUE(protocol::record_quarantine(
         storage.transport,
         orphan_commit_quarantine,
@@ -2047,9 +2081,8 @@ TEST(IntegrityMaintenanceTest,
         runtime, storage.transport, test_key());
     ASSERT_TRUE(restored.has_value()) << restored.error().detail;
     EXPECT_EQ(restored->quarantined_objects, 0U);
-    EXPECT_EQ(restored->restored_objects, 2U);
+    EXPECT_EQ(restored->restored_objects, 1U);
     EXPECT_EQ(restored->purged_objects, 0U);
-    expect_presence(storage.transport, orphan_content, Presence::Present);
     expect_presence(storage.transport,
                     object_path(orphan_published.head),
                     Presence::Present);
@@ -2430,7 +2463,7 @@ TEST(IntegrityMaintenanceTest, PurgesOnlyAfterTenDaysAndAnotherCollection) {
                    storage.workspace,
                    kasumi::history::make_empty_bootstrap().value());
     const auto orphan =
-        put_content(storage.transport, storage.workspace, "orphan", "orphan");
+        make_orphan_variant(storage.transport, storage.workspace);
     const auto quarantined =
         protocol::quarantine_identifier(test_layout(), orphan).value();
 
@@ -2482,10 +2515,10 @@ TEST(IntegrityMaintenanceTest, QuarantineRetentionBoundaryUsesInclusiveAge) {
     publish_remote(storage.transport,
                    storage.workspace,
                    kasumi::history::make_empty_bootstrap().value());
-    const auto boundary = put_content(
-        storage.transport, storage.workspace, "boundary", "boundary");
+    const auto boundary =
+        make_orphan_variant(storage.transport, storage.workspace, "boundary");
     const auto beyond =
-        put_content(storage.transport, storage.workspace, "beyond", "beyond");
+        make_orphan_variant(storage.transport, storage.workspace, "beyond");
     const auto boundary_quarantine =
         protocol::quarantine_identifier(test_layout(), boundary).value();
     const auto beyond_quarantine =
@@ -2524,9 +2557,13 @@ TEST(IntegrityMaintenanceTest,
                    storage.workspace,
                    kasumi::history::make_empty_bootstrap().value());
     const auto orphan =
-        put_content(storage.transport, storage.workspace, "orphan", "orphan");
+        make_orphan_variant(storage.transport, storage.workspace);
     const auto quarantined =
         protocol::quarantine_identifier(test_layout(), orphan).value();
+    const auto reappeared_file =
+        kasumi::test::workspace_path(storage.workspace, "reappeared.commit");
+    ASSERT_TRUE(
+        kasumi::transport::get(storage.transport, orphan, reappeared_file));
     ASSERT_TRUE(kasumi::application::integrity::garbage_collect(
         runtime, storage.transport, test_key()));
 
@@ -2538,7 +2575,8 @@ TEST(IntegrityMaintenanceTest,
         *now - protocol::quarantine_retention_seconds - 1,
         test_key(),
         kasumi::test::workspace_root(storage.workspace)));
-    put_content(storage.transport, storage.workspace, "orphan", "orphan-again");
+    ASSERT_TRUE(
+        kasumi::transport::put(storage.transport, reappeared_file, orphan));
 
     const auto collected = kasumi::application::integrity::garbage_collect(
         runtime, storage.transport, test_key());
@@ -3112,7 +3150,7 @@ TEST(IntegrityMaintenanceTest, CopyFailurePreservesTheOriginal) {
     auto runtime = runtime_data(workspace);
     publish_remote(
         transport, workspace, kasumi::history::make_empty_bootstrap().value());
-    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto orphan = make_orphan_variant(transport, workspace);
     const auto quarantined =
         protocol::quarantine_identifier(test_layout(), orphan).value();
     state->physical_hash_supported = true;
@@ -3130,7 +3168,7 @@ TEST(IntegrityMaintenanceTest, CopyFailurePreservesTheOriginal) {
     expect_presence(transport, orphan, Presence::Present);
     expect_presence(transport, quarantined, Presence::Absent);
     expect_presence(transport, quarantined + ".meta", Presence::Absent);
-    EXPECT_EQ(state->orphan_payload_get_count, 0U);
+    EXPECT_EQ(state->orphan_payload_get_count, 2U);
     EXPECT_EQ(state->quarantine_payload_put_count, 0U);
     EXPECT_EQ(state->copy_count, 1U);
 }
@@ -3145,7 +3183,7 @@ TEST(IntegrityMaintenanceTest,
     auto runtime = runtime_data(workspace);
     publish_remote(
         transport, workspace, kasumi::history::make_empty_bootstrap().value());
-    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto orphan = make_orphan_variant(transport, workspace);
     const auto quarantined =
         protocol::quarantine_identifier(test_layout(), orphan).value();
     state->physical_hash_supported = true;
@@ -3170,7 +3208,7 @@ TEST(IntegrityMaintenanceTest, QuarantineMetadataFailurePreservesTheOriginal) {
     auto runtime = runtime_data(workspace);
     publish_remote(
         transport, workspace, kasumi::history::make_empty_bootstrap().value());
-    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto orphan = make_orphan_variant(transport, workspace);
     const auto quarantined =
         protocol::quarantine_identifier(test_layout(), orphan).value();
     state->physical_hash_supported = true;
@@ -3200,7 +3238,7 @@ TEST(IntegrityMaintenanceTest, BarrierLostBeforeFirstCopyPreventsCopy) {
     auto runtime = runtime_data(workspace);
     publish_remote(
         transport, workspace, kasumi::history::make_empty_bootstrap().value());
-    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto orphan = make_orphan_variant(transport, workspace);
     state->replace_barrier_after_writer_list = true;
 
     const auto collected = kasumi::application::integrity::garbage_collect(
@@ -3224,7 +3262,7 @@ TEST(IntegrityMaintenanceTest, LostBarrierBeforeRemovalPreservesTheOriginal) {
     auto runtime = runtime_data(workspace);
     publish_remote(
         transport, workspace, kasumi::history::make_empty_bootstrap().value());
-    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto orphan = make_orphan_variant(transport, workspace);
     state->physical_hash_supported = true;
     state->copy_supported = true;
     state->replace_barrier_after_quarantine_put = true;
@@ -3252,7 +3290,7 @@ TEST(IntegrityMaintenanceTest,
     auto runtime = runtime_data(workspace);
     publish_remote(
         transport, workspace, kasumi::history::make_empty_bootstrap().value());
-    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto orphan = make_orphan_variant(transport, workspace);
     const auto quarantined =
         protocol::quarantine_identifier(test_layout(), orphan).value();
     state->remove_then_fail_identifier = orphan;
@@ -3275,7 +3313,7 @@ TEST(IntegrityMaintenanceTest,
     auto runtime = runtime_data(workspace);
     publish_remote(
         transport, workspace, kasumi::history::make_empty_bootstrap().value());
-    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto orphan = make_orphan_variant(transport, workspace);
     const auto quarantined =
         protocol::quarantine_identifier(test_layout(), orphan).value();
     state->fail_remove_identifier = test_layout().barrier_identifier;
@@ -3321,7 +3359,7 @@ TEST(IntegrityMaintenanceTest, InvalidRetentionMetadataPreservesQuarantine) {
                    storage.workspace,
                    kasumi::history::make_empty_bootstrap().value());
     const auto orphan =
-        put_content(storage.transport, storage.workspace, "orphan", "orphan");
+        make_orphan_variant(storage.transport, storage.workspace);
     const auto quarantined =
         protocol::quarantine_identifier(test_layout(), orphan).value();
     ASSERT_TRUE(kasumi::application::integrity::garbage_collect(
@@ -3348,7 +3386,7 @@ TEST(IntegrityMaintenanceTest, InterruptedPurgeRestartsRetention) {
     auto runtime = runtime_data(workspace);
     publish_remote(
         transport, workspace, kasumi::history::make_empty_bootstrap().value());
-    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto orphan = make_orphan_variant(transport, workspace);
     const auto quarantined =
         protocol::quarantine_identifier(test_layout(), orphan).value();
     ASSERT_TRUE(kasumi::application::integrity::garbage_collect(
@@ -3384,10 +3422,10 @@ TEST(IntegrityMaintenanceTest, InterruptedMoveResumesIdempotently) {
     auto runtime = runtime_data(workspace);
     publish_remote(
         transport, workspace, kasumi::history::make_empty_bootstrap().value());
-    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto orphan = make_orphan_variant(transport, workspace);
     const auto quarantined =
         protocol::quarantine_identifier(test_layout(), orphan).value();
-    state->fail_remove_at = 2;
+    state->fail_remove_identifier = orphan;
 
     const auto interrupted = kasumi::application::integrity::garbage_collect(
         runtime, transport, test_key());
@@ -3395,7 +3433,6 @@ TEST(IntegrityMaintenanceTest, InterruptedMoveResumesIdempotently) {
     expect_presence(transport, orphan, Presence::Present);
     expect_presence(transport, quarantined, Presence::Present);
 
-    state->fail_remove_at = 0;
     const auto resumed = kasumi::application::integrity::garbage_collect(
         runtime, transport, test_key());
     ASSERT_TRUE(resumed.has_value()) << resumed.error().detail;
@@ -3450,7 +3487,7 @@ TEST(IntegrityMaintenanceTest,
     const auto reachable = make_commit(0, {}, "alpha.txt", "alpha").value();
     publish_remote(transport, workspace, reachable);
     put_content(transport, workspace, "alpha", "alpha");
-    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto orphan = make_orphan_variant(transport, workspace);
     const auto quarantined =
         protocol::quarantine_identifier(test_layout(), orphan).value();
 
@@ -3491,7 +3528,7 @@ TEST(IntegrityMaintenanceTest,
     };
     EXPECT_EQ(state->quarantine_metadata_put_count, 1U);
     EXPECT_EQ(state->copy_count, 1U);
-    EXPECT_EQ(state->orphan_payload_get_count, 0U) << counters();
+    EXPECT_EQ(state->orphan_payload_get_count, 2U) << counters();
     EXPECT_EQ(state->quarantine_payload_put_count, 0U) << counters();
 }
 
@@ -3529,7 +3566,7 @@ TEST(IntegrityMaintenanceTest,
     const auto reachable = make_commit(0, {}, "alpha.txt", "alpha").value();
     publish_remote(transport, workspace, reachable);
     put_content(transport, workspace, "alpha", "alpha");
-    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto orphan = make_orphan_variant(transport, workspace);
     const auto quarantined =
         protocol::quarantine_identifier(test_layout(), orphan).value();
 
@@ -3547,7 +3584,7 @@ TEST(IntegrityMaintenanceTest,
     EXPECT_EQ(collected->quarantined_objects, 1U);
     expect_presence(transport, orphan, Presence::Absent);
     expect_presence(transport, quarantined, Presence::Present);
-    EXPECT_EQ(state->orphan_payload_get_count, 1U);
+    EXPECT_EQ(state->orphan_payload_get_count, 3U);
     EXPECT_EQ(state->quarantine_payload_put_count, 1U);
     EXPECT_EQ(state->copy_count, 1U);
 }
@@ -3601,10 +3638,12 @@ TEST(IntegrityMaintenanceTest,
     auto runtime = runtime_data(workspace);
 
     const auto alpha = make_commit(0, {}, "alpha.txt", "alpha").value();
-    publish_remote(transport, workspace, alpha);
+    const auto alpha_published = publish_remote(transport, workspace, alpha);
     put_content(transport, workspace, "alpha", "alpha");
 
-    const auto orphan = make_commit(0, {}, "old.txt", "old").value();
+    const auto orphan =
+        make_commit(1, {alpha_published.head.commit_id}, "alpha.txt", "alpha")
+            .value();
     const auto orphan_published = publish_remote(transport, workspace, orphan);
     ASSERT_EQ(
         kasumi::transport::remove(transport, marker_path(orphan_published.head))
@@ -3621,14 +3660,11 @@ TEST(IntegrityMaintenanceTest,
     const auto collected = kasumi::application::integrity::garbage_collect(
         runtime, transport, test_key());
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
-    EXPECT_EQ(collected->quarantined_objects, 2U);
+    EXPECT_EQ(collected->content_candidate_objects, 1U);
+    EXPECT_EQ(collected->commit_variant_candidate_objects, 1U);
+    EXPECT_EQ(collected->directly_removed_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
 
-    ASSERT_TRUE(
-        protocol::record_quarantine(transport,
-                                    orphan_content_quarantine,
-                                    0,
-                                    test_key(),
-                                    kasumi::test::workspace_root(workspace)));
     ASSERT_TRUE(
         protocol::record_quarantine(transport,
                                     orphan_commit_quarantine,
@@ -3646,19 +3682,17 @@ TEST(IntegrityMaintenanceTest,
         transport, marker_file, marker_path(orphan_published.head)));
 
     reset_fake_traffic(*state);
-    state->disappear_on_get = orphan_content;
-    state->observed_payload_identifier = orphan_content_quarantine;
+    state->disappear_on_get = orphan_commit_quarantine;
+    state->observed_payload_identifier = orphan_commit_quarantine;
 
     const auto restored = kasumi::application::integrity::garbage_collect(
         runtime, transport, test_key());
     ASSERT_TRUE(restored.has_value()) << restored.error().detail;
-    EXPECT_EQ(restored->restored_objects, 2U);
+    EXPECT_EQ(restored->restored_objects, 1U);
     EXPECT_GE(state->full_list_count, 5U);
-    EXPECT_EQ(state->disappear_on_get, orphan_content);
-    expect_presence(transport, orphan_content, Presence::Present);
     expect_presence(
         transport, object_path(orphan_published.head), Presence::Present);
-    EXPECT_EQ(state->copy_count, 2U);
+    EXPECT_EQ(state->copy_count, 1U);
     EXPECT_EQ(state->orphan_payload_get_count, 0U);
     EXPECT_EQ(state->quarantine_payload_put_count, 0U);
 }
@@ -3714,10 +3748,9 @@ TEST(IntegrityMaintenanceTest, GarbageCollectionBatchBaselineScale) {
         orphans.reserve(orphan_count);
         std::set<std::string> unique_orphan_identifiers;
         std::size_t orphan_bytes = 0;
-        for (std::size_t index = 0; index < orphan_count; ++index) {
-            const auto suffix = "orphan-" + std::to_string(index);
-            const auto identifier =
-                put_content(transport, workspace, suffix, suffix);
+        const auto orphan_ids =
+            make_orphan_variants(transport, workspace, orphan_count);
+        for (const auto& identifier : orphan_ids) {
             state->observed_payload_identifiers.insert(identifier);
             const auto& ciphertext = state->objects.at(identifier);
             EXPECT_TRUE(unique_orphan_identifiers.insert(identifier).second);
@@ -3749,9 +3782,9 @@ TEST(IntegrityMaintenanceTest, GarbageCollectionBatchBaselineScale) {
         EXPECT_EQ(collected->restored_objects, 0U);
         EXPECT_EQ(collected->purged_objects, 0U);
         const auto candidate_batches = (orphan_count + 7U) / 8U;
-        EXPECT_EQ(state->get_count, 4U);
-        EXPECT_EQ(state->orphan_payload_get_count, 0U);
-        EXPECT_EQ(state->orphan_payload_get_bytes, 0U);
+        EXPECT_EQ(state->get_count, 4U + 2U * orphan_count);
+        EXPECT_EQ(state->orphan_payload_get_count, 2U * orphan_count);
+        EXPECT_EQ(state->orphan_payload_get_bytes, 2U * orphan_bytes);
         EXPECT_EQ(state->put_count, 2U + orphan_count);
         EXPECT_EQ(state->quarantine_payload_put_count, 0U);
         EXPECT_EQ(state->quarantine_payload_put_bytes, 0U);
@@ -4150,11 +4183,7 @@ TEST(IntegrityMaintenanceTest, GarbageCollectionBatchMeasurementScale) {
             make_commit(0, {}, "retained.txt", "retained").value();
         publish_remote(transport, workspace, retained);
         put_content(transport, workspace, "retained", "retained");
-
-        for (std::size_t i = 0; i < count; ++i) {
-            const auto suffix = "orphan-" + std::to_string(i);
-            put_content(transport, workspace, suffix, suffix);
-        }
+        make_orphan_variants(transport, workspace, count);
 
         reset_fake_traffic(*state);
         kasumi::platform::perf_trace::force_enable(true);
@@ -4239,7 +4268,7 @@ TEST(IntegrityMaintenanceTest, BatchGcWithOneCandidateUsesOneBatch) {
     const auto retained = make_commit(0, {}, "live.txt", "live").value();
     publish_remote(transport, workspace, retained);
     put_content(transport, workspace, "live", "live-content");
-    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto orphan = make_orphan_variant(transport, workspace);
 
     reset_fake_traffic(*state);
     const auto collected = kasumi::application::integrity::garbage_collect(
@@ -4270,11 +4299,7 @@ TEST(IntegrityMaintenanceTest, BatchGcWithTenCandidatesUsesBoundedBatches) {
     const auto live_content =
         put_content(transport, workspace, "live", "live-content");
 
-    std::vector<std::string> orphans;
-    for (std::size_t i = 0; i < 10; ++i) {
-        const auto suffix = "orphan-" + std::to_string(i);
-        orphans.push_back(put_content(transport, workspace, suffix, suffix));
-    }
+    const auto orphans = make_orphan_variants(transport, workspace, 10);
 
     reset_fake_traffic(*state);
     const auto collected = kasumi::application::integrity::garbage_collect(
@@ -4337,11 +4362,7 @@ TEST(IntegrityMaintenanceTest, BatchGcWithOneHundredCandidatesScales) {
     publish_remote(transport, workspace, retained);
     put_content(transport, workspace, "live", "live-content");
 
-    std::vector<std::string> orphans;
-    for (std::size_t i = 0; i < 100; ++i) {
-        const auto suffix = "orphan-" + std::to_string(i);
-        orphans.push_back(put_content(transport, workspace, suffix, suffix));
-    }
+    const auto orphans = make_orphan_variants(transport, workspace, 100);
 
     reset_fake_traffic(*state);
     const auto collected = kasumi::application::integrity::garbage_collect(
@@ -4369,10 +4390,7 @@ TEST(IntegrityMaintenanceTest, BatchGcUsesSupportedBatchVerification) {
     publish_remote(transport, workspace, retained);
     put_content(transport, workspace, "live", "live-content");
 
-    for (std::size_t i = 0; i < 10; ++i) {
-        const auto suffix = "orphan-" + std::to_string(i);
-        put_content(transport, workspace, suffix, suffix);
-    }
+    make_orphan_variants(transport, workspace, 10);
 
     reset_fake_traffic(*state);
     const auto collected = kasumi::application::integrity::garbage_collect(
@@ -4397,11 +4415,7 @@ TEST(IntegrityMaintenanceTest, BatchGcFallsBackWithoutBatchVerification) {
     publish_remote(transport, workspace, retained);
     put_content(transport, workspace, "live", "live-content");
 
-    std::vector<std::string> orphans;
-    for (std::size_t i = 0; i < 10; ++i) {
-        const auto suffix = "orphan-" + std::to_string(i);
-        orphans.push_back(put_content(transport, workspace, suffix, suffix));
-    }
+    const auto orphans = make_orphan_variants(transport, workspace, 10);
 
     reset_fake_traffic(*state);
     const auto collected = kasumi::application::integrity::garbage_collect(
@@ -4428,11 +4442,7 @@ TEST(IntegrityMaintenanceTest, BatchGcRejectsPartiallyCorruptedReport) {
     publish_remote(transport, workspace, retained);
     put_content(transport, workspace, "live", "live-content");
 
-    std::vector<std::string> orphans;
-    for (std::size_t i = 0; i < 3; ++i) {
-        const auto suffix = "orphan-" + std::to_string(i);
-        orphans.push_back(put_content(transport, workspace, suffix, suffix));
-    }
+    const auto orphans = make_orphan_variants(transport, workspace, 3);
 
     const auto q1 = protocol::quarantine_identifier(test_layout(), orphans[1]);
     ASSERT_TRUE(q1.has_value());
@@ -4459,11 +4469,7 @@ TEST(IntegrityMaintenanceTest, BatchGcStopsAfterIntermediateCandidateFailure) {
     publish_remote(transport, workspace, retained);
     put_content(transport, workspace, "live", "live-content");
 
-    std::vector<std::string> orphans;
-    for (std::size_t i = 0; i < 3; ++i) {
-        const auto suffix = "orphan-" + std::to_string(i);
-        orphans.push_back(put_content(transport, workspace, suffix, suffix));
-    }
+    auto orphans = make_orphan_variants(transport, workspace, 3);
     std::ranges::sort(orphans);
 
     state->physical_hash_mismatch_identifier =
@@ -4491,7 +4497,7 @@ TEST(IntegrityMaintenanceTest, BatchGcStopsWhenBarrierIsLost) {
     const auto retained = make_commit(0, {}, "live.txt", "live").value();
     publish_remote(transport, workspace, retained);
     put_content(transport, workspace, "live", "live-content");
-    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto orphan = make_orphan_variant(transport, workspace);
 
     state->replace_barrier_after_quarantine_put = true;
 
@@ -4514,7 +4520,7 @@ TEST(IntegrityMaintenanceTest, BatchGcResumesAfterInterruption) {
     const auto retained = make_commit(0, {}, "live.txt", "live").value();
     publish_remote(transport, workspace, retained);
     put_content(transport, workspace, "live", "live-content");
-    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto orphan = make_orphan_variant(transport, workspace);
 
     state->fail_quarantine_metadata_put = true;
     const auto run1 = kasumi::application::integrity::garbage_collect(
@@ -4543,7 +4549,7 @@ TEST(IntegrityMaintenanceTest,
     const auto retained = make_commit(0, {}, "live.txt", "live").value();
     const auto published = publish_remote(transport, workspace, retained);
     put_content(transport, workspace, "live", "live-content");
-    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto orphan = make_orphan_variant(transport, workspace);
 
     const auto concurrent =
         make_commit(1, {published.head.commit_id}, "extra.txt", "extra")
@@ -4586,9 +4592,9 @@ TEST(IntegrityMaintenanceTest, BatchGcRejectsEmptyBatchReport) {
     put_content(transport, workspace, "live", "live-content");
 
     const auto orphan0 =
-        put_content(transport, workspace, "orphan0", "orphan0");
+        make_orphan_variant(transport, workspace, "batch-0");
     const auto orphan1 =
-        put_content(transport, workspace, "orphan1", "orphan1");
+        make_orphan_variant(transport, workspace, "batch-1");
 
     state->physical_hash_batch_override_report =
         kasumi::transport::PhysicalHashBatchReport{};
@@ -4618,9 +4624,9 @@ TEST(IntegrityMaintenanceTest,
     put_content(transport, workspace, "live", "live-content");
 
     const auto orphan0 =
-        put_content(transport, workspace, "orphan0", "orphan0");
+        make_orphan_variant(transport, workspace, "batch-0");
     const auto orphan1 =
-        put_content(transport, workspace, "orphan1", "orphan1");
+        make_orphan_variant(transport, workspace, "batch-1");
 
     const auto q1 = protocol::quarantine_identifier(test_layout(), orphan1);
     ASSERT_TRUE(q1.has_value());
@@ -4650,9 +4656,9 @@ TEST(IntegrityMaintenanceTest,
     put_content(transport, workspace, "live", "live-content");
 
     const auto orphan0 =
-        put_content(transport, workspace, "orphan0", "orphan0");
+        make_orphan_variant(transport, workspace, "batch-0");
     const auto orphan1 =
-        put_content(transport, workspace, "orphan1", "orphan1");
+        make_orphan_variant(transport, workspace, "batch-1");
 
     const auto q0 = *protocol::quarantine_identifier(test_layout(), orphan0);
     const auto q1 = *protocol::quarantine_identifier(test_layout(), orphan1);
@@ -4690,9 +4696,9 @@ TEST(IntegrityMaintenanceTest,
     put_content(transport, workspace, "live", "live-content");
 
     const auto orphan0 =
-        put_content(transport, workspace, "orphan0", "orphan0");
+        make_orphan_variant(transport, workspace, "batch-0");
     const auto orphan1 =
-        put_content(transport, workspace, "orphan1", "orphan1");
+        make_orphan_variant(transport, workspace, "batch-1");
 
     const auto q0 = *protocol::quarantine_identifier(test_layout(), orphan0);
     const auto q1 = *protocol::quarantine_identifier(test_layout(), orphan1);
@@ -4730,9 +4736,9 @@ TEST(IntegrityMaintenanceTest,
     put_content(transport, workspace, "live", "live-content");
 
     const auto orphan0 =
-        put_content(transport, workspace, "orphan0", "orphan0");
+        make_orphan_variant(transport, workspace, "batch-0");
     const auto orphan1 =
-        put_content(transport, workspace, "orphan1", "orphan1");
+        make_orphan_variant(transport, workspace, "batch-1");
 
     const auto q0 = *protocol::quarantine_identifier(test_layout(), orphan0);
     const auto q1 = *protocol::quarantine_identifier(test_layout(), orphan1);
@@ -4769,9 +4775,9 @@ TEST(IntegrityMaintenanceTest, BatchGcFailsWhenDestinationIsMissing) {
     put_content(transport, workspace, "live", "live-content");
 
     const auto orphan0 =
-        put_content(transport, workspace, "orphan0", "orphan0");
+        make_orphan_variant(transport, workspace, "batch-0");
     const auto orphan1 =
-        put_content(transport, workspace, "orphan1", "orphan1");
+        make_orphan_variant(transport, workspace, "batch-1");
 
     const auto q1 = *protocol::quarantine_identifier(test_layout(), orphan1);
     state->physical_hash_batch_missing.insert(q1);
@@ -4798,9 +4804,9 @@ TEST(IntegrityMaintenanceTest, BatchGcPropagatesIndividualRemovalFailure) {
     put_content(transport, workspace, "live", "live-content");
 
     const auto orphan0 =
-        put_content(transport, workspace, "orphan0", "orphan0");
+        make_orphan_variant(transport, workspace, "batch-0");
     const auto orphan1 =
-        put_content(transport, workspace, "orphan1", "orphan1");
+        make_orphan_variant(transport, workspace, "batch-1");
 
     const auto q1 = *protocol::quarantine_identifier(test_layout(), orphan1);
     state->physical_hash_batch_errors.insert(q1);
@@ -4828,9 +4834,9 @@ TEST(IntegrityMaintenanceTest,
     put_content(transport, workspace, "live", "live-content");
 
     const auto orphan0 =
-        put_content(transport, workspace, "orphan0", "orphan0");
+        make_orphan_variant(transport, workspace, "batch-0");
     const auto orphan1 =
-        put_content(transport, workspace, "orphan1", "orphan1");
+        make_orphan_variant(transport, workspace, "batch-1");
 
     state->physical_hash_batch_failure =
         kasumi::transport::ErrorCode::BackendUnavailable;
@@ -4859,9 +4865,9 @@ TEST(IntegrityMaintenanceTest,
     put_content(transport, workspace, "live", "live-content");
 
     const auto orphan0 =
-        put_content(transport, workspace, "orphan0", "orphan0");
+        make_orphan_variant(transport, workspace, "batch-0");
     const auto orphan1 =
-        put_content(transport, workspace, "orphan1", "orphan1");
+        make_orphan_variant(transport, workspace, "batch-1");
 
     reset_fake_traffic(*state);
     const auto collected = kasumi::application::integrity::garbage_collect(
@@ -4895,12 +4901,7 @@ TEST(IntegrityMaintenanceTest,
     publish_remote(transport, workspace, retained);
     put_content(transport, workspace, "live", "live-content");
 
-    std::vector<std::string> orphans;
-    for (int i = 0; i < 3; ++i) {
-        const auto name = "orphan-" + std::to_string(i);
-        orphans.push_back(
-            put_content(transport, workspace, name, name + "-content"));
-    }
+    const auto orphans = make_orphan_variants(transport, workspace, 3);
 
     kasumi::platform::perf_trace::force_enable(true);
     kasumi::platform::perf_trace::reset();
@@ -4958,10 +4959,7 @@ TEST(IntegrityMaintenanceTest, BatchGcThresholdBoundaryFiveAndSixCandidates) {
         publish_remote(transport, workspace, retained);
         put_content(transport, workspace, "live", "live-content");
 
-        for (int i = 0; i < 5; ++i) {
-            const auto name = "orphan-5-" + std::to_string(i);
-            put_content(transport, workspace, name, name + "-content");
-        }
+        make_orphan_variants(transport, workspace, 5);
 
         reset_fake_traffic(*state);
         const auto collected = kasumi::application::integrity::garbage_collect(
@@ -4991,10 +4989,7 @@ TEST(IntegrityMaintenanceTest, BatchGcThresholdBoundaryFiveAndSixCandidates) {
         publish_remote(transport, workspace, retained);
         put_content(transport, workspace, "live", "live-content");
 
-        for (int i = 0; i < 6; ++i) {
-            const auto name = "orphan-6-" + std::to_string(i);
-            put_content(transport, workspace, name, name + "-content");
-        }
+        make_orphan_variants(transport, workspace, 6);
 
         reset_fake_traffic(*state);
         const auto collected = kasumi::application::integrity::garbage_collect(
@@ -5025,10 +5020,7 @@ TEST(IntegrityMaintenanceTest,
     publish_remote(transport, workspace, retained);
     put_content(transport, workspace, "live", "live-content");
 
-    for (int i = 0; i < 100; ++i) {
-        const auto name = "orphan-100-" + std::to_string(i);
-        put_content(transport, workspace, name, name + "-content");
-    }
+    make_orphan_variants(transport, workspace, 100);
 
     reset_fake_traffic(*state);
     const auto collected = kasumi::application::integrity::garbage_collect(
@@ -5168,7 +5160,8 @@ TEST(IntegrityMaintenanceTest,
         runtime, transport, test_key());
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
     EXPECT_EQ(collected->candidate_objects, 1U);
-    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(collected->directly_removed_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
     EXPECT_EQ(state->get_batch_count, 0U);
     EXPECT_EQ(state->commit_get_count, 2U);
 }
@@ -5267,7 +5260,8 @@ TEST(IntegrityMaintenanceTest, MultipleCommitsPreserveBatchDuringGc) {
         runtime, transport, test_key());
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
     EXPECT_EQ(collected->candidate_objects, 1U);
-    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(collected->directly_removed_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
     EXPECT_EQ(state->get_batch_count, 2U);
     EXPECT_EQ(state->commit_get_count, 0U);
 }
@@ -5749,7 +5743,8 @@ TEST(GarbageCollectionTelemetryTest, DisabledTracingEmitsNoGcTelemetry) {
     const auto collected = kasumi::application::integrity::garbage_collect(
         runtime, transport, test_key());
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
-    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(collected->directly_removed_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
 
     EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidates_selected"),
               0U);
@@ -5872,7 +5867,8 @@ TEST(IntegrityMaintenanceTest, HistoricalContentRemainsReachable) {
         runtime, transport, test_key());
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
     EXPECT_EQ(collected->candidate_objects, 1U);
-    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(collected->directly_removed_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
 
     // X is NOT in head commit1, but is in historical commit0 reachable from
     // head -> protected!
@@ -5943,7 +5939,8 @@ TEST(IntegrityMaintenanceTest, SharedBranchKeepsSharedContentReachable) {
         runtime, transport, test_key());
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
     EXPECT_EQ(collected->candidate_objects, 1U);
-    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(collected->directly_removed_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
 
     // Branch A drops X, but Branch B (and root) still reference X -> X remains
     // protected!
@@ -5988,7 +5985,8 @@ TEST(IntegrityMaintenanceTest, ReturnedContentRemainsReachable) {
         runtime, transport, test_key());
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
     EXPECT_EQ(collected->candidate_objects, 1U);
-    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(collected->directly_removed_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
 
     // X was removed in commit 1, but re-introduced in commit 2 (and existed in
     // commit 0). The prior removal must not authorize collection of X!
@@ -6073,7 +6071,8 @@ TEST(IntegrityMaintenanceTest, MergeKeepsParentContentReachable) {
         runtime, transport, test_key());
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
     EXPECT_EQ(collected->candidate_objects, 1U);
-    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(collected->directly_removed_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
 
     // All merged branches and base remain protected
     expect_presence(transport, id_c0, Presence::Present);
@@ -6138,7 +6137,8 @@ TEST(IntegrityMaintenanceTest, EpochRetentionKeepsRequiredContentReachable) {
         runtime, transport, test_key());
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
     EXPECT_EQ(collected->candidate_objects, 1U);
-    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(collected->directly_removed_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
 
     // Everything protected by epoch boundary and history is preserved
     expect_presence(transport, id_0, Presence::Present);
@@ -6262,12 +6262,7 @@ seed_copy_batch_gc(kasumi::transport::Transport& transport,
     const auto retained = make_commit(0, {}, "live.txt", "live").value();
     publish_remote(transport, workspace, retained);
     put_content(transport, workspace, "live", "live-content");
-    std::vector<std::string> candidates;
-    for (std::size_t index = 0; index < count; ++index) {
-        const auto value = "batch-orphan-" + std::to_string(index);
-        candidates.push_back(put_content(transport, workspace, value, value));
-    }
-    return candidates;
+    return make_orphan_variants(transport, workspace, count, "batch-orphan");
 }
 
 TEST(IntegrityMaintenanceTest,
@@ -8501,6 +8496,1048 @@ TEST(IntegrityMaintenanceTest,
 
     kasumi::platform::perf_trace::force_enable(false);
     kasumi::platform::perf_trace::reset();
+}
+
+// Test A — Only orphan content
+TEST(IntegrityMaintenanceTest, GcCandidateClassificationOnlyOrphanContent) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    const auto commit = make_commit(0, {}, "live.txt", "live-payload").value();
+    const auto published =
+        publish_remote(storage.transport, storage.workspace, commit);
+    const auto live_content = put_content(
+        storage.transport, storage.workspace, "live-payload", "live");
+    const auto orphan_a =
+        put_content(storage.transport, storage.workspace, "orphan-a", "oa");
+    const auto orphan_b =
+        put_content(storage.transport, storage.workspace, "orphan-b", "ob");
+    const auto orphan_c =
+        put_content(storage.transport, storage.workspace, "orphan-c", "oc");
+
+    std::vector<std::string> orphans{orphan_c, orphan_a, orphan_b};
+    const auto selected =
+        kasumi::application::integrity::select_gc_candidates({}, orphans);
+    EXPECT_TRUE(selected.has_value())
+        << (selected ? "" : selected.error().detail);
+    if (selected) {
+        EXPECT_EQ(selected->size(), 3U);
+        for (const auto& candidate : *selected) {
+            EXPECT_EQ(candidate.kind,
+                      kasumi::application::integrity::GcCandidateKind::Content);
+        }
+    }
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, storage.transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->content_candidate_objects, 3U);
+    EXPECT_EQ(collected->commit_variant_candidate_objects, 0U);
+    EXPECT_EQ(collected->candidate_objects, 3U);
+    EXPECT_EQ(collected->candidate_objects,
+              collected->content_candidate_objects +
+                  collected->commit_variant_candidate_objects);
+    EXPECT_EQ(collected->directly_removed_objects, 3U);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
+
+    expect_presence(storage.transport, live_content, Presence::Present);
+    expect_presence(
+        storage.transport, object_path(published.head), Presence::Present);
+    expect_presence(
+        storage.transport, marker_path(published.head), Presence::Present);
+    for (const auto& orphan : {orphan_a, orphan_b, orphan_c}) {
+        expect_presence(storage.transport, orphan, Presence::Absent);
+        const auto quarantined =
+            protocol::quarantine_identifier(test_layout(), orphan).value();
+        expect_presence(storage.transport, quarantined, Presence::Absent);
+        expect_presence(
+            storage.transport, quarantined + ".meta", Presence::Absent);
+    }
+}
+
+// Test B — Dispensable commit variant
+TEST(IntegrityMaintenanceTest,
+     GcCandidateClassificationDispensableCommitVariant) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    const auto commit = make_commit(0, {}, "live.txt", "live-payload").value();
+    const auto first = add_variant(storage, commit);
+    const auto second = add_variant(storage, commit);
+    ASSERT_NE(first, second);
+    const auto live_content = put_content(
+        storage.transport, storage.workspace, "live-payload", "live");
+
+    const auto redundant = std::min(first, second);
+    const auto head = std::max(first, second);
+    ASSERT_EQ(
+        kasumi::transport::remove(storage.transport, marker_path(redundant))
+            .value(),
+        kasumi::transport::Removal::Removed);
+
+    const std::vector<std::string> variant_ids{object_path(redundant)};
+    const auto selected =
+        kasumi::application::integrity::select_gc_candidates(variant_ids, {});
+    EXPECT_TRUE(selected.has_value())
+        << (selected ? "" : selected.error().detail);
+    if (selected) {
+        ASSERT_EQ(selected->size(), 1U);
+        EXPECT_EQ(selected->front().identifier, object_path(redundant));
+        EXPECT_EQ(
+            selected->front().kind,
+            kasumi::application::integrity::GcCandidateKind::CommitVariant);
+    }
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, storage.transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->content_candidate_objects, 0U);
+    EXPECT_EQ(collected->commit_variant_candidate_objects, 1U);
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->candidate_objects,
+              collected->content_candidate_objects +
+                  collected->commit_variant_candidate_objects);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    expect_presence(storage.transport, object_path(head), Presence::Present);
+    expect_presence(storage.transport, marker_path(head), Presence::Present);
+    expect_presence(storage.transport, live_content, Presence::Present);
+    expect_presence(
+        storage.transport, object_path(redundant), Presence::Absent);
+    expect_presence(
+        storage.transport,
+        protocol::quarantine_identifier(test_layout(), object_path(redundant))
+            .value(),
+        Presence::Present);
+}
+
+// Test C — Mixed candidate set
+HeadReference add_commit_variant(kasumi::transport::Transport& transport,
+                                 TempWorkspace& workspace,
+                                 const Commit& commit) {
+    LocalStorage local{.transport = std::move(transport),
+                       .workspace = std::move(workspace)};
+    const auto ref = add_variant(local, commit);
+    transport = std::move(local.transport);
+    workspace = std::move(local.workspace);
+    return ref;
+}
+
+TEST(IntegrityMaintenanceTest,
+     GcCandidateClassificationMixedSetDeterministicAndDeduplicated) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-mixed-candidates");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    const auto commit = make_commit(0, {}, "live.txt", "live-payload").value();
+    const auto v1 = add_commit_variant(transport, workspace, commit);
+    const auto v2 = add_commit_variant(transport, workspace, commit);
+    const auto v3 = add_commit_variant(transport, workspace, commit);
+    const auto live_content =
+        put_content(transport, workspace, "live-payload", "live");
+
+    std::vector refs{v1, v2, v3};
+    std::ranges::sort(refs);
+    const auto head = refs.back();
+    const auto disp_v1 = refs[0];
+    const auto disp_v2 = refs[1];
+    ASSERT_EQ(kasumi::transport::remove(transport, marker_path(disp_v1)).value(),
+              kasumi::transport::Removal::Removed);
+    ASSERT_EQ(kasumi::transport::remove(transport, marker_path(disp_v2)).value(),
+              kasumi::transport::Removal::Removed);
+
+    const auto orphan_1 = put_content(transport, workspace, "orphan-1", "o1");
+    const auto orphan_2 = put_content(transport, workspace, "orphan-2", "o2");
+
+    // Verify deterministic sorting, deduplication, and explicit failure on
+    // contradictory classification.
+    const std::vector<std::string> raw_variants{
+        object_path(disp_v2), object_path(disp_v1), object_path(disp_v2)};
+    const std::vector<std::string> raw_orphans{orphan_2, orphan_1, orphan_2};
+    const auto selected = kasumi::application::integrity::select_gc_candidates(
+        raw_variants, raw_orphans);
+    EXPECT_TRUE(selected.has_value())
+        << (selected ? "" : selected.error().detail);
+    if (selected) {
+        EXPECT_EQ(selected->size(), 4U);
+        EXPECT_TRUE(std::ranges::is_sorted(
+            *selected,
+            {},
+            &kasumi::application::integrity::GcCandidate::identifier));
+        for (std::size_t i = 1; i < selected->size(); ++i) {
+            EXPECT_NE((*selected)[i - 1].identifier, (*selected)[i].identifier);
+        }
+    }
+
+    const std::vector<std::string> contradictory_variants{"same-id"};
+    const std::vector<std::string> contradictory_orphans{"same-id"};
+    const auto contradictory =
+        kasumi::application::integrity::select_gc_candidates(
+            contradictory_variants, contradictory_orphans);
+    ASSERT_FALSE(contradictory.has_value());
+    EXPECT_EQ(contradictory.error().code, IntegrityErrorCode::IntegrityFailure);
+
+    const std::vector<std::string> empty_variant{""};
+    const std::vector<std::string> valid_orphan{"orphan-valid"};
+    const auto err_variant =
+        kasumi::application::integrity::select_gc_candidates(
+            empty_variant, valid_orphan);
+    ASSERT_FALSE(err_variant.has_value());
+    EXPECT_EQ(err_variant.error().code, IntegrityErrorCode::InvalidInput);
+
+    const std::vector<std::string> valid_variant{"variant-valid"};
+    const std::vector<std::string> empty_orphan{""};
+    const auto err_orphan =
+        kasumi::application::integrity::select_gc_candidates(
+            valid_variant, empty_orphan);
+    ASSERT_FALSE(err_orphan.has_value());
+    EXPECT_EQ(err_orphan.error().code, IntegrityErrorCode::InvalidInput);
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key(), 1, 1, 1);
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->content_candidate_objects, 2U);
+    EXPECT_EQ(collected->commit_variant_candidate_objects, 2U);
+    EXPECT_EQ(collected->candidate_objects, 4U);
+    EXPECT_EQ(collected->candidate_objects,
+              collected->content_candidate_objects +
+                  collected->commit_variant_candidate_objects);
+    EXPECT_EQ(collected->directly_removed_objects, 2U);
+    EXPECT_EQ(collected->quarantined_objects, 2U);
+
+    std::vector<std::string> copied_sources;
+    for (const auto& event : state->gc_events) {
+        if (event.starts_with("copy:")) {
+            const auto bar = event.find('|');
+            copied_sources.push_back(event.substr(5, bar - 5));
+        }
+    }
+    ASSERT_EQ(copied_sources.size(), 2U);
+    EXPECT_TRUE(std::ranges::is_sorted(copied_sources));
+
+    expect_presence(transport, live_content, Presence::Present);
+    expect_presence(transport, object_path(head), Presence::Present);
+    expect_presence(transport, marker_path(head), Presence::Present);
+}
+
+// Test D — No candidates (no-op)
+TEST(IntegrityMaintenanceTest, GcCandidateClassificationNoCandidatesNoOp) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-no-candidates-noop");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    const auto commit = make_commit(0, {}, "live.txt", "live-payload").value();
+    const auto published = publish_remote(transport, workspace, commit);
+    const auto live_content =
+        put_content(transport, workspace, "live-payload", "live");
+
+    const auto empty_selected =
+        kasumi::application::integrity::select_gc_candidates({}, {});
+    EXPECT_TRUE(empty_selected.has_value())
+        << (empty_selected ? "" : empty_selected.error().detail);
+    if (empty_selected) {
+        EXPECT_TRUE(empty_selected->empty());
+    }
+
+    reset_fake_traffic(*state);
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->candidate_objects, 0U);
+    EXPECT_EQ(collected->content_candidate_objects, 0U);
+    EXPECT_EQ(collected->commit_variant_candidate_objects, 0U);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
+    EXPECT_EQ(collected->restored_objects, 0U);
+    EXPECT_EQ(collected->purged_objects, 0U);
+    EXPECT_FALSE(collected->analysis_only);
+    EXPECT_EQ(state->copy_count, 0U);
+    EXPECT_EQ(state->copy_batch_count, 0U);
+    EXPECT_EQ(state->source_remove_count, 0U);
+    EXPECT_EQ(state->quarantine_metadata_put_count, 0U);
+
+    expect_presence(transport, live_content, Presence::Present);
+    expect_presence(transport, object_path(published.head), Presence::Present);
+    expect_presence(transport, marker_path(published.head), Presence::Present);
+}
+
+// Test E — Structural protections
+TEST(IntegrityMaintenanceTest,
+     GcCandidateClassificationPreservesStructuralProtections) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+
+    // Ancestor commit with two variants, unmarked (required by history via child).
+    const auto parent =
+        make_commit(0, {}, "parent.txt", "parent-payload").value();
+    const auto parent_v1 = add_variant(storage, parent);
+    const auto parent_v2 = add_variant(storage, parent);
+    ASSERT_NE(parent_v1, parent_v2);
+    ASSERT_EQ(
+        kasumi::transport::remove(storage.transport, marker_path(parent_v1))
+            .value(),
+        kasumi::transport::Removal::Removed);
+    ASSERT_EQ(
+        kasumi::transport::remove(storage.transport, marker_path(parent_v2))
+            .value(),
+        kasumi::transport::Removal::Removed);
+    const auto parent_content = put_content(
+        storage.transport, storage.workspace, "parent-payload", "parent");
+    const auto kept_parent_variant = std::min(parent_v1, parent_v2);
+    const auto redundant_parent_variant = std::max(parent_v1, parent_v2);
+
+    // Child commit referenced by valid HEAD marker.
+    const auto child =
+        make_commit(1, {commit_id(parent)}, "child.txt", "child-payload")
+            .value();
+    const auto child_head = add_variant(storage, child);
+    const auto child_content = put_content(
+        storage.transport, storage.workspace, "child-payload", "child");
+
+    // Protected Epochs (historical + active) anchored at parent (height 0).
+    const std::string vault_id(64, 'b');
+    std::string previous_epoch_id;
+    std::vector<std::string> epoch_objects;
+    for (std::uint64_t sequence = 0; sequence < 2; ++sequence) {
+        kasumi::application::history_storage::epoch::Epoch value{
+            .vault_id = vault_id,
+            .sequence = sequence,
+            .issued_at = static_cast<std::int64_t>(sequence + 1),
+            .policy = {},
+            .anchors = {{commit_id(parent), 0}},
+            .previous_epoch_id = previous_epoch_id,
+        };
+        const auto sealed = kasumi::application::history_storage::epoch::seal(
+            value, test_key());
+        ASSERT_TRUE(sealed.has_value()) << sealed.error().detail;
+        const auto id =
+            kasumi::application::history_storage::epoch::object_identifier(
+                test_layout(), sealed->reference);
+        ASSERT_TRUE(id.has_value()) << id.error().detail;
+        ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
+            storage.transport,
+            test_key(),
+            *sealed,
+            kasumi::test::workspace_root(storage.workspace)));
+        epoch_objects.push_back(*id);
+        previous_epoch_id = sealed->reference.epoch_id;
+    }
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, storage.transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->content_candidate_objects, 0U);
+    EXPECT_EQ(collected->commit_variant_candidate_objects, 1U);
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    // Valid HEAD marker, Commit required by HEAD, variant required by history,
+    // reachable contents, and Epochs all remain protected.
+    expect_presence(
+        storage.transport, marker_path(child_head), Presence::Present);
+    expect_presence(
+        storage.transport, object_path(child_head), Presence::Present);
+    expect_presence(
+        storage.transport, object_path(kept_parent_variant), Presence::Present);
+    expect_presence(storage.transport, parent_content, Presence::Present);
+    expect_presence(storage.transport, child_content, Presence::Present);
+    for (const auto& epoch_id : epoch_objects) {
+        expect_presence(storage.transport, epoch_id, Presence::Present);
+    }
+    expect_presence(storage.transport,
+                    object_path(redundant_parent_variant),
+                    Presence::Absent);
+
+    // Unknown namespace object blocks GC closed and never becomes an authorized
+    // candidate.
+    const auto orphan =
+        put_content(storage.transport, storage.workspace, "orphan", "orphan");
+    const auto foreign_file =
+        kasumi::test::workspace_path(storage.workspace, "foreign.bin");
+    kasumi::test::write_text(foreign_file, "foreign");
+    ASSERT_TRUE(kasumi::transport::put(
+        storage.transport, foreign_file, "unknown_namespace/object"));
+
+    const auto blocked = kasumi::application::integrity::garbage_collect(
+        runtime, storage.transport, test_key());
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error().code, IntegrityErrorCode::IntegrityFailure);
+    expect_presence(storage.transport, orphan, Presence::Present);
+    expect_presence(
+        storage.transport, "unknown_namespace/object", Presence::Present);
+}
+
+// Test F — Analysis-only mode
+TEST(IntegrityMaintenanceTest,
+     GcCandidateClassificationAnalysisOnlyReportsCategoryCounts) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-analysis-only-categories");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto runtime = runtime_data(workspace);
+
+    const auto commit = make_commit(0, {}, "live.txt", "live-payload").value();
+    const auto first = add_commit_variant(transport, workspace, commit);
+    const auto second = add_commit_variant(transport, workspace, commit);
+    ASSERT_NE(first, second);
+    const auto redundant = std::min(first, second);
+    ASSERT_EQ(kasumi::transport::remove(transport, marker_path(redundant)).value(),
+              kasumi::transport::Removal::Removed);
+    put_content(transport, workspace, "live-payload", "live");
+    const auto orphan_1 = put_content(transport, workspace, "orphan-1", "o1");
+    const auto orphan_2 = put_content(transport, workspace, "orphan-2", "o2");
+
+    state->hide_probe_listing = true;
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_TRUE(collected->analysis_only);
+    EXPECT_EQ(collected->content_candidate_objects, 2U);
+    EXPECT_EQ(collected->commit_variant_candidate_objects, 1U);
+    EXPECT_EQ(collected->candidate_objects, 3U);
+    EXPECT_EQ(collected->candidate_objects,
+              collected->content_candidate_objects +
+                  collected->commit_variant_candidate_objects);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
+    EXPECT_EQ(collected->restored_objects, 0U);
+    EXPECT_EQ(collected->purged_objects, 0U);
+    EXPECT_EQ(state->copy_count, 0U);
+    EXPECT_EQ(state->source_remove_count, 0U);
+    EXPECT_EQ(state->quarantine_metadata_put_count, 0U);
+
+    expect_presence(transport, orphan_1, Presence::Present);
+    expect_presence(transport, orphan_2, Presence::Present);
+    expect_presence(transport, object_path(redundant), Presence::Present);
+    expect_presence(
+        transport,
+        protocol::quarantine_identifier(test_layout(), orphan_1).value(),
+        Presence::Absent);
+    expect_presence(
+        transport,
+        protocol::quarantine_identifier(test_layout(), object_path(redundant))
+            .value(),
+        Presence::Absent);
+}
+
+// Test G — Observation stability
+TEST(IntegrityMaintenanceTest,
+     GcCandidateClassificationStabilityRejectsDivergentCandidatesOrCategories) {
+    using kasumi::application::integrity::GcCandidate;
+    using kasumi::application::integrity::GcCandidateKind;
+
+    // Stability comparison must not ignore candidate category even if
+    // identifiers match.
+    const std::vector<GcCandidate> as_content{
+        GcCandidate{.identifier = "same-id", .kind = GcCandidateKind::Content}};
+    const std::vector<GcCandidate> as_variant{GcCandidate{
+        .identifier = "same-id", .kind = GcCandidateKind::CommitVariant}};
+    EXPECT_FALSE(kasumi::application::integrity::same_gc_candidates(
+        as_content, as_variant));
+    EXPECT_TRUE(kasumi::application::integrity::same_gc_candidates(
+        as_content, as_content));
+
+    // Observation 1 vs Observation 2 divergence in candidate category/identity
+    // during garbage_collect must abort before any destructive action.
+    auto workspace =
+        kasumi::test::make_temp_workspace("gc-stability-category-divergence");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    const auto commit = make_commit(0, {}, "live.txt", "live-payload").value();
+    const auto first = add_commit_variant(transport, workspace, commit);
+    const auto second = add_commit_variant(transport, workspace, commit);
+    ASSERT_NE(first, second);
+    const auto redundant = std::min(first, second);
+    ASSERT_EQ(kasumi::transport::remove(transport, marker_path(redundant)).value(),
+              kasumi::transport::Removal::Removed);
+    put_content(transport, workspace, "live-payload", "live");
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+    const auto redundant_id = object_path(redundant);
+
+    // Hide the redundant commit variant during observation 1, then swap the
+    // orphan content for the redundant commit variant before observation 2.
+    auto variant_node = state->objects.extract(redundant_id);
+    ASSERT_FALSE(variant_node.empty());
+    reset_fake_traffic(*state);
+    state->on_operation = [&](FakeState& st,
+                              std::string_view event,
+                              std::string_view) {
+        if (event == "after_list" && st.full_list_count == 2) {
+            st.objects.erase(orphan);
+            st.objects.insert(std::move(variant_node));
+        }
+    };
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange);
+    EXPECT_EQ(state->copy_count, 0U);
+    EXPECT_EQ(state->source_remove_count, 0U);
+    EXPECT_EQ(state->quarantine_metadata_put_count, 0U);
+    expect_presence(transport, redundant_id, Presence::Present);
+    expect_presence(
+        transport,
+        protocol::quarantine_identifier(test_layout(), orphan).value(),
+        Presence::Absent);
+    expect_presence(
+        transport,
+        protocol::quarantine_identifier(test_layout(), redundant_id).value(),
+        Presence::Absent);
+}
+
+// ============================================================================
+// Phase 0.8-A3: Hybrid GC Tests (Groups A, B, C, D)
+// ============================================================================
+
+TEST(HybridGcTest, GroupA_A1_OrphanContentDirectlyRemovedWithoutQuarantine) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-a3-a1-direct-remove");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    const auto commit = make_commit(0, {}, "live.txt", "live-payload").value();
+    const auto published = publish_remote(transport, workspace, commit);
+    const auto live_content = put_content(transport, workspace, "live-payload", "live");
+    const auto orphan_content = put_content(transport, workspace, "orphan-payload", "orphan");
+    const auto q_id = protocol::quarantine_identifier(test_layout(), orphan_content).value();
+
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    // A1: Counter invariants
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->content_candidate_objects, 1U);
+    EXPECT_EQ(collected->commit_variant_candidate_objects, 0U);
+    EXPECT_EQ(collected->directly_removed_objects, 1U);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
+    EXPECT_EQ(collected->restored_objects, 0U);
+    EXPECT_EQ(collected->purged_objects, 0U);
+
+    // Physical state invariants: content deleted directly, never quarantined
+    expect_presence(transport, orphan_content, Presence::Absent);
+    expect_presence(transport, q_id, Presence::Absent);
+    expect_presence(transport, q_id + ".meta", Presence::Absent);
+    expect_presence(transport, live_content, Presence::Present);
+    expect_presence(transport, object_path(published.head), Presence::Present);
+
+    // No copy to quarantine or metadata publication occurred
+    EXPECT_EQ(state->copy_count, 0U);
+    EXPECT_EQ(state->quarantine_metadata_put_count, 0U);
+}
+
+TEST(HybridGcTest, GroupA_A2_OrphanCommitVariantQuarantinedWithAuthenticatedMetadata) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-a3-a2-quarantine-variant");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    const auto commit = make_commit(0, {}, "live.txt", "live-payload").value();
+    const auto published = publish_remote(transport, workspace, commit);
+    const auto live_content = put_content(transport, workspace, "live-payload", "live");
+
+    // Add an orphan commit variant (marker removed so it is unreachable)
+    const auto orphan_commit = make_commit(0, {}, "orphan.txt", "orphan-payload").value();
+    const auto orphan_published = publish_remote(transport, workspace, orphan_commit);
+    ASSERT_EQ(kasumi::transport::remove(transport, marker_path(orphan_published.head)).value(),
+              kasumi::transport::Removal::Removed);
+    const auto orphan_variant_id = object_path(orphan_published.head);
+    const auto q_variant_id = protocol::quarantine_identifier(test_layout(), orphan_variant_id).value();
+
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    // A2: Counter invariants
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->content_candidate_objects, 0U);
+    EXPECT_EQ(collected->commit_variant_candidate_objects, 1U);
+    EXPECT_EQ(collected->directly_removed_objects, 0U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+    EXPECT_EQ(collected->restored_objects, 0U);
+    EXPECT_EQ(collected->purged_objects, 0U);
+
+    // Physical state invariants: variant moved to authenticated quarantine
+    expect_presence(transport, orphan_variant_id, Presence::Absent);
+    expect_presence(transport, q_variant_id, Presence::Present);
+    expect_presence(transport, q_variant_id + ".meta", Presence::Present);
+    expect_presence(transport, live_content, Presence::Present);
+    expect_presence(transport, object_path(published.head), Presence::Present);
+
+    EXPECT_EQ(state->copy_count, 1U);
+    EXPECT_EQ(state->quarantine_metadata_put_count, 1U);
+}
+
+TEST(HybridGcTest, GroupA_A3_MixedCandidatesIndependentPoliciesAndCounterInvariants) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-a3-a3-mixed");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    const auto commit = make_commit(0, {}, "live.txt", "live-payload").value();
+    const auto published = publish_remote(transport, workspace, commit);
+    const auto live_content = put_content(transport, workspace, "live-payload", "live");
+
+    // M = 2 orphan contents
+    const auto orphan_c1 = put_content(transport, workspace, "orphan-1", "c1");
+    const auto orphan_c2 = put_content(transport, workspace, "orphan-2", "c2");
+    const auto q_c1 = protocol::quarantine_identifier(test_layout(), orphan_c1).value();
+    const auto q_c2 = protocol::quarantine_identifier(test_layout(), orphan_c2).value();
+
+    // N = 2 orphan commit variants
+    const auto orphan_v1 = make_commit(0, {}, "v1.txt", "v1").value();
+    const auto pub_v1 = publish_remote(transport, workspace, orphan_v1);
+    ASSERT_EQ(kasumi::transport::remove(transport, marker_path(pub_v1.head)).value(),
+              kasumi::transport::Removal::Removed);
+    const auto v1_id = object_path(pub_v1.head);
+    const auto q_v1 = protocol::quarantine_identifier(test_layout(), v1_id).value();
+
+    const auto orphan_v2 = make_commit(0, {}, "v2.txt", "v2").value();
+    const auto pub_v2 = publish_remote(transport, workspace, orphan_v2);
+    ASSERT_EQ(kasumi::transport::remove(transport, marker_path(pub_v2.head)).value(),
+              kasumi::transport::Removal::Removed);
+    const auto v2_id = object_path(pub_v2.head);
+    const auto q_v2 = protocol::quarantine_identifier(test_layout(), v2_id).value();
+
+    reset_fake_traffic(*state);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    // Strict mathematical relations:
+    EXPECT_EQ(collected->candidate_objects, 4U);
+    EXPECT_EQ(collected->content_candidate_objects, 2U);
+    EXPECT_EQ(collected->commit_variant_candidate_objects, 2U);
+    EXPECT_EQ(collected->candidate_objects,
+              collected->content_candidate_objects + collected->commit_variant_candidate_objects);
+    EXPECT_EQ(collected->directly_removed_objects, 2U);
+    EXPECT_EQ(collected->quarantined_objects, 2U);
+    EXPECT_LE(collected->directly_removed_objects, collected->content_candidate_objects);
+    EXPECT_LE(collected->quarantined_objects, collected->commit_variant_candidate_objects);
+
+    // Contents removed directly, no quarantine copies or metadata
+    expect_presence(transport, orphan_c1, Presence::Absent);
+    expect_presence(transport, orphan_c2, Presence::Absent);
+    expect_presence(transport, q_c1, Presence::Absent);
+    expect_presence(transport, q_c2, Presence::Absent);
+    expect_presence(transport, q_c1 + ".meta", Presence::Absent);
+    expect_presence(transport, q_c2 + ".meta", Presence::Absent);
+
+    // Variants quarantined with metadata
+    expect_presence(transport, v1_id, Presence::Absent);
+    expect_presence(transport, v2_id, Presence::Absent);
+    expect_presence(transport, q_v1, Presence::Present);
+    expect_presence(transport, q_v2, Presence::Present);
+    expect_presence(transport, q_v1 + ".meta", Presence::Present);
+    expect_presence(transport, q_v2 + ".meta", Presence::Present);
+
+    // Reachable preserved
+    expect_presence(transport, live_content, Presence::Present);
+    expect_presence(transport, object_path(published.head), Presence::Present);
+}
+
+TEST(HybridGcTest, GroupA_A4_ReachableContentNeverRemovedNorQuarantined) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-a3-a4-reachable-content");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    kasumi::Snapshot tree{
+        .rows = {
+            kasumi::NodeRow{.path = "", .hash = {}, .size = 0, .mtime = {}, .is_directory = true},
+            kasumi::NodeRow{.path = "a.txt", .hash = kasumi::hasher::hash_string("payload-a"), .size = 9, .mtime = {}, .is_directory = false},
+            kasumi::NodeRow{.path = "b.txt", .hash = kasumi::hasher::hash_string("payload-b"), .size = 9, .mtime = {}, .is_directory = false},
+        },
+    };
+    kasumi::finalize_snapshot(tree);
+    const auto commit = kasumi::history::make_commit(0, {}, tree).value();
+    const auto published = publish_remote(transport, workspace, commit);
+    const auto ca = put_content(transport, workspace, "payload-a", "a");
+    const auto cb = put_content(transport, workspace, "payload-b", "b");
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    EXPECT_EQ(collected->candidate_objects, 0U);
+    EXPECT_EQ(collected->content_candidate_objects, 0U);
+    EXPECT_EQ(collected->commit_variant_candidate_objects, 0U);
+    EXPECT_EQ(collected->directly_removed_objects, 0U);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
+
+    expect_presence(transport, ca, Presence::Present);
+    expect_presence(transport, cb, Presence::Present);
+    expect_presence(transport, object_path(published.head), Presence::Present);
+}
+
+TEST(HybridGcTest, GroupA_A5_ReachableCommitAndRequiredVariantNeverRemoved) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-a3-a5-reachable-commit");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    const auto parent = make_commit(0, {}, "parent.txt", "parent-payload").value();
+    const auto first = add_commit_variant(transport, workspace, parent);
+    const auto second = add_commit_variant(transport, workspace, parent);
+    ASSERT_NE(first, second);
+    ASSERT_EQ(kasumi::transport::remove(transport, marker_path(first)).value(),
+              kasumi::transport::Removal::Removed);
+    ASSERT_EQ(kasumi::transport::remove(transport, marker_path(second)).value(),
+              kasumi::transport::Removal::Removed);
+
+    const auto child =
+        kasumi::history::make_commit(1, {commit_id(parent)}, parent.tree).value();
+    const auto child_head = add_commit_variant(transport, workspace, child);
+    const auto kept = std::min(first, second);
+    const auto redundant = std::max(first, second);
+    const auto redundant_id = object_path(redundant);
+    const auto kept_id = object_path(kept);
+    const auto child_id = object_path(child_head);
+
+    put_content(transport, workspace, "parent-payload", "parent");
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    // Only the redundant commit variant is a candidate; required variant and child are preserved
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->content_candidate_objects, 0U);
+    EXPECT_EQ(collected->commit_variant_candidate_objects, 1U);
+    EXPECT_EQ(collected->directly_removed_objects, 0U);
+    EXPECT_EQ(collected->quarantined_objects, 1U);
+
+    expect_presence(transport, kept_id, Presence::Present);
+    expect_presence(transport, child_id, Presence::Present);
+    expect_presence(transport, redundant_id, Presence::Absent);
+}
+
+TEST(HybridGcTest, GroupB_B1_LegacyContentQuarantineRestoredWhenReachable) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-a3-b1-legacy-restore");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+    const auto layout = test_layout();
+
+    const std::string text = "restored-legacy-content";
+    const auto hash = kasumi::hasher::hash_string(text);
+    const auto original_id = kasumi::crypto::content_identifier(test_key(), hash);
+    const auto legacy_q_id = layout.quarantine_content_prefix + original_id;
+
+    const auto enc_path = kasumi::test::workspace_path(workspace, "legacy.enc");
+    const auto plain_path = kasumi::test::workspace_path(workspace, "legacy.plain");
+    kasumi::test::write_text(plain_path, text);
+    auto enc = kasumi::crypto::encrypt_file_with_hashes(
+        plain_path, enc_path, test_key(), kasumi::crypto::FilePurpose::Content);
+    ASSERT_TRUE(enc.has_value());
+    ASSERT_TRUE(kasumi::transport::put(transport, enc_path, legacy_q_id));
+
+    const auto now = kasumi::platform::clock::unix_seconds().value();
+    ASSERT_TRUE(protocol::record_quarantine(
+        transport, legacy_q_id, now, test_key(), kasumi::test::workspace_root(workspace), enc->ciphertext_sha256).has_value());
+
+    // Publish reachable commit referencing this content
+    const auto commit = make_commit(0, {}, "file.txt", text).value();
+    publish_remote(transport, workspace, commit);
+
+    // Original content is absent prior to GC
+    expect_presence(transport, original_id, Presence::Absent);
+    expect_presence(transport, legacy_q_id, Presence::Present);
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    EXPECT_EQ(collected->restored_objects, 1U);
+    expect_presence(transport, original_id, Presence::Present);
+}
+
+TEST(HybridGcTest, GroupB_B2_LegacyContentQuarantineRetainedWhileYoung) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-a3-b2-legacy-young");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+    const auto layout = test_layout();
+
+    publish_remote(transport, workspace, kasumi::history::make_empty_bootstrap().value());
+
+    const std::string text = "young-legacy-content";
+    const auto hash = kasumi::hasher::hash_string(text);
+    const auto original_id = kasumi::crypto::content_identifier(test_key(), hash);
+    const auto legacy_q_id = layout.quarantine_content_prefix + original_id;
+
+    const auto enc_path = kasumi::test::workspace_path(workspace, "young.enc");
+    const auto plain_path = kasumi::test::workspace_path(workspace, "young.plain");
+    kasumi::test::write_text(plain_path, text);
+    auto enc = kasumi::crypto::encrypt_file_with_hashes(
+        plain_path, enc_path, test_key(), kasumi::crypto::FilePurpose::Content);
+    ASSERT_TRUE(enc.has_value());
+    ASSERT_TRUE(kasumi::transport::put(transport, enc_path, legacy_q_id));
+
+    const auto now = kasumi::platform::clock::unix_seconds().value();
+    ASSERT_TRUE(protocol::record_quarantine(
+        transport, legacy_q_id, now - 3600, test_key(), kasumi::test::workspace_root(workspace), enc->ciphertext_sha256).has_value());
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    EXPECT_EQ(collected->purged_objects, 0U);
+    expect_presence(transport, legacy_q_id, Presence::Present);
+    expect_presence(transport, legacy_q_id + ".meta", Presence::Present);
+}
+
+TEST(HybridGcTest, GroupB_B3_LegacyContentQuarantinePurgedAfterRetentionExpiry) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-a3-b3-legacy-purge");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+    const auto layout = test_layout();
+
+    publish_remote(transport, workspace, kasumi::history::make_empty_bootstrap().value());
+
+    const std::string text = "expired-legacy-content";
+    const auto hash = kasumi::hasher::hash_string(text);
+    const auto original_id = kasumi::crypto::content_identifier(test_key(), hash);
+    const auto legacy_q_id = layout.quarantine_content_prefix + original_id;
+
+    const auto enc_path = kasumi::test::workspace_path(workspace, "expired.enc");
+    const auto plain_path = kasumi::test::workspace_path(workspace, "expired.plain");
+    kasumi::test::write_text(plain_path, text);
+    auto enc = kasumi::crypto::encrypt_file_with_hashes(
+        plain_path, enc_path, test_key(), kasumi::crypto::FilePurpose::Content);
+    ASSERT_TRUE(enc.has_value());
+    ASSERT_TRUE(kasumi::transport::put(transport, enc_path, legacy_q_id));
+
+    const auto now = kasumi::platform::clock::unix_seconds().value();
+    ASSERT_TRUE(protocol::record_quarantine(
+        transport,
+        legacy_q_id,
+        now - protocol::quarantine_retention_seconds - 3600,
+        test_key(),
+        kasumi::test::workspace_root(workspace),
+        enc->ciphertext_sha256).has_value());
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    EXPECT_EQ(collected->purged_objects, 1U);
+    expect_presence(transport, legacy_q_id, Presence::Absent);
+    expect_presence(transport, legacy_q_id + ".meta", Presence::Absent);
+}
+
+TEST(HybridGcTest, GroupB_B6_HybridGcNeverEmitsPutOrCopyToQuarantineContentPrefix) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-a3-b6-no-qcontent-put");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+    const auto layout = test_layout();
+
+    const auto commit = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, commit);
+    put_content(transport, workspace, "live", "live");
+    put_content(transport, workspace, "orphan", "orphan");
+
+    std::vector<std::string> destinations_targeted;
+    state->on_operation = [&](FakeState&, std::string_view op, std::string_view target) {
+        if (op == "put" || op == "copy") {
+            destinations_targeted.emplace_back(target);
+        }
+    };
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    for (const auto& dest : destinations_targeted) {
+        EXPECT_FALSE(dest.starts_with(layout.quarantine_content_prefix))
+            << "Destination matched legacy quarantine content prefix: " << dest;
+    }
+}
+
+TEST(HybridGcTest, GroupC_C6_AnalysisOnlyReturnsZeroRemovalsAndZeroQuarantine) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-a3-c6-analysis-only");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    const auto commit = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, commit);
+    put_content(transport, workspace, "live", "live");
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+
+    // Force consistency probe failure: hide probe listing
+    state->hide_probe_listing = true;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+
+    EXPECT_TRUE(collected->analysis_only);
+    EXPECT_EQ(collected->candidate_objects, 1U);
+    EXPECT_EQ(collected->content_candidate_objects, 1U);
+    EXPECT_EQ(collected->commit_variant_candidate_objects, 0U);
+    EXPECT_EQ(collected->directly_removed_objects, 0U);
+    EXPECT_EQ(collected->quarantined_objects, 0U);
+    EXPECT_EQ(collected->restored_objects, 0U);
+    EXPECT_EQ(collected->purged_objects, 0U);
+    expect_presence(transport, orphan, Presence::Present);
+}
+
+TEST(HybridGcTest, GroupD_D4_BarrierLossPriorToDirectRemovalAborts) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-a3-d4-barrier-loss");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+    const auto layout = test_layout();
+
+    const auto commit = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, commit);
+    put_content(transport, workspace, "live", "live");
+    const auto orphan = put_content(transport, workspace, "orphan", "orphan");
+
+    // After final namespace listing (full_list_count == 3), delete the barrier before destructive phase
+    state->on_operation = [&](FakeState& st, std::string_view op, std::string_view) {
+        if (op == "after_list" && st.full_list_count == 3) {
+            st.objects.erase(layout.barrier_identifier);
+            st.physical_hashes.erase(layout.barrier_identifier);
+        }
+    };
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::ConcurrentChange);
+    expect_presence(transport, orphan, Presence::Present);
+}
+
+TEST(HybridGcTest, GroupC_C4_PartialDirectRemovalFailureHandledDefensively) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-a3-c4-partial-remove");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    const auto commit = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, commit);
+    put_content(transport, workspace, "live", "live");
+    const auto orphan1 = put_content(transport, workspace, "orphan1", "orphan1");
+    const auto orphan2 = put_content(transport, workspace, "orphan2", "orphan2");
+
+    // Fail removal of orphan2
+    state->fail_remove_identifier = orphan2;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    EXPECT_EQ(collected.error().code, IntegrityErrorCode::TransportFailure);
+}
+
+TEST(HybridGcTest, GroupC_C5_PartialQuarantineFailureLeavesSource) {
+    auto workspace = kasumi::test::make_temp_workspace("gc-a3-c5-partial-quarantine");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    state->physical_hash_supported = true;
+    state->copy_supported = true;
+    auto runtime = runtime_data(workspace);
+
+    const auto commit = make_commit(0, {}, "live.txt", "live").value();
+    publish_remote(transport, workspace, commit);
+    put_content(transport, workspace, "live", "live");
+
+    const auto orphan_v1 = make_commit(0, {}, "v1.txt", "v1").value();
+    const auto pub_v1 = publish_remote(transport, workspace, orphan_v1);
+    ASSERT_EQ(kasumi::transport::remove(transport, marker_path(pub_v1.head)).value(),
+              kasumi::transport::Removal::Removed);
+    const auto v1_id = object_path(pub_v1.head);
+
+    // Fail quarantine metadata put for v1
+    state->fail_quarantine_metadata_put = true;
+
+    const auto collected = kasumi::application::integrity::garbage_collect(
+        runtime, transport, test_key());
+    ASSERT_FALSE(collected.has_value());
+    // Source was NOT removed
+    expect_presence(transport, v1_id, Presence::Present);
+}
+
+TEST(HybridGcTest, GroupD_D1_InvalidContentCandidateIdentifierRejected) {
+    const std::vector<std::string> valid_commits = {};
+    const std::vector<std::string> invalid_contents = {"not-a-valid-sha256-content-hash"};
+
+    const auto selected = kasumi::application::integrity::select_gc_candidates(
+        valid_commits, invalid_contents);
+    ASSERT_FALSE(selected.has_value());
+    EXPECT_EQ(selected.error().code, IntegrityErrorCode::IntegrityFailure);
+}
+
+TEST(HybridGcTest, GroupD_D2_ProtocolObjectBlockedFromCandidateSelection) {
+    const auto layout = test_layout();
+    const std::vector<std::string> valid_commits = {};
+    const std::vector<std::string> invalid_contents = {layout.barrier_identifier};
+
+    const auto selected = kasumi::application::integrity::select_gc_candidates(
+        valid_commits, invalid_contents);
+    ASSERT_FALSE(selected.has_value());
+    EXPECT_EQ(selected.error().code, IntegrityErrorCode::IntegrityFailure);
 }
 
 } // namespace

@@ -1025,9 +1025,30 @@ TEST(RcloneSystemTest,
     ASSERT_TRUE(storage.has_value());
     const auto orphan = put_content_blob(
         *storage, harness_root(harness), "orphan", "gc-orphan");
-    const auto quarantined = kasumi::application::history_storage::
-        maintenance_protocol::quarantine_identifier(layout, orphan);
-    ASSERT_TRUE(quarantined.has_value());
+
+    auto loaded = load_history(harness, harness_root(harness) / "gc-history");
+    ASSERT_EQ(loaded.marked_heads.size(), 1U);
+    const auto base_id = loaded.marked_heads.front();
+    const auto base = std::ranges::find(
+        loaded.commits, base_id, &kasumi::history::LoadedCommit::id);
+    ASSERT_NE(base, loaded.commits.end());
+
+    auto orphan_commit = kasumi::history::make_commit(
+        base->commit.height + 1, {base_id}, base->commit.tree, 2'000'000'000LL);
+    ASSERT_TRUE(orphan_commit.has_value());
+    const auto published = publish_staged(
+        *storage, layout, *orphan_commit, harness_root(harness) / "gc-publish");
+    ASSERT_TRUE(published.has_value()) << (published ? "" : published.error());
+    const auto orphan_variant =
+        kasumi::application::history_storage::commit_object(layout, published->head);
+    const auto marker =
+        kasumi::application::history_storage::marker_object(layout, published->head);
+    ASSERT_EQ(kasumi::transport::remove(*storage, marker).value(),
+              kasumi::transport::Removal::Removed);
+    const auto quarantined_variant =
+        kasumi::application::history_storage::maintenance_protocol::
+            quarantine_identifier(layout, orphan_variant);
+    ASSERT_TRUE(quarantined_variant.has_value());
 
     auto collected = kasumi::application::execute(
         {Request{Operation::GarbageCollect, std::string{profile_name}},
@@ -1039,11 +1060,17 @@ TEST(RcloneSystemTest,
         std::get_if<kasumi::application::GarbageCollectCompleted>(
             &collected->data);
     ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->candidate_objects, 2U);
+    EXPECT_EQ(first->content_candidate_objects, 1U);
+    EXPECT_EQ(first->commit_variant_candidate_objects, 1U);
+    EXPECT_EQ(first->directly_removed_objects, 1U);
     EXPECT_EQ(first->quarantined_objects, 1U);
     EXPECT_EQ(first->purged_objects, 0U);
     EXPECT_EQ(kasumi::transport::presence(*storage, orphan).value(),
               kasumi::transport::Presence::Absent);
-    EXPECT_EQ(kasumi::transport::presence(*storage, *quarantined).value(),
+    EXPECT_EQ(kasumi::transport::presence(*storage, orphan_variant).value(),
+              kasumi::transport::Presence::Absent);
+    EXPECT_EQ(kasumi::transport::presence(*storage, *quarantined_variant).value(),
               kasumi::transport::Presence::Present);
 
     const auto now = kasumi::platform::clock::unix_seconds();
@@ -1051,7 +1078,7 @@ TEST(RcloneSystemTest,
     const auto aged = kasumi::application::history_storage::
         maintenance_protocol::record_quarantine(
             *storage,
-            *quarantined,
+            *quarantined_variant,
             *now -
                 kasumi::application::history_storage::maintenance_protocol::
                     quarantine_retention_seconds -
@@ -1071,7 +1098,7 @@ TEST(RcloneSystemTest,
     ASSERT_NE(second, nullptr);
     EXPECT_EQ(second->quarantined_objects, 0U);
     EXPECT_EQ(second->purged_objects, 1U);
-    EXPECT_EQ(kasumi::transport::presence(*storage, *quarantined).value(),
+    EXPECT_EQ(kasumi::transport::presence(*storage, *quarantined_variant).value(),
               kasumi::transport::Presence::Absent);
     EXPECT_EQ(kasumi::transport::presence(*storage, aged->metadata_identifier)
                   .value(),
@@ -1145,7 +1172,11 @@ TEST(RcloneSystemTest, ReadvertisedHeadRestoresQuarantinedCommitAndContent) {
         std::get_if<kasumi::application::GarbageCollectCompleted>(
             &collected->data);
     ASSERT_NE(first, nullptr);
-    EXPECT_EQ(first->quarantined_objects, 2U);
+    EXPECT_EQ(first->candidate_objects, 2U);
+    EXPECT_EQ(first->content_candidate_objects, 1U);
+    EXPECT_EQ(first->commit_variant_candidate_objects, 1U);
+    EXPECT_EQ(first->directly_removed_objects, 1U);
+    EXPECT_EQ(first->quarantined_objects, 1U);
     {
         auto storage = open_transport(harness);
         ASSERT_TRUE(storage.has_value());
@@ -1162,6 +1193,10 @@ TEST(RcloneSystemTest, ReadvertisedHeadRestoresQuarantinedCommitAndContent) {
                 harness_root(harness) / "recovery-readvertise");
         ASSERT_TRUE(advertised.has_value())
             << (advertised ? "" : advertised.error().detail);
+        content_id = put_content_blob(*storage,
+                                      harness_root(harness),
+                                      recovered_contents,
+                                      "recovery-reupload");
     }
 
     auto restored = kasumi::application::execute(
@@ -1174,7 +1209,7 @@ TEST(RcloneSystemTest, ReadvertisedHeadRestoresQuarantinedCommitAndContent) {
         std::get_if<kasumi::application::GarbageCollectCompleted>(
             &restored->data);
     ASSERT_NE(second, nullptr);
-    EXPECT_EQ(second->restored_objects, 2U);
+    EXPECT_EQ(second->restored_objects, 1U);
     EXPECT_EQ(second->purged_objects, 0U);
 
     auto synchronized = sync_client(receiver);

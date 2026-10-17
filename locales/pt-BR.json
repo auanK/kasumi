@@ -84,7 +84,7 @@
     "stage_applying": "[4/5] Aplicando limpeza segura...",
     "stage_finalizing": "[5/5] Finalizando...",
     "completed": "Coleta de lixo concluída.",
-    "summary": "{} candidatos | {} quarentenados | {} restaurados | {} purgados",
+    "summary": "{} candidatos | {} removidos diretamente | {} quarentenados | {} restaurados | {} purgados",
     "warning_header_singular": "Análise concluída com 1 candidato.",
     "warning_header_plural": "Análise concluída com {} candidatos.",
     "warning_detail1": "A consistência do backend foi insuficiente para quarentena online.",

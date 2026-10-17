@@ -99,6 +99,9 @@ struct FsckCompleted {
 // Result of completed recoverable garbage collection.
 struct GarbageCollectCompleted {
     std::size_t candidate_objects = 0;
+    std::size_t content_candidate_objects = 0;
+    std::size_t commit_variant_candidate_objects = 0;
+    std::size_t directly_removed_objects = 0;
     std::size_t quarantined_objects = 0;
     std::size_t restored_objects = 0;
     std::size_t purged_objects = 0;

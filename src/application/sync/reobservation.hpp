@@ -23,6 +23,15 @@ struct StableExecution {
 bool same_observation(const reconciliation::Input& left,
                       const reconciliation::Input& right) noexcept;
 
+// Audits remote physical presence of required content objects.
+std::expected<void, coordinator::Error>
+observe_content_availability(
+    reconciliation::Input& input,
+    const reconciliation::Result& result,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    std::span<const Hash> confirmed_missing = {});
+
 // Re-observes until the plan stabilizes or fails.
 std::expected<StableExecution, coordinator::Error>
 stabilize(const runtime::RuntimeData& runtime_data,

@@ -84,7 +84,7 @@
     "stage_applying": "[4/5] Applying safe cleanup...",
     "stage_finalizing": "[5/5] Finalizing...",
     "completed": "Garbage collection completed.",
-    "summary": "{} candidates | {} quarantined | {} restored | {} purged",
+    "summary": "{} candidates | {} directly removed | {} quarantined | {} restored | {} purged",
     "warning_header_singular": "Analysis completed with 1 candidate.",
     "warning_header_plural": "Analysis completed with {} candidates.",
     "warning_detail1": "Backend consistency was insufficient for online quarantine.",

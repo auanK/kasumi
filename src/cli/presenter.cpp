@@ -1042,6 +1042,7 @@ int present(const application::Response& response, bool full) {
         std::println("     {}",
                      i18n::format(i18n::Key::GcSummary,
                                   ptr->candidate_objects,
+                                  ptr->directly_removed_objects,
                                   ptr->quarantined_objects,
                                   ptr->restored_objects,
                                   ptr->purged_objects));

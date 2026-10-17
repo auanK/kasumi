@@ -13,6 +13,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace kasumi::application::integrity {
 
@@ -47,9 +48,31 @@ struct FsckResult {
 
 using FsckProgressCallback = std::function<void(const FsckProgress&)>;
 
+enum class GcCandidateKind : std::uint8_t {
+    Content,
+    CommitVariant
+};
+
+struct GcCandidate {
+    std::string identifier;
+    GcCandidateKind kind = GcCandidateKind::Content;
+
+    bool operator==(const GcCandidate&) const = default;
+};
+
+std::expected<std::vector<GcCandidate>, Error>
+select_gc_candidates(std::span<const std::string> commit_variant_ids,
+                     std::span<const std::string> orphan_content_ids);
+
+bool same_gc_candidates(std::span<const GcCandidate> left,
+                        std::span<const GcCandidate> right) noexcept;
+
 // Counts produced by recoverable garbage collection.
 struct GarbageCollectResult {
     std::size_t candidate_objects = 0;
+    std::size_t content_candidate_objects = 0;
+    std::size_t commit_variant_candidate_objects = 0;
+    std::size_t directly_removed_objects = 0;
     std::size_t quarantined_objects = 0;
     std::size_t restored_objects = 0;
     std::size_t purged_objects = 0;

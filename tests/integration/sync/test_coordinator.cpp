@@ -4926,6 +4926,14 @@ TEST(ReobservationTest,
             kasumi::application::history_storage::publish_commit(
                 *base, key, *commit, profile);
         ASSERT_TRUE(published.has_value()) << published.error().detail;
+        for (const auto& row : tree->rows) {
+            if (!row.is_directory) {
+                kasumi::test::write_text(
+                    storage_path /
+                        kasumi::crypto::content_identifier(key, row.hash),
+                    "");
+            }
+        }
         const auto runtime_data = make_runtime(profile, local, storage_path);
         ASSERT_TRUE(
             kasumi::state_storage::initialize(runtime_data.database_path));
@@ -4992,11 +5000,12 @@ TEST(ReobservationTest,
                 : test_layout.epochs_prefix;
 
         EXPECT_EQ(state.presence_count, 0U);
-        EXPECT_EQ(state.full_list_count, 0U);
+        EXPECT_EQ(state.full_list_count, 1U);
         EXPECT_EQ(state.request_events,
                   (std::vector<std::string>{"LIST " + heads_dir,
-                                            "LIST " + epochs_dir}));
-        EXPECT_EQ(state.list_count, 2U);
+                                            "LIST " + epochs_dir,
+                                            "LIST <root>"}));
+        EXPECT_EQ(state.list_count, 3U);
         EXPECT_EQ(state.prefix_list_count, 2U);
         EXPECT_EQ(state.get_count, 0U);
         EXPECT_EQ(state.put_count, 0U);
@@ -5037,7 +5046,7 @@ TEST(ReobservationTest,
         ASSERT_TRUE(kasumi::application::sync::coordinator::execute(
             runtime_data, storage, key, stable->input, stable->result));
         EXPECT_EQ(state.presence_count, 0U);
-        EXPECT_EQ(state.full_list_count, 0U);
+        EXPECT_EQ(state.full_list_count, 2U);
         EXPECT_EQ(state.initialize_count, 0U);
         EXPECT_EQ(state.prefix_list_count, 4U);
         EXPECT_EQ(state.listed_prefixes,
@@ -5058,11 +5067,13 @@ TEST(ReobservationTest,
                                  "parent marker DELETE"}) {
             EXPECT_EQ(std::ranges::count(state.events, event), 1) << event;
         }
-        ASSERT_EQ(state.request_events.size(), 11U);
+        ASSERT_EQ(state.request_events.size(), 13U);
         EXPECT_EQ(state.request_events[0], "LIST " + heads_dir);
         EXPECT_EQ(state.request_events[1], "LIST " + epochs_dir);
-        EXPECT_EQ(state.request_events[2], "LIST " + heads_dir);
-        EXPECT_EQ(state.request_events[3], "LIST " + epochs_dir);
+        EXPECT_EQ(state.request_events[2], "LIST <root>");
+        EXPECT_EQ(state.request_events[3], "LIST " + heads_dir);
+        EXPECT_EQ(state.request_events[4], "LIST " + epochs_dir);
+        EXPECT_EQ(state.request_events[5], "LIST <root>");
         const auto request_index = [&](const auto& predicate) {
             const auto found =
                 std::ranges::find_if(state.request_events, predicate);
@@ -5110,11 +5121,10 @@ TEST(ReobservationTest,
         EXPECT_LT(head_put, head_hash);
         EXPECT_LT(head_hash, cleanup);
         RecordProperty("incremental_1000_plus_1_requests", request_count());
-        EXPECT_EQ(request_count(), 11U);
-        // A trusted NOOP performs exactly the two control-plane prefix LISTs
-        // used to observe heads and Epochs; neither operation scales with the
-        // number of content objects.
-        EXPECT_EQ(no_op_requests, 2U);
+        EXPECT_EQ(request_count(), 13U);
+        // A healthy NOOP performs the two control-plane prefix LISTs plus one
+        // root content availability LIST; none scale with content count.
+        EXPECT_EQ(no_op_requests, 3U);
     }
 }
 

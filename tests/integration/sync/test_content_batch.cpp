@@ -465,7 +465,12 @@ kasumi::transport::PresenceResult recording_presence(void* context,
 }
 
 kasumi::transport::ListingResult recording_list(void* context) {
-    return kasumi::transport::list(*recording_state(context)->base);
+    auto* state = recording_state(context);
+    if (state->probe != nullptr &&
+        state->probe->fail_control_batch_on_call_ordinal.has_value()) {
+        return std::vector<std::string>{};
+    }
+    return kasumi::transport::list(*state->base);
 }
 
 kasumi::transport::ListingResult

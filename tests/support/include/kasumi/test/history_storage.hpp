@@ -256,6 +256,8 @@ struct FakeState {
     std::size_t replace_barrier_after_source_remove_count = 0;
     std::string fail_remove_identifier;
     std::string fail_get_identifier;
+    std::size_t fail_get_identifier_after_count = 0;
+    std::size_t fail_get_identifier_call_count = 0;
     std::string fail_put_identifier;
     std::string put_then_fail_identifier;
     kasumi::transport::ErrorCode put_then_fail_code =
@@ -325,6 +327,7 @@ FakeState* fake_state(void* context) {
     state.probe_list_count = 0;
     state.fail_list.reset();
     state.fail_list_at = 0;
+    state.fail_get_identifier_call_count = 0;
     state.remote_events.clear();
     state.gc_events.clear();
 }
@@ -628,7 +631,14 @@ kasumi::transport::Result fake_get(void* context,
         ++state->barrier_verification_count;
         state->gc_events.emplace_back("barrier:" + std::string{identifier});
     }
-    const bool failed_target = identifier == state->fail_get_identifier;
+    bool failed_target = identifier == state->fail_get_identifier;
+    if (failed_target) {
+        ++state->fail_get_identifier_call_count;
+        if (state->fail_get_identifier_call_count <=
+            state->fail_get_identifier_after_count) {
+            failed_target = false;
+        }
+    }
     if ((is_commit(identifier) && state->fail_commit_get) ||
         (is_marker(identifier) && state->fail_marker_get) ||
         (!is_commit(identifier) && !is_marker(identifier) &&
@@ -854,12 +864,13 @@ kasumi::transport::RemovalResult fake_remove(void* context,
     const bool removed = state->objects.erase(std::string{identifier}) != 0;
     if (removed) {
         state->gc_events.emplace_back("remove:" + std::string{identifier});
-        const bool content_identifier =
-            identifier.size() == 64 &&
-            std::ranges::all_of(identifier, [](unsigned char c) {
-                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-            });
-        if (content_identifier &&
+        const bool candidate_source =
+            (identifier.size() == 64 &&
+             std::ranges::all_of(identifier, [](unsigned char c) {
+                 return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+             })) ||
+            is_commit(identifier);
+        if (candidate_source &&
             ++state->source_remove_count ==
                 state->replace_barrier_after_source_remove_count) {
             state->replace_barrier_after_source_remove_count = 0;

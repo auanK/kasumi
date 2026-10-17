@@ -72,107 +72,6 @@ bool same_rows(std::span<const NodeRow> left,
     return left.size() == right.size() && std::ranges::equal(left, right);
 }
 
-std::expected<void, Error> observe_content_availability(
-    reconciliation::Input& input,
-    const reconciliation::Result& result,
-    transport::Transport& storage,
-    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-    std::span<const Hash> confirmed_missing) {
-    HashSet hashes{0, hash_key};
-    const auto add_hash = [&](const Hash& hash) {
-        hashes.insert(hash);
-    };
-    for (const auto& operation : sync_plan_operations(result.plan)) {
-        if (operation.action == Action::Download) {
-            if (const auto hash = hash_from_hex(operation.hash)) {
-                add_hash(*hash);
-            }
-        }
-    }
-    const auto add_relevant_pending = [&](std::span<const NodeRow> rows) {
-        for (const auto& row : rows) {
-            if (const auto* remote = find_row(input.storage.tree, row.path);
-                remote != nullptr && !remote->is_directory &&
-                remote->hash == row.hash && remote->size == row.size) {
-                const auto* local = find_row(input.local_tree, row.path);
-                if (local == nullptr ||
-                    (!local->is_directory && local->hash == row.hash)) {
-                    add_hash(remote->hash);
-                }
-            }
-        }
-    };
-    add_relevant_pending(input.pending_materializations);
-    add_relevant_pending(input.pending_deletion_authority);
-    add_relevant_pending(result.pending_materializations);
-    add_relevant_pending(result.pending_storage_rows);
-
-    input.known_missing_content_objects.clear();
-    input.known_missing_content_objects.insert(confirmed_missing.begin(),
-                                               confirmed_missing.end());
-    if (hashes.empty()) {
-        return {};
-    }
-    std::vector<std::pair<Hash, std::string>> requested;
-    requested.reserve(hashes.size());
-    for (const auto& hash : hashes) {
-        requested.emplace_back(hash, crypto::content_identifier(key, hash));
-    }
-    std::ranges::sort(requested, {}, [](const auto& item) {
-        return item.second;
-    });
-    platform::perf_trace::count("sync content presence requests",
-                                requested.size());
-
-    std::vector<transport::Presence> presences;
-    if (storage.storage.control_read_batch != nullptr) {
-        transport::ControlReadBatchRequest request;
-        request.presence_identifiers.reserve(requested.size());
-        for (const auto& [hash, identifier] : requested) {
-            request.presence_identifiers.push_back(identifier);
-        }
-        auto batch = transport::control_read_batch(storage, request);
-        if (batch) {
-            if (batch->presences.size() != requested.size()) {
-                return std::unexpected(detail::make_error(
-                    ErrorCode::ObservationFailure,
-                    "presence batch returned an invalid result count"));
-            }
-            presences = std::move(batch->presences);
-        } else if (batch.error().code != transport::ErrorCode::Unsupported) {
-            return std::unexpected(
-                detail::make_error(ErrorCode::ObservationFailure,
-                                   transport::describe(batch.error())));
-        }
-    }
-    if (presences.empty() && storage.storage.presence != nullptr) {
-        presences.reserve(requested.size());
-        for (const auto& [hash, identifier] : requested) {
-            auto observed = transport::presence(storage, identifier);
-            if (!observed) {
-                if (observed.error().code ==
-                    transport::ErrorCode::Unsupported) {
-                    presences.clear();
-                    break;
-                }
-                return std::unexpected(
-                    detail::make_error(ErrorCode::ObservationFailure,
-                                       transport::describe(observed.error())));
-            }
-            presences.push_back(*observed);
-        }
-    }
-    if (presences.empty()) {
-        return {}; // No probe capability: the verified GET remains
-                   // authoritative.
-    }
-    for (std::size_t index = 0; index < requested.size(); ++index) {
-        if (presences[index] == transport::Presence::Absent) {
-            input.known_missing_content_objects.insert(requested[index].first);
-        }
-    }
-    return {};
-}
 
 std::expected<void, Error>
 stage_attempt(const runtime::RuntimeData& runtime_data,
@@ -218,6 +117,159 @@ stage_attempt(const runtime::RuntimeData& runtime_data,
 }
 
 } // namespace
+
+std::expected<void, coordinator::Error>
+observe_content_availability(
+    reconciliation::Input& input,
+    const reconciliation::Result& result,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    std::span<const Hash> confirmed_missing) {
+    HashSet hashes{0, hash_key};
+    const auto add_hash = [&](const Hash& hash) {
+        hashes.insert(hash);
+    };
+
+    HashSet storage_hashes{0, hash_key};
+    for (const auto& row : input.storage.tree.rows) {
+        if (!row.is_directory) {
+            storage_hashes.insert(row.hash);
+        }
+    }
+
+    HashSet planned_new_uploads{0, hash_key};
+    for (const auto& operation : sync_plan_operations(result.plan)) {
+        if (operation.action == Action::Upload) {
+            if (const auto hash = hash_from_hex(operation.hash);
+                hash && !storage_hashes.contains(*hash) &&
+                !input.known_missing_content_objects.contains(*hash) &&
+                std::ranges::find(confirmed_missing, *hash) ==
+                    confirmed_missing.end()) {
+                planned_new_uploads.insert(*hash);
+            }
+        }
+    }
+
+    for (const auto& row : result.candidate_shared_tree.rows) {
+        if (!row.is_directory && !planned_new_uploads.contains(row.hash)) {
+            add_hash(row.hash);
+        }
+    }
+
+    for (const auto& operation : sync_plan_operations(result.plan)) {
+        if (operation.action == Action::Download) {
+            if (const auto hash = hash_from_hex(operation.hash)) {
+                add_hash(*hash);
+            }
+        }
+    }
+
+    const auto add_pending = [&](std::span<const NodeRow> rows) {
+        for (const auto& row : rows) {
+            if (!row.is_directory && storage_hashes.contains(row.hash)) {
+                add_hash(row.hash);
+            }
+        }
+    };
+    add_pending(input.pending_materializations);
+    add_pending(input.pending_deletion_authority);
+    add_pending(result.pending_materializations);
+    add_pending(result.pending_storage_rows);
+    for (const auto& hash : input.known_missing_content_objects) {
+        if (storage_hashes.contains(hash)) {
+            add_hash(hash);
+        }
+    }
+
+    input.known_missing_content_objects.clear();
+    for (const auto& hash : confirmed_missing) {
+        if (storage_hashes.contains(hash)) {
+            input.known_missing_content_objects.insert(hash);
+        }
+    }
+    if (!input.storage.history_present || hashes.empty()) {
+        return {};
+    }
+
+    const auto list_trace = platform::perf_trace::begin();
+    auto listing = transport::list(storage);
+    platform::perf_trace::finish("sync content listing", list_trace);
+    if (!listing) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::ObservationFailure,
+            transport::describe(listing.error())));
+    }
+    std::ranges::sort(*listing);
+
+    std::vector<std::pair<Hash, std::string>> unconfirmed;
+    for (const auto& hash : hashes) {
+        auto identifier = crypto::content_identifier(key, hash);
+        if (!std::ranges::binary_search(*listing, identifier)) {
+            unconfirmed.emplace_back(hash, std::move(identifier));
+        }
+    }
+
+    if (unconfirmed.empty()) {
+        return {};
+    }
+
+    std::ranges::sort(unconfirmed, {}, [](const auto& item) {
+        return item.second;
+    });
+    platform::perf_trace::count("sync content presence requests",
+                                unconfirmed.size());
+
+    std::vector<transport::Presence> presences;
+    if (storage.storage.control_read_batch != nullptr) {
+        transport::ControlReadBatchRequest request;
+        request.presence_identifiers.reserve(unconfirmed.size());
+        for (const auto& [hash, identifier] : unconfirmed) {
+            request.presence_identifiers.push_back(identifier);
+        }
+        auto batch = transport::control_read_batch(storage, request);
+        if (batch) {
+            if (batch->presences.size() != unconfirmed.size()) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    "presence batch returned an invalid result count"));
+            }
+            presences = std::move(batch->presences);
+        } else if (batch.error().code != transport::ErrorCode::Unsupported) {
+            return std::unexpected(
+                detail::make_error(ErrorCode::ObservationFailure,
+                                   transport::describe(batch.error())));
+        }
+    }
+    if (presences.empty() && storage.storage.presence != nullptr) {
+        presences.reserve(unconfirmed.size());
+        for (const auto& [hash, identifier] : unconfirmed) {
+            auto observed = transport::presence(storage, identifier);
+            if (!observed) {
+                if (observed.error().code ==
+                    transport::ErrorCode::Unsupported) {
+                    presences.clear();
+                    break;
+                }
+                return std::unexpected(
+                    detail::make_error(ErrorCode::ObservationFailure,
+                                       transport::describe(observed.error())));
+            }
+            presences.push_back(*observed);
+        }
+    }
+    if (presences.empty()) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::ObservationFailure,
+            "transport does not support presence verification for unlisted content"));
+    }
+    for (std::size_t index = 0; index < unconfirmed.size(); ++index) {
+        if (presences[index] == transport::Presence::Absent) {
+            input.known_missing_content_objects.insert(
+                unconfirmed[index].first);
+        }
+    }
+    return {};
+}
 
 bool same_observation(const reconciliation::Input& left,
                       const reconciliation::Input& right) noexcept {

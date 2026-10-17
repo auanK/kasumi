@@ -1420,7 +1420,8 @@ TEST(CliPresenterTest,
     EXPECT_NE(output.find("Coleta de lixo concluída."), std::string::npos);
     EXPECT_NE(
         output.find(
-            "8 candidatos | 8 quarentenados | 0 restaurados | 0 purgados"),
+            "8 candidatos | 0 removidos diretamente | 8 quarentenados | 0 "
+            "restaurados | 0 purgados"),
         std::string::npos);
 
     // Verify bounded output and no internal leaks
@@ -1449,6 +1450,7 @@ TEST(CliPresenterTest,
         .stage = kasumi::application::GarbageCollectStage::Finalizing});
     kasumi::application::GarbageCollectCompleted summary{
         .candidate_objects = 8,
+        .directly_removed_objects = 0,
         .quarantined_objects = 8,
         .restored_objects = 0,
         .purged_objects = 0,
@@ -1471,9 +1473,57 @@ TEST(CliPresenterTest,
     EXPECT_NE(output.find("[OK]"), std::string::npos);
     EXPECT_NE(output.find("Garbage collection completed."), std::string::npos);
     EXPECT_NE(
-        output.find("8 candidates | 8 quarantined | 0 restored | 0 purged"),
+        output.find(
+            "8 candidates | 0 directly removed | 8 quarantined | 0 restored | "
+            "0 purged"),
         std::string::npos);
     EXPECT_EQ(output.find("[Running destination GC]"), std::string::npos);
+}
+
+TEST(CliPresenterTest,
+     PresentsGarbageCollectProgressHybridSummaryWithDirectRemovals) {
+    {
+        const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
+        testing::internal::CaptureStdout();
+        kasumi::application::GarbageCollectCompleted summary{
+            .candidate_objects = 8,
+            .directly_removed_objects = 5,
+            .quarantined_objects = 3,
+            .restored_objects = 1,
+            .purged_objects = 2,
+            .analysis_only = false,
+        };
+        EXPECT_EQ(kasumi::cli::present(response(
+                      summary, kasumi::application::Operation::GarbageCollect)),
+                  0);
+        const auto output = testing::internal::GetCapturedStdout();
+        EXPECT_NE(
+            output.find(
+                "8 candidatos | 5 removidos diretamente | 3 quarentenados | 1 "
+                "restaurados | 2 purgados"),
+            std::string::npos);
+    }
+    {
+        const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
+        testing::internal::CaptureStdout();
+        kasumi::application::GarbageCollectCompleted summary{
+            .candidate_objects = 8,
+            .directly_removed_objects = 5,
+            .quarantined_objects = 3,
+            .restored_objects = 1,
+            .purged_objects = 2,
+            .analysis_only = false,
+        };
+        EXPECT_EQ(kasumi::cli::present(response(
+                      summary, kasumi::application::Operation::GarbageCollect)),
+                  0);
+        const auto output = testing::internal::GetCapturedStdout();
+        EXPECT_NE(
+            output.find(
+                "8 candidates | 5 directly removed | 3 quarantined | 1 "
+                "restored | 2 purged"),
+            std::string::npos);
+    }
 }
 
 TEST(CliPresenterTest,
@@ -1518,7 +1568,8 @@ TEST(CliPresenterTest,
     EXPECT_NE(output.find("[OK]"), std::string::npos);
     EXPECT_NE(
         output.find(
-            "0 candidatos | 0 quarentenados | 0 restaurados | 0 purgados"),
+            "0 candidatos | 0 removidos diretamente | 0 quarentenados | 0 "
+            "restaurados | 0 purgados"),
         std::string::npos);
 }
 

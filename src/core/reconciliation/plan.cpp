@@ -359,6 +359,12 @@ void append_recovery_uploads(const HashSet& missing_objects,
                              const LocalSources& local_sources,
                              std::vector<Operation>& operations,
                              std::vector<std::string>& repair_paths) {
+    std::unordered_set<std::string> scheduled_hashes;
+    for (const auto& operation : operations) {
+        if (operation.action == Action::Upload) {
+            scheduled_hashes.insert(operation.hash);
+        }
+    }
     for (const auto& hash : missing_objects) {
         const auto source = local_sources.find(hash);
 
@@ -368,13 +374,7 @@ void append_recovery_uploads(const HashSet& missing_objects,
 
         const auto hash_identifier = hash_hex(hash);
 
-        const bool already_scheduled =
-            std::ranges::any_of(operations, [&](const Operation& operation) {
-                return operation.action == Action::Upload &&
-                       operation.hash == hash_identifier;
-            });
-
-        if (already_scheduled) {
+        if (!scheduled_hashes.insert(hash_identifier).second) {
             continue;
         }
 
@@ -448,6 +448,14 @@ candidate_shared_tree(const Input& input,
             input.local_tree, platform::path::to_logical_utf8(operation.path));
         if (direct != nullptr) {
             return direct;
+        }
+        for (const auto& candidate : sync_plan_operations(plan)) {
+            if (candidate.action == Action::RenameLocal &&
+                candidate.alt_path == operation.path) {
+                return find_row(
+                    input.local_tree,
+                    platform::path::to_logical_utf8(candidate.path));
+            }
         }
         if (operation.hash.empty()) {
             return static_cast<const NodeRow*>(nullptr);
@@ -798,8 +806,12 @@ ReconcileResult reconcile(const Input& input) {
                                           input.storage.object_identifiers,
                                           missing_objects);
     }
-    missing_objects.insert(input.known_missing_content_objects.begin(),
-                           input.known_missing_content_objects.end());
+    for (const auto& row : effective_storage_tree.rows) {
+        if (!row.is_directory &&
+            input.known_missing_content_objects.contains(row.hash)) {
+            missing_objects.insert(row.hash);
+        }
+    }
 
     LocalSources local_sources{0, hash_key};
 
