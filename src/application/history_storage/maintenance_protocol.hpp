@@ -54,7 +54,8 @@ RegistrationResult register_writer(transport::Transport& storage,
                                    const RemoteLayout& layout,
                                    const std::filesystem::path& workspace_root);
 
-// Publishes the barrier preventing new writers.
+// Requires exclusive vault operation; refuses an observed existing barrier and
+// publishes the barrier checked by writer admission. Presence/PUT are not atomic.
 RegistrationResult
 establish_barrier(transport::Transport& storage,
                   const RemoteLayout& layout,

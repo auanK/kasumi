@@ -286,6 +286,10 @@ release_registration(RegistrationState& registration) {
     if (!removed) {
         return std::unexpected(transport_error(removed.error()));
     }
+    if (registration.verify_owner && *removed != transport::Removal::Removed) {
+        return std::unexpected(error(ErrorCode::Blocked,
+                                     "owned barrier disappeared before removal"));
+    }
     return {};
 }
 
@@ -386,6 +390,15 @@ establish_barrier(transport::Transport& storage,
     if (!transport::valid(storage) || workspace_root.empty()) {
         return std::unexpected(
             error(ErrorCode::InvalidInput, "invalid barrier context"));
+    }
+    // Exclusive vault operation is required; this check is not an atomic lock.
+    auto present = transport::presence(storage, layout.barrier_identifier);
+    if (!present) {
+        return std::unexpected(transport_error(present.error()));
+    }
+    if (*present == transport::Presence::Present) {
+        return std::unexpected(
+            error(ErrorCode::Blocked, "maintenance barrier already exists"));
     }
     auto token = platform::random::hex_id();
     if (!token) {

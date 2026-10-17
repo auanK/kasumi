@@ -102,6 +102,16 @@ kasumi_add_test_suite(
 )
 
 kasumi_add_test_suite(
+    kasumi_test_unit_gc_orchestration
+    "unit.application.integrity.gc_orchestration"
+    SOURCES
+        unit/application/integrity/test_gc_orchestration.cpp
+        unit/application/integrity/test_writer_removal.cpp
+    LIBRARIES
+        kasumi_application
+)
+
+kasumi_add_test_suite(
     kasumi_test_integration_sync
     "integration.sync"
     SOURCES

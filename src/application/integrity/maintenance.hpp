@@ -90,6 +90,30 @@ collect_gc_snapshot(transport::Transport& storage,
 bool same_gc_snapshot(const GcSnapshot& left,
                       const GcSnapshot& right) noexcept;
 
+enum class GcAnalysisErrorCode {
+    Preconditions,
+    BarrierAcquisition,
+    WriterPresent,
+    OwnershipLost,
+    Observation,
+    SnapshotChanged,
+    BarrierRelease,
+    Cancelled
+};
+
+struct GcAnalysisError {
+    GcAnalysisErrorCode code = GcAnalysisErrorCode::Preconditions;
+    Error cause;
+    std::optional<Error> cleanup_error;
+};
+
+// Requires exclusive operation of this vault. The returned report carries no
+// deletion authorization: its barrier has already been released.
+std::expected<GcSnapshot, GcAnalysisError>
+analyze_gc_under_barrier(transport::Transport& storage,
+                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                        const std::filesystem::path& workspace_root);
+
 // Audits the history and reachable content objects.
 std::expected<FsckResult, Error>
 fsck(const runtime::RuntimeData& runtime_data,
