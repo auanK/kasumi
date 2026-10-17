@@ -96,29 +96,12 @@ struct FsckCompleted {
     std::optional<std::uint64_t> checked_plaintext_bytes = std::nullopt;
 };
 
-// Result of completed recoverable garbage collection.
-struct GarbageCollectCompleted {
-    std::size_t candidate_objects = 0;
-    std::size_t content_candidate_objects = 0;
-    std::size_t commit_variant_candidate_objects = 0;
-    std::size_t directly_removed_objects = 0;
-    std::size_t quarantined_objects = 0;
-    std::size_t restored_objects = 0;
-    std::size_t purged_objects = 0;
-    bool analysis_only = false;
-};
-
 // Result of resolving unavailable pending materializations as logical
 // deletions.
 struct ResolveMissingCompleted {
     std::size_t resolved_count = 0;
     std::vector<std::string> resolved_paths;
     bool published = false;
-};
-
-// Result of completed quarantine repair.
-struct RepairQuarantineCompleted {
-    std::size_t repaired_metadata_count = 0;
 };
 
 struct ManualWriterRemovalCompleted {
@@ -129,9 +112,7 @@ struct ManualWriterRemovalCompleted {
 using ResponseData = std::variant<SyncCompleted,
                                   PlanReport,
                                   FsckCompleted,
-                                  GarbageCollectCompleted,
                                   ResolveMissingCompleted,
-                                  RepairQuarantineCompleted,
                                   ManualWriterRemovalCompleted>;
 
 // Successful operation response.
@@ -152,7 +133,6 @@ enum class ErrorCode {
     CredentialFailure,
     PlanFailure,
     FsckFailure,
-    GarbageCollectionFailure,
     WriterRemovalFailure,
     SynchronizationFailure,
     RecoveryFailure

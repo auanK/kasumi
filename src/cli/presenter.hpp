@@ -33,7 +33,6 @@ void present(const application::SyncProgress& progress,
              application::Operation operation = application::Operation::Sync);
 
 // Displays a garbage collection progress event.
-void present(const application::GarbageCollectProgress& progress);
 
 // Displays an FSCK stage and throttled unique-object progress.
 void present(const application::FsckProgress& progress,

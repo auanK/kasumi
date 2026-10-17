@@ -23,21 +23,6 @@ struct SyncProgress {
     std::uint32_t total_items = 0;
 };
 
-// High-level stages for recoverable garbage collection.
-enum class GarbageCollectStage {
-    Preparing,
-    CheckingQuarantine,
-    Analyzing,
-    Applying,
-    Finalizing,
-};
-
-// Progress notification for high-level garbage collection phases.
-struct GarbageCollectProgress {
-    GarbageCollectStage stage = GarbageCollectStage::Preparing;
-    std::optional<std::size_t> candidate_count = std::nullopt;
-};
-
 // Progress notification for a read-only integrity audit.
 enum class FsckStage {
     Preparing,
@@ -57,7 +42,7 @@ struct FsckProgress {
 
 // Unified progress notification for application executions.
 using ExecutionProgress =
-    std::variant<SyncProgress, GarbageCollectProgress, FsckProgress>;
+    std::variant<SyncProgress, FsckProgress>;
 
 // Callback type for receiving execution progress updates.
 using ProgressCallback = std::function<void(const ExecutionProgress&)>;

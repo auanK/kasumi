@@ -92,7 +92,7 @@ std::string canonical_orphan() {
 }
 
 TEST(ApplicationMaintenanceContract,
-     PublicSyncPreviewStatusFsckAndGcRemainAvailable) {
+     PublicSyncPreviewStatusAndFsckRemainAvailable) {
     auto workspace =
         kasumi::test::make_temp_workspace("application-sync-maintenance");
     const ExecutionEnvironment environment{
@@ -179,15 +179,6 @@ TEST(ApplicationMaintenanceContract,
     const auto fsck = kasumi::application::execute(
         {Request{Operation::Fsck, "demo"}, credentials, environment});
     ASSERT_TRUE(fsck.has_value());
-    const auto gc = kasumi::application::execute(
-        {Request{Operation::GarbageCollect, "demo"}, credentials, environment});
-    ASSERT_TRUE(gc.has_value()) << gc.error().detail;
-    ASSERT_TRUE(
-        std::holds_alternative<kasumi::application::GarbageCollectCompleted>(
-            gc->data));
-    EXPECT_EQ(std::get<kasumi::application::GarbageCollectCompleted>(gc->data)
-                  .quarantined_objects,
-              0U);
     for (const auto& identifier : history->valid_epochs) {
         EXPECT_EQ(kasumi::transport::presence(storage, identifier).value(),
                   kasumi::transport::Presence::Present);
@@ -210,9 +201,6 @@ TEST(ApplicationMaintenanceContract,
                   kasumi::transport::Presence::Present);
     }
 
-    const auto post_gc_fsck = kasumi::application::execute(
-        {Request{Operation::Fsck, "demo"}, credentials, environment});
-    ASSERT_TRUE(post_gc_fsck.has_value()) << post_gc_fsck.error().detail;
 }
 
 TEST(ApplicationMaintenanceContract, UnknownObjectsArePreserved) {
@@ -708,73 +696,6 @@ TEST(ApplicationMaintenanceContract,
               kasumi::transport::Presence::Present);
 }
 
-TEST(ApplicationMaintenanceContract,
-     GarbageCollectQuarantinesOnlyOrphanObjectsAndIsIdempotent) {
-    auto workspace = kasumi::test::make_temp_workspace("application-gc");
-    const ExecutionEnvironment environment{
-        kasumi::test::workspace_path(workspace, "app")};
-    const Profile profile{
-        "demo",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
-    ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{std::string(64, 'd')}));
-    ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
-    kasumi::test::write_text(profile.local_dir / "file.txt", "source");
-    auto opened = kasumi::transport::open_transport(
-        kasumi::test::workspace_path(workspace, "remote").string());
-    ASSERT_TRUE(opened.has_value());
-    auto& storage = *opened;
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
-    ASSERT_TRUE(
-        kasumi::application::execute(request(Operation::Sync, environment)));
-    const auto referenced = content_identifier(storage);
-    ASSERT_FALSE(referenced.empty());
-    const auto orphan = canonical_orphan();
-    const auto orphan_source =
-        kasumi::test::workspace_path(workspace, "orphan.txt");
-    kasumi::test::write_text(orphan_source, "orphan");
-    ASSERT_TRUE(kasumi::transport::put(storage, orphan_source, orphan));
-
-    const auto first = kasumi::application::execute(
-        request(Operation::GarbageCollect, environment));
-    ASSERT_TRUE(first.has_value()) << first.error().detail;
-    ASSERT_TRUE(
-        std::holds_alternative<kasumi::application::GarbageCollectCompleted>(
-            first->data));
-    const auto first_data =
-        std::get<kasumi::application::GarbageCollectCompleted>(first->data);
-    EXPECT_EQ(first_data.candidate_objects, 1U);
-    EXPECT_EQ(first_data.content_candidate_objects, 1U);
-    EXPECT_EQ(first_data.commit_variant_candidate_objects, 0U);
-    EXPECT_EQ(first_data.directly_removed_objects, 1U);
-    EXPECT_EQ(first_data.quarantined_objects, 0U);
-    EXPECT_EQ(kasumi::transport::presence(storage, referenced).value(),
-              kasumi::transport::Presence::Present);
-    EXPECT_EQ(kasumi::transport::presence(storage, orphan).value(),
-              kasumi::transport::Presence::Absent);
-    const auto key_bytes = *kasumi::hash_from_hex(std::string(64, 'd'));
-    std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key_arr{};
-    for (std::size_t i = 0; i < key_arr.size(); ++i) {
-        key_arr[i] = static_cast<std::uint8_t>(key_bytes[i]);
-    }
-    const auto layout =
-        kasumi::application::history_storage::derive_remote_layout(key_arr);
-    EXPECT_EQ(
-        kasumi::transport::presence(
-            storage, protocol::quarantine_identifier(layout, orphan).value())
-            .value(),
-        kasumi::transport::Presence::Absent);
-    const auto second = kasumi::application::execute(
-        request(Operation::GarbageCollect, environment));
-    ASSERT_TRUE(second.has_value()) << second.error().detail;
-    const auto second_data =
-        std::get<kasumi::application::GarbageCollectCompleted>(second->data);
-    EXPECT_EQ(second_data.candidate_objects, 0U);
-    EXPECT_EQ(second_data.directly_removed_objects, 0U);
-    EXPECT_EQ(second_data.quarantined_objects, 0U);
-}
-
 TEST(ApplicationMaintenanceContract, ActiveBarrierBlocksSyncBeforePublication) {
     auto workspace = kasumi::test::make_temp_workspace("application-barrier");
     const ExecutionEnvironment environment{
@@ -857,11 +778,6 @@ TEST(ApplicationMaintenanceContract,
     ASSERT_TRUE(kasumi::transport::put(
         storage, unknown_source, "not-a-canonical-hash"));
 
-    const auto gc = kasumi::application::execute(
-        request(Operation::GarbageCollect, environment));
-    ASSERT_FALSE(gc.has_value());
-    EXPECT_EQ(gc.error().code,
-              kasumi::application::ErrorCode::GarbageCollectionFailure);
     const auto fsck =
         kasumi::application::execute(request(Operation::Fsck, environment));
     ASSERT_FALSE(fsck.has_value());
@@ -871,156 +787,6 @@ TEST(ApplicationMaintenanceContract,
     EXPECT_EQ(
         kasumi::transport::presence(storage, "not-a-canonical-hash").value(),
         kasumi::transport::Presence::Present);
-}
-
-TEST(SyncMaintenanceTest,
-     EmitsGarbageCollectProgressStagesInDeterministicOrder) {
-    auto workspace = kasumi::test::make_temp_workspace("gc-progress-order");
-    const ExecutionEnvironment environment{
-        kasumi::test::workspace_path(workspace, "app")};
-    const Profile profile{
-        "demo",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
-    ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{std::string(64, 'd')}));
-    ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
-    kasumi::test::write_text(profile.local_dir / "file.txt", "source");
-    auto opened = kasumi::transport::open_transport(
-        kasumi::test::workspace_path(workspace, "remote").string());
-    ASSERT_TRUE(opened.has_value());
-    auto& storage = *opened;
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
-    ASSERT_TRUE(
-        kasumi::application::execute(request(Operation::Sync, environment)));
-
-    const auto orphan = canonical_orphan();
-    const auto orphan_source =
-        kasumi::test::workspace_path(workspace, "orphan.txt");
-    kasumi::test::write_text(orphan_source, "orphan");
-    ASSERT_TRUE(kasumi::transport::put(storage, orphan_source, orphan));
-
-    std::vector<kasumi::application::GarbageCollectProgress> progress_events;
-    auto req = request(Operation::GarbageCollect, environment);
-    req.on_progress = [&](const kasumi::application::ExecutionProgress& p) {
-        if (const auto* gc =
-                std::get_if<kasumi::application::GarbageCollectProgress>(&p)) {
-            progress_events.push_back(*gc);
-        }
-    };
-    const auto gc = kasumi::application::execute(req);
-    ASSERT_TRUE(gc.has_value()) << gc.error().detail;
-
-    ASSERT_GE(progress_events.size(), 5U);
-    EXPECT_EQ(progress_events[0].stage,
-              kasumi::application::GarbageCollectStage::Preparing);
-    EXPECT_EQ(progress_events[1].stage,
-              kasumi::application::GarbageCollectStage::CheckingQuarantine);
-    EXPECT_EQ(progress_events[2].stage,
-              kasumi::application::GarbageCollectStage::Analyzing);
-    EXPECT_FALSE(progress_events[2].candidate_count.has_value());
-    EXPECT_EQ(progress_events[3].stage,
-              kasumi::application::GarbageCollectStage::Analyzing);
-    ASSERT_TRUE(progress_events[3].candidate_count.has_value());
-    EXPECT_EQ(*progress_events[3].candidate_count, 1U);
-    EXPECT_EQ(progress_events[4].stage,
-              kasumi::application::GarbageCollectStage::Applying);
-    EXPECT_EQ(progress_events.back().stage,
-              kasumi::application::GarbageCollectStage::Finalizing);
-}
-
-TEST(SyncMaintenanceTest,
-     EmitsGarbageCollectProgressOmittingApplyingWhenNoCandidates) {
-    auto workspace = kasumi::test::make_temp_workspace("gc-progress-no-cand");
-    const ExecutionEnvironment environment{
-        kasumi::test::workspace_path(workspace, "app")};
-    const Profile profile{
-        "demo",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
-    ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{std::string(64, 'd')}));
-    ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
-    kasumi::test::write_text(profile.local_dir / "file.txt", "source");
-    auto opened = kasumi::transport::open_transport(
-        kasumi::test::workspace_path(workspace, "remote").string());
-    ASSERT_TRUE(opened.has_value());
-    auto& storage = *opened;
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
-    ASSERT_TRUE(
-        kasumi::application::execute(request(Operation::Sync, environment)));
-
-    std::vector<kasumi::application::GarbageCollectProgress> progress_events;
-    auto req = request(Operation::GarbageCollect, environment);
-    req.on_progress = [&](const kasumi::application::ExecutionProgress& p) {
-        if (const auto* gc =
-                std::get_if<kasumi::application::GarbageCollectProgress>(&p)) {
-            progress_events.push_back(*gc);
-        }
-    };
-    const auto gc = kasumi::application::execute(req);
-    ASSERT_TRUE(gc.has_value()) << gc.error().detail;
-
-    ASSERT_GE(progress_events.size(), 4U);
-    EXPECT_EQ(progress_events[0].stage,
-              kasumi::application::GarbageCollectStage::Preparing);
-    EXPECT_EQ(progress_events[1].stage,
-              kasumi::application::GarbageCollectStage::CheckingQuarantine);
-    EXPECT_EQ(progress_events[2].stage,
-              kasumi::application::GarbageCollectStage::Analyzing);
-    EXPECT_EQ(progress_events[3].stage,
-              kasumi::application::GarbageCollectStage::Analyzing);
-    ASSERT_TRUE(progress_events[3].candidate_count.has_value());
-    EXPECT_EQ(*progress_events[3].candidate_count, 0U);
-    EXPECT_EQ(progress_events.back().stage,
-              kasumi::application::GarbageCollectStage::Finalizing);
-
-    for (const auto& event : progress_events) {
-        EXPECT_NE(event.stage,
-                  kasumi::application::GarbageCollectStage::Applying);
-    }
-}
-
-TEST(SyncMaintenanceTest, GarbageCollectProgressDoesNotAlterResultOrState) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("gc-progress-invariance");
-    const ExecutionEnvironment environment{
-        kasumi::test::workspace_path(workspace, "app")};
-    const Profile profile{
-        "demo",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
-    ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{std::string(64, 'd')}));
-    ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
-    kasumi::test::write_text(profile.local_dir / "file.txt", "source");
-    auto opened = kasumi::transport::open_transport(
-        kasumi::test::workspace_path(workspace, "remote").string());
-    ASSERT_TRUE(opened.has_value());
-    auto& storage = *opened;
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
-    ASSERT_TRUE(
-        kasumi::application::execute(request(Operation::Sync, environment)));
-
-    const auto orphan = canonical_orphan();
-    const auto orphan_source =
-        kasumi::test::workspace_path(workspace, "orphan.txt");
-    kasumi::test::write_text(orphan_source, "orphan");
-    ASSERT_TRUE(kasumi::transport::put(storage, orphan_source, orphan));
-
-    // Run without progress callback
-    auto req_plain = request(Operation::GarbageCollect, environment);
-    const auto gc_plain = kasumi::application::execute(req_plain);
-    ASSERT_TRUE(gc_plain.has_value());
-    const auto data_plain =
-        std::get<kasumi::application::GarbageCollectCompleted>(gc_plain->data);
-
-    // Verify 1 directly removed (orphan content in Phase A3)
-    EXPECT_EQ(data_plain.candidate_objects, 1U);
-    EXPECT_EQ(data_plain.content_candidate_objects, 1U);
-    EXPECT_EQ(data_plain.commit_variant_candidate_objects, 0U);
-    EXPECT_EQ(data_plain.directly_removed_objects, 1U);
-    EXPECT_EQ(data_plain.quarantined_objects, 0U);
 }
 
 TEST(SyncMaintenanceTest, FsckPublishesOrderedStagesAndAuthenticatedTotals) {

@@ -1310,10 +1310,6 @@ RemoteObjectInfo classify_object(const history_storage::RemoteLayout& layout,
         result.category = RemoteObjectCategory::Writer;
         result.structurally_valid = valid_writer(layout, id);
         result.relation = "blocks maintenance while present";
-    } else if (id.starts_with(layout.quarantine_prefix) &&
-               id.ends_with(".meta")) {
-        result.category = RemoteObjectCategory::RetentionMetadata;
-        result.structurally_valid = true;
     } else if (id.starts_with(layout.quarantine_prefix)) {
         result.category = RemoteObjectCategory::Quarantine;
         result.structurally_valid = true;
@@ -1601,53 +1597,6 @@ make_writers_report(const history_storage::RemoteLayout& layout,
     return report;
 }
 
-std::expected<RemoteQuarantineReport, InspectionError> make_quarantine_report(
-    InspectionContext& context,
-    InspectionOperation operation,
-    std::optional<std::span<const std::string>> identifiers = std::nullopt) {
-    auto inventory =
-        identifiers
-            ? history_storage::maintenance_protocol::inventory_quarantine(
-                  context.storage,
-                  context.key,
-                  *identifiers,
-                  context.workspace->root)
-            : history_storage::maintenance_protocol::inventory_quarantine(
-                  context.storage, context.key, context.workspace->root);
-    if (!inventory) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteObservationFailure,
-                  "remote quarantine has invalid or inaccessible metadata: " +
-                      inventory.error().detail));
-    }
-    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
-                         std::chrono::system_clock::now().time_since_epoch())
-                         .count();
-    RemoteQuarantineReport report;
-    report.entries.reserve(inventory->size());
-    for (const auto& entry : *inventory) {
-        const bool authenticated =
-            entry.quarantined_at.has_value() && !entry.physical_sha256.empty();
-        report.entries.push_back(RemoteQuarantineInfo{
-            .original_identifier = entry.original_identifier,
-            .quarantine_identifier = entry.quarantine_identifier,
-            .metadata_identifier = entry.metadata_identifier,
-            .category = entry.original_identifier.starts_with(
-                            context.layout.commits_prefix)
-                            ? "commit"
-                            : "content",
-            .metadata_authenticated = authenticated,
-            .quarantined_at = entry.quarantined_at.value_or(0),
-            .retention_elapsed =
-                authenticated && *entry.quarantined_at <=
-                                     now -
-                                         history_storage::maintenance_protocol::
-                                             quarantine_retention_seconds});
-    }
-    return report;
-}
-
 std::expected<RemoteHealthReport, InspectionError>
 make_health_report(InspectionContext& context,
                    InspectionOperation operation,
@@ -1670,10 +1619,6 @@ make_health_report(InspectionContext& context,
     if (!content_inventory) {
         return std::unexpected(content_inventory.error());
     }
-    auto quarantine = make_quarantine_report(context, operation, identifiers);
-    if (!quarantine) {
-        return std::unexpected(quarantine.error());
-    }
     const auto markers = make_markers_report(*history_inventory);
     const auto objects = make_objects_report(context.layout, identifiers);
     const auto writers = make_writers_report(context.layout, identifiers);
@@ -1691,7 +1636,6 @@ make_health_report(InspectionContext& context,
                                   })),
         .missing_content_count = content_inventory->missing_content_ids.size(),
         .writer_count = writers.writers.size(),
-        .quarantine_count = quarantine->entries.size(),
         .unknown_object_count = objects.unknown_count,
     };
     report.invalid_content_count =
@@ -1768,15 +1712,6 @@ inspect_physical(InspectionContext& context, InspectionOperation operation) {
             .payload = make_orphans_report(
                 context.layout, *history_inventory, *contents)};
     }
-    if (operation == InspectionOperation::RemoteQuarantine) {
-        auto report = make_quarantine_report(context, operation);
-        if (!report) {
-            return std::unexpected(report.error());
-        }
-        return InspectionResponse{.operation = operation,
-                                  .payload = std::move(*report)};
-    }
-
     auto identifiers = physical_objects(context, operation);
     if (!identifiers) {
         return std::unexpected(identifiers.error());
@@ -1959,7 +1894,6 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
         operation != InspectionOperation::RemoteMarkers &&
         operation != InspectionOperation::RemoteObjects &&
         operation != InspectionOperation::RemoteOrphans &&
-        operation != InspectionOperation::RemoteQuarantine &&
         operation != InspectionOperation::RemoteWriters &&
         operation != InspectionOperation::RemoteHealth) {
         return std::unexpected(error(operation,
@@ -2027,7 +1961,6 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     if (operation == InspectionOperation::RemoteMarkers ||
         operation == InspectionOperation::RemoteObjects ||
         operation == InspectionOperation::RemoteOrphans ||
-        operation == InspectionOperation::RemoteQuarantine ||
         operation == InspectionOperation::RemoteWriters ||
         operation == InspectionOperation::RemoteHealth) {
         return inspect_physical(context, operation);

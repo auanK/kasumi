@@ -212,7 +212,6 @@ enum class RemoteObjectCategory : std::uint8_t {
     Writer,
     Barrier,
     Quarantine,
-    RetentionMetadata,
     Protocol,
     Unknown,
 };
@@ -250,20 +249,6 @@ struct RemoteOrphansReport {
     std::vector<RemoteOrphanInfo> objects;
 };
 
-struct RemoteQuarantineInfo {
-    std::string original_identifier;
-    std::string quarantine_identifier;
-    std::string metadata_identifier;
-    std::string category;
-    bool metadata_authenticated = false;
-    std::int64_t quarantined_at = 0;
-    bool retention_elapsed = false;
-};
-
-struct RemoteQuarantineReport {
-    std::vector<RemoteQuarantineInfo> entries;
-};
-
 enum class RemoteWriterState : std::uint8_t {
     Indeterminate,
     Invalid,
@@ -295,7 +280,6 @@ struct RemoteHealthReport {
     std::size_t missing_content_count = 0;
     std::size_t invalid_content_count = 0;
     std::size_t writer_count = 0;
-    std::size_t quarantine_count = 0;
     std::size_t unknown_object_count = 0;
     std::vector<std::string> reasons;
 };
@@ -314,7 +298,6 @@ using InspectionPayload = std::variant<RemoteHeadsReport,
                                        RemoteMarkersReport,
                                        RemoteObjectsReport,
                                        RemoteOrphansReport,
-                                       RemoteQuarantineReport,
                                        RemoteWritersReport,
                                        RemoteHealthReport>;
 

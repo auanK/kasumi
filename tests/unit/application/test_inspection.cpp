@@ -2421,7 +2421,7 @@ TEST(ApplicationInspectionTest,
 }
 
 TEST(ApplicationInspectionTest,
-     RemoteQuarantineWritersAndHealthAuthenticateAndStayReadOnly) {
+     RemoteWritersAndHealthAuthenticateAndStayReadOnly) {
     namespace epoch = kasumi::application::history_storage::epoch;
     namespace protocol =
         kasumi::application::history_storage::maintenance_protocol;
@@ -2530,38 +2530,6 @@ TEST(ApplicationInspectionTest,
     EXPECT_TRUE(writer_report.maintenance_blocked);
     EXPECT_FALSE(writer_report.protocol_consistent);
     EXPECT_EQ(writer_report.writers.size(), 2U);
-    const auto original = std::string(64, 'f');
-    const auto quarantined = protocol::quarantine_identifier(layout, original);
-    ASSERT_TRUE(quarantined.has_value());
-    put_object(fixture, *quarantined, "bytes em quarentena");
-    ASSERT_TRUE(protocol::record_quarantine(
-        fixture.transport,
-        *quarantined,
-        1,
-        test_key(),
-        kasumi::test::workspace_root(fixture.workspace)));
-    const auto before = kasumi::test::snapshot_tree(remote_root);
-    const auto quarantine = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteQuarantine, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
-    ASSERT_TRUE(quarantine.has_value()) << quarantine.error().detail;
-    const auto& quarantine_report =
-        std::get<kasumi::application::RemoteQuarantineReport>(
-            quarantine->payload);
-    ASSERT_EQ(quarantine_report.entries.size(), 1U);
-    EXPECT_TRUE(quarantine_report.entries.front().metadata_authenticated);
-    EXPECT_TRUE(quarantine_report.entries.front().retention_elapsed);
-    EXPECT_EQ(kasumi::test::snapshot_tree(remote_root), before);
-
-    put_object(fixture, *quarantined + ".meta", "invalid metadata");
-    const auto invalid_quarantine = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteQuarantine, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
-    ASSERT_FALSE(invalid_quarantine.has_value());
-    EXPECT_EQ(invalid_quarantine.error().code,
-              InspectionErrorCode::RemoteObservationFailure);
     EXPECT_FALSE(std::filesystem::exists(
         kasumi::test::workspace_path(workspace, "local")));
     EXPECT_FALSE(std::filesystem::exists(kasumi::test::workspace_path(
@@ -2571,8 +2539,6 @@ TEST(ApplicationInspectionTest,
 
 TEST(ApplicationInspectionTest,
      PhysicalInspectionRejectsWrongAuthenticationAndDefensiveLimits) {
-    namespace protocol =
-        kasumi::application::history_storage::maintenance_protocol;
     auto fixture = make_local_storage();
     auto workspace =
         kasumi::test::make_temp_workspace("application-physical-errors");
@@ -2582,37 +2548,6 @@ TEST(ApplicationInspectionTest,
     publish(fixture, make_commit(0, {}, "file.txt", "contents").value());
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(test_key());
-    const auto quarantined =
-        layout.quarantine_content_prefix + std::string(64, 'f');
-    put_object(fixture, quarantined, "quarantine");
-    ASSERT_TRUE(protocol::record_quarantine(
-        fixture.transport,
-        quarantined,
-        1,
-        test_key(),
-        kasumi::test::workspace_root(fixture.workspace)));
-
-    std::array<std::uint8_t, 32> wrong_key_bytes{};
-    wrong_key_bytes.fill(0xff);
-    const auto wrong_layout =
-        kasumi::application::history_storage::derive_remote_layout(
-            wrong_key_bytes);
-    const auto wrong_quarantined =
-        wrong_layout.quarantine_content_prefix + std::string(64, 'f');
-    put_object(fixture, wrong_quarantined, "quarantine");
-    const auto metadata_source = remote_root / (quarantined + ".meta");
-    const auto metadata_target = remote_root / (wrong_quarantined + ".meta");
-    std::filesystem::create_directories(metadata_target.parent_path());
-    std::filesystem::copy_file(metadata_source, metadata_target);
-
-    const auto wrong_key = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteQuarantine, "demo"},
-        Credentials{MasterKeyHex{std::string(64, 'f')}});
-    ASSERT_FALSE(wrong_key.has_value());
-    EXPECT_EQ(wrong_key.error().code,
-              InspectionErrorCode::RemoteObservationFailure);
-
     const auto heads = remote_root / std::filesystem::path{layout.heads_prefix};
     for (std::size_t index = 0;
          index <= kasumi::history::maximum_marked_head_count;

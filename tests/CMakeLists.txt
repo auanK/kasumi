@@ -285,13 +285,11 @@ if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 endif()
 
 kasumi_add_test_suite(
-    kasumi_test_operational_gc_live_runner
-    "operational.gc_live_runner"
+    kasumi_test_operational_copy_authorization
+    "operational.copy_authorization"
     SOURCES
-        unit/operational/test_gc_live_runner.cpp
         unit/operational/test_gc_live_authorization.cpp
         operational/gc_live_copy_benchmark_support.cpp
-        operational/gc_live_runner_support.cpp
         operational/gc_live_preflight_support.cpp
         operational/remote_copy_smoke_support.cpp
     LIBRARIES
@@ -305,7 +303,7 @@ kasumi_add_test_suite(
         reproc++
 )
 target_include_directories(
-    kasumi_test_operational_gc_live_runner
+    kasumi_test_operational_copy_authorization
     PRIVATE
     ${PROJECT_SOURCE_DIR}/tests/support/include
 
@@ -318,7 +316,6 @@ kasumi_add_test_suite(
         unit/operational/test_provider_certification.cpp
         unit/operational/test_provider_target_config.cpp
         operational/provider_certification_support.cpp
-        operational/gc_live_runner_support.cpp
         operational/gc_live_preflight_support.cpp
         operational/remote_copy_smoke_support.cpp
         support/src/provider_scenarios.cpp
@@ -354,7 +351,6 @@ kasumi_add_test_suite(
     SOURCES
         integration/contracts/test_application_contracts.cpp
         integration/contracts/test_remote_heads.cpp
-        integration/contracts/test_manual_gc_purge.cpp
         integration/contracts/test_sync_maintenance.cpp
         support/src/provider_scenarios.cpp
     LIBRARIES

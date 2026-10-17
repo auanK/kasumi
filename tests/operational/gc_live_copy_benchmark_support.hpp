@@ -3,7 +3,7 @@
 
 #include "crypto/physical_hash.hpp"
 #include "gc_live_preflight_support.hpp"
-#include "gc_live_runner_support.hpp"
+#include "provider_target_config.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/random.hpp"
 #include "remote_copy_smoke_support.hpp"

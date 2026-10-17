@@ -26,7 +26,6 @@ enum class InspectionOperation {
     RemoteMarkers,
     RemoteObjects,
     RemoteOrphans,
-    RemoteQuarantine,
     RemoteWriters,
     RemoteHealth,
 };

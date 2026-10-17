@@ -1,5 +1,5 @@
 {
-  "help_text": "Uso: kasumi <comando> [opções]\n\nComandos:\n  kasumi config                                Assistente de perfis.\n  kasumi update                               Verifica e instala a versão compatível mais recente.\n  kasumi sync <perfil>                         Sincroniza com o remoto.\n  kasumi sync <perfil> --dry-run               Simula sem alterar nada.\n  kasumi status <perfil>                       Mostra mudanças pendentes.\n  kasumi fsck <perfil>                         Audita integridade remota.\n  kasumi gc <perfil>                           Remove objetos órfãos.\n  kasumi gc purge-quarantine <perfil> --confirm-permanent-loss\n                                               Purga permanentemente a quarentena. AVISO: pode destruir conteúdo alcançável.\n  kasumi gc repair-quarantine <perfil> --confirm-permanent-loss\n                                               Limpa metadados incompletos de quarentena cujo payload está ausente.\n  kasumi gc remove-writer <perfil> <writer-id>\n                                               Remove um marker específico; verifique se o processo está inativo.\n  kasumi resolve-missing <perfil>              Resolve conteúdo indisponível como exclusão.\n\nInspeção remota (somente leitura):\n  kasumi remote heads <perfil>                 Heads lógicas atuais.\n  kasumi remote tree <perfil> [--head <id>]    Árvore de uma head.\n  kasumi remote commits <perfil>               Commits alcançáveis.\n  kasumi remote summary <perfil>               Resumo geral do vault.\n  kasumi remote stat <perfil> <path>           Propriedades de um caminho.\n  kasumi remote commit <perfil> <id>           Detalhes de um commit.\n  kasumi remote get <perfil> <path> <dst>      Baixa um arquivo autenticado.\n  kasumi remote epochs <perfil>                Cadeia de Epochs.\n  kasumi remote epoch <perfil> <id>            Detalhes de um Epoch.\n  kasumi remote contents <perfil>              Conteúdos por metadados.\n  kasumi remote contents --audit <perfil>      Auditoria criptográfica.\n  kasumi remote content <perfil> <id>          Detalhes de um conteúdo.\n  kasumi remote markers <perfil>               Classifica markers físicos.\n  kasumi remote objects <perfil>               Namespace físico.\n  kasumi remote orphans <perfil>               Lista órfãos; não executa GC.\n  kasumi remote quarantine <perfil>            Estado da quarentena.\n  kasumi remote writers <perfil>               Writers e barrier.\n  kasumi remote health <perfil>                Faz o diagnóstico remoto completo.\n\nOpções gerais:\n  -h, --help, help                             Exibe esta ajuda.\n  -v, --version, version                       Exibe a versão do Kasumi.\n  --lang <en|pt-BR>                            Define o idioma (Inglês padrão).\n  --full                                       Exibe todos os itens no plano.\n",
+  "help_text": "Uso: kasumi <comando> [opções]\n\nComandos:\n  kasumi config                                Assistente de perfis.\n  kasumi update                               Verifica e instala a versão compatível mais recente.\n  kasumi sync <perfil>                         Sincroniza com o remoto.\n  kasumi sync <perfil> --dry-run               Simula sem alterar nada.\n  kasumi status <perfil>                       Mostra mudanças pendentes.\n  kasumi fsck <perfil>                         Audita integridade remota.\n  kasumi gc remove-writer <perfil> <writer-id>\n                                               Remove um marker específico; verifique se o processo está inativo.\n  kasumi resolve-missing <perfil>              Resolve conteúdo indisponível como exclusão.\n\nInspeção remota (somente leitura):\n  kasumi remote heads <perfil>                 Heads lógicas atuais.\n  kasumi remote tree <perfil> [--head <id>]    Árvore de uma head.\n  kasumi remote commits <perfil>               Commits alcançáveis.\n  kasumi remote summary <perfil>               Resumo geral do vault.\n  kasumi remote stat <perfil> <path>           Propriedades de um caminho.\n  kasumi remote commit <perfil> <id>           Detalhes de um commit.\n  kasumi remote get <perfil> <path> <dst>      Baixa um arquivo autenticado.\n  kasumi remote epochs <perfil>                Cadeia de Epochs.\n  kasumi remote epoch <perfil> <id>            Detalhes de um Epoch.\n  kasumi remote contents <perfil>              Conteúdos por metadados.\n  kasumi remote contents --audit <perfil>      Auditoria criptográfica.\n  kasumi remote content <perfil> <id>          Detalhes de um conteúdo.\n  kasumi remote markers <perfil>               Classifica markers físicos.\n  kasumi remote objects <perfil>               Namespace físico.\n  kasumi remote orphans <perfil>               Lista órfãos; não executa GC.\n  kasumi remote writers <perfil>               Writers e barrier.\n  kasumi remote health <perfil>                Faz o diagnóstico remoto completo.\n\nOpções gerais:\n  -h, --help, help                             Exibe esta ajuda.\n  -v, --version, version                       Exibe a versão do Kasumi.\n  --lang <en|pt-BR>                            Define o idioma (Inglês padrão).\n  --full                                       Exibe todos os itens no plano.\n",
   "version_text": "kasumi version {}\n",
   "update": {
     "checking": "Verificando atualizações...\n",
@@ -73,31 +73,6 @@
     "preview_starting": "Simulando sincronização de \"{}\"...\n",
     "status_starting": "Verificando status de \"{}\"...\n"
   },
-  "gc": {
-    "starting": "Executando coleta de lixo em \"{}\"...\n",
-    "stage_preparing": "[1/5] Preparando coleta de lixo...",
-    "stage_checking_quarantine": "[2/5] Verificando estado da quarentena...",
-    "stage_analyzing": "[3/5] Analisando estado remoto...",
-    "candidates_none": "Nenhum candidato a coleta de lixo encontrado.",
-    "candidates_singular": "1 candidato encontrado.",
-    "candidates_plural": "{} candidatos encontrados.",
-    "stage_applying": "[4/5] Aplicando limpeza segura...",
-    "stage_finalizing": "[5/5] Finalizando...",
-    "completed": "Coleta de lixo concluída.",
-    "summary": "{} candidatos | {} removidos diretamente | {} quarentenados | {} restaurados | {} purgados",
-    "warning_header_singular": "Análise concluída com 1 candidato.",
-    "warning_header_plural": "Análise concluída com {} candidatos.",
-    "warning_detail1": "A consistência do backend foi insuficiente para quarentena online.",
-    "warning_detail2": "Nenhum objeto candidato foi movido."
-  },
-  "manual_purge": {
-    "completed": "Purga manual da quarentena concluída",
-    "summary": "Entradas de quarentena purgadas: {}"
-  },
-  "manual_repair": {
-    "completed": "Reparo de metadados da quarentena concluído",
-    "summary": "Entradas de metadados reparadas: {}"
-  },
   "manual_writer_removal": {
     "warning": "O Kasumi não consegue determinar se o processo associado a este writer ainda está ativo. A verificação da barrier não garante que não há operações em andamento. Verifique se não há Sync ou operação de manutenção antes de removê-lo.",
     "completed": "Marker de writer removido: {}"
@@ -123,10 +98,6 @@
     "fsck_failed": "Auditoria finalizada com falhas: {}",
     "fsck_clean": "Auditoria de integridade concluída.",
     "fsck_auditing": "\n[Auditando integridade do destino]",
-    "gc_running": "\n[Executando GC do destino]",
-    "gc_warning": "[AVISO] análise concluída: {} candidato(s); backend sem consistência suficiente para quarentena online.",
-    "gc_cancelled": "Falha na coleta de lixo: {}",
-    "gc_completed": "{} objeto(s) colocado(s) em quarentena; {} restaurado(s); {} purgado(s).",
     "writer_removal_failed": "Falha ao remover o marker de writer: {}",
     "sync_failed": "Sincronização finalizada com falhas: {}",
     "inconsistent_inspection": "resposta de inspeção inconsistente.",
@@ -164,8 +135,6 @@
     "objects_header": "Namespace físico remoto: {} objeto(s)",
     "orphans_header": "Objetos sem alcance: {}",
     "orphans_read_only_hint": "  Diagnóstico somente-leitura; isto não é um plano de GC.",
-    "quarantine_header": "Quarentena remota: {} objeto(s)",
-    "quarantine_read_only_hint": "  Inspeção somente-leitura; nada será restaurado ou purgado.",
     "writers_header": "Writers remotos: {}",
     "health_header": "Saúde remota: {}"
   },
@@ -229,12 +198,6 @@
     "relation": "  Relação: {}",
     "classification": "  Classificação: {}",
     "structural_candidate": "  Candidato estrutural: {}",
-    "original": "  Original: {}",
-    "quarantine": "  Quarentena: {}",
-    "metadata": "  Metadata: {}",
-    "metadata_authenticated": "  Metadata autenticada: {}",
-    "enqueued": "  Entrada: {}",
-    "retention_elapsed": "  Retenção transcorrida: {}",
     "barrier": "  Barrier: {}",
     "present": "presente",
     "absent": "ausente",
@@ -280,7 +243,6 @@
     "writer": "writer",
     "barrier": "barrier",
     "quarantine": "quarentena",
-    "retention_metadata": "metadata de retenção",
     "protocol": "protocolo",
     "unknown": "desconhecido"
   },

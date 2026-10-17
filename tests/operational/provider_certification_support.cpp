@@ -8,7 +8,6 @@
 #include "crypto/key_derivation.hpp"
 #include "crypto/physical_hash.hpp"
 #include "gc_live_preflight_support.hpp"
-#include "gc_live_runner_support.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/provider_scenarios.hpp"
 #include "platform/path.hpp"
@@ -43,7 +42,7 @@ constexpr std::string_view remote_owner_name = "provider-certification-owner";
 constexpr std::string_view master_hex =
     "7777777777777777777777777777777777777777777777777777777777777777";
 constexpr std::string_view demo_payload = "provider-certification-payload";
-constexpr std::array<std::string_view, 16> scenario_names{
+constexpr std::array<std::string_view, 15> scenario_names{
     "transport-round-trip",
     "bootstrap-publish",
     "bootstrap-second-client",
@@ -58,7 +57,6 @@ constexpr std::array<std::string_view, 16> scenario_names{
     "fsck-healthy",
     "fsck-missing",
     "fsck-corrupt",
-    "gc-lifecycle",
     "cleanup",
 };
 
@@ -539,215 +537,6 @@ void characterize_capabilities(Report& report,
         }
     }
     record_transport_requests(report);
-}
-
-std::expected<void, std::string>
-remove_local_gc_empty_directories(const std::filesystem::path& root,
-                                  std::string_view owner_token) {
-    const auto marker = root / "owner.marker";
-    const auto verify_marker = [&]() -> std::expected<void, std::string> {
-        std::error_code error;
-        const auto status = std::filesystem::symlink_status(marker, error);
-        if (error || !std::filesystem::is_regular_file(status) ||
-            std::filesystem::is_symlink(status)) {
-            return std::unexpected("GC owner marker is absent or unsafe");
-        }
-        std::ifstream input(marker, std::ios::binary);
-        const std::string observed{std::istreambuf_iterator<char>{input}, {}};
-        if (!input || observed != owner_token) {
-            return std::unexpected("GC owner marker does not match");
-        }
-        return {};
-    };
-    if (auto valid = verify_marker(); !valid) {
-        return valid;
-    }
-    if (auto safe = reject_reparse_tree(root); !safe) {
-        return safe;
-    }
-
-    std::vector<std::filesystem::path> directories;
-    std::error_code error;
-    for (std::filesystem::recursive_directory_iterator it(root, error), end;
-         it != end;
-         it.increment(error)) {
-        if (error) {
-            return std::unexpected(error.message());
-        }
-        const auto status = it->symlink_status(error);
-        if (error) {
-            return std::unexpected(error.message());
-        }
-        if (it->path() == marker) {
-            continue;
-        }
-        if (!std::filesystem::is_directory(status)) {
-            return std::unexpected("unexpected file remains in owned GC child");
-        }
-        directories.push_back(it->path());
-    }
-    if (error) {
-        return std::unexpected(error.message());
-    }
-    std::ranges::sort(directories, [](const auto& left, const auto& right) {
-        return left.native().size() > right.native().size();
-    });
-    for (const auto& directory : directories) {
-        error.clear();
-        if (!std::filesystem::is_empty(directory, error) || error ||
-            !std::filesystem::remove(directory, error) || error) {
-            return std::unexpected("owned GC directory was not empty");
-        }
-    }
-    return verify_marker();
-}
-
-Scenario run_gc_lifecycle(const ProviderTarget& target,
-                          const std::filesystem::path& scratch_root) {
-    Scenario result{.name = "gc-lifecycle"};
-    const auto scratch = scratch_root / "gc-runner";
-    if (auto created = make_directory(scratch); !created) {
-        result.status = ScenarioStatus::Fail;
-        result.diagnostics.push_back(created.error());
-        return result;
-    }
-    gc_live_runner::RunnerOptions options;
-    options.remote_parent = target.transport == "Local"
-                                ? "local:provider-certification"
-                                : target.authorized_remote_parent;
-    options.authorization.authorized_parent = options.remote_parent;
-    options.local_scratch = scratch;
-    options.execute_live_gc = true;
-    options.preserve_evidence_on_failure = true;
-
-    gc_live_runner::RunnerReport gc;
-    std::filesystem::path child_root;
-    std::filesystem::path local_parent;
-    if (target.transport == "Local") {
-        auto nonce = platform::random::hex_id();
-        if (!nonce) {
-            result.status = ScenarioStatus::Fail;
-            result.diagnostics.push_back(
-                "could not generate local GC child name");
-            return result;
-        }
-        auto child_name = gc_live_preflight::child_namespace(*nonce);
-        if (!child_name) {
-            result.status = ScenarioStatus::Fail;
-            result.diagnostics.push_back(child_name.error());
-            return result;
-        }
-        local_parent = target.workspace_root;
-        child_root = local_parent / *child_name;
-        if (auto created = make_directory(local_parent); !created) {
-            result.status = ScenarioStatus::Fail;
-            result.diagnostics.push_back(created.error());
-            return result;
-        }
-        std::error_code error;
-        if (!std::filesystem::create_directory(child_root, error) || error) {
-            result.status = ScenarioStatus::Fail;
-            result.diagnostics.push_back(
-                "could not create unique local GC child");
-            return result;
-        }
-        auto parent_storage =
-            open_storage(platform::path::to_utf8(local_parent));
-        auto child_storage = open_storage(platform::path::to_utf8(child_root));
-        if (!parent_storage || !child_storage) {
-            result.status = ScenarioStatus::Fail;
-            result.diagnostics.push_back(!parent_storage
-                                             ? parent_storage.error()
-                                             : child_storage.error());
-            return result;
-        }
-        const auto token = unique_token();
-        options.explicit_child = *child_name;
-        options.explicit_owner_token = token;
-        options.cleanup_empty_directories = [child_root, token] {
-            return remove_local_gc_empty_directories(child_root, token);
-        };
-        gc = gc_live_runner::run(options, &*parent_storage, &*child_storage);
-        if (gc.status == "PASS" && gc.cleanup.result == "removed") {
-            error.clear();
-            const auto status =
-                std::filesystem::symlink_status(child_root, error);
-            if (!error && std::filesystem::is_directory(status) &&
-                !std::filesystem::is_symlink(status) &&
-                std::filesystem::is_empty(child_root, error) && !error &&
-                std::filesystem::remove(child_root, error) && !error) {
-            } else {
-                gc.status = "FAILED";
-                gc.error_message =
-                    "owned local GC child root was not empty after cleanup";
-            }
-        }
-    } else {
-        auto nonce = platform::random::hex_id();
-        if (!nonce) {
-            result.status = ScenarioStatus::Fail;
-            result.diagnostics.push_back(
-                "could not generate Rclone GC child name");
-            return result;
-        }
-        auto child_name = gc_live_preflight::child_namespace(*nonce);
-        if (!child_name) {
-            result.status = ScenarioStatus::Fail;
-            result.diagnostics.push_back(child_name.error());
-            return result;
-        }
-        const auto remote_gc_root = options.remote_parent + "/" + *child_name;
-        options.explicit_child = *child_name;
-        options.explicit_owner_token = unique_token();
-        options.cleanup_empty_directories = [remote_gc_root] {
-            const auto removed = rclone_command(
-                {"rclone", "rmdirs", "--leave-root", remote_gc_root});
-            if (!removed) {
-                return std::expected<void, std::string>{std::unexpected(
-                    "could not remove owned Rclone GC subdirectories")};
-            }
-            return std::expected<void, std::string>{};
-        };
-        gc = gc_live_runner::run(options);
-        if (gc.status == "PASS" && gc.cleanup.result == "removed") {
-            const auto removed =
-                rclone_command({"rclone", "rmdir", remote_gc_root});
-            const auto remaining = rclone_child_names(options.remote_parent);
-            if (!removed || !remaining ||
-                std::ranges::find(*remaining, *child_name) !=
-                    remaining->end()) {
-                gc.status = "FAILED";
-                gc.error_message =
-                    "owned Rclone GC child remains after cleanup";
-            }
-        }
-    }
-
-    const bool passed =
-        gc.status == "PASS" &&
-        gc.stage_reached == gc_live_runner::LiveGcStage::CleanupCompleted &&
-        gc.ownership.marker_readback_verified && gc.gc.called &&
-        gc.gc.call_count == 1U && gc.gc.result == "SUCCESS" &&
-        gc.gc.restored_objects == 1U && gc.gc.purged_objects == 1U &&
-        gc.validation.reachable_preserved && gc.validation.quarantine_present &&
-        gc.validation.quarantine_verified &&
-        gc.validation.metadata_authenticated && gc.validation.source_removed &&
-        gc.validation.unexpected_removed == 0U &&
-        gc.validation.unexpected_created == 0U &&
-        gc.cleanup.result == "removed";
-    result.status = passed ? ScenarioStatus::Pass : ScenarioStatus::Fail;
-    if (!passed) {
-        result.diagnostics.push_back(
-            (gc.error_message.empty()
-                 ? "guarded GC lifecycle verification failed"
-                 : gc.error_message) +
-            ": " + gc_live_runner::to_json(gc).dump());
-    } else {
-        result.diagnostics.push_back(
-            "guarded runner verified reachable restore, expired purge, "
-            "orphan quarantine, source removal, and ownership cleanup");
-    }
-    return result;
 }
 
 } // namespace
@@ -1613,9 +1402,6 @@ Report run_certification(const ProviderTarget& target) {
             record_trace(report, corrupt_result);
             report.scenarios.push_back(std::move(corrupt_result));
         }
-        auto gc_result = run_gc_lifecycle(target, test_space);
-        record_trace(report, gc_result);
-        report.scenarios.push_back(std::move(gc_result));
     } catch (const std::exception& error) {
         report.diagnostics.push_back(error.what());
     }

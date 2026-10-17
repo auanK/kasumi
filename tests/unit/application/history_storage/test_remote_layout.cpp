@@ -30,10 +30,6 @@ TEST(RemoteLayoutTest, DeriveLayoutIsDeterministic) {
     EXPECT_EQ(layout1.writers_prefix, layout2.writers_prefix);
     EXPECT_EQ(layout1.probes_prefix, layout2.probes_prefix);
     EXPECT_EQ(layout1.quarantine_prefix, layout2.quarantine_prefix);
-    EXPECT_EQ(layout1.quarantine_content_prefix,
-              layout2.quarantine_content_prefix);
-    EXPECT_EQ(layout1.quarantine_commits_prefix,
-              layout2.quarantine_commits_prefix);
 }
 
 TEST(RemoteLayoutTest, DistinctKeysProduceDistinctLayouts) {
@@ -67,10 +63,6 @@ TEST(RemoteLayoutTest, PrefixesAreWellFormedAndNestedUnderHistory) {
     EXPECT_TRUE(layout.probes_prefix.ends_with('/'));
     EXPECT_TRUE(layout.quarantine_prefix.starts_with(layout.gc_prefix));
     EXPECT_TRUE(layout.quarantine_prefix.ends_with('/'));
-    EXPECT_TRUE(
-        layout.quarantine_content_prefix.starts_with(layout.quarantine_prefix));
-    EXPECT_TRUE(
-        layout.quarantine_commits_prefix.starts_with(layout.quarantine_prefix));
 }
 
 TEST(RemoteLayoutTest, WriterIdentifierRequiresProtocolShapeAndVaultPrefix) {
@@ -177,32 +169,6 @@ TEST(RemoteLayoutTest, ControlAndHistoryClassification) {
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     EXPECT_FALSE(is_history_object(layout, content_id));
     EXPECT_FALSE(is_control_object(layout, content_id));
-}
-
-TEST(RemoteLayoutTest, QuarantineRoundTrip) {
-    const auto layout = derive_remote_layout(TEST_KEY_A);
-    const std::string content_id =
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-    const auto q_content = quarantine_identifier(layout, content_id);
-    ASSERT_TRUE(q_content.has_value());
-    EXPECT_TRUE(q_content->starts_with(layout.quarantine_content_prefix));
-    const auto restored_content = restore_destination(layout, *q_content);
-    ASSERT_TRUE(restored_content.has_value());
-    EXPECT_EQ(*restored_content, content_id);
-
-    const HeadReference ref{
-        .commit_id =
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        .ciphertext_id =
-            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"};
-    const auto commit = commit_object(layout, ref);
-    const auto q_commit = quarantine_identifier(layout, commit);
-    ASSERT_TRUE(q_commit.has_value());
-    EXPECT_TRUE(q_commit->starts_with(layout.quarantine_commits_prefix));
-    const auto restored_commit = restore_destination(layout, *q_commit);
-    ASSERT_TRUE(restored_commit.has_value());
-    EXPECT_EQ(*restored_commit, commit);
 }
 
 } // namespace

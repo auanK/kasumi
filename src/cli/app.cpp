@@ -168,16 +168,7 @@ int run(int argc, char* argv[]) {
                 present(*fsck, fsck_display_state);
             }
         };
-    } else if (request.operation == application::Operation::GarbageCollect) {
-        std::println("{}",
-                     i18n::format(i18n::Key::GcStarting, request.profile_name));
-        on_progress = [](const application::ExecutionProgress& progress) {
-            if (const auto* gc =
-                    std::get_if<application::GarbageCollectProgress>(
-                        &progress)) {
-                present(*gc);
-            }
-        };
+
     }
 
     auto result =

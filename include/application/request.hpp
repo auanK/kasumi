@@ -17,14 +17,8 @@ enum class Operation {
     // Analyzes cryptographic and structural integrity of remotely stored
     // blocks.
     Fsck,
-    // Quarantines objects unreachable from any logical head.
-    GarbageCollect,
     // Resolves unavailable pending materializations as logical deletions.
     ResolveMissing,
-    // Explicit manual purge of quarantine entries bypassing retention.
-    PurgeQuarantine,
-    // Explicit manual repair of incomplete quarantine pairs.
-    RepairQuarantine,
     // Explicit manual removal of one remote writer marker.
     RemoveWriter
 };

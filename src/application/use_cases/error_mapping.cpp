@@ -113,12 +113,8 @@ Error transaction_error(Operation operation,
 Error maintenance_error(Operation operation,
                         const integrity::Error& error,
                         const RuntimeSummary& summary) {
-    ErrorCode code = ErrorCode::GarbageCollectionFailure;
-    if (operation == Operation::Fsck) {
-        code = ErrorCode::FsckFailure;
-    }
     return Error{.operation = operation,
-                 .code = code,
+                 .code = ErrorCode::FsckFailure,
                  .detail = integrity::describe(error),
                  .runtime = summary};
 }
@@ -127,9 +123,7 @@ Error maintenance_recovery_error(Operation operation,
                                  const sync::coordinator::Error& error,
                                  const RuntimeSummary& summary) {
     return Error{.operation = operation,
-                 .code = operation == Operation::Fsck
-                             ? ErrorCode::FsckFailure
-                             : ErrorCode::GarbageCollectionFailure,
+                 .code = ErrorCode::FsckFailure,
                  .detail = sync::coordinator::describe(error),
                  .runtime = summary};
 }
