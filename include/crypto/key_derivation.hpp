@@ -19,6 +19,7 @@ enum class KeyPurpose {
     Journal,
     RemoteIdentifier,
     FsckCheckpoint,
+    Quarantine,
 };
 
 enum class IdentifierPurpose {

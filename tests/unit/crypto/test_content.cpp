@@ -213,21 +213,29 @@ TEST(CryptoKeyDerivationTest, SeparatesEveryDomainAndKeysRemoteIdentifiers) {
         key, kasumi::crypto::KeyPurpose::RemoteIdentifier);
     const auto checkpoint = kasumi::crypto::derive_key(
         key, kasumi::crypto::KeyPurpose::FsckCheckpoint);
+    const auto quarantine = kasumi::crypto::derive_key(
+        key, kasumi::crypto::KeyPurpose::Quarantine);
     EXPECT_NE(content, history);
     EXPECT_NE(content, epoch);
     EXPECT_NE(content, journal);
     EXPECT_NE(content, identifiers);
     EXPECT_NE(content, checkpoint);
+    EXPECT_NE(content, quarantine);
     EXPECT_NE(history, epoch);
     EXPECT_NE(history, journal);
     EXPECT_NE(history, identifiers);
     EXPECT_NE(history, checkpoint);
+    EXPECT_NE(history, quarantine);
     EXPECT_NE(epoch, journal);
     EXPECT_NE(epoch, identifiers);
     EXPECT_NE(epoch, checkpoint);
+    EXPECT_NE(epoch, quarantine);
     EXPECT_NE(journal, identifiers);
     EXPECT_NE(journal, checkpoint);
+    EXPECT_NE(journal, quarantine);
     EXPECT_NE(identifiers, checkpoint);
+    EXPECT_NE(identifiers, quarantine);
+    EXPECT_NE(checkpoint, quarantine);
 
     const auto plaintext_hash = kasumi::hasher::hash_string("known file");
     const auto first = kasumi::crypto::content_identifier(key, plaintext_hash);

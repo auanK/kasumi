@@ -121,6 +121,16 @@ kasumi_add_test_suite(
 )
 
 kasumi_add_test_suite(
+    kasumi_test_unit_gc_commit_quarantine
+    "unit.application.integrity.gc_commit_quarantine"
+    SOURCES
+        unit/application/integrity/test_gc_commit_quarantine.cpp
+    LIBRARIES
+        kasumi_application
+        monocypher
+)
+
+kasumi_add_test_suite(
     kasumi_test_integration_sync
     "integration.sync"
     SOURCES

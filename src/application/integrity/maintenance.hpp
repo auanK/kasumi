@@ -151,6 +151,55 @@ remove_orphan_content_under_barrier(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const std::filesystem::path& workspace_root);
 
+struct GcCommitQuarantineResult {
+    std::size_t commit_candidates = 0;
+    std::size_t payloads_verified = 0;
+    std::size_t records_confirmed = 0;
+    std::size_t quarantined = 0;
+    std::size_t originals_removed = 0;
+    std::size_t already_absent = 0;
+    std::size_t pending_content_candidates = 0;
+
+    bool operator==(const GcCommitQuarantineResult&) const = default;
+};
+
+enum class GcCommitQuarantineErrorCode {
+    Preconditions,
+    BarrierAcquisition,
+    WriterPresent,
+    OwnershipLost,
+    Observation,
+    SnapshotChanged,
+    CandidateInvalid,
+    PayloadCopyFailed,
+    PayloadVerificationFailed,
+    MetadataPublicationFailed,
+    MetadataVerificationFailed,
+    OriginalRemovalFailed,
+    BarrierRelease,
+    Cancelled
+};
+
+struct GcCommitQuarantineError {
+    GcCommitQuarantineErrorCode code = GcCommitQuarantineErrorCode::Preconditions;
+    Error cause;
+    std::optional<Error> cleanup_error;
+    std::size_t commit_candidates = 0;
+    std::size_t payloads_verified = 0;
+    std::size_t records_confirmed = 0;
+    std::size_t quarantined = 0;
+    std::size_t originals_removed = 0;
+    std::size_t already_absent = 0;
+    bool uncertain_mutation = false;
+};
+
+// Quarantines eligible CommitVariant objects under an active maintenance barrier session.
+std::expected<GcCommitQuarantineResult, GcCommitQuarantineError>
+quarantine_commit_variants_under_barrier(
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const std::filesystem::path& workspace_root);
+
 // Audits the history and reachable content objects.
 std::expected<FsckResult, Error>
 fsck(const runtime::RuntimeData& runtime_data,
