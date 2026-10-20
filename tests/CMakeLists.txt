@@ -126,6 +126,7 @@ target_link_libraries(
     PRIVATE kasumi_application kasumi_sqlite3 monocypher kasumi_warnings
 )
 target_include_directories(kasumi_sync_gc_crash_child PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(kasumi_sync_gc_crash_child PRIVATE KASUMI_PROCESS_CRASH_TESTS)
 if(WIN32)
     target_sources(kasumi_sync_gc_crash_child PRIVATE
         "${PROJECT_BINARY_DIR}/long_path_aware.rc")
@@ -137,6 +138,13 @@ target_compile_definitions(
     kasumi_test_integration_sync
     PRIVATE "KASUMI_SYNC_CRASH_HELPER_PATH=\"$<TARGET_FILE:kasumi_sync_gc_crash_child>\"")
 add_dependencies(kasumi_test_integration_sync kasumi_sync_gc_crash_child)
+add_test(
+    NAME kasumi_crash_hook_isolation
+    COMMAND ${CMAKE_COMMAND}
+        "-DKASUMI_EXECUTABLE=$<TARGET_FILE:kasumi>"
+        "-DCRASH_HELPER=$<TARGET_FILE:kasumi_sync_gc_crash_child>"
+        -P ${PROJECT_SOURCE_DIR}/tests/architecture/check_crash_hook_isolation.cmake
+)
 
 kasumi_add_test_suite(
     kasumi_test_e2e_local_sync

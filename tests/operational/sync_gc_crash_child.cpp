@@ -1,9 +1,11 @@
+#include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/maintenance.hpp"
 #include "application/use_cases/context.hpp"
 #include "platform/path.hpp"
 #include "runtime/vault.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
+#include "process_crash_test_hook.hpp"
 
 #include <cstdlib>
 #include <iostream>
@@ -46,6 +48,50 @@ std::filesystem::path environment_path(const char* name) {
 #endif
 }
 
+kasumi::transport::Transport crash_storage(kasumi::transport::Transport& base) {
+    using namespace kasumi::transport;
+    return Transport{
+        .state = TransportStateHandle{&base, [](void*) noexcept {}},
+        .storage = StorageOperations{
+            .initialize = [](void* state) {
+                return initialize(*static_cast<Transport*>(state));
+            },
+            .put = [](void* state, const std::filesystem::path& source,
+                      std::string_view identifier) {
+                auto result = put(*static_cast<Transport*>(state), source,
+                                  identifier);
+                if (result) {
+                    kasumi::platform::process_crash_test_hook::pause_at(
+                        "transport.put", identifier);
+                }
+                return result;
+            },
+            .get = [](void* state, std::string_view identifier,
+                      const std::filesystem::path& destination) {
+                return get(*static_cast<Transport*>(state), identifier,
+                           destination);
+            },
+            .presence = [](void* state, std::string_view identifier) {
+                return presence(*static_cast<Transport*>(state), identifier);
+            },
+            .list = [](void* state) {
+                return list(*static_cast<Transport*>(state));
+            },
+            .list_prefix = [](void* state, std::string_view prefix) {
+                return list(*static_cast<Transport*>(state), prefix);
+            },
+            .remove = [](void* state, std::string_view identifier) {
+                auto result = remove(*static_cast<Transport*>(state), identifier);
+                if (result && *result == Removal::Removed) {
+                    kasumi::platform::process_crash_test_hook::pause_at(
+                        "transport.remove", identifier);
+                }
+                return result;
+            },
+        },
+    };
+}
+
 } // namespace
 
 int main() {
@@ -83,6 +129,7 @@ int main() {
         .key_path = profile / "key.bin",
         .storage_location = location,
     };
+    auto storage = crash_storage(*opened);
 
     if (mode == "sync") {
         kasumi::application::detail::OperationContext context{
@@ -90,7 +137,7 @@ int main() {
             .runtime = runtime,
             .summary = {.local_dir = local, .remote_dir = location},
             .key = key,
-            .storage = std::move(*opened),
+            .storage = std::move(storage),
         };
         auto result = kasumi::application::detail::run_sync(context);
         if (!result) {
@@ -101,8 +148,16 @@ int main() {
         return 0;
     }
 
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key);
     auto result = kasumi::application::integrity::garbage_collect(
-        runtime, *opened, key);
+        runtime, storage, key,
+        [&](const kasumi::application::GarbageCollectProgress& progress) {
+            if (progress.stage == kasumi::application::GarbageCollectStage::Analyzing) {
+                kasumi::platform::process_crash_test_hook::pause_at(
+                    "gc.barrier.acquired", layout.barrier_identifier);
+            }
+        });
     if (!result) {
         std::cerr << "child GC failed before crash point: "
                   << result.error().detail << '\n';

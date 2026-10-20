@@ -8,10 +8,6 @@
 #include <string_view>
 #include <thread>
 
-#if defined(_WIN32)
-#include <cstdlib>
-#endif
-
 namespace kasumi::platform::process_crash_test_hook {
 
 inline void pause_at(std::string_view point,

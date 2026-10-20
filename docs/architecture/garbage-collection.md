@@ -121,13 +121,56 @@ quarantine objects, and control objects untouched. It has no local
 transaction journal for remote deletions: a later run must re-observe remote
 state rather than trust an earlier partial result.
 
+### Variant revalidation cost
+
+Both initial observations authenticate every physical CommitVariant. During
+Apply, a variant candidate's fresh history inventory reads all HEADs and
+Epochs, every marker-selected variant, one retained valid variant for each
+unmarked reachable Commit, one valid variant for each unreachable Commit,
+and the candidate itself. The retained identifiers are selected by the
+second full observation and never appear in its deletion candidates.
+
+Every selected payload is downloaded and authenticated again for every
+candidate. Only the choice of identifiers is reused; decoded Commits,
+HEADs, Epochs, authentication results, and destructive authorization are not
+cached. Another redundant variant of the same authenticated Commit ID
+cannot add different canonical parents or a different tree. Its bytes are
+not needed to authorize this candidate when a required alternative has
+just been fetched and authenticated. The full physical namespace still
+includes all variants and must match before each deletion.
+
+Missing alternatives, changed HEADs/Epochs, replaced candidate or retained
+payloads, malformed history, unexpected namespace changes, writers, and lost
+barrier ownership stop collection. Same-name payload replacement is checked
+by fresh hashing, decryption/authentication, canonical encoding, and Commit
+identity validation. LIST equality alone is never evidence of byte stability.
+If a retained alternative becomes invalid, GC fails rather than falling back
+to an earlier authentication or a different unverified variant.
+
+Content revalidation continues to reconstruct the full current history and
+authenticate the Content candidate. After a confirmed removal, exactly that
+identifier is removed from the expected namespace. An ambiguous REMOVE stops
+the run without retry. Restart discards every in-memory selection.
+
+Tracing distinguishes attempted history reconstructions from successfully
+returned inventories. The number of logical reconstructions remains one per
+candidate plus the initial observations; the reduction is in repeated downloads
+and authentications of unrelated redundant variants. Local GET counts and
+timings do not measure Google Drive HTTP requests. The cooperative protocol
+still has a check-to-mutation race without provider CAS.
+
+In the local two-Commit benchmark with 100 redundant variants, this reduced
+GETs from 5,766 to 816 while preserving 102 reconstructions, 211 LISTs,
+202 PRESENCE calls, and 100 confirmed candidate removals. Content benchmark
+operation counts were unchanged. These counts do not predict provider latency.
+
 ## Unreachable commits remain out of scope
 
 The collector does not collect whole unreachable Commits. Commit objects that
 are not reachable from current logical heads, Epoch anchors, or retention are
 preserved, together with their variants, even when they are no longer
 referenced. The only Commit-variant deletions are redundant valid variants of
-a currently reachable Commit whose marked variant is already required.
+a currently reachable Commit with a required, freshly authenticated alternative.
 
 Collecting unreachable Commits would require a separate authenticated policy
 for their trees and content; inferring that policy from a raw listing is

@@ -5,7 +5,6 @@
 #include "application/integrity/maintenance.hpp"
 #include "platform/cancellation.hpp"
 #include "platform/perf_trace.hpp"
-#include "platform/process_crash_test_hook.hpp"
 
 #include <algorithm>
 #include <array>
@@ -111,6 +110,7 @@ struct Observation {
     std::vector<std::string> logical_heads;
     std::vector<std::string> reachable_commits;
     std::vector<std::string> required_commit_objects;
+    std::vector<std::string> retained_commit_objects;
     std::vector<std::string> reachable_content;
     std::vector<std::string> orphan_contents;
     std::vector<Candidate> candidates;
@@ -418,6 +418,28 @@ required_variants(const history_storage::ReachabilityInventory& inventory,
     return required;
 }
 
+std::vector<std::string> retained_variants(
+    const history_storage::ReachabilityInventory& inventory,
+    const history_storage::RemoteLayout& layout) {
+    auto retained = required_variants(inventory, layout);
+    for (const auto& commit : inventory.commits) {
+        if (commit.reachable) {
+            continue;
+        }
+        const auto variant = std::ranges::find_if(
+            commit.variants, [](const auto& value) {
+                return !value.identifier.empty() &&
+                       value.state == history_storage::detail::VariantState::Valid;
+            });
+        if (variant != commit.variants.end()) {
+            retained.push_back(variant->identifier);
+        }
+    }
+    std::ranges::sort(retained);
+    retained.erase(std::ranges::unique(retained).begin(), retained.end());
+    return retained;
+}
+
 std::expected<Observation, Error>
 observe(transport::Transport& storage,
         KeySpan key,
@@ -435,7 +457,7 @@ observe(transport::Transport& storage,
     std::ranges::sort(*listing);
 
     const auto layout = history_storage::derive_remote_layout(key);
-    platform::perf_trace::count("gc.history_reconstructions");
+    platform::perf_trace::count("gc.history_reconstruction_attempts");
     auto history = [&] {
         PerfTimer trace{"gc.history_reconstruction_us"};
         return history_storage::inventory_reachability(
@@ -444,6 +466,7 @@ observe(transport::Transport& storage,
     if (!history) {
         return std::unexpected(history_error(history.error()));
     }
+    platform::perf_trace::count("gc.history_reconstructions");
     if (auto valid = validate_history(*history); !valid) {
         return std::unexpected(valid.error());
     }
@@ -464,6 +487,7 @@ observe(transport::Transport& storage,
         .logical_heads = history->logical_heads,
         .reachable_commits = history->reachable_commits,
         .required_commit_objects = required_variants(*history, layout),
+        .retained_commit_objects = retained_variants(*history, layout),
         .reachable_content = content->reachable_content_ids,
         .orphan_contents = {},
         .candidates = {},
@@ -544,6 +568,7 @@ bool same_observation(const Observation& left,
     return left.logical_heads == right.logical_heads &&
            left.reachable_commits == right.reachable_commits &&
            left.required_commit_objects == right.required_commit_objects &&
+           left.retained_commit_objects == right.retained_commit_objects &&
            left.reachable_content == right.reachable_content &&
            left.orphan_contents == right.orphan_contents &&
            left.candidates == right.candidates &&
@@ -607,16 +632,30 @@ revalidate_variant(transport::Transport& storage,
                    KeySpan key,
                    const std::filesystem::path& workspace_root,
                    const std::vector<std::string>& namespace_snapshot,
+                   const std::vector<std::string>& retained_commit_objects,
                    const history_storage::RemoteLayout& layout,
                    const Candidate& candidate) {
     platform::perf_trace::count("gc.variant_revalidations");
-    platform::perf_trace::count("gc.history_reconstructions");
     PerfTimer revalidation_trace{"gc.variant_revalidation_us"};
+    std::vector<std::string> identifiers;
+    identifiers.reserve(namespace_snapshot.size());
+    for (const auto& identifier : namespace_snapshot) {
+        if (!history_storage::parse_commit_object(layout, identifier) ||
+            identifier == candidate.identifier ||
+            std::ranges::binary_search(retained_commit_objects, identifier)) {
+            identifiers.push_back(identifier);
+        }
+    }
+    // Retained alternatives and the candidate are fetched and authenticated anew.
+    platform::perf_trace::count("gc.variant_revalidation_omitted_objects",
+                                namespace_snapshot.size() - identifiers.size());
+    platform::perf_trace::count("gc.history_reconstruction_attempts");
     auto history = history_storage::inventory_reachability(
-        storage, key, namespace_snapshot, workspace_root);
+        storage, key, identifiers, workspace_root);
     if (!history) {
         return std::unexpected(history_error(history.error()));
     }
+    platform::perf_trace::count("gc.history_reconstructions");
     if (auto valid = validate_history(*history); !valid) {
         return std::unexpected(valid.error());
     }
@@ -658,7 +697,6 @@ revalidate_content(transport::Transport& storage,
                    const Candidate& candidate) {
     platform::perf_trace::count("gc.content_revalidations");
     platform::perf_trace::count("gc.content_revalidation_list_calls");
-    platform::perf_trace::count("gc.history_reconstructions");
     PerfTimer revalidation_trace{"gc.content_revalidation_us"};
     auto listing = [&] {
         PerfTimer trace{"gc.content_revalidation_list_us"};
@@ -670,11 +708,13 @@ revalidate_content(transport::Transport& storage,
     }
     std::ranges::sort(*listing);
 
+    platform::perf_trace::count("gc.history_reconstruction_attempts");
     auto history = history_storage::inventory_reachability(
         storage, key, *listing, workspace_root);
     if (!history) {
         return std::unexpected(history_error(history.error()));
     }
+    platform::perf_trace::count("gc.history_reconstructions");
     if (auto valid = validate_history(*history); !valid) {
         return std::unexpected(valid.error());
     }
@@ -738,12 +778,14 @@ revalidate_candidate(transport::Transport& storage,
                      const std::filesystem::path& workspace_root,
                      const history_storage::RemoteLayout& layout,
                      const std::vector<std::string>& namespace_snapshot,
+                     const std::vector<std::string>& retained_commit_objects,
                      const Candidate& candidate) {
     if (candidate.kind == CandidateKind::CommitVariant) {
         return revalidate_variant(storage,
                                   key,
                                   workspace_root,
                                   namespace_snapshot,
+                                  retained_commit_objects,
                                   layout,
                                   candidate);
     }
@@ -904,9 +946,6 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             return finish(std::unexpected(writers.error()));
         }
 
-        platform::process_crash_test_hook::pause_at(
-            "gc.barrier.acquired", layout.barrier_identifier);
-
         platform::perf_trace::count("gc.visibility_probe_attempts");
         auto online = [&] {
             PerfTimer timer{"gc.visibility_probe_us"};
@@ -1056,6 +1095,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                                                      workspace_root,
                                                      layout,
                                                      *expected_namespace,
+                                                     second->retained_commit_objects,
                                                      candidate);
                 !eligible) {
                 return finish(std::unexpected(eligible.error()));
