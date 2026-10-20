@@ -9,12 +9,12 @@ The threat model distinguishes three threat scenarios:
 ### Threat A: Untrusted Remote Storage & Network Eavesdropping
 * **Threat Profile**: The remote storage provider (cloud bucket, SFTP host, NAS share), an untrusted third party, or a network eavesdropper inspects or tampers with stored objects.
 * **Mitigations & Observable Data**:
-  * File content payloads, commit payloads, Epoch records, and quarantine metadata are encrypted and authenticated client-side using **XChaCha20-Poly1305** before remote storage.
+  * File content payloads, commit payloads, and Epoch records are encrypted and authenticated client-side using **XChaCha20-Poly1305** before remote storage.
   * The local transaction journal is also encrypted and authenticated, but resides exclusively on local client storage and is not uploaded to remote storage.
   * Domain-separated keyed BLAKE2b derivations generate Content, Commit, Epoch, and namespace identifiers. Canonical file paths, directory structure, and file modification timestamps are contained within encrypted Commit payloads when represented in remote history and are not used directly as remote object identifiers. The local transaction journal may also contain synchronization paths and logical hashes inside its encrypted record.
   * Protected payloads that fail AEAD authentication or identifier/structural validation are rejected.
   * History continuity checks compare the observed remote history with locally persisted state when such state exists.
-  * **Observable Metadata**: Remote storage providers cannot read authenticated plaintext file contents or the encrypted Commit tree without the key. They can observe the key-derived namespace structure, opaque identifiers, Commit ID/Ciphertext ID pairs in object names, clear Epoch sequence numbers, physical HEAD-marker presence, writer/barrier/probe and quarantine objects, object count and size distributions, deduplication within a vault, and access/operation timing. See [Remote Layout](architecture/remote-layout.md).
+  * **Observable Metadata**: Remote storage providers cannot read authenticated plaintext file contents or the encrypted Commit tree without the key. They can observe the key-derived namespace structure, opaque identifiers, Commit ID/Ciphertext ID pairs in object names, clear Epoch sequence numbers, physical HEAD-marker presence, writer/barrier/probe objects, object count and size distributions, deduplication within a vault, and access/operation timing. See [Remote Layout](architecture/remote-layout.md).
 
 ### Threat B: Stolen or Offline Physical Disk
 * **Threat Profile**: A physical device is lost or stolen, and an adversary gains offline read access to the local storage drive.
@@ -74,7 +74,7 @@ profiles/<profile>/key.bin
 Keyed BLAKE2b derives distinct 32-byte subkeys across isolated domains:
 
 * `Content`: file content payload encryption
-* `History`: commit DAG and quarantine metadata encryption
+* `History`: commit DAG encryption
 * `Epoch`: Epoch lifecycle envelope encryption
 * `Journal`: local transaction journal encryption
 * `RemoteIdentifier`: keyed identifier derivation
@@ -145,7 +145,7 @@ independent backups; retention and GC can permanently remove the last vault copy
 
 ## Remote Metadata Privacy
 
-Remote storage providers observe key-derived protocol namespace components and their hierarchy, keyed or otherwise opaque object identifiers, Commit ID/Ciphertext ID relationships, clear Epoch sequence numbers, HEAD-marker and maintenance control-object presence, object counts and sizes, deduplication/reuse patterns within a vault, quarantine state, and operation timing. Canonical file paths, directory hierarchy, file modification timestamps, Commit parent IDs, and Snapshot rows are inside protected Commit payloads and are not directly remote object names. Provider-specific metadata may reveal further operational information outside Kasumi's payload encryption boundary.
+Remote storage providers observe key-derived protocol namespace components and their hierarchy, keyed or otherwise opaque object identifiers, Commit ID/Ciphertext ID relationships, clear Epoch sequence numbers, HEAD-marker and maintenance control-object presence, object counts and sizes, deduplication/reuse patterns within a vault, and operation timing. Canonical file paths, directory hierarchy, file modification timestamps, Commit parent IDs, and Snapshot rows are inside protected Commit payloads and are not directly remote object names. Provider-specific metadata may reveal further operational information outside Kasumi's payload encryption boundary.
 
 Directory listings are treated as untrusted observations. Where publication or maintenance requires byte confirmation, Kasumi compares a remote physical SHA-256 when supported or uses a verified readback fallback; downloaded protected payloads still require cryptographic authentication. A provider-reported hash alone is not a substitute for fsck's payload audit. See [Transport](architecture/transport.md).
 

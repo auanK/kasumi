@@ -248,7 +248,7 @@ TEST(ProviderCertificationReportTest, DerivesCorrectnessAndRetainsEvidence) {
         {.name = "first",
          .status = ScenarioStatus::Pass,
          .requests = {{"get", 2}}},
-        {.name = "gc-lifecycle", .status = ScenarioStatus::NotRun},
+        {.name = "fsck-corrupt", .status = ScenarioStatus::NotRun},
     };
     report.transport_requests.emplace("rc.http_requests_attempted", 4);
     report.transport_requests.emplace("RC idempotent read retries", 0);
@@ -321,7 +321,7 @@ TEST(ProviderCertificationMatrixTest,
     baseline_report.scenarios = {
         {.name = "transport-round-trip", .status = ScenarioStatus::Pass},
         {.name = "bootstrap-publish", .status = ScenarioStatus::Pass},
-        {.name = "gc-lifecycle", .status = ScenarioStatus::NotRun},
+        {.name = "fsck-corrupt", .status = ScenarioStatus::NotRun},
         {.name = "cleanup", .status = ScenarioStatus::Pass},
     };
     baseline_report.status = derive_status(baseline_report);
@@ -333,7 +333,7 @@ TEST(ProviderCertificationMatrixTest,
         {.name = "bidirectional-update", .status = ScenarioStatus::Pass},
         {.name = "logical-delete", .status = ScenarioStatus::Pass},
         {.name = "two-client-conflict", .status = ScenarioStatus::Pass},
-        {.name = "gc-lifecycle", .status = ScenarioStatus::Pass},
+        {.name = "fsck-corrupt", .status = ScenarioStatus::Pass},
         {.name = "cleanup", .status = ScenarioStatus::Pass},
     };
     expanded.status = derive_status(expanded);
@@ -377,7 +377,6 @@ TEST(ProviderCertificationMatrixTest, RegistersCompleteProviderContract) {
                   "fsck-healthy",
                   "fsck-missing",
                   "fsck-corrupt",
-                  "gc-lifecycle",
                   "cleanup",
               }));
 }
@@ -386,7 +385,7 @@ TEST(ProviderCertificationTest, LocalReferenceScenariosPass) {
     auto target = create_local_target(std::filesystem::temp_directory_path());
     ASSERT_TRUE(target.has_value());
     auto report = run_local_certification(target->root);
-    EXPECT_EQ(report.scenarios.size(), 16U) << to_json(report).dump(2);
+    EXPECT_EQ(report.scenarios.size(), 15U) << to_json(report).dump(2);
     for (const auto& scenario : report.scenarios) {
         if (scenario.name == "cleanup") {
             continue;

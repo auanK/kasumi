@@ -36,7 +36,7 @@ Another Kasumi process is currently running on the same machine using the specif
 ## Interrupted Synchronization and Transaction Recovery
 
 ### Symptom
-At the start of `sync`, `fsck`, ordinary `gc`, or `resolve-missing`, Kasumi may report a recovery conflict or indeterminate recovery diagnostic. The detail depends on the journal and observed remote state.
+At the start of `sync`, `fsck`, or `resolve-missing` — and of `gc` once a collector is reconnected — Kasumi may report a recovery conflict or indeterminate recovery diagnostic. The detail depends on the journal and observed remote state.
 
 ### Likely Meaning
 A prior synchronization was interrupted before completion. Kasumi detected the
@@ -45,7 +45,7 @@ confirmation, and retirement proof are distinct from the staging and backups in
 `.transactions/<id>/`; preserve the complete evidence if recovery fails.
 
 ### Safe Next Steps
-1. **Automatic Evaluation**: Kasumi evaluates the journal before Sync, Fsck, ordinary GC, or `resolve-missing`. Read-only planners/inspection and manual quarantine/writer maintenance do not run recovery. Prefer `kasumi sync <profile>` to recover; `resolve-missing` additionally makes an explicit logical-deletion decision.
+1. **Automatic Evaluation**: Kasumi evaluates the journal before Sync, Fsck, `resolve-missing`, and GC when a collector is reconnected. Read-only planners/inspection and manual writer maintenance do not run recovery. Prefer `kasumi sync <profile>` to recover; `resolve-missing` additionally makes an explicit logical-deletion decision.
 2. Depending on the checkpointed transaction phase:
    * **Pre-publication interruptions**: Kasumi may roll back local mutations from staged backups or resume only when pinned inputs still match.
    * **Post-publication interruptions**: Kasumi verifies the published Commit and HEAD marker before advancing local state; contradictory state stops recovery.
@@ -396,20 +396,19 @@ Fsck downloaded and audited content objects referenced by the effective remote t
 
 ---
 
-## GC Refusing Destructive Operation / Analysis-Only Result
+## GC Unavailable During Direct-Deletion Reconnection
 
 ### Symptom
-Running `kasumi gc <profile>` can return an `analysis_only` result with an English warning that no candidate objects were moved. If writer markers block GC, its failure detail reports active or abandoned writers.
+
+`kasumi gc <profile>` cannot run in phase GC-R1. The quarantine subsystem was removed and the replacement direct-deletion runner is not linked yet, so the GC dispatch reaches an intentionally undefined `run_garbage_collect` symbol.
 
 ### Likely Meaning
-Kasumi's garbage collector enforces strict safety conditions before performing destructive quarantine or purge operations:
-* **Writer Marker Detected**: Any observed writer marker blocks maintenance, including one left behind by a client that is no longer running. A marker does not prove its originating process is alive.
-* **Visibility Probe Failure**: The storage provider did not show consistent visibility during probe checks (e.g., temporary object listing inconsistency).
-* **Observation Discrepancy**: Successive listings of the physical namespace did not agree.
-* **Epoch Continuity**: History or Epoch anchors could not be validated.
+
+The public `GarbageCollect` operation, its progress/result types, and the stable reachability analysis remain, but the old quarantine-based orchestration was removed. There is no stub or fake implementation. No GC command can delete, restore, or purge objects until the collector is reconnected.
 
 ### Safe Next Steps
-1. **Understand Safety Behavior**: `analysis_only` means GC did not restore quarantine, remove candidates, or purge objects. The maintenance barrier and visibility probe may already have been created and cleaned up remotely.
+
+1. **Do not attempt manual quarantine maintenance**: `gc purge-quarantine`, `gc repair-quarantine`, and `remote quarantine` were removed. Do not delete legacy quarantine objects or other protocol objects directly through the provider.
 2. **Inspect Writer Markers**:
    ```bash
    kasumi remote writers <profile>
@@ -419,35 +418,12 @@ Kasumi's garbage collector enforces strict safety conditions before performing d
    ```bash
    kasumi remote health <profile>
    ```
-4. **Retry Under the Operational Contract**: First stop Sync processes and maintenance commands on every client using the vault; then verify no remote process is still running. A quiet window reduces load but is only a heuristic. Run one maintenance command at a time across the vault.
-5. **Keep Normal GC Checks**: Retry normal `kasumi gc <profile>` after the marker is removed. Any other writer marker continues to block destructive GC.
+4. **Use Fsck for Integrity**: `kasumi fsck <profile>` remains available and audits referenced content; GC is not required for integrity verification.
+5. **Wait for Reconnection**: Do not substitute ad-hoc remote deletion for GC. The retained safety contract for the future collector is documented in [Garbage Collection Architecture](architecture/garbage-collection.md).
 
 ### Related Documentation
 * [Garbage Collection Architecture](architecture/garbage-collection.md)
 * [Physical and Maintenance Inspection](architecture/remote-maintenance-inspection.md)
-
----
-
-## Manual Quarantine Purge or Repair
-
-### Symptom
-
-A quarantine entry remains after normal `kasumi gc <profile>`, or a failed operation has left metadata without a corresponding quarantine payload.
-
-### Safe Next Steps
-
-1. Inspect the state with `kasumi remote quarantine <profile>` and `kasumi remote health <profile>`; use `kasumi fsck <profile>` if referenced content may be missing or corrupt.
-2. Prefer rerunning normal `kasumi gc <profile>` after investigating writer markers, retention and backend visibility. A normal analysis-only result is not permission for manual deletion.
-3. `kasumi gc repair-quarantine <profile> --confirm-permanent-loss` is for eligible **metadata-only** quarantine remnants. It does not restore any file, content object or missing ciphertext. Ambiguous and invalid quarantine state is rejected.
-4. `kasumi gc purge-quarantine <profile> --confirm-permanent-loss` permanently removes authenticated quarantine entries **without the normal retention/reachability safety decision**. This can destroy the only copy of content still referenced by history. Use it only after explicitly deciding to accept that permanent loss and preserving any recoverable independent copies.
-5. Never modify quarantine objects, markers or Epoch data directly through the cloud provider.
-
-The confirmation flag only records deliberate operator intent. It does not guarantee that the deleted data is unnecessary.
-
-### Related Documentation
-
-* [Garbage Collection Architecture](architecture/garbage-collection.md)
-* [Remote Quarantine Inspection](architecture/remote-maintenance-inspection.md)
 
 ---
 
@@ -492,13 +468,13 @@ The table below clarifies the purpose and operational behavior of Kasumi's diagn
 | `kasumi status <profile>` | Preview pending changes | No | No | Exclusive | Point-in-time observation |
 | `kasumi sync <profile> --dry-run` | Preview pending changes | No | No | Exclusive | Point-in-time observation |
 | `kasumi fsck <profile>` | Audit referenced payloads | Yes | Yes | Exclusive | Audit may overlap writers |
-| `kasumi gc <profile>` | Storage reclamation | No Fsck-style audit | Yes | Exclusive | Blocks when a writer marker is observed; provider visibility assumptions apply |
+| `kasumi gc <profile>` | Storage reclamation | No Fsck-style audit | No (currently disconnected) | Exclusive | Runner not linked in phase GC-R1; retained writer/barrier checks apply when reconnected |
 | `kasumi gc remove-writer <profile> <writer-id>` | Remove one explicitly selected writer marker | No | No | Exclusive | Operator verifies liveness; other markers still block GC |
 | `kasumi remote health <profile>` | Operational diagnostic | No | No | None | Point-in-time observation |
 | `kasumi remote contents --audit <profile>` | Audit all physical payloads | Yes (all present) | No | None | Point-in-time observation |
 | `kasumi remote summary <profile>` | Overview of vault state | No | No | None | Point-in-time observation |
 
-The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck and GC run pending Sync transaction recovery first, which may change local files or complete remote publication. Manual writer removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit itself does not intentionally modify remote objects. GC may transfer encrypted candidate bytes through a local workspace for quarantine verification without performing Fsck's plaintext audit.
+The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck runs pending Sync transaction recovery first, which may change local files or complete remote publication; GC would do the same once reconnected. Manual writer removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit itself does not intentionally modify remote objects. The disconnected GC path does not modify remote objects.
 
 Fsck counts distinct payloads referenced by the effective current tree; physical
 content inspection can include retained historical versions. Neither count is

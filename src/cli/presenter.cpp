@@ -552,10 +552,6 @@ std::string_view object_category(application::RemoteObjectCategory category) {
             return i18n::tr(i18n::Key::ObjectCategoryWriter);
         case application::RemoteObjectCategory::Barrier:
             return i18n::tr(i18n::Key::ObjectCategoryBarrier);
-        case application::RemoteObjectCategory::Quarantine:
-            return i18n::tr(i18n::Key::ObjectCategoryQuarantine);
-        case application::RemoteObjectCategory::RetentionMetadata:
-            return i18n::tr(i18n::Key::ObjectCategoryRetentionMetadata);
         case application::RemoteObjectCategory::Protocol:
             return i18n::tr(i18n::Key::ObjectCategoryProtocol);
         case application::RemoteObjectCategory::Unknown:
@@ -616,29 +612,6 @@ int present_remote_orphans(const application::RemoteOrphansReport& report) {
     return 0;
 }
 
-int present_remote_quarantine(
-    const application::RemoteQuarantineReport& report) {
-    i18n::println(i18n::Key::RemoteQuarantineHeader, report.entries.size());
-    std::println("{}", i18n::tr(i18n::Key::RemoteQuarantineReadOnlyHint));
-    for (std::size_t index = 0; index < report.entries.size(); ++index) {
-        const auto& entry = report.entries[index];
-        std::println("\n[{}]", index + 1);
-        i18n::println(i18n::Key::FieldOriginal, entry.original_identifier);
-        i18n::println(i18n::Key::FieldQuarantine, entry.quarantine_identifier);
-        i18n::println(i18n::Key::FieldMetadata, entry.metadata_identifier);
-        i18n::println(i18n::Key::FieldCategory, entry.category);
-        i18n::println(i18n::Key::FieldMetadataAuthenticated,
-                      yes_no(entry.metadata_authenticated));
-        i18n::println(i18n::Key::FieldEnqueued,
-                      entry.metadata_authenticated
-                          ? std::to_string(entry.quarantined_at)
-                          : "-");
-        i18n::println(i18n::Key::FieldRetentionElapsed,
-                      yes_no(entry.retention_elapsed));
-    }
-    return 0;
-}
-
 int present_remote_writers(const application::RemoteWritersReport& report) {
     i18n::println(i18n::Key::RemoteWritersHeader, report.writers.size());
     i18n::println(i18n::Key::FieldBarrier,
@@ -683,7 +656,6 @@ int present_remote_health(const application::RemoteHealthReport& report) {
     i18n::println(i18n::Key::FieldInvalidContents,
                   report.invalid_content_count);
     i18n::println(i18n::Key::FieldWriters, report.writer_count);
-    i18n::println(i18n::Key::FieldQuarantine, report.quarantine_count);
     i18n::println(i18n::Key::FieldUnknownObjects, report.unknown_object_count);
     i18n::println(i18n::Key::FieldReasons, report.reasons.size());
     for (const auto& reason : report.reasons) {
@@ -814,9 +786,6 @@ void present(const application::GarbageCollectProgress& progress) {
     switch (progress.stage) {
         case application::GarbageCollectStage::Preparing:
             std::println("{}", i18n::tr(i18n::Key::GcStagePreparing));
-            break;
-        case application::GarbageCollectStage::CheckingQuarantine:
-            std::println("{}", i18n::tr(i18n::Key::GcStageCheckingQuarantine));
             break;
         case application::GarbageCollectStage::Analyzing:
             if (!progress.candidate_count.has_value()) {
@@ -974,37 +943,6 @@ int present(const application::Response& response, bool full) {
         }
         return 0;
     }
-    if (response.operation == application::Operation::PurgeQuarantine) {
-        std::size_t purged = 0;
-        if (const auto* ptr = std::get_if<application::GarbageCollectCompleted>(
-                &response.data)) {
-            purged = ptr->purged_objects;
-        }
-        std::println("{}{}{} {}",
-                     style::green,
-                     i18n::tr(i18n::Key::LabelOk),
-                     style::reset,
-                     i18n::tr(i18n::Key::ManualPurgeCompleted));
-        std::println("     {}",
-                     i18n::format(i18n::Key::ManualPurgeSummary, purged));
-        return 0;
-    }
-    if (response.operation == application::Operation::RepairQuarantine) {
-        std::size_t repaired = 0;
-        if (const auto* ptr =
-                std::get_if<application::RepairQuarantineCompleted>(
-                    &response.data)) {
-            repaired = ptr->repaired_metadata_count;
-        }
-        std::println("{}{}{} {}",
-                     style::green,
-                     i18n::tr(i18n::Key::LabelOk),
-                     style::reset,
-                     i18n::tr(i18n::Key::ManualRepairCompleted));
-        std::println("     {}",
-                     i18n::format(i18n::Key::ManualRepairSummary, repaired));
-        return 0;
-    }
     if (response.operation == application::Operation::RemoveWriter) {
         if (const auto* ptr =
                 std::get_if<application::ManualWriterRemovalCompleted>(
@@ -1041,10 +979,7 @@ int present(const application::Response& response, bool full) {
                      i18n::tr(i18n::Key::GcCompleted));
         std::println("     {}",
                      i18n::format(i18n::Key::GcSummary,
-                                  ptr->candidate_objects,
-                                  ptr->quarantined_objects,
-                                  ptr->restored_objects,
-                                  ptr->purged_objects));
+                                  ptr->candidate_objects));
         return 0;
     }
     if (const auto* ptr =
@@ -1148,13 +1083,6 @@ int present(const application::InspectionResponse& response) {
         if (const auto* report = std::get_if<application::RemoteOrphansReport>(
                 &response.payload)) {
             return present_remote_orphans(*report);
-        }
-    } else if (response.operation ==
-               application::InspectionOperation::RemoteQuarantine) {
-        if (const auto* report =
-                std::get_if<application::RemoteQuarantineReport>(
-                    &response.payload)) {
-            return present_remote_quarantine(*report);
         }
     } else if (response.operation ==
                application::InspectionOperation::RemoteWriters) {

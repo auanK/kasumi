@@ -1,6 +1,6 @@
 # Remote Layout and Publication
 
-The production remote layout is derived from the 32-byte vault master key. `namespace_identifier` uses the remote-identifier subkey and a namespace domain tag; `derive_remote_layout` takes truncated lowercase hex components for history, commits, heads, epochs, GC, barrier, writers, probes, quarantine, and content. The history-family components are eight hex characters; the version component is four. The remote root also contains 64-hex-character keyed Content IDs. The following is structural notation, not literal path names:
+The production remote layout is derived from the 32-byte vault master key. `namespace_identifier` uses the remote-identifier subkey and a namespace domain tag; `derive_remote_layout` takes truncated lowercase hex components for history, commits, heads, epochs, GC, barrier, writers, and probes. The history-family components are eight hex characters; the version component is four. The remote root also contains 64-hex-character keyed Content IDs. The following is structural notation, not literal path names:
 
 ```text
 <remote root>/
@@ -11,11 +11,9 @@ The production remote layout is derived from the 32-byte vault master key. `name
   <history-ns>/<gc-ns>/<version-ns>/<barrier-id>
   <history-ns>/<gc-ns>/<version-ns>/<writers-ns>/<token>
   <history-ns>/<gc-ns>/<version-ns>/<probes-ns>/<token>
-  <history-ns>/<gc-ns>/<version-ns>/<quarantine-ns>/<content-ns>/<content-id>[.meta]
-  <history-ns>/<gc-ns>/<version-ns>/<quarantine-ns>/<commits-ns>/<commit-id>/<ciphertext-id>[.meta]
 ```
 
-Commit variants, physical markers, Epoch objects, writer/probe objects, and ordinary content IDs are extensionless. `.meta` is used for quarantine metadata. Only the key-derived `RemoteLayout` is read and written by current application flows. Former fixed `history/...` paths are not parsed, migrated, or deleted. Unrecognized remote objects are left untouched; when an older vault cannot be safely interpreted, use independently preserved data and a new profile or namespace rather than expecting automatic conversion. Literal protocol labels and old filename extensions do not describe current publications.
+Commit variants, physical markers, Epoch objects, writer/probe objects, and ordinary content IDs are extensionless. Only the key-derived `RemoteLayout` is read and written by current application flows. Former fixed `history/...` paths are not parsed, migrated, or deleted. The quarantine namespace and its `.meta` records were removed in phase GC-R1; legacy quarantine objects are not generated, interpreted, migrated, or treated as deletion candidates. Unrecognized remote objects are left untouched; when an older vault cannot be safely interpreted, use independently preserved data and a new profile or namespace rather than expecting automatic conversion. Literal protocol labels and old filename extensions do not describe current publications.
 
 ## Identities and Visibility
 

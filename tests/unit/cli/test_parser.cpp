@@ -170,8 +170,6 @@ TEST(CliParserTest, ParsesEveryPublicRequestForm) {
                   kasumi::application::InspectionOperation::RemoteObjects},
         std::pair{"orphans",
                   kasumi::application::InspectionOperation::RemoteOrphans},
-        std::pair{"quarantine",
-                  kasumi::application::InspectionOperation::RemoteQuarantine},
         std::pair{"writers",
                   kasumi::application::InspectionOperation::RemoteWriters},
         std::pair{"health",
@@ -183,47 +181,6 @@ TEST(CliParserTest, ParsesEveryPublicRequestForm) {
         EXPECT_EQ(request.operation, operation);
         EXPECT_EQ(request.profile_name, "demo");
     }
-}
-
-TEST(CliParserTest, ManualQuarantinePurgeHasDistinctExplicitAuthority) {
-    std::vector<std::string> arguments{
-        "kasumi", "gc", "purge-quarantine", "demo", "--confirm-permanent-loss"};
-    std::vector<char*> argv;
-    for (auto& argument : arguments) {
-        argv.push_back(argument.data());
-    }
-    const auto invocation =
-        kasumi::cli::parse(static_cast<int>(argv.size()), argv.data());
-    ASSERT_TRUE(invocation.has_value())
-        << "explicit purge syntax is not supported yet";
-    ASSERT_TRUE(
-        std::holds_alternative<kasumi::application::Request>(*invocation));
-    const auto& request = std::get<kasumi::application::Request>(*invocation);
-    EXPECT_EQ(request.profile_name, "demo");
-    EXPECT_NE(request.operation,
-              kasumi::application::Operation::GarbageCollect);
-}
-
-TEST(CliParserTest, ManualQuarantineRepairHasDistinctExplicitAuthority) {
-    std::vector<std::string> arguments{"kasumi",
-                                       "gc",
-                                       "repair-quarantine",
-                                       "demo",
-                                       "--confirm-permanent-loss"};
-    std::vector<char*> argv;
-    for (auto& argument : arguments) {
-        argv.push_back(argument.data());
-    }
-    const auto invocation =
-        kasumi::cli::parse(static_cast<int>(argv.size()), argv.data());
-    ASSERT_TRUE(invocation.has_value())
-        << "explicit repair syntax is not supported yet";
-    ASSERT_TRUE(
-        std::holds_alternative<kasumi::application::Request>(*invocation));
-    const auto& request = std::get<kasumi::application::Request>(*invocation);
-    EXPECT_EQ(request.profile_name, "demo");
-    EXPECT_EQ(request.operation,
-              kasumi::application::Operation::RepairQuarantine);
 }
 
 TEST(CliParserTest, ManualWriterRemovalIsAnExplicitGcRequest) {
@@ -287,28 +244,6 @@ TEST(CliParserTest,
     check_error({"kasumi", "status"});
     check_error({"kasumi", "fsck"});
     check_error({"kasumi", "gc"});
-    check_error({"kasumi", "gc", "purge-quarantine"});
-    check_error({"kasumi", "gc", "purge-quarantine", "demo"});
-    check_error({"kasumi",
-                 "gc",
-                 "purge-quarantine",
-                 "demo",
-                 "--confirm-permanent-loss",
-                 "extra"});
-    check_error(
-        {"kasumi", "gc", "purge-quarantine", "", "--confirm-permanent-loss"});
-    check_error({"kasumi", "gc", "purge-quarantine", "demo", "--unknown"});
-    check_error({"kasumi", "gc", "repair-quarantine"});
-    check_error({"kasumi", "gc", "repair-quarantine", "demo"});
-    check_error({"kasumi",
-                 "gc",
-                 "repair-quarantine",
-                 "demo",
-                 "--confirm-permanent-loss",
-                 "extra"});
-    check_error(
-        {"kasumi", "gc", "repair-quarantine", "", "--confirm-permanent-loss"});
-    check_error({"kasumi", "gc", "repair-quarantine", "demo", "--unknown"});
     check_error({"kasumi", "gc", "remove-writer"});
     check_error({"kasumi", "gc", "remove-writer", "demo"});
     check_error(
@@ -385,7 +320,7 @@ TEST(CliParserTest,
     check_error(
         {"kasumi", "remote", "content", "demo", std::string(64, 'a'), "extra"});
     for (const auto* command :
-         {"markers", "objects", "orphans", "quarantine", "writers", "health"}) {
+         {"markers", "objects", "orphans", "writers", "health"}) {
         check_error({"kasumi", "remote", command});
         check_error({"kasumi", "remote", command, ""});
         check_error({"kasumi", "remote", command, "demo", "extra"});

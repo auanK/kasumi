@@ -43,7 +43,7 @@ For **pre-publication publishing** transactions (`Started` through `CommitPrepar
 
 A **local-only** transaction (`publication_required=false`) pins exactly one observed remote logical head and publishes no new Commit/HEAD/Epoch. Normal Sync validates the materialized tree against that head before saving SQLite. Recovery may resume unfinished storage-repair uploads and local operations, but it only accepts a target already durably committed in SQLite; if SQLite still matches the old base it rolls back, and if it matches neither old nor target it fails as a conflict. Pending materializations remain explicit logical files awaiting safe local materialization or repair, not silent deletions.
 
-At the start of Sync, Fsck, ordinary GC, or `resolve-missing`, recovery loads the
+At the start of Sync, Fsck, `resolve-missing`, or a reconnected GC, recovery loads the
 authenticated journal authority and completes authenticated retirement when
 applicable. Only confirmed log bytes govern replay; unconfirmed tails and `.new`
 output are not recovery authority. Orphan transaction workspaces are cleaned only
@@ -52,7 +52,7 @@ backups stop recovery. Remote-writing recovery re-registers a writer and respect
 the GC barrier; failure to gain admission stops rather than bypasses GC. After
 verified rollback or roll-forward, workspace deletion and authenticated journal
 retirement are durable cleanup steps; failures retain evidence for the next
-attempt. Preview, Status, `remote ...`, and manual quarantine/writer maintenance
+attempt. Preview, Status, `remote ...`, and manual writer maintenance
 do **not** enter this recovery path. See the [journal contract](transaction-journal.md)
 for confirmation, cache validation, retirement, and durability limits.
 

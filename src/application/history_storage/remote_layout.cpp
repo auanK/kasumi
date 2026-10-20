@@ -39,10 +39,6 @@ RemoteLayout derive_remote_layout(
         crypto::namespace_identifier(master_key, "writers", 8);
     const auto probes_hash =
         crypto::namespace_identifier(master_key, "probes", 8);
-    const auto quarantine_hash =
-        crypto::namespace_identifier(master_key, "quarantine", 8);
-    const auto content_hash =
-        crypto::namespace_identifier(master_key, "content", 8);
 
     RemoteLayout layout;
     layout.history_prefix = history_hash + "/";
@@ -54,11 +50,6 @@ RemoteLayout derive_remote_layout(
     layout.barrier_identifier = layout.gc_prefix + barrier_hash;
     layout.writers_prefix = layout.gc_prefix + writers_hash + "/";
     layout.probes_prefix = layout.gc_prefix + probes_hash + "/";
-    layout.quarantine_prefix = layout.gc_prefix + quarantine_hash + "/";
-    layout.quarantine_content_prefix =
-        layout.quarantine_prefix + content_hash + "/";
-    layout.quarantine_commits_prefix =
-        layout.quarantine_prefix + commits_hash + "/";
     return layout;
 }
 
@@ -166,8 +157,7 @@ bool is_control_object(const RemoteLayout& layout,
                        std::string_view identifier) noexcept {
     return identifier == layout.barrier_identifier ||
            identifier.starts_with(layout.writers_prefix) ||
-           identifier.starts_with(layout.probes_prefix) ||
-           identifier.starts_with(layout.quarantine_prefix);
+           identifier.starts_with(layout.probes_prefix);
 }
 
 bool is_history_object(const RemoteLayout& layout,
@@ -209,43 +199,6 @@ bool valid_writer_identifier(const RemoteLayout& layout,
                return (character >= '0' && character <= '9') ||
                       (character >= 'a' && character <= 'f');
            });
-}
-
-std::optional<std::string>
-quarantine_identifier(const RemoteLayout& layout,
-                      std::string_view original_identifier) {
-    if (original_identifier.starts_with(layout.commits_prefix)) {
-        return layout.quarantine_commits_prefix +
-               std::string{
-                   original_identifier.substr(layout.commits_prefix.size())};
-    }
-    if (valid_hex_hash(original_identifier)) {
-        return layout.quarantine_content_prefix +
-               std::string{original_identifier};
-    }
-    return std::nullopt;
-}
-
-std::optional<std::string>
-restore_destination(const RemoteLayout& layout,
-                    std::string_view quarantine_identifier) {
-    if (quarantine_identifier.starts_with(layout.quarantine_content_prefix)) {
-        const auto content = quarantine_identifier.substr(
-            layout.quarantine_content_prefix.size());
-        if (valid_hex_hash(content)) {
-            return std::string{content};
-        }
-        return std::nullopt;
-    }
-    if (quarantine_identifier.starts_with(layout.quarantine_commits_prefix)) {
-        const auto body = quarantine_identifier.substr(
-            layout.quarantine_commits_prefix.size());
-        const auto original = layout.commits_prefix + std::string{body};
-        if (parse_commit_object(layout, original)) {
-            return original;
-        }
-    }
-    return std::nullopt;
 }
 
 } // namespace kasumi::application::history_storage

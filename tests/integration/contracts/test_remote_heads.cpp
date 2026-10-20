@@ -495,7 +495,6 @@ TEST(RemoteHeadsContractTest,
     const auto markers_output = run_physical_inspection("markers");
     const auto objects_output = run_physical_inspection("objects");
     const auto orphans_output = run_physical_inspection("orphans");
-    const auto quarantine_output = run_physical_inspection("quarantine");
     const auto writers_output = run_physical_inspection("writers");
     const auto health_output = run_physical_inspection("health");
 
@@ -545,10 +544,6 @@ TEST(RemoteHeadsContractTest,
         orphans_output.find("Objetos sem alcance: 0") != std::string::npos ||
         orphans_output.find("Orphan contents") != std::string::npos ||
         orphans_output.find("Unreachable objects: 0") != std::string::npos);
-    EXPECT_TRUE(
-        quarantine_output.find("Quarentena remota: 0") != std::string::npos ||
-        quarantine_output.find("Remote quarantine: 0") != std::string::npos ||
-        quarantine_output.find("Quarantine state") != std::string::npos);
     EXPECT_TRUE(writers_output.find("Writers remotos: 0") !=
                     std::string::npos ||
                 writers_output.find("Remote writers") != std::string::npos);

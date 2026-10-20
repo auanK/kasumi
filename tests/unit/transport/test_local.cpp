@@ -67,18 +67,18 @@ TEST(LocalTransportTest, CopiesNestedObjectsWithoutRemovingTheSource) {
     kasumi::test::write_text(old_destination, "old bytes");
     ASSERT_TRUE(kasumi::transport::put(transport, source, "objects/source"));
     ASSERT_TRUE(kasumi::transport::put(
-        transport, old_destination, "quarantine/nested/copy"));
+        transport, old_destination, "archive/nested/copy"));
 
     ASSERT_TRUE(kasumi::transport::copy(
-        transport, "objects/source", "quarantine/nested/copy"));
+        transport, "objects/source", "archive/nested/copy"));
     ASSERT_TRUE(kasumi::transport::get(
-        transport, "quarantine/nested/copy", downloaded));
+        transport, "archive/nested/copy", downloaded));
     EXPECT_EQ(kasumi::test::read_text(downloaded), payload);
     EXPECT_EQ(kasumi::transport::presence(transport, "objects/source").value(),
               Presence::Present);
 
     const auto missing = kasumi::transport::copy(
-        transport, "missing/source", "quarantine/missing/copy");
+        transport, "missing/source", "archive/missing/copy");
     ASSERT_FALSE(missing.has_value());
     EXPECT_EQ(missing.error().code, ErrorCode::ObjectNotFound);
 

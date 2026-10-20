@@ -22,9 +22,6 @@ struct RemoteLayout {
     std::string barrier_identifier;
     std::string writers_prefix;
     std::string probes_prefix;
-    std::string quarantine_prefix;
-    std::string quarantine_content_prefix;
-    std::string quarantine_commits_prefix;
 };
 
 RemoteLayout derive_remote_layout(
@@ -55,13 +52,6 @@ bool is_history_object(const RemoteLayout& layout,
 bool valid_writer_identifier(std::string_view identifier) noexcept;
 bool valid_writer_identifier(const RemoteLayout& layout,
                              std::string_view identifier) noexcept;
-
-std::optional<std::string>
-quarantine_identifier(const RemoteLayout& layout,
-                      std::string_view original_identifier);
-std::optional<std::string>
-restore_destination(const RemoteLayout& layout,
-                    std::string_view quarantine_identifier);
 
 } // namespace kasumi::application::history_storage
 

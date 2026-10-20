@@ -77,8 +77,7 @@ TEST(CliPresenterTest, PresentsSuccessfulResponseVariants) {
     EXPECT_EQ(fsck_output.find("[Auditing destination integrity]"),
               std::string::npos);
     EXPECT_EQ(kasumi::cli::present(
-                  response(GarbageCollectCompleted{.candidate_objects = 3,
-                                                   .quarantined_objects = 3},
+                  response(GarbageCollectCompleted{.candidate_objects = 3},
                            Operation::GarbageCollect)),
               0);
 }
@@ -575,19 +574,6 @@ TEST(CliPresenterTest, PresentsEveryPhysicalInspectionReportInPortuguese) {
     EXPECT_NE(orphans.find("Epoch histórico protegido"), std::string::npos);
     EXPECT_NE(orphans.find("não é um plano de GC"), std::string::npos);
 
-    const auto quarantine = present_and_capture(InspectionResponse{
-        .operation = InspectionOperation::RemoteQuarantine,
-        .payload = RemoteQuarantineReport{
-            .entries = {{.original_identifier = "original",
-                         .quarantine_identifier = "quarentena",
-                         .metadata_identifier = "metadata",
-                         .category = "content",
-                         .metadata_authenticated = true,
-                         .quarantined_at = 7}}}});
-    EXPECT_NE(quarantine.find("Metadata autenticada: sim"), std::string::npos);
-    EXPECT_NE(quarantine.find("nada será restaurado ou purgado"),
-              std::string::npos);
-
     const auto writers = present_and_capture(InspectionResponse{
         .operation = InspectionOperation::RemoteWriters,
         .payload = RemoteWritersReport{
@@ -659,20 +645,6 @@ TEST(CliPresenterTest, PresentsEveryPhysicalInspectionReportInEnglish) {
     EXPECT_NE(orphans.find("orphan logical commit"), std::string::npos);
     EXPECT_NE(orphans.find("protected historical Epoch"), std::string::npos);
     EXPECT_NE(orphans.find("not a GC plan"), std::string::npos);
-
-    const auto quarantine = present_and_capture(InspectionResponse{
-        .operation = InspectionOperation::RemoteQuarantine,
-        .payload = RemoteQuarantineReport{
-            .entries = {{.original_identifier = "original",
-                         .quarantine_identifier = "quarantine",
-                         .metadata_identifier = "metadata",
-                         .category = "content",
-                         .metadata_authenticated = true,
-                         .quarantined_at = 7}}}});
-    EXPECT_NE(quarantine.find("Authenticated metadata: yes"),
-              std::string::npos);
-    EXPECT_NE(quarantine.find("nothing will be restored or purged"),
-              std::string::npos);
 
     const auto writers = present_and_capture(InspectionResponse{
         .operation = InspectionOperation::RemoteWriters,
@@ -1384,8 +1356,6 @@ TEST(CliPresenterTest,
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Preparing});
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::CheckingQuarantine});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Analyzing});
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Analyzing,
@@ -1396,9 +1366,6 @@ TEST(CliPresenterTest,
         .stage = kasumi::application::GarbageCollectStage::Finalizing});
     kasumi::application::GarbageCollectCompleted summary{
         .candidate_objects = 8,
-        .quarantined_objects = 8,
-        .restored_objects = 0,
-        .purged_objects = 0,
         .analysis_only = false,
     };
     EXPECT_EQ(kasumi::cli::present(response(
@@ -1406,27 +1373,22 @@ TEST(CliPresenterTest,
               0);
 
     const auto output = testing::internal::GetCapturedStdout();
-    EXPECT_NE(output.find("[1/5] Preparando coleta de lixo..."),
+    EXPECT_NE(output.find("[1/4] Preparando coleta de lixo..."),
               std::string::npos);
-    EXPECT_NE(output.find("[2/5] Verificando estado da quarentena..."),
-              std::string::npos);
-    EXPECT_NE(output.find("[3/5] Analisando estado remoto..."),
+    EXPECT_NE(output.find("[2/4] Analisando estado remoto..."),
               std::string::npos);
     EXPECT_NE(output.find("8 candidatos encontrados."), std::string::npos);
-    EXPECT_NE(output.find("[4/5] Aplicando limpeza segura..."),
+    EXPECT_NE(output.find("[3/4] Aplicando limpeza..."),
               std::string::npos);
-    EXPECT_NE(output.find("[5/5] Finalizando..."), std::string::npos);
+    EXPECT_NE(output.find("[4/4] Finalizando..."), std::string::npos);
     EXPECT_NE(output.find("[OK]"), std::string::npos);
     EXPECT_NE(output.find("Coleta de lixo concluída."), std::string::npos);
-    EXPECT_NE(
-        output.find(
-            "8 candidatos | 8 quarentenados | 0 restaurados | 0 purgados"),
-        std::string::npos);
+    EXPECT_NE(output.find("8 objeto(s) candidato(s) analisado(s)."),
+              std::string::npos);
 
     // Verify bounded output and no internal leaks
     EXPECT_EQ(output.find("[Running destination GC]"), std::string::npos);
     EXPECT_EQ(output.find("CommitPrepared"), std::string::npos);
-    EXPECT_EQ(output.find("quarantine-"), std::string::npos);
 }
 
 TEST(CliPresenterTest,
@@ -1437,8 +1399,6 @@ TEST(CliPresenterTest,
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Preparing});
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::CheckingQuarantine});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Analyzing});
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Analyzing,
@@ -1449,9 +1409,6 @@ TEST(CliPresenterTest,
         .stage = kasumi::application::GarbageCollectStage::Finalizing});
     kasumi::application::GarbageCollectCompleted summary{
         .candidate_objects = 8,
-        .quarantined_objects = 8,
-        .restored_objects = 0,
-        .purged_objects = 0,
         .analysis_only = false,
     };
     EXPECT_EQ(kasumi::cli::present(response(
@@ -1459,20 +1416,17 @@ TEST(CliPresenterTest,
               0);
 
     const auto output = testing::internal::GetCapturedStdout();
-    EXPECT_NE(output.find("[1/5] Preparing garbage collection..."),
+    EXPECT_NE(output.find("[1/4] Preparing garbage collection..."),
               std::string::npos);
-    EXPECT_NE(output.find("[2/5] Checking quarantine state..."),
-              std::string::npos);
-    EXPECT_NE(output.find("[3/5] Analyzing remote state..."),
+    EXPECT_NE(output.find("[2/4] Analyzing remote state..."),
               std::string::npos);
     EXPECT_NE(output.find("8 candidates found."), std::string::npos);
-    EXPECT_NE(output.find("[4/5] Applying safe cleanup..."), std::string::npos);
-    EXPECT_NE(output.find("[5/5] Finalizing..."), std::string::npos);
+    EXPECT_NE(output.find("[3/4] Applying cleanup..."), std::string::npos);
+    EXPECT_NE(output.find("[4/4] Finalizing..."), std::string::npos);
     EXPECT_NE(output.find("[OK]"), std::string::npos);
     EXPECT_NE(output.find("Garbage collection completed."), std::string::npos);
-    EXPECT_NE(
-        output.find("8 candidates | 8 quarantined | 0 restored | 0 purged"),
-        std::string::npos);
+    EXPECT_NE(output.find("8 candidate object(s) analyzed."),
+              std::string::npos);
     EXPECT_EQ(output.find("[Running destination GC]"), std::string::npos);
 }
 
@@ -1484,20 +1438,15 @@ TEST(CliPresenterTest,
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Preparing});
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::CheckingQuarantine});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Analyzing});
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Analyzing,
         .candidate_count = 0});
-    // Stage 4 (Applying) omitted when no destructive work is performed
+    // Stage 3 (Applying) omitted when no destructive work is performed.
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Finalizing});
     kasumi::application::GarbageCollectCompleted summary{
         .candidate_objects = 0,
-        .quarantined_objects = 0,
-        .restored_objects = 0,
-        .purged_objects = 0,
         .analysis_only = false,
     };
     EXPECT_EQ(kasumi::cli::present(response(
@@ -1505,21 +1454,17 @@ TEST(CliPresenterTest,
               0);
 
     const auto output = testing::internal::GetCapturedStdout();
-    EXPECT_NE(output.find("[1/5] Preparando coleta de lixo..."),
+    EXPECT_NE(output.find("[1/4] Preparando coleta de lixo..."),
               std::string::npos);
-    EXPECT_NE(output.find("[2/5] Verificando estado da quarentena..."),
-              std::string::npos);
-    EXPECT_NE(output.find("[3/5] Analisando estado remoto..."),
+    EXPECT_NE(output.find("[2/4] Analisando estado remoto..."),
               std::string::npos);
     EXPECT_NE(output.find("Nenhum candidato a coleta de lixo encontrado."),
               std::string::npos);
-    EXPECT_EQ(output.find("[4/5]"), std::string::npos);
-    EXPECT_NE(output.find("[5/5] Finalizando..."), std::string::npos);
+    EXPECT_EQ(output.find("[3/4]"), std::string::npos);
+    EXPECT_NE(output.find("[4/4] Finalizando..."), std::string::npos);
     EXPECT_NE(output.find("[OK]"), std::string::npos);
-    EXPECT_NE(
-        output.find(
-            "0 candidatos | 0 quarentenados | 0 restaurados | 0 purgados"),
-        std::string::npos);
+    EXPECT_NE(output.find("0 objeto(s) candidato(s) analisado(s)."),
+              std::string::npos);
 }
 
 TEST(CliPresenterTest, PresentsGarbageCollectProgressAnalysisOnlyWarning) {
@@ -1537,9 +1482,6 @@ TEST(CliPresenterTest, PresentsGarbageCollectProgressAnalysisOnlyWarning) {
         .stage = kasumi::application::GarbageCollectStage::Finalizing});
     kasumi::application::GarbageCollectCompleted summary{
         .candidate_objects = 42,
-        .quarantined_objects = 0,
-        .restored_objects = 0,
-        .purged_objects = 0,
         .analysis_only = true,
     };
     EXPECT_EQ(kasumi::cli::present(response(
@@ -1547,16 +1489,15 @@ TEST(CliPresenterTest, PresentsGarbageCollectProgressAnalysisOnlyWarning) {
               0);
 
     const auto output = testing::internal::GetCapturedStdout();
-    EXPECT_NE(output.find("[1/5] Preparing garbage collection..."),
+    EXPECT_NE(output.find("[1/4] Preparing garbage collection..."),
               std::string::npos);
-    EXPECT_EQ(output.find("[2/5]"), std::string::npos);
-    EXPECT_NE(output.find("[3/5] Analyzing remote state..."),
+    EXPECT_NE(output.find("[2/4] Analyzing remote state..."),
               std::string::npos);
     EXPECT_NE(output.find("42 candidates found."), std::string::npos);
-    EXPECT_EQ(output.find("[4/5]"), std::string::npos);
-    EXPECT_NE(output.find("[5/5] Finalizing..."), std::string::npos);
+    EXPECT_EQ(output.find("[3/4]"), std::string::npos);
+    EXPECT_NE(output.find("[4/4] Finalizing..."), std::string::npos);
     EXPECT_NE(output.find("[WARNING]"), std::string::npos);
-    EXPECT_NE(output.find("insufficient for online quarantine"),
+    EXPECT_NE(output.find("No candidate objects were removed."),
               std::string::npos);
     EXPECT_EQ(output.find("[OK]"), std::string::npos);
 }
@@ -1741,8 +1682,6 @@ TEST(CliPresenterTest, PresentsGarbageCollectBoundedOutputLines) {
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Preparing});
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::CheckingQuarantine});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Analyzing});
     kasumi::cli::present(kasumi::application::GarbageCollectProgress{
         .stage = kasumi::application::GarbageCollectStage::Analyzing,
@@ -1753,9 +1692,6 @@ TEST(CliPresenterTest, PresentsGarbageCollectBoundedOutputLines) {
         .stage = kasumi::application::GarbageCollectStage::Finalizing});
     kasumi::application::GarbageCollectCompleted summary{
         .candidate_objects = 100000,
-        .quarantined_objects = 100000,
-        .restored_objects = 0,
-        .purged_objects = 0,
         .analysis_only = false,
     };
     EXPECT_EQ(kasumi::cli::present(response(
@@ -1765,74 +1701,6 @@ TEST(CliPresenterTest, PresentsGarbageCollectBoundedOutputLines) {
     const auto output = testing::internal::GetCapturedStdout();
     const auto line_count = std::count(output.begin(), output.end(), '\n');
     EXPECT_LE(line_count, 12);
-}
-
-TEST(CliPresenterTest,
-     ManualPurgeHasSpecificResultAndDoesNotPresentAsNormalGc) {
-    kasumi::application::GarbageCollectCompleted summary{
-        .purged_objects = 5,
-    };
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(
-                  summary, kasumi::application::Operation::PurgeQuarantine)),
-              0);
-    const auto output = testing::internal::GetCapturedStdout();
-    EXPECT_NE(output.find("Manual quarantine purge completed"),
-              std::string::npos);
-    EXPECT_NE(output.find("Purged quarantine entries: 5"), std::string::npos);
-    EXPECT_EQ(output.find("Garbage collection completed"), std::string::npos);
-    EXPECT_EQ(output.find("candidates"), std::string::npos);
-}
-
-TEST(CliPresenterTest, ManualPurgePresentsInPortuguese) {
-    kasumi::application::GarbageCollectCompleted summary{
-        .purged_objects = 3,
-    };
-    const ScopedLanguage portuguese{kasumi::cli::i18n::Language::Portuguese};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(
-                  summary, kasumi::application::Operation::PurgeQuarantine)),
-              0);
-    const auto output = testing::internal::GetCapturedStdout();
-    EXPECT_NE(output.find("Purga manual da quarentena concluída"),
-              std::string::npos);
-    EXPECT_NE(output.find("Entradas de quarentena purgadas: 3"),
-              std::string::npos);
-    EXPECT_EQ(output.find("Coleta de lixo concluída"), std::string::npos);
-}
-
-TEST(CliPresenterTest,
-     ManualRepairHasSpecificResultAndDoesNotPresentAsNormalGc) {
-    kasumi::application::RepairQuarantineCompleted summary{
-        .repaired_metadata_count = 5,
-    };
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(
-                  summary, kasumi::application::Operation::RepairQuarantine)),
-              0);
-    const auto output = testing::internal::GetCapturedStdout();
-    EXPECT_NE(output.find("Quarantine metadata repair completed"),
-              std::string::npos);
-    EXPECT_NE(output.find("Repaired metadata entries: 5"), std::string::npos);
-    EXPECT_EQ(output.find("Garbage collection completed"), std::string::npos);
-    EXPECT_EQ(output.find("candidates"), std::string::npos);
-}
-
-TEST(CliPresenterTest, ManualRepairPresentsInPortuguese) {
-    kasumi::application::RepairQuarantineCompleted summary{
-        .repaired_metadata_count = 3,
-    };
-    const ScopedLanguage portuguese{kasumi::cli::i18n::Language::Portuguese};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(
-                  summary, kasumi::application::Operation::RepairQuarantine)),
-              0);
-    const auto output = testing::internal::GetCapturedStdout();
-    EXPECT_NE(output.find("Reparo de metadados da quarentena concluído"),
-              std::string::npos);
-    EXPECT_NE(output.find("Entradas de metadados reparadas: 3"),
-              std::string::npos);
-    EXPECT_EQ(output.find("Coleta de lixo concluída"), std::string::npos);
 }
 
 } // namespace

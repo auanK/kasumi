@@ -174,7 +174,7 @@ publish(LocalStorage& storage, const Commit& commit) {
 }
 
 struct FakeState {
-    // Test-only fault hook at transport boundaries used by manual purge REDs.
+    // Test-only fault hook at transport boundaries.
     std::function<void(FakeState&, std::string_view, std::string_view)>
         on_operation;
     std::map<std::string, std::vector<std::uint8_t>> objects;
@@ -207,10 +207,7 @@ struct FakeState {
     std::size_t epoch_get_count = 0;
     std::size_t orphan_payload_get_count = 0;
     std::size_t orphan_payload_get_bytes = 0;
-    std::size_t quarantine_payload_put_count = 0;
-    std::size_t quarantine_payload_put_bytes = 0;
     std::size_t native_copy_bytes = 0;
-    std::size_t quarantine_metadata_put_count = 0;
     std::size_t physical_hash_count = 0;
     std::size_t physical_hash_batch_count = 0;
     std::size_t barrier_verification_count = 0;
@@ -239,7 +236,7 @@ struct FakeState {
     std::string fail_presence_after_removal_identifier;
     bool fail_commit_put = false;
     bool persist_commit_on_put_failure = false;
-    bool fail_quarantine_metadata_put = false;
+
     bool put_files_batch_supported = false;
     std::optional<kasumi::transport::ErrorCode> put_files_batch_failure;
     std::size_t put_files_batch_fail_after_items = 0;
@@ -268,7 +265,7 @@ struct FakeState {
     bool hide_probe_listing = false;
     bool fail_probe_listing = false;
     std::size_t probe_list_count = 0;
-    bool replace_barrier_after_quarantine_put = false;
+
     bool replace_barrier_after_writer_list = false;
     std::string disappear_on_get;
     std::string observed_payload_identifier;
@@ -315,10 +312,7 @@ FakeState* fake_state(void* context) {
     state.commit_get_count = state.marker_get_count = state.epoch_get_count = 0;
     state.orphan_payload_get_count = 0;
     state.orphan_payload_get_bytes = 0;
-    state.quarantine_payload_put_count = 0;
-    state.quarantine_payload_put_bytes = 0;
     state.native_copy_bytes = 0;
-    state.quarantine_metadata_put_count = 0;
     state.physical_hash_count = state.physical_hash_batch_count = 0;
     state.barrier_verification_count = 0;
     state.control_read_batch_count = 0;
@@ -357,28 +351,6 @@ void replace_barrier_contents(FakeState* state, std::string_view identifier) {
         kasumi::crypto::physical::sha256_finish(hash);
 }
 
-void maybe_replace_barrier_after_quarantine_put(
-    FakeState* state,
-    std::string_view identifier,
-    const kasumi::application::history_storage::RemoteLayout& layout) {
-    if (!state->replace_barrier_after_quarantine_put ||
-        !identifier.starts_with(layout.quarantine_prefix)) {
-        return;
-    }
-    state->replace_barrier_after_quarantine_put = false;
-    for (auto& [object_identifier, object] : state->objects) {
-        constexpr std::string_view barrier_payload = "kasumi-gc-v1:barrier:";
-        static_cast<void>(object_identifier);
-        if (object.size() >= barrier_payload.size() &&
-            std::ranges::equal(
-                barrier_payload,
-                std::span{object}.first(barrier_payload.size()))) {
-            replace_barrier_contents(state, object_identifier);
-            return;
-        }
-    }
-}
-
 kasumi::transport::Result fake_initialize(void*) {
     return {};
 }
@@ -391,11 +363,9 @@ kasumi::transport::Result fake_put(void* context,
     const bool ambiguous_target = identifier == state->put_then_fail_identifier;
     const bool failed_commit = is_commit(identifier) && state->fail_commit_put;
     const bool failed_marker = is_marker(identifier) && state->fail_marker_put;
-    const bool failed_quarantine_metadata =
-        state->fail_quarantine_metadata_put && identifier.ends_with(".meta");
     if ((failed_commit && !state->persist_commit_on_put_failure) ||
         (failed_marker && !state->persist_marker_on_put_failure) ||
-        failed_quarantine_metadata || (failed_target && !ambiguous_target)) {
+        (failed_target && !ambiguous_target)) {
         if (failed_target) {
             state->fail_put_identifier.clear();
         }
@@ -404,25 +374,12 @@ kasumi::transport::Result fake_put(void* context,
                                      .message = "injected put failure"});
     }
     ++state->put_count;
-    const auto layout =
-        kasumi::application::history_storage::derive_remote_layout(test_key());
     if (is_commit(identifier)) {
         ++state->commit_put_count;
         state->remote_events.emplace_back("PutCommit");
     } else if (is_marker(identifier)) {
         ++state->marker_put_count;
         state->remote_events.emplace_back("PutHead");
-    }
-    const bool quarantine_metadata =
-        identifier.starts_with(layout.quarantine_prefix) &&
-        identifier.ends_with(".meta");
-    const bool quarantine_payload =
-        identifier.starts_with(layout.quarantine_prefix) &&
-        !identifier.ends_with(".meta");
-    if (quarantine_metadata) {
-        ++state->quarantine_metadata_put_count;
-    } else if (quarantine_payload) {
-        ++state->quarantine_payload_put_count;
     }
     auto physical_hash = kasumi::crypto::physical::hash_file(source, "sha256");
     if (!physical_hash) {
@@ -442,14 +399,6 @@ kasumi::transport::Result fake_put(void* context,
                static_cast<std::streamsize>(bytes.size()));
     state->objects[std::string{identifier}] = std::move(bytes);
     state->physical_hashes[std::string{identifier}] = std::move(*physical_hash);
-    if (quarantine_metadata) {
-        state->gc_events.emplace_back("metadata:" + std::string{identifier});
-    }
-    if (quarantine_payload) {
-        state->quarantine_payload_put_bytes +=
-            state->objects[std::string{identifier}].size();
-    }
-    maybe_replace_barrier_after_quarantine_put(state, identifier, layout);
     if (failed_commit || failed_marker || ambiguous_target) {
         if (ambiguous_target) {
             state->put_then_fail_identifier.clear();
@@ -497,10 +446,6 @@ kasumi::transport::Result fake_copy(void* context,
         state->physical_hash_mismatch_identifier =
             std::string{destination_identifier};
     }
-    const auto layout =
-        kasumi::application::history_storage::derive_remote_layout(test_key());
-    maybe_replace_barrier_after_quarantine_put(
-        state, destination_identifier, layout);
     state->gc_events.emplace_back("copy:" + std::string{source_identifier} +
                                   "|" + std::string{destination_identifier});
     if (state->copy_failure_after_effect) {
@@ -959,9 +904,6 @@ std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
     if (identifier == layout.barrier_identifier) {
         ++state->barrier_verification_count;
         state->gc_events.emplace_back("barrier:" + std::string{identifier});
-    }
-    if (identifier.starts_with(layout.quarantine_prefix)) {
-        state->gc_events.emplace_back("verify:" + std::string{identifier});
     }
     auto response = mismatched ? std::string(64, '0') : found->second;
     if (state->on_operation) {

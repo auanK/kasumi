@@ -130,11 +130,8 @@ TEST(CliAppTest, PrintsMinimalHelpWithoutRuntimeAccess) {
               std::string::npos);
     EXPECT_NE(output.find("does not run GC"), std::string::npos);
     EXPECT_NE(output.find("health diagnostic"), std::string::npos);
-    EXPECT_NE(
-        output.find(
-            "kasumi gc purge-quarantine <profile> --confirm-permanent-loss"),
-        std::string::npos);
-    EXPECT_NE(output.find("destroy reachable content"), std::string::npos);
+    EXPECT_NE(output.find("Analyze garbage collection candidates"),
+              std::string::npos);
 }
 
 TEST(CliAppTest, PrintsHelpInPortugueseWhenFlagProvided) {
@@ -151,11 +148,8 @@ TEST(CliAppTest, PrintsHelpInPortugueseWhenFlagProvided) {
     EXPECT_NE(output.find("kasumi sync <perfil>"), std::string::npos);
     EXPECT_NE(output.find("não executa GC"), std::string::npos);
     EXPECT_NE(output.find("diagnóstico remoto completo"), std::string::npos);
-    EXPECT_NE(
-        output.find(
-            "kasumi gc purge-quarantine <perfil> --confirm-permanent-loss"),
-        std::string::npos);
-    EXPECT_NE(output.find("destruir conteúdo alcançável"), std::string::npos);
+    EXPECT_NE(output.find("Analisa candidatos à coleta de lixo"),
+              std::string::npos);
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
 }
 

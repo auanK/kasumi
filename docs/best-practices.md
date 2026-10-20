@@ -59,30 +59,23 @@ state or transaction evidence merely to make a failing synchronization proceed.
 
 ## Garbage Collection
 
-Garbage collection (`kasumi gc <profile>`) reclaims remote storage occupied by unreachable objects, such as obsolete commit variants, history outside retained Epoch anchors, and unreferenced content payloads.
+Garbage collection (`kasumi gc <profile>`) is **currently disconnected** in phase GC-R1. The quarantine subsystem was removed and the replacement direct-deletion collector is not linked; the public operation and stable reachability analysis remain, but no GC command can run or delete objects. See [Garbage Collection Architecture](architecture/garbage-collection.md).
 
-* **GC is NOT Fsck**: Garbage collection manages reachability, retention, and quarantine; it does **not** perform Fsck-style cryptographic payload auditing. Depending on transport capabilities, quarantine staging may transfer encrypted candidate bytes through a local workspace to verify physical-byte preservation. Running GC does not prove payload integrity.
-* **GC is Operationally Expensive**: GC uses a cooperative remote maintenance barrier and temporary visibility probes; these are not distributed exclusion or provider-wide consistency proofs. Online collection takes **two complete, stable observations** of the physical namespace and history reachability. In large vaults or high-churn repositories, GC can take a significant amount of time and consumes substantial network I/O.
-* **Plan Dedicated Maintenance Windows**: Off-peak timing reduces load, but it is a heuristic. For the operational requirement, stop Sync activity on every client and serialize GC, purge, repair, and writer-marker maintenance across the vault; see [Garbage Collection Architecture](architecture/garbage-collection.md#operational-contract). Do **not** run GC after every synchronization.
-* **Frequency Guidelines (Heuristics)**:
-  * **Low Churn (Personal Use)**: Monthly maintenance is generally sufficient.
-  * **Moderate Churn (Small Teams / Multi-Machine)**: Weekly GC is a reasonable starting policy.
-  * **High Churn (Automated Pipelines / Large Vaults)**: Weekly or scheduled off-hours GC, adjusted based on measured storage growth and observed execution duration.
-  * *Note*: These frequencies are heuristic recommendations, not protocol requirements. Tune frequency according to observed storage usage and provider performance.
-* **Safety & Quarantine Retention**:
-  * Newly identified unreachable candidates are staged into quarantine in bounded batches (up to 8 objects per batch), with physical SHA-256 verification before source removal.
-  * Previously quarantined objects are **not** purged immediately on the next GC run. Purging requires at least **10 days of quarantine age** recorded in authenticated metadata, verified absence of the original, remaining unreachability, verified physical SHA-256, and active barrier ownership.
-  * If the runtime visibility probe fails, GC may return `analysis_only`: no quarantine restore, candidate removal, or purge occurs. The maintenance barrier and probe may already have been created and cleaned up remotely. A passing probe tests only its own object and may not detect every incomplete listing; see the backend assumptions in [Garbage Collection Architecture](architecture/garbage-collection.md#operational-contract). Other safety failures can stop GC with an error.
+* **GC is NOT Fsck**: Garbage collection will manage reachability and retention; it will **not** perform Fsck-style cryptographic payload auditing. Running GC does not prove payload integrity.
+* **GC Will Be Operationally Expensive**: The retained design uses a cooperative remote maintenance barrier and temporary visibility probes; these are not distributed exclusion or provider-wide consistency proofs. Online collection takes **two complete, stable observations** of the physical namespace and history reachability. In large vaults or high-churn repositories, GC can take a significant amount of time and consume substantial network I/O.
+* **Plan Dedicated Maintenance Windows**: Off-peak timing reduces load, but it is a heuristic. For the operational requirement, stop Sync activity on every client and serialize destructive maintenance and writer-marker maintenance across the vault; see [Garbage Collection Architecture](architecture/garbage-collection.md#operational-contract). Do **not** run GC after every synchronization.
+* **No Quarantine Retention**: The former quarantine staging, 10-day retention, restoration, purge, and repair lifecycle no longer exists. A future collector will delete only candidates that survive stable observation and retained reachability; legacy quarantine objects are not interpreted as deletion candidates.
+* **Analysis-Only Safety**: When reconnected, a failed visibility probe may produce `analysis_only`: no candidate removal occurs. The maintenance barrier and probe may already have been created and cleaned up remotely. A passing probe tests only its own object and may not detect every incomplete listing.
 * **Do Not Manually Delete Remote Objects**: Never treat raw remote object listings (e.g., from cloud consoles or `rclone`) as deletion lists. Manual deletion can destroy active Epoch anchors or referenced content.
 
-For the protocol specification, see [Garbage Collection Architecture](architecture/garbage-collection.md).
+For the protocol specification and reconnection state, see [Garbage Collection Architecture](architecture/garbage-collection.md).
 
 ## Integrity Checks
 
 Kasumi provides distinct tools for auditing vault integrity and remote storage health:
 
 * **`kasumi fsck <profile>`**: Audits the observed vault structure and downloads every content payload referenced by the effective remote tree. For each referenced payload, Fsck decrypts AEAD ciphertext, verifies plaintext BLAKE3 logical hash and size against committed metadata, and verifies keyed Content ID binding. Fsck tracks progress in a private local checkpoint (`fsck_checkpoint.bin.enc`) and recovers interrupted sync transactions before auditing.
-* **`kasumi remote health <profile>`**: A non-destructive operational diagnostic covering physical listing, authenticated history and Epoch reachability, content availability, quarantine, writer controls, and orphan/unknown counts. It does not perform Fsck's payload audit.
+* **`kasumi remote health <profile>`**: A non-destructive operational diagnostic covering physical listing, authenticated history and Epoch reachability, content availability, writer controls, and orphan/unknown counts. It does not perform Fsck's payload audit.
 * **`kasumi remote contents --audit <profile>`**: Audits and validates all **physically present** content objects in remote storage (including orphans), but without Fsck's private checkpoint or preceding transaction recovery.
 
 | Tool | Audits Referenced Payloads | Audits Orphan Payloads | Uses Checkpoint | Runs Transaction Recovery | Modifies Remote Vault |
@@ -90,9 +83,9 @@ Kasumi provides distinct tools for auditing vault integrity and remote storage h
 | `kasumi fsck` | Yes (full download & verify) | No | Yes | Yes | No during audit; preceding recovery may publish |
 | `kasumi remote health` | No payload audit | No | No | No | No |
 | `kasumi remote contents --audit` | Yes (full download & verify) | Yes | No | No | No |
-| `kasumi gc` | No Fsck-style payload audit | No | No | Yes | Yes during collection; preceding recovery may publish |
+| `kasumi gc` | No Fsck-style payload audit | No | No | Yes when reconnected | No (currently disconnected); preceding recovery may publish when reconnected |
 
-Fsck and GC run pending Sync transaction recovery first. Recovery may change local files or complete remote publication; Fsck's audit itself does not intentionally modify the remote vault. GC may transfer encrypted candidate bytes while staging quarantine, without auditing their plaintext.
+Fsck and, when reconnected, GC run pending Sync transaction recovery first. Recovery may change local files or complete remote publication; Fsck's audit itself does not intentionally modify the remote vault.
 
 Schedule `kasumi fsck` periodically (e.g., monthly) to verify that remote storage has not suffered bit rot or silent corruption.
 
@@ -171,8 +164,8 @@ These routines serve as practical starting points. Adjust intervals according to
 Avoid these operational anti-patterns:
 
 * **Do NOT manually delete raw remote objects**: Never delete files directly in the remote storage directory using cloud consoles, SFTP clients, or `rclone delete`. Kasumi manages object reachability, Epoch anchors, and retention internally; deleting files manually can cause missing-content errors and break history continuity.
-* **Do NOT modify quarantine objects through the provider**: Normal `kasumi gc` applies its 10-day retention and verification checks; deleting quarantine files directly can corrupt maintenance state. `kasumi gc purge-quarantine <profile> --confirm-permanent-loss` is an explicit last-resort command that bypasses normal retention/reachability checks and may permanently delete referenced data.
-* **Do NOT assume GC replaces Fsck**: GC verifies physical-byte preservation with SHA-256, but does **not** perform Fsck-style cryptographic plaintext integrity auditing.
+* **Do NOT modify legacy quarantine objects through the provider**: The quarantine subsystem and its manual purge/repair commands were removed in phase GC-R1. Legacy quarantine objects are not deletion candidates and must not be removed manually; wait for the direct-deletion collector to be reconnected and follow its safety contract.
+* **Do NOT assume GC replaces Fsck**: When reconnected, GC will make reachability-based deletion decisions; it will **not** perform Fsck-style cryptographic plaintext integrity auditing or prove payload integrity.
 * **Do NOT replace binaries during an unfinished transaction**: Complete recovery before replacing the application binary. Never delete the journal to bypass recovery.
 * **Do NOT rely on `key.bin` for offline protection without Full-Disk Encryption**: `key.bin` uses a reversible XOR mask and OS file permissions; always enable BitLocker or LUKS on devices containing sensitive profile keys.
 * **Do NOT run concurrent normal application operations on the same profile**: `status`, `sync --dry-run`, `sync`, `fsck`, and `gc` use the local exclusive `profile-<name>.lock`. `remote ...` inspection does not acquire it and reports a point-in-time view.

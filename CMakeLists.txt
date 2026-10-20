@@ -39,16 +39,6 @@ option(
     OFF
 )
 option(
-    KASUMI_BUILD_GC_LIVE_SMOKE
-    "Build the guarded live GC collection runner"
-    OFF
-)
-option(
-    KASUMI_BUILD_GC_LIVE_BENCHMARK
-    "Build the controlled live GC remote copy benchmark runner"
-    OFF
-)
-option(
     KASUMI_BUILD_PROVIDER_CERTIFICATION
     "Build the multi-target provider certification runner"
     OFF
@@ -718,147 +708,6 @@ if(KASUMI_BUILD_GC_LIVE_PREFLIGHT)
     )
 endif()
 
-if(KASUMI_BUILD_GC_LIVE_SMOKE)
-    add_executable(
-        kasumi_gc_live_smoke
-        tests/operational/gc_live_smoke.cpp
-        tests/operational/gc_live_runner_support.cpp
-        tests/operational/gc_live_preflight_support.cpp
-        tests/operational/remote_copy_smoke_support.cpp
-    )
-    target_link_libraries(
-        kasumi_gc_live_smoke
-        PRIVATE
-        kasumi_application
-        kasumi_transport
-        kasumi_platform
-        kasumi_crypto
-        kasumi_operational_provider_target_config
-        nlohmann_json::nlohmann_json
-        reproc++
-        kasumi_warnings
-    )
-    target_include_directories(
-        kasumi_gc_live_smoke
-        PRIVATE
-        ${PROJECT_SOURCE_DIR}/src
-        ${PROJECT_SOURCE_DIR}/include
-    )
-endif()
-
-if(KASUMI_BUILD_GC_LIVE_BENCHMARK)
-    add_executable(
-        kasumi_gc_live_benchmark
-        tests/operational/gc_live_benchmark.cpp
-        tests/operational/gc_live_runner_support.cpp
-        tests/operational/gc_live_preflight_support.cpp
-        tests/operational/remote_copy_smoke_support.cpp
-    )
-    target_link_libraries(
-        kasumi_gc_live_benchmark
-        PRIVATE
-        kasumi_application
-        kasumi_transport
-        kasumi_platform
-        kasumi_crypto
-        kasumi_operational_provider_target_config
-        nlohmann_json::nlohmann_json
-        reproc++
-        kasumi_warnings
-    )
-    target_include_directories(
-        kasumi_gc_live_benchmark
-        PRIVATE
-        ${PROJECT_SOURCE_DIR}/src
-        ${PROJECT_SOURCE_DIR}/include
-    )
-
-    add_executable(
-        kasumi_gc_live_copy_benchmark
-        tests/operational/gc_live_copy_benchmark.cpp
-        tests/operational/gc_live_copy_benchmark_support.cpp
-        tests/operational/gc_live_runner_support.cpp
-        tests/operational/gc_live_preflight_support.cpp
-        tests/operational/remote_copy_smoke_support.cpp
-    )
-    target_link_libraries(
-        kasumi_gc_live_copy_benchmark
-        PRIVATE
-        kasumi_application
-        kasumi_transport
-        kasumi_platform
-        kasumi_crypto
-        kasumi_operational_provider_target_config
-        nlohmann_json::nlohmann_json
-        reproc++
-        kasumi_warnings
-    )
-    target_include_directories(
-        kasumi_gc_live_copy_benchmark
-        PRIVATE
-        ${PROJECT_SOURCE_DIR}/src
-        ${PROJECT_SOURCE_DIR}/include
-    )
-
-    execute_process(
-        COMMAND git rev-parse --short HEAD
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-        OUTPUT_VARIABLE KASUMI_GC_LIVE_MAINTENANCE_BENCHMARK_BUILD_COMMIT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    add_executable(
-        kasumi_gc_live_maintenance_benchmark
-        tests/operational/gc_live_maintenance_benchmark.cpp
-    )
-    target_link_libraries(
-        kasumi_gc_live_maintenance_benchmark
-        PRIVATE
-        kasumi_application
-        kasumi_transport
-        kasumi_platform
-        kasumi_crypto
-        kasumi_operational_provider_target_config
-        nlohmann_json::nlohmann_json
-        reproc++
-        kasumi_warnings
-    )
-    target_compile_definitions(
-        kasumi_gc_live_maintenance_benchmark
-        PRIVATE
-        KASUMI_GC_LIVE_MAINTENANCE_BENCHMARK_BUILD_COMMIT="${KASUMI_GC_LIVE_MAINTENANCE_BENCHMARK_BUILD_COMMIT}"
-    )
-    target_include_directories(
-        kasumi_gc_live_maintenance_benchmark
-        PRIVATE
-        ${PROJECT_SOURCE_DIR}/src
-        ${PROJECT_SOURCE_DIR}/include
-    )
-
-    add_executable(
-        kasumi_profile_gc_scale
-        tests/operational/profile_gc_scale.cpp
-    )
-    target_link_libraries(
-        kasumi_profile_gc_scale
-        PRIVATE
-        GTest::gtest
-        kasumi_test_support
-        kasumi_application
-        kasumi_transport
-        kasumi_platform
-        kasumi_crypto
-        nlohmann_json::nlohmann_json
-        kasumi_warnings
-    )
-    target_include_directories(
-        kasumi_profile_gc_scale
-        PRIVATE
-        ${PROJECT_SOURCE_DIR}/src
-        ${PROJECT_SOURCE_DIR}/include
-        ${PROJECT_SOURCE_DIR}/tests/support/include
-    )
-endif()
-
 set(KASUMI_FIRST_PARTY_TARGETS
     kasumi_core
     kasumi_transport
@@ -911,7 +760,6 @@ if(KASUMI_BUILD_PROVIDER_CERTIFICATION)
         kasumi_provider_certification
         tests/operational/provider_certification.cpp
         tests/operational/provider_certification_support.cpp
-        tests/operational/gc_live_runner_support.cpp
         tests/operational/gc_live_preflight_support.cpp
         tests/operational/remote_copy_smoke_support.cpp
         tests/support/src/provider_scenarios.cpp

@@ -78,28 +78,6 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 .profile_name = argv[3],
                 .writer_identifier = argv[4]};
         }
-        if (argc >= 3 && argv[2] != nullptr &&
-            std::string_view{argv[2]} == "purge-quarantine") {
-            if (argc != 5 || argv[3] == nullptr || argv[3][0] == '\0' ||
-                argv[4] == nullptr ||
-                std::string_view{argv[4]} != "--confirm-permanent-loss") {
-                return std::unexpected(ParseError{});
-            }
-            return application::Request{
-                .operation = application::Operation::PurgeQuarantine,
-                .profile_name = argv[3]};
-        }
-        if (argc >= 3 && argv[2] != nullptr &&
-            std::string_view{argv[2]} == "repair-quarantine") {
-            if (argc != 5 || argv[3] == nullptr || argv[3][0] == '\0' ||
-                argv[4] == nullptr ||
-                std::string_view{argv[4]} != "--confirm-permanent-loss") {
-                return std::unexpected(ParseError{});
-            }
-            return application::Request{
-                .operation = application::Operation::RepairQuarantine,
-                .profile_name = argv[3]};
-        }
         return request(application::Operation::GarbageCollect, argc, argv);
     }
     if (command == "resolve-missing") {
@@ -208,11 +186,6 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         if (inspection == "orphans" && argc == 4) {
             return application::InspectionRequest{
                 .operation = application::InspectionOperation::RemoteOrphans,
-                .profile_name = argv[3]};
-        }
-        if (inspection == "quarantine" && argc == 4) {
-            return application::InspectionRequest{
-                .operation = application::InspectionOperation::RemoteQuarantine,
                 .profile_name = argv[3]};
         }
         if (inspection == "writers" && argc == 4) {

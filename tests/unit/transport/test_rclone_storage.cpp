@@ -706,8 +706,8 @@ TEST(RcloneStorageTest, StorageRequestsAreScopedToConfiguredRemoteRoot) {
     const auto downloaded =
         operations.get(&state, "downloads/object", destination);
     const auto copied =
-        operations.copy(&state, "source/nested", "history/quarantine/copy");
-    const auto removed = operations.remove(&state, "history/quarantine/remove");
+        operations.copy(&state, "source/nested", "history/archive/copy");
+    const auto removed = operations.remove(&state, "history/archive/remove");
     const auto presence = operations.presence(&state, "history/head");
     const auto listed = operations.list(&state);
     const auto listed_prefix = operations.list_prefix(&state, "history/heads");
@@ -749,9 +749,9 @@ TEST(RcloneStorageTest, StorageRequestsAreScopedToConfiguredRemoteRoot) {
          {{"srcFs", root},
           {"srcRemote", "source/nested"},
           {"dstFs", root},
-          {"dstRemote", "history/quarantine/copy"}}},
+          {"dstRemote", "history/archive/copy"}}},
         {"operations/deletefile",
-         {{"fs", root}, {"remote", "history/quarantine/remove"}}},
+         {{"fs", root}, {"remote", "history/archive/remove"}}},
         {"operations/stat",
          {{"fs", root},
           {"remote", "history/head"},
@@ -800,7 +800,7 @@ TEST(RcloneStorageTest, CopiesBetweenPathsOnTheConfiguredRemote) {
     const auto copied =
         operations.copy(&state,
                         "objects/source",
-                        "history/gc/v1/quarantine/nested/destination");
+                        "history/gc/v1/archive/nested/destination");
     stop_rc_server(remote);
 
     ASSERT_TRUE(copied) << kasumi::transport::describe(copied.error());
@@ -809,7 +809,7 @@ TEST(RcloneStorageTest, CopiesBetweenPathsOnTheConfiguredRemote) {
     EXPECT_EQ(requests.front().at("srcRemote"), "objects/source");
     EXPECT_EQ(requests.front().at("dstFs"), "test:root");
     EXPECT_EQ(requests.front().at("dstRemote"),
-              "history/gc/v1/quarantine/nested/destination");
+              "history/gc/v1/archive/nested/destination");
 }
 
 TEST(RcloneStorageTest, PropagatesRemoteCopyFailure) {
@@ -1118,11 +1118,11 @@ TEST(RcloneStorageTest, BulkCheckAcceptsCompleteAllMatchResponse) {
     EXPECT_TRUE(result->errors.empty());
 }
 
-TEST(RcloneStorageTest, PhysicalHashBatchAcceptsNestedQuarantineIdentifier) {
+TEST(RcloneStorageTest, PhysicalHashBatchAcceptsNestedArchiveIdentifier) {
     auto workspace =
         kasumi::test::make_temp_workspace("rclone-batch-nested-id");
     const std::string source_id(64, 'a');
-    const auto quarantine_id = "history/gc/v1/quarantine/content/" + source_id;
+    const auto archive_id = "history/gc/v1/archive/content/" + source_id;
 
     RcServerState remote;
     std::atomic_int check_calls = 0;
@@ -1143,7 +1143,7 @@ TEST(RcloneStorageTest, PhysicalHashBatchAcceptsNestedQuarantineIdentifier) {
                 nlohmann::json{{"differ", nlohmann::json::array()},
                                {"error", nlohmann::json::array()},
                                {"hashType", "sha256"},
-                               {"match", {quarantine_id}},
+                               {"match", {archive_id}},
                                {"missingOnDst", nlohmann::json::array()},
                                {"success", true}}
                     .dump(),
@@ -1156,7 +1156,7 @@ TEST(RcloneStorageTest, PhysicalHashBatchAcceptsNestedQuarantineIdentifier) {
     auto transport = make_preflight_transport(state);
     const auto request = kasumi::transport::PhysicalHashBatchRequest{
         .scratch_root = kasumi::test::workspace_root(workspace),
-        .objects = {{quarantine_id, std::string(64, 'b')}},
+        .objects = {{archive_id, std::string(64, 'b')}},
         .algorithm = "sha256",
     };
     const auto result =
@@ -1165,11 +1165,11 @@ TEST(RcloneStorageTest, PhysicalHashBatchAcceptsNestedQuarantineIdentifier) {
 
     ASSERT_TRUE(result.has_value())
         << kasumi::transport::describe(result.error());
-    EXPECT_EQ(result->matched, (std::vector<std::string>{quarantine_id}));
+    EXPECT_EQ(result->matched, (std::vector<std::string>{archive_id}));
     EXPECT_EQ(check_calls.load(), 1);
     EXPECT_EQ(check_request.at("dstFs"), "test:root");
     EXPECT_EQ(manifest_contents,
-              std::string(64, 'b') + "  " + quarantine_id + "\n");
+              std::string(64, 'b') + "  " + archive_id + "\n");
 }
 
 TEST(RcloneStorageTest, PhysicalHashBatchMatchesGenericPathNormalizationEdges) {
@@ -1320,8 +1320,8 @@ TEST(RcloneStorageTest, PhysicalHashBatchRejectsUnsafeIdentifiersBeforeRc) {
 
     const kasumi::transport::PhysicalHashBatchRequest duplicate{
         .scratch_root = kasumi::test::workspace_root(workspace),
-        .objects = {{"quarantine/a", std::string(64, 'a')},
-                    {"quarantine/a", std::string(64, 'a')}},
+        .objects = {{"archive/a", std::string(64, 'a')},
+                    {"archive/a", std::string(64, 'a')}},
         .algorithm = "sha256",
     };
     const auto through_transport =
@@ -2463,7 +2463,7 @@ TEST(RcloneRequestTelemetryTest, RcEndpointsAcceptControlCharacters) {
     const auto stat_res =
         kasumi::transport::presence(transport, "objects/obj1");
     const auto copy_res =
-        kasumi::transport::copy(transport, "objects/obj1", "quarantine/obj1");
+        kasumi::transport::copy(transport, "objects/obj1", "archive/obj1");
     const auto del_res = kasumi::transport::remove(transport, "objects/obj1");
 
     stop_rc_server(remote);
@@ -2518,9 +2518,9 @@ TEST(RcloneStorageTest, CopyBatchUsesOneJobBatchWithExplicitCopyfileInputs) {
     const auto copied = kasumi::transport::copy_batch(
         storage,
         kasumi::transport::CopyBatch{
-            .items = {{"source-A/nested", "quarantine/A/nested"},
-                      {"source-B", "quarantine/B"},
-                      {"source-C", "quarantine/C"}},
+            .items = {{"source-A/nested", "archive/A/nested"},
+                      {"source-B", "archive/B"},
+                      {"source-C", "archive/C"}},
             .concurrency = 2,
         });
     stop_rc_server(remote);
@@ -2531,9 +2531,9 @@ TEST(RcloneStorageTest, CopyBatchUsesOneJobBatchWithExplicitCopyfileInputs) {
     EXPECT_EQ(requests[0].at("concurrency"), 2);
     ASSERT_EQ(requests[0].at("inputs").size(), 3U);
     const std::array<std::pair<std::string_view, std::string_view>, 3> pairs{{
-        {"source-A/nested", "quarantine/A/nested"},
-        {"source-B", "quarantine/B"},
-        {"source-C", "quarantine/C"},
+        {"source-A/nested", "archive/A/nested"},
+        {"source-B", "archive/B"},
+        {"source-C", "archive/C"},
     }};
     for (std::size_t index = 0; index < pairs.size(); ++index) {
         const auto& input = requests[0].at("inputs").at(index);
@@ -2571,7 +2571,7 @@ TEST(RcloneStorageTest, PutFilesBatchUsesOneJobBatchWithExplicitLocalSources) {
         kasumi::test::write_text(source, "ciphertext-" + std::to_string(index));
         items.push_back({
             source,
-            "history/gc/v1/quarantine/content/" + std::to_string(index) +
+            "history/gc/v1/archive/content/" + std::to_string(index) +
                 ".meta",
         });
     }
@@ -2625,18 +2625,18 @@ TEST(RcloneStorageTest, PutFilesBatchRejectsInvalidRequestsBeforeSubmission) {
         kasumi::transport::PutFilesBatch{.items = {{source, "../escape.meta"}},
                                          .concurrency = 1},
         kasumi::transport::PutFilesBatch{
-            .items = {{source, "quarantine/a.meta"},
-                      {source, "quarantine/a.meta"}},
+            .items = {{source, "archive/a.meta"},
+                      {source, "archive/a.meta"}},
             .concurrency = 2},
         kasumi::transport::PutFilesBatch{
             .items = {{kasumi::test::workspace_path(workspace, "missing.enc"),
-                       "quarantine/missing.meta"}},
+                       "archive/missing.meta"}},
             .concurrency = 1},
         kasumi::transport::PutFilesBatch{
-            .items = {{workspace->root, "quarantine/directory.meta"}},
+            .items = {{workspace->root, "archive/directory.meta"}},
             .concurrency = 1},
         kasumi::transport::PutFilesBatch{
-            .items = {{source, "quarantine/concurrency.meta"}},
+            .items = {{source, "archive/concurrency.meta"}},
             .concurrency = 0},
     };
     for (const auto& batch : invalid) {
@@ -2666,7 +2666,7 @@ TEST(RcloneStorageTest,
         R"({"results":[{}, {"status":"200"}]})",
         R"({"results":[{}, {"status":503}]})",
         R"({"results":[{}, {"path":"operations/deletefile"}]})",
-        R"({"results":[{}, {"input":{"_path":"operations/copyfile","srcFs":"wrong","srcRemote":"file-1.enc","dstFs":"test:","dstRemote":"root/quarantine/1.meta"}}]})",
+        R"({"results":[{}, {"input":{"_path":"operations/copyfile","srcFs":"wrong","srcRemote":"file-1.enc","dstFs":"test:","dstRemote":"root/archive/1.meta"}}]})",
     };
     std::size_t next_response = 0;
     remote.server.Post(
@@ -2686,7 +2686,7 @@ TEST(RcloneStorageTest,
     kasumi::test::write_text(second, "ciphertext-1");
     auto storage = make_preflight_transport(state);
     const kasumi::transport::PutFilesBatch batch{
-        .items = {{first, "quarantine/0.meta"}, {second, "quarantine/1.meta"}},
+        .items = {{first, "archive/0.meta"}, {second, "archive/1.meta"}},
         .concurrency = 2,
     };
 
@@ -2720,7 +2720,7 @@ TEST(RcloneStorageTest, PutFilesBatchMapsMissingJobEndpointToUnsupported) {
     auto storage = make_preflight_transport(state);
     const auto result = kasumi::transport::put_files_batch(
         storage,
-        {.items = {{source, "quarantine/metadata.meta"}}, .concurrency = 1});
+        {.items = {{source, "archive/metadata.meta"}}, .concurrency = 1});
     stop_rc_server(remote);
 
     ASSERT_FALSE(result.has_value());
@@ -2746,7 +2746,7 @@ TEST(RcloneStorageTest, PutFilesBatchDoesNotRetryAmbiguousSubmittedRequest) {
     auto storage = make_preflight_transport(state);
     const auto result = kasumi::transport::put_files_batch(
         storage,
-        {.items = {{source, "quarantine/metadata.meta"}}, .concurrency = 1});
+        {.items = {{source, "archive/metadata.meta"}}, .concurrency = 1});
     stop_rc_server(remote);
 
     ASSERT_FALSE(result.has_value());
@@ -2773,25 +2773,25 @@ TEST(RcloneStorageTest, CopyBatchRejectsInvalidInputsBeforeSending) {
     EXPECT_TRUE(
         kasumi::transport::copy_batch(storage, kasumi::transport::CopyBatch{}));
     const std::array<kasumi::transport::CopyBatch, 9> invalid_batches{
-        kasumi::transport::CopyBatch{.items = {{"../source", "quarantine/A"}},
+        kasumi::transport::CopyBatch{.items = {{"../source", "archive/A"}},
                                      .concurrency = 1},
-        kasumi::transport::CopyBatch{.items = {{"/source", "quarantine/A"}},
+        kasumi::transport::CopyBatch{.items = {{"/source", "archive/A"}},
                                      .concurrency = 1},
-        kasumi::transport::CopyBatch{.items = {{"source", "../quarantine/A"}},
+        kasumi::transport::CopyBatch{.items = {{"source", "../archive/A"}},
                                      .concurrency = 1},
         kasumi::transport::CopyBatch{.items = {{"source", "source"}},
                                      .concurrency = 1},
         kasumi::transport::CopyBatch{
-            .items = {{"source", "quarantine/A"}, {"other", "quarantine/A"}},
+            .items = {{"source", "archive/A"}, {"other", "archive/A"}},
             .concurrency = 2},
         kasumi::transport::CopyBatch{
-            .items = {{"source\\name", "quarantine/A"}}, .concurrency = 1},
+            .items = {{"source\\name", "archive/A"}}, .concurrency = 1},
         kasumi::transport::CopyBatch{
-            .items = {{"source\nname", "quarantine/A"}}, .concurrency = 1},
+            .items = {{"source\nname", "archive/A"}}, .concurrency = 1},
         kasumi::transport::CopyBatch{
-            .items = {{"source\rname", "quarantine/A"}}, .concurrency = 1},
+            .items = {{"source\rname", "archive/A"}}, .concurrency = 1},
         kasumi::transport::CopyBatch{
-            .items = {{"source/./name", "quarantine/A"}}, .concurrency = 1},
+            .items = {{"source/./name", "archive/A"}}, .concurrency = 1},
     };
     for (const auto& batch : invalid_batches) {
         const auto result = kasumi::transport::copy_batch(storage, batch);
@@ -2801,7 +2801,7 @@ TEST(RcloneStorageTest, CopyBatchRejectsInvalidInputsBeforeSending) {
     }
     const auto invalid_concurrency = kasumi::transport::copy_batch(
         storage,
-        kasumi::transport::CopyBatch{.items = {{"source", "quarantine/A"}},
+        kasumi::transport::CopyBatch{.items = {{"source", "archive/A"}},
                                      .concurrency = 0});
     ASSERT_FALSE(invalid_concurrency.has_value());
     EXPECT_EQ(invalid_concurrency.error().code,
@@ -2817,11 +2817,11 @@ TEST(RcloneStorageTest, CopyBatchRejectsPartialExtraMalformedAndFailedResults) {
         R"({"results":[]})",
         R"({"results":[{},{},{}]})",
         R"({"results":[null,{}]})",
-        R"({"results":[{}, {"status":500,"error":"secret","path":"operations/copyfile","input":{"_path":"operations/copyfile","srcFs":"test:","srcRemote":"root/source-B","dstFs":"test:","dstRemote":"root/quarantine/B"}}]})",
+        R"({"results":[{}, {"status":500,"error":"secret","path":"operations/copyfile","input":{"_path":"operations/copyfile","srcFs":"test:","srcRemote":"root/source-B","dstFs":"test:","dstRemote":"root/archive/B"}}]})",
         R"({"results":[{}, {"status":"200"}]})",
         R"({"results":[{}, {"status":503}]})",
         R"({"results":[{}, {"path":"operations/deletefile"}]})",
-        R"({"results":[{}, {"input":{"_path":"operations/copyfile","srcFs":"test:","srcRemote":"root/wrong","dstFs":"test:","dstRemote":"root/quarantine/B"}}]})",
+        R"({"results":[{}, {"input":{"_path":"operations/copyfile","srcFs":"test:","srcRemote":"root/wrong","dstFs":"test:","dstRemote":"root/archive/B"}}]})",
     };
     std::size_t next_response = 0;
     remote.server.Post(
@@ -2835,7 +2835,7 @@ TEST(RcloneStorageTest, CopyBatchRejectsPartialExtraMalformedAndFailedResults) {
     configure_state(state, remote.port);
     auto storage = make_preflight_transport(state);
     const kasumi::transport::CopyBatch batch{
-        .items = {{"source-A", "quarantine/A"}, {"source-B", "quarantine/B"}},
+        .items = {{"source-A", "archive/A"}, {"source-B", "archive/B"}},
         .concurrency = 2,
     };
 
@@ -2865,7 +2865,7 @@ TEST(RcloneStorageTest, CopyBatchMapsOnlyMissingJobBatchEndpointToUnsupported) {
     auto storage = make_preflight_transport(state);
     const auto result = kasumi::transport::copy_batch(
         storage,
-        kasumi::transport::CopyBatch{.items = {{"source", "quarantine/source"}},
+        kasumi::transport::CopyBatch{.items = {{"source", "archive/source"}},
                                      .concurrency = 1});
     stop_rc_server(remote);
 
@@ -2888,7 +2888,7 @@ TEST(RcloneStorageTest, CopyBatchDoesNotRetryAnAmbiguousSubmittedRequest) {
     auto storage = make_preflight_transport(state);
     const auto result = kasumi::transport::copy_batch(
         storage,
-        kasumi::transport::CopyBatch{.items = {{"source", "quarantine/source"}},
+        kasumi::transport::CopyBatch{.items = {{"source", "archive/source"}},
                                      .concurrency = 1});
     stop_rc_server(remote);
 
@@ -2910,7 +2910,7 @@ TEST(RcloneStorageTest, CopyBatchConnectionFailureBeforeResponseFailsClosed) {
 
     const auto result = kasumi::transport::copy_batch(
         storage,
-        kasumi::transport::CopyBatch{.items = {{"source", "quarantine/source"}},
+        kasumi::transport::CopyBatch{.items = {{"source", "archive/source"}},
                                      .concurrency = 1});
 
     ASSERT_FALSE(result.has_value());

@@ -70,17 +70,15 @@ New profiles default to a minimum retention depth of 5 commits and a minimum ret
 | `kasumi sync <profile>` | Runs synchronization |
 | `kasumi update` | Downloads and verifies the official GitHub release, then updates this Kasumi executable |
 | `kasumi fsck <profile>` | Validates observed remote history and audits content objects referenced by the effective remote state |
-| `kasumi gc <profile>` | Runs garbage-collection analysis and, when online collection conditions are met, quarantine and removal processing |
+| `kasumi gc <profile>` | Garbage-collection entry point retained for the pending direct-deletion implementation; the current phase does not link a GC runner, so this command cannot execute deletion |
 | `kasumi gc remove-writer <profile> <writer-id>` | Manually removes exactly one listed remote writer marker |
-| `kasumi gc purge-quarantine <profile> --confirm-permanent-loss` | Explicitly and permanently purges authenticated quarantine entries; **may destroy still-referenced content** |
-| `kasumi gc repair-quarantine <profile> --confirm-permanent-loss` | Removes eligible orphaned quarantine metadata whose payload is already missing; **does not restore content** |
 | `kasumi resolve-missing <profile>` | Explicitly resolves eligible pending missing remote payloads as logical deletions; **may publish permanent data loss** |
 
 * `status` and `sync --dry-run` dispatch through the same planner and return a `PlanReport`. Both enumerate the managed tree and read metadata, reusing persisted BLAKE3 hashes only when path, regular-file type, size, nanosecond mtime, and native identity match. Cache misses, changed files, and insufficient identity require content hashing; an effective ignore projection differing from local rules uses full hashing. Neither executes the plan, recovers a transaction, advances accepted state, publishes history, or saves cache deltas. They acquire the local profile lock; private-path permission normalization can still occur. A later Sync reobserves and independently verifies destructive local targets. See [Preview and Status](architecture/planning-and-status.md).
 * **Plan Truncation & `--full`**: When a synchronization plan contains more than 10 items, Kasumi truncates output to display the first 5 and last 5 items, separated by an ellipsis line (`... (N more items) ...` / `... (mais N itens) ...`) to maintain clean terminal output. Pass `--full` to list all items without truncation (useful for inspection scripts, complete audits, or piping to log files).
 * `sync` applies local tree modifications, transfers content payloads, and publishes Commit and HEAD records. See [Synchronization](architecture/synchronization.md).
 * See [Updating Kasumi](#updating-kasumi) for update behavior, platform requirements, and compatibility notes.
-* `gc` uses a cooperative remote barrier, checks probe visibility, and stages candidates through a 10-day quarantine before permanent removal. The barrier is not distributed exclusivity; maintenance must be serialized across clients and Sync must be stopped during maintenance. See [Garbage Collection](architecture/garbage-collection.md).
+* `gc` is currently disconnected (phase GC-R1): the quarantine subsystem was removed and the replacement direct-deletion collector is not linked yet. The retained `GarbageCollect` operation, analysis infrastructure, and CLI surface are documented in [Garbage Collection](architecture/garbage-collection.md). When reconnected, GC will use a cooperative remote barrier, check probe visibility, and remove only stable unreachable candidates. The barrier is not distributed exclusivity; maintenance must be serialized across clients and Sync must be stopped during maintenance.
 * `gc remove-writer` is a manual recovery command for one exact identifier from `kasumi remote writers <profile>`. Kasumi refuses removal when a maintenance barrier is present, but this check does not coordinate distributed operations. Verify that no Sync or maintenance operation is running before removal. It does not run Sync or GC.
 * `fsck` validates observed remote history and physical identifiers, downloads referenced content, checks authentication, size, and logical hashes, and reports missing or corrupted objects. It may update a private checkpoint but does not use that checkpoint to skip payload audits. See [Fsck](architecture/fsck.md).
 
@@ -112,7 +110,7 @@ When `kasumi sync <profile>` succeeds with unresolved missing remote payloads, i
 
 `kasumi resolve-missing <profile>` is an explicit, potentially destructive resolution path: it first recovers any pending synchronization transaction, then validates the accepted state and current observations and may publish logical deletions for eligible unresolved paths that have no local source. It is not a download/repair command. Use it only when losing those files is an informed decision.
 
-The two manual quarantine commands require the exact final argument `--confirm-permanent-loss`. `gc purge-quarantine` bypasses the ordinary age and reachability criteria used by normal GC, and can delete the only remaining encrypted copy of referenced content. `gc repair-quarantine` is restricted to cleanup of eligible metadata-only quarantine entries; it cannot recover the missing payload. Both require their own maintenance safety checks but are **not routine scheduled GC commands**. See [Garbage Collection](architecture/garbage-collection.md) and [Troubleshooting](troubleshooting.md).
+The former manual quarantine commands (`gc purge-quarantine` and `gc repair-quarantine`) were removed with the quarantine subsystem in phase GC-R1. There is no supported command that restores or purges quarantine state, and legacy quarantine objects are not reinterpreted as deletion candidates. See [Garbage Collection](architecture/garbage-collection.md) and [Troubleshooting](troubleshooting.md).
 
 ### Interruption and Recovery
 
@@ -123,7 +121,7 @@ and backups; these workspace files are not uniformly encrypted. Preserve both
 directories when recovery fails. See the [journal format](architecture/transaction-journal.md).
 
 If synchronization is interrupted:
-* Sync, Fsck, ordinary GC, and `resolve-missing` inspect the existing local transaction journal before their own work. Preview, Status, remote inspection, and manual quarantine/writer maintenance do not run this recovery path.
+* Sync, Fsck, `resolve-missing`, and GC when a collector is reconnected inspect the existing local transaction journal before their own work. Preview, Status, remote inspection, and manual writer maintenance do not run this recovery path.
 * Depending on the persisted phase and observed state, recovery may resume, rollback, or roll forward the transaction.
 * Conflicting or indeterminate publication states are reported as recovery errors rather than assumed successful.
 * Already present content objects may be reused when their identifiers and verification checks match the required content.
@@ -157,7 +155,6 @@ These commands do not publish synchronization changes or run garbage collection.
 | `kasumi remote markers <profile>` | Validates and classifies physical HEAD markers |
 | `kasumi remote objects <profile>` | Lists and categorizes objects in the raw physical namespace |
 | `kasumi remote orphans <profile>` | Lists orphaned objects outside the reachable/retained set without running garbage collection |
-| `kasumi remote quarantine <profile>` | Displays quarantine contents without restoring or purging |
 | `kasumi remote writers <profile>` | Shows active writer markers and barrier registration state |
 | `kasumi remote health <profile>` | Runs remote health inspection checks |
 

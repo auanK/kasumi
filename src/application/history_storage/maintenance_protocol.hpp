@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
-#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -18,8 +17,6 @@ struct RemoteLayout;
 }
 
 namespace kasumi::application::history_storage::maintenance_protocol {
-
-inline constexpr std::int64_t quarantine_retention_seconds = 10 * 24 * 60 * 60;
 
 enum class ErrorCode {
     InvalidInput,
@@ -64,7 +61,7 @@ establish_barrier(transport::Transport& storage,
                   const RemoteLayout& layout,
                   const std::filesystem::path& workspace_root);
 
-// Lists active writers; any abandoned marker continues to block GC.
+// Lists active writers; any abandoned marker continues to block maintenance.
 std::expected<std::vector<std::string>, Error>
 active_writers(transport::Transport& storage, const RemoteLayout& layout);
 
@@ -81,119 +78,9 @@ supports_online_collection(transport::Transport& storage,
                            const RemoteLayout& layout,
                            const std::filesystem::path& workspace_root);
 
-struct QuarantineEntry {
-    std::string original_identifier;
-    std::string quarantine_identifier;
-    std::string metadata_identifier;
-    std::optional<std::int64_t> quarantined_at;
-    std::string physical_sha256;
-};
-
-struct PreparedQuarantineMetadata {
-    QuarantineEntry entry;
-    std::filesystem::path ciphertext_path;
-    std::string expected_physical_sha256;
-};
-
-bool is_epoch_object(const RemoteLayout& layout,
-                     std::string_view identifier) noexcept;
-
 // Identifies objects reserved for the protocol, outside logical history.
 bool is_control_object(const RemoteLayout& layout,
                        std::string_view identifier) noexcept;
-
-// Builds the deterministic quarantine destination for content or commit.
-std::optional<std::string>
-quarantine_identifier(const RemoteLayout& layout,
-                      std::string_view original_identifier);
-
-// Inventories and authenticates metadata present in quarantine.
-std::expected<std::vector<QuarantineEntry>, Error>
-inventory_quarantine(transport::Transport& storage,
-                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                     const std::filesystem::path& workspace_root);
-
-std::expected<std::vector<QuarantineEntry>, Error>
-inventory_quarantine(transport::Transport& storage,
-                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                     std::span<const std::string> identifiers,
-                     const std::filesystem::path& workspace_root);
-
-// Records the authenticated timestamp and hash of the quarantined copy.
-std::expected<QuarantineEntry, Error>
-record_quarantine(transport::Transport& storage,
-                  std::string_view quarantine_identifier,
-                  std::int64_t quarantined_at,
-                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                  const std::filesystem::path& workspace_root,
-                  std::string_view verified_sha256 = {});
-
-// Builds the existing authenticated metadata format in a caller-owned local
-// workspace without publishing it remotely.
-std::expected<PreparedQuarantineMetadata, Error>
-prepare_quarantine_metadata(std::string_view quarantine_identifier,
-                            std::int64_t quarantined_at,
-                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                            const std::filesystem::path& ciphertext_path,
-                            std::string_view verified_sha256);
-
-// Confirms that the copy still matches the authenticated metadata.
-std::expected<bool, Error>
-verify_quarantine(transport::Transport& storage,
-                  const QuarantineEntry& entry,
-                  const std::filesystem::path& workspace_root);
-
-// Verifies destination object bytes match expected physical hash via local
-// workspace readback.
-std::expected<void, Error>
-verify_destination_via_workspace(transport::Transport& storage,
-                                 std::string_view destination_identifier,
-                                 std::string_view expected_sha256,
-                                 const std::filesystem::path& workspace_root);
-
-// Copies bytes via local workspace download and upload, validating hash.
-std::expected<std::string, Error>
-copy_verified_via_workspace(transport::Transport& storage,
-                            const RemoteLayout& layout,
-                            std::string_view source_identifier,
-                            std::string_view destination_identifier,
-                            const std::filesystem::path& workspace_root);
-
-// Copies bytes, validates destination SHA-256, and returns the hash.
-std::expected<std::string, Error>
-copy_verified(transport::Transport& storage,
-              const RemoteLayout& layout,
-              std::string_view source_identifier,
-              std::string_view destination_identifier,
-              const std::filesystem::path& workspace_root);
-
-struct QuarantineRepairClassification {
-    std::vector<QuarantineEntry> healthy_pairs;
-    std::vector<QuarantineEntry> metadata_only_candidates;
-    std::vector<std::string> payload_only_identifiers;
-    std::vector<std::string> invalid_identifiers;
-};
-
-// Classifies quarantine objects into healthy pairs, metadata-only repair
-// candidates, payload-only objects, and invalid/ambiguous entries.
-std::expected<QuarantineRepairClassification, Error>
-classify_quarantine_for_repair(transport::Transport& storage,
-                               const RemoteLayout& layout);
-
-struct AuthenticatedQuarantineMetadata {
-    std::int64_t quarantined_at = 0;
-    std::string payload_sha256;
-    std::string ciphertext_sha256;
-};
-
-// Authenticates a single quarantine metadata object and extracts its timestamp,
-// recorded physical payload SHA-256, and ciphertext physical SHA-256.
-std::expected<AuthenticatedQuarantineMetadata, Error>
-authenticate_quarantine_metadata(
-    transport::Transport& storage,
-    std::string_view metadata_identifier,
-    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-    const std::filesystem::path& workspace_root);
 
 namespace testing {
 std::vector<std::uint8_t> format_payload(std::string_view kind,

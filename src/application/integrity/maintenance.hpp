@@ -47,15 +47,6 @@ struct FsckResult {
 
 using FsckProgressCallback = std::function<void(const FsckProgress&)>;
 
-// Counts produced by recoverable garbage collection.
-struct GarbageCollectResult {
-    std::size_t candidate_objects = 0;
-    std::size_t quarantined_objects = 0;
-    std::size_t restored_objects = 0;
-    std::size_t purged_objects = 0;
-    bool analysis_only = false;
-};
-
 // Audits the history and reachable content objects.
 std::expected<FsckResult, Error>
 fsck(const runtime::RuntimeData& runtime_data,
@@ -63,32 +54,6 @@ fsck(const runtime::RuntimeData& runtime_data,
      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
      std::size_t audit_concurrency = 1,
      FsckProgressCallback on_progress = {});
-
-// Callback type for receiving garbage collection progress updates.
-using GarbageCollectProgressCallback =
-    std::function<void(const GarbageCollectProgress&)>;
-
-// Moves unreachable objects to quarantine after two stable observations.
-std::expected<GarbageCollectResult, Error>
-garbage_collect(const runtime::RuntimeData& runtime_data,
-                transport::Transport& storage,
-                std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                std::size_t copy_batch_concurrency = 8,
-                std::size_t metadata_batch_concurrency = 8,
-                std::size_t source_removal_concurrency = 8,
-                GarbageCollectProgressCallback on_progress = {});
-
-// Explicit quarantine-only purge boundary. The command is not wired yet.
-std::expected<std::size_t, Error>
-purge_quarantine(const runtime::RuntimeData& runtime_data,
-                 transport::Transport& storage,
-                 std::span<const std::uint8_t, crypto::KEY_SIZE> key);
-
-// Explicit quarantine-only repair boundary for incomplete quarantine pairs.
-std::expected<std::size_t, Error>
-repair_quarantine(const runtime::RuntimeData& runtime_data,
-                  transport::Transport& storage,
-                  std::span<const std::uint8_t, crypto::KEY_SIZE> key);
 
 } // namespace kasumi::application::integrity
 

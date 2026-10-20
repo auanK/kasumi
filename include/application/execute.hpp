@@ -23,10 +23,9 @@ struct SyncProgress {
     std::uint32_t total_items = 0;
 };
 
-// High-level stages for recoverable garbage collection.
+// High-level stages for garbage collection.
 enum class GarbageCollectStage {
     Preparing,
-    CheckingQuarantine,
     Analyzing,
     Applying,
     Finalizing,

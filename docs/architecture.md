@@ -24,7 +24,7 @@ CLI/profile → local observation + authenticated remote history + StoredState
 | What do transaction phases mean, and how does interruption recovery decide? | [Transactions and Recovery](architecture/transactions-and-recovery.md) |
 | Which journal bytes are confirmed, cached, replayed, or retired? | [Incremental Transaction Journal](architecture/transaction-journal.md) |
 | How does `fsck` audit structure and every referenced payload? | [Fsck](architecture/fsck.md) |
-| When can `gc` quarantine, restore, or purge safely? | [Garbage Collection](architecture/garbage-collection.md) |
+| What is the status of GC after quarantine removal, and what must reconnection preserve? | [Garbage Collection](architecture/garbage-collection.md) |
 | How are Commit DAGs, logical heads, merge bases, Epochs, and retention resolved? | [History and Concurrency](architecture/history-and-concurrency.md) |
 | What is the actual remote namespace and publication order? | [Remote Layout and Publication](architecture/remote-layout.md) |
 | What must a backend implement, and how are optional capabilities verified? | [Transport](architecture/transport.md) |
@@ -39,7 +39,7 @@ CLI/profile → local observation + authenticated remote history + StoredState
 | Preview (`sync --dry-run`), Status | Reads local/SQLite state; profile lock and permission normalization are possible | Observation only; no recovery or publication |
 | Sync | May change synchronized files, file-hash cache, transaction journal, and accepted `StoredState` | May upload content and publish/prune history; registers a writer for active work |
 | Fsck | Checkpoint/workspace; preceding recovery can change local state | Audit reads only, **except** effects of preceding transaction recovery |
-| GC | Workspace; preceding recovery can change local state | Barrier/probe even in analysis-only mode; online restore, quarantine, source removal, and purge when safe |
+| GC | Workspace; preceding recovery can change local state | **Currently disconnected (phase GC-R1):** no runner is linked, so there is no deletion path. Retained design: barrier/probe even in analysis-only mode, then quarantine-free removal of stable candidates when safe |
 | `remote ...` | Temporary workspace and possible private history cache; `remote get` writes its chosen destination | Inspection reads only; no normal transaction recovery |
 
 Read the linked owners for exact invariants. The [README](../README.md) is a short entry point, and [Provider Certification](provider-certification.md) records externally established backend certification results.
