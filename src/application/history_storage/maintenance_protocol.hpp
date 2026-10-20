@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -31,6 +32,8 @@ enum class ErrorCode {
 struct Error {
     ErrorCode code = ErrorCode::InvalidInput;
     std::string detail;
+    // Preserves the backend category and native code when available.
+    std::optional<transport::Error> transport_failure;
 };
 
 struct RegistrationState {

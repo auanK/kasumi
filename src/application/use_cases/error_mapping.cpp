@@ -120,7 +120,8 @@ Error maintenance_error(Operation operation,
     return Error{.operation = operation,
                  .code = code,
                  .detail = integrity::describe(error),
-                 .runtime = summary};
+                 .runtime = summary,
+                 .garbage_collection = error.garbage_collection};
 }
 
 Error maintenance_recovery_error(Operation operation,

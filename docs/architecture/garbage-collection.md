@@ -1,15 +1,13 @@
 # Garbage Collection
 
-> **Phase GC-R1 status:** the quarantine subsystem has been removed. The
-> public `GarbageCollect` operation, its progress/result types, the CLI
-> dispatch, and the stable reachability analysis helpers remain, but the old
-> GC orchestration (`run_garbage_collect`) has no definition. Until the new
-> direct-deletion collector is implemented and the dispatch is reconnected,
-> this path does not link and no GC command can run. Fsck, Sync, transport
-> operations, writers, barriers, probes, and maintenance inspection are
-> unaffected. This document describes the retained design contract and the
-> reconnection boundary; it does not claim that destructive collection is
-> currently available.
+> **Phase GC-R2.1 status:** the quarantine subsystem is gone and the
+> direct-deletion collector is implemented and connected to
+> `Operation::GarbageCollect`. It removes one authenticated candidate at a
+> time, revalidates current history and ownership before each deletion, counts
+> only confirmed removals, and preserves partial-failure diagnostics. This
+> remains best-effort maintenance, not a distributed lock or fencing
+> mechanism. Fsck, Sync, transport operations, writers, barriers, probes, and
+> maintenance inspection share the same operational limits described below.
 
 ## What was removed
 
@@ -26,38 +24,32 @@ deleted by this phase. They are ordinary unknown remote objects unless a
 future explicit design assigns them another meaning. A raw `remote objects`
 listing is not a deletion list.
 
-## Retained pieces and the reconnection point
+## Components and connection point
 
-The following remain in place and must be preserved when GC is reconnected:
-
-- `Operation::GarbageCollect` and its dispatch case in
-  `src/application/execute.cpp`.
+- `Operation::GarbageCollect` dispatches through
+  `run_garbage_collect(OperationContext&)`, implemented in
+  `src/application/use_cases/maintenance.cpp`.
 - `GarbageCollectStage` (`Preparing`, `Analyzing`, `Applying`, `Finalizing`),
-  `GarbageCollectProgress`, and `GarbageCollectCompleted`
-  (`candidate_objects`, `analysis_only`).
-- The GC analysis infrastructure in `maintenance.cpp`:
-  `GarbageCollectionSnapshot`, the snapshot trace names,
-  `collect_garbage_collection_snapshot`, `same_reachable_state`, and the
-  validation helpers used to compare stable observations.
+  `GarbageCollectProgress`, `GarbageCollectCompleted`
+  (`candidate_objects`, `analysis_only`, `removed_objects`), and
+  `GarbageCollectFailure` describe progress, successful counts, and partial
+  failure context.
+- `src/application/integrity/garbage_collection.cpp` contains the stable
+  observation, candidate selection, revalidation, direct removal, and barrier
+  cleanup implementation.
 - Barrier establishment/ownership checks, writer admission, writer-marker
-  observations, and the provider-visibility probe.
+  observations, and the provider-visibility probe remain separate protocol
+  components.
 - Reachability, Commit variant selection, Epoch anchors, historical retention
   (`min_history_depth` and `min_history_age_hours`), content availability,
-  and transport batch/physical-hash capabilities.
+  and transport batch/physical-hash capabilities remain the reachability
+  authority used by GC.
 - Fsck, Sync and incremental observation, and the `gc remove-writer`
-  maintenance operation.
-
-The single known broken reconnection point is intentional:
-`src/application/execute.cpp` declares and dispatches
-`run_garbage_collect(OperationContext&)`, but no translation unit defines it.
-There is no stub, compatibility alias, or fake implementation. A build that
-links the GC dispatch will therefore fail at link time until the new
-collector is implemented or the call is deliberately reconnected to it.
+  maintenance operation are unchanged.
 
 ## Admission and analysis contract
 
-When the direct-deletion collector is reconnected, it is expected to preserve
-the following order:
+The direct-deletion collector preserves the following order:
 
 1. `application::execute` resolves the profile/key, validates retention,
    takes the **local** profile lock, and opens the [transport](transport.md).
@@ -91,23 +83,53 @@ Candidate selection excludes retained content and required variants.
 Unknown/protected objects are **not** inferred safe to delete, and Epoch
 objects are not deletion candidates.
 
-## Destructive phase (not currently connected)
+## Destructive phase
 
 The former quarantine staging, metadata verification, retention, restoration,
-and purge steps no longer exist. The replacement direct-deletion design must
-delete only candidates that survive both stable observations and continue to
-satisfy retention and barrier ownership at the point of removal. It must:
+and purge steps no longer exist. The direct-deletion collector issues one
+REMOVE for one candidate at a time and applies these checks immediately before
+that mutation:
 
-- recheck barrier ownership before each destructive batch;
-- use bounded batches and report partial outcomes without blindly replaying
-  ambiguous failures;
-- leave unknown objects, legacy quarantine objects, and control objects
-  untouched;
-- return counts for candidates and whether the run was analysis-only; and
-- have no local transaction journal for remote deletions. A later run must
-  re-observe remote state rather than trust an earlier partial result.
+- the physical namespace still matches the observed namespace and no writer
+  marker is active;
+- a Commit variant is still a valid, redundant variant of a current reachable
+  Commit, or a Content object is still an authenticated, unreferenced payload
+  under a freshly authenticated current-history inventory;
+- the candidate identifier is still present and belongs to the authorized
+  candidate kind;
+- the maintenance barrier is still owned by this run; and
+- cancellation has not been requested.
 
-Until that implementation exists, no destructive GC phase can run.
+After REMOVE, a PRESENCE check must report `Absent` before the removal is
+counted. An ambiguous DELETE is never retried automatically; its mutation
+state remains `Uncertain` and the object is not added to `removed_objects`. A
+failure that definitely did not mutate the object remains `NotAttempted`.
+Every post-Apply failure carries the candidate total,
+confirmed removals, failed identifier when one exists, operation stage,
+transport error category/message/native code when available, mutation state
+(`NotAttempted`, `Confirmed`, or `Uncertain`), and barrier cleanup status.
+
+Barrier cleanup has a single owner. A normal result path attempts release at
+most once, a failed or ambiguous release is not retried during destruction,
+a foreign or replaced barrier is never removed, and primary and cleanup
+errors are both preserved. Destructive GC leaves unknown objects, legacy
+quarantine objects, and control objects untouched. It has no local
+transaction journal for remote deletions: a later run must re-observe remote
+state rather than trust an earlier partial result.
+
+## Unreachable commits remain out of scope
+
+The collector does not collect whole unreachable Commits. Commit objects that
+are not reachable from current logical heads, Epoch anchors, or retention are
+preserved, together with their variants, even when they are no longer
+referenced. The only Commit-variant deletions are redundant valid variants of
+a currently reachable Commit whose marked variant is already required.
+
+Collecting unreachable Commits would require a separate authenticated policy
+for their trees and content; inferring that policy from a raw listing is
+unsafe. `GarbageCollectionTest.UnreachableCommitVariantsArePreserved` fixes
+this boundary, and the same boundary applies to the `GC → Fsck → GC`
+regression: the second run must report zero candidates and zero removals.
 
 ## Operational contract
 
@@ -129,12 +151,11 @@ the backend exposes completed changes to the listings and presence checks
 used by the protocol. The runtime probe tests visibility of its own newly
 published probe; passing it does not prove that every older object or writer
 marker is visible, nor certify provider-wide consistency. Confirm the
-backend's consistency guarantees independently before reconnecting
+backend's consistency guarantees independently before relying on
 destructive GC.
 
-An `analysis_only` result, when the collector is connected, means no
-candidate removal occurred; it is not a selectable mode or proof that a
-backend which passed the probe is safe.
+An `analysis_only` result means no candidate removal occurred; it is not a
+selectable mode or proof that a backend which passed the probe is safe.
 
 ### Maintenance procedure for retained operations
 

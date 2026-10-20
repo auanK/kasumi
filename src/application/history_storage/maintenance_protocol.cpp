@@ -23,7 +23,10 @@ Error error(ErrorCode code, std::string detail) {
 }
 
 Error transport_error(const transport::Error& source) {
-    return error(ErrorCode::TransportFailure, transport::describe(source));
+    auto result =
+        error(ErrorCode::TransportFailure, transport::describe(source));
+    result.transport_failure = source;
+    return result;
 }
 
 Error history_error(const history_storage::Error& source) {

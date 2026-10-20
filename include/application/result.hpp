@@ -2,6 +2,7 @@
 #define KASUMI_APPLICATION_RESULT_HPP
 
 #include "application/request.hpp"
+#include "transport/types.hpp"
 
 #include <array>
 #include <chrono>
@@ -96,10 +97,42 @@ struct FsckCompleted {
     std::optional<std::uint64_t> checked_plaintext_bytes = std::nullopt;
 };
 
+// High-level stages for garbage collection.
+enum class GarbageCollectStage {
+    Preparing,
+    Analyzing,
+    Applying,
+    Finalizing,
+};
+
+// State of the mutation associated with a garbage-collection failure.
+enum class GarbageCollectMutationState {
+    NotAttempted,
+    Confirmed,
+    Uncertain,
+};
+
+// Diagnostic context for a garbage-collection failure. This records only what
+// was observed or confirmed; an ambiguous mutation remains Uncertain.
+struct GarbageCollectFailure {
+    std::size_t candidate_objects = 0;
+    std::size_t confirmed_removed = 0;
+    std::optional<std::string> failed_identifier;
+    GarbageCollectStage stage = GarbageCollectStage::Preparing;
+    GarbageCollectMutationState mutation_state =
+        GarbageCollectMutationState::NotAttempted;
+    std::optional<transport::Error> transport_error;
+    bool barrier_release_attempted = false;
+    bool barrier_release_confirmed = false;
+    std::optional<std::string> barrier_cleanup_error;
+    std::optional<transport::Error> barrier_cleanup_transport_error;
+};
+
 // Result of completed garbage collection.
 struct GarbageCollectCompleted {
     std::size_t candidate_objects = 0;
     bool analysis_only = false;
+    std::size_t removed_objects = 0;
 };
 
 // Result of resolving unavailable pending materializations as logical
@@ -153,6 +186,9 @@ struct Error {
     std::string detail;
     std::optional<RuntimeSummary> runtime;
     std::optional<SyncStage> stage = std::nullopt;
+    // Present when garbage collection failed after acquiring execution context
+    // sufficient to report candidate and cleanup diagnostics.
+    std::optional<GarbageCollectFailure> garbage_collection;
 };
 
 } // namespace kasumi::application

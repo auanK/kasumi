@@ -56,10 +56,54 @@ std::expected<Response, Error> run_fsck_operation(OperationContext& context) {
         }};
 }
 
+std::expected<Response, Error>
+run_garbage_collect_operation(OperationContext& context) {
+    std::optional<GarbageCollectProgress> last_progress;
+    integrity::GarbageCollectProgressCallback gc_progress{};
+    if (context.on_progress) {
+        gc_progress = [&context, &last_progress](
+                          const GarbageCollectProgress& progress) noexcept {
+            last_progress = progress;
+            try {
+                context.on_progress(progress);
+            } catch (...) {
+                // Progress is observational and must not alter the operation.
+            }
+        };
+        gc_progress(
+            GarbageCollectProgress{.stage = GarbageCollectStage::Preparing});
+    }
+
+    auto recovery = sync::coordinator::recover_if_needed(
+        context.runtime, context.storage, context.key);
+    if (!recovery) {
+        return std::unexpected(maintenance_recovery_error(
+            context.operation, recovery.error(), context.summary));
+    }
+
+    auto collected = integrity::garbage_collect(
+        context.runtime, context.storage, context.key, std::move(gc_progress));
+    if (!collected) {
+        return std::unexpected(maintenance_error(
+            context.operation, collected.error(), context.summary));
+    }
+    return Response{.operation = context.operation,
+                    .runtime = context.summary,
+                    .data = GarbageCollectCompleted{
+                        .candidate_objects = collected->candidate_objects,
+                        .analysis_only = collected->analysis_only,
+                        .removed_objects = collected->removed_objects,
+                    }};
+}
+
 } // namespace
 
 std::expected<Response, Error> run_fsck(OperationContext& context) {
     return run_fsck_operation(context);
+}
+
+std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
+    return run_garbage_collect_operation(context);
 }
 
 std::expected<Response, Error> run_remove_writer(OperationContext& context) {

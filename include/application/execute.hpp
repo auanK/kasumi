@@ -23,18 +23,11 @@ struct SyncProgress {
     std::uint32_t total_items = 0;
 };
 
-// High-level stages for garbage collection.
-enum class GarbageCollectStage {
-    Preparing,
-    Analyzing,
-    Applying,
-    Finalizing,
-};
-
 // Progress notification for high-level garbage collection phases.
 struct GarbageCollectProgress {
     GarbageCollectStage stage = GarbageCollectStage::Preparing;
     std::optional<std::size_t> candidate_count = std::nullopt;
+    std::size_t removed_objects = 0;
 };
 
 // Progress notification for a read-only integrity audit.

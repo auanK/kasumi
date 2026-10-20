@@ -90,8 +90,8 @@ This table records only physical-hash capability. It does not certify provider-w
 
 Google Drive's operational results do not remove that boundary. Stop Sync on
 every client and serialize destructive maintenance and writer removal. A
-zero-candidate historical GC run does not certify any future direct-deletion
-collector, and phase GC-R1 does not expose a runnable GC path. Fsck's
+zero-candidate historical GC run did not exercise the current direct-deletion
+collector and does not certify it. Fsck's
 AEAD/BLAKE3/size checks, the physical content audit, and optional provider SHA-256
 measure different things; a provider-reported hash is not proof against a
 malicious provider. Keep [independent backups](best-practices.md#backups).

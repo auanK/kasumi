@@ -369,19 +369,22 @@ TEST(HistoryStorageTest, AmbiguousCommitAndHeadPutsRollForwardWithoutRetry) {
     EXPECT_EQ(state->physical_hash_count, 1U);
 }
 
-TEST(HistoryStorageTest, AmbiguousDeleteConfirmsAbsenceWithoutRetry) {
+TEST(HistoryStorageTest, AmbiguousDeleteRemainsErrorWithoutRetry) {
     FakeState* state = nullptr;
     auto storage = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(storage));
     state->objects["object"] = {'x'};
     state->remove_then_fail_identifier = "object";
+    state->remove_failure_native_code = 1234;
 
     const auto removed = kasumi::transport::remove(storage, "object");
 
-    ASSERT_TRUE(removed.has_value());
-    EXPECT_EQ(*removed, kasumi::transport::Removal::Removed);
+    ASSERT_FALSE(removed.has_value());
+    EXPECT_EQ(removed.error().code, kasumi::transport::ErrorCode::Io);
+    EXPECT_EQ(removed.error().message, "injected remove failure");
+    EXPECT_EQ(removed.error().native_code, 1234);
     EXPECT_EQ(state->remove_count, 1U);
-    EXPECT_EQ(state->presence_count, 1U);
+    EXPECT_EQ(state->presence_count, 0U);
 }
 
 TEST(HistoryStorageTest, StrongPhysicalHashAvoidsCommitAndHeadReadback) {

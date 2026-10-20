@@ -39,7 +39,7 @@ CLI/profile → local observation + authenticated remote history + StoredState
 | Preview (`sync --dry-run`), Status | Reads local/SQLite state; profile lock and permission normalization are possible | Observation only; no recovery or publication |
 | Sync | May change synchronized files, file-hash cache, transaction journal, and accepted `StoredState` | May upload content and publish/prune history; registers a writer for active work |
 | Fsck | Checkpoint/workspace; preceding recovery can change local state | Audit reads only, **except** effects of preceding transaction recovery |
-| GC | Workspace; preceding recovery can change local state | **Currently disconnected (phase GC-R1):** no runner is linked, so there is no deletion path. Retained design: barrier/probe even in analysis-only mode, then quarantine-free removal of stable candidates when safe |
+| GC | Workspace; preceding recovery can change local state | Destructive direct deletion of authenticated orphan Content and redundant CommitVariants of reachable Commits, under barrier/probe and two stable observations. Ambiguous mutations are reported as uncertain and are not retried automatically. Whole unreachable Commits remain out of scope |
 | `remote ...` | Temporary workspace and possible private history cache; `remote get` writes its chosen destination | Inspection reads only; no normal transaction recovery |
 
 Read the linked owners for exact invariants. The [README](../README.md) is a short entry point, and [Provider Certification](provider-certification.md) records externally established backend certification results.

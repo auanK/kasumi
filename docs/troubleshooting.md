@@ -396,15 +396,15 @@ Fsck downloaded and audited content objects referenced by the effective remote t
 
 ---
 
-## GC Unavailable During Direct-Deletion Reconnection
+## GC Partial Failures and Uncertain Deletions
 
 ### Symptom
 
-`kasumi gc <profile>` cannot run in phase GC-R1. The quarantine subsystem was removed and the replacement direct-deletion runner is not linked yet, so the GC dispatch reaches an intentionally undefined `run_garbage_collect` symbol.
+`kasumi gc <profile>` returns `GarbageCollectionFailure`, or reports that a candidate or barrier operation may be ambiguous.
 
 ### Likely Meaning
 
-The public `GarbageCollect` operation, its progress/result types, and the stable reachability analysis remain, but the old quarantine-based orchestration was removed. There is no stub or fake implementation. No GC command can delete, restore, or purge objects until the collector is reconnected.
+GC stops on a revalidation failure, transport error, ownership loss, or ambiguous DELETE. The error carries the candidate total, confirmed removals, failed identifier when one exists, stage, transport category/message/native code when available, mutation state (`NotAttempted`, `Confirmed`, or `Uncertain`), and barrier-cleanup status. An ambiguous mutation is not retried automatically, and an observed absence after a failed DELETE is not counted as a confirmed removal.
 
 ### Safe Next Steps
 
@@ -418,8 +418,8 @@ The public `GarbageCollect` operation, its progress/result types, and the stable
    ```bash
    kasumi remote health <profile>
    ```
-4. **Use Fsck for Integrity**: `kasumi fsck <profile>` remains available and audits referenced content; GC is not required for integrity verification.
-5. **Wait for Reconnection**: Do not substitute ad-hoc remote deletion for GC. The retained safety contract for the future collector is documented in [Garbage Collection Architecture](architecture/garbage-collection.md).
+4. **Use Fsck for Integrity**: `kasumi fsck <profile>` audits referenced content; GC is not required for integrity verification.
+5. **Investigate Before Retrying**: Treat `Uncertain` mutation state and barrier-cleanup errors as reasons to inspect the remote namespace and retry only after the state is understood. Do not substitute ad-hoc provider deletion for GC. See [Garbage Collection Architecture](architecture/garbage-collection.md).
 
 ### Related Documentation
 * [Garbage Collection Architecture](architecture/garbage-collection.md)
@@ -468,13 +468,13 @@ The table below clarifies the purpose and operational behavior of Kasumi's diagn
 | `kasumi status <profile>` | Preview pending changes | No | No | Exclusive | Point-in-time observation |
 | `kasumi sync <profile> --dry-run` | Preview pending changes | No | No | Exclusive | Point-in-time observation |
 | `kasumi fsck <profile>` | Audit referenced payloads | Yes | Yes | Exclusive | Audit may overlap writers |
-| `kasumi gc <profile>` | Storage reclamation | No Fsck-style audit | No (currently disconnected) | Exclusive | Runner not linked in phase GC-R1; retained writer/barrier checks apply when reconnected |
+| `kasumi gc <profile>` | Storage reclamation | No Fsck-style audit | Yes | Exclusive | Barrier plus writer/ownership checks; not distributed exclusion |
 | `kasumi gc remove-writer <profile> <writer-id>` | Remove one explicitly selected writer marker | No | No | Exclusive | Operator verifies liveness; other markers still block GC |
 | `kasumi remote health <profile>` | Operational diagnostic | No | No | None | Point-in-time observation |
 | `kasumi remote contents --audit <profile>` | Audit all physical payloads | Yes (all present) | No | None | Point-in-time observation |
 | `kasumi remote summary <profile>` | Overview of vault state | No | No | None | Point-in-time observation |
 
-The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck runs pending Sync transaction recovery first, which may change local files or complete remote publication; GC would do the same once reconnected. Manual writer removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit itself does not intentionally modify remote objects. The disconnected GC path does not modify remote objects.
+The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck and GC run pending Sync transaction recovery first, which may change local files or complete remote publication. Manual writer removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit itself does not intentionally modify remote objects. GC modifies remote objects only after its barrier, stability, ownership, and per-candidate revalidation checks pass.
 
 Fsck counts distinct payloads referenced by the effective current tree; physical
 content inspection can include retained historical versions. Neither count is

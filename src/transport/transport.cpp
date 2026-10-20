@@ -831,16 +831,11 @@ RemovalResult remove(Transport& transport, std::string_view identifier) {
         return std::unexpected(invalid_transport_error());
     }
 
-    auto removed = transport.storage.remove(state, identifier);
-    if (removed || !mutation_result_is_ambiguous(removed.error())) {
-        return removed;
-    }
-
-    auto observed = presence(transport, identifier);
-    if (observed && *observed == Presence::Absent) {
-        return Removal::Removed;
-    }
-    return std::unexpected(removed.error());
+    // A removal failure is ambiguous: the backend may have applied the effect
+    // before reporting an error. Do not probe and reinterpret it as success,
+    // because callers must stop on uncertain mutation. Exactly one REMOVE
+    // attempt is made and the original error (including native_code) is kept.
+    return transport.storage.remove(state, identifier);
 }
 
 RemoveBatchResult remove_batch(Transport& transport, const RemoveBatch& batch) {
