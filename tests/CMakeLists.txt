@@ -102,6 +102,7 @@ kasumi_add_test_suite(
         integration/sync/test_journal_preparation.cpp
         integration/sync/test_journal_incremental.cpp
         integration/sync/test_publication.cpp
+        integration/sync/test_remote_availability.cpp
         integration/sync/test_reobservation_safeguards.cpp
         integration/sync/test_mutation_contracts.cpp
     LIBRARIES
@@ -410,6 +411,23 @@ target_link_libraries(
 )
 target_include_directories(
     kasumi_benchmark_sync_e2e
+    PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/include
+)
+
+add_executable(
+    kasumi_benchmark_sync_availability
+    operational/benchmark_sync_availability.cpp
+)
+target_link_libraries(
+    kasumi_benchmark_sync_availability
+    PRIVATE
+    kasumi_application
+    kasumi_warnings
+)
+target_include_directories(
+    kasumi_benchmark_sync_availability
     PRIVATE
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/include

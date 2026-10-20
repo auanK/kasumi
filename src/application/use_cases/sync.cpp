@@ -148,6 +148,20 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 return std::unexpected(err);
             }
 
+            const auto availability_trace = platform::perf_trace::begin();
+            auto available =
+                sync::coordinator::reobservation::refresh_content_availability(
+                    *collected, *reconciled, context.storage, context.key);
+            platform::perf_trace::finish("content availability",
+                                         availability_trace);
+            if (!available) {
+                auto err = transaction_error(
+                    context.operation, available.error(), context.summary);
+                err.stage = SyncStage::Calculating;
+                return std::unexpected(err);
+            }
+            reconciled = std::move(*available);
+
             const bool remote_write_required =
                 reconciled->requires_publication ||
                 reconciled->requires_storage_repair;
@@ -208,7 +222,9 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 context.key,
                 std::move(*collected),
                 std::move(*reconciled),
-                &observation_session);
+                &observation_session,
+                {},
+                true);
             platform::perf_trace::finish("reobservation", reobservation_trace);
             if (!stable) {
                 auto err = transaction_error(

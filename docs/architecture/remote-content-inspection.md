@@ -11,3 +11,9 @@ These commands use the [common inspection path](remote-inspection.md). `stat`/`g
 | `remote content <id>` | Build the same complete-history structural inventory as `contents`, then select one Content ID and report its references/presence. | Does **not** audit that payload; absent ID is an error. Use `contents --audit` for byte validation. |
 
 `remote get` authenticates only the requested file payload, while `contents --audit` audits physically present content across the inventory. [Fsck](fsck.md) instead audits every **referenced** object, has private checkpoint/progress behavior, and first recovers an interrupted Sync. Neither structural `contents` nor `remote health` is a substitute for either payload audit. No content-inspection command publishes or deletes remote objects.
+
+## Relationship to Sync repair
+
+Normal [Sync](synchronization.md#required-content-availability) does not require a complete vault listing for this check. It probes only the deduplicated Content IDs required by the effective tree, relevant pending rows, and Download operations, using the transport's control-read batch where available and PRESENCE otherwise. If a complete inventory has already been obtained, Sync cross-checks that inventory against PRESENCE and fails closed on disagreement; a LIST omission alone is not treated as proof of absence.
+
+Inspection remains diagnostic. `remote contents` reports structural presence, `remote contents --audit` validates bytes, and neither repairs or publishes. Use `kasumi sync <profile>` on a client with intact local bytes when the desired outcome is repair. Transport failures and LIST/PRESENCE disagreements must be investigated rather than converted into missing-content deletions.

@@ -564,9 +564,13 @@ TEST(ApplicationMaintenanceContract,
     ASSERT_FALSE(identifier.empty());
     ASSERT_EQ(kasumi::transport::remove(storage, identifier).value(),
               kasumi::transport::Removal::Removed);
-    const auto trusted_no_op =
+    const auto repaired =
         kasumi::application::execute(request(Operation::Sync, environment));
-    ASSERT_TRUE(trusted_no_op.has_value()) << trusted_no_op.error().detail;
+    ASSERT_TRUE(repaired.has_value()) << repaired.error().detail;
+    ASSERT_EQ(kasumi::transport::presence(storage, identifier).value(),
+              kasumi::transport::Presence::Present);
+    ASSERT_EQ(kasumi::transport::remove(storage, identifier).value(),
+              kasumi::transport::Removal::Removed);
     const auto missing =
         kasumi::application::execute(request(Operation::Fsck, environment));
     ASSERT_FALSE(missing.has_value());

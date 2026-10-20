@@ -122,13 +122,13 @@ Pending:
 ```
 
 ### Likely Meaning
-The synchronization was a non-fatal **partial synchronization**. Remote commit metadata and history were successfully accepted and recorded, but one or more file payloads could not be downloaded or were missing from remote storage.
+The synchronization was a non-fatal **partial synchronization**. Remote commit metadata and history were successfully accepted and recorded, but one or more required payloads were missing from remote storage and no compatible local source was available to repair them. Sync preserves the logical files, expected Content IDs, accepted state, and pending evidence; it does not infer a deletion.
 
 ### Safe Next Steps
-1. **Treat Exit Code 2 as Non-Fatal**: In automated scripts or pipelines, exit code `2` indicates that metadata was updated, but content downloads are deferred until payloads become available.
+1. **Treat Exit Code 2 as Non-Fatal**: In automated scripts or pipelines, exit code `2` indicates that metadata was updated, but content remains unresolved until a verified payload becomes available.
 2. **Identify Pending Files**: Run `kasumi status <profile>` or `kasumi status <profile> --full` to inspect the list of pending paths.
-3. **Trigger Payload Upload from Source Client**: If another machine originally created or modified the pending files, ensure that machine runs `kasumi sync <profile>` to upload the required payloads.
-4. **Subsequent Synchronization**: Once the missing content objects are present on remote storage, the next `kasumi sync <profile>` will download and materialize the files automatically.
+3. **Trigger Payload Upload from Source Client**: If another machine created or modified the pending files, run `kasumi sync <profile>` there. The repair check runs even when that machine's local tree is otherwise unchanged and no upload was otherwise planned.
+4. **Subsequent Synchronization**: Once the missing content objects are present on remote storage, the next `kasumi sync <profile>` will download and materialize the pending files automatically. If a client holds intact bytes for the expected Content ID, its normal Sync can repair the physical object without publishing a new logical version.
 
 ### Related Documentation
 * [Reconciliation and SyncPlan](architecture/reconciliation.md)
@@ -149,8 +149,9 @@ A content payload referenced by the history DAG is absent from remote storage or
 2. Run `kasumi remote contents --audit <profile>` to inspect physical content states across the entire vault.
 3. **Repair from Intact Client**: If an intact version of the affected file exists locally on any client machine:
    * Verify the file content on that machine.
-   * Run `kasumi sync <profile>` from that machine. Kasumi will detect the missing remote payload, upload the local file bytes, and repair remote storage without changing logical history.
+   * Run `kasumi sync <profile>` from that machine. Even if no local file changed, the required-content probe detects the absent remote object, reuses the existing local source only after hash/size authentication, and restores the physical object without changing logical history.
 4. If the payload is permanently lost from remote storage and no client has a copy, restore the file from an external backup into the synchronized folder on one client and run `kasumi sync <profile>`.
+5. If Sync reports a transport failure or a LIST/PRESENCE disagreement instead of repairing, treat the content as unverified rather than logically deleted. Rerun after the backend is consistent and inspect with `kasumi remote contents --audit <profile>`. Do not delete protocol objects manually or run `resolve-missing` merely to silence the error.
 
 ### Related Documentation
 * [Fsck Architecture](architecture/fsck.md)
@@ -424,6 +425,25 @@ GC stops on a revalidation failure, transport error, ownership loss, or ambiguou
 ### Related Documentation
 * [Garbage Collection Architecture](architecture/garbage-collection.md)
 * [Physical and Maintenance Inspection](architecture/remote-maintenance-inspection.md)
+
+---
+
+## Sync Cannot Establish Content Availability
+
+### Symptom
+
+`kasumi sync <profile>` fails while calculating with a transport/presence error or a message that LIST and PRESENCE disagree about a Content object.
+
+### Likely Meaning
+
+Sync requires a definitive physical-availability answer before repairing or planning around required Content. A transport failure, cancelled presence request, malformed batch response, or LIST/PRESENCE disagreement is an indeterminate observation, not a missing object. Sync fails closed and does not upload, delete, or convert the affected paths to pending based on that result.
+
+### Safe Next Steps
+
+1. **Retry after checking connectivity and backend health**. Do not interpret the error as evidence that the Content is gone.
+2. **Inspect the vault** with `kasumi remote contents --audit <profile>` and `kasumi fsck <profile>` once the transport is stable.
+3. **Check provider consistency** if LIST and PRESENCE continue to disagree. Confirm completed writes and listings are visible as required by [Transport](architecture/transport.md) and [Garbage Collection](architecture/garbage-collection.md#operational-contract).
+4. **Repair from a verified local source** by running Sync on a client whose file still matches the expected logical hash and size. Never remove the logical row, HEAD, journal, or remote Content object merely to make the diagnostic disappear.
 
 ---
 

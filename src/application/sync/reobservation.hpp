@@ -23,7 +23,20 @@ struct StableExecution {
 bool same_observation(const reconciliation::Input& left,
                       const reconciliation::Input& right) noexcept;
 
-// Re-observes until the plan stabilizes or fails.
+// Probes the physical availability of Content required by the effective
+// logical state and relevant pending materializations, then reconciles the
+// updated availability information.
+std::expected<reconciliation::Result, coordinator::Error>
+refresh_content_availability(
+    reconciliation::Input& input,
+    const reconciliation::Result& reconciliation_result,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    std::span<const Hash> confirmed_missing = {});
+
+// Re-observes until the plan stabilizes or fails. When
+// content_availability_is_current is true, the initial availability probe and
+// reconciliation have already been performed by the caller.
 std::expected<StableExecution, coordinator::Error>
 stabilize(const runtime::RuntimeData& runtime_data,
           transport::Transport& storage,
@@ -31,7 +44,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
           reconciliation::Input observed_input,
           reconciliation::Result reconciliation_result,
           observation::LocalObservationSession* session = nullptr,
-          std::span<const Hash> confirmed_missing = {});
+          std::span<const Hash> confirmed_missing = {},
+          bool content_availability_is_current = false);
 
 } // namespace kasumi::application::sync::coordinator::reobservation
 

@@ -82,6 +82,20 @@ std::expected<void, Error> observe_content_availability(
     const auto add_hash = [&](const Hash& hash) {
         hashes.insert(hash);
     };
+
+    // Every Content object referenced by the effective reconciled logical
+    // state is required, independently of whether this run uploads or
+    // downloads it. A normal deletion resolution deliberately keeps this
+    // scope unchanged.
+    if (input.storage.history_present &&
+        input.pending_deletion_authority.empty()) {
+        for (const auto& row : input.storage.tree.rows) {
+            if (!row.is_directory) {
+                add_hash(row.hash);
+            }
+        }
+    }
+
     for (const auto& operation : sync_plan_operations(result.plan)) {
         if (operation.action == Action::Download) {
             if (const auto hash = hash_from_hex(operation.hash)) {
@@ -107,10 +121,10 @@ std::expected<void, Error> observe_content_availability(
     add_relevant_pending(result.pending_materializations);
     add_relevant_pending(result.pending_storage_rows);
 
-    input.known_missing_content_objects.clear();
-    input.known_missing_content_objects.insert(confirmed_missing.begin(),
-                                               confirmed_missing.end());
     if (hashes.empty()) {
+        input.known_missing_content_objects.clear();
+        input.known_missing_content_objects.insert(confirmed_missing.begin(),
+                                                   confirmed_missing.end());
         return {};
     }
     std::vector<std::pair<Hash, std::string>> requested;
@@ -121,10 +135,13 @@ std::expected<void, Error> observe_content_availability(
     std::ranges::sort(requested, {}, [](const auto& item) {
         return item.second;
     });
+    platform::perf_trace::count("sync content availability identifiers",
+                                requested.size());
     platform::perf_trace::count("sync content presence requests",
                                 requested.size());
 
     std::vector<transport::Presence> presences;
+    bool probed = false;
     if (storage.storage.control_read_batch != nullptr) {
         transport::ControlReadBatchRequest request;
         request.presence_identifiers.reserve(requested.size());
@@ -139,22 +156,24 @@ std::expected<void, Error> observe_content_availability(
                     "presence batch returned an invalid result count"));
             }
             presences = std::move(batch->presences);
+            probed = true;
+            platform::perf_trace::count("sync content presence batches", 1);
         } else if (batch.error().code != transport::ErrorCode::Unsupported) {
             return std::unexpected(
                 detail::make_error(ErrorCode::ObservationFailure,
                                    transport::describe(batch.error())));
         }
     }
-    if (presences.empty() && storage.storage.presence != nullptr) {
+    if (!probed) {
+        if (storage.storage.presence == nullptr) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::ObservationFailure,
+                "transport cannot verify required content availability"));
+        }
         presences.reserve(requested.size());
         for (const auto& [hash, identifier] : requested) {
             auto observed = transport::presence(storage, identifier);
             if (!observed) {
-                if (observed.error().code ==
-                    transport::ErrorCode::Unsupported) {
-                    presences.clear();
-                    break;
-                }
                 return std::unexpected(
                     detail::make_error(ErrorCode::ObservationFailure,
                                        transport::describe(observed.error())));
@@ -162,15 +181,35 @@ std::expected<void, Error> observe_content_availability(
             presences.push_back(*observed);
         }
     }
-    if (presences.empty()) {
-        return {}; // No probe capability: the verified GET remains
-                   // authoritative.
-    }
+
+    const bool inventory_available = input.audit_storage_objects;
+    std::vector<Hash> missing;
+    missing.reserve(requested.size());
     for (std::size_t index = 0; index < requested.size(); ++index) {
-        if (presences[index] == transport::Presence::Absent) {
-            input.known_missing_content_objects.insert(requested[index].first);
+        const auto& [hash, identifier] = requested[index];
+        const bool present = presences[index] == transport::Presence::Present;
+        if (inventory_available) {
+            const bool listed =
+                input.storage.object_identifiers.contains(identifier);
+            if (listed != present) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    "content availability disagreement for " + identifier +
+                        ": LIST says " + (listed ? "present" : "absent") +
+                        ", PRESENCE says " + (present ? "present" : "absent")));
+            }
+        }
+        if (!present) {
+            missing.push_back(hash);
         }
     }
+    // Replace the set only after every requested identifier has been
+    // classified successfully; an error or disagreement leaves the input
+    // unchanged for the caller's fail-closed path.
+    input.known_missing_content_objects.clear();
+    input.known_missing_content_objects.insert(confirmed_missing.begin(),
+                                               confirmed_missing.end());
+    input.known_missing_content_objects.insert(missing.begin(), missing.end());
     return {};
 }
 
@@ -237,16 +276,14 @@ bool same_observation(const reconciliation::Input& left,
            same_storage(left.storage, right.storage);
 }
 
-std::expected<bool, coordinator::Error>
-verify_destructive_local_operations(
+std::expected<bool, coordinator::Error> verify_destructive_local_operations(
     const runtime::RuntimeData& runtime_data,
     reconciliation::Input& input,
     const reconciliation::Result& result,
     observation::LocalObservationSession* session) {
     bool modified = false;
     for (const auto& op : sync_plan_operations(result.plan)) {
-        if (op.action != Action::DeleteLocal &&
-            op.action != Action::Download &&
+        if (op.action != Action::DeleteLocal && op.action != Action::Download &&
             op.action != Action::RenameLocal) {
             continue;
         }
@@ -260,8 +297,8 @@ verify_destructive_local_operations(
             const auto local_path = runtime_data.local_dir / rel_path;
             const auto logical_path = platform::path::to_logical_utf8(rel_path);
 
-            auto pre_meta =
-                observation::cache::read_file_metadata(local_path, logical_path);
+            auto pre_meta = observation::cache::read_file_metadata(
+                local_path, logical_path);
             if (!pre_meta) {
                 if (pre_meta.error().code ==
                     observation::cache::FileMetadataErrorCode::NotFound) {
@@ -315,16 +352,16 @@ verify_destructive_local_operations(
                         local_path.string()));
             }
 
-            auto post_meta =
-                observation::cache::read_file_metadata(local_path, logical_path);
+            auto post_meta = observation::cache::read_file_metadata(
+                local_path, logical_path);
             if (!post_meta || !*post_meta ||
                 (*pre_meta)->size != (*post_meta)->size ||
                 (*pre_meta)->mtime_nanoseconds !=
                     (*post_meta)->mtime_nanoseconds ||
                 (*pre_meta)->identity != (*post_meta)->identity) {
-                return std::unexpected(detail::make_error(
-                    ErrorCode::ObservationFailure,
-                    "file changed while being read"));
+                return std::unexpected(
+                    detail::make_error(ErrorCode::ObservationFailure,
+                                       "file changed while being read"));
             }
 
             if (local_row->hash != *actual_hash) {
@@ -356,6 +393,26 @@ verify_destructive_local_operations(
     return modified;
 }
 
+std::expected<reconciliation::Result, coordinator::Error>
+refresh_content_availability(
+    reconciliation::Input& input,
+    const reconciliation::Result& reconciliation_result,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    std::span<const Hash> confirmed_missing) {
+    auto availability = observe_content_availability(
+        input, reconciliation_result, storage, key, confirmed_missing);
+    if (!availability) {
+        return std::unexpected(availability.error());
+    }
+    auto available_result = reconciliation::reconcile(input);
+    if (!available_result) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::ObservationFailure, available_result.error().detail));
+    }
+    return std::move(*available_result);
+}
+
 std::expected<StableExecution, coordinator::Error>
 stabilize(const runtime::RuntimeData& runtime_data,
           transport::Transport& storage,
@@ -363,18 +420,19 @@ stabilize(const runtime::RuntimeData& runtime_data,
           reconciliation::Input observed_input,
           reconciliation::Result reconciliation_result,
           observation::LocalObservationSession* session,
-          std::span<const Hash> confirmed_missing) {
-    auto availability = observe_content_availability(
-        observed_input, reconciliation_result, storage, key, confirmed_missing);
-    if (!availability) {
-        return std::unexpected(availability.error());
+          std::span<const Hash> confirmed_missing,
+          bool content_availability_is_current) {
+    if (!content_availability_is_current) {
+        auto available = refresh_content_availability(observed_input,
+                                                      reconciliation_result,
+                                                      storage,
+                                                      key,
+                                                      confirmed_missing);
+        if (!available) {
+            return std::unexpected(available.error());
+        }
+        reconciliation_result = std::move(*available);
     }
-    auto available_result = reconciliation::reconcile(observed_input);
-    if (!available_result) {
-        return std::unexpected(detail::make_error(
-            ErrorCode::ObservationFailure, available_result.error().detail));
-    }
-    reconciliation_result = std::move(*available_result);
 
     if (!reconciliation_result.requires_publication &&
         !reconciliation_result.requires_local_mutation &&
@@ -411,8 +469,9 @@ stabilize(const runtime::RuntimeData& runtime_data,
             }
             auto recalculated = reconciliation::reconcile(input);
             if (!recalculated) {
-                return std::unexpected(detail::make_error(
-                    ErrorCode::ObservationFailure, recalculated.error().detail));
+                return std::unexpected(
+                    detail::make_error(ErrorCode::ObservationFailure,
+                                       recalculated.error().detail));
             }
             auto reobserved_availability = observe_content_availability(
                 input, *recalculated, storage, key, confirmed_missing);
@@ -421,8 +480,9 @@ stabilize(const runtime::RuntimeData& runtime_data,
             }
             recalculated = reconciliation::reconcile(input);
             if (!recalculated) {
-                return std::unexpected(detail::make_error(
-                    ErrorCode::ObservationFailure, recalculated.error().detail));
+                return std::unexpected(
+                    detail::make_error(ErrorCode::ObservationFailure,
+                                       recalculated.error().detail));
             }
             result = std::move(*recalculated);
             if (!result.requires_publication &&

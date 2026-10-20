@@ -44,8 +44,12 @@ listing is not a deletion list.
   (`min_history_depth` and `min_history_age_hours`), content availability,
   and transport batch/physical-hash capabilities remain the reachability
   authority used by GC.
-- Fsck, Sync and incremental observation, and the `gc remove-writer`
-  maintenance operation are unchanged.
+- The GC collector lifecycle is unchanged by GC-R3. Normal Sync now checks
+  required Content availability on every run, including no-ops, and may repair
+  a missing required object from an authenticated local source. That repair is
+  still gated by writer admission and the GC barrier; it cannot upload while
+  the barrier blocks writers. Fsck, incremental observation, and the
+  `gc remove-writer` maintenance operation remain separate.
 
 ## Admission and analysis contract
 
@@ -138,6 +142,9 @@ one destructive maintenance operation per remote vault at a time, across all
 machines. Manual writer-marker removal must not overlap with another
 maintenance operation. Pause scheduled and interactive Sync on every client
 before destructive maintenance and keep it paused until maintenance finishes.
+That includes no-op Sync runs: they now probe required Content and may repair a
+missing object even when local files are unchanged. Writer admission rejects a
+repair while the barrier is visible, but the barrier is not a distributed lock.
 The local profile lock covers only processes using that profile on one
 machine. The remote barrier is a best-effort coordination mechanism built
 from ordinary storage operations. It can reduce the chance of overlap, but it

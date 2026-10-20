@@ -432,6 +432,7 @@ struct ReobserveTransportState {
     std::size_t put_count = 0;
     std::size_t get_count = 0;
     std::size_t presence_count = 0;
+    std::size_t presence_batch_count = 0;
     std::size_t list_count = 0;
     std::size_t full_list_count = 0;
     std::size_t prefix_list_count = 0;
@@ -575,6 +576,46 @@ reobserve_presence(void* context, std::string_view identifier) {
     return kasumi::transport::presence(*state->base, identifier);
 }
 
+kasumi::transport::ListingResult
+reobserve_list_prefix(void* context, std::string_view prefix);
+
+kasumi::transport::ControlReadBatchResponse
+reobserve_control_read_batch(void* context,
+                             const kasumi::transport::ControlReadBatchRequest&
+                                 request) {
+    auto* state = reobserve_state(context);
+    kasumi::transport::ControlReadBatchResult result;
+    for (const auto& prefix : request.list_prefixes) {
+        auto listing = reobserve_list_prefix(context, prefix);
+        if (!listing) {
+            return std::unexpected(listing.error());
+        }
+        result.listings.push_back(std::move(*listing));
+    }
+
+    std::string forced_present;
+    {
+        std::lock_guard lock(state->mutex);
+        ++state->presence_batch_count;
+        state->presence_count += request.presence_identifiers.size();
+        state->request_events.emplace_back("PRESENCE BATCH");
+        forced_present = state->forced_present_identifier;
+    }
+    result.presences.reserve(request.presence_identifiers.size());
+    for (const auto& identifier : request.presence_identifiers) {
+        if (!forced_present.empty() && identifier == forced_present) {
+            result.presences.push_back(kasumi::transport::Presence::Present);
+            continue;
+        }
+        auto presence = kasumi::transport::presence(*state->base, identifier);
+        if (!presence) {
+            return std::unexpected(presence.error());
+        }
+        result.presences.push_back(*presence);
+    }
+    return result;
+}
+
 kasumi::transport::ListingResult reobserve_list(void* context) {
     auto* state = reobserve_state(context);
     std::optional<std::size_t> mutation;
@@ -715,6 +756,7 @@ make_reobserve_transport(ReobserveTransportState& state) {
                       .list = reobserve_list,
                       .list_prefix = reobserve_list_prefix,
                       .physical_hash = reobserve_physical_hash,
+                      .control_read_batch = reobserve_control_read_batch,
                       .remove = reobserve_remove};
     return result;
 }
@@ -4922,6 +4964,21 @@ TEST(ReobservationTest,
         auto base = kasumi::transport::open_transport(storage_path.string());
         ASSERT_TRUE(base.has_value());
         ASSERT_TRUE(kasumi::transport::initialize(*base));
+        const auto encrypted_content =
+            kasumi::test::workspace_path(workspace, "seed-content.enc");
+        for (const auto& row : tree->rows) {
+            if (row.is_directory) {
+                continue;
+            }
+            const auto source =
+                local / kasumi::platform::path::from_utf8(row.path);
+            ASSERT_TRUE(kasumi::crypto::encrypt_file(
+                source, encrypted_content, key));
+            ASSERT_TRUE(kasumi::transport::put(
+                *base,
+                encrypted_content,
+                kasumi::crypto::content_identifier(key, row.hash)));
+        }
         const auto published =
             kasumi::application::history_storage::publish_commit(
                 *base, key, *commit, profile);
@@ -4942,7 +4999,7 @@ TEST(ReobservationTest,
         auto storage = make_reobserve_transport(state);
         const auto request_count = [&] {
             return state.initialize_count + state.put_count + state.get_count +
-                   state.presence_count + state.list_count +
+                   state.presence_batch_count + state.list_count +
                    state.physical_hash_count + state.remove_count;
         };
         const auto reset_counts = [&] {
@@ -4950,6 +5007,7 @@ TEST(ReobservationTest,
             state.put_count = 0;
             state.get_count = 0;
             state.presence_count = 0;
+            state.presence_batch_count = 0;
             state.list_count = 0;
             state.full_list_count = 0;
             state.prefix_list_count = 0;
@@ -4991,11 +5049,13 @@ TEST(ReobservationTest,
                       0, test_layout.epochs_prefix.size() - 1)
                 : test_layout.epochs_prefix;
 
-        EXPECT_EQ(state.presence_count, 0U);
+        EXPECT_EQ(state.presence_count, content_count);
+        EXPECT_EQ(state.presence_batch_count, 1U);
         EXPECT_EQ(state.full_list_count, 0U);
         EXPECT_EQ(state.request_events,
                   (std::vector<std::string>{"LIST " + heads_dir,
-                                            "LIST " + epochs_dir}));
+                                            "LIST " + epochs_dir,
+                                            "PRESENCE BATCH"}));
         EXPECT_EQ(state.list_count, 2U);
         EXPECT_EQ(state.prefix_list_count, 2U);
         EXPECT_EQ(state.get_count, 0U);
@@ -5036,7 +5096,8 @@ TEST(ReobservationTest,
         ASSERT_TRUE(stable.has_value()) << stable.error().detail;
         ASSERT_TRUE(kasumi::application::sync::coordinator::execute(
             runtime_data, storage, key, stable->input, stable->result));
-        EXPECT_EQ(state.presence_count, 0U);
+        EXPECT_EQ(state.presence_count, 2U * content_count);
+        EXPECT_EQ(state.presence_batch_count, 2U);
         EXPECT_EQ(state.full_list_count, 0U);
         EXPECT_EQ(state.initialize_count, 0U);
         EXPECT_EQ(state.prefix_list_count, 4U);
@@ -5058,11 +5119,13 @@ TEST(ReobservationTest,
                                  "parent marker DELETE"}) {
             EXPECT_EQ(std::ranges::count(state.events, event), 1) << event;
         }
-        ASSERT_EQ(state.request_events.size(), 11U);
+        ASSERT_EQ(state.request_events.size(), 13U);
         EXPECT_EQ(state.request_events[0], "LIST " + heads_dir);
         EXPECT_EQ(state.request_events[1], "LIST " + epochs_dir);
-        EXPECT_EQ(state.request_events[2], "LIST " + heads_dir);
-        EXPECT_EQ(state.request_events[3], "LIST " + epochs_dir);
+        EXPECT_EQ(state.request_events[2], "PRESENCE BATCH");
+        EXPECT_EQ(state.request_events[3], "LIST " + heads_dir);
+        EXPECT_EQ(state.request_events[4], "LIST " + epochs_dir);
+        EXPECT_EQ(state.request_events[5], "PRESENCE BATCH");
         const auto request_index = [&](const auto& predicate) {
             const auto found =
                 std::ranges::find_if(state.request_events, predicate);
@@ -5110,11 +5173,11 @@ TEST(ReobservationTest,
         EXPECT_LT(head_put, head_hash);
         EXPECT_LT(head_hash, cleanup);
         RecordProperty("incremental_1000_plus_1_requests", request_count());
-        EXPECT_EQ(request_count(), 11U);
-        // A trusted NOOP performs exactly the two control-plane prefix LISTs
-        // used to observe heads and Epochs; neither operation scales with the
-        // number of content objects.
-        EXPECT_EQ(no_op_requests, 2U);
+        EXPECT_EQ(request_count(), 13U);
+        // A trusted NOOP performs the two control-plane prefix LISTs used to
+        // observe heads and Epochs plus one aggregated presence batch. The
+        // request count does not scale with the number of content objects.
+        EXPECT_EQ(no_op_requests, 3U);
     }
 }
 

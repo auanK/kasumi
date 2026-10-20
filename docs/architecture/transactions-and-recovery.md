@@ -43,6 +43,8 @@ For **pre-publication publishing** transactions (`Started` through `CommitPrepar
 
 A **local-only** transaction (`publication_required=false`) pins exactly one observed remote logical head and publishes no new Commit/HEAD/Epoch. Normal Sync validates the materialized tree against that head before saving SQLite. Recovery may resume unfinished storage-repair uploads and local operations, but it only accepts a target already durably committed in SQLite; if SQLite still matches the old base it rolls back, and if it matches neither old nor target it fails as a conflict. Pending materializations remain explicit logical files awaiting safe local materialization or repair, not silent deletions.
 
+A repair-only Sync follows that local-only path. Required-content detection and reconciliation are not accepted state; they produce ordinary repair upload operations when a compatible local source exists. No Commit or HEAD is published merely to record a repaired object. An interrupted repair is resumed or rolled back through the existing journal, and a missing or unauthentic local source leaves the accepted state and pending evidence intact for a later run. Writer admission and the GC barrier still gate any repair upload.
+
 At the start of Sync, Fsck, `resolve-missing`, or a reconnected GC, recovery loads the
 authenticated journal authority and completes authenticated retirement when
 applicable. Only confirmed log bytes govern replay; unconfirmed tails and `.new`
