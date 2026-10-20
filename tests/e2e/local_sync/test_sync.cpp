@@ -27,6 +27,7 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <initializer_list>
+#include <iostream>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -1073,37 +1074,49 @@ TEST(H3LocalSyncTest, UploadsFromLongRootPath) {
     EXPECT_EQ(staged.native().size(), 260U);
 
     const auto synchronized = sync(client);
-#if defined(_WIN32)
-    DWORD enabled = 0;
-    DWORD enabled_size = sizeof(enabled);
-    const auto long_paths_result = RegGetValueW(
-        HKEY_LOCAL_MACHINE,
-        L"SYSTEM\\CurrentControlSet\\Control\\FileSystem",
-        L"LongPathsEnabled",
-        RRF_RT_REG_DWORD,
-        nullptr,
-        &enabled,
-        &enabled_size);
-    const bool long_paths_enabled =
-        long_paths_result == ERROR_SUCCESS && enabled != 0;
-    if (!long_paths_enabled) {
-        ASSERT_FALSE(synchronized.has_value());
-        EXPECT_NE(synchronized.error().find("enable Windows long-path support"),
-                  std::string::npos);
-        EXPECT_EQ(kasumi::test::read_text(source), contents);
-        auto unchanged_remote = remote(scenario);
-        ASSERT_TRUE(unchanged_remote.has_value())
-            << unchanged_remote.error();
-        EXPECT_TRUE(unchanged_remote->effective_tree.rows.empty());
-        return;
-    }
-#endif
     ASSERT_TRUE(synchronized.has_value())
         << (synchronized ? "" : synchronized.error());
     auto observed = remote(scenario);
     ASSERT_TRUE(observed.has_value()) << observed.error();
     const auto* row = kasumi::find_row(observed->effective_tree, "hello.txt");
     ASSERT_NE(row, nullptr);
+    EXPECT_EQ(row->size, contents.size());
+}
+
+TEST(SyncPathTest, LongTemporaryCiphertextPathIsHandledSafely) {
+    auto scenario = make_scenario();
+    const auto client =
+        make_client_at_root_length(scenario, "long-staging", 146);
+    constexpr std::string_view contents = "long staging path upload";
+    const auto source = client_local_dir(client) / "long.txt";
+    kasumi::test::write_text(source, contents);
+
+    const auto profile = client_environment(client).app_data_dir / "profiles" /
+                         "long-staging";
+    const auto previous_staging =
+        profile / ".transactions" / std::string(32, 'a') / "upload-batches" /
+        "0" / std::string(64, 'b');
+    const auto database = profile / "state.db";
+    SCOPED_TRACE("database path characters=" +
+                 std::to_string(database.native().size()) +
+                 ", previous ciphertext staging path characters=" +
+                 std::to_string(previous_staging.native().size()));
+    ASSERT_LT(database.native().size(), 260U);
+    ASSERT_GE(previous_staging.native().size(), 300U);
+    std::cerr << "SYNC_PATH_EVIDENCE {\"database_path_chars\":"
+              << database.native().size()
+              << ",\"previous_ciphertext_staging_chars\":"
+              << previous_staging.native().size() << "}\n";
+
+    const auto synchronized = sync(client);
+    ASSERT_TRUE(synchronized.has_value())
+        << (synchronized ? "" : synchronized.error());
+    EXPECT_FALSE(std::filesystem::exists(previous_staging));
+    auto observed = remote(scenario);
+    ASSERT_TRUE(observed.has_value()) << observed.error();
+    const auto* row = kasumi::find_row(observed->effective_tree, "long.txt");
+    ASSERT_NE(row, nullptr);
+    EXPECT_EQ(row->hash, kasumi::hasher::hash_string(contents));
     EXPECT_EQ(row->size, contents.size());
 }
 

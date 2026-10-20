@@ -51,6 +51,9 @@ bool registration_active(const RegistrationState& registration) noexcept;
 std::expected<void, Error>
 verify_registration(const RegistrationState& registration);
 std::expected<void, Error>
+verify_writer_admission(const RegistrationState& registration,
+                        const RemoteLayout& layout);
+std::expected<void, Error>
 release_registration(RegistrationState& registration);
 
 // Registers a writer and denies entry when a barrier is present.

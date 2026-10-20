@@ -200,6 +200,8 @@ target_include_directories(
     kasumi_transport
     PUBLIC
     include
+    PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
 )
 
 if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU")
@@ -509,6 +511,8 @@ target_include_directories(
 
 if(BUILD_TESTING)
     target_compile_definitions(kasumi_application PUBLIC KASUMI_MUTATION_FAULT_TESTS)
+    target_compile_definitions(kasumi_application PRIVATE KASUMI_PROCESS_CRASH_TESTS)
+    target_compile_definitions(kasumi_transport PRIVATE KASUMI_PROCESS_CRASH_TESTS)
 endif()
 
 if(KASUMI_BUILD_JOURNAL_FAULT_TESTS)

@@ -11073,7 +11073,7 @@ TEST(SyncCoordinatorTest, FailedRepairRollsBackRenameAndNextRecoveryCompletes) {
     EXPECT_FALSE(std::filesystem::exists(transaction_root));
 }
 
-TEST(SyncCoordinatorTest, LocalOnlyRecoveryRepeatsPresentRepairBeforeApplied) {
+TEST(SyncCoordinatorTest, LocalOnlyRecoveryVerifiesPresentRepairBeforeApplied) {
     auto workspace =
         kasumi::test::make_temp_workspace("local-only-pending-repair");
     const auto profile = kasumi::test::workspace_path(workspace, "profile");
@@ -11139,8 +11139,8 @@ TEST(SyncCoordinatorTest, LocalOnlyRecoveryRepeatsPresentRepairBeforeApplied) {
     EXPECT_EQ(
         *recovered,
         kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
-    EXPECT_EQ(state->put_count, 3U);
-    EXPECT_EQ(state->get_count, 2U);
+    EXPECT_EQ(state->put_count, 2U);
+    EXPECT_EQ(state->get_count, 3U);
     EXPECT_EQ(kasumi::transport::presence(storage,
                                           remote_content_id(key, content_hash))
                   .value(),
@@ -11268,7 +11268,7 @@ TEST(SyncCoordinatorTest, FailedRepairRemainsDurableAcrossRecoveryAttempts) {
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_FALSE(std::filesystem::exists(transaction_root));
     EXPECT_EQ(state->put_count, 5U);
-    EXPECT_EQ(state->get_count, 5U);
+    EXPECT_EQ(state->get_count, 9U);
     EXPECT_TRUE(std::ranges::none_of(state->objects, [](const auto& entry) {
         return entry.first.find('/') != std::string_view::npos;
     }));

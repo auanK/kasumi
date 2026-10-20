@@ -271,6 +271,30 @@ verify_registration(const RegistrationState& registration) {
 }
 
 std::expected<void, Error>
+verify_writer_admission(const RegistrationState& registration,
+                        const RemoteLayout& layout) {
+    if (!registration_active(registration) ||
+        !valid_writer_identifier(layout, registration.identifier)) {
+        return std::unexpected(
+            error(ErrorCode::InvalidInput, "invalid writer registration"));
+    }
+    auto owned = verify_registration(registration);
+    if (!owned) {
+        return std::unexpected(owned.error());
+    }
+    auto barrier =
+        transport::presence(*registration.storage, layout.barrier_identifier);
+    if (!barrier) {
+        return std::unexpected(transport_error(barrier.error()));
+    }
+    if (*barrier == transport::Presence::Present) {
+        return std::unexpected(
+            error(ErrorCode::Blocked, "GC active on destination"));
+    }
+    return {};
+}
+
+std::expected<void, Error>
 release_registration(RegistrationState& registration) {
     if (!registration_active(registration)) {
         return {};

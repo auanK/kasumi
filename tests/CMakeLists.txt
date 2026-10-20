@@ -98,6 +98,7 @@ kasumi_add_test_suite(
     "integration.sync"
     SOURCES
         integration/sync/test_coordinator.cpp
+        integration/sync/test_crash_recovery.cpp
         integration/sync/test_content_batch.cpp
         integration/sync/test_journal_preparation.cpp
         integration/sync/test_journal_incremental.cpp
@@ -115,6 +116,27 @@ if(KASUMI_BUILD_JOURNAL_FAULT_TESTS)
         kasumi_test_integration_sync PRIVATE KASUMI_JOURNAL_FAULT_TESTS)
 endif()
 target_compile_definitions(kasumi_test_integration_sync PRIVATE KASUMI_WORKSPACE_FAULT_TESTS)
+
+add_executable(
+    kasumi_sync_gc_crash_child
+    operational/sync_gc_crash_child.cpp
+)
+target_link_libraries(
+    kasumi_sync_gc_crash_child
+    PRIVATE kasumi_application kasumi_sqlite3 monocypher kasumi_warnings
+)
+target_include_directories(kasumi_sync_gc_crash_child PRIVATE ${PROJECT_SOURCE_DIR}/src)
+if(WIN32)
+    target_sources(kasumi_sync_gc_crash_child PRIVATE
+        "${PROJECT_BINARY_DIR}/long_path_aware.rc")
+    if(MSVC)
+        target_link_options(kasumi_sync_gc_crash_child PRIVATE /MANIFEST:NO)
+    endif()
+endif()
+target_compile_definitions(
+    kasumi_test_integration_sync
+    PRIVATE "KASUMI_SYNC_CRASH_HELPER_PATH=\"$<TARGET_FILE:kasumi_sync_gc_crash_child>\"")
+add_dependencies(kasumi_test_integration_sync kasumi_sync_gc_crash_child)
 
 kasumi_add_test_suite(
     kasumi_test_e2e_local_sync

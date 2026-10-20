@@ -275,6 +275,22 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             std::vector<Hash> confirmed_missing;
             std::expected<void, sync::coordinator::Error> synchronized;
             for (std::size_t attempt = 0; attempt < 3; ++attempt) {
+                auto admission =
+                    history_storage::maintenance_protocol::
+                        verify_writer_admission(writer, layout);
+                if (!admission) {
+                    synchronized = std::unexpected(sync::coordinator::Error{
+                        .code = admission.error().code ==
+                                        history_storage::maintenance_protocol::
+                                            ErrorCode::Blocked
+                                    ? sync::coordinator::ErrorCode::
+                                          ConcurrentModification
+                                    : sync::coordinator::ErrorCode::
+                                          ObservationFailure,
+                        .detail = admission.error().detail,
+                    });
+                    break;
+                }
                 synchronized = sync::coordinator::execute(context.runtime,
                                                           context.storage,
                                                           context.key,

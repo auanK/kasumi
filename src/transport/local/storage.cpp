@@ -1,5 +1,6 @@
 #include "detail.hpp"
 #include "platform/path.hpp"
+#include "platform/process_crash_test_hook.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -180,7 +181,12 @@ Result local_put(void* context,
         });
     }
 
-    return copy_file_overwrite(source, *destination);
+    auto copied = copy_file_overwrite(source, *destination);
+    if (copied) {
+        platform::process_crash_test_hook::pause_at("transport.put",
+                                                    identifier);
+    }
+    return copied;
 }
 
 Result local_get(void* context,
@@ -406,6 +412,10 @@ RemovalResult local_remove(void* context, std::string_view identifier) {
         return std::unexpected(make_error(error));
     }
 
+    if (removed) {
+        platform::process_crash_test_hook::pause_at("transport.remove",
+                                                    identifier);
+    }
     return removed ? Removal::Removed : Removal::AlreadyAbsent;
 }
 

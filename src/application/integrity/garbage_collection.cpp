@@ -4,6 +4,8 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/maintenance.hpp"
 #include "platform/cancellation.hpp"
+#include "platform/perf_trace.hpp"
+#include "platform/process_crash_test_hook.hpp"
 
 #include <algorithm>
 #include <array>
@@ -25,6 +27,72 @@ namespace {
 namespace history_storage = application::history_storage;
 namespace protocol = application::history_storage::maintenance_protocol;
 using KeySpan = std::span<const std::uint8_t, crypto::KEY_SIZE>;
+
+std::string_view phase_metric(GarbageCollectStage stage) noexcept {
+    switch (stage) {
+        case GarbageCollectStage::Preparing:
+            return "gc.preparing_us";
+        case GarbageCollectStage::Analyzing:
+            return "gc.analyzing_us";
+        case GarbageCollectStage::Applying:
+            return "gc.applying_us";
+        case GarbageCollectStage::Finalizing:
+            return "gc.finalizing_us";
+    }
+    return "gc.unknown_stage_us";
+}
+
+class PerfTimer {
+public:
+    explicit PerfTimer(std::string_view name) noexcept
+        : name_(name), token_(platform::perf_trace::begin()) {
+    }
+
+    ~PerfTimer() {
+        platform::perf_trace::finish(name_, token_);
+    }
+
+    PerfTimer(const PerfTimer&) = delete;
+    PerfTimer& operator=(const PerfTimer&) = delete;
+
+private:
+    std::string_view name_;
+    platform::perf_trace::Token token_;
+};
+
+class GarbageCollectionTrace {
+public:
+    GarbageCollectionTrace() noexcept
+        : total_(platform::perf_trace::begin()),
+          phase_(platform::perf_trace::begin()) {
+    }
+
+    ~GarbageCollectionTrace() { finish(); }
+
+    void enter(GarbageCollectStage stage) noexcept {
+        if (stage == stage_ || finished_) {
+            return;
+        }
+        platform::perf_trace::finish(phase_metric(stage_), phase_);
+        stage_ = stage;
+        phase_ = platform::perf_trace::begin();
+    }
+
+    void finish() noexcept {
+        if (finished_) {
+            return;
+        }
+        platform::perf_trace::finish(phase_metric(stage_), phase_);
+        platform::perf_trace::finish("gc.total_us", total_);
+        finished_ = true;
+    }
+
+private:
+    platform::perf_trace::Token total_;
+    platform::perf_trace::Token phase_;
+    GarbageCollectStage stage_ = GarbageCollectStage::Preparing;
+    bool finished_ = false;
+};
 
 enum class CandidateKind {
     CommitVariant,
@@ -143,6 +211,8 @@ struct BarrierCleanup {
     }
 
     std::expected<void, Error> release_once() {
+        platform::perf_trace::count("gc.barrier_cleanup_attempts");
+        PerfTimer cleanup_trace{"gc.barrier_cleanup_us"};
         if (cleanup_started) {
             if (release_confirmed) {
                 return {};
@@ -352,7 +422,12 @@ std::expected<Observation, Error>
 observe(transport::Transport& storage,
         KeySpan key,
         const std::filesystem::path& workspace_root) {
-    auto listing = transport::list(storage);
+    platform::perf_trace::count("gc.analysis_observations");
+    PerfTimer observation_trace{"gc.observation_us"};
+    auto listing = [&] {
+        PerfTimer trace{"gc.analysis_list_us"};
+        return transport::list(storage);
+    }();
     if (!listing) {
         return std::unexpected(
             transport_error(listing.error(), "could not list remote objects"));
@@ -360,8 +435,12 @@ observe(transport::Transport& storage,
     std::ranges::sort(*listing);
 
     const auto layout = history_storage::derive_remote_layout(key);
-    auto history = history_storage::inventory_reachability(
-        storage, key, *listing, workspace_root);
+    platform::perf_trace::count("gc.history_reconstructions");
+    auto history = [&] {
+        PerfTimer trace{"gc.history_reconstruction_us"};
+        return history_storage::inventory_reachability(
+            storage, key, *listing, workspace_root);
+    }();
     if (!history) {
         return std::unexpected(history_error(history.error()));
     }
@@ -369,8 +448,11 @@ observe(transport::Transport& storage,
         return std::unexpected(valid.error());
     }
 
-    auto content = history_storage::inventory_content_reachability(
-        storage, key, *listing, *history, workspace_root, false);
+    auto content = [&] {
+        PerfTimer trace{"gc.content_classification_us"};
+        return history_storage::inventory_content_reachability(
+            storage, key, *listing, *history, workspace_root, false);
+    }();
     if (!content) {
         return std::unexpected(history_error(content.error()));
     }
@@ -392,13 +474,19 @@ observe(transport::Transport& storage,
     std::ranges::sort(orphan_ids);
     orphan_ids.erase(std::ranges::unique(orphan_ids).begin(), orphan_ids.end());
     if (!orphan_ids.empty()) {
-        auto audited = history_storage::inventory_content_reachability(
-            storage,
-            key,
-            std::span<const std::string>{orphan_ids},
-            *history,
-            workspace_root,
-            true);
+        platform::perf_trace::count("gc.candidate_audit_batches");
+        platform::perf_trace::count("gc.candidate_audit_objects",
+                                    orphan_ids.size());
+        auto audited = [&] {
+            PerfTimer trace{"gc.candidate_audit_us"};
+            return history_storage::inventory_content_reachability(
+                storage,
+                key,
+                std::span<const std::string>{orphan_ids},
+                *history,
+                workspace_root,
+                true);
+        }();
         if (!audited) {
             return std::unexpected(history_error(audited.error()));
         }
@@ -465,6 +553,8 @@ bool same_observation(const Observation& left,
 std::expected<std::vector<std::string>, Error>
 fresh_namespace(transport::Transport& storage,
                 const std::vector<std::string>& expected) {
+    platform::perf_trace::count("gc.namespace_list_calls");
+    PerfTimer listing_trace{"gc.namespace_list_us"};
     auto listing = transport::list(storage);
     if (!listing) {
         return std::unexpected(
@@ -482,6 +572,8 @@ fresh_namespace(transport::Transport& storage,
 std::expected<void, Error>
 require_no_writers(transport::Transport& storage,
                    const history_storage::RemoteLayout& layout) {
+    platform::perf_trace::count("gc.writer_checks");
+    PerfTimer writers_trace{"gc.writer_check_us"};
     auto writers = protocol::active_writers(storage, layout);
     if (!writers) {
         return std::unexpected(protocol_error(writers.error()));
@@ -497,6 +589,8 @@ require_no_writers(transport::Transport& storage,
 
 std::expected<void, Error>
 require_barrier_ownership(const protocol::RegistrationState& barrier) {
+    platform::perf_trace::count("gc.barrier_ownership_checks");
+    PerfTimer ownership_trace{"gc.barrier_ownership_check_us"};
     if (!protocol::registration_active(barrier)) {
         return std::unexpected(make_error(ErrorCode::ConcurrentChange,
                                           "maintenance barrier lost"));
@@ -515,6 +609,9 @@ revalidate_variant(transport::Transport& storage,
                    const std::vector<std::string>& namespace_snapshot,
                    const history_storage::RemoteLayout& layout,
                    const Candidate& candidate) {
+    platform::perf_trace::count("gc.variant_revalidations");
+    platform::perf_trace::count("gc.history_reconstructions");
+    PerfTimer revalidation_trace{"gc.variant_revalidation_us"};
     auto history = history_storage::inventory_reachability(
         storage, key, namespace_snapshot, workspace_root);
     if (!history) {
@@ -559,7 +656,14 @@ revalidate_content(transport::Transport& storage,
                    const std::filesystem::path& workspace_root,
                    const std::vector<std::string>& expected_namespace,
                    const Candidate& candidate) {
-    auto listing = transport::list(storage);
+    platform::perf_trace::count("gc.content_revalidations");
+    platform::perf_trace::count("gc.content_revalidation_list_calls");
+    platform::perf_trace::count("gc.history_reconstructions");
+    PerfTimer revalidation_trace{"gc.content_revalidation_us"};
+    auto listing = [&] {
+        PerfTimer trace{"gc.content_revalidation_list_us"};
+        return transport::list(storage);
+    }();
     if (!listing) {
         return std::unexpected(
             transport_error(listing.error(), "could not list remote objects"));
@@ -576,13 +680,16 @@ revalidate_content(transport::Transport& storage,
     }
 
     const std::array<std::string, 1> identifiers{candidate.identifier};
-    auto audited = history_storage::inventory_content_reachability(
-        storage,
-        key,
-        std::span<const std::string>{identifiers},
-        *history,
-        workspace_root,
-        true);
+    auto audited = [&] {
+        PerfTimer trace{"gc.content_revalidation_audit_us"};
+        return history_storage::inventory_content_reachability(
+            storage,
+            key,
+            std::span<const std::string>{identifiers},
+            *history,
+            workspace_root,
+            true);
+    }();
     if (!audited) {
         return std::unexpected(history_error(audited.error()));
     }
@@ -647,6 +754,8 @@ revalidate_candidate(transport::Transport& storage,
 std::expected<void, Error>
 require_candidate_present(transport::Transport& storage,
                           const Candidate& candidate) {
+    platform::perf_trace::count("gc.candidate_presence_checks");
+    PerfTimer presence_trace{"gc.candidate_presence_us"};
     auto presence = transport::presence(storage, candidate.identifier);
     if (!presence) {
         return std::unexpected(
@@ -663,6 +772,8 @@ require_candidate_present(transport::Transport& storage,
 
 std::expected<void, Error> confirm_removal(transport::Transport& storage,
                                            const Candidate& candidate) {
+    platform::perf_trace::count("gc.removal_confirmation_checks");
+    PerfTimer confirmation_trace{"gc.removal_confirmation_us"};
     auto presence = transport::presence(storage, candidate.identifier);
     if (!presence) {
         return std::unexpected(transport_error(
@@ -681,6 +792,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                      transport::Transport& storage,
                      KeySpan key,
                      GarbageCollectProgressCallback on_progress) {
+    GarbageCollectionTrace trace;
     if (!transport::valid(storage)) {
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid transport"));
@@ -699,8 +811,11 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
     }
 
     const auto layout = history_storage::derive_remote_layout(key);
-    auto barrier_presence =
-        transport::presence(storage, layout.barrier_identifier);
+    platform::perf_trace::count("gc.initial_barrier_presence_checks");
+    auto barrier_presence = [&] {
+        PerfTimer timer{"gc.initial_barrier_presence_us"};
+        return transport::presence(storage, layout.barrier_identifier);
+    }();
     if (!barrier_presence) {
         return std::unexpected(transport_error(
             barrier_presence.error(), "could not inspect maintenance barrier"));
@@ -711,15 +826,24 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                        "another maintenance barrier is already present"));
     }
 
-    auto barrier = protocol::establish_barrier(storage, layout, workspace_root);
+    platform::perf_trace::count("gc.barrier_acquisition_attempts");
+    auto barrier = [&] {
+        PerfTimer timer{"gc.barrier_acquisition_us"};
+        return protocol::establish_barrier(storage, layout, workspace_root);
+    }();
     if (!barrier) {
         return std::unexpected(protocol_error(barrier.error()));
     }
     BarrierCleanup cleanup{std::move(*barrier)};
 
-    const auto finish = [&cleanup, &failure_diagnostic](
+    bool candidate_count_known = false;
+    const auto finish = [&cleanup,
+                         &failure_diagnostic,
+                         &trace,
+                         &candidate_count_known](
                             std::expected<GarbageCollectResult, Error> outcome)
         -> std::expected<GarbageCollectResult, Error> {
+        trace.enter(GarbageCollectStage::Finalizing);
         std::optional<Error> cleanup_failure;
         try {
             auto released = cleanup.release_once();
@@ -743,6 +867,13 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             failure_diagnostic.barrier_cleanup_transport_error =
                 cleanup_failure->transport_failure;
         }
+        if (candidate_count_known) {
+            platform::perf_trace::count("gc.candidate_count",
+                                        failure_diagnostic.candidate_objects);
+            platform::perf_trace::count("gc.confirmed_removed",
+                                        failure_diagnostic.confirmed_removed);
+        }
+        trace.finish();
 
         if (!outcome.has_value()) {
             if (!failure_diagnostic.transport_error.has_value()) {
@@ -773,21 +904,48 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             return finish(std::unexpected(writers.error()));
         }
 
-        auto online = protocol::supports_online_collection(
-            storage, layout, workspace_root);
+        platform::process_crash_test_hook::pause_at(
+            "gc.barrier.acquired", layout.barrier_identifier);
+
+        platform::perf_trace::count("gc.visibility_probe_attempts");
+        auto online = [&] {
+            PerfTimer timer{"gc.visibility_probe_us"};
+            return protocol::supports_online_collection(
+                storage, layout, workspace_root);
+        }();
         if (!online) {
             return finish(std::unexpected(protocol_error(online.error())));
         }
 
         failure_diagnostic.stage = GarbageCollectStage::Analyzing;
+        trace.enter(GarbageCollectStage::Analyzing);
         notify(on_progress, GarbageCollectStage::Analyzing, std::nullopt, 0);
         if (!*online) {
-            auto snapshot = observe(storage, key, workspace_root);
+            auto snapshot = [&] {
+                PerfTimer timer{"gc.first_observation_us"};
+                return observe(storage, key, workspace_root);
+            }();
             if (!snapshot) {
                 return finish(std::unexpected(snapshot.error()));
             }
             failure_diagnostic.stage = GarbageCollectStage::Finalizing;
             failure_diagnostic.candidate_objects = snapshot->candidates.size();
+            candidate_count_known = true;
+            if (platform::perf_trace::enabled()) {
+                platform::perf_trace::count(
+                    "gc.candidate_content_count",
+                    static_cast<std::uint64_t>(std::ranges::count_if(
+                        snapshot->candidates, [](const auto& candidate) {
+                            return candidate.kind == CandidateKind::Content;
+                        })));
+                platform::perf_trace::count(
+                    "gc.candidate_variant_count",
+                    static_cast<std::uint64_t>(std::ranges::count_if(
+                        snapshot->candidates, [](const auto& candidate) {
+                            return candidate.kind ==
+                                   CandidateKind::CommitVariant;
+                        })));
+            }
             notify(on_progress,
                    GarbageCollectStage::Finalizing,
                    snapshot->candidates.size(),
@@ -799,7 +957,10 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             });
         }
 
-        auto first = observe(storage, key, workspace_root);
+        auto first = [&] {
+            PerfTimer timer{"gc.first_observation_us"};
+            return observe(storage, key, workspace_root);
+        }();
         if (!first) {
             return finish(std::unexpected(first.error()));
         }
@@ -814,19 +975,28 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             return finish(std::unexpected(verified.error()));
         }
 
-        auto second = observe(storage, key, workspace_root);
+        auto second = [&] {
+            PerfTimer timer{"gc.second_observation_us"};
+            return observe(storage, key, workspace_root);
+        }();
         if (!second) {
             return finish(std::unexpected(second.error()));
         }
-        if (!same_observation(*first, *second)) {
+        const bool observations_match = [&] {
+            PerfTimer timer{"gc.observation_comparison_us"};
+            return same_observation(*first, *second);
+        }();
+        if (!observations_match) {
             return finish(
                 std::unexpected(make_error(ErrorCode::ConcurrentChange,
                                            "remote observation changed during "
                                            "garbage collection analysis")));
         }
 
-        auto expected_namespace =
-            fresh_namespace(storage, second->physical_namespace);
+        auto expected_namespace = [&] {
+            PerfTimer timer{"gc.stabilization_list_us"};
+            return fresh_namespace(storage, second->physical_namespace);
+        }();
         if (!expected_namespace) {
             return finish(std::unexpected(expected_namespace.error()));
         }
@@ -840,7 +1010,23 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
 
         const auto candidate_count = second->candidates.size();
         failure_diagnostic.candidate_objects = candidate_count;
+        candidate_count_known = true;
+        if (platform::perf_trace::enabled()) {
+            platform::perf_trace::count(
+                "gc.candidate_content_count",
+                static_cast<std::uint64_t>(std::ranges::count_if(
+                    second->candidates, [](const auto& candidate) {
+                        return candidate.kind == CandidateKind::Content;
+                    })));
+            platform::perf_trace::count(
+                "gc.candidate_variant_count",
+                static_cast<std::uint64_t>(std::ranges::count_if(
+                    second->candidates, [](const auto& candidate) {
+                        return candidate.kind == CandidateKind::CommitVariant;
+                    })));
+        }
         failure_diagnostic.stage = GarbageCollectStage::Applying;
+        trace.enter(GarbageCollectStage::Applying);
         notify(on_progress, GarbageCollectStage::Applying, candidate_count, 0);
         std::size_t removed_objects = 0;
         for (const auto& candidate : second->candidates) {
@@ -853,8 +1039,12 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                 return finish(std::unexpected(std::move(*cancelled)));
             }
             failure_diagnostic.failed_identifier = candidate.identifier;
-            auto namespace_check =
-                fresh_namespace(storage, *expected_namespace);
+            platform::perf_trace::count(
+                "gc.apply.candidate_namespace_list_calls");
+            auto namespace_check = [&] {
+                PerfTimer timer{"gc.apply.candidate_namespace_list_us"};
+                return fresh_namespace(storage, *expected_namespace);
+            }();
             if (!namespace_check) {
                 return finish(std::unexpected(namespace_check.error()));
             }
@@ -883,7 +1073,11 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             }
 
             mutation_in_flight = true;
-            auto removed = transport::remove(storage, candidate.identifier);
+            platform::perf_trace::count("gc.remove_attempts");
+            auto removed = [&] {
+                PerfTimer timer{"gc.remove_us"};
+                return transport::remove(storage, candidate.identifier);
+            }();
             mutation_in_flight = false;
             if (!removed) {
                 failure_diagnostic.mutation_state =
@@ -933,6 +1127,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         }
 
         failure_diagnostic.stage = GarbageCollectStage::Finalizing;
+        trace.enter(GarbageCollectStage::Finalizing);
         failure_diagnostic.failed_identifier.reset();
         failure_diagnostic.transport_error.reset();
         failure_diagnostic.mutation_state =
@@ -942,7 +1137,11 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                GarbageCollectStage::Finalizing,
                candidate_count,
                removed_objects);
-        auto final_namespace = fresh_namespace(storage, *expected_namespace);
+        auto final_namespace = [&] {
+            platform::perf_trace::count("gc.final_namespace_list_calls");
+            PerfTimer timer{"gc.final_namespace_check_us"};
+            return fresh_namespace(storage, *expected_namespace);
+        }();
         if (!final_namespace) {
             return finish(std::unexpected(final_namespace.error()));
         }

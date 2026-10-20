@@ -3,7 +3,6 @@
 #include "application/sync/mutation_detail.hpp"
 #include "crypto/content.hpp"
 #include "platform/perf_trace.hpp"
-#include "platform/private_storage.hpp"
 #include "platform/workspace.hpp"
 #include "transport/transport.hpp"
 
@@ -35,78 +34,25 @@ create_batch_staging_directory(const platform::Workspace& workspace,
                        first_index));
     }
 
-    const auto upload_batches_root = workspace.root / "upload-batches";
-    std::error_code error;
-    if (std::filesystem::exists(upload_batches_root, error)) {
-        if (auto valid = platform::validate_non_redirecting_directory(
-                upload_batches_root);
-            !valid) {
-            return std::unexpected(
-                make_error(MutationErrorCode::UnsafePath,
-                           "upload-batches is unsafe: " + valid.error(),
-                           upload_batches_root,
-                           first_index));
-        }
-    } else {
-        auto created =
-            platform::private_storage::create_directory(upload_batches_root);
-        if (!created) {
-            return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                              created.error(),
-                                              upload_batches_root,
-                                              first_index));
-        }
-    }
-
-    if (auto valid =
-            platform::validate_non_redirecting_directory(upload_batches_root);
-        !valid) {
-        return std::unexpected(
-            make_error(MutationErrorCode::UnsafePath,
-                       "upload-batches became unsafe: " + valid.error(),
-                       upload_batches_root,
-                       first_index));
-    }
-
-    const auto batch_root = upload_batches_root / std::to_string(first_index);
-    if (std::filesystem::exists(batch_root, error)) {
-        if (auto valid =
-                platform::validate_non_redirecting_directory(batch_root);
-            !valid) {
-            return std::unexpected(make_error(
-                MutationErrorCode::UnsafePath,
-                "existing batch staging directory is unsafe: " + valid.error(),
-                batch_root,
-                first_index));
-        }
-        auto removed =
-            platform::remove_workspace(platform::Workspace{batch_root});
-        if (!removed) {
-            return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                              removed.error(),
-                                              batch_root,
-                                              first_index));
-        }
-    }
-
-    auto created = platform::private_storage::create_directory(batch_root);
-    if (!created) {
+    // shortcut: process death can leave encrypted temp batches; add journal ownership if crash cleanup becomes a requirement.
+    auto staging = platform::create_workspace("upload-batch");
+    if (!staging) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          created.error(),
-                                          batch_root,
+                                          staging.error(),
+                                          workspace.root,
                                           first_index));
     }
-
-    if (auto valid = platform::validate_non_redirecting_directory(batch_root);
+    if (auto valid =
+            platform::validate_non_redirecting_directory(staging->root);
         !valid) {
+        platform::cleanup_workspace(*staging);
         return std::unexpected(make_error(
             MutationErrorCode::UnsafePath,
-            "batch staging directory became unsafe: " + valid.error(),
-            batch_root,
+            "batch staging directory is unsafe: " + valid.error(),
+            staging->root,
             first_index));
     }
-
-    return batch_root;
+    return staging->root;
 }
 
 std::expected<StagedUploadObject, MutationError>

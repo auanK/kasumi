@@ -551,33 +551,87 @@ std::expected<void, Error> resume_pending_storage_repairs(
                                    staged_batch.error().operation_index));
         }
 
-        const auto transfer_trace = platform::perf_trace::begin();
-        auto transferred = mutation::transfer_upload_batch(
-            *staged_batch, storage, parallelism);
-        platform::perf_trace::finish("content transfer", transfer_trace);
-
-        const bool transfer_unknown =
-            !transferred &&
-            transferred.error().code ==
-                mutation::MutationErrorCode::RemoteResultUnknown;
-        if (!transferred && !transfer_unknown) {
-            return std::unexpected(
-                detail::make_error(ErrorCode::MutationFailure,
-                                   "failed to transfer pending repairs batch",
-                                   transferred.error().operation_index));
+        mutation::StagedUploadBatch missing_batch{
+            .root = staged_batch->root};
+        const auto listing_trace = platform::perf_trace::begin();
+        auto listing = transport::list(storage);
+        platform::perf_trace::finish("repair availability LIST", listing_trace);
+        if (!listing) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::ObservationFailure,
+                "failed to list remote objects before pending repair: " +
+                    transport::describe(listing.error())));
         }
 
-        const auto verification_trace = platform::perf_trace::begin();
-        auto verified = mutation::verify_upload_batch(
-            *staged_batch, storage, key, *workspace, parallelism);
-        platform::perf_trace::finish("content verification wall",
-                                     verification_trace);
+        for (const auto& object : staged_batch->objects) {
+            const bool listed =
+                std::ranges::find(*listing, object.identifier) != listing->end();
+            auto presence = transport::presence(storage, object.identifier);
+            if (!presence) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    "failed to verify pending repair availability: " +
+                        transport::describe(presence.error())));
+            }
+            if (listed != (*presence == transport::Presence::Present)) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ConcurrentModification,
+                    "remote LIST and PRESENCE disagree for pending repair"));
+            }
+            if (*presence == transport::Presence::Absent) {
+                missing_batch.objects.push_back(object);
+                continue;
+            }
 
-        if (!verified) {
-            return std::unexpected(
-                detail::make_error(ErrorCode::MutationFailure,
-                                   "failed to verify pending repairs batch",
-                                   verified.error().operation_index));
+            mutation::StagedUploadBatch existing_batch{
+                .root = staged_batch->root,
+                .objects = {object},
+            };
+            auto verified = mutation::verify_upload_batch(
+                existing_batch, storage, key, *workspace, 1);
+            if (!verified) {
+                // Retry a verified byte mismatch; read failures stay fail-closed.
+                if (verified.error().code ==
+                    mutation::MutationErrorCode::IntegrityMismatch) {
+                    missing_batch.objects.push_back(object);
+                    continue;
+                }
+                return std::unexpected(detail::make_error(
+                    ErrorCode::MutationFailure,
+                    "failed to verify existing pending repair",
+                    verified.error().operation_index));
+            }
+        }
+
+        if (!missing_batch.objects.empty()) {
+            const auto transfer_trace = platform::perf_trace::begin();
+            auto transferred = mutation::transfer_upload_batch(
+                missing_batch, storage, parallelism);
+            platform::perf_trace::finish("content transfer", transfer_trace);
+
+            const bool transfer_unknown =
+                !transferred &&
+                transferred.error().code ==
+                    mutation::MutationErrorCode::RemoteResultUnknown;
+            if (!transferred && !transfer_unknown) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::MutationFailure,
+                    "failed to transfer pending repairs batch",
+                    transferred.error().operation_index));
+            }
+
+            const auto verification_trace = platform::perf_trace::begin();
+            auto verified = mutation::verify_upload_batch(
+                missing_batch, storage, key, *workspace, parallelism);
+            platform::perf_trace::finish("content verification wall",
+                                         verification_trace);
+
+            if (!verified) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::MutationFailure,
+                    "failed to verify pending repairs batch",
+                    verified.error().operation_index));
+            }
         }
 
         const auto checkpoint_trace = platform::perf_trace::begin();
@@ -907,6 +961,20 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
 
     auto outcome = [&]() -> std::expected<RecoveryResult, Error> {
         try {
+            if (remote_write_required) {
+                auto admission =
+                    history_storage::maintenance_protocol::
+                        verify_writer_admission(writer, layout);
+                if (!admission) {
+                    return std::unexpected(detail::make_error(
+                        admission.error().code ==
+                                history_storage::maintenance_protocol::
+                                    ErrorCode::Blocked
+                            ? ErrorCode::ConcurrentModification
+                            : ErrorCode::ObservationFailure,
+                        admission.error().detail));
+                }
+            }
             if (!(*record)->publication_required) {
                 if (has_pending_storage_repair(**record)) {
                     auto resumed = resume_pending_storage_repairs(*paths,

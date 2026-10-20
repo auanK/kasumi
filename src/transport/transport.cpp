@@ -585,6 +585,7 @@ Result put(Transport& transport,
         return std::unexpected(invalid_transport_error());
     }
 
+    platform::perf_trace::count("transport put");
     return transport.storage.put(state, source, identifier);
 }
 
@@ -649,6 +650,7 @@ Result get(Transport& transport,
         return std::unexpected(invalid_transport_error());
     }
 
+    platform::perf_trace::count("transport get");
     return transport.storage.get(state, identifier, destination);
 }
 
@@ -732,6 +734,7 @@ PresenceResult presence(Transport& transport, std::string_view identifier) {
         return std::unexpected(invalid_transport_error());
     }
 
+    platform::perf_trace::count("transport presence");
     return transport.storage.presence(state, identifier);
 }
 
@@ -835,6 +838,7 @@ RemovalResult remove(Transport& transport, std::string_view identifier) {
     // before reporting an error. Do not probe and reinterpret it as success,
     // because callers must stop on uncertain mutation. Exactly one REMOVE
     // attempt is made and the original error (including native_code) is kept.
+    platform::perf_trace::count("transport remove");
     return transport.storage.remove(state, identifier);
 }
 

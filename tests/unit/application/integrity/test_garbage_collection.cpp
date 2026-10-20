@@ -8,13 +8,16 @@
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
 #include "platform/cancellation.hpp"
+#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <gtest/gtest.h>
+#include <iostream>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -234,6 +237,69 @@ struct FakeFixture {
             runtime, transport, test_key(), std::move(progress));
     }
 };
+
+template <typename Fixture>
+auto measure_gc(Fixture& fixture, std::string_view scenario) {
+    using Result = decltype(fixture.collect());
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+    const auto started = std::chrono::steady_clock::now();
+    Result result = fixture.collect();
+    const auto wall_us = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started)
+            .count());
+    const auto count = [](std::string_view name) {
+        return kasumi::platform::perf_trace::get_count(name);
+    };
+    const auto time = [](std::string_view name) {
+        return kasumi::platform::perf_trace::get_time(name);
+    };
+    const auto optional_time = [&](std::string_view calls_name,
+                                   std::string_view time_name) {
+        return count(calls_name) == 0 ? std::string{"null"}
+                                      : std::to_string(time(time_name));
+    };
+    std::cerr << "GC_BENCHMARK {\"scenario\":\"" << scenario
+              << "\",\"measurement_level\":\"local file-backed transport; "
+                 "fixture setup excluded\",\"wall_us\":"
+              << wall_us << ",\"gc_total_us\":" << time("gc.total_us")
+              << ",\"preparing_us\":" << time("gc.preparing_us")
+              << ",\"analyzing_us\":" << time("gc.analyzing_us")
+              << ",\"applying_us\":" << time("gc.applying_us")
+              << ",\"finalizing_us\":" << time("gc.finalizing_us")
+              << ",\"candidate_count\":" << count("gc.candidate_count")
+              << ",\"content_candidates\":"
+              << count("gc.candidate_content_count")
+              << ",\"variant_candidates\":"
+              << count("gc.candidate_variant_count")
+              << ",\"confirmed_removed\":"
+              << count("gc.confirmed_removed")
+              << ",\"candidate_remove_attempts\":"
+              << count("gc.remove_attempts")
+              << ",\"list_calls\":"
+              << count("transport list") + count("transport list prefix")
+              << ",\"presence_calls\":"
+              << count("transport presence") << ",\"get_calls\":"
+              << count("transport get") << ",\"remove_calls\":"
+              << count("transport remove")
+              << ",\"history_reconstructions\":"
+              << count("gc.history_reconstructions")
+              << ",\"content_classification_us\":"
+              << time("gc.content_classification_us")
+              << ",\"candidate_audit_us\":"
+              << optional_time("gc.candidate_audit_batches",
+                               "gc.candidate_audit_us")
+              << ",\"content_revalidation_us\":"
+              << optional_time("gc.content_revalidations",
+                               "gc.content_revalidation_us")
+              << ",\"variant_revalidation_us\":"
+              << optional_time("gc.variant_revalidations",
+                               "gc.variant_revalidation_us")
+              << "}\n";
+    kasumi::platform::perf_trace::force_enable(false);
+    return result;
+}
 
 struct Repository {
     HeadReference head;
@@ -848,6 +914,52 @@ TEST(GarbageCollectionTest, ActiveWriterBlocksMutation) {
     EXPECT_TRUE(protocol::release_registration(*writer));
 }
 
+TEST(GarbageCollectionTest, WriterAppearingBetweenRemovalsStopsNextCandidate) {
+    FakeFixture fixture("gc-writer-during-apply");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+    const auto first =
+        put_content(fixture.transport, fixture.workspace, "orphan-a", "a");
+    const auto second =
+        put_content(fixture.transport, fixture.workspace, "orphan-b", "b");
+    const auto first_candidate = std::min(first, second);
+    const auto second_candidate = std::max(first, second);
+    const auto writer_identifier =
+        layout().writers_prefix + "0123456789abcdef0123456789abcdef";
+    const std::string writer_payload =
+        "kasumi-gc-v1:writer:0123456789abcdef0123456789abcdef";
+    fixture.state->on_operation =
+        [first_candidate, writer_identifier, writer_payload](
+            FakeState& state,
+            std::string_view operation,
+            std::string_view identifier) {
+            if (operation == "after_remove" &&
+                identifier == first_candidate) {
+                state.objects[writer_identifier] = std::vector<std::uint8_t>(
+                    writer_payload.begin(), writer_payload.end());
+            }
+        };
+    fixture.state->remove_attempts.clear();
+
+    const auto result = fixture.collect();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code,
+              kasumi::application::integrity::ErrorCode::ConcurrentChange);
+    ASSERT_TRUE(result.error().garbage_collection.has_value());
+    const auto& diagnostic = *result.error().garbage_collection;
+    EXPECT_EQ(diagnostic.candidate_objects, 2U);
+    EXPECT_EQ(diagnostic.confirmed_removed, 1U);
+    EXPECT_EQ(diagnostic.failed_identifier,
+              std::optional<std::string>{second_candidate});
+    EXPECT_EQ(diagnostic.mutation_state,
+              kasumi::application::GarbageCollectMutationState::NotAttempted);
+    EXPECT_EQ(candidate_remove_attempts(*fixture.state), 1U);
+    EXPECT_FALSE(object_present(fixture.transport, first_candidate));
+    EXPECT_TRUE(object_present(fixture.transport, second_candidate));
+    EXPECT_TRUE(object_present(fixture.transport, writer_identifier));
+}
+
 TEST(GarbageCollectionTest, BarrierOwnershipIsRecheckedBeforeEachRemoval) {
     FakeFixture fixture("gc-barrier-replaced");
     publish_object(
@@ -1393,7 +1505,50 @@ TEST(GarbageCollectionTest, FailureInjectionPositionsStopAfterOneAttempt) {
     }
 }
 
-TEST(GarbageCollectionTest, LocalLoadRemovesOneHundredOrphanContents) {
+TEST(GarbageCollectionBenchmarkTest, ZeroCandidates) {
+    LocalFixture fixture;
+    publish_object(fixture.storage.transport,
+                   fixture.storage.workspace,
+                   commit_with_file("live"),
+                   "bench-zero-head");
+    const auto protected_content = put_content(
+        fixture.storage.transport, fixture.storage.workspace, "live", "bench-live");
+
+    const auto result = measure_gc(fixture, "0_candidates");
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->candidate_objects, 0U);
+    EXPECT_EQ(result->removed_objects, 0U);
+    EXPECT_TRUE(object_present(fixture.storage.transport, protected_content));
+}
+
+TEST(GarbageCollectionBenchmarkTest, TenOrphanContents) {
+    LocalFixture fixture;
+    publish_object(fixture.storage.transport,
+                   fixture.storage.workspace,
+                   commit_with_file("live"),
+                   "bench-ten-head");
+    const auto protected_content = put_content(
+        fixture.storage.transport, fixture.storage.workspace, "live", "bench-ten-live");
+    std::vector<std::string> orphans;
+    for (std::size_t index = 0; index < 10; ++index) {
+        const auto contents = "bench-ten-orphan-" + std::to_string(index);
+        orphans.push_back(put_content(fixture.storage.transport,
+                                      fixture.storage.workspace,
+                                      contents,
+                                      contents));
+    }
+
+    const auto result = measure_gc(fixture, "10_content_orphans");
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->candidate_objects, 10U);
+    EXPECT_EQ(result->removed_objects, 10U);
+    EXPECT_TRUE(object_present(fixture.storage.transport, protected_content));
+    EXPECT_TRUE(std::ranges::all_of(orphans, [&](const auto& identifier) {
+        return !object_present(fixture.storage.transport, identifier);
+    }));
+}
+
+TEST(GarbageCollectionBenchmarkTest, OneHundredContentOrphans) {
     LocalFixture fixture;
     publish_object(fixture.storage.transport,
                    fixture.storage.workspace,
@@ -1409,7 +1564,7 @@ TEST(GarbageCollectionTest, LocalLoadRemovesOneHundredOrphanContents) {
                                       "load-content-" + std::to_string(index)));
     }
 
-    const auto result = fixture.collect();
+    const auto result = measure_gc(fixture, "100_content_orphans");
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 100U);
     EXPECT_EQ(result->removed_objects, 100U);
@@ -1418,7 +1573,7 @@ TEST(GarbageCollectionTest, LocalLoadRemovesOneHundredOrphanContents) {
     }));
 }
 
-TEST(GarbageCollectionTest, LocalLoadRemovesOneHundredRedundantVariants) {
+TEST(GarbageCollectionBenchmarkTest, OneHundredRedundantVariants) {
     LocalFixture fixture;
     const auto parent = commit_with_file("parent");
     const auto child_tree = commit_with_file("child").tree;
@@ -1455,7 +1610,7 @@ TEST(GarbageCollectionTest, LocalLoadRemovesOneHundredRedundantVariants) {
                                "load-child-variant-" + std::to_string(index)));
     }
 
-    const auto result = fixture.collect();
+    const auto result = measure_gc(fixture, "100_redundant_commit_variants");
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 100U);
     EXPECT_EQ(result->removed_objects, 100U);

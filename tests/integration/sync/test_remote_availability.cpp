@@ -1,4 +1,5 @@
 #include "application/history_storage/remote_layout.hpp"
+#include "application/integrity/maintenance.hpp"
 #include "application/sync/reobservation.hpp"
 #include "application/use_cases/context.hpp"
 #include "core/hasher.hpp"
@@ -16,6 +17,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
@@ -36,6 +38,22 @@ struct CountingStorageState {
     std::size_t presences = 0;
     std::size_t lists = 0;
     bool cancel_next_content_put = false;
+    bool ambiguous_next_content_put_after_effect = false;
+    bool barrier_injected = false;
+    bool nested_gc_attempted = false;
+    bool nested_gc_succeeded = false;
+    bool barrier_sync_attempted = false;
+    bool barrier_sync_succeeded = false;
+    std::size_t barrier_sync_content_puts = 0;
+    std::size_t barrier_absent_observations = 0;
+    std::string fail_get_identifier;
+    std::string hidden_list_identifier;
+    std::string nested_gc_error;
+    std::function<void()> before_next_content_put;
+    std::function<void(std::string_view)> after_put;
+    std::function<void(std::string_view,
+                       const kasumi::transport::PresenceResult&)>
+        after_presence;
 };
 
 void destroy_counting_storage(void*) noexcept {
@@ -53,14 +71,34 @@ kasumi::transport::Result counting_put(void* context,
     ++state->puts;
     if (identifier.find('/') == std::string_view::npos) {
         ++state->content_puts;
+        if (state->before_next_content_put) {
+            auto callback = std::move(state->before_next_content_put);
+            callback();
+        }
         if (state->cancel_next_content_put) {
             state->cancel_next_content_put = false;
             return std::unexpected(kasumi::transport::Error{
                 .code = kasumi::transport::ErrorCode::Cancelled,
                 .message = "cancelled repair upload"});
         }
+        if (state->ambiguous_next_content_put_after_effect) {
+            state->ambiguous_next_content_put_after_effect = false;
+            auto uploaded = kasumi::transport::put(
+                *state->base, source, identifier);
+            if (!uploaded) {
+                return uploaded;
+            }
+            return std::unexpected(kasumi::transport::Error{
+                .code = kasumi::transport::ErrorCode::Timeout,
+                .message = "injected lost PUT response"});
+        }
     }
-    return kasumi::transport::put(*state->base, source, identifier);
+    auto uploaded = kasumi::transport::put(*state->base, source, identifier);
+    if (uploaded && state->after_put) {
+        auto callback = std::move(state->after_put);
+        callback(identifier);
+    }
+    return uploaded;
 }
 
 kasumi::transport::Result
@@ -69,6 +107,12 @@ counting_get(void* context,
              const std::filesystem::path& destination) {
     auto* state = static_cast<CountingStorageState*>(context);
     ++state->gets;
+    if (identifier == state->fail_get_identifier) {
+        state->fail_get_identifier.clear();
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Io,
+            .message = "injected readback failure"});
+    }
     return kasumi::transport::get(*state->base, identifier, destination);
 }
 
@@ -76,13 +120,21 @@ kasumi::transport::PresenceResult
 counting_presence(void* context, std::string_view identifier) {
     auto* state = static_cast<CountingStorageState*>(context);
     ++state->presences;
-    return kasumi::transport::presence(*state->base, identifier);
+    auto result = kasumi::transport::presence(*state->base, identifier);
+    if (state->after_presence) {
+        state->after_presence(identifier, result);
+    }
+    return result;
 }
 
 kasumi::transport::ListingResult counting_list(void* context) {
     auto* state = static_cast<CountingStorageState*>(context);
     ++state->lists;
-    return kasumi::transport::list(*state->base);
+    auto result = kasumi::transport::list(*state->base);
+    if (result && !state->hidden_list_identifier.empty()) {
+        std::erase(*result, state->hidden_list_identifier);
+    }
+    return result;
 }
 
 kasumi::transport::ListingResult counting_list_prefix(void* context,
@@ -201,6 +253,76 @@ public:
         kasumi::test::write_text(target, contents);
     }
 
+    bool remove_remote(std::string_view identifier) {
+        return kasumi::transport::remove(base_storage_, identifier).has_value();
+    }
+
+    [[nodiscard]] std::optional<std::string>
+    add_orphan_content(std::string_view contents) {
+        const auto source = profile_ / "orphan.source";
+        const auto encrypted = profile_ / "orphan.enc";
+        kasumi::test::write_text(source, contents);
+        const auto result = kasumi::crypto::encrypt_file_with_hashes(
+            source, encrypted, key_);
+        if (!result) {
+            return std::nullopt;
+        }
+        const auto identifier =
+            kasumi::crypto::content_identifier(key_, result->plaintext_hash);
+        if (!kasumi::transport::put(base_storage_, encrypted, identifier)) {
+            return std::nullopt;
+        }
+        return identifier;
+    }
+
+    [[nodiscard]] std::expected<kasumi::application::integrity::
+                                   GarbageCollectResult,
+                               kasumi::application::integrity::Error>
+    collect_garbage() {
+        return kasumi::application::integrity::garbage_collect(
+            runtime_, context_.storage, key_);
+    }
+
+    [[nodiscard]] std::expected<kasumi::application::integrity::FsckResult,
+                                kasumi::application::integrity::Error>
+    fsck() {
+        return kasumi::application::integrity::fsck(
+            runtime_, context_.storage, key_);
+    }
+
+    void collect_before_next_content_put() {
+        counting_state_.before_next_content_put = [this] {
+            const auto result = collect_garbage();
+            counting_state_.nested_gc_attempted = true;
+            counting_state_.nested_gc_succeeded = result.has_value();
+            if (!result) {
+                counting_state_.nested_gc_error =
+                    kasumi::application::integrity::describe(result.error());
+            }
+        };
+    }
+
+    void sync_after_barrier_is_published() {
+        const auto identifier =
+            kasumi::application::history_storage::derive_remote_layout(key_)
+                .barrier_identifier;
+        counting_state_.after_put = [this, identifier](
+                                       std::string_view current) {
+            if (current == identifier) {
+                counting_state_.barrier_sync_attempted = true;
+                const auto result = sync();
+                counting_state_.barrier_sync_succeeded = result.has_value();
+                counting_state_.barrier_sync_content_puts =
+                    counting_state_.content_puts;
+            }
+        };
+    }
+
+    [[nodiscard]] std::filesystem::path
+    remote_path(std::string_view identifier) const {
+        return storage_root_ / kasumi::platform::path::from_utf8(identifier);
+    }
+
     [[nodiscard]] const std::filesystem::path& local() const noexcept {
         return local_;
     }
@@ -240,6 +362,81 @@ public:
 
     void cancel_next_content_put() noexcept {
         counting_state_.cancel_next_content_put = true;
+    }
+
+    void lose_next_content_put_response() noexcept {
+        counting_state_.ambiguous_next_content_put_after_effect = true;
+    }
+
+    void fail_next_content_readback(const kasumi::Hash& hash) {
+        counting_state_.fail_get_identifier =
+            kasumi::crypto::content_identifier(key_, hash);
+    }
+
+    void hide_from_listing(const kasumi::Hash& hash) {
+        counting_state_.hidden_list_identifier =
+            kasumi::crypto::content_identifier(key_, hash);
+    }
+
+    void place_barrier_after_writer_admission() {
+        const auto identifier =
+            kasumi::application::history_storage::derive_remote_layout(key_)
+                .barrier_identifier;
+        counting_state_.after_presence = [this, identifier](
+                                              std::string_view current,
+                                              const kasumi::transport::PresenceResult& result) {
+            if (current == identifier && result &&
+                *result == kasumi::transport::Presence::Absent &&
+                !counting_state_.barrier_injected) {
+                counting_state_.barrier_injected = true;
+                write_remote(identifier, "injected active GC barrier");
+            }
+        };
+    }
+
+    void place_barrier_after_final_admission_observation() {
+        const auto identifier =
+            kasumi::application::history_storage::derive_remote_layout(key_)
+                .barrier_identifier;
+        counting_state_.barrier_absent_observations = 0;
+        counting_state_.after_presence = [this, identifier](
+                                              std::string_view current,
+                                              const kasumi::transport::PresenceResult& result) {
+            if (current == identifier && result &&
+                *result == kasumi::transport::Presence::Absent &&
+                ++counting_state_.barrier_absent_observations == 2U) {
+                counting_state_.barrier_injected = true;
+                write_remote(identifier, "injected active GC barrier");
+            }
+        };
+    }
+
+    [[nodiscard]] bool barrier_injected() const noexcept {
+        return counting_state_.barrier_injected;
+    }
+
+    [[nodiscard]] bool nested_gc_attempted() const noexcept {
+        return counting_state_.nested_gc_attempted;
+    }
+
+    [[nodiscard]] bool nested_gc_succeeded() const noexcept {
+        return counting_state_.nested_gc_succeeded;
+    }
+
+    [[nodiscard]] const std::string& nested_gc_error() const noexcept {
+        return counting_state_.nested_gc_error;
+    }
+
+    [[nodiscard]] bool barrier_sync_attempted() const noexcept {
+        return counting_state_.barrier_sync_attempted;
+    }
+
+    [[nodiscard]] bool barrier_sync_succeeded() const noexcept {
+        return counting_state_.barrier_sync_succeeded;
+    }
+
+    [[nodiscard]] std::size_t barrier_sync_content_puts() const noexcept {
+        return counting_state_.barrier_sync_content_puts;
     }
 
 private:
@@ -567,6 +764,388 @@ TEST(SyncRemoteAvailabilityTest, ActiveGcBarrierBlocksRepairBeforeContentPut) {
     ASSERT_TRUE(after.has_value() && *after);
     EXPECT_EQ((*after)->commit_id, (*before)->commit_id);
     EXPECT_EQ((*after)->tree, (*before)->tree);
+}
+
+TEST(SyncGcCertificationTest, AmbiguousRepairPutAfterRemoteEffect) {
+    SyncHarness harness("gc-r4-ambiguous-repair-put");
+    ASSERT_TRUE(harness.valid());
+    harness.write("file.txt", "repair me");
+    ASSERT_TRUE(harness.sync().has_value());
+    const auto before = kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(before.has_value() && *before);
+
+    const auto hash = kasumi::hasher::hash_string("repair me");
+    const auto path = harness.content_path(hash);
+    ASSERT_TRUE(std::filesystem::remove(path));
+    harness.reset_transfer_counts();
+    harness.lose_next_content_put_response();
+
+    const auto repaired = harness.sync();
+    ASSERT_TRUE(repaired.has_value()) << repaired.error().detail;
+    EXPECT_EQ(harness.content_puts(), 1U);
+    EXPECT_TRUE(std::filesystem::is_regular_file(path));
+
+    const auto after = kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(after.has_value() && *after);
+    EXPECT_EQ((*after)->commit_id, (*before)->commit_id);
+    EXPECT_EQ((*after)->tree, (*before)->tree);
+
+    harness.reset_transfer_counts();
+    const auto no_op = harness.sync();
+    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
+    EXPECT_EQ(harness.content_puts(), 0U);
+}
+
+TEST(SyncGcCertificationTest,
+     AmbiguousRepairPutWithFailedReadbackRecoversWithoutBlindPut) {
+    SyncHarness harness("gc-r4-ambiguous-repair-readback");
+    ASSERT_TRUE(harness.valid());
+    harness.write("file.txt", "repair me");
+    ASSERT_TRUE(harness.sync().has_value());
+    const auto before = kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(before.has_value() && *before);
+
+    const auto hash = kasumi::hasher::hash_string("repair me");
+    const auto path = harness.content_path(hash);
+    ASSERT_TRUE(std::filesystem::remove(path));
+    harness.reset_transfer_counts();
+    harness.lose_next_content_put_response();
+    harness.fail_next_content_readback(hash);
+
+    const auto uncertain = harness.sync();
+    ASSERT_FALSE(uncertain.has_value());
+    EXPECT_EQ(harness.content_puts(), 1U);
+    EXPECT_TRUE(std::filesystem::is_regular_file(path));
+    auto after_failure = kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(after_failure.has_value() && *after_failure);
+    EXPECT_EQ((*after_failure)->commit_id, (*before)->commit_id);
+    EXPECT_EQ((*after_failure)->tree, (*before)->tree);
+
+    harness.reset_transfer_counts();
+    const auto recovered = harness.sync();
+    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+    EXPECT_EQ(harness.content_puts(), 0U);
+    EXPECT_TRUE(std::filesystem::is_regular_file(path));
+    const auto after_recovery =
+        kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(after_recovery.has_value() && *after_recovery);
+    EXPECT_EQ((*after_recovery)->commit_id, (*before)->commit_id);
+    EXPECT_EQ((*after_recovery)->tree, (*before)->tree);
+
+    const auto orphan = harness.add_orphan_content("post-recovery orphan");
+    ASSERT_TRUE(orphan.has_value());
+    const auto collected = harness.collect_garbage();
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->removed_objects, 1U);
+    EXPECT_TRUE(std::filesystem::is_regular_file(path));
+    const auto audited = harness.fsck();
+    ASSERT_TRUE(audited.has_value()) << audited.error().detail;
+}
+
+TEST(SyncGcCertificationTest,
+     RecoveryFailsClosedWhenListAndPresenceDisagreeForRepair) {
+    SyncHarness harness("gc-r4-recovery-presence-divergence");
+    ASSERT_TRUE(harness.valid());
+    harness.write("file.txt", "repair me");
+    ASSERT_TRUE(harness.sync().has_value());
+    const auto before = kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(before.has_value() && *before);
+
+    const auto hash = kasumi::hasher::hash_string("repair me");
+    const auto path = harness.content_path(hash);
+    ASSERT_TRUE(std::filesystem::remove(path));
+    harness.reset_transfer_counts();
+    harness.lose_next_content_put_response();
+    harness.fail_next_content_readback(hash);
+    ASSERT_FALSE(harness.sync().has_value());
+    ASSERT_TRUE(std::filesystem::is_regular_file(path));
+
+    harness.reset_transfer_counts();
+    harness.hide_from_listing(hash);
+    const auto blocked = harness.sync();
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(harness.content_puts(), 0U);
+    EXPECT_TRUE(std::filesystem::is_regular_file(path));
+    const auto after = kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(after.has_value() && *after);
+    EXPECT_EQ((*after)->commit_id, (*before)->commit_id);
+    EXPECT_EQ((*after)->tree, (*before)->tree);
+}
+
+TEST(SyncGcCertificationTest, SyncWriterRegisteredFirstBlocksGc) {
+    SyncHarness harness("gc-r4-sync-writer-first");
+    ASSERT_TRUE(harness.valid());
+    harness.write("file.txt", "sync writer first");
+    harness.collect_before_next_content_put();
+
+    const auto synchronized = harness.sync();
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    EXPECT_TRUE(harness.nested_gc_attempted());
+    EXPECT_FALSE(harness.nested_gc_succeeded());
+    EXPECT_NE(harness.nested_gc_error().find("active writers block"),
+              std::string::npos);
+    EXPECT_EQ(harness.content_puts(), 1U);
+    EXPECT_TRUE(std::filesystem::is_regular_file(
+        harness.content_path(kasumi::hasher::hash_string("sync writer first"))));
+}
+
+TEST(SyncGcCertificationTest, GcBarrierFirstBlocksSyncAndThenConverges) {
+    SyncHarness harness("gc-r4-gc-barrier-first");
+    ASSERT_TRUE(harness.valid());
+    harness.write("kept.txt", "protected content");
+    ASSERT_TRUE(harness.sync().has_value());
+    const auto orphan = harness.add_orphan_content("discardable orphan");
+    ASSERT_TRUE(orphan.has_value());
+    harness.write("new.txt", "published after GC");
+    harness.reset_transfer_counts();
+    harness.sync_after_barrier_is_published();
+
+    const auto collected = harness.collect_garbage();
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->removed_objects, 1U);
+    EXPECT_TRUE(harness.barrier_sync_attempted());
+    EXPECT_FALSE(harness.barrier_sync_succeeded());
+    EXPECT_EQ(harness.barrier_sync_content_puts(), 0U);
+    EXPECT_FALSE(std::filesystem::exists(harness.remote_path(*orphan)));
+    EXPECT_TRUE(std::filesystem::is_regular_file(
+        harness.content_path(kasumi::hasher::hash_string("protected content"))));
+
+    const auto synchronized = harness.sync();
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    const auto* summary =
+        std::get_if<kasumi::application::SyncCompleted>(&synchronized->data);
+    ASSERT_NE(summary, nullptr);
+    EXPECT_TRUE(summary->published);
+    EXPECT_EQ(harness.content_puts(), 1U);
+
+    harness.reset_transfer_counts();
+    const auto no_op = harness.sync();
+    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
+    const auto* no_op_summary =
+        std::get_if<kasumi::application::SyncCompleted>(&no_op->data);
+    ASSERT_NE(no_op_summary, nullptr);
+    EXPECT_FALSE(no_op_summary->published);
+    EXPECT_EQ(harness.content_puts(), 0U);
+}
+
+TEST(SyncGcCertificationTest,
+     GarbageCollectThenSyncRepairsMissingReachableContent) {
+    SyncHarness harness("gc-r4-gc-then-repair");
+    ASSERT_TRUE(harness.valid());
+    harness.write("kept.txt", "protected content");
+    ASSERT_TRUE(harness.sync().has_value());
+    const auto before = kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(before.has_value() && *before);
+
+    const auto orphan = harness.add_orphan_content("discardable orphan");
+    ASSERT_TRUE(orphan.has_value());
+    const auto collected = harness.collect_garbage();
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_EQ(collected->removed_objects, 1U);
+    EXPECT_FALSE(std::filesystem::exists(harness.remote_path(*orphan)));
+
+    harness.reset_transfer_counts();
+    const auto no_op = harness.sync();
+    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
+    const auto* no_op_summary =
+        std::get_if<kasumi::application::SyncCompleted>(&no_op->data);
+    ASSERT_NE(no_op_summary, nullptr);
+    EXPECT_FALSE(no_op_summary->published);
+    EXPECT_EQ(harness.content_puts(), 0U);
+    EXPECT_FALSE(std::filesystem::exists(harness.remote_path(*orphan)));
+    const auto after_no_op =
+        kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(after_no_op.has_value() && *after_no_op);
+    EXPECT_EQ((*after_no_op)->commit_id, (*before)->commit_id);
+    EXPECT_EQ((*after_no_op)->tree, (*before)->tree);
+
+    const auto hash = kasumi::hasher::hash_string("protected content");
+    const auto content = harness.content_path(hash);
+    ASSERT_TRUE(std::filesystem::remove(content));
+    harness.reset_transfer_counts();
+    const auto repaired = harness.sync();
+    ASSERT_TRUE(repaired.has_value()) << repaired.error().detail;
+    EXPECT_EQ(harness.content_puts(), 1U);
+    EXPECT_TRUE(std::filesystem::is_regular_file(content));
+    const auto* summary =
+        std::get_if<kasumi::application::SyncCompleted>(&repaired->data);
+    ASSERT_NE(summary, nullptr);
+    EXPECT_FALSE(summary->published);
+
+    const auto after = kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(after.has_value() && *after);
+    EXPECT_EQ((*after)->commit_id, (*before)->commit_id);
+    EXPECT_EQ((*after)->tree, (*before)->tree);
+    const auto audited = harness.fsck();
+    ASSERT_TRUE(audited.has_value()) << audited.error().detail;
+}
+
+TEST(SyncGcCertificationTest,
+     LogicalDeletionStaysDeletedAcrossGcAndNoOpSync) {
+    SyncHarness harness("gc-r4-delete-gc-noop");
+    ASSERT_TRUE(harness.valid());
+    harness.write("deleted.txt", "logically deleted");
+    ASSERT_TRUE(harness.sync().has_value());
+    ASSERT_TRUE(std::filesystem::remove(harness.local() / "deleted.txt"));
+
+    const auto deleted = harness.sync();
+    ASSERT_TRUE(deleted.has_value()) << deleted.error().detail;
+    const auto* deleted_summary =
+        std::get_if<kasumi::application::SyncCompleted>(&deleted->data);
+    ASSERT_NE(deleted_summary, nullptr);
+    EXPECT_TRUE(deleted_summary->published);
+    const auto deleted_state =
+        kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(deleted_state.has_value() && *deleted_state);
+
+    const auto collected = harness.collect_garbage();
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    const auto audited = harness.fsck();
+    ASSERT_TRUE(audited.has_value()) << audited.error().detail;
+    harness.reset_transfer_counts();
+    const auto no_op = harness.sync();
+    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
+    const auto* no_op_summary =
+        std::get_if<kasumi::application::SyncCompleted>(&no_op->data);
+    ASSERT_NE(no_op_summary, nullptr);
+    EXPECT_FALSE(no_op_summary->published);
+    EXPECT_EQ(harness.content_puts(), 0U);
+    EXPECT_FALSE(std::filesystem::exists(harness.local() / "deleted.txt"));
+    const auto final_state =
+        kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(final_state.has_value() && *final_state);
+    EXPECT_EQ((*final_state)->commit_id, (*deleted_state)->commit_id);
+}
+
+TEST(SyncGcCertificationTest,
+     MissingRemoteAndLocalContentDoesNotAdvanceHistory) {
+    SyncHarness harness("gc-r4-missing-unrecoverable-content");
+    ASSERT_TRUE(harness.valid());
+    harness.write("lost.txt", "unrecoverable content");
+    ASSERT_TRUE(harness.sync().has_value());
+    const auto before = kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(before.has_value() && *before);
+    const auto hash = kasumi::hasher::hash_string("unrecoverable content");
+    const auto content_id =
+        kasumi::crypto::content_identifier(harness.key(), hash);
+    const auto* required = kasumi::find_row((*before)->tree, "lost.txt");
+    ASSERT_NE(required, nullptr);
+    EXPECT_EQ(required->hash, hash);
+    const auto content = harness.content_path(hash);
+    ASSERT_TRUE(harness.remove_remote(content_id));
+    ASSERT_TRUE(std::filesystem::remove(harness.local() / "lost.txt"));
+    ASSERT_FALSE(std::filesystem::exists(harness.local() / "lost.txt"));
+    harness.reset_transfer_counts();
+
+    const auto partial = harness.sync();
+    ASSERT_TRUE(partial.has_value()) << partial.error().detail;
+    const auto* summary =
+        std::get_if<kasumi::application::SyncCompleted>(&partial->data);
+    ASSERT_NE(summary, nullptr);
+    EXPECT_FALSE(summary->published);
+    EXPECT_TRUE(summary->partial);
+    EXPECT_EQ(summary->pending, 1U);
+    ASSERT_EQ(summary->pending_paths.size(), 1U);
+    EXPECT_EQ(summary->pending_paths.front(), "lost.txt");
+    EXPECT_EQ(harness.content_puts(), 0U);
+    const auto after = kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(after.has_value() && *after);
+    EXPECT_EQ((*after)->commit_id, (*before)->commit_id);
+    EXPECT_EQ((*after)->ciphertext_id, (*before)->ciphertext_id);
+    EXPECT_EQ((*after)->tree, (*before)->tree);
+    ASSERT_EQ((*after)->pending_materializations.size(), 1U);
+    EXPECT_EQ((*after)->pending_materializations.front().path, "lost.txt");
+    EXPECT_EQ((*after)->pending_materializations.front().hash, hash);
+    EXPECT_FALSE(std::filesystem::exists(content));
+    EXPECT_FALSE(std::filesystem::exists(harness.remote_path(content_id)));
+    EXPECT_FALSE(std::filesystem::exists(harness.local() / "lost.txt"));
+
+    harness.reset_transfer_counts();
+    const auto repeated = harness.sync();
+    ASSERT_TRUE(repeated.has_value()) << repeated.error().detail;
+    const auto* repeated_summary =
+        std::get_if<kasumi::application::SyncCompleted>(&repeated->data);
+    ASSERT_NE(repeated_summary, nullptr);
+    EXPECT_FALSE(repeated_summary->published);
+    EXPECT_TRUE(repeated_summary->partial);
+    EXPECT_EQ(repeated_summary->pending_paths,
+              std::vector<std::filesystem::path>{"lost.txt"});
+    EXPECT_EQ(harness.content_puts(), 0U);
+    const auto after_repeat =
+        kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(after_repeat.has_value() && *after_repeat);
+    EXPECT_EQ((*after_repeat)->commit_id, (*before)->commit_id);
+    ASSERT_EQ((*after_repeat)->pending_materializations.size(), 1U);
+    EXPECT_EQ((*after_repeat)->pending_materializations.front().hash, hash);
+}
+
+TEST(SyncGcCertificationTest,
+     ReplacedRemoteContentFailsClosedBeforeDownloadMutation) {
+    SyncHarness source("gc-r4-corrupt-download-source");
+    ASSERT_TRUE(source.valid());
+    source.write("protected.txt", "authenticated content");
+    ASSERT_TRUE(source.sync().has_value());
+    const auto content_id = kasumi::crypto::content_identifier(
+        source.key(), kasumi::hasher::hash_string("authenticated content"));
+    source.write_remote(content_id, "replacement bytes");
+
+    SyncHarness consumer("gc-r4-corrupt-download-consumer",
+                         source.storage_root());
+    ASSERT_TRUE(consumer.valid());
+    const auto blocked = consumer.sync();
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_FALSE(std::filesystem::exists(consumer.local() / "protected.txt"));
+    EXPECT_EQ(consumer.content_puts(), 0U);
+    EXPECT_TRUE(std::filesystem::exists(consumer.remote_path(content_id)));
+}
+
+TEST(SyncGcCertificationTest, BarrierAppearingAfterWriterAdmissionBlocksRepair) {
+    SyncHarness harness("gc-r4-barrier-during-repair");
+    ASSERT_TRUE(harness.valid());
+    harness.write("file.txt", "barrier protected repair");
+    ASSERT_TRUE(harness.sync().has_value());
+    const auto before = kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(before.has_value() && *before);
+
+    const auto hash = kasumi::hasher::hash_string("barrier protected repair");
+    const auto path = harness.content_path(hash);
+    ASSERT_TRUE(std::filesystem::remove(path));
+    harness.reset_transfer_counts();
+    harness.place_barrier_after_writer_admission();
+
+    const auto blocked = harness.sync();
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_TRUE(harness.barrier_injected());
+    EXPECT_EQ(harness.content_puts(), 0U);
+    EXPECT_FALSE(std::filesystem::exists(path));
+    const auto after = kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(after.has_value() && *after);
+    EXPECT_EQ((*after)->commit_id, (*before)->commit_id);
+    EXPECT_EQ((*after)->tree, (*before)->tree);
+}
+
+TEST(SyncGcCertificationTest,
+     BarrierCreatedAfterFinalAdmissionObservationCanRaceWithPublication) {
+    SyncHarness harness("gc-r4-admission-check-to-put-race");
+    ASSERT_TRUE(harness.valid());
+    harness.write("file.txt", "before race");
+    ASSERT_TRUE(harness.sync().has_value());
+    harness.write("file.txt", "after race");
+    harness.reset_transfer_counts();
+    harness.place_barrier_after_final_admission_observation();
+
+    const auto synchronized = harness.sync();
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    EXPECT_TRUE(harness.barrier_injected());
+    EXPECT_EQ(harness.content_puts(), 1U);
+    EXPECT_TRUE(std::filesystem::exists(harness.remote_path(
+        kasumi::application::history_storage::derive_remote_layout(
+            harness.key())
+            .barrier_identifier)));
+    const auto* summary =
+        std::get_if<kasumi::application::SyncCompleted>(&synchronized->data);
+    ASSERT_NE(summary, nullptr);
+    EXPECT_TRUE(summary->published);
 }
 
 namespace {
