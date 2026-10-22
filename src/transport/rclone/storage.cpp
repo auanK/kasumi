@@ -24,6 +24,8 @@ constexpr std::size_t maximum_response_size = 64 * 1024;
 constexpr std::size_t maximum_list_response_size = 64 * 1024 * 1024;
 constexpr std::size_t maximum_check_response_size = 64 * 1024 * 1024;
 constexpr auto quick_timeout = std::chrono::seconds{30};
+// Drive DELETE calls show 5-20 s tails; 120 s avoids ambiguous client timeouts.
+constexpr auto remove_timeout = std::chrono::seconds{120};
 constexpr auto control_read_deadline = std::chrono::minutes{2};
 constexpr auto transfer_timeout = std::chrono::minutes{30};
 
@@ -1251,7 +1253,7 @@ RemovalResult rclone_remove(void* context, std::string_view identifier) {
                      nlohmann::json{{"fs", rooted_remote_fs(*state)},
                                     {"remote", std::string{identifier}}},
                      maximum_response_size,
-                     quick_timeout);
+                     remove_timeout);
     if (!deleted) {
         if (not_found(deleted.error())) {
             return Removal::AlreadyAbsent;

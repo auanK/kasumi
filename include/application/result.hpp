@@ -112,8 +112,9 @@ enum class GarbageCollectMutationState {
     Uncertain,
 };
 
-// Diagnostic context for a garbage-collection failure. This records only what
-// was observed or confirmed; an ambiguous mutation remains Uncertain.
+// Diagnostic context for a garbage-collection failure. confirmed_removed counts
+// REMOVE operations acknowledged by the transport, not an independent physical
+// audit; an ambiguous mutation remains Uncertain.
 struct GarbageCollectFailure {
     std::size_t candidate_objects = 0;
     std::size_t confirmed_removed = 0;

@@ -17,6 +17,8 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -106,15 +108,64 @@ struct Candidate {
     bool operator==(const Candidate&) const = default;
 };
 
+// Built once from the authenticated observation and consumed as-is by Apply.
+// The maintenance barrier excludes cooperative writers; there is no distributed
+// CAS, so later non-cooperative mutation is outside this contract.
+struct DeletionPlan {
+    std::vector<Candidate> candidates;
+    std::vector<std::string> protected_objects;
+};
+
 struct Observation {
     std::vector<std::string> logical_heads;
     std::vector<std::string> reachable_commits;
-    std::vector<std::string> required_commit_objects;
-    std::vector<std::string> retained_commit_objects;
     std::vector<std::string> reachable_content;
-    std::vector<std::string> orphan_contents;
-    std::vector<Candidate> candidates;
-    std::vector<std::string> physical_namespace;
+    DeletionPlan plan;
+};
+
+// Attributes transport reads to the phase that performed them. Perf tracing is
+// optional; when disabled every read returns zero.
+class PhaseTraffic {
+public:
+    explicit PhaseTraffic(std::string_view prefix)
+        : prefix_(prefix),
+          get_start_(platform::perf_trace::get_count("transport get")),
+          list_start_(platform::perf_trace::get_count("transport list") +
+                      platform::perf_trace::get_count("transport list prefix")),
+          presence_start_(
+              platform::perf_trace::get_count("transport presence")) {
+    }
+
+    ~PhaseTraffic() { finish(); }
+
+    PhaseTraffic(const PhaseTraffic&) = delete;
+    PhaseTraffic& operator=(const PhaseTraffic&) = delete;
+
+    void finish() noexcept {
+        if (finished_) {
+            return;
+        }
+        finished_ = true;
+        platform::perf_trace::count(
+            std::string{prefix_} + "get_calls",
+            platform::perf_trace::get_count("transport get") - get_start_);
+        platform::perf_trace::count(
+            std::string{prefix_} + "list_calls",
+            platform::perf_trace::get_count("transport list") +
+                platform::perf_trace::get_count("transport list prefix") -
+                list_start_);
+        platform::perf_trace::count(
+            std::string{prefix_} + "presence_calls",
+            platform::perf_trace::get_count("transport presence") -
+                presence_start_);
+    }
+
+private:
+    std::string_view prefix_;
+    std::uint64_t get_start_ = 0;
+    std::uint64_t list_start_ = 0;
+    std::uint64_t presence_start_ = 0;
+    bool finished_ = false;
 };
 
 Error make_error(ErrorCode code,
@@ -418,32 +469,112 @@ required_variants(const history_storage::ReachabilityInventory& inventory,
     return required;
 }
 
-std::vector<std::string> retained_variants(
-    const history_storage::ReachabilityInventory& inventory,
+std::expected<void, Error> validate_deletion_plan(
+    const DeletionPlan& plan,
+    const history_storage::ReachabilityInventory& history,
+    const std::vector<std::string>& orphan_contents,
     const history_storage::RemoteLayout& layout) {
-    auto retained = required_variants(inventory, layout);
-    for (const auto& commit : inventory.commits) {
-        if (commit.reachable) {
-            continue;
-        }
-        const auto variant = std::ranges::find_if(
-            commit.variants, [](const auto& value) {
-                return !value.identifier.empty() &&
-                       value.state == history_storage::detail::VariantState::Valid;
-            });
-        if (variant != commit.variants.end()) {
-            retained.push_back(variant->identifier);
+    platform::perf_trace::count("gc.plan_validations");
+    for (std::size_t index = 1; index < plan.candidates.size(); ++index) {
+        const auto& previous = plan.candidates[index - 1];
+        const auto& current = plan.candidates[index];
+        if (!(std::tie(previous.kind, previous.identifier) <
+              std::tie(current.kind, current.identifier))) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "deletion plan candidates are not sorted and unique"));
         }
     }
-    std::ranges::sort(retained);
-    retained.erase(std::ranges::unique(retained).begin(), retained.end());
-    return retained;
+
+    const std::unordered_set<std::string> protected_objects(
+        plan.protected_objects.begin(), plan.protected_objects.end());
+    std::unordered_set<std::string> deletions;
+    deletions.reserve(plan.candidates.size());
+    for (const auto& candidate : plan.candidates) {
+        if (candidate.identifier.empty() ||
+            history_storage::maintenance_protocol::is_control_object(
+                layout, candidate.identifier) ||
+            protected_objects.contains(candidate.identifier) ||
+            !deletions.insert(candidate.identifier).second) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "deletion plan intersects protected or control objects",
+                candidate.identifier));
+        }
+        if (candidate.kind == CandidateKind::Content) {
+            if (!std::ranges::binary_search(orphan_contents,
+                                            candidate.identifier)) {
+                return std::unexpected(make_error(
+                    ErrorCode::IntegrityFailure,
+                    "deletion plan contains an unclassified content object",
+                    candidate.identifier));
+            }
+            continue;
+        }
+        const auto commit =
+            std::ranges::find(history.commits,
+                              candidate.commit_id,
+                              &history_storage::ReachabilityCommit::commit_id);
+        if (commit == history.commits.end() || !commit->reachable ||
+            !commit->valid) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "deletion plan contains an unclassified commit variant",
+                candidate.identifier));
+        }
+        const auto variant =
+            std::ranges::find(commit->variants,
+                              candidate.identifier,
+                              &history_storage::ReachabilityVariant::identifier);
+        if (variant == commit->variants.end() ||
+            variant->state != history_storage::detail::VariantState::Valid) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "deletion plan contains an unclassified commit variant",
+                candidate.identifier));
+        }
+    }
+
+    for (const auto& commit : history.commits) {
+        if (!commit.reachable) {
+            continue;
+        }
+        const bool preserves_alternative = std::ranges::any_of(
+            commit.variants, [&](const auto& variant) {
+                return !variant.identifier.empty() &&
+                       variant.state ==
+                           history_storage::detail::VariantState::Valid &&
+                       !deletions.contains(variant.identifier);
+            });
+        if (!preserves_alternative) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "deletion plan removes every valid variant of a reachable commit",
+                commit.commit_id));
+        }
+    }
+
+    for (const auto& marker : history.markers) {
+        if (marker.state != history_storage::ReachabilityMarkerState::Valid ||
+            !marker.reference.has_value()) {
+            continue;
+        }
+        const auto identifier =
+            history_storage::commit_object(layout, *marker.reference);
+        if (deletions.contains(identifier)) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "deletion plan removes a head-selected variant", identifier));
+        }
+    }
+    return {};
 }
 
 std::expected<Observation, Error>
 observe(transport::Transport& storage,
         KeySpan key,
         const std::filesystem::path& workspace_root) {
+    PhaseTraffic analysis_traffic{"gc.analysis_"};
     platform::perf_trace::count("gc.analysis_observations");
     PerfTimer observation_trace{"gc.observation_us"};
     auto listing = [&] {
@@ -483,20 +614,10 @@ observe(transport::Transport& storage,
         return std::unexpected(valid.error());
     }
 
-    Observation result{
-        .logical_heads = history->logical_heads,
-        .reachable_commits = history->reachable_commits,
-        .required_commit_objects = required_variants(*history, layout),
-        .retained_commit_objects = retained_variants(*history, layout),
-        .reachable_content = content->reachable_content_ids,
-        .orphan_contents = {},
-        .candidates = {},
-        .physical_namespace = std::move(*listing),
-    };
-
     std::vector<std::string> orphan_ids = content->orphan_content_ids;
     std::ranges::sort(orphan_ids);
     orphan_ids.erase(std::ranges::unique(orphan_ids).begin(), orphan_ids.end());
+    std::vector<std::string> valid_orphans;
     if (!orphan_ids.empty()) {
         platform::perf_trace::count("gc.candidate_audit_batches");
         platform::perf_trace::count("gc.candidate_audit_objects",
@@ -518,16 +639,35 @@ observe(transport::Transport& storage,
             if (!entry.reachable &&
                 entry.state == history_storage::ContentObjectState::Present &&
                 std::ranges::binary_search(orphan_ids, entry.content_id)) {
-                result.orphan_contents.push_back(entry.content_id);
-                result.candidates.push_back(Candidate{
-                    .kind = CandidateKind::Content,
-                    .identifier = entry.content_id,
-                    .commit_id = {},
-                });
+                valid_orphans.push_back(entry.content_id);
             }
         }
     }
+    std::ranges::sort(valid_orphans);
 
+    DeletionPlan plan;
+    plan.protected_objects = required_variants(*history, layout);
+    plan.protected_objects.insert(plan.protected_objects.end(),
+                                  content->reachable_content_ids.begin(),
+                                  content->reachable_content_ids.end());
+    plan.protected_objects.insert(plan.protected_objects.end(),
+                                  history->valid_epochs.begin(),
+                                  history->valid_epochs.end());
+    plan.protected_objects.insert(plan.protected_objects.end(),
+                                  history->orphan_epochs.begin(),
+                                  history->orphan_epochs.end());
+    std::ranges::sort(plan.protected_objects);
+    plan.protected_objects.erase(
+        std::ranges::unique(plan.protected_objects).begin(),
+        plan.protected_objects.end());
+
+    for (const auto& identifier : valid_orphans) {
+        plan.candidates.push_back(Candidate{
+            .kind = CandidateKind::Content,
+            .identifier = identifier,
+            .commit_id = {},
+        });
+    }
     for (const auto& commit : history->commits) {
         if (!commit.reachable) {
             continue;
@@ -535,63 +675,39 @@ observe(transport::Transport& storage,
         for (const auto& variant : commit.variants) {
             if (variant.identifier.empty() ||
                 variant.state != history_storage::detail::VariantState::Valid ||
-                std::ranges::binary_search(result.required_commit_objects,
+                std::ranges::binary_search(plan.protected_objects,
                                            variant.identifier)) {
                 continue;
             }
-            result.candidates.push_back(Candidate{
+            plan.candidates.push_back(Candidate{
                 .kind = CandidateKind::CommitVariant,
                 .identifier = variant.identifier,
                 .commit_id = commit.commit_id,
             });
         }
     }
-
-    std::ranges::sort(result.candidates,
+    std::ranges::sort(plan.candidates,
                       [](const auto& left, const auto& right) {
                           return std::tie(left.kind, left.identifier) <
                                  std::tie(right.kind, right.identifier);
                       });
-    result.candidates.erase(
-        std::ranges::unique(result.candidates,
-                            [](const auto& left, const auto& right) {
-                                return left.kind == right.kind &&
-                                       left.identifier == right.identifier;
-                            })
+    plan.candidates.erase(
+        std::ranges::unique(plan.candidates)
             .begin(),
-        result.candidates.end());
-    return result;
-}
+        plan.candidates.end());
 
-bool same_observation(const Observation& left,
-                      const Observation& right) noexcept {
-    return left.logical_heads == right.logical_heads &&
-           left.reachable_commits == right.reachable_commits &&
-           left.required_commit_objects == right.required_commit_objects &&
-           left.retained_commit_objects == right.retained_commit_objects &&
-           left.reachable_content == right.reachable_content &&
-           left.orphan_contents == right.orphan_contents &&
-           left.candidates == right.candidates &&
-           left.physical_namespace == right.physical_namespace;
-}
+    if (auto valid =
+            validate_deletion_plan(plan, *history, valid_orphans, layout);
+        !valid) {
+        return std::unexpected(valid.error());
+    }
 
-std::expected<std::vector<std::string>, Error>
-fresh_namespace(transport::Transport& storage,
-                const std::vector<std::string>& expected) {
-    platform::perf_trace::count("gc.namespace_list_calls");
-    PerfTimer listing_trace{"gc.namespace_list_us"};
-    auto listing = transport::list(storage);
-    if (!listing) {
-        return std::unexpected(
-            transport_error(listing.error(), "could not list remote objects"));
-    }
-    std::ranges::sort(*listing);
-    if (*listing != expected) {
-        return std::unexpected(
-            make_error(ErrorCode::ConcurrentChange,
-                       "physical namespace changed during garbage collection"));
-    }
-    return *listing;
+    return Observation{
+        .logical_heads = std::move(history->logical_heads),
+        .reachable_commits = std::move(history->reachable_commits),
+        .reachable_content = std::move(content->reachable_content_ids),
+        .plan = std::move(plan),
+    };
 }
 
 std::expected<void, Error>
@@ -623,208 +739,6 @@ require_barrier_ownership(const protocol::RegistrationState& barrier) {
     auto verified = protocol::verify_registration(barrier);
     if (!verified) {
         return std::unexpected(protocol_error(verified.error()));
-    }
-    return {};
-}
-
-std::expected<void, Error>
-revalidate_variant(transport::Transport& storage,
-                   KeySpan key,
-                   const std::filesystem::path& workspace_root,
-                   const std::vector<std::string>& namespace_snapshot,
-                   const std::vector<std::string>& retained_commit_objects,
-                   const history_storage::RemoteLayout& layout,
-                   const Candidate& candidate) {
-    platform::perf_trace::count("gc.variant_revalidations");
-    PerfTimer revalidation_trace{"gc.variant_revalidation_us"};
-    std::vector<std::string> identifiers;
-    identifiers.reserve(namespace_snapshot.size());
-    for (const auto& identifier : namespace_snapshot) {
-        if (!history_storage::parse_commit_object(layout, identifier) ||
-            identifier == candidate.identifier ||
-            std::ranges::binary_search(retained_commit_objects, identifier)) {
-            identifiers.push_back(identifier);
-        }
-    }
-    // Retained alternatives and the candidate are fetched and authenticated anew.
-    platform::perf_trace::count("gc.variant_revalidation_omitted_objects",
-                                namespace_snapshot.size() - identifiers.size());
-    platform::perf_trace::count("gc.history_reconstruction_attempts");
-    auto history = history_storage::inventory_reachability(
-        storage, key, identifiers, workspace_root);
-    if (!history) {
-        return std::unexpected(history_error(history.error()));
-    }
-    platform::perf_trace::count("gc.history_reconstructions");
-    if (auto valid = validate_history(*history); !valid) {
-        return std::unexpected(valid.error());
-    }
-    const auto required = required_variants(*history, layout);
-    if (std::ranges::binary_search(required, candidate.identifier)) {
-        return std::unexpected(
-            make_error(ErrorCode::ConcurrentChange,
-                       "commit variant became required during collection",
-                       candidate.identifier));
-    }
-    const auto commit =
-        std::ranges::find(history->commits,
-                          candidate.commit_id,
-                          &history_storage::ReachabilityCommit::commit_id);
-    if (commit == history->commits.end() || !commit->reachable) {
-        return std::unexpected(
-            make_error(ErrorCode::ConcurrentChange,
-                       "commit variant is no longer reachable",
-                       candidate.identifier));
-    }
-    const auto variant =
-        std::ranges::find(commit->variants,
-                          candidate.identifier,
-                          &history_storage::ReachabilityVariant::identifier);
-    if (variant == commit->variants.end() ||
-        variant->state != history_storage::detail::VariantState::Valid) {
-        return std::unexpected(make_error(ErrorCode::ConcurrentChange,
-                                          "commit variant is no longer valid",
-                                          candidate.identifier));
-    }
-    return {};
-}
-
-std::expected<void, Error>
-revalidate_content(transport::Transport& storage,
-                   KeySpan key,
-                   const std::filesystem::path& workspace_root,
-                   const std::vector<std::string>& expected_namespace,
-                   const Candidate& candidate) {
-    platform::perf_trace::count("gc.content_revalidations");
-    platform::perf_trace::count("gc.content_revalidation_list_calls");
-    PerfTimer revalidation_trace{"gc.content_revalidation_us"};
-    auto listing = [&] {
-        PerfTimer trace{"gc.content_revalidation_list_us"};
-        return transport::list(storage);
-    }();
-    if (!listing) {
-        return std::unexpected(
-            transport_error(listing.error(), "could not list remote objects"));
-    }
-    std::ranges::sort(*listing);
-
-    platform::perf_trace::count("gc.history_reconstruction_attempts");
-    auto history = history_storage::inventory_reachability(
-        storage, key, *listing, workspace_root);
-    if (!history) {
-        return std::unexpected(history_error(history.error()));
-    }
-    platform::perf_trace::count("gc.history_reconstructions");
-    if (auto valid = validate_history(*history); !valid) {
-        return std::unexpected(valid.error());
-    }
-
-    const std::array<std::string, 1> identifiers{candidate.identifier};
-    auto audited = [&] {
-        PerfTimer trace{"gc.content_revalidation_audit_us"};
-        return history_storage::inventory_content_reachability(
-            storage,
-            key,
-            std::span<const std::string>{identifiers},
-            *history,
-            workspace_root,
-            true);
-    }();
-    if (!audited) {
-        return std::unexpected(history_error(audited.error()));
-    }
-    if (!audited->unknown_storage_objects.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::ConcurrentChange,
-                       "content candidate changed classification",
-                       candidate.identifier));
-    }
-    const auto entry =
-        std::ranges::find(audited->contents,
-                          candidate.identifier,
-                          &history_storage::ContentEntry::content_id);
-    if (entry == audited->contents.end()) {
-        return std::unexpected(
-            make_error(ErrorCode::ConcurrentChange,
-                       "content candidate disappeared during revalidation",
-                       candidate.identifier));
-    }
-    if (entry->reachable) {
-        return std::unexpected(
-            make_error(ErrorCode::ConcurrentChange,
-                       "content candidate became reachable during collection",
-                       candidate.identifier));
-    }
-    if (entry->state != history_storage::ContentObjectState::Present ||
-        !std::ranges::binary_search(audited->orphan_content_ids,
-                                    candidate.identifier)) {
-        return std::unexpected(
-            make_error(ErrorCode::ConcurrentChange,
-                       "content candidate is no longer an authenticated orphan",
-                       candidate.identifier));
-    }
-    if (*listing != expected_namespace) {
-        return std::unexpected(
-            make_error(ErrorCode::ConcurrentChange,
-                       "physical namespace changed during content revalidation",
-                       candidate.identifier));
-    }
-    return {};
-}
-
-std::expected<void, Error>
-revalidate_candidate(transport::Transport& storage,
-                     KeySpan key,
-                     const std::filesystem::path& workspace_root,
-                     const history_storage::RemoteLayout& layout,
-                     const std::vector<std::string>& namespace_snapshot,
-                     const std::vector<std::string>& retained_commit_objects,
-                     const Candidate& candidate) {
-    if (candidate.kind == CandidateKind::CommitVariant) {
-        return revalidate_variant(storage,
-                                  key,
-                                  workspace_root,
-                                  namespace_snapshot,
-                                  retained_commit_objects,
-                                  layout,
-                                  candidate);
-    }
-    return revalidate_content(
-        storage, key, workspace_root, namespace_snapshot, candidate);
-}
-
-std::expected<void, Error>
-require_candidate_present(transport::Transport& storage,
-                          const Candidate& candidate) {
-    platform::perf_trace::count("gc.candidate_presence_checks");
-    PerfTimer presence_trace{"gc.candidate_presence_us"};
-    auto presence = transport::presence(storage, candidate.identifier);
-    if (!presence) {
-        return std::unexpected(
-            transport_error(presence.error(), "could not verify candidate"));
-    }
-    if (*presence != transport::Presence::Present) {
-        return std::unexpected(
-            make_error(ErrorCode::ConcurrentChange,
-                       "candidate disappeared before removal",
-                       candidate.identifier));
-    }
-    return {};
-}
-
-std::expected<void, Error> confirm_removal(transport::Transport& storage,
-                                           const Candidate& candidate) {
-    platform::perf_trace::count("gc.removal_confirmation_checks");
-    PerfTimer confirmation_trace{"gc.removal_confirmation_us"};
-    auto presence = transport::presence(storage, candidate.identifier);
-    if (!presence) {
-        return std::unexpected(transport_error(
-            presence.error(), "removal visibility is uncertain"));
-    }
-    if (*presence != transport::Presence::Absent) {
-        return std::unexpected(make_error(ErrorCode::ConcurrentChange,
-                                          "removal was not visible",
-                                          candidate.identifier));
     }
     return {};
 }
@@ -959,212 +873,96 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         failure_diagnostic.stage = GarbageCollectStage::Analyzing;
         trace.enter(GarbageCollectStage::Analyzing);
         notify(on_progress, GarbageCollectStage::Analyzing, std::nullopt, 0);
-        if (!*online) {
-            auto snapshot = [&] {
-                PerfTimer timer{"gc.first_observation_us"};
-                return observe(storage, key, workspace_root);
-            }();
-            if (!snapshot) {
-                return finish(std::unexpected(snapshot.error()));
-            }
-            failure_diagnostic.stage = GarbageCollectStage::Finalizing;
-            failure_diagnostic.candidate_objects = snapshot->candidates.size();
-            candidate_count_known = true;
-            if (platform::perf_trace::enabled()) {
-                platform::perf_trace::count(
-                    "gc.candidate_content_count",
-                    static_cast<std::uint64_t>(std::ranges::count_if(
-                        snapshot->candidates, [](const auto& candidate) {
-                            return candidate.kind == CandidateKind::Content;
-                        })));
-                platform::perf_trace::count(
-                    "gc.candidate_variant_count",
-                    static_cast<std::uint64_t>(std::ranges::count_if(
-                        snapshot->candidates, [](const auto& candidate) {
-                            return candidate.kind ==
-                                   CandidateKind::CommitVariant;
-                        })));
-            }
-            notify(on_progress,
-                   GarbageCollectStage::Finalizing,
-                   snapshot->candidates.size(),
-                   0);
-            return finish(GarbageCollectResult{
-                .candidate_objects = snapshot->candidates.size(),
-                .removed_objects = 0,
-                .analysis_only = true,
-            });
-        }
-
-        auto first = [&] {
+        auto snapshot = [&] {
             PerfTimer timer{"gc.first_observation_us"};
             return observe(storage, key, workspace_root);
         }();
-        if (!first) {
-            return finish(std::unexpected(first.error()));
-        }
-        if (auto cancelled = cancellation_error(); cancelled.has_value()) {
-            return finish(std::unexpected(std::move(*cancelled)));
-        }
-        if (auto writers = require_no_writers(storage, layout); !writers) {
-            return finish(std::unexpected(writers.error()));
-        }
-        if (auto verified = require_barrier_ownership(cleanup.registration);
-            !verified) {
-            return finish(std::unexpected(verified.error()));
+        if (!snapshot) {
+            return finish(std::unexpected(snapshot.error()));
         }
 
-        auto second = [&] {
-            PerfTimer timer{"gc.second_observation_us"};
-            return observe(storage, key, workspace_root);
-        }();
-        if (!second) {
-            return finish(std::unexpected(second.error()));
-        }
-        const bool observations_match = [&] {
-            PerfTimer timer{"gc.observation_comparison_us"};
-            return same_observation(*first, *second);
-        }();
-        if (!observations_match) {
-            return finish(
-                std::unexpected(make_error(ErrorCode::ConcurrentChange,
-                                           "remote observation changed during "
-                                           "garbage collection analysis")));
-        }
-
-        auto expected_namespace = [&] {
-            PerfTimer timer{"gc.stabilization_list_us"};
-            return fresh_namespace(storage, second->physical_namespace);
-        }();
-        if (!expected_namespace) {
-            return finish(std::unexpected(expected_namespace.error()));
-        }
-        if (auto writers = require_no_writers(storage, layout); !writers) {
-            return finish(std::unexpected(writers.error()));
-        }
-        if (auto verified = require_barrier_ownership(cleanup.registration);
-            !verified) {
-            return finish(std::unexpected(verified.error()));
-        }
-
-        const auto candidate_count = second->candidates.size();
+        const auto candidate_count = snapshot->plan.candidates.size();
         failure_diagnostic.candidate_objects = candidate_count;
         candidate_count_known = true;
         if (platform::perf_trace::enabled()) {
             platform::perf_trace::count(
                 "gc.candidate_content_count",
                 static_cast<std::uint64_t>(std::ranges::count_if(
-                    second->candidates, [](const auto& candidate) {
+                    snapshot->plan.candidates, [](const auto& candidate) {
                         return candidate.kind == CandidateKind::Content;
                     })));
             platform::perf_trace::count(
                 "gc.candidate_variant_count",
                 static_cast<std::uint64_t>(std::ranges::count_if(
-                    second->candidates, [](const auto& candidate) {
+                    snapshot->plan.candidates, [](const auto& candidate) {
                         return candidate.kind == CandidateKind::CommitVariant;
                     })));
         }
+
+        if (!*online) {
+            failure_diagnostic.stage = GarbageCollectStage::Finalizing;
+            notify(on_progress,
+                   GarbageCollectStage::Finalizing,
+                   candidate_count,
+                   0);
+            return finish(GarbageCollectResult{
+                .candidate_objects = candidate_count,
+                .removed_objects = 0,
+                .analysis_only = true,
+            });
+        }
+
         failure_diagnostic.stage = GarbageCollectStage::Applying;
         trace.enter(GarbageCollectStage::Applying);
         notify(on_progress, GarbageCollectStage::Applying, candidate_count, 0);
-        std::size_t removed_objects = 0;
-        for (const auto& candidate : second->candidates) {
-            failure_diagnostic.failed_identifier.reset();
-            failure_diagnostic.mutation_state =
-                GarbageCollectMutationState::NotAttempted;
-            failure_diagnostic.transport_error.reset();
-
-            if (auto cancelled = cancellation_error(); cancelled.has_value()) {
-                return finish(std::unexpected(std::move(*cancelled)));
-            }
-            failure_diagnostic.failed_identifier = candidate.identifier;
-            platform::perf_trace::count(
-                "gc.apply.candidate_namespace_list_calls");
-            auto namespace_check = [&] {
-                PerfTimer timer{"gc.apply.candidate_namespace_list_us"};
-                return fresh_namespace(storage, *expected_namespace);
-            }();
-            if (!namespace_check) {
-                return finish(std::unexpected(namespace_check.error()));
-            }
-            if (auto writers = require_no_writers(storage, layout); !writers) {
-                return finish(std::unexpected(writers.error()));
-            }
-            if (auto eligible = revalidate_candidate(storage,
-                                                     key,
-                                                     workspace_root,
-                                                     layout,
-                                                     *expected_namespace,
-                                                     second->retained_commit_objects,
-                                                     candidate);
-                !eligible) {
-                return finish(std::unexpected(eligible.error()));
-            }
-            if (auto present = require_candidate_present(storage, candidate);
-                !present) {
-                return finish(std::unexpected(present.error()));
-            }
-            if (auto verified = require_barrier_ownership(cleanup.registration);
-                !verified) {
-                return finish(std::unexpected(verified.error()));
-            }
-            if (auto cancelled = cancellation_error(); cancelled.has_value()) {
-                return finish(std::unexpected(std::move(*cancelled)));
-            }
-
-            mutation_in_flight = true;
-            platform::perf_trace::count("gc.remove_attempts");
-            auto removed = [&] {
-                PerfTimer timer{"gc.remove_us"};
-                return transport::remove(storage, candidate.identifier);
-            }();
-            mutation_in_flight = false;
-            if (!removed) {
-                failure_diagnostic.mutation_state =
-                    transport::mutation_result_is_ambiguous(removed.error())
-                        ? GarbageCollectMutationState::Uncertain
-                        : GarbageCollectMutationState::NotAttempted;
-                return finish(std::unexpected(
-                    transport_error(removed.error(), "object removal failed")));
-            }
-            if (*removed != transport::Removal::Removed) {
+        auto apply = [&]() -> std::expected<std::size_t, Error> {
+            PhaseTraffic apply_traffic{"gc.apply_"};
+            std::size_t acknowledged_removals = 0;
+            for (const auto& candidate : snapshot->plan.candidates) {
+                failure_diagnostic.failed_identifier.reset();
                 failure_diagnostic.mutation_state =
                     GarbageCollectMutationState::NotAttempted;
-                return finish(std::unexpected(
-                    make_error(ErrorCode::ConcurrentChange,
-                               "candidate disappeared during removal",
-                               candidate.identifier)));
-            }
+                failure_diagnostic.transport_error.reset();
 
-            failure_diagnostic.mutation_state =
-                GarbageCollectMutationState::Uncertain;
-            if (auto confirmed = confirm_removal(storage, candidate);
-                !confirmed) {
+                if (auto cancelled = cancellation_error();
+                    cancelled.has_value()) {
+                    return std::unexpected(std::move(*cancelled));
+                }
+                failure_diagnostic.failed_identifier = candidate.identifier;
+                platform::perf_trace::count("gc.remove_attempts");
+                platform::perf_trace::count("gc.candidate_remove_attempts");
+                mutation_in_flight = true;
+                auto removed = [&] {
+                    PerfTimer timer{"gc.remove_us"};
+                    return transport::remove(storage, candidate.identifier);
+                }();
+                mutation_in_flight = false;
+                if (!removed) {
+                    failure_diagnostic.mutation_state =
+                        transport::mutation_result_is_ambiguous(removed.error())
+                            ? GarbageCollectMutationState::Uncertain
+                            : GarbageCollectMutationState::NotAttempted;
+                    return std::unexpected(transport_error(
+                        removed.error(), "object removal failed"));
+                }
+                // Both outcomes acknowledge the transport-level REMOVE; the
+                // collector does not read the object back to prove absence.
+                ++acknowledged_removals;
+                platform::perf_trace::count("gc.candidate_remove_acknowledged");
+                failure_diagnostic.confirmed_removed = acknowledged_removals;
                 failure_diagnostic.mutation_state =
-                    GarbageCollectMutationState::Uncertain;
-                return finish(std::unexpected(confirmed.error()));
+                    GarbageCollectMutationState::Confirmed;
+                notify(on_progress,
+                       GarbageCollectStage::Applying,
+                       candidate_count,
+                       acknowledged_removals);
             }
-
-            ++removed_objects;
-            failure_diagnostic.confirmed_removed = removed_objects;
-            failure_diagnostic.mutation_state =
-                GarbageCollectMutationState::Confirmed;
-            failure_diagnostic.transport_error.reset();
-
-            const auto found =
-                std::ranges::find(*expected_namespace, candidate.identifier);
-            if (found == expected_namespace->end()) {
-                return finish(std::unexpected(make_error(
-                    ErrorCode::ConcurrentChange,
-                    "removed object was absent from the expected namespace",
-                    candidate.identifier)));
-            }
-            expected_namespace->erase(found);
-            notify(on_progress,
-                   GarbageCollectStage::Applying,
-                   candidate_count,
-                   removed_objects);
+            return acknowledged_removals;
+        }();
+        if (!apply) {
+            return finish(std::unexpected(apply.error()));
         }
+        const auto removed_objects = *apply;
 
         failure_diagnostic.stage = GarbageCollectStage::Finalizing;
         trace.enter(GarbageCollectStage::Finalizing);
@@ -1177,18 +975,6 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                GarbageCollectStage::Finalizing,
                candidate_count,
                removed_objects);
-        auto final_namespace = [&] {
-            platform::perf_trace::count("gc.final_namespace_list_calls");
-            PerfTimer timer{"gc.final_namespace_check_us"};
-            return fresh_namespace(storage, *expected_namespace);
-        }();
-        if (!final_namespace) {
-            return finish(std::unexpected(final_namespace.error()));
-        }
-        if (auto verified = require_barrier_ownership(cleanup.registration);
-            !verified) {
-            return finish(std::unexpected(verified.error()));
-        }
 
         return finish(GarbageCollectResult{
             .candidate_objects = candidate_count,

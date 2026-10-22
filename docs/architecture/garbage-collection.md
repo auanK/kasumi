@@ -1,211 +1,210 @@
 # Garbage Collection
 
-> **Phase GC-R2.1 status:** the quarantine subsystem is gone and the
-> direct-deletion collector is implemented and connected to
-> `Operation::GarbageCollect`. It removes one authenticated candidate at a
-> time, revalidates current history and ownership before each deletion, counts
-> only confirmed removals, and preserves partial-failure diagnostics. This
-> remains best-effort maintenance, not a distributed lock or fencing
-> mechanism. Fsck, Sync, transport operations, writers, barriers, probes, and
-> maintenance inspection share the same operational limits described below.
-
-## What was removed
-
-The entire quarantine lifecycle is gone: quarantine inventory, staging,
-authenticated metadata, retention, restoration, expiration/purge, repair,
-inspection, CLI commands (`gc purge-quarantine`, `gc repair-quarantine`,
-`remote quarantine`), translations, exclusive tests, live GC runners, smoke
-tests, and GC benchmarks. The remote layout no longer derives quarantine
-paths, and `RemoteObjectCategory::RetentionMetadata` no longer exists.
-
-Legacy objects that happen to live under an old quarantine path are **not**
-interpreted as deletion candidates and are not migrated, restored, or
-deleted by this phase. They are ordinary unknown remote objects unless a
-future explicit design assigns them another meaning. A raw `remote objects`
-listing is not a deletion list.
+> **Phase GC-R5.3 status:** the collector acquires cooperative exclusivity,
+> performs **one authenticated observation**, builds and validates a complete
+> global deletion plan, executes one sequential `REMOVE` per planned candidate,
+> and releases the maintenance barrier. Apply performs no history
+> reconstruction, candidate `GET`, candidate `LIST`, or candidate `PRESENCE`
+> call. A successful `REMOVE` is counted as acknowledged by the transport; the
+> collector does not read the object back to prove physical absence. Exclusivity
+> is cooperative, not a distributed transaction.
 
 ## Components and connection point
 
 - `Operation::GarbageCollect` dispatches through
-  `run_garbage_collect(OperationContext&)`, implemented in
+  `run_garbage_collect(OperationContext&)` in
   `src/application/use_cases/maintenance.cpp`.
 - `GarbageCollectStage` (`Preparing`, `Analyzing`, `Applying`, `Finalizing`),
-  `GarbageCollectProgress`, `GarbageCollectCompleted`
-  (`candidate_objects`, `analysis_only`, `removed_objects`), and
-  `GarbageCollectFailure` describe progress, successful counts, and partial
-  failure context.
-- `src/application/integrity/garbage_collection.cpp` contains the stable
-  observation, candidate selection, revalidation, direct removal, and barrier
-  cleanup implementation.
+  `GarbageCollectProgress`, `GarbageCollectCompleted`, and
+  `GarbageCollectFailure` describe progress, counts, and partial failure
+  context.
+- `src/application/integrity/garbage_collection.cpp` implements exclusivity
+  acquisition, the single authenticated observation, global plan construction
+  and validation, sequential deletion, and barrier cleanup.
 - Barrier establishment/ownership checks, writer admission, writer-marker
-  observations, and the provider-visibility probe remain separate protocol
-  components.
+  observation, and the provider-visibility probe remain separate protocol
+  components in `history_storage/maintenance_protocol.cpp`.
 - Reachability, Commit variant selection, Epoch anchors, historical retention
-  (`min_history_depth` and `min_history_age_hours`), content availability,
-  and transport batch/physical-hash capabilities remain the reachability
-  authority used by GC.
-- The GC collector lifecycle is unchanged by GC-R3. Normal Sync now checks
-  required Content availability on every run, including no-ops, and may repair
-  a missing required object from an authenticated local source. That repair is
-  still gated by writer admission and the GC barrier; it cannot upload while
-  the barrier blocks writers. Fsck, incremental observation, and the
-  `gc remove-writer` maintenance operation remain separate.
+  (`min_history_depth` and `min_history_age_hours`), content reachability, and
+  transport capabilities remain the authority used by GC.
 
 ## Admission and analysis contract
 
-The direct-deletion collector preserves the following order:
+The collector preserves this order:
 
-1. `application::execute` resolves the profile/key, validates retention,
-   takes the **local** profile lock, and opens the [transport](transport.md).
-   As with Fsck, pending [Sync transaction recovery](transactions-and-recovery.md)
-   runs **before** GC and can finish local or remote Sync effects or stop the
-   operation on uncertainty.
-2. GC publishes a verified, token-owned remote **barrier**. New Sync writers
-   register their own visible writer marker and reject admission if the
-   barrier is present. GC lists writer markers twice and re-verifies its own
-   barrier between checks. Any observed active or abandoned marker, malformed
-   control state, or observed loss of barrier ownership blocks collection
-   rather than guessing liveness.
-3. GC publishes a temporary provider-visibility probe, requires its presence
-   in two listings, removes it, and requires its absence in two listings. If
-   safe online mutation cannot be established, the collector must return
-   `analysis_only` after one validated reachability/candidate snapshot and
-   perform no deletion. Barrier/probe creation and cleanup may already have
-   touched the remote. Probe errors fail rather than imply safety.
-4. The collector takes **two complete observations** of the physical
-   namespace plus authenticated HEAD/Commit/Epoch reachability and content
-   inventory. The observations must agree on logical heads, reachable
-   Commits, required ciphertext variants, reachable content, candidates, and
-   physical identifiers. A final listing must match before any destructive
-   phase. Change, malformed history, unknown identifiers, missing required
-   content, or an unsafe transport result stops collection.
+1. `application::execute` resolves the profile/key, validates retention, takes
+   the **local** profile lock, and opens the transport. Pending
+   [Sync transaction recovery](transactions-and-recovery.md) runs before GC.
+2. GC publishes a verified, token-owned remote **barrier**. Cooperative Sync
+   writers register a visible writer marker and are denied admission while the
+   barrier is present. GC rejects any active or abandoned writer marker before
+   analysis.
+3. GC publishes a temporary provider-visibility probe, requires it to be
+   visible in listings, removes it, and requires its absence. Probe errors fail
+   closed. The probe is a transport precondition, not a second history
+   observation.
+4. After these preconditions, GC performs **one complete authenticated
+   observation**: physical listing, HEAD/Commit/Epoch reachability, commit
+   variants, content references, and orphan-content payload classification.
+   Malformed history, unknown objects, missing required content, invalid
+   control state, or transport errors stop collection before mutation.
+5. GC builds the complete deletion plan and validates the plan as a set before
+   the first `REMOVE`. If online mutation cannot be established, the collector
+   returns `analysis_only` and performs no candidate deletion.
 
-The reachability walk retains current logical heads and the history required
-by authenticated Epoch anchors/retention; a reachable Commit needs its marked
-Ciphertext ID or a valid required variant, not every redundant variant.
-Candidate selection excludes retained content and required variants.
-Unknown/protected objects are **not** inferred safe to delete, and Epoch
-objects are not deletion candidates.
+The single observation is authoritative for the rest of the run. The collector
+does not perform a second full reconstruction merely to repeat the first.
+
+## Global deletion plan
+
+The plan is an in-memory `std::vector` of candidates plus a sorted set of
+protected object identifiers. It is never persisted and is discarded at the end
+of the run. Candidate kinds are:
+
+- `CommitVariant`: a valid variant of a current reachable Commit that is not a
+  required variant.
+- `Content`: an authenticated, unreferenced payload that is physically present
+  and valid.
+
+The protected set includes:
+
+- every variant selected by a valid HEAD marker (all HEAD-selected ciphertext
+  variants are preserved);
+- at least one valid variant for every reachable, unmarked Commit, including
+  unmarked parents and Epoch-anchored Commits;
+- every reachable Content object;
+- valid Epoch objects and retained orphan Epoch objects;
+- all protocol/control objects by construction.
+
+Before the first DELETE the collector verifies:
+
+```text
+DELETE_SET ∩ PROTECTED_SET = ∅
+```
+
+It also verifies that candidates are sorted and unique, that every candidate is
+a classified Content or valid reachable Commit variant, that no control object
+is a candidate, that every reachable Commit retains at least one valid variant
+outside the deletion set, and that every HEAD-selected variant is outside the
+deletion set. Removing all variants of a Commit with multiple individually
+redundant variants is rejected before mutation.
+
+Unreachable Commit variants remain out of scope: the collector does not delete
+whole unreachable Commits. Unknown, invalid, or ambiguously classified objects
+are not inferred safe to delete. Epoch objects are never candidates.
 
 ## Destructive phase
 
-The former quarantine staging, metadata verification, retention, restoration,
-and purge steps no longer exist. The direct-deletion collector issues one
-REMOVE for one candidate at a time and applies these checks immediately before
-that mutation:
+Apply iterates the frozen plan in deterministic order and issues exactly one
+`REMOVE` per candidate:
 
-- the physical namespace still matches the observed namespace and no writer
-  marker is active;
-- a Commit variant is still a valid, redundant variant of a current reachable
-  Commit, or a Content object is still an authenticated, unreferenced payload
-  under a freshly authenticated current-history inventory;
-- the candidate identifier is still present and belongs to the authorized
-  candidate kind;
-- the maintenance barrier is still owned by this run; and
-- cancellation has not been requested.
+```text
+for candidate in deletion_plan:
+    result = transport.remove(candidate)
 
-After REMOVE, a PRESENCE check must report `Absent` before the removal is
-counted. An ambiguous DELETE is never retried automatically; its mutation
-state remains `Uncertain` and the object is not added to `removed_objects`. A
-failure that definitely did not mutate the object remains `NotAttempted`.
-Every post-Apply failure carries the candidate total,
-confirmed removals, failed identifier when one exists, operation stage,
-transport error category/message/native code when available, mutation state
-(`NotAttempted`, `Confirmed`, or `Uncertain`), and barrier cleanup status.
+    if result is successful:
+        increment acknowledged_removals
+        continue
 
-Barrier cleanup has a single owner. A normal result path attempts release at
-most once, a failed or ambiguous release is not retried during destruction,
-a foreign or replaced barrier is never removed, and primary and cleanup
-errors are both preserved. Destructive GC leaves unknown objects, legacy
-quarantine objects, and control objects untouched. It has no local
-transaction journal for remote deletions: a later run must re-observe remote
-state rather than trust an earlier partial result.
+    preserve failure diagnostic
+    stop applying further candidates
+```
 
-### Variant revalidation cost
+There is no per-candidate history reconstruction, candidate `GET`, candidate
+`LIST`, candidate `PRESENCE`, barrier-ownership recheck, writer recheck,
+read-back, retry, batching, quarantine, or persistent authorization cache.
 
-Both initial observations authenticate every physical CommitVariant. During
-Apply, a variant candidate's fresh history inventory reads all HEADs and
-Epochs, every marker-selected variant, one retained valid variant for each
-unmarked reachable Commit, one valid variant for each unreachable Commit,
-and the candidate itself. The retained identifiers are selected by the
-second full observation and never appear in its deletion candidates.
+A `Removed` or `AlreadyAbsent` result is transport-acknowledged completion and
+is counted in `removed_objects` / `confirmed_removed`. Those public names now
+mean **REMOVE operations acknowledged by the API**, not an independent physical
+audit. No presence check follows the delete to prove absence.
 
-Every selected payload is downloaded and authenticated again for every
-candidate. Only the choice of identifiers is reused; decoded Commits,
-HEADs, Epochs, authentication results, and destructive authorization are not
-cached. Another redundant variant of the same authenticated Commit ID
-cannot add different canonical parents or a different tree. Its bytes are
-not needed to authorize this candidate when a required alternative has
-just been fetched and authenticated. The full physical namespace still
-includes all variants and must match before each deletion.
+On a failed `REMOVE`, the collector preserves the transport error category,
+message, and native code; keeps the count of previously acknowledged removals;
+classifies the attempt (`NotAttempted` for a definite non-mutation, `Uncertain`
+for an ambiguous result); stops further deletion without retry; releases the
+barrier through the normal cleanup path; and returns the partial diagnostic.
+A later GC run starts from a new observation and does not reuse the old plan.
 
-Missing alternatives, changed HEADs/Epochs, replaced candidate or retained
-payloads, malformed history, unexpected namespace changes, writers, and lost
-barrier ownership stop collection. Same-name payload replacement is checked
-by fresh hashing, decryption/authentication, canonical encoding, and Commit
-identity validation. LIST equality alone is never evidence of byte stability.
-If a retained alternative becomes invalid, GC fails rather than falling back
-to an earlier authentication or a different unverified variant.
+Barrier cleanup remains special. It verifies ownership, attempts release at most
+once, never removes a foreign or replaced barrier, preserves primary and
+cleanup errors separately, and does not declare a healthy finish when release
+is ambiguous. The destructor never opens a second release path.
 
-Content revalidation continues to reconstruct the full current history and
-authenticate the Content candidate. After a confirmed removal, exactly that
-identifier is removed from the expected namespace. An ambiguous REMOVE stops
-the run without retry. Restart discards every in-memory selection.
+## Concurrency contract and removed guarantees
 
-Tracing distinguishes attempted history reconstructions from successfully
-returned inventories. The number of logical reconstructions remains one per
-candidate plus the initial observations; the reduction is in repeated downloads
-and authentications of unrelated redundant variants. Local GET counts and
-timings do not measure Google Drive HTTP requests. The cooperative protocol
-still has a check-to-mutation race without provider CAS.
+Exclusivity is **cooperative**:
 
-In the local two-Commit benchmark with 100 redundant variants, this reduced
-GETs from 5,766 to 816 while preserving 102 reconstructions, 211 LISTs,
-202 PRESENCE calls, and 100 confirmed candidate removals. Content benchmark
-operation counts were unchanged. These counts do not predict provider latency.
+- one authorized GC per vault;
+- the local profile lock;
+- the remote maintenance barrier;
+- writer registration and the initial writer check;
+- barrier ownership verification on acquisition and cleanup;
+- the provider-visibility probe.
 
-## Unreachable commits remain out of scope
+The protocol has no distributed CAS or fencing token. A non-cooperative agent
+can mutate the vault after the observation; such a change may invalidate the
+plan and is outside the cooperative contract. The collector does not claim to
+detect arbitrary external mutation during Apply, and it does not add repeated
+checks that shrink the race window without establishing atomicity.
 
-The collector does not collect whole unreachable Commits. Commit objects that
-are not reachable from current logical heads, Epoch anchors, or retention are
-preserved, together with their variants, even when they are no longer
-referenced. The only Commit-variant deletions are redundant valid variants of
-a currently reachable Commit with a required, freshly authenticated alternative.
+The previous implementation reconstructed and reauthenticated history before
+each candidate, compared two full observations, listed the namespace per
+candidate, checked writers and barrier ownership per candidate, and performed a
+post-`REMOVE` presence check. These guarantees are deliberately removed from
+Apply because they duplicated the observation and did not create atomicity.
+Cooperative writer admission and barrier ownership at acquisition/cleanup remain
+mandatory; tests cover them directly. Residual risk: a non-cooperative writer
+or provider change during Apply can make a planned deletion unsafe or leave an
+object unexpectedly absent.
 
-Collecting unreachable Commits would require a separate authenticated policy
-for their trees and content; inferring that policy from a raw listing is
-unsafe. `GarbageCollectionTest.UnreachableCommitVariantsArePreserved` fixes
-this boundary, and the same boundary applies to the `GC → Fsck → GC`
-regression: the second run must report zero candidates and zero removals.
+## Tracing
+
+Tracing keeps the existing phase timings and history counters and adds:
+
+```text
+gc.analysis_get_calls
+gc.analysis_list_calls
+gc.analysis_presence_calls
+
+gc.apply_get_calls
+gc.apply_list_calls
+gc.apply_presence_calls
+
+gc.candidate_remove_attempts
+gc.candidate_remove_acknowledged
+gc.history_reconstructions
+```
+
+The structural target is `gc.apply_get_calls = 0`,
+`gc.apply_list_calls = 0`, and `gc.apply_presence_calls = 0`; per-candidate
+maintenance reads must not reappear. Analysis `GET` counts depend on the number
+of distinct commit variants, markers, Epochs, and audited orphan payloads, not
+on the number of deletion candidates multiplied by full-history
+reconstruction. Barrier/probe control operations remain separate from candidate
+traffic.
 
 ## Operational contract
 
-**Warning — concurrent destructive maintenance is unsupported.** Run only
-one destructive maintenance operation per remote vault at a time, across all
-machines. Manual writer-marker removal must not overlap with another
-maintenance operation. Pause scheduled and interactive Sync on every client
-before destructive maintenance and keep it paused until maintenance finishes.
-That includes no-op Sync runs: they now probe required Content and may repair a
-missing object even when local files are unchanged. Writer admission rejects a
-repair while the barrier is visible, but the barrier is not a distributed lock.
-The local profile lock covers only processes using that profile on one
-machine. The remote barrier is a best-effort coordination mechanism built
-from ordinary storage operations. It can reduce the chance of overlap, but it
-is not a distributed lock or fencing mechanism; two maintenance commands can
-replace the shared barrier, and an ownership check can become stale before
-the next mutation.
+**Warning — concurrent destructive maintenance is unsupported.** Run only one
+destructive maintenance operation per remote vault at a time, across all
+machines. Manual writer-marker removal must not overlap with another maintenance
+operation. Pause scheduled and interactive Sync on every client before
+destructive maintenance and keep it paused until maintenance finishes. This
+includes no-op Sync runs: they probe required Content and may repair a missing
+object. Writer admission rejects a repair while the barrier is visible, but the
+barrier is not a distributed lock.
 
-The required `PUT`, `GET`, `LIST`, `PRESENCE`, and `REMOVE` operation names do
-not by themselves promise strong consistency. Destructive collection assumes
-the backend exposes completed changes to the listings and presence checks
-used by the protocol. The runtime probe tests visibility of its own newly
-published probe; passing it does not prove that every older object or writer
-marker is visible, nor certify provider-wide consistency. Confirm the
-backend's consistency guarantees independently before relying on
-destructive GC.
+The local profile lock covers only processes using that profile on one machine.
+The remote barrier is best-effort coordination built from ordinary storage
+operations. It reduces the chance of overlap but is not a distributed lock or
+fencing mechanism. The collector assumes that cooperative writers honor the
+barrier and that the backend exposes completed changes to the listings and
+presence checks used by the protocol. Passing the runtime probe does not prove
+provider-wide consistency or protect against non-cooperative mutation.
 
-An `analysis_only` result means no candidate removal occurred; it is not a
-selectable mode or proof that a backend which passed the probe is safe.
+An `analysis_only` result means no candidate removal occurred. It is not a
+selectable mode and not proof that a backend which passed the probe is safe.
 
 ### Maintenance procedure for retained operations
 
@@ -221,24 +220,23 @@ selectable mode or proof that a backend which passed the probe is safe.
    ambiguous transport errors as reasons to investigate before retrying.
 6. Preserve markers and control objects while resolving uncertainty. Do not
    delete protocol objects directly through the provider.
-7. Resume normal Sync activity after maintenance has completed and its
-   results have been inspected.
+7. Resume normal Sync activity after maintenance has completed and its results
+   have been inspected.
 
 ## Manual writer removal
 
 `kasumi gc remove-writer <profile> <writer-id>` is a separate manual recovery
 operation. Take the exact identifier from `kasumi remote writers <profile>`;
 Kasumi verifies the keyed writer namespace and removes only that marker. It
-refuses removal when a maintenance barrier is present, but this check does
-not provide distributed exclusion. Kasumi cannot determine safely whether the
-associated process is still active, so the operator must verify that no Sync
-or maintenance operation is running before proceeding. It neither removes
-barriers nor runs Sync or GC.
+refuses removal when a maintenance barrier is present, but this check does not
+provide distributed exclusion. Kasumi cannot determine safely whether the
+associated process is still active, so the operator must verify that no Sync or
+maintenance operation is running before proceeding. It neither removes barriers
+nor runs Sync or GC.
 
 ## Inspecting before maintenance
 
 Prefer `kasumi remote health <profile>`, `kasumi remote writers <profile>`,
-`kasumi remote orphans <profile>`, and `kasumi fsck <profile>` to understand
-the state before maintenance. The `remote quarantine` command has been
-removed. Do not remove other remote protocol objects through the storage
-backend.
+`kasumi remote orphans <profile>`, and `kasumi fsck <profile>` to understand the
+state before maintenance. The `remote quarantine` command has been removed. Do
+not remove other remote protocol objects through the storage backend.

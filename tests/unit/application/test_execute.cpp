@@ -308,7 +308,9 @@ TEST(ApplicationExecuteTest,
     EXPECT_FALSE(completed->analysis_only);
 }
 
-// PARTIAL-R05
+// PARTIAL-R05: a candidate mutated after the single authenticated observation is
+// no longer revalidated (cooperative exclusivity). The public partial diagnostic
+// is exercised by a genuine REMOVE failure instead.
 TEST(ApplicationExecuteTest,
      GarbageCollectPartialFailureKeepsPublicDiagnostics) {
     auto workspace =
@@ -360,7 +362,10 @@ TEST(ApplicationExecuteTest,
                                                     std::byte{0xbe},
                                                     std::byte{0xef}};
              try {
-                 kasumi::test::write_binary(target_path, garbage);
+                 std::error_code ignored;
+                 std::filesystem::remove(target_path, ignored);
+                 std::filesystem::create_directories(target_path);
+                 kasumi::test::write_binary(target_path / "blocker", garbage);
              } catch (...) {
              }
          }});
@@ -376,7 +381,7 @@ TEST(ApplicationExecuteTest,
     EXPECT_EQ(diagnostic.stage,
               kasumi::application::GarbageCollectStage::Applying);
     EXPECT_EQ(diagnostic.mutation_state,
-              kasumi::application::GarbageCollectMutationState::NotAttempted);
+              kasumi::application::GarbageCollectMutationState::Uncertain);
     EXPECT_TRUE(diagnostic.barrier_release_attempted);
     EXPECT_TRUE(diagnostic.barrier_release_confirmed);
 }

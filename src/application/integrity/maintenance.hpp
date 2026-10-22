@@ -51,9 +51,11 @@ struct FsckResult {
 
 using FsckProgressCallback = std::function<void(const FsckProgress&)>;
 
-// Counts produced by direct, individually validated garbage collection.
+// Counts produced by global-plan garbage collection.
 struct GarbageCollectResult {
     std::size_t candidate_objects = 0;
+    // REMOVE calls acknowledged by the transport. This is not an independent
+    // physical audit; no presence read-back is performed after deletion.
     std::size_t removed_objects = 0;
     bool analysis_only = false;
 };
@@ -62,8 +64,11 @@ using GarbageCollectProgressCallback =
     std::function<void(const GarbageCollectProgress&)>;
 
 // Removes authenticated, unreachable content and redundant commit variants.
-// Analysis is stable only when two complete observations agree. Candidates are
-// revalidated individually and removed with exactly one backend attempt each.
+// One authenticated observation builds and validates the complete deletion
+// plan; Apply performs exactly one sequential REMOVE per planned candidate and
+// trusts the transport result. Exclusivity is cooperative: the barrier and
+// writer registration prevent cooperative writers, but there is no distributed
+// CAS against non-cooperative mutation after the observation.
 std::expected<GarbageCollectResult, Error>
 garbage_collect(const runtime::RuntimeData& runtime_data,
                 transport::Transport& storage,

@@ -405,7 +405,7 @@ Fsck downloaded and audited content objects referenced by the effective remote t
 
 ### Likely Meaning
 
-GC stops on a revalidation failure, transport error, ownership loss, or ambiguous DELETE. The error carries the candidate total, confirmed removals, failed identifier when one exists, stage, transport category/message/native code when available, mutation state (`NotAttempted`, `Confirmed`, or `Uncertain`), and barrier-cleanup status. An ambiguous mutation is not retried automatically, and an observed absence after a failed DELETE is not counted as a confirmed removal.
+GC stops on an analysis failure, transport error, ownership loss, or ambiguous DELETE. The error carries the candidate total, transport-acknowledged removals, failed identifier when one exists, stage, transport category/message/native code when available, mutation state (`NotAttempted`, `Confirmed`, or `Uncertain`), and barrier-cleanup status. An ambiguous mutation is not retried automatically, and an observed absence after a failed DELETE is not counted as an acknowledged removal. Successful REMOVE calls are not read back with PRESENCE.
 
 ### Safe Next Steps
 
@@ -494,7 +494,7 @@ The table below clarifies the purpose and operational behavior of Kasumi's diagn
 | `kasumi remote contents --audit <profile>` | Audit all physical payloads | Yes (all present) | No | None | Point-in-time observation |
 | `kasumi remote summary <profile>` | Overview of vault state | No | No | None | Point-in-time observation |
 
-The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck and GC run pending Sync transaction recovery first, which may change local files or complete remote publication. Manual writer removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit itself does not intentionally modify remote objects. GC modifies remote objects only after its barrier, stability, ownership, and per-candidate revalidation checks pass.
+The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck and GC run pending Sync transaction recovery first, which may change local files or complete remote publication. Manual writer removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit itself does not intentionally modify remote objects. GC modifies remote objects only after its barrier, probe, single authenticated observation, and global plan validation pass.
 
 Fsck counts distinct payloads referenced by the effective current tree; physical
 content inspection can include retained historical versions. Neither count is
