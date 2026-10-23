@@ -1,5 +1,6 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/maintenance.hpp"
+#include "application/observation/file_metadata.hpp"
 #include "application/sync/reobservation.hpp"
 #include "application/use_cases/context.hpp"
 #include "core/hasher.hpp"
@@ -21,8 +22,16 @@
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace kasumi::application::detail {
 std::expected<Response, Error> run_sync(OperationContext& context);
@@ -222,9 +231,61 @@ public:
     void write_preserving_fingerprint(std::string_view path,
                                       std::string_view contents) const {
         const auto target = local_ / kasumi::platform::path::from_utf8(path);
+#if defined(_WIN32)
+        // Preserve the exact 100 ns FILETIME; MinGW's filesystem setter rounds it.
+        FILETIME modified{};
+        auto file = ::CreateFileW(target.c_str(),
+                                  FILE_READ_ATTRIBUTES,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE |
+                                      FILE_SHARE_DELETE,
+                                  nullptr,
+                                  OPEN_EXISTING,
+                                  FILE_ATTRIBUTE_NORMAL,
+                                  nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            throw std::system_error(
+                static_cast<int>(::GetLastError()),
+                std::system_category(),
+                "failed to open fingerprint fixture");
+        }
+        const BOOL read_time = ::GetFileTime(file, nullptr, nullptr, &modified);
+        const DWORD read_error = read_time ? ERROR_SUCCESS : ::GetLastError();
+        ::CloseHandle(file);
+        if (!read_time) {
+            throw std::system_error(static_cast<int>(read_error),
+                                    std::system_category(),
+                                    "failed to read fingerprint fixture timestamp");
+        }
+
+        kasumi::test::write_text(target, contents);
+
+        file = ::CreateFileW(target.c_str(),
+                             FILE_WRITE_ATTRIBUTES,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE |
+                                 FILE_SHARE_DELETE,
+                             nullptr,
+                             OPEN_EXISTING,
+                             FILE_ATTRIBUTE_NORMAL,
+                             nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            throw std::system_error(
+                static_cast<int>(::GetLastError()),
+                std::system_category(),
+                "failed to reopen fingerprint fixture");
+        }
+        const BOOL restored = ::SetFileTime(file, nullptr, nullptr, &modified);
+        const DWORD restore_error = restored ? ERROR_SUCCESS : ::GetLastError();
+        ::CloseHandle(file);
+        if (!restored) {
+            throw std::system_error(static_cast<int>(restore_error),
+                                    std::system_category(),
+                                    "failed to restore fingerprint fixture timestamp");
+        }
+#else
         const auto modified = std::filesystem::last_write_time(target);
         kasumi::test::write_text(target, contents);
         std::filesystem::last_write_time(target, modified);
+#endif
     }
 
     [[nodiscard]] std::string read(std::string_view path) const {
@@ -532,15 +593,41 @@ TEST(SyncRemoteAvailabilityTest, CorruptLocalRepairSourceIsRejected) {
     harness.write("alpha.txt", "alpha contents");
     const auto first = harness.sync();
     ASSERT_TRUE(first.has_value()) << first.error().detail;
+    const auto source_path = harness.local() / "alpha.txt";
+    const auto metadata_before =
+        kasumi::application::observation::cache::read_file_metadata(
+            source_path, "alpha.txt");
+    ASSERT_TRUE(metadata_before.has_value() && metadata_before->has_value());
+    ASSERT_TRUE((**metadata_before).identity.has_value());
     const auto hash = kasumi::hasher::hash_string("alpha contents");
+    const auto accepted_before =
+        kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(accepted_before.has_value() && *accepted_before);
+    const auto cached =
+        kasumi::state_storage::load_file_cache(harness.database());
+    ASSERT_TRUE(cached.has_value());
+    const auto cached_source = std::ranges::find(
+        *cached,
+        std::string{"alpha.txt"},
+        &kasumi::state_storage::FileCacheRow::path);
+    ASSERT_NE(cached_source, cached->end());
+    EXPECT_EQ(cached_source->hash, hash);
     const auto path = harness.content_path(hash);
     ASSERT_TRUE(std::filesystem::exists(path));
     ASSERT_TRUE(std::filesystem::remove(path));
     harness.reset_transfer_counts();
 
-    // Same length and restored mtime keep the scanner's cached hash, but the
-    // bytes no longer authenticate against the expected Content ID.
+    // Preserve the full cache fingerprint while changing the bytes.
     harness.write_preserving_fingerprint("alpha.txt", "omega contents");
+    const auto metadata_after =
+        kasumi::application::observation::cache::read_file_metadata(
+            source_path, "alpha.txt");
+    ASSERT_TRUE(metadata_after.has_value() && metadata_after->has_value());
+    EXPECT_EQ((**metadata_after).size, (**metadata_before).size);
+    EXPECT_EQ((**metadata_after).mtime_nanoseconds,
+              (**metadata_before).mtime_nanoseconds);
+    EXPECT_EQ((**metadata_after).identity, (**metadata_before).identity);
+    EXPECT_EQ(harness.read("alpha.txt"), "omega contents");
     const auto rejected = harness.sync();
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(rejected.error().code,
@@ -548,6 +635,13 @@ TEST(SyncRemoteAvailabilityTest, CorruptLocalRepairSourceIsRejected) {
     EXPECT_EQ(harness.content_puts(), 0U);
     EXPECT_FALSE(std::filesystem::exists(path));
     EXPECT_EQ(harness.read("alpha.txt"), "omega contents");
+    const auto accepted_after =
+        kasumi::state_storage::load_state(harness.database());
+    ASSERT_TRUE(accepted_after.has_value() && *accepted_after);
+    EXPECT_EQ((*accepted_after)->commit_id, (*accepted_before)->commit_id);
+    EXPECT_EQ((*accepted_after)->tree, (*accepted_before)->tree);
+    EXPECT_EQ((*accepted_after)->pending_materializations,
+              (*accepted_before)->pending_materializations);
 
     harness.write("alpha.txt", "alpha contents");
     harness.reset_transfer_counts();

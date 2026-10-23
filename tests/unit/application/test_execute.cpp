@@ -380,8 +380,13 @@ TEST(ApplicationExecuteTest,
     EXPECT_EQ(diagnostic.failed_identifier, std::optional<std::string>{target});
     EXPECT_EQ(diagnostic.stage,
               kasumi::application::GarbageCollectStage::Applying);
-    EXPECT_EQ(diagnostic.mutation_state,
-              kasumi::application::GarbageCollectMutationState::Uncertain);
+    ASSERT_TRUE(diagnostic.transport_error.has_value());
+    EXPECT_EQ(
+        diagnostic.mutation_state,
+        kasumi::transport::mutation_result_is_ambiguous(
+            *diagnostic.transport_error)
+            ? kasumi::application::GarbageCollectMutationState::Uncertain
+            : kasumi::application::GarbageCollectMutationState::NotAttempted);
     EXPECT_TRUE(diagnostic.barrier_release_attempted);
     EXPECT_TRUE(diagnostic.barrier_release_confirmed);
 }

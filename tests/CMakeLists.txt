@@ -125,6 +125,10 @@ target_link_libraries(
     kasumi_sync_gc_crash_child
     PRIVATE kasumi_application kasumi_sqlite3 monocypher kasumi_warnings
 )
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
+    target_link_options(kasumi_sync_gc_crash_child PRIVATE
+        -static-libgcc -static-libstdc++ -Wl,--allow-multiple-definition)
+endif()
 target_include_directories(kasumi_sync_gc_crash_child PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_definitions(kasumi_sync_gc_crash_child PRIVATE KASUMI_PROCESS_CRASH_TESTS)
 if(WIN32)
