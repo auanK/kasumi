@@ -55,7 +55,7 @@ For source builds, see [Build and Test](docs/build-and-test.md).
 - [Troubleshooting](docs/troubleshooting.md) — diagnosis and safe recovery procedures.
 - [Security](docs/security.md) — threats, cryptography, and local key protection.
 - [Architecture](docs/architecture.md) — components and their responsibilities.
-- [Provider Certification](docs/provider-certification.md) — recorded backend capabilities.
+- [Provider Certification](docs/provider-certification.md) — provider requirements and certification procedure.
 - [Changelog](CHANGELOG.md) and [Release Notes](RELEASE_NOTES.md) — changes and upgrade requirements.
 
 Use the same release on all clients; read the

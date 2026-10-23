@@ -18,8 +18,8 @@ Repository CI exercises:
 * Clang on Ubuntu (Debug and Release).
 
 This lists workflow coverage, not the result for an arbitrary commit. Consult
-the Actions runs for the exact SHA; operational provider validation is recorded
-separately in [Provider Certification](provider-certification.md).
+the Actions runs for the exact revision; provider-specific operational checks
+can be run with the procedure in [Provider Certification](provider-certification.md).
 
 ### Windows Long Paths
 

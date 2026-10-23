@@ -92,24 +92,16 @@ Kasumi provides distinct tools for auditing vault integrity and remote storage h
 
 Fsck and GC run pending Sync transaction recovery first. Recovery may change local files or complete remote publication; Fsck's audit itself does not intentionally modify the remote vault.
 
-Schedule `kasumi fsck` periodically (e.g., monthly) to verify that remote storage has not suffered bit rot or silent corruption.
+Run `kasumi fsck` when you need a full integrity audit of referenced content. It downloads and verifies every payload in the effective remote tree.
 
 For details, see [Fsck Architecture](architecture/fsck.md) and [Remote Maintenance Inspection](architecture/remote-maintenance-inspection.md).
 
 ## Multi-Machine Usage
 
-Kasumi is designed for multi-machine workflows where each device publishes changes independently.
-
-* **Independent Publication**: Machines do not communicate directly with each other; all synchronization occurs through the shared storage vault.
-* **Automatic Branch Merging**: When multiple machines publish changes concurrently, Kasumi records these as concurrent branches in the history DAG. When a machine synchronizes, Kasumi identifies the best common ancestor (merge base), combines non-overlapping edits automatically, and publishes a multi-parent merge commit (`CM`).
-* **Conflict Handling**:
-  * **Independent Paths**: If Machine A edits `docs/notes.txt` and Machine B edits `src/main.cpp`, both changes merge cleanly without conflicts.
-  * **Concurrent Edits on the Same File**:
-    * If local modification time (`mtime`) is strictly newer than remote `mtime`, the local file keeps the canonical path, and the remote variant is materialized as `<path>.kasumiconflict_remote`.
-    * Otherwise (including equal timestamps), the remote file keeps the canonical path, and the local file is renamed to `<path>.kasumiconflict_local` and uploaded.
-  * **Remote Branch Conflicts**: When resolving multiple competing remote heads, Kasumi keeps one variant at the canonical path and preserves additional variants under `<path>.kasumiconflict_<12-char-commit-id>`.
-  * **Edit vs. Deletion**: If one machine modifies a file while another deletes it, the modified content is preserved.
-* **Operational Habit**: After resolving conflicts, review the files, incorporate changes into the canonical file, delete the conflict artifacts, and run `kasumi sync <profile>` to publish the resolution.
+Each machine publishes independently through the shared vault. Sync reconciles
+concurrent branches and preserves incompatible file changes as conflict files.
+Review those files, merge the desired content into the canonical file, remove
+the resolved artifacts, and run `kasumi sync <profile>` to publish the result.
 
 For merge rules and conflict naming, see [History and Concurrency](architecture/history-and-concurrency.md#conflict-handling).
 
@@ -124,10 +116,9 @@ local account: same-user processes can access its private state. See
 
 ## Upgrading Kasumi
 
-Kasumi 0.x has no general compatibility guarantee between releases or automatic
-migration of SQLite, journals, configuration, keys, or remote formats. No in-place
-upgrade from **0.7.0 to 0.8.0** has been certified. Use the same release on all
-clients; downgrade is not a supported recovery procedure.
+Kasumi does not guarantee compatibility across releases or automatically migrate
+SQLite state, journals, configuration, keys, or remote formats. Use the same
+release on all clients; downgrade is not a supported recovery procedure.
 
 Before replacing binaries:
 
@@ -153,26 +144,14 @@ When running Kasumi in automated scripts, cron jobs, or task schedulers:
   * **Windows**: Task Scheduler.
 * **Concurrency Configuration**: Adjust transfer concurrency using the environment variable `KASUMI_CONTENT_CONCURRENCY` (default: 8, maximum: 16).
 
-## Suggested Maintenance Routines
+## Maintenance Cadence
 
-These routines serve as practical starting points. Adjust intervals according to repository size, churn rate, and storage constraints:
-
-### Personal / Low Churn
-* **Synchronization**: Run `kasumi sync` on demand or at the start/end of work sessions.
-* **Integrity Audit**: Run `kasumi remote health` occasionally; run `kasumi fsck` every 1 to 3 months.
-* **Garbage Collection**: Run `kasumi gc` roughly monthly or when storage reclamation is desired.
-
-### Regular Multi-Machine Use
-* **Synchronization**: Run `kasumi sync` regularly (e.g., every 1 to 4 hours via automated scheduler).
-* **Pre-Sync Checks**: Use `kasumi status` or `kasumi sync --dry-run` before applying unusually large changes.
-* **Integrity Audit**: Schedule `kasumi fsck` monthly.
-* **Garbage Collection**: Schedule `kasumi gc` weekly during off-hours maintenance windows. Frequency and timing are recommendations; maintenance exclusivity is required.
-
-### High Churn / Large Vault
-* **Synchronization**: Run `kasumi sync` frequently (e.g., hourly or continuous automated triggers).
-* **Storage Monitoring**: Monitor storage usage with your backend/provider; use `kasumi remote summary` and `kasumi remote objects` to inspect history and object counts.
-* **Garbage Collection**: Reserve a dedicated weekly off-hours maintenance window for `kasumi gc`. If churn is high, increase frequency based on observed storage growth and measured GC duration. Keep all Sync and maintenance processes stopped across clients while it runs.
-* **Integrity Audit**: Schedule `kasumi fsck` separately during dedicated off-hours maintenance windows.
+Choose synchronization and audit intervals from the vault's change rate, storage
+cost, and integrity requirements. Frequent synchronization reduces the time
+branches can diverge but does not prevent conflicts. Fsck downloads every
+referenced payload, while GC permanently deletes eligible objects and requires
+Sync and other maintenance to be stopped across clients; see the procedures
+above before scheduling either operation.
 
 ## Things Not To Do
 

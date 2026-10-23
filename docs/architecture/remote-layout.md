@@ -1,6 +1,12 @@
 # Remote Layout and Publication
 
-The production remote layout is derived from the 32-byte vault master key. `namespace_identifier` uses the remote-identifier subkey and a namespace domain tag; `derive_remote_layout` takes truncated lowercase hex components for history, commits, heads, epochs, GC, barrier, writers, and probes. The history-family components are eight hex characters; the version component is four. The remote root also contains 64-hex-character keyed Content IDs. The following is structural notation, not literal path names:
+The production remote layout is derived from the 32-byte vault master key using
+the remote-identifier subkey and namespace-specific domain tags. Truncated
+lowercase hexadecimal components identify history, commits, heads, epochs, GC,
+barrier, writers, and probes. History-family components are eight hexadecimal
+characters; the version component is four hexadecimal characters. The remote
+root also contains 64-hex-character keyed Content IDs. The following is
+structural notation, not literal path names:
 
 ```text
 <remote root>/
@@ -13,7 +19,12 @@ The production remote layout is derived from the 32-byte vault master key. `name
   <history-ns>/<gc-ns>/<version-ns>/<probes-ns>/<token>
 ```
 
-Commit variants, physical markers, Epoch objects, writer/probe objects, and ordinary content IDs are extensionless. Only the key-derived `RemoteLayout` is read and written by current application flows. Former fixed `history/...` paths are not parsed, migrated, or deleted. Unrecognized objects, including legacy quarantine state, are left untouched. For compatibility and backup requirements, see [Upgrading Kasumi](../best-practices.md#upgrading-kasumi).
+Commit variants, physical markers, Epoch objects, writer/probe objects, and
+ordinary Content IDs are extensionless. The active layout is key-derived.
+Former fixed `history/...` paths are not parsed, migrated, or deleted.
+Unrecognized objects, including legacy quarantine state, are left untouched.
+For compatibility and backup requirements, see
+[Upgrading Kasumi](../best-practices.md#upgrading-kasumi).
 
 ## Identities and Visibility
 

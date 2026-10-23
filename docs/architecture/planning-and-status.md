@@ -1,10 +1,14 @@
 # Preview and Status
 
-`kasumi sync <profile> --dry-run` dispatches `application::Operation::Preview`; `kasumi status <profile>` dispatches `Operation::Status`. They are distinct CLI intents and response operation labels, but the application uses the same `run_plan` path and returns a `PlanReport`. `--full` changes CLI display truncation only. Neither command is a shortened Sync execution.
+`kasumi sync <profile> --dry-run` and `kasumi status <profile>` are distinct CLI
+intents but share the same read-only planner and return a plan report. `--full`
+changes display truncation only. Neither command is a shortened Sync execution.
 
 ## Lifecycle
 
-1. The CLI parses the operation and profile, then `application::execute` resolves the profile in read-only runtime mode, validates retention, acquires the **local** exclusive profile lock, resolves the persisted or supplied matching master key, and opens the configured transport. See [Application and Runtime](application-and-runtime.md).
+1. Runtime resolution validates the profile and retention, acquires the
+   **local** exclusive profile lock, resolves the persisted or supplied matching
+   master key, and opens the configured transport. See [Application and Runtime](application-and-runtime.md).
 2. The planner **does not call normal transaction recovery**. It loads the accepted `StoredState` reconciliation base from SQLite and reads `.kasumiignore`; local observation and authenticated remote history observation run concurrently. Local observation creates a read-only session that reuses valid strong fingerprints from the persistent file-hash cache, falling back to full hashing for new, modified, or uncached files. Unlike Sync, this path operates strictly read-only: it does not commit file-hash cache deltas, register remote writers, or mutate SQLite state. Reconciliation can also download/authenticate a remote `.kasumiignore` to choose the effective projection. The remote observation can use the accepted Commit/Ciphertext ID and Epoch as frontier hints. See [Local Observation](local-observation.md) and [History and Concurrency](history-and-concurrency.md).
 3. [Reconciliation](reconciliation.md) validates local/base/remote continuity and derives a candidate shared tree and ordered `SyncPlan`. The planner converts operations to action/path rows and counts, upload/download byte totals, conflict flag, target generation, and pending-materialization paths. It reports a plan; it does not stage, transfer, apply, stabilize, or publish it.
 4. The transport closes, key/credential buffers are wiped at cleanup points, and the profile lock is released. No accepted `StoredState` commit, transaction journal, content upload, Commit, HEAD marker, or Epoch publication occurs.

@@ -139,7 +139,9 @@ The synchronization was a non-fatal **partial synchronization**. Remote commit m
 ## Missing Remote Payload or Corrupt Content
 
 ### Symptom
-Running `kasumi fsck <profile>` reports an audit failure for missing or corrupted referenced content. The diagnostic includes affected paths; its detail depends on the failure.
+Running `kasumi fsck <profile>` reports an audit failure, commonly introduced as
+`Audit finished with failures:`. The diagnostic includes affected paths; its
+detail depends on the failure.
 
 ### Likely Meaning
 A content payload referenced by the history DAG is absent from remote storage or failed cryptographic authentication (AEAD decryption failure or BLAKE3 plaintext hash mismatch).
@@ -377,26 +379,6 @@ The operating system user account running Kasumi lacks sufficient filesystem per
 
 ---
 
-## Fsck Failure
-
-### Symptom
-Running `kasumi fsck <profile>` fails with an audit diagnostic for affected paths. The English presenter introduces the detail with `Audit finished with failures:`.
-
-### Likely Meaning
-Fsck downloaded and audited content objects referenced by the effective remote tree, but found missing payloads, corrupted bytes, or AEAD decryption errors.
-
-### Safe Next Steps
-1. **Review Fsck Output**: Examine the specific paths and Content IDs reported as failing.
-2. **Check Other Clients**: If another client has the intact files, running `kasumi sync` from that client can upload the missing payloads and restore remote integrity.
-3. **Run Remote Content Audit**: Run `kasumi remote contents --audit <profile>` to audit physically present content objects, including orphans.
-4. **Restore Missing Files**: If objects are permanently corrupted or missing from remote storage and no client has a local copy, restore the affected files from an external backup into the local synchronized folder on one machine, then run `kasumi sync <profile>`.
-
-### Related Documentation
-* [Fsck: Integrity Audit](architecture/fsck.md)
-* [Effective Tree and Content Inspection](architecture/remote-content-inspection.md)
-
----
-
 ## GC Partial Failures and Uncertain Deletions
 
 ### Symptom
@@ -504,8 +486,3 @@ older Commits; use `remote contents`, `remote health`, and `remote orphans` for
 their respective inventories. A cached head can display zero parents/time in
 `remote heads` without being genesis; `remote commit <profile> <id>` inspects
 complete retained metadata. See [History Inspection](architecture/remote-history-inspection.md).
-
-* Use **`status`** to see what will change locally and remotely.
-* Use **`remote health`** for an operational diagnostic without Fsck's payload audit.
-* Use **`fsck`** to verify payload authenticity and detect missing files.
-* Use **`gc`** to reclaim remote disk space.

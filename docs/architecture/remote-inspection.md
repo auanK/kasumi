@@ -1,6 +1,7 @@
 # Remote Inspection
 
-`kasumi remote ...` uses the separate inspection dispatch rather than `application::execute`. Exact syntax is in [Configuration and Usage](../configuration-and-usage.md#remote-inspection). The family reports either an authenticated **logical** history/tree, a physical namespace/maintenance view, or both. A raw listing's existence and shape are not proof that its bytes authenticate.
+`kasumi remote ...` uses a separate inspection path from synchronization and
+other application operations. Exact syntax is in [Configuration and Usage](../configuration-and-usage.md#remote-inspection). The family reports either an authenticated **logical** history/tree, a physical namespace/maintenance view, or both. A raw listing's existence and shape are not proof that its bytes authenticate.
 
 ## Common request path
 

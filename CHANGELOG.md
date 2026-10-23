@@ -17,7 +17,7 @@
 ### Upgrade Notes
 
 - Use the same release on all clients. See [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi) for compatibility and backup requirements.
-- See [Release Notes](RELEASE_NOTES.md) for user-facing changes and [Provider Certification](docs/provider-certification.md#direct-gc-validation--october-2026) for recorded validation results.
+- See [Release Notes](RELEASE_NOTES.md) for user-facing changes and the [provider certification scope](docs/provider-certification.md#requirements-and-limits) for current requirements and limitations.
 
 ## [0.7.0]
 
@@ -68,10 +68,10 @@
 
 ### Validation
 
-- Stabilization records include complete Debug regression runs on five local toolchains, with platform/privilege-dependent skips. Hosted Ubuntu and Windows CI passed for the corrected commit `e1a0ce3`, including Debug/Release builds and tests on all five configured toolchains; run links are recorded in [Provider Certification](docs/provider-certification.md#source-and-build-identity).
+- Stabilization records include complete Debug regression runs on five local toolchains, with platform/privilege-dependent skips. Hosted Ubuntu [CI](https://github.com/auanK/kasumi/actions/runs/38844759389) and Windows [CI](https://github.com/auanK/kasumi/actions/runs/38844759361) passed for the corrected commit `e1a0ce3`, including Debug/Release builds and tests on all five configured toolchains.
 - Real Google Drive/rclone validation used Windows 11 and Ubuntu WSL2/ext4, independent profiles, bidirectional changes, 1/10/100 MiB files and a 100 MiB update, conflicts, simultaneous publication, abrupt process/transport failure, reconnection/recovery, payload audits, and a 100-file workload. The interrupted large-file scenario used 10 MiB. Cross-client BLAKE3 and SHA-256 matched after convergence.
 - GC blocked observed abandoned writers, then completed after verified manual marker removal with zero candidates and zero purged objects. No eligible-object purge or quarantine repair/restoration was established by that run.
-- [Provider Certification](docs/provider-certification.md#google-drive-operational-validation--070) distinguishes initial source, post-fix binaries, hosted CI, historical backend results, and the limits of the operational evidence.
+- The provider runner's current scope and safety limits are documented in [Provider Certification](docs/provider-certification.md#requirements-and-limits). Historical validation above remains specific to its recorded builds and provider setup.
 
 ## [0.6.1]
 

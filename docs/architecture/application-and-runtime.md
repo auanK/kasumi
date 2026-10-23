@@ -1,6 +1,13 @@
 # Application and Runtime
 
-The CLI parses profile management, binary update, application operations, or remote inspection. `application::execute` dispatches Sync, Preview, Status, Fsck, GarbageCollect, ResolveMissing, and RemoveWriter. Preview and Status use the same planner and return a `PlanReport`. Remote inspection and binary update have separate dispatch paths. The CLI selects language, strips the display-only `--full` switch, installs interruption handlers, obtains environment credentials, and presents typed results and errors. Syntax and environment variables are in [Configuration and Usage](../configuration-and-usage.md).
+The CLI handles profile management, binary update, application operations, and
+remote inspection. Application operations include Sync, Preview, Status, Fsck,
+Garbage Collection, Resolve Missing, and manual writer removal. Preview and
+Status share a planner; remote inspection and binary update have separate
+flows. The CLI selects language, strips the display-only `--full` switch,
+installs interruption handlers, obtains environment credentials, and presents
+results and errors. Syntax and environment variables are in
+[Configuration and Usage](../configuration-and-usage.md).
 
 ## Profiles and Resolution
 

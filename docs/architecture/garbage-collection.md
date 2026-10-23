@@ -4,25 +4,6 @@ GC acquires cooperative exclusivity per vault, observes authenticated history
 once, validates a global deletion plan, removes candidates sequentially, and
 releases the maintenance barrier.
 
-## Components and connection point
-
-- `Operation::GarbageCollect` dispatches through
-  `run_garbage_collect(OperationContext&)` in
-  `src/application/use_cases/maintenance.cpp`.
-- `GarbageCollectStage` (`Preparing`, `Analyzing`, `Applying`, `Finalizing`),
-  `GarbageCollectProgress`, `GarbageCollectCompleted`, and
-  `GarbageCollectFailure` describe progress, counts, and partial failure
-  context.
-- `src/application/integrity/garbage_collection.cpp` implements exclusivity
-  acquisition, the single authenticated observation, global plan construction
-  and validation, sequential deletion, and barrier cleanup.
-- Barrier establishment/ownership checks, writer admission, writer-marker
-  observation, and the provider-visibility probe remain separate protocol
-  components in `history_storage/maintenance_protocol.cpp`.
-- Reachability, Commit variant selection, Epoch anchors, historical retention
-  (`min_history_depth` and `min_history_age_hours`), content reachability, and
-  transport capabilities remain the authority used by GC.
-
 ## Admission and analysis contract
 
 The collector preserves this order:

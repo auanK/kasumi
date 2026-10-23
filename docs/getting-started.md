@@ -5,8 +5,8 @@ its own local folder and profile; the shared destination stores encrypted object
 not a browsable copy of your files. For exact command syntax and options, use
 [Configuration and Usage](configuration-and-usage.md).
 
-Use the same Kasumi release on every client. Kasumi provides no backward
-compatibility between 0.x releases and no automatic migration; see the
+Use the same Kasumi release on every client. Kasumi does not guarantee
+compatibility across releases or automatically migrate existing data; see the
 [upgrade precautions](best-practices.md#upgrading-kasumi) before reusing existing data.
 
 ## 1. Obtain Kasumi

@@ -4,7 +4,9 @@
 
 ## Lifecycle
 
-1. The CLI dispatches `Operation::Fsck` through `application::execute`. Read-only runtime/profile resolution validates retention, the local exclusive profile lock is acquired, the saved or matching supplied key is loaded, and the local/rclone [transport](transport.md) is opened.
+1. Runtime/profile resolution validates retention, acquires the local exclusive
+   profile lock, loads the saved or matching supplied key, and opens the local
+   or rclone [transport](transport.md).
 2. **Before the audit**, [Sync transaction recovery](transactions-and-recovery.md) runs if a journal exists. It may roll back or roll forward local mutations and remote publication; failure stops Fsck. The Fsck audit itself does not intentionally publish or remove remote objects.
 3. Fsck obtains an authenticated remote storage observation, including history and the physical namespace. Missing history, malformed/unknown identifiers, invalid history, or inconsistent references fail closed. It also performs a normal local-tree scan for inventory analysis; the local tree is a comparison input, not a substitute for authenticated remote bytes. Inventory identifies distinct content objects referenced by the effective remote state and the paths affected by each. It does not select orphan-only content for its payload audit.
 4. A private workspace holds downloads and plaintext only during the audit. Fsck loads the encrypted/authenticated `fsck_checkpoint.bin.enc` when it matches the current vault identity and records matching prior entries as resume candidates. A bad/mismatched checkpoint is not trusted. Provider `physical_hash` may compare SHA-256 for a candidate, but **even a match does not skip download, AEAD authentication, or plaintext verification**: provider metadata cannot prove bytes against an untrusted provider.
