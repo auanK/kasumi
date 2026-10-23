@@ -738,6 +738,21 @@ void render_sync_summary(const application::SyncCompleted& summary) {
     std::println();
 }
 
+int render_inventory_audit(const application::InventoryAuditReport& report) {
+    std::println("{}", i18n::tr(i18n::Key::SyncInventoryAuditHeader));
+    std::println("{}",
+                 i18n::format(i18n::Key::SyncInventoryAuditSummary,
+                              report.referenced_content,
+                              report.present_content,
+                              report.missing_content,
+                              report.orphan_content,
+                              report.unknown_objects));
+    return report.missing_content == 0 && report.orphan_content == 0 &&
+                   report.unknown_objects == 0
+               ? 0
+               : 2;
+}
+
 } // namespace
 
 void present(const application::SyncProgress& progress,
@@ -903,11 +918,11 @@ int present(const application::Response& response, bool full) {
     if (const auto* sync =
             std::get_if<application::SyncCompleted>(&response.data);
         sync && response.operation == application::Operation::Sync) {
+        int exit_code = 0;
         if (sync->partial) {
             render_pending_paths(sync->pending_paths, full);
-            return 2;
-        }
-        if (sync->duration.has_value()) {
+            exit_code = 2;
+        } else if (sync->duration.has_value()) {
             std::println("{}{}{} {}",
                          style::green,
                          i18n::tr(i18n::Key::LabelOk),
@@ -921,7 +936,11 @@ int present(const application::Response& response, bool full) {
                          style::reset,
                          i18n::tr(i18n::Key::SyncCompleted));
         }
-        return 0;
+        if (response.inventory_audit) {
+            exit_code = std::max(
+                exit_code, render_inventory_audit(*response.inventory_audit));
+        }
+        return exit_code;
     }
     if (const auto* ptr = std::get_if<application::PlanReport>(&response.data);
         ptr && (response.operation == application::Operation::Preview ||
@@ -1232,6 +1251,26 @@ int present(const application::Error& error) {
                          style::reset,
                          i18n::format(i18n::Key::ErrorWriterRemovalFailed,
                                       error.detail));
+            break;
+        case application::ErrorCode::InventoryAuditFailure:
+            std::println("{}{}{} {}",
+                         style::red,
+                         i18n::tr(i18n::Key::LabelError),
+                         style::reset,
+                         i18n::format(i18n::Key::ErrorInventoryAuditFailed,
+                                      error.detail));
+            if (error.sync_completed) {
+                std::println(
+                    "{}",
+                    i18n::tr(i18n::Key::ErrorInventoryAuditSyncCompleted));
+                if (error.sync_completed->partial) {
+                    render_pending_status(error.sync_completed->pending);
+                }
+            }
+            if (error.sync_completed && error.sync_completed->published) {
+                std::println("{}",
+                             i18n::tr(i18n::Key::ErrorInventoryAuditPublished));
+            }
             break;
         case application::ErrorCode::SynchronizationFailure:
         case application::ErrorCode::RecoveryFailure:

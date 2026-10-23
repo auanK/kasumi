@@ -79,6 +79,10 @@ int run(int argc, char* argv[]) {
     std::signal(SIGTERM, request_cancellation);
     auto parse_result = parse(effective_argc, effective_argv);
     if (!parse_result) {
+        if (parse_result.error().unsupported_sync_audit_combination) {
+            std::println(
+                stderr, "{}", i18n::tr(i18n::Key::ErrorSyncAuditCombination));
+        }
         return parse_result.error().exit_code;
     }
 

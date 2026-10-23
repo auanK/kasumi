@@ -27,6 +27,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     const auto operation = input.request.operation;
     output.operation = operation;
     output.initial_sync = input.request.initial;
+    output.audit_inventory = input.request.audit_inventory;
     output.writer_identifier = input.request.writer_identifier;
     output.on_progress = input.on_progress;
     if (input.request.initial && operation != Operation::Sync) {
@@ -34,6 +35,20 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
             .operation = operation,
             .code = ErrorCode::RuntimeFailure,
             .detail = "--initial is only valid for sync",
+        });
+    }
+    if (input.request.audit_inventory && operation != Operation::Sync) {
+        return std::unexpected(Error{
+            .operation = operation,
+            .code = ErrorCode::RuntimeFailure,
+            .detail = "--audit-inventory is only valid for sync",
+        });
+    }
+    if (input.request.audit_inventory && input.request.initial) {
+        return std::unexpected(Error{
+            .operation = operation,
+            .code = ErrorCode::RuntimeFailure,
+            .detail = "--audit-inventory cannot be combined with --initial",
         });
     }
     const auto access_mode =

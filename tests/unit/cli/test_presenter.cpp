@@ -117,6 +117,60 @@ TEST(CliPresenterTest, PartialSyncIsLocalizedAndReturnsDistinctExitCode) {
     EXPECT_NE(portuguese_output.find("Pendentes:"), std::string::npos);
 }
 
+TEST(CliPresenterTest, PresentsStructuralInventoryAuditAndExitStatus) {
+    const ScopedLanguage english{kasumi::cli::i18n::Language::English};
+    auto audited = response(SyncCompleted{}, Operation::Sync);
+    audited.inventory_audit = InventoryAuditReport{
+        .referenced_content = 4,
+        .present_content = 2,
+        .missing_content = 1,
+        .orphan_content = 1,
+        .unknown_objects = 0,
+    };
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(audited), 2);
+    const auto english_output = testing::internal::GetCapturedStdout();
+    EXPECT_NE(english_output.find("Structural inventory audit"),
+              std::string::npos);
+    EXPECT_NE(english_output.find("Referenced content: 4"), std::string::npos);
+    EXPECT_NE(english_output.find("Missing: 1"), std::string::npos);
+
+    kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::Portuguese);
+    audited.inventory_audit = InventoryAuditReport{
+        .referenced_content = 1,
+        .present_content = 1,
+    };
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(audited), 0);
+    const auto portuguese_output = testing::internal::GetCapturedStdout();
+    EXPECT_NE(portuguese_output.find("Auditoria estrutural"),
+              std::string::npos);
+    EXPECT_NE(portuguese_output.find("Conteúdo referenciado: 1"),
+              std::string::npos);
+}
+
+TEST(CliPresenterTest, AuditFailureStatesSyncCompletionAndPublication) {
+    const ScopedLanguage english{kasumi::cli::i18n::Language::English};
+    const Error error{
+        .operation = Operation::Sync,
+        .code = ErrorCode::InventoryAuditFailure,
+        .detail = "remote inventory changed",
+        .sync_completed =
+            SyncCompleted{.published = true, .pending = 2, .partial = true},
+    };
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(error), 1);
+    const auto output = testing::internal::GetCapturedStdout();
+    EXPECT_NE(output.find("Inventory audit failed"), std::string::npos);
+    EXPECT_NE(output.find("Synchronization completed before"),
+              std::string::npos);
+    EXPECT_NE(output.find("published changes remain remote"),
+              std::string::npos);
+    EXPECT_NE(output.find("Synchronization completed partially"),
+              std::string::npos);
+    EXPECT_NE(output.find("2 files are waiting"), std::string::npos);
+}
+
 TEST(CliPresenterTest, PendingPathsAreBoundedUnlessFullIsRequested) {
     PlanReport report;
     for (int index = 0; index < 12; ++index) {

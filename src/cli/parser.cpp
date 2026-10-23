@@ -48,24 +48,38 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                          : std::unexpected(ParseError{});
     }
     if (command == "sync") {
+        if (argc >= 5 && argv[2] != nullptr && argv[3] != nullptr &&
+            argv[4] != nullptr &&
+            ((std::string_view{argv[3]} == "--audit-inventory" &&
+              (std::string_view{argv[4]} == "--dry-run" ||
+               std::string_view{argv[4]} == "--initial")) ||
+             (std::string_view{argv[4]} == "--audit-inventory" &&
+              (std::string_view{argv[3]} == "--dry-run" ||
+               std::string_view{argv[3]} == "--initial")))) {
+            return std::unexpected(
+                ParseError{.unsupported_sync_audit_combination = true});
+        }
         if ((argc != 3 && argc != 4) || argv[2] == nullptr ||
-            argv[2][0] == '\0' ||
-            std::string_view{argv[2]} == "--dry-run" ||
+            argv[2][0] == '\0' || std::string_view{argv[2]} == "--dry-run" ||
             std::string_view{argv[2]} == "--initial" ||
             (argc == 4 &&
              (argv[3] == nullptr ||
               (std::string_view{argv[3]} != "--dry-run" &&
-               std::string_view{argv[3]} != "--initial")))) {
+               std::string_view{argv[3]} != "--initial" &&
+               std::string_view{argv[3]} != "--audit-inventory")))) {
             return std::unexpected(ParseError{});
         }
         const bool initial =
             argc == 4 && std::string_view{argv[3]} == "--initial";
+        const bool audit_inventory =
+            argc == 4 && std::string_view{argv[3]} == "--audit-inventory";
         return application::Request{
-            .operation = argc == 4 && !initial
+            .operation = argc == 4 && !initial && !audit_inventory
                              ? application::Operation::Preview
                              : application::Operation::Sync,
             .profile_name = argv[2],
-            .initial = initial};
+            .initial = initial,
+            .audit_inventory = audit_inventory};
     }
     if (command == "status") {
         return request(application::Operation::Status, argc, argv);

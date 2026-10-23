@@ -2163,6 +2163,109 @@ void finish_inspection(InspectionInput& input, InspectionContext& context) {
 
 } // namespace
 
+std::expected<InventoryAuditReport, std::string>
+audit_remote_inventory(transport::Transport& storage,
+                       std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+    auto workspace = platform::create_workspace("sync-inventory-audit");
+    if (!workspace) {
+        return std::unexpected("failed to prepare remote inventory audit");
+    }
+    std::expected<InventoryAuditReport, std::string> result =
+        std::unexpected("remote inventory audit failed");
+    try {
+        result = [&]() -> std::expected<InventoryAuditReport, std::string> {
+            const auto list =
+                [&]() -> std::expected<std::vector<std::string>, std::string> {
+                auto identifiers = transport::list(storage);
+                if (!identifiers) {
+                    return std::unexpected(
+                        "failed to list remote inventory: " +
+                        transport::describe(identifiers.error()));
+                }
+                if (identifiers->size() > maximum_physical_object_count) {
+                    return std::unexpected(
+                        "remote inventory exceeds defensive limit");
+                }
+                std::ranges::sort(*identifiers);
+                identifiers->erase(std::ranges::unique(*identifiers).begin(),
+                                   identifiers->end());
+                return std::move(*identifiers);
+            };
+
+            const auto identifiers = list();
+            if (!identifiers) {
+                return std::unexpected(identifiers.error());
+            }
+            const auto layout = history_storage::derive_remote_layout(key);
+            const auto writers = make_writers_report(layout, *identifiers);
+            if (writers.maintenance_blocked || !writers.protocol_consistent) {
+                return std::unexpected("remote inventory is inconclusive while "
+                                       "maintenance or a writer is active");
+            }
+            auto epochs = history_storage::epoch::load_chain(
+                storage, key, workspace->root, *identifiers);
+            if (!epochs) {
+                return std::unexpected(
+                    "failed to authenticate remote Epoch history");
+            }
+            auto history_inventory = history_storage::inventory_reachability(
+                storage, key, *identifiers, *epochs, workspace->root);
+            if (!history_inventory) {
+                return std::unexpected(
+                    "failed to authenticate remote history inventory");
+            }
+            if (history_inventory->logical_heads.empty() ||
+                !history_inventory->missing_parent_ids.empty() ||
+                !history_inventory->invalid_parent_ids.empty()) {
+                return std::unexpected(
+                    "remote history is incomplete; inventory is inconclusive");
+            }
+            auto content_inventory =
+                history_storage::inventory_content_reachability(
+                    storage,
+                    key,
+                    *identifiers,
+                    *history_inventory,
+                    workspace->root);
+            if (!content_inventory) {
+                return std::unexpected(
+                    "failed to classify remote content reachability");
+            }
+            const auto objects = make_objects_report(layout, *identifiers);
+            const auto unchanged = list();
+            if (!unchanged) {
+                return std::unexpected(unchanged.error());
+            }
+            if (*identifiers != *unchanged) {
+                return std::unexpected("remote inventory changed during audit; "
+                                       "results are inconclusive");
+            }
+            if (content_inventory->missing_content_ids.size() >
+                content_inventory->reachable_content_ids.size()) {
+                return std::unexpected(
+                    "remote content inventory is internally inconsistent");
+            }
+            return InventoryAuditReport{
+                .referenced_content =
+                    content_inventory->reachable_content_ids.size(),
+                .present_content =
+                    content_inventory->reachable_content_ids.size() -
+                    content_inventory->missing_content_ids.size(),
+                .missing_content =
+                    content_inventory->missing_content_ids.size(),
+                .orphan_content = content_inventory->orphan_content_ids.size(),
+                .unknown_objects = objects.unknown_count,
+            };
+        }();
+    } catch (const std::exception&) {
+        result = std::unexpected("exception during remote inventory audit");
+    } catch (...) {
+        result = std::unexpected("exception during remote inventory audit");
+    }
+    platform::cleanup_workspace(*workspace);
+    return result;
+}
+
 std::expected<InspectionResponse, InspectionError>
 inspect(InspectionInput input) {
     platform::perf_trace::reset();

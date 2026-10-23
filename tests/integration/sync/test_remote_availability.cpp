@@ -1,4 +1,5 @@
 #include "application/history_storage/remote_layout.hpp"
+#include "application/inspection/inspect.hpp"
 #include "application/integrity/maintenance.hpp"
 #include "application/observation/file_metadata.hpp"
 #include "application/sync/journal.hpp"
@@ -49,6 +50,7 @@ struct CountingStorageState {
     bool fail_next_content_get = false;
     std::size_t presences = 0;
     std::size_t full_lists = 0;
+    bool fail_next_full_list = false;
     bool fail_next_head_listing = false;
     bool cancel_next_content_put = false;
     bool ambiguous_next_content_put_after_effect = false;
@@ -63,6 +65,7 @@ struct CountingStorageState {
     std::string hidden_list_identifier;
     std::string nested_gc_error;
     std::function<void()> before_next_content_put;
+    std::function<void()> after_next_full_list;
     std::function<void(std::string_view)> after_put;
     std::function<void(std::string_view,
                        const kasumi::transport::PresenceResult&)>
@@ -96,8 +99,8 @@ kasumi::transport::Result counting_put(void* context,
         }
         if (state->ambiguous_next_content_put_after_effect) {
             state->ambiguous_next_content_put_after_effect = false;
-            auto uploaded = kasumi::transport::put(
-                *state->base, source, identifier);
+            auto uploaded =
+                kasumi::transport::put(*state->base, source, identifier);
             if (!uploaded) {
                 return uploaded;
             }
@@ -131,9 +134,9 @@ counting_get(void* context,
     }
     if (identifier == state->fail_get_identifier) {
         state->fail_get_identifier.clear();
-        return std::unexpected(kasumi::transport::Error{
-            .code = kasumi::transport::ErrorCode::Io,
-            .message = "injected readback failure"});
+        return std::unexpected(
+            kasumi::transport::Error{.code = kasumi::transport::ErrorCode::Io,
+                                     .message = "injected readback failure"});
     }
     return kasumi::transport::get(*state->base, identifier, destination);
 }
@@ -154,9 +157,19 @@ counting_presence(void* context, std::string_view identifier) {
 kasumi::transport::ListingResult counting_list(void* context) {
     auto* state = static_cast<CountingStorageState*>(context);
     ++state->full_lists;
+    if (std::exchange(state->fail_next_full_list, false)) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Io,
+            .message = "injected full listing failure",
+        });
+    }
     auto result = kasumi::transport::list(*state->base);
     if (result && !state->hidden_list_identifier.empty()) {
         std::erase(*result, state->hidden_list_identifier);
+    }
+    if (result && state->after_next_full_list) {
+        auto callback = std::move(state->after_next_full_list);
+        callback();
     }
     return result;
 }
@@ -317,6 +330,25 @@ public:
                                 kasumi::application::Error>
     sync() {
         return kasumi::application::detail::run_sync(context_);
+    }
+
+    void enable_inventory_audit() noexcept {
+        context_.audit_inventory = true;
+    }
+
+    [[nodiscard]] std::expected<kasumi::application::InventoryAuditReport,
+                                std::string>
+    audit_inventory() {
+        return kasumi::application::audit_remote_inventory(context_.storage,
+                                                           key_);
+    }
+
+    void fail_next_full_list() noexcept {
+        counting_state_.fail_next_full_list = true;
+    }
+
+    void add_after_next_full_list(std::function<void()> callback) {
+        counting_state_.after_next_full_list = std::move(callback);
     }
 
     [[nodiscard]] std::filesystem::path
@@ -573,6 +605,207 @@ TEST(SyncRemoteAvailabilityTest, NoOpSyncSkipsContentAvailabilityChecks) {
     EXPECT_EQ(harness.content_gets(), 0U);
     EXPECT_EQ(harness.presence_checks(), 0U);
     EXPECT_EQ(harness.full_list_calls(), 0U);
+}
+
+TEST(SyncRemoteAvailabilityTest,
+     InventoryAuditReportsHealthyInventoryReadOnly) {
+    SyncHarness harness("sync-inventory-audit-healthy");
+    ASSERT_TRUE(harness.valid());
+    harness.write("alpha.txt", "alpha contents");
+    ASSERT_TRUE(harness.sync().has_value());
+    const auto remote_before =
+        kasumi::test::snapshot_tree(harness.storage_root());
+    harness.reset_transfer_counts();
+    harness.enable_inventory_audit();
+
+    const auto audited = harness.sync();
+    ASSERT_TRUE(audited.has_value()) << audited.error().detail;
+    ASSERT_TRUE(audited->inventory_audit.has_value());
+    EXPECT_EQ(audited->inventory_audit->referenced_content, 1U);
+    EXPECT_EQ(audited->inventory_audit->present_content, 1U);
+    EXPECT_EQ(audited->inventory_audit->missing_content, 0U);
+    EXPECT_EQ(audited->inventory_audit->orphan_content, 0U);
+    EXPECT_EQ(audited->inventory_audit->unknown_objects, 0U);
+    EXPECT_EQ(harness.content_puts(), 0U);
+    EXPECT_EQ(harness.content_gets(), 0U);
+    EXPECT_EQ(harness.full_list_calls(), 2U);
+    EXPECT_EQ(kasumi::test::snapshot_tree(harness.storage_root()),
+              remote_before);
+}
+
+TEST(SyncRemoteAvailabilityTest,
+     InventoryAuditClassifiesMissingOrphanUnknownAndHistoricalContent) {
+    SyncHarness harness("sync-inventory-audit-classification");
+    ASSERT_TRUE(harness.valid());
+    harness.write("historic.txt", "historic contents");
+    ASSERT_TRUE(harness.sync().has_value());
+    const auto historic_hash = kasumi::hasher::hash_string("historic contents");
+    ASSERT_TRUE(std::filesystem::exists(harness.content_path(historic_hash)));
+    ASSERT_TRUE(std::filesystem::remove(harness.local() / "historic.txt"));
+    harness.write("current.txt", "current contents");
+    ASSERT_TRUE(harness.sync().has_value());
+
+    const auto current_hash = kasumi::hasher::hash_string("current contents");
+    ASSERT_TRUE(std::filesystem::remove(harness.content_path(current_hash)));
+    const auto orphan = harness.add_orphan_content("orphan contents");
+    ASSERT_TRUE(orphan.has_value());
+    const std::string unknown_id = "unexpected/unknown-object";
+    harness.write_remote(unknown_id, "unknown protocol object");
+    harness.enable_inventory_audit();
+    harness.reset_transfer_counts();
+
+    const auto audited = harness.sync();
+    ASSERT_TRUE(audited.has_value()) << audited.error().detail;
+    ASSERT_TRUE(audited->inventory_audit.has_value());
+    EXPECT_EQ(audited->inventory_audit->referenced_content, 2U);
+    EXPECT_EQ(audited->inventory_audit->present_content, 1U);
+    EXPECT_EQ(audited->inventory_audit->missing_content, 1U);
+    EXPECT_EQ(audited->inventory_audit->orphan_content, 1U);
+    EXPECT_GE(audited->inventory_audit->unknown_objects, 1U);
+    EXPECT_EQ(harness.content_puts(), 0U);
+    EXPECT_EQ(harness.content_gets(), 0U);
+    EXPECT_EQ(harness.full_list_calls(), 2U);
+    EXPECT_FALSE(std::filesystem::exists(harness.content_path(current_hash)));
+    EXPECT_TRUE(std::filesystem::exists(harness.remote_path(*orphan)));
+    EXPECT_TRUE(std::filesystem::exists(harness.remote_path(unknown_id)));
+    EXPECT_TRUE(std::filesystem::exists(harness.content_path(historic_hash)));
+}
+
+TEST(SyncRemoteAvailabilityTest, InventoryAuditFailsOnListingFailure) {
+    SyncHarness harness("sync-inventory-audit-list-failure");
+    ASSERT_TRUE(harness.valid());
+    harness.write("alpha.txt", "alpha contents");
+    ASSERT_TRUE(harness.sync().has_value());
+    harness.enable_inventory_audit();
+    harness.fail_next_full_list();
+
+    const auto audited = harness.sync();
+    ASSERT_FALSE(audited.has_value());
+    EXPECT_EQ(audited.error().code,
+              kasumi::application::ErrorCode::InventoryAuditFailure);
+    ASSERT_TRUE(audited.error().sync_completed.has_value());
+    EXPECT_FALSE(audited.error().sync_completed->published);
+    EXPECT_EQ(harness.full_list_calls(), 1U);
+}
+
+TEST(SyncRemoteAvailabilityTest, InventoryAuditRejectsConcurrentPublication) {
+    SyncHarness auditor("sync-inventory-audit-concurrent-auditor");
+    ASSERT_TRUE(auditor.valid());
+    auditor.write("base.txt", "base contents");
+    ASSERT_TRUE(auditor.sync().has_value());
+
+    SyncHarness publisher("sync-inventory-audit-concurrent-publisher",
+                          auditor.storage_root());
+    ASSERT_TRUE(publisher.valid());
+    const auto observed = publisher.sync();
+    ASSERT_TRUE(observed.has_value()) << observed.error().detail;
+    publisher.write("peer.txt", "concurrent publication");
+    bool published_concurrently = false;
+    auditor.add_after_next_full_list([&publisher, &published_concurrently] {
+        const auto result = publisher.sync();
+        if (result) {
+            const auto* summary =
+                std::get_if<kasumi::application::SyncCompleted>(&result->data);
+            published_concurrently = summary != nullptr && summary->published;
+        }
+    });
+    auditor.enable_inventory_audit();
+
+    const auto audited = auditor.sync();
+    ASSERT_FALSE(audited.has_value());
+    EXPECT_EQ(audited.error().code,
+              kasumi::application::ErrorCode::InventoryAuditFailure);
+    EXPECT_TRUE(published_concurrently);
+    EXPECT_GT(auditor.full_list_calls(), 0U);
+}
+
+TEST(SyncRemoteAvailabilityTest,
+     InventoryAuditRejectsInventoryMutationBetweenSnapshots) {
+    SyncHarness harness("sync-inventory-audit-concurrent-barrier");
+    ASSERT_TRUE(harness.valid());
+    harness.write("alpha.txt", "alpha contents");
+    ASSERT_TRUE(harness.sync().has_value());
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(
+            harness.key());
+    harness.add_after_next_full_list(
+        [&harness, identifier = layout.barrier_identifier] {
+            harness.write_remote(identifier, "concurrent maintenance barrier");
+        });
+    harness.enable_inventory_audit();
+
+    const auto audited = harness.sync();
+    ASSERT_FALSE(audited.has_value());
+    EXPECT_EQ(audited.error().code,
+              kasumi::application::ErrorCode::InventoryAuditFailure);
+    EXPECT_EQ(harness.full_list_calls(), 2U);
+}
+
+TEST(SyncRemoteAvailabilityTest, InventoryAuditRejectsActiveWriterOrBarrier) {
+    const auto key = test_key();
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key);
+    const std::array<std::string, 2> identifiers{layout.barrier_identifier,
+                                                 layout.writers_prefix +
+                                                     std::string(32, 'a')};
+    for (std::size_t index = 0; index < identifiers.size(); ++index) {
+        const auto name =
+            "sync-inventory-audit-active-maintenance-" + std::to_string(index);
+        SyncHarness harness(name);
+        ASSERT_TRUE(harness.valid());
+        harness.write("alpha.txt", "alpha contents");
+        ASSERT_TRUE(harness.sync().has_value());
+        harness.write_remote(identifiers[index], "active maintenance marker");
+
+        const auto audited = harness.audit_inventory();
+        ASSERT_FALSE(audited.has_value());
+        EXPECT_NE(audited.error().find("inconclusive"), std::string::npos);
+        EXPECT_EQ(harness.full_list_calls(), 1U);
+    }
+}
+
+TEST(SyncRemoteAvailabilityTest,
+     InventoryAuditRunsAfterPublicationAndKeepsPublishedChangesOnFailure) {
+    SyncHarness harness("sync-inventory-audit-published-then-fails");
+    ASSERT_TRUE(harness.valid());
+    harness.write("alpha.txt", "before");
+    ASSERT_TRUE(harness.sync().has_value());
+    harness.write("alpha.txt", "after");
+    harness.reset_transfer_counts();
+    harness.enable_inventory_audit();
+    harness.fail_next_full_list();
+
+    const auto failed_audit = harness.sync();
+    ASSERT_FALSE(failed_audit.has_value());
+    EXPECT_EQ(failed_audit.error().code,
+              kasumi::application::ErrorCode::InventoryAuditFailure);
+    ASSERT_TRUE(failed_audit.error().sync_completed.has_value());
+    EXPECT_TRUE(failed_audit.error().sync_completed->published);
+    EXPECT_EQ(harness.read("alpha.txt"), "after");
+    EXPECT_TRUE(std::filesystem::exists(
+        harness.content_path(kasumi::hasher::hash_string("after"))));
+}
+
+TEST(SyncRemoteAvailabilityTest, InventoryAuditUsesNewlyPublishedHistory) {
+    SyncHarness harness("sync-inventory-audit-after-publication");
+    ASSERT_TRUE(harness.valid());
+    harness.write("alpha.txt", "before");
+    ASSERT_TRUE(harness.sync().has_value());
+    harness.write("alpha.txt", "after");
+    harness.reset_transfer_counts();
+    harness.enable_inventory_audit();
+
+    const auto audited = harness.sync();
+    ASSERT_TRUE(audited.has_value()) << audited.error().detail;
+    const auto* summary =
+        std::get_if<kasumi::application::SyncCompleted>(&audited->data);
+    ASSERT_NE(summary, nullptr);
+    EXPECT_TRUE(summary->published);
+    ASSERT_TRUE(audited->inventory_audit.has_value());
+    EXPECT_EQ(audited->inventory_audit->referenced_content, 2U);
+    EXPECT_EQ(audited->inventory_audit->present_content, 2U);
+    EXPECT_GE(harness.content_puts(), 1U);
+    EXPECT_EQ(harness.full_list_calls(), 2U);
 }
 
 TEST(SyncRemoteAvailabilityTest, NoOpSyncFailsWhenHeadObservationFails) {

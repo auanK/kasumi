@@ -1,5 +1,6 @@
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
+#include "application/inspection/inspect.hpp"
 #include "application/observation/state.hpp"
 #include "application/sync/coordinator.hpp"
 #include "application/sync/coordinator_detail.hpp"
@@ -467,6 +468,28 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             err.stage = SyncStage::Finalizing;
             return std::unexpected(err);
         }
+    }
+    if (outcome && context.audit_inventory) {
+        const auto* summary = std::get_if<SyncCompleted>(&outcome->data);
+        if (summary == nullptr) {
+            return std::unexpected(Error{
+                .operation = context.operation,
+                .code = ErrorCode::InventoryAuditFailure,
+                .detail = "sync completed without a synchronization summary",
+                .runtime = context.summary,
+            });
+        }
+        const auto audit = audit_remote_inventory(context.storage, context.key);
+        if (!audit) {
+            return std::unexpected(Error{
+                .operation = context.operation,
+                .code = ErrorCode::InventoryAuditFailure,
+                .detail = audit.error(),
+                .runtime = context.summary,
+                .sync_completed = *summary,
+            });
+        }
+        outcome->inventory_audit = *audit;
     }
     return outcome;
 }

@@ -183,6 +183,43 @@ TEST(CliParserTest, ParsesEveryPublicRequestForm) {
     }
 }
 
+TEST(CliParserTest, AcceptsOptInSyncInventoryAudit) {
+    std::vector<std::string> arguments{
+        "kasumi", "sync", "demo", "--audit-inventory"};
+    std::vector<char*> argv;
+    for (auto& argument : arguments) {
+        argv.push_back(argument.data());
+    }
+
+    const auto invocation =
+        kasumi::cli::parse(static_cast<int>(argv.size()), argv.data());
+    ASSERT_TRUE(invocation.has_value())
+        << "sync should accept the explicit inventory audit flag";
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::application::Request>(*invocation));
+    const auto& request = std::get<kasumi::application::Request>(*invocation);
+    EXPECT_EQ(request.operation, kasumi::application::Operation::Sync);
+    EXPECT_TRUE(request.audit_inventory);
+}
+
+TEST(CliParserTest, RejectsInventoryAuditWithDryRunOrInitial) {
+    for (const auto& arguments : {
+             std::vector<std::string>{
+                 "kasumi", "sync", "demo", "--audit-inventory", "--dry-run"},
+             std::vector<std::string>{
+                 "kasumi", "sync", "demo", "--initial", "--audit-inventory"},
+         }) {
+        std::vector<char*> argv;
+        for (const auto& argument : arguments) {
+            argv.push_back(const_cast<char*>(argument.c_str()));
+        }
+        const auto parsed =
+            kasumi::cli::parse(static_cast<int>(argv.size()), argv.data());
+        ASSERT_FALSE(parsed.has_value());
+        EXPECT_TRUE(parsed.error().unsupported_sync_audit_combination);
+    }
+}
+
 TEST(CliParserTest, ManualWriterRemovalIsAnExplicitGcRequest) {
     std::vector<std::string> arguments{"kasumi",
                                        "gc",

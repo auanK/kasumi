@@ -91,6 +91,15 @@ struct SyncCompleted {
     std::optional<std::chrono::nanoseconds> duration = std::nullopt;
 };
 
+// Structural inventory summary collected after an explicitly audited Sync.
+struct InventoryAuditReport {
+    std::size_t referenced_content = 0;
+    std::size_t present_content = 0;
+    std::size_t missing_content = 0;
+    std::size_t orphan_content = 0;
+    std::size_t unknown_objects = 0;
+};
+
 // Summary of a completed integrity check.
 struct FsckCompleted {
     std::size_t checked_objects = 0;
@@ -163,6 +172,7 @@ struct Response {
     std::optional<RuntimeSummary> runtime;
     // Payload variant corresponding to operation.
     ResponseData data;
+    std::optional<InventoryAuditReport> inventory_audit;
 };
 
 // Application failure categories.
@@ -177,7 +187,8 @@ enum class ErrorCode {
     GarbageCollectionFailure,
     WriterRemovalFailure,
     SynchronizationFailure,
-    RecoveryFailure
+    RecoveryFailure,
+    InventoryAuditFailure
 };
 
 // Error returned by the application.
@@ -190,6 +201,8 @@ struct Error {
     // Present when garbage collection failed after acquiring execution context
     // sufficient to report candidate and cleanup diagnostics.
     std::optional<GarbageCollectFailure> garbage_collection;
+    // Sync succeeded before a subsequent inventory audit failed.
+    std::optional<SyncCompleted> sync_completed;
 };
 
 } // namespace kasumi::application

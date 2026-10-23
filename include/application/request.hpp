@@ -32,6 +32,7 @@ struct Request {
     std::string profile_name;
     std::string writer_identifier;
     bool initial = false;
+    bool audit_inventory = false;
 };
 
 } // namespace kasumi::application
