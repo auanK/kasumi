@@ -143,11 +143,16 @@ ctest --test-dir build-debug --output-on-failure
 ctest --test-dir build-debug -L unit --output-on-failure
 ctest --test-dir build-debug -L integration --output-on-failure
 ctest --test-dir build-debug -L e2e.local_sync --output-on-failure
-ctest --test-dir build-debug -L release-critical --output-on-failure
+ctest --test-dir build-debug -L release-critical --output-on-failure --no-tests=error
 
 # Filter tests by name pattern
 ctest --test-dir build-debug -R ^kasumi_architecture_dag$ --output-on-failure
 ```
+
+The release-critical selection covers crypto, formats, paths, protected history,
+GC, authenticated Sync repair, journal/crash recovery, and Fsck. Run it alongside
+the full suite; record skipped and disabled tests separately. `--no-tests=error`
+rejects an empty selection.
 
 Specific test labels include:
 * `unit.platform`

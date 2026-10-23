@@ -70,7 +70,7 @@ New profiles default to a minimum retention depth of 5 commits and a minimum ret
 | `kasumi sync <profile>` | Runs synchronization |
 | `kasumi update` | Downloads and verifies the official GitHub release, then updates this Kasumi executable |
 | `kasumi fsck <profile>` | Validates observed remote history and audits content objects referenced by the effective remote state |
-| `kasumi gc <profile>` | Garbage-collection entry point retained for the pending direct-deletion implementation; the current phase does not link a GC runner, so this command cannot execute deletion |
+| `kasumi gc <profile>` | Directly removes authenticated orphan Content and eligible redundant CommitVariants using a globally validated deletion plan under cooperative maintenance controls |
 | `kasumi gc remove-writer <profile> <writer-id>` | Manually removes exactly one listed remote writer marker |
 | `kasumi resolve-missing <profile>` | Explicitly resolves eligible pending missing remote payloads as logical deletions; **may publish permanent data loss** |
 
@@ -78,7 +78,7 @@ New profiles default to a minimum retention depth of 5 commits and a minimum ret
 * **Plan Truncation & `--full`**: When a synchronization plan contains more than 10 items, Kasumi truncates output to display the first 5 and last 5 items, separated by an ellipsis line (`... (N more items) ...` / `... (mais N itens) ...`) to maintain clean terminal output. Pass `--full` to list all items without truncation (useful for inspection scripts, complete audits, or piping to log files).
 * `sync` applies local tree modifications, transfers content payloads, publishes Commit and HEAD records when logical state changes, and verifies the physical availability of Content required by the effective tree. A no-op run may repair a missing remote object from an authenticated local source without changing logical history. See [Synchronization](architecture/synchronization.md#required-content-availability).
 * See [Updating Kasumi](#updating-kasumi) for update behavior, platform requirements, and compatibility notes.
-* `gc` removes authenticated orphan Content and redundant CommitVariants of reachable Commits. It uses a cooperative remote barrier, checks probe visibility, performs one authenticated observation, validates a global deletion plan, and then executes one sequential REMOVE per candidate. Successful REMOVE calls are counted as transport-acknowledged removals without presence read-back. It reports partial failures with acknowledged counts and does not collect whole unreachable Commits; see [Garbage Collection](architecture/garbage-collection.md). The barrier is not distributed exclusivity; maintenance must be serialized across clients and Sync must be stopped during maintenance.
+* `gc` permanently removes eligible candidates using a global deletion plan. Stop Sync on every client and serialize maintenance across the vault; see [Garbage Collection](architecture/garbage-collection.md#operational-contract).
 * `gc remove-writer` is a manual recovery command for one exact identifier from `kasumi remote writers <profile>`. Kasumi refuses removal when a maintenance barrier is present, but this check does not coordinate distributed operations. Verify that no Sync or maintenance operation is running before removal. It does not run Sync or GC.
 * `fsck` validates observed remote history and physical identifiers, downloads referenced content, checks authentication, size, and logical hashes, and reports missing or corrupted objects. It may update a private checkpoint but does not use that checkpoint to skip payload audits. See [Fsck](architecture/fsck.md).
 
@@ -99,10 +99,8 @@ On Windows, Kasumi uses the built-in `tar` command and starts a helper that wait
 On Linux, `curl`, `tar`, and `sha256sum` must be available. Kasumi installs without root when the executable's directory is writable. If permissions deny replacement, it attempts `pkexec`; it falls back to `sudo` only when authentication through `pkexec` is unavailable and the terminal is interactive.
 
 Installations managed by a package manager must be updated through that manager.
-Kasumi provides no backward compatibility between 0.x releases and no automatic
-migration of configuration, SQLite, journals, or remote formats. The updater
-changes only the executable. Preserve incompatible state and read
-[Upgrading Kasumi](best-practices.md#upgrading-kasumi) before replacing binaries.
+Read [Upgrading Kasumi](best-practices.md#upgrading-kasumi) for compatibility
+and backup requirements before replacing binaries.
 
 ### Partial Synchronization and Explicit Data-Loss Operations
 
@@ -110,7 +108,7 @@ When `kasumi sync <profile>` succeeds with unresolved missing remote payloads, i
 
 `kasumi resolve-missing <profile>` is an explicit, potentially destructive resolution path: it first recovers any pending synchronization transaction, then validates the accepted state and current observations and may publish logical deletions for eligible unresolved paths that have no local source. It is not a download/repair command. Use it only when losing those files is an informed decision.
 
-The former manual quarantine commands (`gc purge-quarantine` and `gc repair-quarantine`) were removed with the quarantine subsystem in phase GC-R1. There is no supported command that restores or purges quarantine state, and legacy quarantine objects are not reinterpreted as deletion candidates. See [Garbage Collection](architecture/garbage-collection.md) and [Troubleshooting](troubleshooting.md).
+Quarantine and the `gc purge-quarantine`, `gc repair-quarantine`, and `remote quarantine` commands have been removed. Legacy quarantine objects are left untouched and are not deletion candidates. See [Troubleshooting](troubleshooting.md#gc-partial-failures-and-uncertain-deletions) for handling GC failures.
 
 ### Interruption and Recovery
 
@@ -121,7 +119,7 @@ and backups; these workspace files are not uniformly encrypted. Preserve both
 directories when recovery fails. See the [journal format](architecture/transaction-journal.md).
 
 If synchronization is interrupted:
-* Sync, Fsck, `resolve-missing`, and GC when a collector is reconnected inspect the existing local transaction journal before their own work. Preview, Status, remote inspection, and manual writer maintenance do not run this recovery path.
+* Sync, Fsck, `resolve-missing`, and GC inspect the existing local transaction journal before their own work. Preview, Status, remote inspection, and manual writer maintenance do not run this recovery path.
 * Depending on the persisted phase and observed state, recovery may resume, rollback, or roll forward the transaction.
 * Conflicting or indeterminate publication states are reported as recovery errors rather than assumed successful.
 * Already present content objects may be reused when their identifiers and verification checks match the required content.

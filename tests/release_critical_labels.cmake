@@ -21,5 +21,30 @@ set_tests_properties(
     ScannerTest.UnicodeSupplementaryPathsAndTargetedObservation
     RuntimeProfileTest.UnicodeFilesystemPathsSurvivePersistence
     H3LocalSyncTest.UnicodeSupplementaryAndExtendedSync
+    GarbageCollectionTest.PreservesReachableContentAndRequiredHistory
+    GarbageCollectionTest.UnmarkedReachableCommitKeepsOneRequiredVariant
+    GarbageCollectionTest.MissingReachableContentBlocksAllMutation
+    GarbageCollectionTest.UnknownPhysicalAndHistoryObjectsBlockMutation
+    GarbageCollectionTest.AmbiguousRemovalStopsWithoutCompensatingRetry
+    GarbageCollectionTest.ForeignBarrierIsNotRemovedDuringCleanup
+    GarbageCollectionTest.PrimaryAndBarrierCleanupFailuresRemainDistinguishable
+    GarbageCollectionTest.CooperativeWriterCannotRegisterWhileBarrierActive
+    ApplicationExecuteTest.GarbageCollectPartialFailureKeepsPublicDiagnostics
+    SyncRemoteAvailabilityTest.NoOpSyncRepairsMissingRemoteContent
+    SyncRemoteAvailabilityTest.CorruptLocalRepairSourceIsRejected
+    SyncRemoteAvailabilityTest.MissingContentWithoutLocalSourcePreservesLogicalAndPendingState
+    SyncRemoteAvailabilityTest.PresenceFailureIsNotClassifiedAsMissing
+    SyncRemoteAvailabilityTest.ActiveGcBarrierBlocksRepairBeforeContentPut
+    SyncCoordinatorTest.InvalidJournalIsRejectedBeforeMutation
+    JournalCorrectionTest.AuthenticatedMalformedDeltasAreRejectedWithoutWrites
+    SyncGcCrashTest.KilledAfterRepairPutBeforeCheckpointRecoversSafely
+    SyncGcCrashTest.KilledAfterBarrierAcquisitionFailsClosedOnRestart
+    SyncGcCrashTest.KilledAfterCandidateRemovalBeforeConfirmationRequiresFreshAnalysis
+    IntegrityMaintenanceTest.BoundedConcurrentFsckRejectsValidAeadWrongLogicalIdentity
+    IntegrityMaintenanceTest.BoundedConcurrentFsckHardTransportFailureDrainsAndReportsLowestIndex
+    FsckResumeTest.DecisiveAdversarialLyingPhysicalHashRejectsBlindReuseUnderThreatA
+    FsckResumeTest.CorruptedCheckpointFileFallsBackToFullAuditFailClosed
+    FsckCheckpointTest.RejectsWrongKey
+    FsckCheckpointTest.RejectsBitFlipInHeaderOrCiphertext
     PROPERTIES LABELS "release-critical"
 )

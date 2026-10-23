@@ -35,7 +35,9 @@ inline void pause_at(std::string_view point,
         }
         const std::filesystem::path signal_path{signal_value};
 #endif
-        std::ofstream signal{signal_path, std::ios::binary | std::ios::trunc};
+        auto temporary = signal_path;
+        temporary += ".tmp";
+        std::ofstream signal{temporary, std::ios::binary | std::ios::trunc};
         if (!signal) {
             return;
         }
@@ -44,6 +46,9 @@ inline void pause_at(std::string_view point,
         if (!signal) {
             return;
         }
+
+        // Publish readiness only after the complete signal has been closed.
+        std::filesystem::rename(temporary, signal_path);
 
         for (;;) {
             std::this_thread::sleep_for(std::chrono::milliseconds{10});

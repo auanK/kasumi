@@ -35,12 +35,12 @@ jobs:
 
       - name: Build (Release)
         run: |
-          cmake --preset default
+          cmake --preset default -DBUILD_TESTING=ON
           cmake --build --preset default -j$(nproc)
 
       - name: Release Gate - Critical Tests
         run: |
-          ctest --test-dir build -L release-critical --output-on-failure
+          ctest --test-dir build -L release-critical --output-on-failure --no-tests=error
 
       - name: Release Gate - Smoke Test (Binary)
         run: |
@@ -99,7 +99,7 @@ jobs:
       - name: Release Gate - Critical Tests
         shell: powershell
         run: |
-          ctest --test-dir build-release -C Release -L release-critical --output-on-failure
+          ctest --test-dir build-release -C Release -L release-critical --output-on-failure --no-tests=error
 
       - name: Release Gate - Smoke Test (Binary)
         shell: powershell

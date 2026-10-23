@@ -1,12 +1,12 @@
 # Physical and Maintenance Inspection
 
-These commands use the [common inspection path](remote-inspection.md), but start from different levels of physical evidence. A provider listing proves only reported names; authenticated HEAD/Commit/Epoch metadata is loaded where stated. None acquires GC's barrier, recovers a Sync transaction, or deletes objects. See [Garbage Collection](garbage-collection.md) for the retained maintenance contract and its current reconnection state, and [Remote Layout](remote-layout.md) for keyed namespaces.
+These commands use the [common inspection path](remote-inspection.md), but start from different levels of physical evidence. A provider listing proves only reported names; authenticated HEAD/Commit/Epoch metadata is loaded where stated. None acquires GC's barrier, recovers a Sync transaction, or deletes objects. See [Garbage Collection](garbage-collection.md) for the maintenance protocol, and [Remote Layout](remote-layout.md) for keyed namespaces.
 
 | Command | View built and result | Authentication and limit |
 |---|---|---|
 | `remote markers` | Build physical history reachability and classify HEAD marker paths/references as logical, ancestral, missing, or invalid. | Reads/authenticates history/marker records and Commit variants as needed; not file-content payloads or a GC candidate decision. |
 | `remote objects` | List and classify **raw physical identifiers** by namespace/category and structural shape. | No history or payload authentication. A structurally valid name is not proof that its bytes are valid, reachable, or safe to remove. |
-| `remote orphans` | Join a full physical listing with authenticated history reachability and structural content reachability; report diagnostic unreachable candidates and protected/unknown objects. | No content AEAD audit or deletion. It does not establish GC's writer exclusion, visibility, or repeated-observation safety. |
+| `remote orphans` | Join a full physical listing with authenticated history reachability and structural content reachability; report diagnostic unreachable candidates and protected/unknown objects. | No content AEAD audit or deletion. GC independently validates deletion eligibility under its maintenance protocol. |
 | `remote writers` | Classify physical barrier and writer markers and report protocol consistency/blocking. | Listing a marker does not prove that its writer process is live; no writer admission or barrier acquisition occurs. |
 | `remote health` | Compose physical listing, authenticated Epoch/history reachability, structural content availability, writer controls, and orphan/unknown counts into healthy/degraded/critical reasons. | Diagnostic composition only. Default content reachability does **not** download/decrypt all content payloads; “healthy” is **not** [Fsck](fsck.md) and cannot certify payload integrity. |
 

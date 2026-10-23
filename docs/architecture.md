@@ -24,7 +24,7 @@ CLI/profile → local observation + authenticated remote history + StoredState
 | What do transaction phases mean, and how does interruption recovery decide? | [Transactions and Recovery](architecture/transactions-and-recovery.md) |
 | Which journal bytes are confirmed, cached, replayed, or retired? | [Incremental Transaction Journal](architecture/transaction-journal.md) |
 | How does `fsck` audit structure and every referenced payload? | [Fsck](architecture/fsck.md) |
-| What is the status of GC after quarantine removal, and what must reconnection preserve? | [Garbage Collection](architecture/garbage-collection.md) |
+| How does GC authorize direct deletion and preserve partial results? | [Garbage Collection](architecture/garbage-collection.md) |
 | How are Commit DAGs, logical heads, merge bases, Epochs, and retention resolved? | [History and Concurrency](architecture/history-and-concurrency.md) |
 | What is the actual remote namespace and publication order? | [Remote Layout and Publication](architecture/remote-layout.md) |
 | What must a backend implement, and how are optional capabilities verified? | [Transport](architecture/transport.md) |
@@ -39,7 +39,7 @@ CLI/profile → local observation + authenticated remote history + StoredState
 | Preview (`sync --dry-run`), Status | Reads local/SQLite state; profile lock and permission normalization are possible | Observation only; no recovery or publication |
 | Sync | May change synchronized files, file-hash cache, transaction journal, and accepted `StoredState` | May upload content and publish/prune history; registers a writer for active work |
 | Fsck | Checkpoint/workspace; preceding recovery can change local state | Audit reads only, **except** effects of preceding transaction recovery |
-| GC | Workspace; preceding recovery can change local state | Destructive direct deletion of authenticated orphan Content and redundant CommitVariants of reachable Commits, under barrier/probe and two stable observations. Ambiguous mutations are reported as uncertain and are not retried automatically. Whole unreachable Commits remain out of scope |
+| GC | Workspace; preceding recovery can change local state | Direct deletion of eligible orphan Content and redundant CommitVariants under cooperative maintenance controls and a globally validated plan; preceding recovery may publish |
 | `remote ...` | Temporary workspace and possible private history cache; `remote get` writes its chosen destination | Inspection reads only; no normal transaction recovery |
 
 Read the linked owners for exact invariants. The [README](../README.md) is a short entry point, and [Provider Certification](provider-certification.md) records externally established backend certification results.

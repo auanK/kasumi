@@ -36,7 +36,7 @@ Another Kasumi process is currently running on the same machine using the specif
 ## Interrupted Synchronization and Transaction Recovery
 
 ### Symptom
-At the start of `sync`, `fsck`, or `resolve-missing` — and of `gc` once a collector is reconnected — Kasumi may report a recovery conflict or indeterminate recovery diagnostic. The detail depends on the journal and observed remote state.
+At the start of `sync`, `fsck`, `resolve-missing`, or `gc`, Kasumi may report a recovery conflict or indeterminate recovery diagnostic. The detail depends on the journal and observed remote state.
 
 ### Likely Meaning
 A prior synchronization was interrupted before completion. Kasumi detected the
@@ -45,7 +45,7 @@ confirmation, and retirement proof are distinct from the staging and backups in
 `.transactions/<id>/`; preserve the complete evidence if recovery fails.
 
 ### Safe Next Steps
-1. **Automatic Evaluation**: Kasumi evaluates the journal before Sync, Fsck, `resolve-missing`, and GC when a collector is reconnected. Read-only planners/inspection and manual writer maintenance do not run recovery. Prefer `kasumi sync <profile>` to recover; `resolve-missing` additionally makes an explicit logical-deletion decision.
+1. **Automatic Evaluation**: Kasumi evaluates the journal before Sync, Fsck, `resolve-missing`, and GC. Read-only planners/inspection and manual writer maintenance do not run recovery. Prefer `kasumi sync <profile>` to recover; `resolve-missing` additionally makes an explicit logical-deletion decision.
 2. Depending on the checkpointed transaction phase:
    * **Pre-publication interruptions**: Kasumi may roll back local mutations from staged backups or resume only when pinned inputs still match.
    * **Post-publication interruptions**: Kasumi verifies the published Commit and HEAD marker before advancing local state; contradictory state stops recovery.
@@ -409,7 +409,7 @@ GC stops on an analysis failure, transport error, ownership loss, or ambiguous D
 
 ### Safe Next Steps
 
-1. **Do not attempt manual quarantine maintenance**: `gc purge-quarantine`, `gc repair-quarantine`, and `remote quarantine` were removed. Do not delete legacy quarantine objects or other protocol objects directly through the provider.
+1. **Preserve Protocol Objects**: Do not delete legacy quarantine objects or other protocol objects directly through the provider.
 2. **Inspect Writer Markers**:
    ```bash
    kasumi remote writers <profile>

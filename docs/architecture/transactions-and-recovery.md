@@ -45,7 +45,7 @@ A **local-only** transaction (`publication_required=false`) pins exactly one obs
 
 A repair-only Sync follows that local-only path. Required-content detection and reconciliation are not accepted state; they produce ordinary repair upload operations when a compatible local source exists. No Commit or HEAD is published merely to record a repaired object. An interrupted repair is resumed or rolled back through the existing journal, and a missing or unauthentic local source leaves the accepted state and pending evidence intact for a later run. Writer admission and the GC barrier still gate any repair upload.
 
-At the start of Sync, Fsck, `resolve-missing`, or a reconnected GC, recovery loads the
+At the start of Sync, Fsck, `resolve-missing`, or GC, recovery loads the
 authenticated journal authority and completes authenticated retirement when
 applicable. Only confirmed log bytes govern replay; unconfirmed tails and `.new`
 output are not recovery authority. Orphan transaction workspaces are cleaned only

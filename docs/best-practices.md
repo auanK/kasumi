@@ -59,16 +59,21 @@ state or transaction evidence merely to make a failing synchronization proceed.
 
 ## Garbage Collection
 
-Garbage collection (`kasumi gc <profile>`) is available as a destructive maintenance operation. It removes authenticated orphan Content and redundant CommitVariants of reachable Commits under a cooperative barrier, visibility probe, and two complete reachability observations. It does **not** collect whole unreachable Commits or perform Fsck-style payload auditing. See [Garbage Collection Architecture](architecture/garbage-collection.md).
+`kasumi gc <profile>` reclaims storage by directly deleting eligible orphan
+Content and redundant CommitVariants while preserving required history and
+Epochs. Deletions are permanent; keep independent backups.
 
-* **GC is NOT Fsck**: Garbage collection manages reachability and retention; it does **not** perform Fsck-style cryptographic payload auditing. Running GC does not prove payload integrity.
-* **GC Is Operationally Expensive**: The collector uses a cooperative remote maintenance barrier and temporary visibility probes; these are not distributed exclusion or provider-wide consistency proofs. Online collection takes **two complete, stable observations** of the physical namespace and history reachability. In large vaults or high-churn repositories, GC can take a significant amount of time and consume substantial network I/O.
-* **Plan Dedicated Maintenance Windows**: Off-peak timing reduces load, but it is a heuristic. For the operational requirement, stop Sync activity on every client and serialize destructive maintenance and writer-marker maintenance across the vault; see [Garbage Collection Architecture](architecture/garbage-collection.md#operational-contract). Do **not** run GC after every synchronization.
-* **No Quarantine Retention**: The former quarantine staging, 10-day retention, restoration, purge, and repair lifecycle no longer exists. GC deletes only candidates that survive stable observation and retained reachability; legacy quarantine objects are not interpreted as deletion candidates.
-* **Analysis-Only Safety**: A failed visibility probe may produce `analysis_only`: no candidate removal occurs. The maintenance barrier and probe may already have been created and cleaned up remotely. A passing probe tests only its own object and may not detect every incomplete listing.
-* **Do Not Manually Delete Remote Objects**: Never treat raw remote object listings (e.g., from cloud consoles or `rclone`) as deletion lists. Manual deletion can destroy active Epoch anchors or referenced content.
+* **Reserve a Maintenance Window**: Stop Sync on every client and run only one
+  destructive maintenance or writer-removal operation at a time. Size the window
+  using observed GC duration; running GC after every Sync is unnecessary.
+* **Inspect Results**: Check acknowledged removals and investigate partial or
+  uncertain results before retrying. A later run builds a new plan.
+* **Respect Protocol Objects**: Use Kasumi's maintenance commands rather than
+  treating a provider listing as a deletion list.
 
-For the protocol specification and reconnection state, see [Garbage Collection Architecture](architecture/garbage-collection.md).
+See [Garbage Collection Architecture](architecture/garbage-collection.md#operational-contract)
+for the protocol, backend assumptions, and maintenance procedure. Use the
+integrity tools below to audit payloads.
 
 ## Integrity Checks
 
@@ -83,7 +88,7 @@ Kasumi provides distinct tools for auditing vault integrity and remote storage h
 | `kasumi fsck` | Yes (full download & verify) | No | Yes | Yes | No during audit; preceding recovery may publish |
 | `kasumi remote health` | No payload audit | No | No | No | No |
 | `kasumi remote contents --audit` | Yes (full download & verify) | Yes | No | No | No |
-| `kasumi gc` | No Fsck-style payload audit | No | No | Yes | No; preceding recovery may publish |
+| `kasumi gc` | No Fsck-style payload audit | Candidate authentication only | No | Yes | Yes: authorized direct deletions and control cleanup; preceding recovery may publish |
 
 Fsck and GC run pending Sync transaction recovery first. Recovery may change local files or complete remote publication; Fsck's audit itself does not intentionally modify the remote vault.
 
@@ -119,13 +124,23 @@ local account: same-user processes can access its private state. See
 
 ## Upgrading Kasumi
 
-Kasumi follows a strict pre-1.0 release policy:
+Kasumi 0.x has no general compatibility guarantee between releases or automatic
+migration of SQLite, journals, configuration, keys, or remote formats. No in-place
+upgrade from **0.7.0 to 0.8.0** has been certified. Use the same release on all
+clients; downgrade is not a supported recovery procedure.
 
-* **Review Release Compatibility**: Read release notes and compatibility information before replacing binaries.
-* **No Backward Compatibility**: Kasumi provides no backward compatibility between 0.x releases. Internal formats can change, and existing profiles may be incompatible. Clients on different releases have no interoperability contract; use the same release on every client. Downgrade is not a supported recovery procedure.
-* **Complete In-Flight Operations**: Complete active synchronizations and transaction recovery before replacing binaries. Never delete transaction journals to bypass recovery.
-* **No Automatic Migration**: Kasumi does not migrate old SQLite databases, journals, configuration, credentials, or remote formats, and does not reinterpret old remote layouts. Preserve the old executable, complete profile, credentials, local files, and remote data independently. Do not delete `db.sqlite`, the accepted base, or recovery evidence to force initialization. A new profile or namespace may be necessary; there is no supported in-place migration procedure.
-* **Executable Update Only**: `kasumi update` replaces only the executable. It neither makes existing data compatible nor validates interoperability with other clients; see [Updating Kasumi](configuration-and-usage.md#updating-kasumi).
+Before replacing binaries:
+
+1. Read the release notes and verify compatibility before reusing existing state.
+2. Complete pending Sync/recovery with the compatible executable, then stop Sync
+   and maintenance on every client using the vault.
+3. Independently back up synchronized files, complete profiles/local state, and
+   credentials securely; preserve access to remote data and retain the old binary.
+4. Preserve journals and diagnostics for partial or uncertain operations. Never
+   delete SQLite, accepted state, or recovery evidence to force initialization.
+
+[`kasumi update`](configuration-and-usage.md#updating-kasumi) replaces only the
+executable; it does not migrate data or validate cross-version compatibility.
 
 ## Automation
 
@@ -164,8 +179,6 @@ These routines serve as practical starting points. Adjust intervals according to
 Avoid these operational anti-patterns:
 
 * **Do NOT manually delete raw remote objects**: Never delete files directly in the remote storage directory using cloud consoles, SFTP clients, or `rclone delete`. Kasumi manages object reachability, Epoch anchors, and retention internally; deleting files manually can cause missing-content errors and break history continuity.
-* **Do NOT modify legacy quarantine objects through the provider**: The quarantine subsystem and its manual purge/repair commands were removed in phase GC-R1. Legacy quarantine objects are not deletion candidates and must not be removed manually; do not substitute ad-hoc provider deletion for the current GC safety contract.
-* **Do NOT assume GC replaces Fsck**: GC makes reachability-based deletion decisions; it does **not** perform Fsck-style cryptographic plaintext integrity auditing or prove payload integrity.
 * **Do NOT replace binaries during an unfinished transaction**: Complete recovery before replacing the application binary. Never delete the journal to bypass recovery.
 * **Do NOT rely on `key.bin` for offline protection without Full-Disk Encryption**: `key.bin` uses a reversible XOR mask and OS file permissions; always enable BitLocker or LUKS on devices containing sensitive profile keys.
 * **Do NOT run concurrent normal application operations on the same profile**: `status`, `sync --dry-run`, `sync`, `fsck`, and `gc` use the local exclusive `profile-<name>.lock`. `remote ...` inspection does not acquire it and reports a point-in-time view.

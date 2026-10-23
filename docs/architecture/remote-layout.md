@@ -13,7 +13,7 @@ The production remote layout is derived from the 32-byte vault master key. `name
   <history-ns>/<gc-ns>/<version-ns>/<probes-ns>/<token>
 ```
 
-Commit variants, physical markers, Epoch objects, writer/probe objects, and ordinary content IDs are extensionless. Only the key-derived `RemoteLayout` is read and written by current application flows. Former fixed `history/...` paths are not parsed, migrated, or deleted. The quarantine namespace and its `.meta` records were removed in phase GC-R1; legacy quarantine objects are not generated, interpreted, migrated, or treated as deletion candidates. Unrecognized remote objects are left untouched; when an older vault cannot be safely interpreted, use independently preserved data and a new profile or namespace rather than expecting automatic conversion. Literal protocol labels and old filename extensions do not describe current publications.
+Commit variants, physical markers, Epoch objects, writer/probe objects, and ordinary content IDs are extensionless. Only the key-derived `RemoteLayout` is read and written by current application flows. Former fixed `history/...` paths are not parsed, migrated, or deleted. Unrecognized objects, including legacy quarantine state, are left untouched. For compatibility and backup requirements, see [Upgrading Kasumi](../best-practices.md#upgrading-kasumi).
 
 ## Identities and Visibility
 

@@ -23,7 +23,7 @@ Machine C ───┘
 - **Immutable history and conflict handling** that preserve divergent file versions.
 - **Interrupted-operation recovery** through an authenticated transaction journal.
 - **Persistent BLAKE3 hash cache** shared by sync and read-only plan observation.
-- **Integrity and maintenance tools** to audit content and reclaim unreachable storage.
+- **Integrity and maintenance tools** to audit referenced content and directly remove authenticated orphan Content and redundant CommitVariants.
 
 ## Quick Start
 
@@ -58,8 +58,7 @@ For source builds, see [Build and Test](docs/build-and-test.md).
 - [Provider Certification](docs/provider-certification.md) — recorded backend capabilities.
 - [Changelog](CHANGELOG.md) and [Release Notes](RELEASE_NOTES.md) — changes and upgrade requirements.
 
-Kasumi 0.x provides **no backward compatibility between releases and no automatic
-migration**. Use the same release on all clients; read the
+Use the same release on all clients; read the
 [upgrade precautions](docs/best-practices.md#upgrading-kasumi) before replacing binaries.
 Synchronization propagates deletions; keep independent backups. A sync that exits
 with code `2` is only partially complete; see

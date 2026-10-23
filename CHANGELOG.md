@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.8.0]
+
+### Changed
+
+- Replaced quarantine-based GC with direct removal of authenticated orphan Content and redundant CommitVariants, using one authenticated observation and a globally validated plan.
+- GC applies sequential removals, reports partial and uncertain results, and preserves ownership checks during barrier cleanup.
+- Sync checks required remote Content even on no-op runs and repairs missing objects from authenticated local bytes without publishing unnecessary history. Unavailable content remains pending instead of becoming a logical deletion.
+- Expanded maintenance, repair, and process-crash regressions and the release-critical gate; corrected Windows GCC/MSYS2 fixtures, crash-helper linkage, and crash-test signaling.
+
+### Removed
+
+- Quarantine and the `gc purge-quarantine`, `gc repair-quarantine`, and `remote quarantine` commands. GC deletions are permanent.
+
+### Upgrade Notes
+
+- Use the same release on all clients. See [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi) for compatibility and backup requirements.
+- See [Release Notes](RELEASE_NOTES.md) for user-facing changes and [Provider Certification](docs/provider-certification.md#direct-gc-validation--october-2026) for recorded validation results.
+
 ## [0.7.0]
 
 ### Highlights
@@ -52,7 +70,7 @@
 - Stabilization records include complete Debug regression runs on five local toolchains, with platform/privilege-dependent skips. Hosted Ubuntu and Windows CI passed for the corrected commit `e1a0ce3`, including Debug/Release builds and tests on all five configured toolchains; run links are recorded in [Provider Certification](docs/provider-certification.md#source-and-build-identity).
 - Real Google Drive/rclone validation used Windows 11 and Ubuntu WSL2/ext4, independent profiles, bidirectional changes, 1/10/100 MiB files and a 100 MiB update, conflicts, simultaneous publication, abrupt process/transport failure, reconnection/recovery, payload audits, and a 100-file workload. The interrupted large-file scenario used 10 MiB. Cross-client BLAKE3 and SHA-256 matched after convergence.
 - GC blocked observed abandoned writers, then completed after verified manual marker removal with zero candidates and zero purged objects. No eligible-object purge or quarantine repair/restoration was established by that run.
-- [Provider Certification](docs/provider-certification.md#google-drive-operational-validation--070) distinguishes initial source, post-fix binaries, hosted CI, historical backend results, and the limits of the operational evidence. This preparation record does not declare an RC or release published.
+- [Provider Certification](docs/provider-certification.md#google-drive-operational-validation--070) distinguishes initial source, post-fix binaries, hosted CI, historical backend results, and the limits of the operational evidence.
 
 ## [0.6.1]
 
