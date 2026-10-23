@@ -6,6 +6,7 @@
 #include "application/result.hpp"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -16,6 +17,11 @@ struct FsckProgressDisplayState {
     std::optional<application::FsckStage> last_stage;
     std::optional<unsigned> last_object_percent;
     bool empty_inventory_reported = false;
+};
+
+struct GarbageCollectProgressDisplayState {
+    std::optional<application::GarbageCollectStage> last_stage;
+    std::optional<std::size_t> last_candidate_count;
 };
 
 // Formats a byte count into a human-readable representation.
@@ -33,7 +39,8 @@ void present(const application::SyncProgress& progress,
              application::Operation operation = application::Operation::Sync);
 
 // Displays a garbage collection progress event.
-void present(const application::GarbageCollectProgress& progress);
+void present(const application::GarbageCollectProgress& progress,
+             GarbageCollectProgressDisplayState& state);
 
 // Displays an FSCK stage and throttled unique-object progress.
 void present(const application::FsckProgress& progress,

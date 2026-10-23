@@ -782,31 +782,40 @@ void present(const application::SyncProgress& progress,
     }
 }
 
-void present(const application::GarbageCollectProgress& progress) {
-    switch (progress.stage) {
-        case application::GarbageCollectStage::Preparing:
-            std::println("{}", i18n::tr(i18n::Key::GcStagePreparing));
-            break;
-        case application::GarbageCollectStage::Analyzing:
-            if (!progress.candidate_count.has_value()) {
+void present(const application::GarbageCollectProgress& progress,
+             GarbageCollectProgressDisplayState& state) {
+    if (state.last_stage != progress.stage) {
+        switch (progress.stage) {
+            case application::GarbageCollectStage::Preparing:
+                std::println("{}", i18n::tr(i18n::Key::GcStagePreparing));
+                break;
+            case application::GarbageCollectStage::Analyzing:
                 std::println("{}", i18n::tr(i18n::Key::GcStageAnalyzing));
-            } else if (*progress.candidate_count == 0) {
-                std::println("{}", i18n::tr(i18n::Key::GcCandidatesNone));
-            } else if (*progress.candidate_count == 1) {
-                std::println("{}", i18n::tr(i18n::Key::GcCandidatesSingular));
-            } else {
-                std::println("{}",
-                             i18n::format(i18n::Key::GcCandidatesPlural,
-                                          *progress.candidate_count));
-            }
-            break;
-        case application::GarbageCollectStage::Applying:
-            std::println("{}", i18n::tr(i18n::Key::GcStageApplying));
-            break;
-        case application::GarbageCollectStage::Finalizing:
-            std::println("{}", i18n::tr(i18n::Key::GcStageFinalizing));
-            std::println();
-            break;
+                break;
+            case application::GarbageCollectStage::Applying:
+                std::println("{}", i18n::tr(i18n::Key::GcStageApplying));
+                break;
+            case application::GarbageCollectStage::Finalizing:
+                std::println("{}", i18n::tr(i18n::Key::GcStageFinalizing));
+                std::println();
+                break;
+        }
+        state.last_stage = progress.stage;
+    }
+
+    if (progress.stage == application::GarbageCollectStage::Analyzing &&
+        progress.candidate_count.has_value() &&
+        state.last_candidate_count != progress.candidate_count) {
+        if (*progress.candidate_count == 0) {
+            std::println("{}", i18n::tr(i18n::Key::GcCandidatesNone));
+        } else if (*progress.candidate_count == 1) {
+            std::println("{}", i18n::tr(i18n::Key::GcCandidatesSingular));
+        } else {
+            std::println("{}",
+                         i18n::format(i18n::Key::GcCandidatesPlural,
+                                      *progress.candidate_count));
+        }
+        state.last_candidate_count = progress.candidate_count;
     }
 }
 
@@ -892,7 +901,8 @@ void present(const application::FsckProgress& progress,
 
 int present(const application::Response& response, bool full) {
     if (const auto* sync =
-            std::get_if<application::SyncCompleted>(&response.data)) {
+            std::get_if<application::SyncCompleted>(&response.data);
+        sync && response.operation == application::Operation::Sync) {
         if (sync->partial) {
             render_pending_paths(sync->pending_paths, full);
             return 2;
@@ -913,8 +923,9 @@ int present(const application::Response& response, bool full) {
         }
         return 0;
     }
-    if (const auto* ptr =
-            std::get_if<application::PlanReport>(&response.data)) {
+    if (const auto* ptr = std::get_if<application::PlanReport>(&response.data);
+        ptr && (response.operation == application::Operation::Preview ||
+                response.operation == application::Operation::Status)) {
         render_plan_report(*ptr, full);
         if (response.operation == application::Operation::Preview) {
             std::println("{}", i18n::tr(i18n::Key::PreviewCompleted));
@@ -922,7 +933,8 @@ int present(const application::Response& response, bool full) {
         return ptr->pending_paths.empty() ? 0 : 2;
     }
     if (const auto* fsck =
-            std::get_if<application::FsckCompleted>(&response.data)) {
+            std::get_if<application::FsckCompleted>(&response.data);
+        fsck && response.operation == application::Operation::Fsck) {
         std::println("{}{}{} {}",
                      style::green,
                      i18n::tr(i18n::Key::LabelOk),
@@ -957,7 +969,8 @@ int present(const application::Response& response, bool full) {
         }
     }
     if (const auto* ptr =
-            std::get_if<application::GarbageCollectCompleted>(&response.data)) {
+            std::get_if<application::GarbageCollectCompleted>(&response.data);
+        ptr && response.operation == application::Operation::GarbageCollect) {
         if (ptr->analysis_only) {
             const auto header =
                 (ptr->candidate_objects == 1)
@@ -977,13 +990,14 @@ int present(const application::Response& response, bool full) {
                      i18n::tr(i18n::Key::LabelOk),
                      style::reset,
                      i18n::tr(i18n::Key::GcCompleted));
-        std::println("     {}",
-                     i18n::format(i18n::Key::GcSummary,
-                                  ptr->candidate_objects));
+        std::println(
+            "     {}",
+            i18n::format(i18n::Key::GcSummary, ptr->candidate_objects));
         return 0;
     }
     if (const auto* ptr =
-            std::get_if<application::ResolveMissingCompleted>(&response.data)) {
+            std::get_if<application::ResolveMissingCompleted>(&response.data);
+        ptr && response.operation == application::Operation::ResolveMissing) {
         if (ptr->resolved_count > 0) {
             std::println("{}{}{} resolved {} missing paths",
                          style::green,
@@ -995,7 +1009,7 @@ int present(const application::Response& response, bool full) {
         }
         return 0;
     }
-    return 0;
+    return 1;
 }
 
 int present(const application::InspectionResponse& response) {

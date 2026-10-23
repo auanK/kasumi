@@ -129,6 +129,7 @@ int run(int argc, char* argv[]) {
 
     application::ProgressCallback on_progress{};
     FsckProgressDisplayState fsck_display_state;
+    GarbageCollectProgressDisplayState gc_display_state;
     if (request.operation == application::Operation::Sync) {
         std::println(
             "{}", i18n::format(i18n::Key::SyncStarting, request.profile_name));
@@ -171,11 +172,12 @@ int run(int argc, char* argv[]) {
     } else if (request.operation == application::Operation::GarbageCollect) {
         std::println("{}",
                      i18n::format(i18n::Key::GcStarting, request.profile_name));
-        on_progress = [](const application::ExecutionProgress& progress) {
+        on_progress = [&gc_display_state](
+                          const application::ExecutionProgress& progress) {
             if (const auto* gc =
                     std::get_if<application::GarbageCollectProgress>(
                         &progress)) {
-                present(*gc);
+                present(*gc, gc_display_state);
             }
         };
     }

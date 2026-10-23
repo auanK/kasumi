@@ -82,6 +82,17 @@ TEST(CliPresenterTest, PresentsSuccessfulResponseVariants) {
               0);
 }
 
+TEST(CliPresenterTest, RejectsCompletionPayloadForDifferentOperation) {
+    const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(
+                  response(SyncCompleted{}, Operation::GarbageCollect)),
+              1);
+    const auto output = testing::internal::GetCapturedStdout();
+    EXPECT_EQ(output.find("Sincronização concluída."), std::string::npos);
+    EXPECT_EQ(output.find("[OK]"), std::string::npos);
+}
+
 TEST(CliPresenterTest, PartialSyncIsLocalizedAndReturnsDistinctExitCode) {
     SyncCompleted partial{
         .pending = 1, .pending_paths = {"docs/missing.txt"}, .partial = true};
@@ -1351,19 +1362,30 @@ TEST(CliPresenterTest,
 TEST(CliPresenterTest,
      PresentsGarbageCollectProgressStagesAndSummaryInPortuguese) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
+    kasumi::cli::GarbageCollectProgressDisplayState state;
 
     testing::internal::CaptureStdout();
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Preparing});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Analyzing});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Analyzing,
-        .candidate_count = 8});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Applying});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Finalizing});
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Preparing},
+        state);
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Analyzing},
+        state);
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Analyzing,
+            .candidate_count = 8},
+        state);
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Applying},
+        state);
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Finalizing},
+        state);
     kasumi::application::GarbageCollectCompleted summary{
         .candidate_objects = 8,
         .analysis_only = false,
@@ -1378,8 +1400,7 @@ TEST(CliPresenterTest,
     EXPECT_NE(output.find("[2/4] Analisando estado remoto..."),
               std::string::npos);
     EXPECT_NE(output.find("8 candidatos encontrados."), std::string::npos);
-    EXPECT_NE(output.find("[3/4] Aplicando limpeza..."),
-              std::string::npos);
+    EXPECT_NE(output.find("[3/4] Aplicando limpeza..."), std::string::npos);
     EXPECT_NE(output.find("[4/4] Finalizando..."), std::string::npos);
     EXPECT_NE(output.find("[OK]"), std::string::npos);
     EXPECT_NE(output.find("Coleta de lixo concluída."), std::string::npos);
@@ -1394,19 +1415,30 @@ TEST(CliPresenterTest,
 TEST(CliPresenterTest,
      PresentsGarbageCollectProgressStagesAndSummaryInEnglish) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
+    kasumi::cli::GarbageCollectProgressDisplayState state;
 
     testing::internal::CaptureStdout();
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Preparing});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Analyzing});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Analyzing,
-        .candidate_count = 8});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Applying});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Finalizing});
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Preparing},
+        state);
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Analyzing},
+        state);
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Analyzing,
+            .candidate_count = 8},
+        state);
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Applying},
+        state);
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Finalizing},
+        state);
     kasumi::application::GarbageCollectCompleted summary{
         .candidate_objects = 8,
         .analysis_only = false,
@@ -1425,26 +1457,114 @@ TEST(CliPresenterTest,
     EXPECT_NE(output.find("[4/4] Finalizing..."), std::string::npos);
     EXPECT_NE(output.find("[OK]"), std::string::npos);
     EXPECT_NE(output.find("Garbage collection completed."), std::string::npos);
+    EXPECT_EQ(output.find("Synchronization completed"), std::string::npos);
     EXPECT_NE(output.find("8 candidate object(s) analyzed."),
               std::string::npos);
     EXPECT_EQ(output.find("[Running destination GC]"), std::string::npos);
 }
 
+TEST(CliPresenterTest, DoesNotRepeatGarbageCollectProgressMessages) {
+    const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
+    kasumi::cli::GarbageCollectProgressDisplayState state;
+
+    testing::internal::CaptureStdout();
+    for (int i = 0; i < 3; ++i) {
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Preparing},
+            state);
+    }
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Analyzing},
+        state);
+    for (int i = 0; i < 2; ++i) {
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Analyzing,
+                .candidate_count = 8},
+            state);
+    }
+    for (int i = 0; i < 6; ++i) {
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Applying},
+            state);
+    }
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Finalizing},
+        state);
+    const auto output = testing::internal::GetCapturedStdout();
+    const auto expect_once = [&](const std::string& message) {
+        const auto first = output.find(message);
+        EXPECT_NE(first, std::string::npos);
+        EXPECT_EQ(first, output.rfind(message));
+    };
+
+    expect_once("[1/4] Preparing garbage collection...");
+    expect_once("[2/4] Analyzing remote state...");
+    expect_once("8 candidates found.");
+    expect_once("[3/4] Applying cleanup...");
+    expect_once("[4/4] Finalizing...");
+}
+
+TEST(CliPresenterTest, GarbageCollectProgressStateIsPerExecution) {
+    const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
+    kasumi::cli::GarbageCollectProgressDisplayState first_state;
+    kasumi::cli::GarbageCollectProgressDisplayState second_state;
+
+    testing::internal::CaptureStdout();
+    for (auto* state : {&first_state, &second_state}) {
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Preparing},
+            *state);
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Analyzing},
+            *state);
+    }
+    const auto output = testing::internal::GetCapturedStdout();
+    for (const std::string message : {"[1/4] Preparing garbage collection...",
+                                      "[2/4] Analyzing remote state..."}) {
+        const auto first = output.find(message);
+        const auto second = output.find(message, first + message.size());
+        EXPECT_NE(first, std::string::npos);
+        EXPECT_NE(second, std::string::npos);
+        EXPECT_EQ(second, output.rfind(message));
+    }
+}
+
 TEST(CliPresenterTest,
      PresentsGarbageCollectProgressNoCandidatesOmittingApplying) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
+    kasumi::cli::GarbageCollectProgressDisplayState state;
 
     testing::internal::CaptureStdout();
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Preparing});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Analyzing});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Analyzing,
-        .candidate_count = 0});
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Preparing},
+        state);
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Analyzing},
+        state);
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Analyzing,
+            .candidate_count = 0},
+        state);
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Analyzing,
+            .candidate_count = 0},
+        state);
     // Stage 3 (Applying) omitted when no destructive work is performed.
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Finalizing});
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Finalizing},
+        state);
     kasumi::application::GarbageCollectCompleted summary{
         .candidate_objects = 0,
         .analysis_only = false,
@@ -1460,6 +1580,8 @@ TEST(CliPresenterTest,
               std::string::npos);
     EXPECT_NE(output.find("Nenhum candidato a coleta de lixo encontrado."),
               std::string::npos);
+    EXPECT_EQ(output.find("Nenhum candidato a coleta de lixo encontrado."),
+              output.rfind("Nenhum candidato a coleta de lixo encontrado."));
     EXPECT_EQ(output.find("[3/4]"), std::string::npos);
     EXPECT_NE(output.find("[4/4] Finalizando..."), std::string::npos);
     EXPECT_NE(output.find("[OK]"), std::string::npos);
@@ -1469,17 +1591,26 @@ TEST(CliPresenterTest,
 
 TEST(CliPresenterTest, PresentsGarbageCollectProgressAnalysisOnlyWarning) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
+    kasumi::cli::GarbageCollectProgressDisplayState state;
 
     testing::internal::CaptureStdout();
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Preparing});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Analyzing});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Analyzing,
-        .candidate_count = 42});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Finalizing});
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Preparing},
+        state);
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Analyzing},
+        state);
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Analyzing,
+            .candidate_count = 42},
+        state);
+    kasumi::cli::present(
+        kasumi::application::GarbageCollectProgress{
+            .stage = kasumi::application::GarbageCollectStage::Finalizing},
+        state);
     kasumi::application::GarbageCollectCompleted summary{
         .candidate_objects = 42,
         .analysis_only = true,
@@ -1677,19 +1808,24 @@ TEST(CliPresenterTest,
 
 TEST(CliPresenterTest, PresentsGarbageCollectBoundedOutputLines) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
+    kasumi::cli::GarbageCollectProgressDisplayState state;
+    const auto repeat_progress =
+        [&](kasumi::application::GarbageCollectProgress progress) {
+            for (int i = 0; i < 10000; ++i) {
+                kasumi::cli::present(progress, state);
+            }
+        };
 
     testing::internal::CaptureStdout();
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Preparing});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Analyzing});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Analyzing,
-        .candidate_count = 100000});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Applying});
-    kasumi::cli::present(kasumi::application::GarbageCollectProgress{
-        .stage = kasumi::application::GarbageCollectStage::Finalizing});
+    repeat_progress(
+        {.stage = kasumi::application::GarbageCollectStage::Preparing});
+    repeat_progress(
+        {.stage = kasumi::application::GarbageCollectStage::Analyzing,
+         .candidate_count = 100000});
+    repeat_progress(
+        {.stage = kasumi::application::GarbageCollectStage::Applying});
+    repeat_progress(
+        {.stage = kasumi::application::GarbageCollectStage::Finalizing});
     kasumi::application::GarbageCollectCompleted summary{
         .candidate_objects = 100000,
         .analysis_only = false,
