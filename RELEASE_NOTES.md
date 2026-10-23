@@ -26,6 +26,13 @@ protocol, failure handling, and backend requirements.
 
 ## Synchronization and Recovery
 
+`kasumi sync <profile> --initial` can initialize a missing local database from
+the existing profile configuration and vault key when no current remote history
+or unfinished local transaction evidence exists. It publishes new history from
+local files and can reuse compatible remote Content. It does not migrate old
+databases, recover deleted history, or remove remote objects. Sync without the
+flag continues to reject a missing database.
+
 Sync checks the remote Content required by the reconciled tree and pending
 work. Missing objects can be repaired from local bytes verified against the
 expected hash and size, independently of the scanner's hash cache. Repair-only

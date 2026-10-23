@@ -1074,6 +1074,14 @@ std::vector<bool> required_content_uploads(const reconciliation::Input& input,
         if (operation.action != Action::Upload) {
             continue;
         }
+        const auto content_identity =
+            operation.hash + ':' + std::to_string(operation.size);
+        if (input.verified_remote_content_objects.contains(content_identity)) {
+            available.insert(operation.hash + ':' +
+                             std::to_string(operation.size));
+            required[index] = false;
+            continue;
+        }
         required[index] =
             available
                 .insert(operation.hash + ':' + std::to_string(operation.size))

@@ -31,6 +31,7 @@ struct Request {
     Operation operation = Operation::Sync;
     std::string profile_name;
     std::string writer_identifier;
+    bool initial = false;
 };
 
 } // namespace kasumi::application

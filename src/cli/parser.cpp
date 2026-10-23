@@ -49,14 +49,23 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
     }
     if (command == "sync") {
         if ((argc != 3 && argc != 4) || argv[2] == nullptr ||
-            (argc == 4 && (argv[3] == nullptr ||
-                           std::string_view{argv[3]} != "--dry-run"))) {
+            argv[2][0] == '\0' ||
+            std::string_view{argv[2]} == "--dry-run" ||
+            std::string_view{argv[2]} == "--initial" ||
+            (argc == 4 &&
+             (argv[3] == nullptr ||
+              (std::string_view{argv[3]} != "--dry-run" &&
+               std::string_view{argv[3]} != "--initial")))) {
             return std::unexpected(ParseError{});
         }
+        const bool initial =
+            argc == 4 && std::string_view{argv[3]} == "--initial";
         return application::Request{
-            .operation = argc == 4 ? application::Operation::Preview
-                                   : application::Operation::Sync,
-            .profile_name = argv[2]};
+            .operation = argc == 4 && !initial
+                             ? application::Operation::Preview
+                             : application::Operation::Sync,
+            .profile_name = argv[2],
+            .initial = initial};
     }
     if (command == "status") {
         return request(application::Operation::Status, argc, argv);

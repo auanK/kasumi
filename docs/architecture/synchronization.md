@@ -2,6 +2,17 @@
 
 `kasumi sync <profile>` prepares the [runtime](application-and-runtime.md), recovers a pending [transaction](transactions-and-recovery.md), then collects local disk, accepted `StoredState`, and authenticated remote history. Local scan and remote observation can overlap. Remote history resolution produces an effective remote tree; [reconciliation](reconciliation.md) creates a candidate shared tree, an ordered `SyncPlan`, and flags for physical repair, local mutation, publication, or accepted-state commit.
 
+## Initial Sync
+
+`kasumi sync <profile> --initial` is an explicit exception for a missing local
+database. Under the profile lock it rejects SQLite sidecars and transaction
+evidence, resolves the existing vault key, initializes and lists the transport,
+and rejects any object in the key-derived current history namespace. It then
+creates the current database schema and runs the same Sync path, which publishes
+new history from local files and can reuse compatible root Content. It never
+overwrites a database, migrates old state, or deletes remote objects; a failed
+listing is an error. Without this flag, Sync behavior is unchanged.
+
 ## Required Content Availability
 
 Every normal Sync, including an otherwise empty no-op run, derives a deduplicated set of Content IDs required by the effective reconciled remote tree, Download operations, and pending materialization/storage rows that still match the effective tree. A stable local file is therefore still a repair source even when this run would otherwise upload nothing. The explicit pending-deletion authority used by `resolve-missing` keeps its own scope; Sync never expands it into a logical deletion.

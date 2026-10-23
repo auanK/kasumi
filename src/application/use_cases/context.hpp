@@ -17,6 +17,7 @@ struct OperationContext {
     Operation operation;
     runtime::RuntimeData runtime;
     RuntimeSummary summary;
+    bool initial_sync = false;
     std::intptr_t profile_lock = platform::invalid_profile_lock;
     runtime::vault::KeyBytes key{};
     std::string writer_identifier;

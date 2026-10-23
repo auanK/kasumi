@@ -336,6 +336,29 @@ TEST(CliParserTest, ParserAcceptsNamesWhoseRuntimeValidityIsSeparate) {
               "name with space");
 }
 
+TEST(CliParserTest, ParsesInitialSyncAndRejectsInvalidCombinations) {
+    const auto initial = parse({"kasumi", "sync", "demo", "--initial"});
+    ASSERT_TRUE(std::holds_alternative<kasumi::application::Request>(initial));
+    EXPECT_EQ(std::get<kasumi::application::Request>(initial).operation,
+              kasumi::application::Operation::Sync);
+    EXPECT_TRUE(std::get<kasumi::application::Request>(initial).initial);
+
+    const auto preview = parse({"kasumi", "sync", "demo", "--dry-run"});
+    EXPECT_FALSE(std::get<kasumi::application::Request>(preview).initial);
+
+    const auto rejected = [](std::vector<std::string> values) {
+        std::vector<char*> argv;
+        argv.reserve(values.size());
+        for (auto& value : values)
+            argv.push_back(value.data());
+        return !kasumi::cli::parse(static_cast<int>(argv.size()), argv.data());
+    };
+    EXPECT_TRUE(rejected({"kasumi", "sync", "", "--initial"}));
+    EXPECT_TRUE(rejected({"kasumi", "sync", "--initial"}));
+    EXPECT_TRUE(rejected({"kasumi", "sync", "demo", "--initial", "--initial"}));
+    EXPECT_TRUE(rejected({"kasumi", "sync", "demo", "--initial", "--dry-run"}));
+}
+
 TEST(CliParserTest, ParsesResolveMissingRequest) {
     std::vector<std::string> values = {"kasumi", "resolve-missing", "demo"};
     std::vector<char*> argv;

@@ -34,6 +34,8 @@ TEST(CliI18nTest, DefaultLanguageIsEnglish) {
     EXPECT_EQ(format(Key::SyncPlanOmittedPlural, 5), "5 more items");
     EXPECT_EQ(format(Key::SyncPendingSingular, 1),
               "1 file is waiting for unavailable remote content.");
+    EXPECT_NE(tr(Key::HelpText).find("sync <profile> --initial"),
+              std::string_view::npos);
 }
 
 TEST(CliI18nTest, SwitchingToPortugueseUpdatesStrings) {
@@ -57,6 +59,8 @@ TEST(CliI18nTest, SwitchingToPortugueseUpdatesStrings) {
     EXPECT_EQ(format(Key::SyncPlanOmittedPlural, 5), "mais 5 itens");
     EXPECT_EQ(format(Key::SyncPendingPlural, 2),
               "2 arquivos aguardam conteúdo remoto indisponível.");
+    EXPECT_NE(tr(Key::HelpText).find("sync <perfil> --initial"),
+              std::string_view::npos);
     set_language(Language::English); // Restore default
 }
 

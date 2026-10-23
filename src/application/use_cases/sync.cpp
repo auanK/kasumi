@@ -151,7 +151,12 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             const auto availability_trace = platform::perf_trace::begin();
             auto available =
                 sync::coordinator::reobservation::refresh_content_availability(
-                    *collected, *reconciled, context.storage, context.key);
+                    *collected,
+                    *reconciled,
+                    context.storage,
+                    context.key,
+                    {},
+                    context.initial_sync);
             platform::perf_trace::finish("content availability",
                                          availability_trace);
             if (!available) {
@@ -224,7 +229,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 std::move(*reconciled),
                 &observation_session,
                 {},
-                true);
+                true,
+                context.initial_sync);
             platform::perf_trace::finish("reobservation", reobservation_trace);
             if (!stable) {
                 auto err = transaction_error(

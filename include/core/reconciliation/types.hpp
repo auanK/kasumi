@@ -113,6 +113,8 @@ struct Input {
 
     // Content known missing from demand-driven probes in this run.
     HashSet known_missing_content_objects{0, hash_key};
+    // Unreferenced Content authenticated for reuse by explicit initial Sync.
+    std::unordered_set<std::string> verified_remote_content_objects;
 
     // Last shared tree persisted locally.
     Snapshot base_tree;

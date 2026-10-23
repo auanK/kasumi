@@ -7,6 +7,7 @@
 - Replaced quarantine-based GC with direct removal of authenticated orphan Content and redundant CommitVariants, using one authenticated observation and a globally validated plan.
 - GC applies sequential removals, reports partial and uncertain results, and preserves ownership checks during barrier cleanup.
 - Sync checks required remote Content even on no-op runs and repairs missing objects from authenticated local bytes without publishing unnecessary history. Unavailable content remains pending instead of becoming a logical deletion.
+- Added explicit `sync --initial` to initialize a missing local database only when local transaction evidence and current remote history are absent; compatible Content can be reused.
 - Expanded maintenance, repair, and process-crash regressions and the release-critical gate; corrected Windows GCC/MSYS2 fixtures, crash-helper linkage, and crash-test signaling.
 
 ### Removed

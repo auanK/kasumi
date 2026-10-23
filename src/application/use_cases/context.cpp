@@ -1,5 +1,7 @@
 #include "application/use_cases/context.hpp"
 
+#include "application/history_storage/remote_layout.hpp"
+#include "application/sync/journal.hpp"
 #include "application/use_cases/error_mapping.hpp"
 #include "core/history.hpp"
 #include "crypto/secure_memory.hpp"
@@ -9,7 +11,13 @@
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 
+#include <algorithm>
+#include <filesystem>
+#include <optional>
+#include <string>
+#include <system_error>
 #include <utility>
+#include <vector>
 
 namespace kasumi::application::detail {
 
@@ -18,8 +26,16 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     wipe_operation(output);
     const auto operation = input.request.operation;
     output.operation = operation;
+    output.initial_sync = input.request.initial;
     output.writer_identifier = input.request.writer_identifier;
     output.on_progress = input.on_progress;
+    if (input.request.initial && operation != Operation::Sync) {
+        return std::unexpected(Error{
+            .operation = operation,
+            .code = ErrorCode::RuntimeFailure,
+            .detail = "--initial is only valid for sync",
+        });
+    }
     const auto access_mode =
         (operation == Operation::Sync || operation == Operation::ResolveMissing)
             ? runtime::AccessMode::ReadWrite
@@ -68,7 +84,104 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         });
     }
     output.profile_lock = *profile_lock;
-    if (!state_storage::validate(runtime_data->database_path)) {
+
+    if (input.request.initial) {
+        const auto reject_initial = [&](std::string detail)
+            -> std::expected<void, Error> {
+            platform::perf_trace::finish("operation preparation",
+                                         preparation_trace);
+            wipe_operation(output);
+            return std::unexpected(Error{
+                .operation = operation,
+                .code = ErrorCode::RuntimeFailure,
+                .detail = std::move(detail),
+                .runtime = output.summary,
+            });
+        };
+        const auto check_absent = [](const std::filesystem::path& path)
+            -> std::optional<std::string> {
+            std::error_code error;
+            const auto status = std::filesystem::symlink_status(path, error);
+            if (error == std::errc::no_such_file_or_directory ||
+                error == std::errc::not_a_directory) {
+                return std::nullopt;
+            }
+            if (error) {
+                return "cannot inspect local initialization state: " +
+                       error.message();
+            }
+            if (status.type() != std::filesystem::file_type::not_found) {
+                return "initial sync requires absent local state; existing "
+                       "database or transaction evidence was left untouched";
+            }
+            return std::nullopt;
+        };
+        const auto check_empty_directory = [](const std::filesystem::path& path)
+            -> std::optional<std::string> {
+            std::error_code error;
+            const auto status = std::filesystem::symlink_status(path, error);
+            if (error == std::errc::no_such_file_or_directory ||
+                error == std::errc::not_a_directory) {
+                return std::nullopt;
+            }
+            if (error) {
+                return "cannot inspect local transaction workspaces: " +
+                       error.message();
+            }
+            if (status.type() == std::filesystem::file_type::not_found) {
+                return std::nullopt;
+            }
+            if (std::filesystem::is_symlink(status) ||
+                !std::filesystem::is_directory(status)) {
+                return "initial sync requires a physical transaction "
+                       "workspace directory";
+            }
+            std::filesystem::directory_iterator entry(path, error);
+            if (error) {
+                return "cannot list local transaction workspaces: " +
+                       error.message();
+            }
+            if (entry != std::filesystem::directory_iterator{}) {
+                return "initial sync found existing transaction workspace "
+                       "evidence; local state was left untouched";
+            }
+            return std::nullopt;
+        };
+
+        if (auto error = check_absent(runtime_data->database_path)) {
+            return reject_initial(*error);
+        }
+
+        auto wal_path = runtime_data->database_path;
+        wal_path += "-wal";
+        auto shm_path = runtime_data->database_path;
+        shm_path += "-shm";
+        auto journal_path = runtime_data->database_path;
+        journal_path += "-journal";
+        const auto profile_directory =
+            runtime_data->database_path.parent_path();
+        const auto journal_paths = sync::journal::make_paths(profile_directory);
+        if (!journal_paths) {
+            return reject_initial("cannot inspect local transaction state: " +
+                                  journal_paths.error());
+        }
+        const std::vector<std::filesystem::path> evidence{
+            wal_path,
+            shm_path,
+            journal_path,
+            journal_paths->final_path.parent_path(),
+            profile_directory / "transaction.bin.enc.cleared",
+        };
+        for (const auto& path : evidence) {
+            if (auto error = check_absent(path)) {
+                return reject_initial(*error);
+            }
+        }
+        if (auto error =
+                check_empty_directory(profile_directory / ".transactions")) {
+            return reject_initial(*error);
+        }
+    } else if (!state_storage::validate(runtime_data->database_path)) {
         platform::perf_trace::finish("operation preparation",
                                      preparation_trace);
         wipe_operation(output);
@@ -106,6 +219,55 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
             .detail = transport::describe(opened_storage.error()),
             .runtime = output.summary,
         });
+    }
+
+    if (input.request.initial) {
+        auto initialized = transport::initialize(*opened_storage);
+        if (!initialized) {
+            wipe_operation(output);
+            return std::unexpected(Error{
+                .operation = operation,
+                .code = ErrorCode::RuntimeFailure,
+                .detail = "cannot initialize remote storage: " +
+                          transport::describe(initialized.error()),
+                .runtime = output.summary,
+            });
+        }
+        auto identifiers = transport::list(*opened_storage);
+        if (!identifiers) {
+            wipe_operation(output);
+            return std::unexpected(Error{
+                .operation = operation,
+                .code = ErrorCode::RuntimeFailure,
+                .detail = "cannot verify remote protocol state: " +
+                          transport::describe(identifiers.error()),
+                .runtime = output.summary,
+            });
+        }
+        const auto layout = history_storage::derive_remote_layout(output.key);
+        if (std::ranges::any_of(*identifiers, [&](const std::string& id) {
+                return id.starts_with(layout.history_prefix);
+            })) {
+            wipe_operation(output);
+            return std::unexpected(Error{
+                .operation = operation,
+                .code = ErrorCode::RuntimeFailure,
+                .detail = "initial sync requires an empty current protocol "
+                          "namespace; remote objects were left untouched",
+                .runtime = output.summary,
+            });
+        }
+        if (!state_storage::initialize(runtime_data->database_path) ||
+            !state_storage::validate(runtime_data->database_path)) {
+            wipe_operation(output);
+            return std::unexpected(Error{
+                .operation = operation,
+                .code = ErrorCode::RuntimeFailure,
+                .detail = "failed to initialize the missing profile state "
+                          "database; inspect local state before retrying",
+                .runtime = output.summary,
+            });
+        }
     }
 
     output.storage = std::move(*opened_storage);

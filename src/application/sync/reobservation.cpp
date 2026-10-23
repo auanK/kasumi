@@ -7,10 +7,12 @@
 #include "application/sync/mutation.hpp"
 #include "core/reconciliation/plan.hpp"
 #include "crypto/content.hpp"
+#include "crypto/file_crypto.hpp"
 #include "crypto/key_derivation.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
+#include "platform/workspace.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -72,16 +74,82 @@ bool same_rows(std::span<const NodeRow> left,
     return left.size() == right.size() && std::ranges::equal(left, right);
 }
 
+std::expected<bool, Error> verify_existing_content(
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const Hash& hash,
+    std::uint64_t size,
+    const platform::Workspace& workspace,
+    std::size_t index) {
+    const auto encrypted =
+        platform::workspace_file(workspace, index, ".initial.enc");
+    const auto plaintext =
+        platform::workspace_file(workspace, index, ".initial.plain");
+    const auto identifier = crypto::content_identifier(key, hash);
+    auto downloaded = transport::get(storage, identifier, encrypted);
+    if (!downloaded) {
+        if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
+            return false;
+        }
+        return std::unexpected(detail::make_error(
+            ErrorCode::ObservationFailure,
+            transport::describe(downloaded.error())));
+    }
+    if (!crypto::decrypt_file(encrypted, plaintext, key)) {
+        return false;
+    }
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(plaintext, error);
+    if (error) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::ObservationFailure,
+            "could not inspect downloaded Content: " + error.message()));
+    }
+    if (!std::filesystem::is_regular_file(status)) {
+        return false;
+    }
+    const auto actual_size = std::filesystem::file_size(plaintext, error);
+    if (error) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::ObservationFailure,
+            "could not read downloaded Content size: " + error.message()));
+    }
+    if (actual_size != size) {
+        return false;
+    }
+    const auto actual_hash = crypto::content::hash_file(plaintext);
+    if (!actual_hash) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::ObservationFailure, actual_hash.error()));
+    }
+    return *actual_hash == hash;
+}
+
 std::expected<void, Error> observe_content_availability(
     reconciliation::Input& input,
     const reconciliation::Result& result,
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-    std::span<const Hash> confirmed_missing) {
+    std::span<const Hash> confirmed_missing,
+    bool allow_unreferenced_content_reuse) {
     HashSet hashes{0, hash_key};
+    HashSet upload_hashes{0, hash_key};
     const auto add_hash = [&](const Hash& hash) {
         hashes.insert(hash);
     };
+
+    if (allow_unreferenced_content_reuse) {
+        for (const auto& operation : sync_plan_operations(result.plan)) {
+            if (operation.action != Action::Upload) {
+                continue;
+            }
+            if (const auto hash = hash_from_hex(operation.hash)) {
+                upload_hashes.insert(*hash);
+                add_hash(*hash);
+            }
+        }
+    }
+    input.verified_remote_content_objects.clear();
 
     // Every Content object referenced by the effective reconciled logical
     // state is required, independently of whether this run uploads or
@@ -126,6 +194,19 @@ std::expected<void, Error> observe_content_availability(
         input.known_missing_content_objects.insert(confirmed_missing.begin(),
                                                    confirmed_missing.end());
         return {};
+    }
+    platform::Workspace reuse_workspace;
+    struct WorkspaceCleanup {
+        platform::Workspace& workspace;
+        ~WorkspaceCleanup() { platform::cleanup_workspace(workspace); }
+    } cleanup{reuse_workspace};
+    if (!upload_hashes.empty()) {
+        auto created = platform::create_workspace("sync-initial-content");
+        if (!created) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::ObservationFailure, created.error()));
+        }
+        reuse_workspace = std::move(*created);
     }
     std::vector<std::pair<Hash, std::string>> requested;
     requested.reserve(hashes.size());
@@ -199,7 +280,36 @@ std::expected<void, Error> observe_content_availability(
                         ", PRESENCE says " + (present ? "present" : "absent")));
             }
         }
-        if (!present) {
+        if (allow_unreferenced_content_reuse && present &&
+            upload_hashes.contains(hash)) {
+            const auto operations = sync_plan_operations(result.plan);
+            const auto operation = std::ranges::find_if(
+                operations, [&](const auto& candidate) {
+                    return candidate.action == Action::Upload &&
+                           candidate.hash == hash_hex(hash);
+                });
+            if (operation == operations.end()) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::ObservationFailure,
+                    "verified Content has no matching upload operation"));
+            }
+            const auto verified = verify_existing_content(
+                storage,
+                key,
+                hash,
+                operation->size,
+                reuse_workspace,
+                index);
+            if (!verified) {
+                return std::unexpected(verified.error());
+            }
+            if (*verified) {
+                input.verified_remote_content_objects.insert(
+                    hash_hex(hash) + ':' + std::to_string(operation->size));
+                continue;
+            }
+        }
+        if (!present || upload_hashes.contains(hash)) {
             missing.push_back(hash);
         }
     }
@@ -267,6 +377,8 @@ bool same_observation(const reconciliation::Input& left,
                      right.pending_deletion_authority) &&
            left.known_missing_content_objects ==
                right.known_missing_content_objects &&
+           left.verified_remote_content_objects ==
+               right.verified_remote_content_objects &&
            same_snapshot(left.base_tree, right.base_tree) &&
            left.base_commit_id == right.base_commit_id &&
            left.base_state_present == right.base_state_present &&
@@ -399,9 +511,15 @@ refresh_content_availability(
     const reconciliation::Result& reconciliation_result,
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-    std::span<const Hash> confirmed_missing) {
+    std::span<const Hash> confirmed_missing,
+    bool allow_unreferenced_content_reuse) {
     auto availability = observe_content_availability(
-        input, reconciliation_result, storage, key, confirmed_missing);
+        input,
+        reconciliation_result,
+        storage,
+        key,
+        confirmed_missing,
+        allow_unreferenced_content_reuse);
     if (!availability) {
         return std::unexpected(availability.error());
     }
@@ -421,13 +539,15 @@ stabilize(const runtime::RuntimeData& runtime_data,
           reconciliation::Result reconciliation_result,
           observation::LocalObservationSession* session,
           std::span<const Hash> confirmed_missing,
-          bool content_availability_is_current) {
+          bool content_availability_is_current,
+          bool allow_unreferenced_content_reuse) {
     if (!content_availability_is_current) {
         auto available = refresh_content_availability(observed_input,
                                                       reconciliation_result,
                                                       storage,
                                                       key,
-                                                      confirmed_missing);
+                                                      confirmed_missing,
+                                                      allow_unreferenced_content_reuse);
         if (!available) {
             return std::unexpected(available.error());
         }
@@ -474,7 +594,12 @@ stabilize(const runtime::RuntimeData& runtime_data,
                                        recalculated.error().detail));
             }
             auto reobserved_availability = observe_content_availability(
-                input, *recalculated, storage, key, confirmed_missing);
+                input,
+                *recalculated,
+                storage,
+                key,
+                confirmed_missing,
+                allow_unreferenced_content_reuse);
             if (!reobserved_availability) {
                 return std::unexpected(reobserved_availability.error());
             }
@@ -557,7 +682,12 @@ stabilize(const runtime::RuntimeData& runtime_data,
                 ErrorCode::ObservationFailure, recalculated.error().detail));
         }
         auto reobserved_availability = observe_content_availability(
-            *observed, *recalculated, storage, key, confirmed_missing);
+            *observed,
+            *recalculated,
+            storage,
+            key,
+            confirmed_missing,
+            allow_unreferenced_content_reuse);
         if (!reobserved_availability) {
             auto removed = detail::remove_transaction_workspace(workspace);
             if (!removed) {
