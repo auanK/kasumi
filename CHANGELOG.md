@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1]
+
+### Fixed
+
+- Stopped duplicate progress messages during `kasumi gc`.
+- CLI rejects completion payloads that do not match their operation, preventing incorrect success messages.
+
 ## [0.8.0]
 
 ### Changed
