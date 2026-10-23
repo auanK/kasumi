@@ -4938,7 +4938,7 @@ TEST(ReobservationTest, ChangedSyncReobservesScopedHistory) {
 TEST(ReobservationTest,
      NormalSyncRequestsStayConstantAcrossTrustedContentCounts) {
     std::optional<std::size_t> no_op_requests;
-    for (const std::size_t content_count : {1U, 10U, 100U, 1000U}) {
+    for (const std::size_t content_count : {1U, 10U, 100U, 2048U}) {
         SCOPED_TRACE(content_count);
         auto workspace = kasumi::test::make_temp_workspace(
             "trusted-content-count-" + std::to_string(content_count));
@@ -5049,13 +5049,12 @@ TEST(ReobservationTest,
                       0, test_layout.epochs_prefix.size() - 1)
                 : test_layout.epochs_prefix;
 
-        EXPECT_EQ(state.presence_count, content_count);
-        EXPECT_EQ(state.presence_batch_count, 1U);
+        EXPECT_EQ(state.presence_count, 0U);
+        EXPECT_EQ(state.presence_batch_count, 0U);
         EXPECT_EQ(state.full_list_count, 0U);
         EXPECT_EQ(state.request_events,
                   (std::vector<std::string>{"LIST " + heads_dir,
-                                            "LIST " + epochs_dir,
-                                            "PRESENCE BATCH"}));
+                                            "LIST " + epochs_dir}));
         EXPECT_EQ(state.list_count, 2U);
         EXPECT_EQ(state.prefix_list_count, 2U);
         EXPECT_EQ(state.get_count, 0U);
@@ -5070,7 +5069,7 @@ TEST(ReobservationTest,
             no_op_requests = request_count();
         }
 
-        if (content_count != 1000U) {
+        if (content_count != 2048U) {
             continue;
         }
 
@@ -5096,8 +5095,8 @@ TEST(ReobservationTest,
         ASSERT_TRUE(stable.has_value()) << stable.error().detail;
         ASSERT_TRUE(kasumi::application::sync::coordinator::execute(
             runtime_data, storage, key, stable->input, stable->result));
-        EXPECT_EQ(state.presence_count, 2U * content_count);
-        EXPECT_EQ(state.presence_batch_count, 2U);
+        EXPECT_EQ(state.presence_count, 0U);
+        EXPECT_EQ(state.presence_batch_count, 0U);
         EXPECT_EQ(state.full_list_count, 0U);
         EXPECT_EQ(state.initialize_count, 0U);
         EXPECT_EQ(state.prefix_list_count, 4U);
@@ -5119,13 +5118,11 @@ TEST(ReobservationTest,
                                  "parent marker DELETE"}) {
             EXPECT_EQ(std::ranges::count(state.events, event), 1) << event;
         }
-        ASSERT_EQ(state.request_events.size(), 13U);
+        ASSERT_EQ(state.request_events.size(), 11U);
         EXPECT_EQ(state.request_events[0], "LIST " + heads_dir);
         EXPECT_EQ(state.request_events[1], "LIST " + epochs_dir);
-        EXPECT_EQ(state.request_events[2], "PRESENCE BATCH");
-        EXPECT_EQ(state.request_events[3], "LIST " + heads_dir);
-        EXPECT_EQ(state.request_events[4], "LIST " + epochs_dir);
-        EXPECT_EQ(state.request_events[5], "PRESENCE BATCH");
+        EXPECT_EQ(state.request_events[2], "LIST " + heads_dir);
+        EXPECT_EQ(state.request_events[3], "LIST " + epochs_dir);
         const auto request_index = [&](const auto& predicate) {
             const auto found =
                 std::ranges::find_if(state.request_events, predicate);
@@ -5172,12 +5169,43 @@ TEST(ReobservationTest,
         EXPECT_LT(commit_hash, head_put);
         EXPECT_LT(head_put, head_hash);
         EXPECT_LT(head_hash, cleanup);
-        RecordProperty("incremental_1000_plus_1_requests", request_count());
-        EXPECT_EQ(request_count(), 13U);
-        // A trusted NOOP performs the two control-plane prefix LISTs used to
-        // observe heads and Epochs plus one aggregated presence batch. The
-        // request count does not scale with the number of content objects.
-        EXPECT_EQ(no_op_requests, 3U);
+        RecordProperty("incremental_2048_plus_1_requests", request_count());
+        EXPECT_EQ(request_count(), 11U);
+        EXPECT_EQ(no_op_requests, 2U);
+
+        reset_counts();
+        state.require_local_change_overlap = false;
+        for (std::size_t index = 0; index < 3U; ++index) {
+            const auto path = "batch-" + std::to_string(index) + ".txt";
+            kasumi::test::write_text(local / path,
+                                     "batch-content-" + std::to_string(index));
+        }
+        observed =
+            kasumi::application::observation::collect_reconciliation_input(
+                runtime_data, storage, key, false);
+        ASSERT_TRUE(observed.has_value()) << observed.error().detail;
+        result = kasumi::reconciliation::reconcile(*observed);
+        ASSERT_TRUE(result.has_value()) << result.error().detail;
+        ASSERT_TRUE(result->requires_publication);
+        stable =
+            kasumi::application::sync::coordinator::reobservation::stabilize(
+                runtime_data, storage, key, *observed, *result);
+        ASSERT_TRUE(stable.has_value()) << stable.error().detail;
+        EXPECT_EQ(std::ranges::count_if(
+                      stable->result.plan.operations, [](const auto& operation) {
+                          return operation.action == kasumi::Action::Upload;
+                      }),
+                  3U);
+        ASSERT_TRUE(kasumi::application::sync::coordinator::execute(
+            runtime_data, storage, key, stable->input, stable->result));
+        EXPECT_EQ(state.presence_count, 0U);
+        EXPECT_EQ(state.presence_batch_count, 0U);
+        EXPECT_EQ(state.full_list_count, 0U);
+        EXPECT_EQ(state.prefix_list_count, 4U);
+        EXPECT_EQ(state.put_count, 5U);
+        EXPECT_EQ(state.physical_hash_count, 5U);
+        EXPECT_EQ(state.remove_count, 1U);
+        EXPECT_EQ(request_count(), 15U);
     }
 }
 

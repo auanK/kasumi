@@ -580,6 +580,7 @@ TEST(SyncGcCrashTest, KilledAfterRepairPutBeforeCheckpointRecoversSafely) {
     ASSERT_TRUE(removed.has_value());
     ASSERT_EQ(*removed, kasumi::transport::Removal::Removed);
     ASSERT_TRUE(std::filesystem::exists(fixture.local() / "repair.txt"));
+    fixture.write("repair-copy.txt", "crash repair content");
     fixture.reset_content_puts();
 
     const auto signal = fixture.profile() / "crash-r01.signal";
@@ -608,15 +609,17 @@ TEST(SyncGcCrashTest, KilledAfterRepairPutBeforeCheckpointRecoversSafely) {
     const auto* summary =
         std::get_if<kasumi::application::SyncCompleted>(&recovered->data);
     ASSERT_NE(summary, nullptr);
-    EXPECT_FALSE(summary->published);
+    EXPECT_TRUE(summary->published);
     EXPECT_FALSE(summary->partial);
     EXPECT_EQ(fixture.content_puts(), 0U);
     auto after = fixture.state();
     ASSERT_TRUE(after.has_value() && *after);
-    EXPECT_EQ((*after)->commit_id, (*before)->commit_id);
-    EXPECT_EQ((*after)->ciphertext_id, (*before)->ciphertext_id);
-    EXPECT_EQ((*after)->tree, (*before)->tree);
+    EXPECT_NE((*after)->commit_id, (*before)->commit_id);
+    EXPECT_NE((*after)->ciphertext_id, (*before)->ciphertext_id);
+    EXPECT_NE((*after)->tree, (*before)->tree);
     ASSERT_TRUE(std::filesystem::is_regular_file(fixture.local() / "repair.txt"));
+    ASSERT_TRUE(
+        std::filesystem::is_regular_file(fixture.local() / "repair-copy.txt"));
     auto audited = fixture.fsck();
     ASSERT_TRUE(audited.has_value()) << audited.error().detail;
 }

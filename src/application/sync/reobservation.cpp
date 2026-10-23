@@ -19,6 +19,7 @@
 #include <exception>
 #include <filesystem>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -134,40 +135,39 @@ std::expected<void, Error> observe_content_availability(
     bool allow_unreferenced_content_reuse) {
     HashSet hashes{0, hash_key};
     HashSet upload_hashes{0, hash_key};
+    std::unordered_set<std::string> upload_identities;
     const auto add_hash = [&](const Hash& hash) {
         hashes.insert(hash);
     };
 
-    if (allow_unreferenced_content_reuse) {
-        for (const auto& operation : sync_plan_operations(result.plan)) {
-            if (operation.action != Action::Upload) {
-                continue;
+    for (const auto& candidate : sync_plan_operations(result.plan)) {
+        if (candidate.action == Action::Upload) {
+            if (const auto hash = hash_from_hex(candidate.hash)) {
+                if (allow_unreferenced_content_reuse) {
+                    upload_hashes.insert(*hash);
+                    add_hash(*hash);
+                } else {
+                    upload_identities.insert(
+                        hash_hex(*hash) + ':' +
+                        std::to_string(candidate.size));
+                }
             }
-            if (const auto hash = hash_from_hex(operation.hash)) {
-                upload_hashes.insert(*hash);
+        } else if (candidate.action == Action::Download) {
+            if (const auto hash = hash_from_hex(candidate.hash)) {
                 add_hash(*hash);
             }
         }
     }
     input.verified_remote_content_objects.clear();
 
-    // Every Content object referenced by the effective reconciled logical
-    // state is required, independently of whether this run uploads or
-    // downloads it. A normal deletion resolution deliberately keeps this
-    // scope unchanged.
-    if (input.storage.history_present &&
-        input.pending_deletion_authority.empty()) {
+    // Probe a known object only when an Upload would be elided because another
+    // accepted row already references the same Content identity.
+    if (input.storage.history_present && !upload_identities.empty()) {
         for (const auto& row : input.storage.tree.rows) {
-            if (!row.is_directory) {
+            if (!row.is_directory &&
+                upload_identities.contains(hash_hex(row.hash) + ':' +
+                                           std::to_string(row.size))) {
                 add_hash(row.hash);
-            }
-        }
-    }
-
-    for (const auto& operation : sync_plan_operations(result.plan)) {
-        if (operation.action == Action::Download) {
-            if (const auto hash = hash_from_hex(operation.hash)) {
-                add_hash(*hash);
             }
         }
     }

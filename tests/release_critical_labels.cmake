@@ -35,7 +35,13 @@ set_tests_properties(
     ApplicationExecuteTest.InitialSyncRejectsPartialRemoteHistoryWithoutCreatingDatabase
     ApplicationExecuteTest.InitialSyncRejectsPendingLocalTransactionEvidence
     CliParserTest.ParsesInitialSyncAndRejectsInvalidCombinations
-    SyncRemoteAvailabilityTest.NoOpSyncRepairsMissingRemoteContent
+    SyncRemoteAvailabilityTest.NoOpSyncSkipsContentAvailabilityChecks
+    SyncRemoteAvailabilityTest.NoOpAndActiveSyncCheckOnlyRequiredContent
+    SyncRemoteAvailabilityTest.ActiveSyncIgnoresUnrelatedMissingContents
+    SyncRemoteAvailabilityTest.NoOpSyncFailsWhenHeadObservationFails
+    SyncRemoteAvailabilityTest.NoOpFastPathStillObservesUnknownRemoteHead
+    SyncRemoteAvailabilityTest.NoOpFastPathRecoversPendingJournalFirst
+    SyncRemoteAvailabilityTest.NoOpSyncDoesNotAuditOrRepairMissingRemoteContent
     SyncRemoteAvailabilityTest.CorruptLocalRepairSourceIsRejected
     SyncRemoteAvailabilityTest.MissingContentWithoutLocalSourcePreservesLogicalAndPendingState
     SyncRemoteAvailabilityTest.PresenceFailureIsNotClassifiedAsMissing
