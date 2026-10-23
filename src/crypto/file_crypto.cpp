@@ -115,6 +115,45 @@ void cleanup_encryption_failure(
         base_nonce, chunk_nonce, header_mac, mac, plain_buffer, cipher_buffer);
 }
 
+void wipe_decrypt_buffers(std::array<std::uint8_t, NONCE_SIZE>& base_nonce,
+                          std::array<std::uint8_t, NONCE_SIZE>& chunk_nonce,
+                          std::array<std::uint8_t, MAC_SIZE>& header_mac,
+                          std::array<std::uint8_t, MAC_SIZE>& mac,
+                          std::vector<std::uint8_t>& cipher_buffer,
+                          std::vector<std::uint8_t>& plain_buffer) noexcept {
+    platform::perf_trace::count("file decryption wipe bytes",
+                                cipher_buffer.size() + plain_buffer.size());
+    crypto_wipe(base_nonce.data(), base_nonce.size());
+    crypto_wipe(chunk_nonce.data(), chunk_nonce.size());
+    crypto_wipe(header_mac.data(), header_mac.size());
+    crypto_wipe(mac.data(), mac.size());
+    if (!cipher_buffer.empty()) {
+        crypto_wipe(cipher_buffer.data(), cipher_buffer.size());
+    }
+    if (!plain_buffer.empty()) {
+        crypto_wipe(plain_buffer.data(), plain_buffer.size());
+    }
+}
+
+// Wipes every sensitive decryption value on all returns and exceptions.
+struct DecryptionCleanup {
+    std::array<std::uint8_t, NONCE_SIZE>& base_nonce;
+    std::array<std::uint8_t, NONCE_SIZE>& chunk_nonce;
+    std::array<std::uint8_t, MAC_SIZE>& header_mac;
+    std::array<std::uint8_t, MAC_SIZE>& mac;
+    std::vector<std::uint8_t>& cipher_buffer;
+    std::vector<std::uint8_t>& plain_buffer;
+
+    ~DecryptionCleanup() noexcept {
+        wipe_decrypt_buffers(base_nonce,
+                             chunk_nonce,
+                             header_mac,
+                             mac,
+                             cipher_buffer,
+                             plain_buffer);
+    }
+};
+
 void derive_chunk_nonce(const std::uint8_t* base_nonce,
                         std::uint64_t chunk_index,
                         std::uint8_t* out_nonce) noexcept {
@@ -157,14 +196,16 @@ bool valid_header_mac(const std::uint8_t* mac,
     std::array<std::uint8_t, NONCE_SIZE> header_nonce{};
     derive_header_nonce(base_nonce, header_nonce.data());
     std::uint8_t empty = 0;
-    return crypto_aead_unlock(&empty,
-                              mac,
-                              key,
-                              header_nonce.data(),
-                              header.data(),
-                              header.size(),
-                              &empty,
-                              0) == 0;
+    const bool valid = crypto_aead_unlock(&empty,
+                                          mac,
+                                          key,
+                                          header_nonce.data(),
+                                          header.data(),
+                                          header.size(),
+                                          &empty,
+                                          0) == 0;
+    crypto_wipe(header_nonce.data(), header_nonce.size());
+    return valid;
 }
 
 bool encoded_size_matches(std::uint64_t plaintext_size,
@@ -518,6 +559,15 @@ bool encrypt_file(const std::filesystem::path& input_path,
 bool decrypt_file_with_key(const std::filesystem::path& input_path,
                            const std::filesystem::path& output_path,
                            const Key& key) {
+    std::array<std::uint8_t, NONCE_SIZE> base_nonce{};
+    std::array<std::uint8_t, NONCE_SIZE> chunk_nonce{};
+    std::array<std::uint8_t, MAC_SIZE> header_mac{};
+    std::array<std::uint8_t, MAC_SIZE> mac{};
+    std::vector<std::uint8_t> cipher_buffer;
+    std::vector<std::uint8_t> plain_buffer;
+    DecryptionCleanup cleanup{
+        base_nonce, chunk_nonce, header_mac, mac, cipher_buffer, plain_buffer};
+
     try {
         remove_partial_output(output_path);
 
@@ -547,14 +597,12 @@ bool decrypt_file_with_key(const std::filesystem::path& input_path,
             return false;
         }
 
-        std::array<std::uint8_t, NONCE_SIZE> base_nonce{};
         std::copy_n(header.data() + format_magic.size(),
                     base_nonce.size(),
                     base_nonce.data());
         const auto expected_size =
             decode_u64_le(header.data() + format_magic.size() + NONCE_SIZE);
 
-        std::array<std::uint8_t, MAC_SIZE> header_mac{};
         input.read(reinterpret_cast<char*>(header_mac.data()),
                    static_cast<std::streamsize>(header_mac.size()));
         if (input.gcount() != static_cast<std::streamsize>(header_mac.size()) ||
@@ -564,9 +612,14 @@ bool decrypt_file_with_key(const std::filesystem::path& input_path,
             return false;
         }
 
+        const auto buffer_size = static_cast<std::size_t>(
+            std::min<std::uint64_t>(CHUNK_SIZE, expected_size));
+        cipher_buffer.resize(buffer_size);
+        plain_buffer.resize(buffer_size);
+        platform::perf_trace::count("file decryption scratch bytes",
+                                    cipher_buffer.size() + plain_buffer.size());
+
         if (!platform::private_storage::create_file(output_path)) {
-            crypto_wipe(base_nonce.data(), base_nonce.size());
-            crypto_wipe(header_mac.data(), header_mac.size());
             return false;
         }
         std::ofstream output(output_path, std::ios::binary | std::ios::trunc);
@@ -575,8 +628,6 @@ bool decrypt_file_with_key(const std::filesystem::path& input_path,
             return false;
         }
 
-        std::vector<std::uint8_t> cipher_buffer(CHUNK_SIZE);
-        std::vector<std::uint8_t> plain_buffer(CHUNK_SIZE);
         std::uint64_t chunk_index = 0;
         std::uint64_t total_decrypted = 0;
 
@@ -585,7 +636,6 @@ bool decrypt_file_with_key(const std::filesystem::path& input_path,
                 static_cast<std::size_t>(std::min<std::uint64_t>(
                     CHUNK_SIZE, expected_size - total_decrypted));
 
-            std::array<std::uint8_t, MAC_SIZE> mac{};
             input.read(reinterpret_cast<char*>(mac.data()),
                        static_cast<std::streamsize>(mac.size()));
             if (input.gcount() != static_cast<std::streamsize>(mac.size())) {
@@ -600,7 +650,6 @@ bool decrypt_file_with_key(const std::filesystem::path& input_path,
                 return false;
             }
 
-            std::array<std::uint8_t, NONCE_SIZE> chunk_nonce{};
             derive_chunk_nonce(
                 base_nonce.data(), chunk_index, chunk_nonce.data());
             const auto chunk_ad =

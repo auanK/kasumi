@@ -545,8 +545,10 @@ bool run_benchmark(const fs::path& root_argument,
 
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> master_key{};
     std::vector<Sample> full_samples;
+    std::vector<Sample> decrypt_samples;
     std::vector<Sample> kdf_samples;
     full_samples.reserve(repetitions);
+    decrypt_samples.reserve(repetitions);
     kdf_samples.reserve(repetitions);
 
     for (std::size_t repetition = 0; repetition < repetitions; ++repetition) {
@@ -571,6 +573,25 @@ bool run_benchmark(const fs::path& root_argument,
         }
         full_samples.push_back({elapsed_us(started)});
 
+        const auto decrypt_started = Clock::now();
+        for (std::size_t index = 0; index < files.size(); ++index) {
+            auto decrypted = outputs[index];
+            decrypted += ".dec";
+            if (!kasumi::crypto::decrypt_file(
+                    outputs[index], decrypted, master_key)) {
+                error = "decryption failed: " + path_text(outputs[index]);
+                return false;
+            }
+            std::error_code remove_error;
+            fs::remove(decrypted, remove_error);
+            if (remove_error) {
+                error = "could not remove decrypted output: " +
+                        path_text(decrypted);
+                return false;
+            }
+        }
+        decrypt_samples.push_back({elapsed_us(decrypt_started)});
+
         const auto kdf_started = Clock::now();
         for (std::size_t index = 0; index < files.size(); ++index) {
             const auto key = kasumi::crypto::derive_key(
@@ -584,6 +605,7 @@ bool run_benchmark(const fs::path& root_argument,
         std::cout << "TRACE|enabled|"
                   << (kasumi::platform::perf_trace::enabled() ? 1 : 0) << '\n';
         print_result("encrypt_with_hashes", files.size(), bytes, full_samples);
+        print_result("decrypt", files.size(), bytes, decrypt_samples);
         print_result("derive_key", files.size(), bytes, kdf_samples);
         std::cout << "MEMORY|peak_working_set_bytes|" << peak_working_set()
                   << '\n';
@@ -594,6 +616,14 @@ bool run_benchmark(const fs::path& root_argument,
         std::cout << "WIPE|bytes|"
                   << kasumi::platform::perf_trace::get_count(
                          "file encryption wipe bytes")
+                  << '\n';
+        std::cout << "SCRATCH|decryption|bytes|"
+                  << kasumi::platform::perf_trace::get_count(
+                         "file decryption scratch bytes")
+                  << '\n';
+        std::cout << "WIPE|decryption|bytes|"
+                  << kasumi::platform::perf_trace::get_count(
+                         "file decryption wipe bytes")
                   << '\n';
     }
     return true;

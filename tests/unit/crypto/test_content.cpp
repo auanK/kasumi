@@ -313,8 +313,97 @@ TEST(CryptoFileTest, CoversEveryChunkBoundaryWithPayloadSizedScratch) {
             std::span{ciphertext_bytes}.first(magic.size()), magic));
 
         ASSERT_TRUE(kasumi::crypto::decrypt_file(ciphertext, restored, key));
-        EXPECT_EQ(kasumi::test::read_binary(restored), payload);
+        const auto restored_bytes = kasumi::test::read_binary(restored);
+        EXPECT_EQ(restored_bytes, payload);
+        EXPECT_EQ(kasumi::crypto::content::hash_file(restored), expected_hash);
+        EXPECT_EQ(kasumi::test::read_binary(ciphertext), ciphertext_bytes);
+        const auto decrypt_scratch_bytes =
+            kasumi::platform::perf_trace::get_count(
+                "file decryption scratch bytes");
+        const auto decrypt_wipe_bytes = kasumi::platform::perf_trace::get_count(
+            "file decryption wipe bytes");
+        EXPECT_EQ(decrypt_scratch_bytes, expected_buffer);
+        EXPECT_EQ(decrypt_wipe_bytes, expected_buffer);
     }
+}
+
+TEST(CryptoFileTest, WipesDecryptionBuffersAfterAuthenticatedFailure) {
+    auto workspace = kasumi::test::make_temp_workspace("crypto-decrypt-wipe");
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    std::vector<std::byte> payload(kasumi::crypto::CHUNK_SIZE + 257U);
+    for (std::size_t index = 0; index < payload.size(); ++index) {
+        payload[index] = static_cast<std::byte>((index * 73U + 11U) % 251U);
+    }
+    const auto plain = kasumi::test::workspace_path(workspace, "plain");
+    const auto cipher = kasumi::test::workspace_path(workspace, "cipher");
+    kasumi::test::write_binary(plain, payload);
+    ASSERT_TRUE(kasumi::crypto::encrypt_file(plain, cipher, key));
+    const auto original = kasumi::test::read_binary(cipher);
+    auto corrupted = original;
+    corrupted[corrupted.size() - (257U + kasumi::crypto::MAC_SIZE)] ^=
+        std::byte{1};
+    const auto damaged = kasumi::test::workspace_path(workspace, "damaged");
+    const auto output = kasumi::test::workspace_path(workspace, "output");
+    kasumi::test::write_binary(damaged, corrupted);
+
+    ScopedPerfTrace trace;
+    EXPECT_FALSE(kasumi::crypto::decrypt_file(damaged, output, key));
+    EXPECT_FALSE(std::filesystem::exists(output));
+    EXPECT_EQ(kasumi::test::read_binary(damaged), corrupted);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "file decryption scratch bytes"),
+              2U * kasumi::crypto::CHUNK_SIZE);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("file decryption wipe bytes"),
+        2U * kasumi::crypto::CHUNK_SIZE);
+}
+
+TEST(CryptoFileTest, WipesDecryptionBuffersAfterOutputCreationFailure) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("crypto-decrypt-create-failure");
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    const auto plain = kasumi::test::workspace_path(workspace, "plain");
+    const auto cipher = kasumi::test::workspace_path(workspace, "cipher");
+    kasumi::test::write_text(plain, "output creation failure");
+    ASSERT_TRUE(kasumi::crypto::encrypt_file(plain, cipher, key));
+    const auto output =
+        kasumi::test::workspace_path(workspace, "absent") / "restored";
+
+    ScopedPerfTrace trace;
+    EXPECT_FALSE(kasumi::crypto::decrypt_file(cipher, output, key));
+    EXPECT_FALSE(std::filesystem::exists(output));
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "file decryption scratch bytes"),
+              2U * 23U);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("file decryption wipe bytes"),
+        2U * 23U);
+}
+
+TEST(CryptoFileTest, RejectsHeaderMacWithoutAllocatingScratch) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("crypto-decrypt-header-failure");
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    const auto plain = kasumi::test::workspace_path(workspace, "plain");
+    const auto cipher = kasumi::test::workspace_path(workspace, "cipher");
+    kasumi::test::write_text(plain, "header authentication");
+    ASSERT_TRUE(kasumi::crypto::encrypt_file(plain, cipher, key));
+    auto damaged = kasumi::test::read_binary(cipher);
+    damaged[kasumi::crypto::FILE_HEADER_SIZE - 1] ^= std::byte{1};
+    const auto damaged_path =
+        kasumi::test::workspace_path(workspace, "damaged");
+    const auto output = kasumi::test::workspace_path(workspace, "output");
+    kasumi::test::write_binary(damaged_path, damaged);
+
+    ScopedPerfTrace trace;
+    EXPECT_FALSE(kasumi::crypto::decrypt_file(damaged_path, output, key));
+    EXPECT_FALSE(std::filesystem::exists(output));
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
+                  "file decryption scratch bytes"),
+              0U);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("file decryption wipe bytes"),
+        0U);
 }
 
 TEST(CryptoContentTest, HashesReadBufferBoundaries) {
@@ -384,6 +473,34 @@ TEST(CryptoFileTest, OpenFailuresLeaveNoPartialOutputOrModifiedInput) {
         kasumi::test::workspace_path(workspace, "restored.bin");
     EXPECT_FALSE(kasumi::crypto::decrypt_file(missing, restored, key));
     EXPECT_FALSE(std::filesystem::exists(restored));
+}
+
+TEST(CryptoFileTest, DecryptsLegacyCiphertextFixture) {
+    // Produced by the implementation before payload-sized decryption buffers.
+    constexpr std::array<std::uint8_t, 98> legacy_ciphertext{
+        0x4b, 0x41, 0x53, 0x55, 0x4d, 0x49, 0x02, 0x00, 0x67, 0x01, 0x3a,
+        0x08, 0x97, 0x8d, 0x43, 0xb9, 0x26, 0x2a, 0x34, 0x67, 0x59, 0x91,
+        0x80, 0x75, 0xa2, 0x60, 0x9d, 0x98, 0x3a, 0x8a, 0x58, 0xcd, 0x1a,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x70, 0xfa, 0xfe, 0x81,
+        0x23, 0xbe, 0xec, 0xcb, 0x58, 0x71, 0x19, 0x94, 0xa8, 0x17, 0x02,
+        0xbe, 0xfa, 0x67, 0x15, 0xff, 0x6d, 0xa2, 0xe0, 0x60, 0xce, 0x82,
+        0x63, 0x21, 0xb9, 0x72, 0x56, 0xa3, 0xbd, 0x73, 0x33, 0xab, 0x86,
+        0xc7, 0x59, 0x52, 0x42, 0x16, 0x9b, 0x07, 0x4c, 0xfe, 0x94, 0x9c,
+        0x81, 0x3e, 0x04, 0xb3, 0xe2, 0xd7, 0xce, 0x99, 0xa8, 0xc4};
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    auto workspace = kasumi::test::make_temp_workspace("crypto-legacy-fixture");
+    const auto cipher = kasumi::test::workspace_path(workspace, "cipher");
+    const auto restored = kasumi::test::workspace_path(workspace, "restored");
+    std::vector<std::byte> fixture;
+    fixture.reserve(legacy_ciphertext.size());
+    for (const auto byte : legacy_ciphertext) {
+        fixture.push_back(static_cast<std::byte>(byte));
+    }
+    kasumi::test::write_binary(cipher, fixture);
+
+    ASSERT_TRUE(kasumi::crypto::decrypt_file(cipher, restored, key));
+    EXPECT_EQ(kasumi::test::read_text(restored), "legacy ciphertext fixture\n");
+    EXPECT_EQ(kasumi::test::read_binary(cipher), fixture);
 }
 
 TEST(CryptoKeyDerivationTest, SeparatesEveryDomainAndKeysRemoteIdentifiers) {
