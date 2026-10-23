@@ -1,6 +1,7 @@
 #include "crypto/file_crypto.hpp"
 
 #include "crypto/physical_hash.hpp"
+#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 
@@ -86,6 +87,8 @@ void wipe_encrypt_buffers(std::array<std::uint8_t, NONCE_SIZE>& base_nonce,
                           std::array<std::uint8_t, MAC_SIZE>& mac,
                           std::vector<std::uint8_t>& plain_buffer,
                           std::vector<std::uint8_t>& cipher_buffer) noexcept {
+    platform::perf_trace::count("file encryption wipe bytes",
+                                plain_buffer.size() + cipher_buffer.size());
     crypto_wipe(base_nonce.data(), base_nonce.size());
     crypto_wipe(chunk_nonce.data(), chunk_nonce.size());
     crypto_wipe(header_mac.data(), header_mac.size());
@@ -254,8 +257,12 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
         create_header_mac(
             header_mac.data(), base_nonce.data(), header, key.data());
 
-        plain_buffer.resize(CHUNK_SIZE);
-        cipher_buffer.resize(CHUNK_SIZE);
+        const auto buffer_size = static_cast<std::size_t>(
+            std::min<std::uint64_t>(CHUNK_SIZE, plaintext_size));
+        plain_buffer.resize(buffer_size);
+        cipher_buffer.resize(buffer_size);
+        platform::perf_trace::count("file encryption scratch bytes",
+                                    plain_buffer.size() + cipher_buffer.size());
 
         auto created = platform::private_storage::create_file(output_path);
         if (!created) {

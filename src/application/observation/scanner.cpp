@@ -58,7 +58,14 @@ process_file(const std::filesystem::path& file_path,
              std::string relative,
              ScanContext& context) {
     NodeRow row{.path = std::move(relative)};
-    const auto meta_result = context.metadata_query(file_path, row.path);
+    const auto query_metadata = [&](const std::filesystem::path& path) {
+        const auto trace = platform::perf_trace::begin();
+        auto result = context.metadata_query(path, row.path);
+        platform::perf_trace::finish("local metadata query wall", trace);
+        platform::perf_trace::count("local metadata query calls");
+        return result;
+    };
+    const auto meta_result = query_metadata(file_path);
     if (!meta_result) {
         const auto& err = meta_result.error();
         return std::unexpected(ScanError{
@@ -131,8 +138,7 @@ process_file(const std::filesystem::path& file_path,
             if (!hash)
                 break;
 
-            const auto after_result =
-                context.metadata_query(file_path, row.path);
+            const auto after_result = query_metadata(file_path);
             if (!after_result) {
                 const auto& err = after_result.error();
                 return std::unexpected(ScanError{

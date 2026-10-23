@@ -413,6 +413,63 @@ if(WIN32)
 endif()
 
 add_executable(
+    kasumi_benchmark_file_open
+    operational/benchmark_file_open.cpp
+)
+
+target_link_libraries(
+    kasumi_benchmark_file_open
+    PRIVATE
+    kasumi_application
+    kasumi_crypto
+    kasumi_platform
+    blake3
+    kasumi_warnings
+)
+
+target_include_directories(
+    kasumi_benchmark_file_open
+    PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/include
+)
+
+add_executable(
+    kasumi_benchmark_crypto_files
+    operational/benchmark_crypto_files.cpp
+)
+
+target_link_libraries(
+    kasumi_benchmark_crypto_files
+    PRIVATE
+    kasumi_crypto
+    kasumi_platform
+    kasumi_warnings
+)
+
+target_include_directories(
+    kasumi_benchmark_crypto_files
+    PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/include
+)
+
+if(WIN32)
+    target_link_libraries(kasumi_benchmark_crypto_files PRIVATE psapi)
+endif()
+
+add_test(
+    NAME kasumi_benchmark_crypto_files_safety
+    COMMAND kasumi_benchmark_crypto_files --self-test
+)
+
+set_tests_properties(
+    kasumi_benchmark_crypto_files_safety
+    PROPERTIES
+    LABELS "benchmark;security"
+)
+
+add_executable(
     kasumi_benchmark_structural_scale
     operational/benchmark_structural_scale.cpp
 )

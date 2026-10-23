@@ -1,6 +1,7 @@
 #include "crypto/content.hpp"
 
 #include "platform/path.hpp"
+#include "platform/perf_trace.hpp"
 
 #include <blake3.h>
 #include <fstream>
@@ -12,7 +13,9 @@ namespace kasumi::crypto::content {
 
 std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
     try {
+        const auto open_trace = platform::perf_trace::begin();
         std::ifstream input(path, std::ios::binary);
+        platform::perf_trace::finish("content hash input open", open_trace);
         if (!input) {
             return std::unexpected("could not open file for hashing: " +
                                    platform::path::to_utf8(path));
@@ -20,17 +23,31 @@ std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
 
         blake3_hasher state;
         blake3_hasher_init(&state);
+        const auto buffer_trace = platform::perf_trace::begin();
         std::vector<char> buffer(1024U * 1024U);
+        platform::perf_trace::finish("content hash buffer setup", buffer_trace);
+        platform::perf_trace::count("content hash scratch bytes",
+                                    buffer.size());
+        std::uint64_t read_calls = 0;
+        std::uint64_t read_bytes = 0;
 
         while (input) {
+            const auto read_trace = platform::perf_trace::begin();
             input.read(buffer.data(),
                        static_cast<std::streamsize>(buffer.size()));
+            platform::perf_trace::finish("content hash read", read_trace);
+            ++read_calls;
             const auto count = input.gcount();
             if (count > 0) {
+                const auto hash_trace = platform::perf_trace::begin();
                 blake3_hasher_update(
                     &state, buffer.data(), static_cast<std::size_t>(count));
+                platform::perf_trace::finish("content hash BLAKE3", hash_trace);
+                read_bytes += static_cast<std::uint64_t>(count);
             }
         }
+        platform::perf_trace::count("content hash read calls", read_calls);
+        platform::perf_trace::count("content hash read bytes", read_bytes);
 
         if (input.bad()) {
             return std::unexpected("failed to read file for hashing: " +
@@ -38,9 +55,11 @@ std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
         }
 
         Hash result{};
+        const auto finalize_trace = platform::perf_trace::begin();
         blake3_hasher_finalize(&state,
                                reinterpret_cast<std::uint8_t*>(result.data()),
                                result.size());
+        platform::perf_trace::finish("content hash finalize", finalize_trace);
         return result;
     } catch (const std::exception& exception) {
         return std::unexpected(std::string{"could not compute file hash: "} +

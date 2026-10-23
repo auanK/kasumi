@@ -51,6 +51,10 @@ struct ContentWindowProbe {
     std::size_t content_get_count = 0;
     std::size_t active = 0;
     std::size_t peak_active = 0;
+    // Test-only count of physical hash calls for content objects. It does not
+    // measure fallback GET/decrypt/BLAKE3 verification.
+    std::size_t active_content_hashes = 0;
+    std::size_t peak_active_content_hashes = 0;
     std::size_t checkpoint_applied = 0;
     std::size_t active_at_checkpoint = 0;
     std::size_t applied_at_commit = 0;
@@ -314,17 +318,21 @@ std::expected<std::string, kasumi::transport::Error> recording_physical_hash(
             .message = "physical hash unavailable"});
     }
 
+    const bool content_object = identifier.find('/') == std::string_view::npos;
     if (probe != nullptr) {
         std::unique_lock lock(probe->mutex);
-        if (identifier.find('/') == std::string_view::npos) {
+        if (content_object) {
             ++probe->content_physical_hash_calls;
+            ++probe->active_content_hashes;
+            probe->peak_active_content_hashes =
+                std::max(probe->peak_active_content_hashes,
+                         probe->active_content_hashes);
         }
         ++probe->active;
         ++probe->physical_hash_started;
         probe->peak_active = std::max(probe->peak_active, probe->active);
         probe->changed.notify_all();
-        if (identifier.find('/') == std::string_view::npos &&
-            probe->barrier_first_two_hashes &&
+        if (content_object && probe->barrier_first_two_hashes &&
             probe->content_physical_hash_calls <= 2) {
             probe->changed.wait_until(
                 lock,
@@ -355,6 +363,9 @@ std::expected<std::string, kasumi::transport::Error> recording_physical_hash(
     if (probe != nullptr) {
         std::lock_guard lock(probe->mutex);
         --probe->active;
+        if (content_object) {
+            --probe->active_content_hashes;
+        }
     }
     if (probe != nullptr) {
         probe->changed.notify_all();
@@ -829,7 +840,7 @@ TEST(SyncContentBatchTest, VerificationBelowThresholdUsesIndividualHashes) {
 
     EXPECT_EQ(probe.physical_hash_batch_calls, 0U);
     EXPECT_EQ(probe.content_physical_hash_calls, 5U);
-    EXPECT_EQ(probe.peak_active, 2U);
+    EXPECT_EQ(probe.peak_active_content_hashes, 2U);
 }
 
 TEST(SyncContentBatchTest, VerificationAboveThresholdUsesBulk) {
