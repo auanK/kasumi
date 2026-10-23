@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.8.2]
+
+### Performance
+
+- Sync checks remote Content availability only for its current work. No-op and small runs avoid a global presence scan; unrelated missing objects are not discovered or repaired automatically.
+
+### Added
+
+- Added the opt-in `kasumi sync <profile> --audit-inventory` command to report referenced, present, missing, and orphan Content across reachable history, plus unknown physical objects. A clean complete run returns `0`, findings or partial Sync return `2`, and audit failure returns `1`.
+
+### Limitations
+
+- The structural audit does not download or authenticate Content payloads, repair or delete objects, or provide an atomic snapshot. It rejects detected writers, barriers, and changes between its two physical listings. If audit fails after Sync publishes, that publication remains.
+
 ## [0.8.1]
 
 ### Fixed
