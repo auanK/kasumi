@@ -37,7 +37,6 @@ using kasumi::application::history_storage::PublishedCommit;
 namespace protocol = kasumi::application::history_storage::maintenance_protocol;
 using IntegrityErrorCode = kasumi::application::integrity::ErrorCode;
 using kasumi::runtime::RuntimeData;
-using kasumi::transport::Presence;
 
 using FsckNormalApi = std::expected<kasumi::application::integrity::FsckResult,
                                     kasumi::application::integrity::Error> (*)(
@@ -103,14 +102,6 @@ PublishedCommit publish_remote(kasumi::transport::Transport& transport,
         transport, test_key(), commit, kasumi::test::workspace_root(workspace));
     EXPECT_TRUE(published.has_value()) << published.error().detail;
     return published ? *published : PublishedCommit{};
-}
-
-void expect_presence(kasumi::transport::Transport& transport,
-                     std::string_view identifier,
-                     Presence expected) {
-    const auto present = kasumi::transport::presence(transport, identifier);
-    ASSERT_TRUE(present.has_value()) << present.error().message;
-    EXPECT_EQ(*present, expected);
 }
 
 class BarrierOwnershipTest : public ::testing::Test {

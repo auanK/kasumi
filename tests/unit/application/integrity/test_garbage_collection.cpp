@@ -1805,12 +1805,11 @@ TEST_P(PostApplyMutationTest, MutationAfterFirstRemovalDoesNotChangeThePlan) {
             layout(), sealed->reference).value();
     const auto change = GetParam();
     fixture.state->on_operation =
-        [=, armed = false](FakeState& state, std::string_view operation,
+        [=](FakeState& state, std::string_view operation,
                            std::string_view identifier) mutable {
             if (operation != "after_remove" || identifier != first) {
                 return;
             }
-            armed = true;
             if (change == "head") {
                 state.objects[marker_path(second_reference)] =
                     marker_bytes(second_reference);
