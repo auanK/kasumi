@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.8.3]
+
+### Fixed
+
+- Made file encryption and decryption transactional: output is written to isolated temporary files with private permissions and published atomically, preserving preexisting destinations when operations fail before publication.
+- Protected against alias and destination corruption by rejecting empty paths, identical source/destination paths, directory/symlink targets, and hardlinked aliases of the input file.
+- Fixed a double-close vulnerability in private file handling and strengthened RAII ownership of Windows handles and POSIX file descriptors.
+- Made temporary file cleanup safe by validating physical `FileIdentity` before unlinking, preventing accidental removal of colliding or replaced files.
+
+### Performance
+
+- Sized encryption and decryption scratch buffers according to payload size up to chunk limits, reducing memory consumption and wipe work for small files.
+- Optimized BLAKE3 file hashing with a 64 KiB buffer and RAII memory wiping via `BufferWipeGuard`.
+
 ## [0.8.2]
 
 ### Performance
