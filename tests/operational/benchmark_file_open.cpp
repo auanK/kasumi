@@ -1,5 +1,6 @@
 #include "application/observation/file_metadata.hpp"
 #include "crypto/content.hpp"
+#include "crypto/secure_memory.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 
@@ -13,6 +14,7 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -123,6 +125,129 @@ bool hash_ifstream(const std::filesystem::path& path,
     return true;
 }
 
+struct HashBenchDetail {
+    Clock::duration file_size{};
+    Clock::duration buffer_setup{};
+    Clock::duration open{};
+    Clock::duration read{};
+    Clock::duration blake3{};
+    Clock::duration wipe{};
+    std::uint64_t read_calls = 0;
+    std::uint64_t bytes = 0;
+    std::uint64_t scratch_bytes = 0;
+    std::uint64_t scratch_peak_bytes = 0;
+};
+
+bool hash_ifstream_detail(const std::filesystem::path& path,
+                          char* buffer,
+                          std::size_t buffer_size,
+                          HashBenchDetail& detail) {
+    auto started = Clock::now();
+    std::ifstream input(path, std::ios::binary);
+    detail.open += Clock::now() - started;
+    if (!input) {
+        return false;
+    }
+
+    blake3_hasher state;
+    started = Clock::now();
+    blake3_hasher_init(&state);
+    detail.blake3 += Clock::now() - started;
+    while (input) {
+        started = Clock::now();
+        input.read(buffer, static_cast<std::streamsize>(buffer_size));
+        detail.read += Clock::now() - started;
+        ++detail.read_calls;
+        const auto count = input.gcount();
+        if (count > 0) {
+            started = Clock::now();
+            blake3_hasher_update(
+                &state, buffer, static_cast<std::size_t>(count));
+            detail.blake3 += Clock::now() - started;
+            detail.bytes += static_cast<std::uint64_t>(count);
+        }
+    }
+    if (input.bad() || (input.fail() && !input.eof())) {
+        return false;
+    }
+
+    std::uint8_t digest[BLAKE3_OUT_LEN];
+    started = Clock::now();
+    blake3_hasher_finalize(&state, digest, sizeof(digest));
+    detail.blake3 += Clock::now() - started;
+    sink ^= digest[0];
+    return true;
+}
+
+double elapsed_us(Clock::duration duration) {
+    return std::chrono::duration<double, std::micro>(duration).count();
+}
+
+struct Mode {
+    std::string name;
+    std::function<bool()> run;
+    bool failed = false;
+    std::function<void()> report_detail;
+};
+
+Mode make_hash_buffer_mode(std::string name,
+                           const std::vector<std::filesystem::path>& files,
+                           std::size_t buffer_size,
+                           bool size_to_file,
+                           bool uninitialized,
+                           bool wipe = false) {
+    auto detail = std::make_shared<HashBenchDetail>();
+    auto report = [name, detail] {
+        std::cout << "DETAIL|" << name << '|' << elapsed_us(detail->file_size)
+                  << '|' << elapsed_us(detail->buffer_setup) << '|'
+                  << elapsed_us(detail->open) << '|' << elapsed_us(detail->read)
+                  << '|' << elapsed_us(detail->blake3) << '|'
+                  << elapsed_us(detail->wipe) << '|' << detail->read_calls
+                  << '|' << detail->bytes << '|' << detail->scratch_bytes << '|'
+                  << detail->scratch_peak_bytes << '\n';
+    };
+    auto run =
+        [&files, detail, buffer_size, size_to_file, uninitialized, wipe] {
+        *detail = {};
+        bool ok = true;
+        for (const auto& path : files) {
+            auto current_size = buffer_size;
+            if (size_to_file) {
+                const auto started = Clock::now();
+                std::error_code error;
+                const auto file_size = std::filesystem::file_size(path, error);
+                detail->file_size += Clock::now() - started;
+                if (error) {
+                    ok = false;
+                    continue;
+                }
+                current_size = static_cast<std::size_t>(
+                    std::min<std::uintmax_t>(file_size, buffer_size));
+                current_size = std::max<std::size_t>(current_size, 1U);
+            }
+
+            const auto started = Clock::now();
+            std::unique_ptr<char[]> buffer(uninitialized
+                                               ? new char[current_size]
+                                               : new char[current_size]());
+            detail->buffer_setup += Clock::now() - started;
+            detail->scratch_bytes += current_size;
+            detail->scratch_peak_bytes = std::max<std::uint64_t>(
+                detail->scratch_peak_bytes, current_size);
+            ok = hash_ifstream_detail(
+                     path, buffer.get(), current_size, *detail) &&
+                 ok;
+            if (wipe) {
+                const auto wipe_started = Clock::now();
+                kasumi::crypto::secure_memory::wipe(buffer.get(), current_size);
+                detail->wipe += Clock::now() - wipe_started;
+            }
+        }
+        return ok;
+    };
+    return Mode{std::move(name), std::move(run), false, std::move(report)};
+}
+
 #if defined(_WIN32)
 HANDLE open_attributes(const std::filesystem::path& path) {
     return ::CreateFileW(path.c_str(),
@@ -231,12 +356,6 @@ bool native_read(const std::filesystem::path& path,
 }
 #endif
 
-struct Mode {
-    std::string name;
-    std::function<bool()> run;
-    bool failed = false;
-};
-
 std::vector<Mode> make_modes(const std::filesystem::path& root,
                              const std::vector<std::filesystem::path>& files,
                              std::vector<char>& buffer) {
@@ -267,6 +386,49 @@ std::vector<Mode> make_modes(const std::filesystem::path& root,
                          }
                          return ok;
                      }});
+    for (const auto buffer_size :
+         {4U * 1024U, 16U * 1024U, 64U * 1024U, 256U * 1024U, 1024U * 1024U}) {
+        modes.push_back(make_hash_buffer_mode(
+            "ifstream_hash_vector_" + std::to_string(buffer_size / 1024U) + "k",
+            files,
+            buffer_size,
+            false,
+            false));
+    }
+    modes.push_back(make_hash_buffer_mode(
+        "ifstream_hash_file_size_1m", files, 1024U * 1024U, true, false));
+    modes.push_back(make_hash_buffer_mode(
+        "ifstream_hash_uninit_64k", files, 64U * 1024U, false, true));
+    modes.push_back(make_hash_buffer_mode(
+        "ifstream_hash_uninit_128k", files, 128U * 1024U, false, true));
+    modes.push_back(make_hash_buffer_mode(
+        "ifstream_hash_uninit_256k", files, 256U * 1024U, false, true));
+    modes.push_back(make_hash_buffer_mode(
+        "ifstream_hash_uninit_1m", files, 1024U * 1024U, false, true));
+    modes.push_back(make_hash_buffer_mode("ifstream_hash_uninit_wipe_64k",
+                                          files,
+                                          64U * 1024U,
+                                          false,
+                                          true,
+                                          true));
+    modes.push_back(make_hash_buffer_mode("ifstream_hash_uninit_wipe_128k",
+                                          files,
+                                          128U * 1024U,
+                                          false,
+                                          true,
+                                          true));
+    modes.push_back(make_hash_buffer_mode("ifstream_hash_uninit_wipe_256k",
+                                          files,
+                                          256U * 1024U,
+                                          false,
+                                          true,
+                                          true));
+    modes.push_back(make_hash_buffer_mode("ifstream_hash_uninit_wipe_1m",
+                                          files,
+                                          1024U * 1024U,
+                                          false,
+                                          true,
+                                          true));
     modes.push_back({"app_hash_file", [&] {
                          bool ok = true;
                          for (const auto& path : files) {
@@ -529,6 +691,12 @@ int main(int argc, char** argv) {
         failed = modes[index].failed || failed;
         print_result(modes[index], files.size(), bytes, samples[index]);
     }
+    for (const auto& mode : modes) {
+        if (mode.report_detail) {
+            mode.report_detail();
+        }
+    }
+    kasumi::platform::perf_trace::report("benchmark");
     std::cout << "SINK|" << sink << '\n';
     return failed ? 1 : 0;
 }

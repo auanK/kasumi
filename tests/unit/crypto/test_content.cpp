@@ -1,5 +1,8 @@
 #include "core/hasher.hpp"
 #include "crypto/content.hpp"
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 #include "crypto/file_crypto.hpp"
 #include "crypto/key_derivation.hpp"
 #include "crypto/physical_hash.hpp"
@@ -45,6 +48,29 @@ TEST(CryptoContentTest, HashesAnEmptyFile) {
     EXPECT_EQ(*result, kasumi::hasher::hash_string({}));
 }
 
+TEST(CryptoContentTest, RecordsConfiguredScratchCapacityAndWipesBuffer) {
+    auto workspace = kasumi::test::make_temp_workspace("content-scratch");
+    const auto file = kasumi::test::workspace_path(workspace, "payload.bin");
+    const std::vector<std::byte> payload(4U * 1024U, std::byte{0x5a});
+    kasumi::test::write_binary(file, payload);
+
+    ScopedPerfTrace trace;
+    const auto result = kasumi::crypto::content::hash_file(file);
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result,
+              kasumi::hasher::hash_bytes(payload.data(), payload.size()));
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("content hash scratch bytes"),
+        64U * 1024U);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("content hash wipe bytes"),
+        64U * 1024U);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("content hash read bytes"),
+        payload.size());
+}
+
 TEST(CryptoContentTest, HashesContentLargerThanTheReadBuffer) {
     auto workspace = kasumi::test::make_temp_workspace("content-large");
     constexpr auto payload_size = 2U * 1024U * 1024U + 257U;
@@ -69,6 +95,67 @@ TEST(CryptoContentTest, MissingFileReturnsAControlledError) {
     ASSERT_FALSE(result.has_value());
     EXPECT_FALSE(result.error().empty());
     EXPECT_NE(result.error().find("could not open file"), std::string::npos);
+}
+
+TEST(CryptoContentTest, DirectoryReadReturnsAControlledError) {
+    auto workspace = kasumi::test::make_temp_workspace("content-directory");
+    const auto directory = kasumi::test::workspace_path(workspace, "directory");
+    std::filesystem::create_directory(directory);
+
+    const auto result = kasumi::crypto::content::hash_file(directory);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_FALSE(result.error().empty());
+}
+
+TEST(CryptoContentTest, AccessDeniedReturnsAControlledError) {
+    auto workspace = kasumi::test::make_temp_workspace("content-access-denied");
+    const auto file = kasumi::test::workspace_path(workspace, "locked.bin");
+    kasumi::test::write_binary(file, {std::byte{0x01}});
+#if defined(_WIN32)
+    HANDLE lock_handle = ::CreateFileW(file.c_str(),
+                                       GENERIC_READ | GENERIC_WRITE,
+                                       0,
+                                       nullptr,
+                                       OPEN_EXISTING,
+                                       FILE_ATTRIBUTE_NORMAL,
+                                       nullptr);
+    ASSERT_NE(lock_handle, INVALID_HANDLE_VALUE);
+    const auto result = kasumi::crypto::content::hash_file(file);
+    ::CloseHandle(lock_handle);
+#else
+    std::filesystem::permissions(file,
+                                 std::filesystem::perms::none,
+                                 std::filesystem::perm_options::replace);
+    const auto result = kasumi::crypto::content::hash_file(file);
+    std::filesystem::permissions(file,
+                                 std::filesystem::perms::all,
+                                 std::filesystem::perm_options::replace);
+#endif
+    ASSERT_FALSE(result.has_value());
+    EXPECT_FALSE(result.error().empty());
+}
+
+TEST(CryptoContentTest, UsesSixtyFourKilobyteReadChunks) {
+    auto workspace = kasumi::test::make_temp_workspace("content-chunks");
+    const auto file = kasumi::test::workspace_path(workspace, "chunked.bin");
+    constexpr std::size_t payload_size = 64U * 1024U + 1U;
+    std::vector<std::byte> payload(payload_size, std::byte{0x7b});
+    kasumi::test::write_binary(file, payload);
+
+    ScopedPerfTrace trace;
+    const auto result = kasumi::crypto::content::hash_file(file);
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result,
+              kasumi::hasher::hash_bytes(payload.data(), payload.size()));
+    // With a 64 KiB buffer, a (64 KiB + 1 B) payload requires 2 read calls.
+    // The 1 MiB buffer reads the entire payload in 1 call.
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("content hash read calls"), 2U);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("content hash read bytes"),
+        payload.size());
 }
 
 TEST(CryptoPhysicalHashTest, Sha256MatchesKnownVector) {
@@ -409,12 +496,18 @@ TEST(CryptoFileTest, RejectsHeaderMacWithoutAllocatingScratch) {
 TEST(CryptoContentTest, HashesReadBufferBoundaries) {
     auto workspace =
         kasumi::test::make_temp_workspace("content-read-boundaries");
-    constexpr std::size_t read_buffer_size = 1024U * 1024U;
-    const std::array<std::size_t, 5> sizes{0U,
-                                           1U,
-                                           read_buffer_size - 1U,
-                                           read_buffer_size,
-                                           read_buffer_size + 1U};
+    constexpr std::size_t new_buffer_size = 64U * 1024U;
+    constexpr std::size_t one_mib = 1024U * 1024U;
+    const std::array<std::size_t, 10> sizes{0U,
+                                            1U,
+                                            4U * 1024U,
+                                            new_buffer_size - 1U,
+                                            new_buffer_size,
+                                            new_buffer_size + 1U,
+                                            one_mib - 1U,
+                                            one_mib,
+                                            one_mib + 1U,
+                                            2U * one_mib + 257U};
     for (const auto size : sizes) {
         SCOPED_TRACE(std::to_string(size));
         std::vector<std::byte> payload(size);

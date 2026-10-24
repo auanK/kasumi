@@ -1,15 +1,33 @@
 #include "crypto/content.hpp"
 
+#include "crypto/secure_memory.hpp"
+
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 
 #include <blake3.h>
 #include <fstream>
+#include <memory>
 #include <stdexcept>
 #include <system_error>
-#include <vector>
 
 namespace kasumi::crypto::content {
+
+namespace {
+
+struct BufferWipeGuard {
+    char* data = nullptr;
+    std::size_t size = 0;
+
+    ~BufferWipeGuard() noexcept {
+        if (data != nullptr && size > 0) {
+            secure_memory::wipe(data, size);
+            platform::perf_trace::count("content hash wipe bytes", size);
+        }
+    }
+};
+
+} // namespace
 
 std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
     try {
@@ -24,24 +42,24 @@ std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
         blake3_hasher state;
         blake3_hasher_init(&state);
         const auto buffer_trace = platform::perf_trace::begin();
-        std::vector<char> buffer(1024U * 1024U);
+        constexpr std::size_t buffer_size = 64U * 1024U;
+        auto buffer = std::make_unique_for_overwrite<char[]>(buffer_size);
         platform::perf_trace::finish("content hash buffer setup", buffer_trace);
-        platform::perf_trace::count("content hash scratch bytes",
-                                    buffer.size());
+        platform::perf_trace::count("content hash scratch bytes", buffer_size);
+        BufferWipeGuard wipe_guard{buffer.get(), buffer_size};
         std::uint64_t read_calls = 0;
         std::uint64_t read_bytes = 0;
 
         while (input) {
             const auto read_trace = platform::perf_trace::begin();
-            input.read(buffer.data(),
-                       static_cast<std::streamsize>(buffer.size()));
+            input.read(buffer.get(), static_cast<std::streamsize>(buffer_size));
             platform::perf_trace::finish("content hash read", read_trace);
             ++read_calls;
             const auto count = input.gcount();
             if (count > 0) {
                 const auto hash_trace = platform::perf_trace::begin();
                 blake3_hasher_update(
-                    &state, buffer.data(), static_cast<std::size_t>(count));
+                    &state, buffer.get(), static_cast<std::size_t>(count));
                 platform::perf_trace::finish("content hash BLAKE3", hash_trace);
                 read_bytes += static_cast<std::uint64_t>(count);
             }
@@ -49,7 +67,7 @@ std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
         platform::perf_trace::count("content hash read calls", read_calls);
         platform::perf_trace::count("content hash read bytes", read_bytes);
 
-        if (input.bad()) {
+        if (input.bad() || (input.fail() && !input.eof())) {
             return std::unexpected("failed to read file for hashing: " +
                                    platform::path::to_utf8(path));
         }
