@@ -20,6 +20,7 @@
 #include <span>
 #include <string>
 #include <thread>
+#include <future>
 #include <vector>
 
 namespace {
@@ -991,6 +992,297 @@ TEST(CryptoFileTest, RejectsSymlinkDestinationWithoutChangingTarget) {
         std::filesystem::symlink_status(symlink_dest)));
     EXPECT_EQ(kasumi::test::read_text(victim_target),
               "victim content untouched");
+}
+
+TEST(CryptoFileTest, EncryptionPreservesExistingCiphertextWhenInputIsMissing) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("encrypt-missing-input-preserves-dest");
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    const auto missing_plain =
+        kasumi::test::workspace_path(workspace, "nonexistent.txt");
+    const auto existing_cipher =
+        kasumi::test::workspace_path(workspace, "existing_cipher.bin");
+    const std::string original_content =
+        "original pre-existing ciphertext payload";
+    kasumi::test::write_text(existing_cipher, original_content);
+
+    std::string error_detail;
+    auto res = kasumi::crypto::encrypt_file_with_hashes(
+        missing_plain,
+        existing_cipher,
+        key,
+        kasumi::crypto::FilePurpose::Content,
+        &error_detail);
+
+    EXPECT_FALSE(res.has_value());
+    EXPECT_TRUE(std::filesystem::exists(existing_cipher));
+    EXPECT_EQ(kasumi::test::read_text(existing_cipher), original_content);
+
+    std::size_t entry_count = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(
+             kasumi::test::workspace_root(workspace))) {
+        (void)entry;
+        ++entry_count;
+    }
+    EXPECT_EQ(entry_count, 1U);
+}
+
+TEST(CryptoFileTest, EncryptionRejectsSameInputAndOutputWithoutMutation) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("encrypt-same-input-output");
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    const auto file_path =
+        kasumi::test::workspace_path(workspace, "same_file.txt");
+    const std::string original_content =
+        "important plaintext that must never be destroyed";
+    kasumi::test::write_text(file_path, original_content);
+
+    std::string error_detail;
+    auto res = kasumi::crypto::encrypt_file_with_hashes(
+        file_path,
+        file_path,
+        key,
+        kasumi::crypto::FilePurpose::Content,
+        &error_detail);
+
+    EXPECT_FALSE(res.has_value());
+    EXPECT_TRUE(std::filesystem::exists(file_path));
+    EXPECT_EQ(kasumi::test::read_text(file_path), original_content);
+
+    std::size_t entry_count = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(
+             kasumi::test::workspace_root(workspace))) {
+        (void)entry;
+        ++entry_count;
+    }
+    EXPECT_EQ(entry_count, 1U);
+}
+
+TEST(CryptoFileTest, EncryptionCreationFailureDoesNotModifyExistingFiles) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("encrypt-creation-failure");
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    const auto plain = kasumi::test::workspace_path(workspace, "plain.txt");
+    const std::string original_plain = "my precious plaintext";
+    kasumi::test::write_text(plain, original_plain);
+
+    const auto existing_sibling =
+        kasumi::test::workspace_path(workspace, "sibling.txt");
+    const std::string sibling_content =
+        "sibling content that must remain untouched";
+    kasumi::test::write_text(existing_sibling, sibling_content);
+
+    const auto bad_destination =
+        kasumi::test::workspace_path(workspace, "nonexistent_subdir/output.enc");
+
+    std::string error_detail;
+    auto res = kasumi::crypto::encrypt_file_with_hashes(
+        plain,
+        bad_destination,
+        key,
+        kasumi::crypto::FilePurpose::Content,
+        &error_detail);
+
+    EXPECT_FALSE(res.has_value());
+    EXPECT_TRUE(std::filesystem::exists(plain));
+    EXPECT_EQ(kasumi::test::read_text(plain), original_plain);
+    EXPECT_TRUE(std::filesystem::exists(existing_sibling));
+    EXPECT_EQ(kasumi::test::read_text(existing_sibling), sibling_content);
+    EXPECT_FALSE(std::filesystem::exists(bad_destination));
+}
+
+TEST(CryptoFileTest, EncryptionRejectsHardlinkAliasWithoutModifyingPlaintext) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("encrypt-hardlink-alias");
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    const auto plain = kasumi::test::workspace_path(workspace, "plain.txt");
+    const auto alias = kasumi::test::workspace_path(workspace, "alias.enc");
+    const std::string original_content = "plain text with hardlink alias";
+    kasumi::test::write_text(plain, original_content);
+
+    std::error_code link_ec;
+    std::filesystem::create_hard_link(plain, alias, link_ec);
+    if (link_ec) {
+        GTEST_SKIP() << "Hard links not supported in this filesystem: "
+                     << link_ec.message();
+    }
+
+    std::string error_detail;
+    auto res = kasumi::crypto::encrypt_file_with_hashes(
+        plain,
+        alias,
+        key,
+        kasumi::crypto::FilePurpose::Content,
+        &error_detail);
+
+    EXPECT_FALSE(res.has_value());
+    EXPECT_TRUE(std::filesystem::exists(plain));
+    EXPECT_TRUE(std::filesystem::exists(alias));
+    EXPECT_EQ(kasumi::test::read_text(plain), original_content);
+    EXPECT_EQ(kasumi::test::read_text(alias), original_content);
+}
+
+TEST(CryptoFileTest,
+     EncryptionRejectsDirectoryDestinationWithoutModifyingDirectory) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("encrypt-rejects-dir-dest");
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    const auto plain = kasumi::test::workspace_path(workspace, "plain.txt");
+    kasumi::test::write_text(plain, "content for dir reject");
+
+    const auto dest_dir = kasumi::test::workspace_path(workspace, "target_dir");
+    std::filesystem::create_directory(dest_dir);
+    const auto child_file = dest_dir / "child.txt";
+    kasumi::test::write_text(child_file, "child content");
+
+    std::string error_detail;
+    auto res = kasumi::crypto::encrypt_file_with_hashes(
+        plain,
+        dest_dir,
+        key,
+        kasumi::crypto::FilePurpose::Content,
+        &error_detail);
+
+    EXPECT_FALSE(res.has_value());
+    EXPECT_TRUE(std::filesystem::is_directory(dest_dir));
+    EXPECT_TRUE(std::filesystem::exists(child_file));
+    EXPECT_EQ(kasumi::test::read_text(child_file), "child content");
+    EXPECT_TRUE(std::filesystem::exists(plain));
+}
+
+TEST(CryptoFileTest,
+     EncryptionRejectsSymlinkDestinationWithoutChangingTarget) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("encrypt-dest-symlink-reject");
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    const auto plain = kasumi::test::workspace_path(workspace, "plain.txt");
+    const auto victim_target =
+        kasumi::test::workspace_path(workspace, "victim_target.txt");
+    const auto symlink_dest =
+        kasumi::test::workspace_path(workspace, "symlink_dest.lnk");
+
+    kasumi::test::write_text(plain, "payload meant for destination");
+    kasumi::test::write_text(victim_target, "victim content untouched");
+
+    std::error_code symlink_ec;
+    std::filesystem::create_symlink(victim_target, symlink_dest, symlink_ec);
+    if (symlink_ec) {
+        GTEST_SKIP()
+            << "Symlink creation not supported without elevated privileges: "
+            << symlink_ec.message();
+    }
+
+    std::string error_detail;
+    auto res = kasumi::crypto::encrypt_file_with_hashes(
+        plain,
+        symlink_dest,
+        key,
+        kasumi::crypto::FilePurpose::Content,
+        &error_detail);
+
+    EXPECT_FALSE(res.has_value());
+    EXPECT_TRUE(std::filesystem::is_symlink(
+        std::filesystem::symlink_status(symlink_dest)));
+    EXPECT_EQ(kasumi::test::read_text(victim_target),
+              "victim content untouched");
+}
+
+TEST(CryptoFileTest,
+     EncryptionAtomicallyReplacesExistingCiphertextOnSuccess) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("encrypt-replaces-existing");
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    const auto plain_a =
+        kasumi::test::workspace_path(workspace, "plain_a.txt");
+    const auto plain_b =
+        kasumi::test::workspace_path(workspace, "plain_b.txt");
+    const auto destination =
+        kasumi::test::workspace_path(workspace, "shared.enc");
+    const auto decrypted =
+        kasumi::test::workspace_path(workspace, "decrypted.txt");
+
+    kasumi::test::write_text(plain_a, "plaintext A content before replacement");
+    kasumi::test::write_text(plain_b, "plaintext B content after replacement");
+
+    ASSERT_TRUE(kasumi::crypto::encrypt_file(plain_a, destination, key));
+    EXPECT_TRUE(std::filesystem::exists(destination));
+
+    ASSERT_TRUE(kasumi::crypto::encrypt_file(plain_b, destination, key));
+    EXPECT_TRUE(std::filesystem::exists(destination));
+
+    ASSERT_TRUE(kasumi::crypto::decrypt_file(destination, decrypted, key));
+    EXPECT_EQ(kasumi::test::read_text(decrypted),
+              "plaintext B content after replacement");
+
+    std::size_t entry_count = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(
+             kasumi::test::workspace_root(workspace))) {
+        (void)entry;
+        ++entry_count;
+    }
+    EXPECT_EQ(entry_count, 4U);
+}
+
+TEST(CryptoFileTest,
+     ConcurrentEncryptionsToSameDestinationPreserveIntegrity) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("encrypt-concurrent");
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    const auto plain_a =
+        kasumi::test::workspace_path(workspace, "plain_a.txt");
+    const auto plain_b =
+        kasumi::test::workspace_path(workspace, "plain_b.txt");
+    const auto destination =
+        kasumi::test::workspace_path(workspace, "shared_dest.enc");
+    const auto decrypted =
+        kasumi::test::workspace_path(workspace, "decrypted.txt");
+
+    const std::string text_a = "Concurrent worker A payload content string!";
+    const std::string text_b = "Concurrent worker B payload content string!";
+    kasumi::test::write_text(plain_a, text_a);
+    kasumi::test::write_text(plain_b, text_b);
+
+    std::promise<void> start_promise;
+    std::shared_future<void> start_future(start_promise.get_future());
+
+    auto worker = [&](const std::filesystem::path& input) {
+        start_future.wait();
+        return kasumi::crypto::encrypt_file(input, destination, key);
+    };
+
+    auto future_a = std::async(std::launch::async, worker, plain_a);
+    auto future_b = std::async(std::launch::async, worker, plain_b);
+
+    start_promise.set_value();
+
+    const bool res_a = future_a.get();
+    const bool res_b = future_b.get();
+
+    EXPECT_TRUE(res_a || res_b);
+
+    ASSERT_TRUE(std::filesystem::exists(destination));
+    ASSERT_TRUE(kasumi::crypto::decrypt_file(destination, decrypted, key));
+    const auto decrypted_text = kasumi::test::read_text(decrypted);
+    EXPECT_TRUE(decrypted_text == text_a || decrypted_text == text_b);
+
+    EXPECT_EQ(kasumi::test::read_text(plain_a), text_a);
+    EXPECT_EQ(kasumi::test::read_text(plain_b), text_b);
+
+    std::size_t count = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(
+             kasumi::test::workspace_root(workspace))) {
+        (void)entry;
+        ++count;
+    }
+    EXPECT_EQ(count, 4U);
 }
 
 TEST(CryptoKeyDerivationTest, SeparatesEveryDomainAndKeysRemoteIdentifiers) {

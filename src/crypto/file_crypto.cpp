@@ -69,20 +69,6 @@ make_chunk_ad(const std::array<std::uint8_t, header_ad_size>& header,
     return result;
 }
 
-void remove_partial_output(const std::filesystem::path& path) noexcept {
-    std::error_code error;
-    std::filesystem::remove(path, error);
-}
-
-void close_and_remove_partial_output(
-    std::ofstream& output, const std::filesystem::path& path) noexcept {
-    if (output.is_open()) {
-        output.close();
-    }
-
-    remove_partial_output(path);
-}
-
 void wipe_encrypt_buffers(std::array<std::uint8_t, NONCE_SIZE>& base_nonce,
                           std::array<std::uint8_t, NONCE_SIZE>& chunk_nonce,
                           std::array<std::uint8_t, MAC_SIZE>& header_mac,
@@ -103,19 +89,24 @@ void wipe_encrypt_buffers(std::array<std::uint8_t, NONCE_SIZE>& base_nonce,
     }
 }
 
-void cleanup_encryption_failure(
-    std::ofstream& output,
-    const std::filesystem::path& path,
-    std::array<std::uint8_t, NONCE_SIZE>& base_nonce,
-    std::array<std::uint8_t, NONCE_SIZE>& chunk_nonce,
-    std::array<std::uint8_t, MAC_SIZE>& header_mac,
-    std::array<std::uint8_t, MAC_SIZE>& mac,
-    std::vector<std::uint8_t>& plain_buffer,
-    std::vector<std::uint8_t>& cipher_buffer) noexcept {
-    close_and_remove_partial_output(output, path);
-    wipe_encrypt_buffers(
-        base_nonce, chunk_nonce, header_mac, mac, plain_buffer, cipher_buffer);
-}
+// Wipes every sensitive encryption value on all returns and exceptions.
+struct EncryptionCleanup {
+    std::array<std::uint8_t, NONCE_SIZE>& base_nonce;
+    std::array<std::uint8_t, NONCE_SIZE>& chunk_nonce;
+    std::array<std::uint8_t, MAC_SIZE>& header_mac;
+    std::array<std::uint8_t, MAC_SIZE>& mac;
+    std::vector<std::uint8_t>& plain_buffer;
+    std::vector<std::uint8_t>& cipher_buffer;
+
+    ~EncryptionCleanup() noexcept {
+        wipe_encrypt_buffers(base_nonce,
+                             chunk_nonce,
+                             header_mac,
+                             mac,
+                             plain_buffer,
+                             cipher_buffer);
+    }
+};
 
 void wipe_decrypt_buffers(std::array<std::uint8_t, NONCE_SIZE>& base_nonce,
                           std::array<std::uint8_t, NONCE_SIZE>& chunk_nonce,
@@ -236,63 +227,161 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
                       const std::filesystem::path& output_path,
                       const Key& key,
                       std::string* error_detail) {
+    if (input_path.empty() || output_path.empty() ||
+        input_path == output_path) {
+        if (error_detail) {
+            *error_detail = "invalid empty or identical input/output paths";
+        }
+        return std::nullopt;
+    }
+
+    const auto target_path = output_path.has_parent_path()
+                                 ? output_path
+                                 : (std::filesystem::path(".") / output_path);
+
+    if (input_path == target_path) {
+        if (error_detail) {
+            *error_detail = "input and target output paths are identical";
+        }
+        return std::nullopt;
+    }
+
+    std::error_code in_error;
+    const auto in_status = std::filesystem::status(input_path, in_error);
+    if (in_error || !std::filesystem::is_regular_file(in_status)) {
+        if (error_detail) {
+            *error_detail =
+                "opening plaintext input failed: input path is not an accessible regular file";
+        }
+        return std::nullopt;
+    }
+
+    std::error_code dest_error;
+    const auto dest_status =
+        std::filesystem::symlink_status(target_path, dest_error);
+    if (dest_error) {
+        if (dest_error != std::errc::no_such_file_or_directory) {
+            if (error_detail) {
+                *error_detail = "failed to query destination path status";
+            }
+            return std::nullopt;
+        }
+    } else {
+        if (std::filesystem::is_directory(dest_status) ||
+            std::filesystem::is_symlink(dest_status)) {
+            if (error_detail) {
+                *error_detail =
+                    "destination cannot be an existing directory or symlink";
+            }
+            return std::nullopt;
+        }
+        if (std::filesystem::exists(dest_status)) {
+            std::error_code eq_error;
+            if (std::filesystem::equivalent(input_path, target_path, eq_error) ||
+                eq_error) {
+                if (error_detail) {
+                    *error_detail =
+                        "destination is an alias or hardlink to the input file";
+                }
+                return std::nullopt;
+            }
+        }
+    }
+
+    const auto dest_parent = target_path.parent_path();
+    if (!dest_parent.empty()) {
+        std::error_code parent_error;
+        const auto parent_status =
+            std::filesystem::status(dest_parent, parent_error);
+        if (parent_error || !std::filesystem::is_directory(parent_status)) {
+            if (error_detail) {
+                *error_detail =
+                    "creating ciphertext output failed: destination parent directory does not exist or is not a directory";
+            }
+            return std::nullopt;
+        }
+    }
+
     std::array<std::uint8_t, NONCE_SIZE> base_nonce{};
     std::array<std::uint8_t, NONCE_SIZE> chunk_nonce{};
     std::array<std::uint8_t, MAC_SIZE> header_mac{};
     std::array<std::uint8_t, MAC_SIZE> mac{};
     std::vector<std::uint8_t> plain_buffer;
     std::vector<std::uint8_t> cipher_buffer;
+    EncryptionCleanup cleanup{
+        base_nonce, chunk_nonce, header_mac, mac, plain_buffer, cipher_buffer};
+
+    struct TemporaryOutputGuard {
+        platform::private_storage::PrivateOutputFile file;
+        bool published{false};
+
+        ~TemporaryOutputGuard() noexcept {
+            if (!published && !file.published && !file.path.empty()) {
+                const auto res =
+                    platform::private_storage::remove_private_file_if_owned(
+                        file);
+                if (res == platform::private_storage::CleanupResult::
+                               AccessDenied ||
+                    res == platform::private_storage::CleanupResult::
+                               FilesystemError ||
+                    res == platform::private_storage::CleanupResult::
+                               IdentityMismatch) {
+                    platform::perf_trace::count("encryption.cleanup_failure");
+                }
+            } else {
+                platform::private_storage::close_private_file(file);
+            }
+        }
+    } temp_guard;
 
     try {
-        remove_partial_output(output_path);
-
         std::ifstream input(input_path, std::ios::binary | std::ios::ate);
         if (!input) {
-            if (error_detail)
+            if (error_detail) {
                 *error_detail = "opening plaintext input failed";
+            }
             return std::nullopt;
         }
 
         const auto end_position = input.tellg();
         if (end_position < std::streampos{0}) {
-            if (error_detail)
+            if (error_detail) {
                 *error_detail = "reading plaintext size failed";
+            }
             return std::nullopt;
         }
 
         const auto stream_size = static_cast<std::streamoff>(end_position);
         if (stream_size < 0) {
-            if (error_detail)
+            if (error_detail) {
                 *error_detail = "reading plaintext size failed";
+            }
             return std::nullopt;
         }
         const auto input_size = static_cast<std::uintmax_t>(stream_size);
         if (input_size > static_cast<std::uintmax_t>(
                              std::numeric_limits<std::uint64_t>::max())) {
-            if (error_detail)
+            if (error_detail) {
                 *error_detail = "plaintext size is unsupported";
+            }
             return std::nullopt;
         }
         const auto plaintext_size = static_cast<std::uint64_t>(input_size);
 
         input.seekg(0, std::ios::beg);
         if (!input) {
-            if (error_detail)
+            if (error_detail) {
                 *error_detail = "seeking plaintext input failed";
+            }
             return std::nullopt;
         }
 
         auto random_result = platform::random::fill_bytes(base_nonce);
         if (!random_result) {
-            if (error_detail)
+            if (error_detail) {
                 *error_detail = "generating encryption nonce failed: " +
                                 random_result.error();
-            wipe_encrypt_buffers(base_nonce,
-                                 chunk_nonce,
-                                 header_mac,
-                                 mac,
-                                 plain_buffer,
-                                 cipher_buffer);
+            }
             return std::nullopt;
         }
 
@@ -307,55 +396,69 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
         platform::perf_trace::count("file encryption scratch bytes",
                                     plain_buffer.size() + cipher_buffer.size());
 
-        auto created = platform::private_storage::create_file(output_path);
-        if (!created) {
-            if (error_detail)
-                *error_detail =
-                    "creating ciphertext output failed: " + created.error();
-            wipe_encrypt_buffers(base_nonce,
-                                 chunk_nonce,
-                                 header_mac,
-                                 mac,
-                                 plain_buffer,
-                                 cipher_buffer);
-            return std::nullopt;
+        bool reserved = false;
+        for (std::size_t attempt = 0; attempt < 32; ++attempt) {
+            auto id = platform::random::hex_id();
+            if (!id) {
+                if (error_detail) {
+                    *error_detail = "generating temporary file id failed";
+                }
+                return std::nullopt;
+            }
+            std::filesystem::path candidate;
+            if (target_path.native().size() + 16 < 260) {
+                candidate = platform::path::temporary_sibling_path(
+                    target_path, ".k_", "." + id->substr(0, 8));
+            } else {
+                candidate =
+                    target_path.parent_path() /
+                    platform::path::from_utf8(".k_" + id->substr(0, 16));
+            }
+            auto created =
+                platform::private_storage::create_private_file(candidate);
+            if (created) {
+                temp_guard.file = std::move(*created);
+                reserved = true;
+                break;
+            }
+            if (!created.error().is_collision) {
+                if (error_detail) {
+                    *error_detail =
+                        "creating ciphertext output failed: " +
+                        created.error().message;
+                }
+                break;
+            }
         }
-        std::ofstream output(output_path, std::ios::binary | std::ios::trunc);
-        if (!output) {
-            if (error_detail)
-                *error_detail = "opening ciphertext output failed";
-            cleanup_encryption_failure(output,
-                                       output_path,
-                                       base_nonce,
-                                       chunk_nonce,
-                                       header_mac,
-                                       mac,
-                                       plain_buffer,
-                                       cipher_buffer);
+        if (!reserved) {
+            if (error_detail && error_detail->empty()) {
+                *error_detail =
+                    "creating ciphertext output failed: failed to reserve exclusive temporary file";
+            }
             return std::nullopt;
         }
 
         auto ciphertext_hash = physical::sha256_init();
         const auto write = [&](const auto* data, std::size_t size) {
-            output.write(reinterpret_cast<const char*>(data),
-                         static_cast<std::streamsize>(size));
+            if (size == 0) {
+                return true;
+            }
+            auto written = platform::private_storage::write_private_file(
+                temp_guard.file, data, size);
+            if (!written) {
+                return false;
+            }
             physical::sha256_update(
                 ciphertext_hash,
                 {reinterpret_cast<const std::uint8_t*>(data), size});
-            return static_cast<bool>(output);
+            return true;
         };
+
         if (!write(header.data(), header.size()) ||
             !write(header_mac.data(), header_mac.size())) {
-            if (error_detail)
+            if (error_detail) {
                 *error_detail = "writing ciphertext header failed";
-            cleanup_encryption_failure(output,
-                                       output_path,
-                                       base_nonce,
-                                       chunk_nonce,
-                                       header_mac,
-                                       mac,
-                                       plain_buffer,
-                                       cipher_buffer);
+            }
             return std::nullopt;
         }
 
@@ -372,16 +475,9 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
                        static_cast<std::streamsize>(chunk_size));
             if (input.gcount() != static_cast<std::streamsize>(chunk_size) ||
                 input.bad()) {
-                if (error_detail)
+                if (error_detail) {
                     *error_detail = "reading plaintext chunk failed";
-                cleanup_encryption_failure(output,
-                                           output_path,
-                                           base_nonce,
-                                           chunk_nonce,
-                                           header_mac,
-                                           mac,
-                                           plain_buffer,
-                                           cipher_buffer);
+                }
                 return std::nullopt;
             }
             blake3_hasher_update(
@@ -402,16 +498,9 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
 
             if (!write(mac.data(), mac.size()) ||
                 !write(cipher_buffer.data(), chunk_size)) {
-                if (error_detail)
+                if (error_detail) {
                     *error_detail = "writing encrypted chunk failed";
-                cleanup_encryption_failure(output,
-                                           output_path,
-                                           base_nonce,
-                                           chunk_nonce,
-                                           header_mac,
-                                           mac,
-                                           plain_buffer,
-                                           cipher_buffer);
+                }
                 return std::nullopt;
             }
 
@@ -420,77 +509,34 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
         }
 
         if (total_read != plaintext_size) {
-            if (error_detail)
+            if (error_detail) {
                 *error_detail = "plaintext size changed during encryption";
-            cleanup_encryption_failure(output,
-                                       output_path,
-                                       base_nonce,
-                                       chunk_nonce,
-                                       header_mac,
-                                       mac,
-                                       plain_buffer,
-                                       cipher_buffer);
+            }
             return std::nullopt;
         }
 
         char trailing = 0;
         input.read(&trailing, 1);
         if (input.gcount() != 0 || input.bad()) {
-            if (error_detail)
+            if (error_detail) {
                 *error_detail = "checking plaintext end failed";
-            cleanup_encryption_failure(output,
-                                       output_path,
-                                       base_nonce,
-                                       chunk_nonce,
-                                       header_mac,
-                                       mac,
-                                       plain_buffer,
-                                       cipher_buffer);
+            }
             return std::nullopt;
         }
 
         input.clear();
         input.close();
         if (input.fail()) {
-            if (error_detail)
+            if (error_detail) {
                 *error_detail = "closing plaintext input failed";
-            cleanup_encryption_failure(output,
-                                       output_path,
-                                       base_nonce,
-                                       chunk_nonce,
-                                       header_mac,
-                                       mac,
-                                       plain_buffer,
-                                       cipher_buffer);
+            }
             return std::nullopt;
         }
 
-        output.flush();
-        if (!output) {
-            if (error_detail)
-                *error_detail = "flushing ciphertext output failed";
-            cleanup_encryption_failure(output,
-                                       output_path,
-                                       base_nonce,
-                                       chunk_nonce,
-                                       header_mac,
-                                       mac,
-                                       plain_buffer,
-                                       cipher_buffer);
-            return std::nullopt;
-        }
-
-        output.close();
-        if (output.fail()) {
-            if (error_detail)
-                *error_detail = "closing ciphertext output failed";
-            remove_partial_output(output_path);
-            wipe_encrypt_buffers(base_nonce,
-                                 chunk_nonce,
-                                 header_mac,
-                                 mac,
-                                 plain_buffer,
-                                 cipher_buffer);
+        if (!temp_guard.file.identity.valid) {
+            if (error_detail) {
+                *error_detail = "temporary file identity is invalid";
+            }
             return std::nullopt;
         }
 
@@ -501,35 +547,31 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
             &plaintext_hash,
             reinterpret_cast<std::uint8_t*>(result.plaintext_hash.data()),
             result.plaintext_hash.size());
-        wipe_encrypt_buffers(base_nonce,
-                             chunk_nonce,
-                             header_mac,
-                             mac,
-                             plain_buffer,
-                             cipher_buffer);
+
+        auto published = platform::private_storage::publish_private_file(
+            temp_guard.file, target_path);
+        if (temp_guard.file.published) {
+            temp_guard.published = true;
+        }
+        if (!published) {
+            if (error_detail) {
+                *error_detail =
+                    "publishing ciphertext failed: " + published.error();
+            }
+            return std::nullopt;
+        }
+
         return result;
     } catch (const std::exception& exception) {
-        if (error_detail)
+        if (error_detail) {
             *error_detail =
                 std::string{"encryption operation failed: "} + exception.what();
-        remove_partial_output(output_path);
-        wipe_encrypt_buffers(base_nonce,
-                             chunk_nonce,
-                             header_mac,
-                             mac,
-                             plain_buffer,
-                             cipher_buffer);
+        }
         return std::nullopt;
     } catch (...) {
-        if (error_detail)
+        if (error_detail) {
             *error_detail = "encryption operation failed with an unknown error";
-        remove_partial_output(output_path);
-        wipe_encrypt_buffers(base_nonce,
-                             chunk_nonce,
-                             header_mac,
-                             mac,
-                             plain_buffer,
-                             cipher_buffer);
+        }
         return std::nullopt;
     }
 }
