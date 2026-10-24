@@ -1,3 +1,4 @@
+#include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/workspace.hpp"
@@ -16,7 +17,9 @@
 #include <aclapi.h>
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -193,6 +196,329 @@ TEST(PrivateStorageTest, RejectsRedirectingPaths) {
     }
     EXPECT_FALSE(
         kasumi::platform::private_storage::protect_directory(link).has_value());
+}
+
+TEST(PrivateStorageTest, CleanupRefusesToRemoveWhenInitialIdentityIsInvalid) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("cleanup-invalid-initial-id");
+    const auto file_path =
+        kasumi::test::workspace_path(workspace, "victim.txt");
+    kasumi::test::write_text(file_path, "important data");
+
+    kasumi::platform::private_storage::PrivateOutputFile file{
+        .handle = kasumi::platform::private_storage::invalid_private_handle,
+        .path = file_path,
+        .identity =
+            kasumi::platform::private_storage::FileIdentity{.valid = false}};
+
+    const auto result =
+        kasumi::platform::private_storage::remove_private_file_if_owned(file);
+    EXPECT_NE(result,
+              kasumi::platform::private_storage::CleanupResult::Removed);
+    EXPECT_TRUE(std::filesystem::exists(file_path));
+    EXPECT_EQ(kasumi::test::read_text(file_path), "important data");
+}
+
+TEST(PrivateStorageTest,
+     CleanupRefusesToRemoveWhenCurrentIdentityCannotBeQueried) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("cleanup-unqueryable-current-id");
+    const auto dir_path = kasumi::test::workspace_path(workspace, "victim_dir");
+    std::filesystem::create_directory(dir_path);
+
+    kasumi::platform::private_storage::PrivateOutputFile file{
+        .handle = kasumi::platform::private_storage::invalid_private_handle,
+        .path = dir_path,
+        .identity = kasumi::platform::private_storage::FileIdentity{
+            .volume_or_dev = 12345,
+            .file_id_low = 67890,
+            .file_id_high = 0,
+            .valid = true}};
+
+    const auto result =
+        kasumi::platform::private_storage::remove_private_file_if_owned(file);
+    EXPECT_NE(result,
+              kasumi::platform::private_storage::CleanupResult::Removed);
+    EXPECT_TRUE(std::filesystem::exists(dir_path));
+}
+
+TEST(PrivateStorageTest, CleanupReturnsAlreadyAbsentWhenFileTrulyDoesNotExist) {
+    auto workspace = kasumi::test::make_temp_workspace("cleanup-truly-absent");
+    const auto file_path =
+        kasumi::test::workspace_path(workspace, "nonexistent.bin");
+
+    kasumi::platform::private_storage::PrivateOutputFile file{
+        .handle = kasumi::platform::private_storage::invalid_private_handle,
+        .path = file_path,
+        .identity =
+            kasumi::platform::private_storage::FileIdentity{.valid = true}};
+
+    const auto result =
+        kasumi::platform::private_storage::remove_private_file_if_owned(file);
+    EXPECT_EQ(result,
+              kasumi::platform::private_storage::CleanupResult::AlreadyAbsent);
+}
+
+TEST(PrivateStorageTest, CleanupRepeatedCallReturnsAlreadyAbsent) {
+    auto workspace = kasumi::test::make_temp_workspace("cleanup-repeated");
+    const auto file_path =
+        kasumi::test::workspace_path(workspace, "temp_to_remove.bin");
+
+    auto created =
+        kasumi::platform::private_storage::create_private_file(file_path);
+    ASSERT_TRUE(created.has_value());
+    ASSERT_TRUE(created->identity.valid);
+
+    const auto first =
+        kasumi::platform::private_storage::remove_private_file_if_owned(
+            *created);
+    EXPECT_EQ(first, kasumi::platform::private_storage::CleanupResult::Removed);
+    EXPECT_FALSE(std::filesystem::exists(file_path));
+
+    const auto second =
+        kasumi::platform::private_storage::remove_private_file_if_owned(
+            *created);
+    EXPECT_EQ(second,
+              kasumi::platform::private_storage::CleanupResult::AlreadyAbsent);
+}
+
+TEST(PrivateStorageTest, QueryIdentityRejectsDirectoriesAndReparsePoints) {
+    auto workspace = kasumi::test::make_temp_workspace("query-identity-types");
+    const auto dir_path = kasumi::test::workspace_path(workspace, "subdir");
+    std::filesystem::create_directory(dir_path);
+
+    const auto id =
+        kasumi::platform::private_storage::query_file_identity(dir_path);
+    EXPECT_FALSE(id.valid);
+}
+
+TEST(PrivateStorageTest, PrivateHandleMoveDoesNotLeakOrDoubleClose) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("handle-ownership-transfer");
+    const auto p1 = kasumi::test::workspace_path(workspace, "h1.bin");
+    const auto p2 = kasumi::test::workspace_path(workspace, "h2.bin");
+
+    auto f1 = kasumi::platform::private_storage::create_private_file(p1);
+    auto f2 = kasumi::platform::private_storage::create_private_file(p2);
+    ASSERT_TRUE(f1.has_value());
+    ASSERT_TRUE(f2.has_value());
+
+    const auto h1_raw = f1->handle.value;
+    const auto h2_raw = f2->handle.value;
+    ASSERT_NE(h1_raw,
+              kasumi::platform::private_storage::invalid_private_handle);
+    ASSERT_NE(h2_raw,
+              kasumi::platform::private_storage::invalid_private_handle);
+
+    // Overwriting f1 with f2 via move assignment must close f1's previous
+    // handle (not leak it)
+    *f1 = std::move(*f2);
+
+    // 1. Source f2 is invalidated after transfer
+    EXPECT_FALSE(f2->is_open());
+    EXPECT_EQ(f2->handle.value,
+              kasumi::platform::private_storage::invalid_private_handle);
+
+    // 2. Target f1 owns h2_raw
+    EXPECT_TRUE(f1->is_open());
+    EXPECT_EQ(f1->handle.value, h2_raw);
+
+    // 3. Previously held h1_raw was closed and NOT abandoned/leaked
+#if defined(_WIN32)
+    DWORD flags = 0;
+    const BOOL h1_is_still_open =
+        GetHandleInformation(reinterpret_cast<HANDLE>(h1_raw), &flags);
+    EXPECT_FALSE(h1_is_still_open);
+#else
+    const int h1_status = ::fcntl(static_cast<int>(h1_raw), F_GETFD);
+    EXPECT_EQ(h1_status, -1);
+    EXPECT_EQ(errno, EBADF);
+#endif
+
+    // 4. Closing f1 closes h2_raw
+    kasumi::platform::private_storage::close_private_file(*f1);
+    EXPECT_FALSE(f1->is_open());
+
+    // 5. Calling close_private_file again is a no-op (no double close)
+    kasumi::platform::private_storage::close_private_file(*f1);
+    kasumi::platform::private_storage::close_private_file(*f2);
+}
+
+TEST(PrivateStorageTest, PublicationRejectedWhenFileIdentityIsInvalid) {
+    auto workspace = kasumi::test::make_temp_workspace("publish-invalid-id");
+    const auto temp_path = kasumi::test::workspace_path(workspace, "temp.bin");
+    const auto target_path =
+        kasumi::test::workspace_path(workspace, "target.bin");
+
+    auto f = kasumi::platform::private_storage::create_private_file(temp_path);
+    ASSERT_TRUE(f.has_value());
+    ASSERT_TRUE(f->is_open());
+
+    f->identity.valid = false;
+    auto pub_res = kasumi::platform::private_storage::publish_private_file(
+        *f, target_path);
+    EXPECT_FALSE(pub_res.has_value());
+    EXPECT_FALSE(std::filesystem::exists(target_path));
+}
+
+TEST(PrivateStorageTest,
+     SuccessfulPublicationTransfersOwnershipAndClosesHandle) {
+    auto workspace = kasumi::test::make_temp_workspace("publish-ownership");
+    const auto temp_path = kasumi::test::workspace_path(workspace, "temp.bin");
+    const auto target_path =
+        kasumi::test::workspace_path(workspace, "published_target.bin");
+
+    auto f = kasumi::platform::private_storage::create_private_file(temp_path);
+    ASSERT_TRUE(f.has_value());
+    ASSERT_TRUE(f->is_open());
+
+    const std::string payload = "authenticated durable plaintext";
+    auto written = kasumi::platform::private_storage::write_private_file(
+        *f, payload.data(), payload.size());
+    ASSERT_TRUE(written.has_value());
+
+    auto pub_res = kasumi::platform::private_storage::publish_private_file(
+        *f, target_path);
+    EXPECT_TRUE(pub_res.has_value());
+
+    // Target contains the published authenticated plaintext
+    EXPECT_TRUE(std::filesystem::exists(target_path));
+    EXPECT_EQ(kasumi::test::read_text(target_path), payload);
+
+    // Temporary path is gone (renamed)
+    EXPECT_FALSE(std::filesystem::exists(temp_path));
+
+    // Ownership was cleanly relinquished
+    EXPECT_FALSE(f->is_open());
+    EXPECT_TRUE(f->is_published());
+    EXPECT_TRUE(f->path.empty());
+    EXPECT_FALSE(f->identity.valid);
+
+    // Subsequent cleanup call is a no-op returning AlreadyAbsent
+    const auto cleanup_res =
+        kasumi::platform::private_storage::remove_private_file_if_owned(*f);
+    EXPECT_EQ(cleanup_res,
+              kasumi::platform::private_storage::CleanupResult::AlreadyAbsent);
+}
+
+TEST(PrivateStorageTest,
+     ExclusiveCreationDetectsCollisionAndPreservesFirstHandle) {
+    auto workspace = kasumi::test::make_temp_workspace("create-collision");
+    const auto file_path =
+        kasumi::test::workspace_path(workspace, "exclusive.bin");
+
+    // 1. Criar um temporário exclusivo.
+    auto f1 = kasumi::platform::private_storage::create_private_file(file_path);
+    ASSERT_TRUE(f1.has_value());
+    ASSERT_TRUE(f1->is_open());
+
+    const std::string payload = "original content";
+    auto write_res = kasumi::platform::private_storage::write_private_file(
+        *f1, payload.data(), payload.size());
+    ASSERT_TRUE(write_res.has_value());
+
+    // 2. Tentar criá-lo novamente.
+    auto f2 = kasumi::platform::private_storage::create_private_file(file_path);
+
+    // 3. Confirmar que a segunda tentativa falha.
+    ASSERT_FALSE(f2.has_value());
+
+    // 4. Confirmar is_collision == true.
+    EXPECT_TRUE(f2.error().is_collision);
+
+    // 5. Confirmar que o conteúdo e o handle da primeira operação permanecem válidos.
+    EXPECT_TRUE(f1->is_open());
+    kasumi::platform::private_storage::close_private_file(*f1);
+    EXPECT_EQ(kasumi::test::read_text(file_path), payload);
+
+    // 6. Confirmar que erro por diretório inexistente tem is_collision == false.
+    const auto invalid_path =
+        kasumi::test::workspace_path(workspace, "nonexistent_dir/file.bin");
+    auto f3 =
+        kasumi::platform::private_storage::create_private_file(invalid_path);
+    ASSERT_FALSE(f3.has_value());
+    EXPECT_FALSE(f3.error().is_collision);
+}
+
+TEST(PrivateStorageTest, FlushAndCloseReleasesHandleAndPreservesContent) {
+    auto workspace = kasumi::test::make_temp_workspace("flush-close-basic");
+    const auto file_path = kasumi::test::workspace_path(workspace, "flush.bin");
+
+    // 1. Criar um arquivo privado em workspace descartável.
+    auto file = kasumi::platform::private_storage::create_private_file(file_path);
+    ASSERT_TRUE(file.has_value());
+
+    // 2. Confirmar que o handle está aberto.
+    EXPECT_TRUE(file->is_open());
+    const auto raw_handle = file->handle.value;
+    EXPECT_NE(raw_handle,
+              kasumi::platform::private_storage::invalid_private_handle);
+
+    // 3. Escrever um payload conhecido.
+    const std::string payload = "flush and close payload verification";
+    auto write_res = kasumi::platform::private_storage::write_private_file(
+        *file, payload.data(), payload.size());
+    ASSERT_TRUE(write_res.has_value());
+
+    // 4. Executar flush_and_close_private_file().
+    auto flush_res =
+        kasumi::platform::private_storage::flush_and_close_private_file(*file);
+
+    // 5. Confirmar sucesso.
+    EXPECT_TRUE(flush_res.has_value());
+
+    // 6. Confirmar is_open() == false.
+    EXPECT_FALSE(file->is_open());
+
+    // 7. Confirmar handle.value == invalid_private_handle.
+    EXPECT_EQ(file->handle.value,
+              kasumi::platform::private_storage::invalid_private_handle);
+
+    // 8. Confirmar que os bytes gravados permanecem íntegros.
+    EXPECT_EQ(kasumi::test::read_text(file_path), payload);
+
+    // 9. Executar close_private_file() novamente.
+    kasumi::platform::private_storage::close_private_file(*file);
+
+    // 10. Confirmar que a operação não destrói outro recurso.
+    EXPECT_FALSE(file->is_open());
+    EXPECT_EQ(file->handle.value,
+              kasumi::platform::private_storage::invalid_private_handle);
+}
+
+TEST(PrivateStorageTest, FlushAndCloseRepeatedCallIsNoOp) {
+    auto workspace = kasumi::test::make_temp_workspace("flush-close-repeat");
+    const auto file_path = kasumi::test::workspace_path(workspace, "repeat.bin");
+
+    auto file = kasumi::platform::private_storage::create_private_file(file_path);
+    ASSERT_TRUE(file.has_value());
+    EXPECT_TRUE(file->is_open());
+
+    const std::string payload = "repeat call preservation test";
+    auto write_res = kasumi::platform::private_storage::write_private_file(
+        *file, payload.data(), payload.size());
+    ASSERT_TRUE(write_res.has_value());
+
+    // Primeiro flush e fechamento bem-sucedidos.
+    auto first_res =
+        kasumi::platform::private_storage::flush_and_close_private_file(*file);
+    EXPECT_TRUE(first_res.has_value());
+    EXPECT_FALSE(file->is_open());
+    EXPECT_EQ(file->handle.value,
+              kasumi::platform::private_storage::invalid_private_handle);
+
+    // Segunda chamada não tenta utilizar handle inválido e retorna sucesso (no-op).
+    auto second_res =
+        kasumi::platform::private_storage::flush_and_close_private_file(*file);
+    EXPECT_TRUE(second_res.has_value());
+    EXPECT_FALSE(file->is_open());
+
+    // close_private_file() posterior permanece inofensivo.
+    kasumi::platform::private_storage::close_private_file(*file);
+    EXPECT_FALSE(file->is_open());
+
+    // Conteúdo do arquivo permanece íntegro.
+    EXPECT_EQ(kasumi::test::read_text(file_path), payload);
 }
 
 } // namespace

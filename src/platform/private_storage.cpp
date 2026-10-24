@@ -382,15 +382,16 @@ protect_tree(const std::filesystem::path& root) {
 #endif
 }
 
-std::expected<void, std::string>
-create_file(const std::filesystem::path& path) {
+std::expected<PrivateOutputFile, CreateFileError>
+create_private_file(const std::filesystem::path& path) {
     if (path.empty()) {
-        return std::unexpected("empty private file path");
+        return std::unexpected(
+            CreateFileError{"empty private file path", false});
     }
 #if defined(_WIN32)
     auto descriptor = security_descriptor(false);
     if (!descriptor) {
-        return std::unexpected(descriptor.error());
+        return std::unexpected(CreateFileError{descriptor.error(), false});
     }
     SECURITY_ATTRIBUTES attributes{
         .nLength = sizeof(SECURITY_ATTRIBUTES),
@@ -398,14 +399,19 @@ create_file(const std::filesystem::path& path) {
         .bInheritHandle = FALSE,
     };
     const auto file = CreateFileW(path.c_str(),
-                                  GENERIC_READ | GENERIC_WRITE,
-                                  0,
+                                  GENERIC_READ | GENERIC_WRITE | DELETE,
+                                  FILE_SHARE_READ | FILE_SHARE_DELETE,
                                   &attributes,
                                   CREATE_NEW,
                                   FILE_ATTRIBUTE_NORMAL,
                                   nullptr);
+    const DWORD create_error =
+        (file == INVALID_HANDLE_VALUE) ? GetLastError() : ERROR_SUCCESS;
+    LocalFree(*descriptor);
     if (file == INVALID_HANDLE_VALUE) {
-        const auto code = GetLastError();
+        const auto code = create_error;
+        const bool is_col =
+            (code == ERROR_FILE_EXISTS || code == ERROR_ALREADY_EXISTS);
         auto detail = "CreateFileW failed for '" +
                       platform::path::to_utf8(path) + "' (Win32 error " +
                       std::to_string(code) + ")";
@@ -413,22 +419,40 @@ create_file(const std::filesystem::path& path) {
             GetFileAttributesW(path.parent_path().c_str()) !=
                 INVALID_FILE_ATTRIBUTES) {
             detail =
-                "Windows rejected a " +
-                std::to_string(path.native().size()) +
+                "Windows rejected a " + std::to_string(path.native().size()) +
                 "-character path although its parent exists; enable Windows "
                 "long-path support or shorten the profile path";
         }
-        const auto error = windows_error(detail, code);
-        LocalFree(*descriptor);
-        return std::unexpected(error);
-    }
-    LocalFree(*descriptor);
-    if (!CloseHandle(file)) {
         return std::unexpected(
-            windows_error("CloseHandle failed", GetLastError()));
+            CreateFileError{windows_error(detail, code), is_col});
     }
+    FILE_ID_INFO id{};
+    FileIdentity identity{};
+    const BOOL id_ok =
+        GetFileInformationByHandleEx(file, FileIdInfo, &id, sizeof(id));
+    if (!id_ok) {
+        const auto code = GetLastError();
+        FILE_DISPOSITION_INFO disp_info{TRUE};
+        SetFileInformationByHandle(
+            file, FileDispositionInfo, &disp_info, sizeof(disp_info));
+        CloseHandle(file);
+        return std::unexpected(CreateFileError{
+            windows_error("Failed to query file identity", code), false});
+    }
+    identity.volume_or_dev = id.VolumeSerialNumber;
+    std::memcpy(
+        &identity.file_id_low, id.FileId.Identifier, sizeof(std::uint64_t));
+    std::memcpy(&identity.file_id_high,
+                id.FileId.Identifier + sizeof(std::uint64_t),
+                sizeof(std::uint64_t));
+    identity.valid = true;
+    return PrivateOutputFile{
+        .handle = reinterpret_cast<std::intptr_t>(file),
+        .path = path,
+        .identity = identity,
+    };
 #else
-    int flags = O_WRONLY | O_CREAT | O_EXCL;
+    int flags = O_RDWR | O_CREAT | O_EXCL;
 #ifdef O_CLOEXEC
     flags |= O_CLOEXEC;
 #endif
@@ -437,23 +461,509 @@ create_file(const std::filesystem::path& path) {
 #endif
     const int file = ::open(path.c_str(), flags, 0600);
     if (file < 0) {
-        return std::unexpected(system_error(
-            "open failed", std::error_code{errno, std::generic_category()}));
+        const bool is_col = (errno == EEXIST);
+        return std::unexpected(CreateFileError{
+            system_error("open failed",
+                         std::error_code{errno, std::generic_category()}),
+            is_col});
     }
     if (::fchmod(file, 0600) != 0) {
         const auto error = errno;
+        std::string cleanup_detail;
+        struct stat st_f{};
+        struct stat st_path{};
+        if (::fstat(file, &st_f) == 0 && ::lstat(path.c_str(), &st_path) == 0 &&
+            st_f.st_dev == st_path.st_dev && st_f.st_ino == st_path.st_ino &&
+            S_ISREG(st_path.st_mode)) {
+            if (::unlink(path.c_str()) != 0) {
+                const auto unlink_err = errno;
+                cleanup_detail = " (cleanup unlink failed: " +
+                    std::error_code{unlink_err, std::generic_category()}.message() + ")";
+            }
+        }
         ::close(file);
-        remove_temporary(path);
-        return std::unexpected(
-            system_error("fchmod 0600 failed",
-                         std::error_code{error, std::generic_category()}));
+        return std::unexpected(CreateFileError{
+            system_error("fchmod 0600 failed" + cleanup_detail,
+                         std::error_code{error, std::generic_category()}),
+            false});
     }
-    if (::close(file) != 0) {
-        return std::unexpected(system_error(
-            "close failed", std::error_code{errno, std::generic_category()}));
+    struct stat st{};
+    FileIdentity identity{};
+    const int fstat_res = ::fstat(file, &st);
+    if (fstat_res != 0) {
+        const auto error = errno;
+        std::string cleanup_detail;
+        struct stat st_path{};
+        if (::lstat(path.c_str(), &st_path) == 0 && S_ISREG(st_path.st_mode)) {
+            if (::unlink(path.c_str()) != 0) {
+                const auto unlink_err = errno;
+                cleanup_detail = " (cleanup unlink failed: " +
+                    std::error_code{unlink_err, std::generic_category()}.message() + ")";
+            }
+        }
+        ::close(file);
+        return std::unexpected(CreateFileError{
+            system_error("fstat failed" + cleanup_detail,
+                         std::error_code{error, std::generic_category()}),
+            false});
     }
+    identity.volume_or_dev = static_cast<std::uint64_t>(st.st_dev);
+    identity.file_id_low = static_cast<std::uint64_t>(st.st_ino);
+    identity.valid = true;
+    return PrivateOutputFile{
+        .handle = static_cast<std::intptr_t>(file),
+        .path = path,
+        .identity = identity,
+    };
 #endif
+}
+
+void close_raw_handle(std::intptr_t handle) noexcept {
+    if (handle == invalid_private_handle) {
+        return;
+    }
+#if defined(_WIN32)
+    CloseHandle(reinterpret_cast<HANDLE>(handle));
+#else
+    ::close(static_cast<int>(handle));
+#endif
+}
+
+void close_private_file(PrivateOutputFile& file) noexcept {
+    file.handle.close();
+}
+
+std::expected<void, std::string>
+create_file(const std::filesystem::path& path) {
+    auto file = create_private_file(path);
+    if (!file) {
+        return std::unexpected(file.error().message);
+    }
+    close_private_file(*file);
     return {};
+}
+
+std::expected<void, std::string> write_private_file(PrivateOutputFile& file,
+                                                    const void* data,
+                                                    std::size_t size) {
+    if (!file.is_open()) {
+        return std::unexpected("private file is not open for writing");
+    }
+    if (size == 0) {
+        return {};
+    }
+#if defined(_WIN32)
+    const char* ptr = static_cast<const char*>(data);
+    std::size_t remaining = size;
+    while (remaining > 0) {
+        const DWORD chunk =
+            static_cast<DWORD>(std::min<std::size_t>(remaining, 0xFFFFFFFFUL));
+        DWORD written = 0;
+        if (!WriteFile(reinterpret_cast<HANDLE>(file.handle.value),
+                       ptr,
+                       chunk,
+                       &written,
+                       nullptr) ||
+            written == 0) {
+            return std::unexpected(
+                windows_error("WriteFile failed", GetLastError()));
+        }
+        ptr += written;
+        remaining -= written;
+    }
+    return {};
+#else
+    const char* ptr = static_cast<const char*>(data);
+    std::size_t remaining = size;
+    while (remaining > 0) {
+        const ssize_t written =
+            ::write(static_cast<int>(file.handle), ptr, remaining);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return std::unexpected(
+                system_error("write failed",
+                             std::error_code{errno, std::generic_category()}));
+        }
+        if (written == 0) {
+            return std::unexpected("write returned 0 bytes");
+        }
+        ptr += written;
+        remaining -= static_cast<std::size_t>(written);
+    }
+    return {};
+#endif
+}
+
+std::expected<void, std::string>
+flush_and_close_private_file(PrivateOutputFile& file) {
+    if (!file.is_open()) {
+        return {};
+    }
+#if defined(_WIN32)
+    HANDLE h = reinterpret_cast<HANDLE>(file.handle.value);
+    if (!FlushFileBuffers(h)) {
+        const auto error = GetLastError();
+        close_private_file(file);
+        return std::unexpected(windows_error("FlushFileBuffers failed", error));
+    }
+    const HANDLE handle_to_close =
+        reinterpret_cast<HANDLE>(
+            std::exchange(
+                file.handle.value,
+                invalid_private_handle));
+    if (!CloseHandle(handle_to_close)) {
+        const auto error = GetLastError();
+        return std::unexpected(windows_error("CloseHandle failed", error));
+    }
+    return {};
+#else
+    int fd = static_cast<int>(file.handle);
+    if (fsync(fd) != 0) {
+        const auto error = errno;
+        close_private_file(file);
+        return std::unexpected(system_error(
+            "fsync failed", std::error_code{error, std::generic_category()}));
+    }
+    const int fd_to_close = static_cast<int>(
+        std::exchange(file.handle.value, invalid_private_handle));
+    if (::close(fd_to_close) != 0) {
+        const auto error = errno;
+        return std::unexpected(system_error(
+            "close failed", std::error_code{error, std::generic_category()}));
+    }
+    return {};
+#endif
+}
+
+FileIdentity query_file_identity(const std::filesystem::path& path) noexcept {
+    if (path.empty()) {
+        return {};
+    }
+#if defined(_WIN32)
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES ||
+        (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+        (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return {};
+    }
+    const auto handle =
+        CreateFileW(path.c_str(),
+                    FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                    nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+    FILE_ID_INFO id{};
+    FileIdentity result{};
+    if (GetFileInformationByHandleEx(handle, FileIdInfo, &id, sizeof(id))) {
+        result.volume_or_dev = id.VolumeSerialNumber;
+        std::memcpy(
+            &result.file_id_low, id.FileId.Identifier, sizeof(std::uint64_t));
+        std::memcpy(&result.file_id_high,
+                    id.FileId.Identifier + sizeof(std::uint64_t),
+                    sizeof(std::uint64_t));
+        result.valid = true;
+    }
+    CloseHandle(handle);
+    return result;
+#else
+    struct stat st{};
+    if (::lstat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+        return {};
+    }
+    FileIdentity result{};
+    result.volume_or_dev = static_cast<std::uint64_t>(st.st_dev);
+    result.file_id_low = static_cast<std::uint64_t>(st.st_ino);
+    result.valid = true;
+    return result;
+#endif
+}
+
+std::expected<void, std::string>
+publish_private_file(PrivateOutputFile& file,
+                     const std::filesystem::path& target_path) {
+    if (!file.is_open()) {
+        return std::unexpected("private file is not open");
+    }
+    if (target_path.empty()) {
+        return std::unexpected("target path cannot be empty");
+    }
+    if (!file.identity.valid) {
+        return std::unexpected("private file identity is invalid");
+    }
+#if defined(_WIN32)
+    HANDLE h = reinterpret_cast<HANDLE>(file.handle.value);
+    FILE_ID_INFO current_id{};
+    if (!GetFileInformationByHandleEx(
+            h, FileIdInfo, &current_id, sizeof(current_id))) {
+        return std::unexpected(
+            windows_error("GetFileInformationByHandleEx failed during publish",
+                          GetLastError()));
+    }
+    FileIdentity handle_id{
+        .volume_or_dev = current_id.VolumeSerialNumber,
+        .file_id_low = 0,
+        .file_id_high = 0,
+        .valid = true,
+    };
+    std::memcpy(&handle_id.file_id_low,
+                current_id.FileId.Identifier,
+                sizeof(std::uint64_t));
+    std::memcpy(&handle_id.file_id_high,
+                current_id.FileId.Identifier + sizeof(std::uint64_t),
+                sizeof(std::uint64_t));
+    if (!(handle_id == file.identity)) {
+        return std::unexpected("file handle identity mismatch during publish");
+    }
+
+    if (!FlushFileBuffers(h)) {
+        const auto code = GetLastError();
+        return std::unexpected(windows_error("FlushFileBuffers failed", code));
+    }
+
+    std::wstring target_str = target_path.wstring();
+    const DWORD rename_info_size = static_cast<DWORD>(
+        sizeof(FILE_RENAME_INFO) + target_str.size() * sizeof(WCHAR));
+    std::vector<char> buffer(rename_info_size, 0);
+    FILE_RENAME_INFO* rename_info =
+        reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
+    rename_info->ReplaceIfExists = TRUE;
+    rename_info->RootDirectory = nullptr;
+    rename_info->FileNameLength =
+        static_cast<DWORD>(target_str.size() * sizeof(WCHAR));
+    std::memcpy(rename_info->FileName,
+                target_str.c_str(),
+                target_str.size() * sizeof(WCHAR));
+
+    if (!SetFileInformationByHandle(
+            h, FileRenameInfo, rename_info, rename_info_size)) {
+        const auto code = GetLastError();
+        return std::unexpected(
+            windows_error("SetFileInformationByHandle rename failed", code));
+    }
+    file.published = true;
+    file.path.clear();
+    file.identity.valid = false;
+    close_private_file(file);
+    return {};
+#else
+    int fd = static_cast<int>(file.handle);
+    if (fsync(fd) != 0) {
+        return std::unexpected(system_error(
+            "fsync failed", std::error_code{errno, std::generic_category()}));
+    }
+    struct stat st_fd{};
+    if (::fstat(fd, &st_fd) != 0) {
+        return std::unexpected(system_error(
+            "fstat failed", std::error_code{errno, std::generic_category()}));
+    }
+    struct stat st_path{};
+    if (::lstat(file.path.c_str(), &st_path) != 0) {
+        return std::unexpected("temporary path cannot be queried with lstat");
+    }
+    if (st_fd.st_dev != st_path.st_dev || st_fd.st_ino != st_path.st_ino ||
+        !S_ISREG(st_path.st_mode)) {
+        return std::unexpected(
+            "temporary file identity mismatch before publication");
+    }
+
+    std::error_code rename_err;
+    std::filesystem::rename(file.path, target_path, rename_err);
+    if (rename_err) {
+        return std::unexpected(rename_err.message());
+    }
+    file.published = true;
+    file.path.clear();
+    file.identity.valid = false;
+    close_private_file(file);
+
+    auto sync_parent = platform::durability::sync_parent_directory(target_path);
+    if (!sync_parent) {
+        return std::unexpected("published but parent directory sync failed: " +
+                               sync_parent.error());
+    }
+    return {};
+#endif
+}
+
+CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
+    if (file.is_published() || file.path.empty()) {
+        if (file.is_open()) {
+            close_private_file(file);
+        }
+        return CleanupResult::AlreadyAbsent;
+    }
+
+    if (!file.identity.valid) {
+        if (file.is_open()) {
+            close_private_file(file);
+        }
+        return CleanupResult::IdentityMismatch;
+    }
+
+    if (file.is_open()) {
+#if defined(_WIN32)
+        HANDLE h = reinterpret_cast<HANDLE>(file.handle.value);
+        FILE_DISPOSITION_INFO disp{TRUE};
+        const BOOL disp_ok = SetFileInformationByHandle(
+            h, FileDispositionInfo, &disp, sizeof(disp));
+        const auto disp_err = GetLastError();
+        close_private_file(file);
+        if (!disp_ok) {
+            if (!file.path.empty()) {
+                const auto current_id = query_file_identity(file.path);
+                if (current_id.valid && !(current_id == file.identity)) {
+                    return CleanupResult::IdentityMismatch;
+                }
+            }
+            if (disp_err == ERROR_ACCESS_DENIED ||
+                disp_err == ERROR_SHARING_VIOLATION) {
+                return CleanupResult::AccessDenied;
+            }
+            return CleanupResult::FilesystemError;
+        }
+        if (!file.path.empty()) {
+            std::error_code exists_err;
+            if (std::filesystem::exists(file.path, exists_err)) {
+                const auto current_id = query_file_identity(file.path);
+                if (!current_id.valid || !(current_id == file.identity)) {
+                    return CleanupResult::IdentityMismatch;
+                }
+            }
+        }
+        return CleanupResult::Removed;
+#else
+        int fd = static_cast<int>(file.handle);
+        struct stat st_fd{};
+        if (::fstat(fd, &st_fd) != 0) {
+            close_private_file(file);
+            return CleanupResult::FilesystemError;
+        }
+        struct stat st_path{};
+        if (::lstat(file.path.c_str(), &st_path) != 0) {
+            const auto err = errno;
+            close_private_file(file);
+            if (err == ENOENT) {
+                return CleanupResult::AlreadyAbsent;
+            }
+            return CleanupResult::FilesystemError;
+        }
+        if (st_fd.st_dev != st_path.st_dev || st_fd.st_ino != st_path.st_ino ||
+            !S_ISREG(st_path.st_mode)) {
+            close_private_file(file);
+            return CleanupResult::IdentityMismatch;
+        }
+
+        if (::unlink(file.path.c_str()) != 0) {
+            const auto err = errno;
+            close_private_file(file);
+            if (err == ENOENT) {
+                return CleanupResult::AlreadyAbsent;
+            }
+            if (err == EACCES || err == EPERM || err == EROFS) {
+                return CleanupResult::AccessDenied;
+            }
+            return CleanupResult::FilesystemError;
+        }
+        close_private_file(file);
+        return CleanupResult::Removed;
+#endif
+    }
+
+    if (file.path.empty()) {
+        return CleanupResult::AlreadyAbsent;
+    }
+    std::error_code exists_err;
+    const bool exists = std::filesystem::exists(file.path, exists_err);
+    if (exists_err) {
+        return CleanupResult::FilesystemError;
+    }
+    if (!exists) {
+        return CleanupResult::AlreadyAbsent;
+    }
+    if (!file.identity.valid) {
+        return CleanupResult::IdentityMismatch;
+    }
+
+#if defined(_WIN32)
+    HANDLE h =
+        CreateFileW(file.path.c_str(),
+                    DELETE | FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                    nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        const auto code = GetLastError();
+        if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
+            return CleanupResult::AlreadyAbsent;
+        }
+        if (code == ERROR_ACCESS_DENIED || code == ERROR_SHARING_VIOLATION) {
+            return CleanupResult::AccessDenied;
+        }
+        return CleanupResult::FilesystemError;
+    }
+
+    FILE_ID_INFO current_id{};
+    if (!GetFileInformationByHandleEx(
+            h, FileIdInfo, &current_id, sizeof(current_id))) {
+        CloseHandle(h);
+        return CleanupResult::IdentityMismatch;
+    }
+    FileIdentity id{
+        .volume_or_dev = current_id.VolumeSerialNumber,
+        .file_id_low = 0,
+        .file_id_high = 0,
+        .valid = true,
+    };
+    std::memcpy(
+        &id.file_id_low, current_id.FileId.Identifier, sizeof(std::uint64_t));
+    std::memcpy(&id.file_id_high,
+                current_id.FileId.Identifier + sizeof(std::uint64_t),
+                sizeof(std::uint64_t));
+    if (!(id == file.identity)) {
+        CloseHandle(h);
+        return CleanupResult::IdentityMismatch;
+    }
+
+    FILE_DISPOSITION_INFO disp{TRUE};
+    if (!SetFileInformationByHandle(
+            h, FileDispositionInfo, &disp, sizeof(disp))) {
+        const auto code = GetLastError();
+        CloseHandle(h);
+        if (code == ERROR_ACCESS_DENIED || code == ERROR_SHARING_VIOLATION) {
+            return CleanupResult::AccessDenied;
+        }
+        return CleanupResult::FilesystemError;
+    }
+    CloseHandle(h);
+    return CleanupResult::Removed;
+#else
+    const auto current_id = query_file_identity(file.path);
+    if (!current_id.valid || !(current_id == file.identity)) {
+        return CleanupResult::IdentityMismatch;
+    }
+
+    std::error_code remove_err;
+    const bool removed = std::filesystem::remove(file.path, remove_err);
+    if (removed && !remove_err) {
+        return CleanupResult::Removed;
+    }
+    if (remove_err == std::errc::no_such_file_or_directory) {
+        return CleanupResult::AlreadyAbsent;
+    }
+    if (remove_err == std::errc::permission_denied) {
+        return CleanupResult::AccessDenied;
+    }
+    return CleanupResult::FilesystemError;
+#endif
 }
 
 std::expected<void, std::string>
