@@ -1218,4 +1218,52 @@ TEST(ApplicationExecuteTest,
     ASSERT_TRUE(result.has_value()) << result.error().detail;
 }
 
+
+TEST(ApplicationExecuteTest,
+     InitialSyncWithTrustExistingContentReusesContentWithoutPresenceProbes) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("app-trust-no-presence");
+    const auto app = kasumi::test::workspace_path(workspace, "app");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    const ExecutionEnvironment env{app};
+    const Profile profile{"demo", local, remote.string()};
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    ASSERT_TRUE(std::filesystem::create_directories(remote));
+
+    const auto key_bytes = application_key();
+    for (int i = 0; i < 5; ++i) {
+        const std::string name = "file_" + std::to_string(i) + ".txt";
+        const std::string text = "content_" + std::to_string(i);
+        kasumi::test::write_text(local / name, text);
+
+        // Pre-create orphan content on remote
+        const auto source = kasumi::test::workspace_path(workspace, "src.tmp");
+        const auto cipher = kasumi::test::workspace_path(workspace, "enc.tmp");
+        kasumi::test::write_text(source, text);
+        const auto enc = kasumi::crypto::encrypt_file_with_hashes(source, cipher, key_bytes);
+        ASSERT_TRUE(enc.has_value());
+        const auto id = kasumi::crypto::content_identifier(key_bytes, enc->plaintext_hash);
+        std::filesystem::copy_file(cipher, remote / id);
+    }
+    ASSERT_TRUE(kasumi::application::create_profile(env, profile, key()));
+    const auto db = app / "profiles/demo/db.sqlite";
+    ASSERT_TRUE(std::filesystem::remove(db));
+
+    const auto result = kasumi::application::execute(
+        {Request{.operation = Operation::Sync,
+                 .profile_name = "demo",
+                 .initial = true,
+                 .trust_existing_content = true},
+         Credentials{NoCredentials{}},
+         env});
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    const auto* summary =
+        std::get_if<kasumi::application::SyncCompleted>(&result->data);
+    ASSERT_NE(summary, nullptr);
+    EXPECT_EQ(summary->uploaded, 5U);
+    EXPECT_EQ(summary->downloaded, 0U);
+    EXPECT_EQ(summary->trusted_content_reused, 5U);
+}
+
 } // namespace

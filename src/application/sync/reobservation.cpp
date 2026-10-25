@@ -133,7 +133,8 @@ std::expected<void, Error> observe_content_availability(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     std::span<const Hash> confirmed_missing,
     bool allow_unreferenced_content_reuse,
-    bool trust_existing_content = false) {
+    bool trust_existing_content = false,
+    const std::unordered_set<std::string>* initial_content_identifiers = nullptr) {
     HashSet hashes{0, hash_key};
     HashSet upload_hashes{0, hash_key};
     std::unordered_set<std::string> upload_identities;
@@ -190,6 +191,27 @@ std::expected<void, Error> observe_content_availability(
     add_relevant_pending(input.pending_deletion_authority);
     add_relevant_pending(result.pending_materializations);
     add_relevant_pending(result.pending_storage_rows);
+
+    if (allow_unreferenced_content_reuse && trust_existing_content &&
+        initial_content_identifiers != nullptr && !input.audit_storage_objects) {
+        const auto operations = sync_plan_operations(result.plan);
+        for (const auto& candidate : operations) {
+            if (candidate.action != Action::Upload) {
+                continue;
+            }
+            const auto hash = hash_from_hex(candidate.hash);
+            if (!hash) {
+                continue;
+            }
+            const auto identifier = crypto::content_identifier(key, *hash);
+            if (initial_content_identifiers->contains(identifier)) {
+                input.trusted_remote_content_objects.insert(
+                    hash_hex(*hash) + ':' + std::to_string(candidate.size));
+                upload_hashes.erase(*hash);
+                hashes.erase(*hash);
+            }
+        }
+    }
 
     if (hashes.empty()) {
         input.known_missing_content_objects.clear();
@@ -522,7 +544,8 @@ refresh_content_availability(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     std::span<const Hash> confirmed_missing,
     bool allow_unreferenced_content_reuse,
-    bool trust_existing_content) {
+    bool trust_existing_content,
+    const std::unordered_set<std::string>* initial_content_identifiers) {
     auto availability = observe_content_availability(
         input,
         reconciliation_result,
@@ -530,7 +553,8 @@ refresh_content_availability(
         key,
         confirmed_missing,
         allow_unreferenced_content_reuse,
-        trust_existing_content);
+        trust_existing_content,
+        initial_content_identifiers);
     if (!availability) {
         return std::unexpected(availability.error());
     }
@@ -552,7 +576,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
           std::span<const Hash> confirmed_missing,
           bool content_availability_is_current,
           bool allow_unreferenced_content_reuse,
-          bool trust_existing_content) {
+          bool trust_existing_content,
+          const std::unordered_set<std::string>* initial_content_identifiers) {
     if (trust_existing_content && observed_input.storage.history_present) {
         return std::unexpected(detail::make_error(
             ErrorCode::ConcurrentModification,
@@ -568,7 +593,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
                                                       key,
                                                       confirmed_missing,
                                                       allow_unreferenced_content_reuse,
-                                                      trust_existing_content);
+                                                      trust_existing_content,
+                                                      initial_content_identifiers);
         if (!available) {
             return std::unexpected(available.error());
         }
@@ -621,7 +647,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
                 key,
                 confirmed_missing,
                 allow_unreferenced_content_reuse,
-                trust_existing_content);
+                trust_existing_content,
+                initial_content_identifiers);
             if (!reobserved_availability) {
                 return std::unexpected(reobserved_availability.error());
             }
@@ -724,7 +751,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
             key,
             confirmed_missing,
             current_allow_unreferenced_reuse,
-            trust_existing_content);
+            trust_existing_content,
+            initial_content_identifiers);
         if (!reobserved_availability) {
             auto removed = detail::remove_transaction_workspace(workspace);
             if (!removed) {

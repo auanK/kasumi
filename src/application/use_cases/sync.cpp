@@ -183,7 +183,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     context.key,
                     {},
                     allow_unreferenced_content_reuse,
-                    context.trust_existing_content);
+                    context.trust_existing_content,
+                    &context.initial_content_identifiers);
             platform::perf_trace::finish("content availability",
                                          availability_trace);
             if (!available) {
@@ -258,7 +259,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 {},
                 true,
                 allow_unreferenced_content_reuse,
-                context.trust_existing_content);
+                context.trust_existing_content,
+                &context.initial_content_identifiers);
             platform::perf_trace::finish("reobservation", reobservation_trace);
             if (!stable) {
                 auto err = transaction_error(
@@ -399,7 +401,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     confirmed_missing,
                     false,
                     allow_unreferenced_content_reuse,
-                    context.trust_existing_content);
+                    context.trust_existing_content,
+                    &context.initial_content_identifiers);
                 if (!restabilized) {
                     auto err = transaction_error(context.operation,
                                                  restabilized.error(),

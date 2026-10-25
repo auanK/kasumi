@@ -2,6 +2,7 @@
 
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
+#include "application/observation/history_detail.hpp"
 #include "application/sync/journal.hpp"
 #include "application/use_cases/error_mapping.hpp"
 #include "core/history.hpp"
@@ -314,6 +315,21 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
                 .runtime = output.summary,
             });
         }
+        if (input.request.trust_existing_content) {
+            auto collected =
+                observation::history::detail::collect_content_identifiers(
+                    *identifiers, 1'000'000);
+            if (!collected) {
+                wipe_operation(output);
+                return std::unexpected(Error{
+                    .operation = operation,
+                    .code = ErrorCode::RuntimeFailure,
+                    .detail = collected.error().detail,
+                    .runtime = output.summary,
+                });
+            }
+            output.initial_content_identifiers = std::move(*collected);
+        }
         if (has_remote_history) {
             const auto profile_dir = runtime_data->database_path.parent_path();
             auto observed = observation::history::observe(
@@ -363,6 +379,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
 
 void wipe_operation(OperationContext& context) noexcept {
     crypto::secure_memory::wipe(context.key.data(), context.key.size());
+    context.initial_content_identifiers.clear();
     platform::release_profile_lock(context.profile_lock);
 }
 

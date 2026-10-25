@@ -9,6 +9,8 @@
 
 #include <cstdint>
 #include <expected>
+#include <string>
+#include <unordered_set>
 
 namespace kasumi::application::detail {
 
@@ -26,6 +28,7 @@ struct OperationContext {
     std::string writer_identifier;
     transport::Transport storage;
     ProgressCallback on_progress{};
+    std::unordered_set<std::string> initial_content_identifiers;
 };
 
 // Validates input and prepares profile, key, and transport.
