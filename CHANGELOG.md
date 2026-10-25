@@ -4,23 +4,18 @@
 
 ### Added
 
-- Added support for enrolling an uninitialized client into an existing authenticated remote vault (`kasumi sync <profile> --initial`).
-- Added the opt-in `--trust-existing-content` flag exclusively for `sync --initial` to bootstrap using existing remote Content without payload verification downloads (0 GETs) or redundant uploads (0 PUTs).
-- Added user warning and count of unverified remote Content objects reused based on explicit trust, recommending subsequent `kasumi fsck`.
+- Added support for `sync --initial` to enroll an uninitialized client into an existing authenticated remote vault.
+- Added `--trust-existing-content` parameter for `sync --initial` to reuse orphan Content during bootstrap without verification downloads or redundant uploads.
 
 ### Fixed
 
-- Prevented `kasumi sync <profile> --initial` from creating genesis or leaving untracked databases when remote history contains objects but lacks valid authenticated head markers (fails closed).
+- Hardened SQLite database validation by rejecting symlinks and non-regular files, while safely reusing empty databases left by interrupted initial operations.
 - Validated remote history authentication before creating or updating the local SQLite database.
-- Hardened SQLite database detection to inspect physical file status without following symlinks, rejecting dangling or valid symlinks and directories at the database path.
-- Eliminated race condition between bootstrap and enrollment: rejected operations with `--trust-existing-content` if remote history is observed concurrently during initial observation or stabilization.
-- Ensured enrollment into existing vaults does not speculatively audit or download unreferenced orphan Content.
-- Allowed safe reuse of empty, valid local databases left by interrupted initial sync without manual intervention.
+- Protected against concurrent modifications during bootstrap and enrollment, failing closed if remote history is observed concurrently.
 
 ### Performance
 
-- Elided 100% of GET verification requests for orphan Content during initial sync with `--trust-existing-content`.
-- Elided redundant PUT uploads for pre-existing trusted Content objects.
+- Reduced redundant remote presence queries during trusted bootstrap by reusing the initial storage listing.
 - Preserved zero network request overhead for normal sync and no-op operations.
 
 ## [0.8.3]

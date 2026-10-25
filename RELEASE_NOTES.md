@@ -1,46 +1,30 @@
 # Kasumi v0.8.4
 
-Stabilization release of Kasumi focused on initial vault enrollment, robust
-orphan content bootstrapping, concurrency protection, and local state validation.
+Release focused on initial vault enrollment, efficient orphan content bootstrapping, and stability fixes.
 
 ## Highlights
 
-### Initial vault enrollment (Scenario A2)
+### Initial Vault Enrollment
 
-`kasumi sync <profile> --initial` now supports joining an existing authenticated
-remote vault from an uninitialized client without failing with namespace errors.
-The client observes accepted remote history, verifies head markers and epochs,
-and reconciles its local tree against the remote snapshot. If remote history is
-partial, unrecognized, or corrupted, the operation fails closed before creating
-a local database.
+`kasumi sync <profile> --initial` now supports joining an existing authenticated remote vault from an uninitialized client. The client verifies remote history and head markers before reconciling its local directory with the remote snapshot, failing closed if remote history is incomplete or invalid.
 
-### Trusted content bootstrapping (`--trust-existing-content`)
+### Trusted Content Bootstrapping
 
-For initial sync against an empty remote history namespace containing pre-existing
-Content objects (e.g. orphan objects left in cloud storage like Google Drive),
-the `--trust-existing-content` flag allows bootstrapping without performing
-speculative verification downloads.
+For initial synchronization against remote storage containing pre-existing orphan Content objects, Kasumi introduces:
 
-- **Zero Verification GETs:** Content matching key-derived logical identifiers is trusted by presence without payload downloads.
-- **Zero Redundant PUTs:** Uploads of pre-existing trusted content are elided.
-- **Strict Concurrency Protection:** If remote history is published concurrently by another client before or during stabilization, the operation fails closed to prevent unverified content reuse or concurrent genesis publication.
-- **Integrity Notice:** Reports the count of reused unverified objects and recommends running `kasumi fsck` for offline payload verification.
+```bash
+kasumi sync <profile> --initial --trust-existing-content
+```
 
-### Enrollment and bootstrap policy isolation
+This flag avoids pre-verifying reused remote content and skips redundant uploads for matching Content objects, significantly reducing network operations during initial onboarding. Because remote Content payloads are not inspected prior to reuse, using this flag implies explicit trust in those existing objects; running `kasumi fsck` subsequently is recommended for offline integrity verification. Redundant remote presence queries are avoided by leveraging the initial storage listing.
 
-Enrollment into an existing vault no longer audits or downloads unreferenced
-orphan content, preventing speculative GET overhead and preserving standard
-deduplication behavior.
+### Stability and Concurrency Fixes
 
-### Hardened local state validation
+- **Database and State Validation:** SQLite detection rejects symlinks and invalid filesystem objects at the database path, while safely reusing empty databases left by interrupted initial runs.
+- **Fail-Closed Concurrency:** Operations with `--trust-existing-content` fail closed if remote history is published concurrently during bootstrap.
+- **History Authentication:** Remote history is strictly authenticated before the local database is initialized or updated.
 
-Local database inspection now uses `symlink_status` directly instead of following
-symlinks. Symlinks (dangling or targeting valid databases) and non-regular files
-at the database path are rejected. Empty, valid databases without accepted state
-from interrupted initial runs are safely reused when no transaction recovery
-evidence exists.
+## Compatibility
 
-## Performance and Compatibility
-
-- **No Remote Performance Regression:** Normal sync and no-op operations perform zero additional remote requests.
-- **Protocol Compatibility:** Kasumi 0.8.4 introduces no changes to remote protocols, SQLite schemas, or ciphertext formats.
+- **Remote Protocol:** The remote storage layout, ciphertext format, and authentication mechanisms remain fully unchanged.
+- **Standard Sync:** Normal sync and no-op operations retain zero overhead.
