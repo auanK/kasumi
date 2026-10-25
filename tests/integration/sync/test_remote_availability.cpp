@@ -503,6 +503,11 @@ public:
         counting_state_.fail_next_content_get = true;
     }
 
+    void enable_initial_sync(bool trust_existing_content = false) noexcept {
+        context_.initial_sync = true;
+        context_.trust_existing_content = trust_existing_content;
+    }
+
     void hide_from_listing(const kasumi::Hash& hash) {
         counting_state_.hidden_list_identifier =
             kasumi::crypto::content_identifier(key_, hash);
@@ -1752,6 +1757,23 @@ kasumi::reconciliation::Result downloads_for(const kasumi::Snapshot& remote) {
     return result;
 }
 
+kasumi::reconciliation::Result uploads_for(const kasumi::Snapshot& local) {
+    std::vector<kasumi::Operation> operations;
+    for (const auto& row : local.rows) {
+        if (!row.is_directory) {
+            operations.push_back(kasumi::Operation{
+                .action = kasumi::Action::Upload,
+                .path = row.path,
+                .hash = kasumi::hash_hex(row.hash),
+                .size = row.size,
+            });
+        }
+    }
+    kasumi::reconciliation::Result result{};
+    result.plan = kasumi::make_sync_plan(std::move(operations), 0);
+    return result;
+}
+
 } // namespace
 
 TEST(SyncRemoteAvailabilityTest, ListPresentPresenceAbsentFailsClosed) {
@@ -1899,6 +1921,99 @@ TEST(SyncRemoteAvailabilityTest, CancelledPresenceBatchDoesNotBecomeMissing) {
         refreshed.error().code,
         kasumi::application::sync::coordinator::ErrorCode::ObservationFailure);
     EXPECT_TRUE(input.known_missing_content_objects.empty());
+}
+
+TEST(SyncRemoteAvailabilityTest, WithoutTrustExistingContentPerformsGetVerification) {
+    const auto key = test_key();
+    const auto hash = kasumi::hasher::hash_string("verify-me");
+    const auto identifier = kasumi::crypto::content_identifier(key, hash);
+    const auto local = remote_tree_with(hash, 9);
+    auto input = availability_input(local, true);
+    input.storage.object_identifiers.insert(identifier);
+    const auto result = uploads_for(local);
+
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    state->objects[identifier] = {1U, 2U, 3U};
+
+    // allow_unreferenced_content_reuse = true, trust_existing_content = false
+    const auto refreshed = kasumi::application::sync::coordinator::
+        reobservation::refresh_content_availability(
+            input, result, storage, key, {}, true, false);
+    ASSERT_TRUE(refreshed.has_value()) << refreshed.error().detail;
+    // Verification GET was performed!
+    EXPECT_EQ(state->get_count, 1U);
+    // Since bytes {1, 2, 3} are not valid ciphertext for "verify-me", it failed verification and was marked missing
+    EXPECT_TRUE(input.known_missing_content_objects.contains(hash));
+    EXPECT_TRUE(input.verified_remote_content_objects.empty());
+    EXPECT_TRUE(input.trusted_remote_content_objects.empty());
+}
+
+TEST(SyncRemoteAvailabilityTest, TrustExistingContentElidesGetVerificationAndMarksTrusted) {
+    const auto key = test_key();
+    const auto hash = kasumi::hasher::hash_string("trust-me");
+    const auto identifier = kasumi::crypto::content_identifier(key, hash);
+    const auto local = remote_tree_with(hash, 8);
+    auto input = availability_input(local, true);
+    input.storage.object_identifiers.insert(identifier);
+    const auto result = uploads_for(local);
+
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    state->objects[identifier] = {1U, 2U, 3U}; // arbitrary / unverified bytes
+
+    // allow_unreferenced_content_reuse = true, trust_existing_content = true
+    const auto refreshed = kasumi::application::sync::coordinator::
+        reobservation::refresh_content_availability(
+            input, result, storage, key, {}, true, true);
+    ASSERT_TRUE(refreshed.has_value()) << refreshed.error().detail;
+    // EXACTLY ZERO GETS!
+    EXPECT_EQ(state->get_count, 0U);
+    // Trusted without verification
+    EXPECT_TRUE(input.trusted_remote_content_objects.contains(kasumi::hash_hex(hash) + ":8"));
+    EXPECT_TRUE(input.verified_remote_content_objects.empty());
+    EXPECT_FALSE(input.known_missing_content_objects.contains(hash));
+}
+
+
+
+TEST(SyncRemoteAvailabilityTest, EnrollmentDoesNotAllowUnreferencedContentReuse) {
+    const auto key = test_key();
+    const auto hash = kasumi::hasher::hash_string("orphan-in-enrollment");
+    const auto identifier = kasumi::crypto::content_identifier(key, hash);
+    const auto local = remote_tree_with(hash, 20);
+    auto input = availability_input(local, true);
+    input.storage.history_present = true;
+    input.storage.object_identifiers.insert(identifier);
+    const auto result = uploads_for(local);
+
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    state->objects[identifier] = {1U, 2U, 3U};
+
+    // allow_unreferenced_content_reuse = false (Enrollment into existing vault)
+    const auto refreshed = kasumi::application::sync::coordinator::
+        reobservation::refresh_content_availability(
+            input, result, storage, key, {}, false, false);
+    ASSERT_TRUE(refreshed.has_value()) << refreshed.error().detail;
+    // 0 GETs performed! The orphan content is NOT probed!
+    EXPECT_EQ(state->get_count, 0U);
+}
+
+TEST(SyncRemoteAvailabilityTest,
+     InitialSyncWithTrustExistingContentRejectsConcurrentlyObservedHistory) {
+    SyncHarness harness("sync-trust-concurrent-history");
+    ASSERT_TRUE(harness.valid());
+    harness.write("hello.txt", "hello-content");
+    ASSERT_TRUE(harness.sync().has_value());
+
+    // When remote history exists, running sync with trust_existing_content must be rejected
+    harness.enable_initial_sync(true);
+    const auto result = harness.sync();
+    EXPECT_FALSE(result.has_value());
+    if (!result.has_value()) {
+        EXPECT_NE(result.error().detail.find("remote history"), std::string::npos);
+    }
 }
 
 } // namespace

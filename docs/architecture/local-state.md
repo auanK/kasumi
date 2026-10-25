@@ -28,7 +28,8 @@ The current database requires `PRAGMA user_version=1` and the validated `nodes`,
 column and primary-key contracts. The version number alone does not establish
 compatibility. Profile creation and explicit `sync --initial` initialize a
 missing database; initial Sync also requires no SQLite sidecars or transaction
-evidence and an empty current remote history namespace. Normal application
+evidence. It admits either bootstrap into an empty remote history namespace or
+enrollment into an existing authenticated remote vault. Normal application
 operations reject missing or incompatible databases before opening transport.
 No old-schema conversion or automatic accepted-base reset occurs.
 

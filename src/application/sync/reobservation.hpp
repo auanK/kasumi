@@ -33,7 +33,8 @@ refresh_content_availability(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     std::span<const Hash> confirmed_missing = {},
-    bool allow_unreferenced_content_reuse = false);
+    bool allow_unreferenced_content_reuse = false,
+    bool trust_existing_content = false);
 
 // Re-observes until the plan stabilizes or fails. When
 // content_availability_is_current is true, the initial availability probe and
@@ -47,7 +48,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
           observation::LocalObservationSession* session = nullptr,
           std::span<const Hash> confirmed_missing = {},
           bool content_availability_is_current = false,
-          bool allow_unreferenced_content_reuse = false);
+          bool allow_unreferenced_content_reuse = false,
+          bool trust_existing_content = false);
 
 } // namespace kasumi::application::sync::coordinator::reobservation
 

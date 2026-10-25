@@ -130,6 +130,27 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 err.stage = SyncStage::Observing;
                 return std::unexpected(err);
             }
+            if (context.trust_existing_content &&
+                collected->storage.history_present) {
+                auto err = plan_error(
+                    context.operation,
+                    "remote history was published concurrently during initial sync with "
+                    "--trust-existing-content; operation was rejected to prevent unverified "
+                    "content reuse",
+                    context.summary);
+                err.stage = SyncStage::Observing;
+                return std::unexpected(err);
+            }
+            if (context.initial_sync && context.has_remote_history_objects &&
+                !collected->storage.history_present) {
+                auto err = plan_error(
+                    context.operation,
+                    "remote history contains head markers but no valid "
+                    "authenticated history could be observed",
+                    context.summary);
+                err.stage = SyncStage::Observing;
+                return std::unexpected(err);
+            }
 
             current_stage = SyncStage::Calculating;
             if (context.on_progress) {
@@ -149,6 +170,10 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 return std::unexpected(err);
             }
 
+            const bool is_bootstrap =
+                context.initial_sync && !collected->storage.history_present;
+            const bool allow_unreferenced_content_reuse = is_bootstrap;
+
             const auto availability_trace = platform::perf_trace::begin();
             auto available =
                 sync::coordinator::reobservation::refresh_content_availability(
@@ -157,7 +182,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     context.storage,
                     context.key,
                     {},
-                    context.initial_sync);
+                    allow_unreferenced_content_reuse,
+                    context.trust_existing_content);
             platform::perf_trace::finish("content availability",
                                          availability_trace);
             if (!available) {
@@ -231,7 +257,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 &observation_session,
                 {},
                 true,
-                context.initial_sync);
+                allow_unreferenced_content_reuse,
+                context.trust_existing_content);
             platform::perf_trace::finish("reobservation", reobservation_trace);
             if (!stable) {
                 auto err = transaction_error(
@@ -241,6 +268,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             }
 
             auto summary = compute_sync_summary(stable->result);
+            summary.trusted_content_reused = static_cast<std::uint32_t>(
+                stable->input.trusted_remote_content_objects.size());
             if (context.on_progress) {
                 context.on_progress(SyncProgress{
                     .stage = SyncStage::Calculating,
@@ -367,7 +396,10 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     std::move(*refreshed),
                     std::move(*replanned),
                     &observation_session,
-                    confirmed_missing);
+                    confirmed_missing,
+                    false,
+                    allow_unreferenced_content_reuse,
+                    context.trust_existing_content);
                 if (!restabilized) {
                     auto err = transaction_error(context.operation,
                                                  restabilized.error(),
@@ -377,6 +409,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 }
                 stable = std::move(restabilized);
                 summary = compute_sync_summary(stable->result);
+                summary.trusted_content_reused = static_cast<std::uint32_t>(
+                    stable->input.trusted_remote_content_objects.size());
                 if (context.on_progress) {
                     context.on_progress(SyncProgress{
                         .stage = SyncStage::Calculating,

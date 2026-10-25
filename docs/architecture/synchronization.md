@@ -4,14 +4,21 @@
 
 ## Initial Sync
 
-`kasumi sync <profile> --initial` is an explicit exception for a missing local
-database. Under the profile lock it rejects SQLite sidecars and transaction
-evidence, resolves the existing vault key, initializes and lists the transport,
-and rejects any object in the key-derived current history namespace. It then
-creates the current database schema and runs the same Sync path, which publishes
-new history from local files and can reuse compatible root Content. It never
-overwrites a database, migrates old state, or deletes remote objects; a failed
-listing is an error. Without this flag, Sync behavior is unchanged.
+`kasumi sync <profile> --initial` initializes a missing local database and admits two valid scenarios:
+
+1. **Bootstrap (Empty Remote History):** When the remote history namespace is empty, initial sync publishes new genesis history from the local files and can reuse compatible pre-existing Content.
+2. **Enrollment (Existing Authenticated Remote Vault):** When valid authenticated remote history already exists, an uninitialized client observes the accepted remote history and enrolls into the vault, reconciling its local files against the remote tree. If the remote history contains partial, unrecognized, or corrupted objects without authenticated head markers, the operation fails closed before creating the local database.
+
+Under the profile lock, initial sync rejects SQLite sidecars (`-wal`, `-shm`, `-journal`) and transaction evidence, resolves the existing vault key, and inspects local state without following symlinks. An empty, valid pre-existing local database without accepted state (such as from an interrupted initial run) is safely reused without manual deletion, provided no transaction recovery evidence exists.
+
+### Trusted Pre-existing Content (`--trust-existing-content`)
+
+`kasumi sync <profile> --initial --trust-existing-content` is an opt-in bootstrap optimization that allows an uninitialized client bootstrapping against an empty remote history namespace to reuse pre-existing remote Content matching logical ciphertext identifiers without performing speculative download and verification GETs. Pre-existing trusted content is tracked separately (`trusted_remote_content_objects`), and redundant upload PUTs are elided.
+
+- **Scope:** Strictly valid only during bootstrap with an empty remote history namespace. It cannot be combined with any command other than `sync --initial`.
+- **Concurrency Protection:** If remote history is observed concurrently during initial observation or stabilization, the operation is immediately rejected to prevent unverified content reuse or concurrent genesis publication.
+- **Enrollment Isolation:** Enrollment into an existing vault never performs speculative orphan content audit, ensuring normal deduplication and payload validation standards.
+- **Security:** Content reused via `--trust-existing-content` is assumed valid based on key and hash derivation without payload AEAD authentication. A warning is presented advising subsequent `kasumi fsck` for offline verification. Subsequent normal syncs do not implicitly re-audit trusted content and suffer zero performance overhead.
 
 ## Required Content Availability
 

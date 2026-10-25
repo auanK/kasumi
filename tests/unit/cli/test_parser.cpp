@@ -396,6 +396,44 @@ TEST(CliParserTest, ParsesInitialSyncAndRejectsInvalidCombinations) {
     EXPECT_TRUE(rejected({"kasumi", "sync", "demo", "--initial", "--dry-run"}));
 }
 
+TEST(CliParserTest, ParsesTrustExistingContentWithInitialSyncAndRejectsInvalidCombinations) {
+    const auto initial_trust = parse(
+        {"kasumi", "sync", "demo", "--initial", "--trust-existing-content"});
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::application::Request>(initial_trust));
+    EXPECT_EQ(std::get<kasumi::application::Request>(initial_trust).operation,
+              kasumi::application::Operation::Sync);
+    EXPECT_TRUE(std::get<kasumi::application::Request>(initial_trust).initial);
+    EXPECT_TRUE(
+        std::get<kasumi::application::Request>(initial_trust).trust_existing_content);
+
+    const auto reversed = parse(
+        {"kasumi", "sync", "demo", "--trust-existing-content", "--initial"});
+    ASSERT_TRUE(std::holds_alternative<kasumi::application::Request>(reversed));
+    EXPECT_TRUE(std::get<kasumi::application::Request>(reversed).initial);
+    EXPECT_TRUE(
+        std::get<kasumi::application::Request>(reversed).trust_existing_content);
+
+    const auto rejected = [](std::vector<std::string> values) {
+        std::vector<char*> argv;
+        argv.reserve(values.size());
+        for (auto& value : values)
+            argv.push_back(value.data());
+        return !kasumi::cli::parse(static_cast<int>(argv.size()), argv.data());
+    };
+    EXPECT_TRUE(rejected({"kasumi", "sync", "demo", "--trust-existing-content"}));
+    EXPECT_TRUE(rejected({"kasumi", "sync", "demo", "--trust-existing-content", "--dry-run"}));
+    EXPECT_TRUE(rejected({"kasumi", "sync", "demo", "--dry-run", "--trust-existing-content"}));
+    EXPECT_TRUE(rejected(
+        {"kasumi", "sync", "demo", "--initial", "--trust-existing-content", "--dry-run"}));
+    EXPECT_TRUE(rejected(
+        {"kasumi", "sync", "demo", "--initial", "--trust-existing-content", "--audit-inventory"}));
+    EXPECT_TRUE(rejected(
+        {"kasumi", "sync", "demo", "--audit-inventory", "--trust-existing-content"}));
+    EXPECT_TRUE(rejected(
+        {"kasumi", "sync", "demo", "--trust-existing-content", "--trust-existing-content"}));
+}
+
 TEST(CliParserTest, ParsesResolveMissingRequest) {
     std::vector<std::string> values = {"kasumi", "resolve-missing", "demo"};
     std::vector<char*> argv;

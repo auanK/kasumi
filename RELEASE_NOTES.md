@@ -1,50 +1,46 @@
-# Kasumi v0.8.3
+# Kasumi v0.8.4
 
-Maintenance release of Kasumi focused on transactional file crypto operations,
-data integrity guarantees, handle ownership, and cryptographic buffer
-management.
+Stabilization release of Kasumi focused on initial vault enrollment, robust
+orphan content bootstrapping, concurrency protection, and local state validation.
 
 ## Highlights
 
-### Transactional file encryption and decryption
+### Initial vault enrollment (Scenario A2)
 
-File encryption and decryption now use isolated temporary files with
-private permissions and atomic publication. Before publication,
-validation, authentication, or I/O failures leave existing destination
-files unchanged.
+`kasumi sync <profile> --initial` now supports joining an existing authenticated
+remote vault from an uninitialized client without failing with namespace errors.
+The client observes accepted remote history, verifies head markers and epochs,
+and reconciles its local tree against the remote snapshot. If remote history is
+partial, unrecognized, or corrupted, the operation fails closed before creating
+a local database.
 
-If publication succeeds but a subsequent durability operation fails,
-the operation may report an error even though the new output is already
-present.
+### Trusted content bootstrapping (`--trust-existing-content`)
 
-### Safe temporary cleanup and alias protection
+For initial sync against an empty remote history namespace containing pre-existing
+Content objects (e.g. orphan objects left in cloud storage like Google Drive),
+the `--trust-existing-content` flag allows bootstrapping without performing
+speculative verification downloads.
 
-Temporary output files are verified by unique physical file identity
-(`FileIdentity`) before removal, preventing accidental unlinking of colliding
-or replaced files. Encryption and decryption routines validate input and
-destination paths up front, rejecting empty paths, identical inputs and outputs,
-directory or symlink targets, and hardlinked aliases of the input file to prevent
-destructive data overwrites.
+- **Zero Verification GETs:** Content matching key-derived logical identifiers is trusted by presence without payload downloads.
+- **Zero Redundant PUTs:** Uploads of pre-existing trusted content are elided.
+- **Strict Concurrency Protection:** If remote history is published concurrently by another client before or during stabilization, the operation fails closed to prevent unverified content reuse or concurrent genesis publication.
+- **Integrity Notice:** Reports the count of reused unverified objects and recommends running `kasumi fsck` for offline payload verification.
 
-### Handle lifecycle and leak prevention
+### Enrollment and bootstrap policy isolation
 
-Private file handling now uses RAII-based ownership (`PrivateHandle`)
-for Windows handles and POSIX file descriptors. The changes fix a
-double-close defect and improve resource ownership and cleanup across
-the affected file operations.
+Enrollment into an existing vault no longer audits or downloads unreferenced
+orphan content, preventing speculative GET overhead and preserving standard
+deduplication behavior.
 
-### Buffer optimizations and secure memory wiping
+### Hardened local state validation
 
-- Encryption and decryption use payload-sized scratch buffers up to
-  the configured chunk limit, reducing memory consumption and wipe
-  work for small files.
-- Sensitive working buffers, nonces, and authentication tags are wiped
-  through RAII cleanup on normal and exceptional exits.
-- BLAKE3 file hashing uses a 64 KiB read buffer with RAII memory
-  wiping.
+Local database inspection now uses `symlink_status` directly instead of following
+symlinks. Symlinks (dangling or targeting valid databases) and non-regular files
+at the database path are rejected. Empty, valid databases without accepted state
+from interrupted initial runs are safely reused when no transaction recovery
+evidence exists.
 
-## Compatibility
+## Performance and Compatibility
 
-Kasumi 0.8.3 introduces no remote protocol, SQLite, content, or history format
-changes. The project does not guarantee backward compatibility between 0.x
-releases; use the same release on all clients.
+- **No Remote Performance Regression:** Normal sync and no-op operations perform zero additional remote requests.
+- **Protocol Compatibility:** Kasumi 0.8.4 introduces no changes to remote protocols, SQLite schemas, or ciphertext formats.

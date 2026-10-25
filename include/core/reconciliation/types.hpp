@@ -115,6 +115,8 @@ struct Input {
     HashSet known_missing_content_objects{0, hash_key};
     // Unreferenced Content authenticated for reuse by explicit initial Sync.
     std::unordered_set<std::string> verified_remote_content_objects;
+    // Unreferenced Content trusted for reuse by explicit initial Sync without prior audit.
+    std::unordered_set<std::string> trusted_remote_content_objects;
 
     // Last shared tree persisted locally.
     Snapshot base_tree;

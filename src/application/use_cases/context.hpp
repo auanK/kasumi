@@ -19,6 +19,8 @@ struct OperationContext {
     RuntimeSummary summary;
     bool initial_sync = false;
     bool audit_inventory = false;
+    bool trust_existing_content = false;
+    bool has_remote_history_objects = false;
     std::intptr_t profile_lock = platform::invalid_profile_lock;
     runtime::vault::KeyBytes key{};
     std::string writer_identifier;

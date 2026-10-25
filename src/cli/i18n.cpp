@@ -78,6 +78,7 @@ constexpr KeyMapping KEY_MAPPINGS[] = {
     {Key::SyncUpload, "sync.upload"},
     {Key::SyncDownload, "sync.download"},
     {Key::SyncCompletedWithDuration, "sync.completed_with_duration"},
+    {Key::SyncTrustedContentWarning, "sync.trusted_content_warning"},
     {Key::SyncPartialHeader, "sync.partial_header"},
     {Key::SyncPendingSingular, "sync.pending_singular"},
     {Key::SyncPendingPlural, "sync.pending_plural"},

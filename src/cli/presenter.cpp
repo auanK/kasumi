@@ -936,6 +936,11 @@ int present(const application::Response& response, bool full) {
                          style::reset,
                          i18n::tr(i18n::Key::SyncCompleted));
         }
+        if (sync->trusted_content_reused > 0) {
+            std::println("{}",
+                         i18n::format(i18n::Key::SyncTrustedContentWarning,
+                                      sync->trusted_content_reused));
+        }
         if (response.inventory_audit) {
             exit_code = std::max(
                 exit_code, render_inventory_audit(*response.inventory_audit));

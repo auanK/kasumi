@@ -33,6 +33,7 @@ struct Request {
     std::string writer_identifier;
     bool initial = false;
     bool audit_inventory = false;
+    bool trust_existing_content = false;
 };
 
 } // namespace kasumi::application

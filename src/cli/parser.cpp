@@ -48,38 +48,55 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                          : std::unexpected(ParseError{});
     }
     if (command == "sync") {
-        if (argc >= 5 && argv[2] != nullptr && argv[3] != nullptr &&
-            argv[4] != nullptr &&
-            ((std::string_view{argv[3]} == "--audit-inventory" &&
-              (std::string_view{argv[4]} == "--dry-run" ||
-               std::string_view{argv[4]} == "--initial")) ||
-             (std::string_view{argv[4]} == "--audit-inventory" &&
-              (std::string_view{argv[3]} == "--dry-run" ||
-               std::string_view{argv[3]} == "--initial")))) {
+        if (argc < 3 || argc > 5 || argv[2] == nullptr || argv[2][0] == '\0') {
+            return std::unexpected(ParseError{});
+        }
+        const std::string_view profile{argv[2]};
+        if (profile.starts_with("--")) {
+            return std::unexpected(ParseError{});
+        }
+        bool dry_run = false;
+        bool initial = false;
+        bool audit_inventory = false;
+        bool trust_existing_content = false;
+        for (int i = 3; i < argc; ++i) {
+            if (argv[i] == nullptr) {
+                return std::unexpected(ParseError{});
+            }
+            const std::string_view flag{argv[i]};
+            if (flag == "--dry-run") {
+                if (dry_run) return std::unexpected(ParseError{});
+                dry_run = true;
+            } else if (flag == "--initial") {
+                if (initial) return std::unexpected(ParseError{});
+                initial = true;
+            } else if (flag == "--audit-inventory") {
+                if (audit_inventory) return std::unexpected(ParseError{});
+                audit_inventory = true;
+            } else if (flag == "--trust-existing-content") {
+                if (trust_existing_content) return std::unexpected(ParseError{});
+                trust_existing_content = true;
+            } else {
+                return std::unexpected(ParseError{});
+            }
+        }
+        if (audit_inventory && (dry_run || initial || trust_existing_content)) {
             return std::unexpected(
                 ParseError{.unsupported_sync_audit_combination = true});
         }
-        if ((argc != 3 && argc != 4) || argv[2] == nullptr ||
-            argv[2][0] == '\0' || std::string_view{argv[2]} == "--dry-run" ||
-            std::string_view{argv[2]} == "--initial" ||
-            (argc == 4 &&
-             (argv[3] == nullptr ||
-              (std::string_view{argv[3]} != "--dry-run" &&
-               std::string_view{argv[3]} != "--initial" &&
-               std::string_view{argv[3]} != "--audit-inventory")))) {
+        if (trust_existing_content && (!initial || dry_run)) {
             return std::unexpected(ParseError{});
         }
-        const bool initial =
-            argc == 4 && std::string_view{argv[3]} == "--initial";
-        const bool audit_inventory =
-            argc == 4 && std::string_view{argv[3]} == "--audit-inventory";
+        if (dry_run && initial) {
+            return std::unexpected(ParseError{});
+        }
         return application::Request{
-            .operation = argc == 4 && !initial && !audit_inventory
-                             ? application::Operation::Preview
-                             : application::Operation::Sync,
+            .operation = dry_run ? application::Operation::Preview
+                                 : application::Operation::Sync,
             .profile_name = argv[2],
             .initial = initial,
-            .audit_inventory = audit_inventory};
+            .audit_inventory = audit_inventory,
+            .trust_existing_content = trust_existing_content};
     }
     if (command == "status") {
         return request(application::Operation::Status, argc, argv);

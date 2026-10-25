@@ -1893,4 +1893,16 @@ TEST(CliPresenterTest, PresentsGarbageCollectBoundedOutputLines) {
     EXPECT_LE(line_count, 12);
 }
 
+TEST(CliPresenterTest, PresentsTrustedContentWarningWhenReused) {
+    const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(
+                  response(SyncCompleted{.published = true, .trusted_content_reused = 5},
+                           Operation::Sync)),
+              0);
+    const auto output = testing::internal::GetCapturedStdout();
+    EXPECT_NE(output.find("[WARNING] Reused 5 unverified remote content objects"), std::string::npos);
+    EXPECT_NE(output.find("kasumi fsck"), std::string::npos);
+}
+
 } // namespace

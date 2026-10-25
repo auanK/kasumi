@@ -73,6 +73,7 @@ enum class Key {
     SyncUpload,
     SyncDownload,
     SyncCompletedWithDuration,
+    SyncTrustedContentWarning,
     SyncPartialHeader,
     SyncPendingSingular,
     SyncPendingPlural,

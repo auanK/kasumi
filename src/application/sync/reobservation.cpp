@@ -132,7 +132,8 @@ std::expected<void, Error> observe_content_availability(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     std::span<const Hash> confirmed_missing,
-    bool allow_unreferenced_content_reuse) {
+    bool allow_unreferenced_content_reuse,
+    bool trust_existing_content = false) {
     HashSet hashes{0, hash_key};
     HashSet upload_hashes{0, hash_key};
     std::unordered_set<std::string> upload_identities;
@@ -159,6 +160,7 @@ std::expected<void, Error> observe_content_availability(
         }
     }
     input.verified_remote_content_objects.clear();
+    input.trusted_remote_content_objects.clear();
 
     // Probe a known object only when an Upload would be elided because another
     // accepted row already references the same Content identity.
@@ -293,6 +295,11 @@ std::expected<void, Error> observe_content_availability(
                     ErrorCode::ObservationFailure,
                     "verified Content has no matching upload operation"));
             }
+            if (trust_existing_content) {
+                input.trusted_remote_content_objects.insert(
+                    hash_hex(hash) + ':' + std::to_string(operation->size));
+                continue;
+            }
             const auto verified = verify_existing_content(
                 storage,
                 key,
@@ -379,6 +386,8 @@ bool same_observation(const reconciliation::Input& left,
                right.known_missing_content_objects &&
            left.verified_remote_content_objects ==
                right.verified_remote_content_objects &&
+           left.trusted_remote_content_objects ==
+               right.trusted_remote_content_objects &&
            same_snapshot(left.base_tree, right.base_tree) &&
            left.base_commit_id == right.base_commit_id &&
            left.base_state_present == right.base_state_present &&
@@ -512,14 +521,16 @@ refresh_content_availability(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     std::span<const Hash> confirmed_missing,
-    bool allow_unreferenced_content_reuse) {
+    bool allow_unreferenced_content_reuse,
+    bool trust_existing_content) {
     auto availability = observe_content_availability(
         input,
         reconciliation_result,
         storage,
         key,
         confirmed_missing,
-        allow_unreferenced_content_reuse);
+        allow_unreferenced_content_reuse,
+        trust_existing_content);
     if (!availability) {
         return std::unexpected(availability.error());
     }
@@ -540,14 +551,24 @@ stabilize(const runtime::RuntimeData& runtime_data,
           observation::LocalObservationSession* session,
           std::span<const Hash> confirmed_missing,
           bool content_availability_is_current,
-          bool allow_unreferenced_content_reuse) {
+          bool allow_unreferenced_content_reuse,
+          bool trust_existing_content) {
+    if (trust_existing_content && observed_input.storage.history_present) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::ConcurrentModification,
+            "remote history was published concurrently during initial sync with "
+            "--trust-existing-content; operation was rejected to prevent unverified "
+            "content reuse"));
+    }
+
     if (!content_availability_is_current) {
         auto available = refresh_content_availability(observed_input,
                                                       reconciliation_result,
                                                       storage,
                                                       key,
                                                       confirmed_missing,
-                                                      allow_unreferenced_content_reuse);
+                                                      allow_unreferenced_content_reuse,
+                                                      trust_existing_content);
         if (!available) {
             return std::unexpected(available.error());
         }
@@ -599,7 +620,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
                 storage,
                 key,
                 confirmed_missing,
-                allow_unreferenced_content_reuse);
+                allow_unreferenced_content_reuse,
+                trust_existing_content);
             if (!reobserved_availability) {
                 return std::unexpected(reobserved_availability.error());
             }
@@ -658,6 +680,17 @@ stabilize(const runtime::RuntimeData& runtime_data,
             return std::unexpected(detail::make_error(
                 ErrorCode::ObservationFailure, observed.error().detail));
         }
+        if (trust_existing_content && observed->storage.history_present) {
+            auto removed = detail::remove_transaction_workspace(workspace);
+            if (!removed) {
+                return std::unexpected(removed.error());
+            }
+            return std::unexpected(detail::make_error(
+                ErrorCode::ConcurrentModification,
+                "remote history was published concurrently during initial sync with "
+                "--trust-existing-content; operation was rejected to prevent unverified "
+                "content reuse"));
+        }
         observed->pending_deletion_authority = input.pending_deletion_authority;
         auto local_after_storage = observation::collect_local_tree(
             runtime_data.local_dir, session, observed->ignore_list);
@@ -681,13 +714,17 @@ stabilize(const runtime::RuntimeData& runtime_data,
             return std::unexpected(detail::make_error(
                 ErrorCode::ObservationFailure, recalculated.error().detail));
         }
+        const bool current_allow_unreferenced_reuse =
+            allow_unreferenced_content_reuse &&
+            !observed->storage.history_present;
         auto reobserved_availability = observe_content_availability(
             *observed,
             *recalculated,
             storage,
             key,
             confirmed_missing,
-            allow_unreferenced_content_reuse);
+            current_allow_unreferenced_reuse,
+            trust_existing_content);
         if (!reobserved_availability) {
             auto removed = detail::remove_transaction_workspace(workspace);
             if (!removed) {
