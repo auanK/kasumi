@@ -115,7 +115,9 @@ enum class GarbageCollectStage {
     Finalizing,
 };
 
-// State of the mutation associated with a garbage-collection failure.
+// NotAttempted means no REMOVE call; errors after a call remain Uncertain
+// because transport error categories do not guarantee absence of remote
+// effects.
 enum class GarbageCollectMutationState {
     NotAttempted,
     Confirmed,
@@ -180,7 +182,8 @@ enum class BarrierRemovalStage : std::uint8_t {
     ConfirmingAbsence,
 };
 
-// State of the mutation associated with a barrier-removal failure.
+// NotAttempted means no REMOVE call; Confirmed requires verified absence.
+// An attempted REMOVE with an unproven outcome remains Uncertain.
 enum class BarrierRemovalMutationState : std::uint8_t {
     NotAttempted,
     Confirmed,

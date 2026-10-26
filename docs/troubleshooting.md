@@ -387,7 +387,13 @@ The operating system user account running Kasumi lacks sufficient filesystem per
 
 ### Likely Meaning
 
-GC stops on an analysis failure, transport error, ownership loss, or ambiguous DELETE. The error carries the candidate total, transport-acknowledged removals, failed identifier when one exists, stage, transport category/message/native code when available, mutation state (`NotAttempted`, `Confirmed`, or `Uncertain`), and barrier-cleanup status. An ambiguous mutation is not retried automatically, and an observed absence after a failed DELETE is not counted as an acknowledged removal. Successful REMOVE calls are not read back with PRESENCE.
+GC checks barrier ownership after acquisition and immediately before Apply. Loss detected before Apply prevents every candidate DELETE. Apply stops on observed cancellation or failure; ownership lost after the pre-Apply check may only be detected during cleanup. No periodic ownership checkpoints or history reobservations run during Apply: they would add latency without fencing and could suggest false concurrency safety.
+
+The error carries the candidate total, transport-acknowledged removals, failed identifier when one exists, stage, transport category/message/native code when available, mutation state, and barrier-cleanup status. `NotAttempted` means no DELETE was started for this failure, including cancellation before the next candidate. `Confirmed` counts acknowledged `Removed` and `AlreadyAbsent` results, not independently audited absence. `Uncertain` means an attempted DELETE has an unproven effect, including exceptions and removal errors whose category cannot guarantee no mutation. The transport provides no no-effect guarantee for these errors, so `NotApplied` is not emitted. A failed DELETE is never labelled `NotAttempted`.
+
+Partial failures preserve the exact previous acknowledgement count and stop further DELETEs without retry, rollback, or compensation. The primary error and any cleanup error remain separate; failed or throwing cleanup leaves barrier release unconfirmed and is not retried by the destructor. Successful candidate REMOVE calls are not read back with PRESENCE. Manual barrier removal still verifies absence after either acknowledged REMOVE result.
+
+**GC is not safe to run concurrently with Sync on the same vault.** Stop all Syncs and other GC processes before starting, and resume Sync only after healthy completion or resolution of maintenance uncertainty. The barrier is cooperative; pre-Apply and cleanup checks provide neither distributed exclusivity nor fencing and cannot close the TOCTOU window between verification and DELETE. Running `gc remove-barrier --confirm-abandoned` while a GC is active can break exclusivity and cause data loss.
 
 ### Safe Next Steps
 

@@ -28,6 +28,10 @@ The collector preserves this order:
 5. GC builds the complete deletion plan and validates the plan as a set before
    the first `REMOVE`. If online mutation cannot be established, the collector
    returns `analysis_only` and performs no candidate deletion.
+6. Immediately before Apply, GC revalidates barrier ownership using remote
+   SHA-256 or the existing control-payload GET fallback. Replacement, absence,
+   or verification failure stops all candidate deletion and preserves the plan's
+   count for diagnostics. This is one additional ownership check per run.
 
 ## Global deletion plan
 
@@ -90,7 +94,9 @@ Apply iterates the frozen plan in deterministic order and issues exactly one
 `REMOVE` per candidate:
 
 ```text
+verify_barrier_ownership()
 for candidate in deletion_plan:
+    check_cancellation()
     result = transport.remove(candidate)
 
     if result is successful:
@@ -101,25 +107,44 @@ for candidate in deletion_plan:
     stop applying further candidates
 ```
 
-Apply consumes the frozen plan without per-candidate observation, writer or
-barrier checks, batching, or readback. It performs no candidate `GET`, `LIST`,
-or `PRESENCE` calls.
+After the fixed pre-Apply ownership check, Apply consumes the frozen plan without
+per-candidate observation, writer or barrier checks, batching, or readback. It
+performs no candidate `GET`, `LIST`, or `PRESENCE` calls. Periodic checkpoints,
+whether by object count or elapsed time, are deliberately absent: they would add
+latency without providing fencing and could suggest false concurrency safety.
 
 A `Removed` or `AlreadyAbsent` result increments `removed_objects` /
 `confirmed_removed`: these count **REMOVE operations acknowledged by the API**,
 not independently verified physical absence.
 
 On a failed `REMOVE`, the collector preserves the transport error category,
-message, and native code; keeps the count of previously acknowledged removals;
-classifies the attempt (`NotAttempted` for a definite non-mutation, `Uncertain`
-for an ambiguous result); stops further deletion without retry; releases the
-barrier through the normal cleanup path; and returns the partial diagnostic.
-A later GC run starts from a new observation and does not reuse the old plan.
+message, native code, and candidate identifier; keeps the count of previously
+acknowledged removals; stops further deletion without retry or compensation;
+attempts barrier cleanup through the normal path; and returns the partial
+diagnostic. Exceptions during DELETE also leave the candidate `Uncertain` and
+preserve earlier acknowledgements. A later GC run starts from a new observation
+and does not reuse the old plan.
+
+| Mutation state | Meaning |
+|---|---|
+| `NotAttempted` | No candidate DELETE was started for this failure, including cancellation before the next candidate |
+| `Confirmed` | A candidate REMOVE returned `Removed` or `AlreadyAbsent`; this is transport acknowledgement, not an independent absence audit |
+| `Uncertain` | DELETE was attempted, but its remote effect cannot be proven; error categories alone do not establish absence of effects |
+
+`NotApplied` would mean a DELETE was attempted with a documented guarantee of no
+mutation. The current transport does not provide that evidence for removal
+errors, so no such state is emitted or added to the enum. A failed DELETE is
+never reported as `NotAttempted`. Cancellation observed before a subsequent
+DELETE stops Apply with `NotAttempted` and keeps the exact previous
+acknowledgement count; it does not retry or restore earlier objects.
 
 Barrier cleanup remains special. It verifies ownership, attempts release at most
-once, never removes a foreign or replaced barrier, preserves primary and
-cleanup errors separately, and does not declare a healthy finish when release
-is ambiguous. The destructor never opens a second release path.
+once, refuses to intentionally remove a detected foreign or replaced barrier,
+preserves primary and cleanup errors separately, and does not declare a healthy
+finish when release is ambiguous. Absence is checked after acknowledged barrier
+release. Cleanup exceptions leave release unconfirmed, and the destructor never
+opens a second release path. Ownership checks cannot eliminate the TOCTOU window
+between verification and DELETE without conditional deletion/CAS.
 
 ## Tracing
 
@@ -147,16 +172,25 @@ Barrier/probe operations are separate from candidate traffic.
 
 ## Operational contract
 
-Run only one destructive maintenance operation per vault at a time, across
-all machines. Pause scheduled and interactive Sync, including no-op runs that
-can repair Content, until maintenance finishes. Manual writer removal must
-also be serialized with Sync and other maintenance.
+**GC is not safe to run concurrently with Sync on the same vault.** Run only one
+destructive maintenance operation per vault at a time, across all machines.
+Stop scheduled and interactive Sync, including no-op runs that can repair
+Content, before starting GC. Resume Sync only after a healthy completion or
+after resolving all maintenance uncertainty. Manual writer removal must also be
+serialized with Sync and other maintenance.
 
 Exclusivity is cooperative: the local profile lock, remote token-owned barrier,
 writer registration, and initial writer check coordinate participating clients.
 The local lock covers one profile on one machine; the remote protocol has no
 distributed CAS or fencing token. Non-cooperative mutation after observation
 can invalidate the deletion plan and cause data loss.
+
+Pre-Apply and cleanup ownership checks do not guarantee distributed exclusivity.
+If ownership is lost after pre-Apply verification, Apply may continue deleting
+the frozen plan until another observed failure or cleanup detects the loss.
+This is an accepted limitation of cooperative exclusion, not an invitation to
+run Sync during GC. Running `gc remove-barrier --confirm-abandoned` while a GC
+is active can break exclusivity and allow data loss.
 
 The backend must expose completed control and namespace changes to protocol
 `LIST` and `PRESENCE` checks. The visibility probe tests its own temporary object;
@@ -246,13 +280,16 @@ another maintenance barrier is already present
    revalidation, removal is aborted and the replacement is preserved.
 5. **Post-removal Confirmation and Diagnostic Mutation States**: After issuing a
    DELETE call, Kasumi immediately re-checks absence via transport PRESENCE.
-   Failures are classified into three explicit mutation states:
+   Mutation outcomes use three explicit states:
    - `NotAttempted`: Failure occurred before any DELETE was sent (e.g., control
      token validation failure or physical identity mismatch).
    - `Confirmed`: DELETE was acknowledged and post-removal PRESENCE confirmed absence.
-   - `Uncertain`: DELETE was issued, but its final consequence could not be proven
-     (e.g., ambiguous transport error such as timeout or network drop, or post-removal
+   - `Uncertain`: DELETE was attempted, but its final consequence could not be
+     proven (any removal error without a no-effect guarantee, or post-removal
      PRESENCE check failed or reported the barrier still present).
+   An `AlreadyAbsent` DELETE result is still an attempted, acknowledged operation
+   and must pass the same post-removal absence check. This differs from initial
+   PRESENCE reporting absence, which returns `AlreadyAbsent` without any DELETE.
    Kasumi never converts an ambiguous error into success and never retries DELETE
    automatically after an uncertain result. When an operation returns `Uncertain`,
    the operator must re-inspect the remote state using `kasumi remote writers <profile>`.

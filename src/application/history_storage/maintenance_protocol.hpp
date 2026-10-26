@@ -39,6 +39,9 @@ enum class BarrierRemovalStage : std::uint8_t {
     ConfirmingAbsence,
 };
 
+// Keep aligned with application::BarrierRemovalMutationState. A REMOVE error
+// does not prove absence of effects; confirmation requires a subsequent
+// PRESENCE.
 enum class BarrierRemovalMutationState : std::uint8_t {
     NotAttempted,
     Confirmed,

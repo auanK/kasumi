@@ -721,25 +721,12 @@ remove_barrier(transport::Transport& storage,
 
     auto removed = transport::remove(storage, layout.barrier_identifier);
     if (!removed) {
-        const bool ambiguous =
-            transport::mutation_result_is_ambiguous(removed.error());
-        const auto mutation_state = ambiguous
-            ? BarrierRemovalMutationState::Uncertain
-            : BarrierRemovalMutationState::NotAttempted;
-        return std::unexpected(transport_error(
-            removed.error(),
-            "could not remove maintenance barrier",
-            layout.barrier_identifier,
-            BarrierRemovalStage::Removing,
-            mutation_state));
-    }
-    if (*removed != transport::Removal::Removed) {
-        return std::unexpected(error(
-            ErrorCode::VerificationFailure,
-            "maintenance barrier disappeared before it could be removed",
-            layout.barrier_identifier,
-            BarrierRemovalStage::Removing,
-            BarrierRemovalMutationState::NotAttempted));
+        return std::unexpected(
+            transport_error(removed.error(),
+                            "could not remove maintenance barrier",
+                            layout.barrier_identifier,
+                            BarrierRemovalStage::Removing,
+                            BarrierRemovalMutationState::Uncertain));
     }
 
     present = transport::presence(storage, layout.barrier_identifier);
@@ -761,7 +748,9 @@ remove_barrier(transport::Transport& storage,
     }
 
     return BarrierRemovalResult{
-        .outcome = BarrierRemovalOutcome::Removed,
+        .outcome = *removed == transport::Removal::Removed
+                       ? BarrierRemovalOutcome::Removed
+                       : BarrierRemovalOutcome::AlreadyAbsent,
         .active_writers_count = writers_count,
     };
 }

@@ -889,6 +889,10 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         trace.enter(GarbageCollectStage::Applying);
         notify(on_progress, GarbageCollectStage::Applying, candidate_count, 0);
         auto apply = [&]() -> std::expected<std::size_t, Error> {
+            if (auto verified = require_barrier_ownership(cleanup.registration);
+                !verified) {
+                return std::unexpected(verified.error());
+            }
             PhaseTraffic apply_traffic{"gc.apply_"};
             std::size_t acknowledged_removals = 0;
             for (const auto& candidate : snapshot->plan.candidates) {
@@ -912,9 +916,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                 mutation_in_flight = false;
                 if (!removed) {
                     failure_diagnostic.mutation_state =
-                        transport::mutation_result_is_ambiguous(removed.error())
-                            ? GarbageCollectMutationState::Uncertain
-                            : GarbageCollectMutationState::NotAttempted;
+                        GarbageCollectMutationState::Uncertain;
                     return std::unexpected(transport_error(
                         removed.error(), "object removal failed"));
                 }
