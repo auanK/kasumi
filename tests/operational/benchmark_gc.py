@@ -20,7 +20,7 @@ METRICS = {
         "gc.finalizing_us", "gc.analysis_list_us", "gc.first_observation_us",
         "gc.content_classification_us", "gc.plan_build_us", "gc.plan_validation_us",
         "gc.barrier_acquisition_us", "gc.barrier_ownership_check_us",
-        "gc.pre_apply_ownership_us", "gc.barrier_cleanup_us", "gc.remove_us")},
+        "gc.pre_apply_ownership_us", "gc.barrier_cleanup_us", "gc.remove_us", "gc.remove_batch_us")},
     **{name: "calls" for name in (
         "gc.physical_object_count", "gc.physical_content_count",
         "gc.protected_content_count", "gc.protected_object_count",
@@ -28,7 +28,7 @@ METRICS = {
         "gc.analysis_get_calls", "gc.analysis_list_calls", "gc.analysis_presence_calls",
         "gc.content_get_calls", "gc.apply_get_calls", "gc.apply_list_calls",
         "gc.apply_presence_calls", "gc.candidate_remove_attempts",
-        "gc.candidate_remove_acknowledged", "gc.confirmed_removed",
+        "gc.candidate_remove_acknowledged", "gc.confirmed_removed", "gc.remove_batches_submitted", "gc.remove_batch_items_submitted", "gc.remove_batch_transport_errors", "gc.remove_batch_fallback_used",
         "gc.candidate_remove_errors", "gc.barrier_cleanup_errors", "gc.errors",
         "gc.history_reconstructions", "gc.barrier_ownership_verifications",
         "gc.barrier_physical_hash_attempts", "gc.barrier_get_fallbacks",

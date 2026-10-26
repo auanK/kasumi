@@ -18,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -28,6 +29,7 @@ namespace {
 namespace history_storage = application::history_storage;
 namespace protocol = application::history_storage::maintenance_protocol;
 using KeySpan = std::span<const std::uint8_t, crypto::KEY_SIZE>;
+constexpr std::size_t gc_delete_batch_size = 8;
 
 std::string_view phase_metric(GarbageCollectStage stage) noexcept {
     switch (stage) {
@@ -923,7 +925,16 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             }
             PhaseTraffic apply_traffic{"gc.apply_"};
             std::size_t acknowledged_removals = 0;
-            for (const auto& candidate : snapshot->plan.candidates) {
+            bool fallback_sequential = (storage.storage.remove_batch == nullptr);
+            if (fallback_sequential) {
+                platform::perf_trace::count("gc.remove_batch_fallback_used", 1);
+            }
+
+            std::size_t chunk_start = 0;
+            const auto& candidates = snapshot->plan.candidates;
+            const std::size_t total_candidates = candidates.size();
+
+            while (chunk_start < total_candidates) {
                 failure_diagnostic.failed_identifier.reset();
                 failure_diagnostic.mutation_state =
                     GarbageCollectMutationState::NotAttempted;
@@ -933,33 +944,173 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                     cancelled.has_value()) {
                     return std::unexpected(std::move(*cancelled));
                 }
-                failure_diagnostic.failed_identifier = candidate.identifier;
-                platform::perf_trace::count("gc.remove_attempts");
-                platform::perf_trace::count("gc.candidate_remove_attempts");
-                mutation_in_flight = true;
-                auto removed = [&] {
-                    PerfTimer timer{"gc.remove_us"};
-                    return transport::remove(storage, candidate.identifier);
-                }();
-                mutation_in_flight = false;
-                if (!removed) {
-                    platform::perf_trace::count("gc.candidate_remove_errors");
+
+                if (!fallback_sequential) {
+                    const std::size_t chunk_size =
+                        std::min(gc_delete_batch_size, total_candidates - chunk_start);
+
+                    transport::RemoveBatch batch;
+                    batch.concurrency = gc_delete_batch_size;
+                    batch.items.reserve(chunk_size);
+                    for (std::size_t i = 0; i < chunk_size; ++i) {
+                        batch.items.push_back(transport::RemoveBatchItem{
+                            .identifier = candidates[chunk_start + i].identifier,
+                        });
+                    }
+
+                    platform::perf_trace::count("gc.remove_batches_submitted", 1);
+                    platform::perf_trace::count(
+                        "gc.remove_batch_items_submitted", chunk_size);
+
+                    mutation_in_flight = true;
+                    auto batch_result = [&] {
+                        PerfTimer timer{"gc.remove_batch_us"};
+                        return transport::remove_batch(storage, batch);
+                    }();
+                    mutation_in_flight = false;
+
+                    if (!batch_result) {
+                        const auto err = batch_result.error();
+                        if (err.code == transport::ErrorCode::Unsupported) {
+                            fallback_sequential = true;
+                            platform::perf_trace::count(
+                                "gc.remove_batch_fallback_used", 1);
+                            continue;
+                        }
+
+                        platform::perf_trace::count("gc.remove_attempts", chunk_size);
+                        platform::perf_trace::count(
+                            "gc.candidate_remove_attempts", chunk_size);
+                        platform::perf_trace::count("gc.candidate_remove_errors", 1);
+                        platform::perf_trace::count(
+                            "gc.remove_batch_transport_errors", 1);
+                        failure_diagnostic.failed_identifier.reset();
+                        failure_diagnostic.transport_error = err;
+                        failure_diagnostic.mutation_state =
+                            GarbageCollectMutationState::Uncertain;
+                        return std::unexpected(
+                            transport_error(err, "batch object removal failed"));
+                    }
+
+                    platform::perf_trace::count("gc.remove_attempts", chunk_size);
+                    platform::perf_trace::count(
+                        "gc.candidate_remove_attempts", chunk_size);
+
+                    const auto& report = *batch_result;
+                    bool report_valid = (report.items.size() == chunk_size);
+                    std::unordered_map<std::string_view,
+                                       const transport::RemoveBatchItemResult*>
+                        result_by_id;
+                    if (report_valid) {
+                        result_by_id.reserve(chunk_size);
+                        for (const auto& item_result : report.items) {
+                            if (!result_by_id.emplace(item_result.identifier, &item_result)
+                                     .second) {
+                                report_valid = false;
+                                break;
+                            }
+                        }
+                        if (report_valid) {
+                            for (std::size_t i = 0; i < chunk_size; ++i) {
+                                if (!result_by_id.contains(
+                                        candidates[chunk_start + i].identifier)) {
+                                    report_valid = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!report_valid) {
+                        platform::perf_trace::count("gc.candidate_remove_errors", 1);
+                        platform::perf_trace::count(
+                            "gc.remove_batch_transport_errors", 1);
+                        failure_diagnostic.failed_identifier.reset();
+                        failure_diagnostic.transport_error = transport::Error{
+                            .code = transport::ErrorCode::ProtocolFailure,
+                            .message = "invalid or incomplete remove batch report",
+                        };
+                        failure_diagnostic.mutation_state =
+                            GarbageCollectMutationState::Uncertain;
+                        return std::unexpected(transport_error(
+                            *failure_diagnostic.transport_error,
+                            "invalid remove batch report"));
+                    }
+
+                    std::size_t batch_acknowledged = 0;
+                    std::size_t batch_errors = 0;
+                    const transport::RemoveBatchItemResult* first_failure = nullptr;
+                    std::string first_failed_identifier;
+
+                    for (std::size_t i = 0; i < chunk_size; ++i) {
+                        const auto& cand_id = candidates[chunk_start + i].identifier;
+                        const auto* res = result_by_id.at(cand_id);
+                        if (res->result.has_value()) {
+                            ++batch_acknowledged;
+                        } else {
+                            ++batch_errors;
+                            if (first_failure == nullptr) {
+                                first_failure = res;
+                                first_failed_identifier = cand_id;
+                            }
+                        }
+                    }
+
+                    acknowledged_removals += batch_acknowledged;
+                    if (batch_acknowledged > 0) {
+                        platform::perf_trace::count(
+                            "gc.candidate_remove_acknowledged", batch_acknowledged);
+                        failure_diagnostic.confirmed_removed = acknowledged_removals;
+                        failure_diagnostic.mutation_state =
+                            GarbageCollectMutationState::Confirmed;
+                        notify(on_progress,
+                               GarbageCollectStage::Applying,
+                               candidate_count,
+                               acknowledged_removals);
+                    }
+
+                    if (batch_errors > 0) {
+                        platform::perf_trace::count(
+                            "gc.candidate_remove_errors", batch_errors);
+                        failure_diagnostic.failed_identifier = first_failed_identifier;
+                        failure_diagnostic.transport_error = first_failure->result.error();
+                        failure_diagnostic.mutation_state =
+                            GarbageCollectMutationState::Uncertain;
+                        return std::unexpected(transport_error(
+                            first_failure->result.error(), "object removal failed"));
+                    }
+
+                    chunk_start += chunk_size;
+                } else {
+                    const auto& candidate = candidates[chunk_start];
+                    failure_diagnostic.failed_identifier = candidate.identifier;
+                    platform::perf_trace::count("gc.remove_attempts");
+                    platform::perf_trace::count("gc.candidate_remove_attempts");
+                    mutation_in_flight = true;
+                    auto removed = [&] {
+                        PerfTimer timer{"gc.remove_us"};
+                        return transport::remove(storage, candidate.identifier);
+                    }();
+                    mutation_in_flight = false;
+                    if (!removed) {
+                        platform::perf_trace::count("gc.candidate_remove_errors");
+                        failure_diagnostic.mutation_state =
+                            GarbageCollectMutationState::Uncertain;
+                        return std::unexpected(transport_error(
+                            removed.error(), "object removal failed"));
+                    }
+
+                    ++acknowledged_removals;
+                    platform::perf_trace::count("gc.candidate_remove_acknowledged");
+                    failure_diagnostic.confirmed_removed = acknowledged_removals;
                     failure_diagnostic.mutation_state =
-                        GarbageCollectMutationState::Uncertain;
-                    return std::unexpected(transport_error(
-                        removed.error(), "object removal failed"));
+                        GarbageCollectMutationState::Confirmed;
+                    notify(on_progress,
+                           GarbageCollectStage::Applying,
+                           candidate_count,
+                           acknowledged_removals);
+                    ++chunk_start;
                 }
-                // Both outcomes acknowledge the transport-level REMOVE; the
-                // collector does not read the object back to prove absence.
-                ++acknowledged_removals;
-                platform::perf_trace::count("gc.candidate_remove_acknowledged");
-                failure_diagnostic.confirmed_removed = acknowledged_removals;
-                failure_diagnostic.mutation_state =
-                    GarbageCollectMutationState::Confirmed;
-                notify(on_progress,
-                       GarbageCollectStage::Applying,
-                       candidate_count,
-                       acknowledged_removals);
             }
             return acknowledged_removals;
         }();
