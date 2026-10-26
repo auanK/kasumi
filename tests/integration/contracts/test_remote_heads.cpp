@@ -463,7 +463,7 @@ TEST(RemoteHeadsContractTest,
 
     char audit[] = "--audit";
     char* audit_argv[] = {
-        command, remote_command, contents, audit, profile_name};
+        command, remote_command, contents, profile_name, audit};
     testing::internal::CaptureStdout();
     EXPECT_EQ(kasumi::cli::run(5, audit_argv), 0);
     const auto audit_output = testing::internal::GetCapturedStdout();

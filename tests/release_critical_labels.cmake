@@ -34,7 +34,7 @@ set_tests_properties(
     ApplicationExecuteTest.InitialSyncRejectsExistingRemoteHistoryWithoutCreatingDatabase
     ApplicationExecuteTest.InitialSyncRejectsPartialRemoteHistoryWithoutCreatingDatabase
     ApplicationExecuteTest.InitialSyncRejectsPendingLocalTransactionEvidence
-    CliParserTest.ParsesInitialSyncAndRejectsInvalidCombinations
+    Canonical/ApplicationGrammarTest.ParsesOperationAndArguments/InitialSync
     SyncRemoteAvailabilityTest.NoOpSyncSkipsContentAvailabilityChecks
     SyncRemoteAvailabilityTest.NoOpAndActiveSyncCheckOnlyRequiredContent
     SyncRemoteAvailabilityTest.ActiveSyncIgnoresUnrelatedMissingContents

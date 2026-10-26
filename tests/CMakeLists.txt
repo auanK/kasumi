@@ -1,5 +1,9 @@
 include(GoogleTest)
 
+add_test(NAME kasumi_documentation_hygiene
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/architecture/test_documentation.py)
+set_tests_properties(kasumi_documentation_hygiene PROPERTIES LABELS "architecture")
+
 function(kasumi_add_test_suite target label)
     cmake_parse_arguments(
         ARG "" "" "SOURCES;LIBRARIES" ${ARGN}
@@ -207,6 +211,7 @@ kasumi_add_test_suite(
     SOURCES
         unit/cli/test_credentials.cpp
         unit/cli/test_i18n.cpp
+        unit/cli/test_interface.cpp
         unit/cli/test_parser.cpp
         unit/cli/test_presenter.cpp
         unit/cli/test_update.cpp

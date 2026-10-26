@@ -118,7 +118,7 @@ TEST(CliAppTest, PrintsSynchronizationProgressOnce) {
 
 TEST(CliAppTest, PrintsMinimalHelpWithoutRuntimeAccess) {
     char command[] = "kasumi";
-    char help[] = "help";
+    char help[] = "--help";
     char* argv[] = {command, help};
     testing::internal::CaptureStdout();
 
@@ -126,7 +126,7 @@ TEST(CliAppTest, PrintsMinimalHelpWithoutRuntimeAccess) {
 
     const auto output = testing::internal::GetCapturedStdout();
     EXPECT_NE(output.find("kasumi sync <profile>"), std::string::npos);
-    EXPECT_NE(output.find("kasumi remote contents --audit <profile>"),
+    EXPECT_NE(output.find("kasumi remote contents <profile> --audit"),
               std::string::npos);
     EXPECT_NE(output.find("does not run GC"), std::string::npos);
     EXPECT_NE(output.find("health diagnostic"), std::string::npos);
@@ -138,7 +138,7 @@ TEST(CliAppTest, PrintsHelpInPortugueseWhenFlagProvided) {
     char command[] = "kasumi";
     char lang_flag[] = "--lang";
     char lang_val[] = "pt";
-    char help[] = "help";
+    char help[] = "--help";
     char* argv[] = {command, lang_flag, lang_val, help};
     testing::internal::CaptureStdout();
 
@@ -258,7 +258,7 @@ TEST(CliAppTest, PrintsGarbageCollectStartingProgressInPortuguese) {
     char profile[] = "missing";
     char lang_flag[] = "--lang";
     char lang_val[] = "pt-BR";
-    char* argv[] = {command, operation, profile, lang_flag, lang_val};
+    char* argv[] = {command, lang_flag, lang_val, operation, profile};
     testing::internal::CaptureStdout();
 
     EXPECT_EQ(kasumi::cli::run(5, argv), 1);
@@ -312,7 +312,7 @@ TEST(CliAppTest, PrintsFsckStartingProgressInPortuguese) {
     char profile[] = "missing";
     char lang_flag[] = "--lang";
     char lang_val[] = "pt-BR";
-    char* argv[] = {command, operation, profile, lang_flag, lang_val};
+    char* argv[] = {command, lang_flag, lang_val, operation, profile};
     testing::internal::CaptureStdout();
 
     EXPECT_EQ(kasumi::cli::run(5, argv), 1);

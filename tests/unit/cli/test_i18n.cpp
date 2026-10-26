@@ -95,21 +95,6 @@ TEST(CliI18nTest, ExtractsLanguageFlagCorrectly) {
     set_language(Language::English); // Restore default
 }
 
-TEST(CliI18nTest, ExtractsInlineLanguageFlag) {
-    char arg0[] = "kasumi";
-    char arg1[] = "--lang=pt";
-    char arg2[] = "status";
-    char* argv[] = {arg0, arg1, arg2};
-
-    const auto sanitized = extract_language_argument(3, argv);
-    EXPECT_EQ(current_language(), Language::Portuguese);
-    ASSERT_EQ(sanitized.size(), 2U);
-    EXPECT_EQ(sanitized[0], "kasumi");
-    EXPECT_EQ(sanitized[1], "status");
-
-    set_language(Language::English); // Restore default
-}
-
 TEST(CliI18nTest, AllKeysHaveValidTranslations) {
     const auto test_catalog = [](Language lang) {
         set_language(lang);
