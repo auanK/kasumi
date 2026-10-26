@@ -255,6 +255,7 @@ struct FakeState {
     std::vector<std::string> remove_attempts;
     std::size_t replace_barrier_after_source_remove_count = 0;
     std::string fail_remove_identifier;
+    std::optional<kasumi::transport::ErrorCode> fail_remove_code;
     std::string fail_get_identifier;
     std::string fail_put_identifier;
     std::string put_then_fail_identifier;
@@ -554,6 +555,9 @@ kasumi::transport::Result fake_get(void* context,
                                    std::string_view identifier,
                                    const std::filesystem::path& destination) {
     auto* state = fake_state(context);
+    if (state->on_operation) {
+        state->on_operation(*state, "get", identifier);
+    }
     ++state->get_count;
     if (is_commit(identifier)) {
         ++state->commit_get_count;
@@ -793,7 +797,7 @@ kasumi::transport::RemovalResult fake_remove(void* context,
         state->physical_hashes.erase(std::string{identifier});
         state->objects.erase(std::string{identifier});
         return std::unexpected(kasumi::transport::Error{
-            .code = kasumi::transport::ErrorCode::Io,
+            .code = state->fail_remove_code.value_or(kasumi::transport::ErrorCode::Io),
             .message = "injected remove failure",
             .native_code = state->remove_failure_native_code});
     }
@@ -814,7 +818,7 @@ kasumi::transport::RemovalResult fake_remove(void* context,
     if (identifier == state->fail_remove_identifier) {
         state->fail_remove_identifier.clear();
         return std::unexpected(kasumi::transport::Error{
-            .code = kasumi::transport::ErrorCode::Io,
+            .code = state->fail_remove_code.value_or(kasumi::transport::ErrorCode::Io),
             .message = "injected remove failure",
             .native_code = state->remove_failure_native_code});
     }

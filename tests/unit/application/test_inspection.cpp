@@ -2524,6 +2524,7 @@ TEST(ApplicationInspectionTest, RemoteWritersAndHealthAuthenticateAndStayReadOnl
     const auto& writer_report =
         std::get<kasumi::application::RemoteWritersReport>(writers->payload);
     EXPECT_TRUE(writer_report.barrier_present);
+    EXPECT_EQ(writer_report.barrier_identifier, layout.barrier_identifier);
     EXPECT_TRUE(writer_report.maintenance_blocked);
     EXPECT_FALSE(writer_report.protocol_consistent);
     EXPECT_EQ(writer_report.writers.size(), 2U);
@@ -2573,4 +2574,44 @@ TEST(ApplicationInspectionTest,
               InspectionErrorCode::RuntimeFailure);
 }
 
+
+TEST(ApplicationInspectionTest,
+     RemoteWritersReportBarrierPresenceAndFullIdentifierWithoutModifyingStorage) {
+    auto fixture = make_local_storage();
+    auto workspace =
+        kasumi::test::make_temp_workspace("application-writers-barrier-id");
+    const auto remote_root =
+        kasumi::test::workspace_path(fixture.workspace, "storage");
+    write_profile(workspace, remote_root);
+    publish(fixture, make_commit(0, {}, "file.txt", "contents").value());
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+
+    // 1. Absent barrier
+    auto writers_before = inspect_request(
+        workspace,
+        InspectionRequest{InspectionOperation::RemoteWriters, "demo"},
+        Credentials{MasterKeyHex{key_hex()}});
+    ASSERT_TRUE(writers_before.has_value()) << writers_before.error().detail;
+    const auto& report_before =
+        std::get<kasumi::application::RemoteWritersReport>(writers_before->payload);
+    EXPECT_FALSE(report_before.barrier_present);
+    EXPECT_FALSE(report_before.barrier_identifier.has_value());
+
+    // 2. Present barrier
+    put_object(fixture, layout.barrier_identifier);
+    auto writers_after = inspect_request(
+        workspace,
+        InspectionRequest{InspectionOperation::RemoteWriters, "demo"},
+        Credentials{MasterKeyHex{key_hex()}});
+    ASSERT_TRUE(writers_after.has_value()) << writers_after.error().detail;
+    const auto& report_after =
+        std::get<kasumi::application::RemoteWritersReport>(writers_after->payload);
+    EXPECT_TRUE(report_after.barrier_present);
+    ASSERT_TRUE(report_after.barrier_identifier.has_value());
+    EXPECT_EQ(*report_after.barrier_identifier, layout.barrier_identifier);
+
+    // 3. Inspection remains strictly read-only and non-destructive
+    EXPECT_TRUE(std::filesystem::exists(remote_root / std::filesystem::path{layout.barrier_identifier}));
+}
 } // namespace

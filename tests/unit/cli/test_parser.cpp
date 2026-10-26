@@ -451,4 +451,44 @@ TEST(CliParserTest, ParsesResolveMissingRequest) {
     }
 }
 
+
+TEST(CliParserTest, ManualBarrierRemovalParsesValidConfirmation) {
+    std::vector<std::string> arguments{"kasumi",
+                                        "gc",
+                                        "remove-barrier",
+                                        "Pictures",
+                                        "--confirm-abandoned"};
+    std::vector<char*> argv;
+    for (auto& argument : arguments) {
+        argv.push_back(argument.data());
+    }
+    const auto invocation =
+        kasumi::cli::parse(static_cast<int>(argv.size()), argv.data());
+    ASSERT_TRUE(invocation.has_value());
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::application::Request>(*invocation));
+    const auto& request = std::get<kasumi::application::Request>(*invocation);
+    EXPECT_EQ(request.operation, kasumi::application::Operation::RemoveBarrier);
+    EXPECT_EQ(request.profile_name, "Pictures");
+    EXPECT_TRUE(request.confirm_abandoned);
+}
+
+TEST(CliParserTest, ManualBarrierRemovalRejectsMissingOrInvalidArguments) {
+    const auto check_error = [](std::vector<std::string> values) {
+        std::vector<char*> argv;
+        for (auto& value : values)
+            argv.push_back(value.data());
+        const auto result =
+            kasumi::cli::parse(static_cast<int>(argv.size()), argv.data());
+        EXPECT_FALSE(result.has_value());
+    };
+    check_error({"kasumi", "gc", "remove-barrier"});
+    check_error({"kasumi", "gc", "remove-barrier", "Pictures"});
+    check_error({"kasumi", "gc", "remove-barrier", "Pictures", "--confirm"});
+    check_error({"kasumi", "gc", "remove-barrier", "Pictures", "--yes"});
+    check_error({"kasumi", "gc", "remove-barrier", "--confirm-abandoned"});
+    check_error({"kasumi", "gc", "remove-barrier", "", "--confirm-abandoned"});
+    check_error({"kasumi", "gc", "remove-barrier", "Pictures", "--confirm-abandoned", "extra"});
+    check_error({"kasumi", "gc", "remove-barrier", "--confirm-abandoned", "Pictures"});
+}
 } // namespace

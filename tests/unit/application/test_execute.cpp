@@ -1266,4 +1266,79 @@ TEST(ApplicationExecuteTest,
     EXPECT_EQ(summary->trusted_content_reused, 5U);
 }
 
+
+TEST(ApplicationExecuteTest, RemoveBarrierRequiresConfirmAbandonedFlag) {
+    auto workspace = kasumi::test::make_temp_workspace("exec-barrier-confirm-req");
+    write_profile(workspace);
+    const auto env = ExecutionEnvironment{
+        kasumi::test::workspace_path(workspace, "app")};
+
+    const auto result = kasumi::application::execute(
+        {Request{.operation = Operation::RemoveBarrier,
+                 .profile_name = "demo",
+                 .confirm_abandoned = false},
+         Credentials{key()},
+         env});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(result.error().detail.find("--confirm-abandoned is required"), std::string::npos);
+}
+
+TEST(ApplicationExecuteTest, RemoveBarrierOperatesWithMissingLocalDatabase) {
+    auto workspace = kasumi::test::make_temp_workspace("exec-barrier-missing-db");
+    write_profile(workspace);
+    const auto app = kasumi::test::workspace_path(workspace, "app");
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    const auto env = ExecutionEnvironment{app};
+
+    // Remove SQLite database to simulate corrupted/missing local db
+    const auto db = app / "profiles/demo/db.sqlite";
+    std::filesystem::remove(db);
+    ASSERT_FALSE(std::filesystem::exists(db));
+
+    // Place abandoned barrier in remote
+    const auto layout = kasumi::application::history_storage::derive_remote_layout(application_key());
+    const auto barrier_path = remote / layout.barrier_identifier;
+    std::filesystem::create_directories(barrier_path.parent_path());
+    kasumi::test::write_text(barrier_path, "kasumi-gc-v1:barrier:0123456789abcdef0123456789abcdef");
+
+    const auto result = kasumi::application::execute(
+        {Request{.operation = Operation::RemoveBarrier,
+                 .profile_name = "demo",
+                 .confirm_abandoned = true},
+         Credentials{key()},
+         env});
+    ASSERT_TRUE(result.has_value()) << (result ? "" : result.error().detail);
+    const auto* completed =
+        std::get_if<kasumi::application::ManualBarrierRemovalCompleted>(&result->data);
+    ASSERT_NE(completed, nullptr);
+    EXPECT_EQ(completed->outcome, kasumi::application::BarrierRemovalOutcome::Removed);
+    EXPECT_FALSE(std::filesystem::exists(barrier_path));
+}
+
+TEST(ApplicationExecuteTest, RemoveBarrierFailurePreservesDiagnosticContext) {
+    auto workspace = kasumi::test::make_temp_workspace("exec-barrier-diag");
+    write_profile(workspace);
+    const auto app = kasumi::test::workspace_path(workspace, "app");
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    const auto env = ExecutionEnvironment{app};
+
+    // Place corrupt barrier on remote
+    const auto layout = kasumi::application::history_storage::derive_remote_layout(application_key());
+    const auto barrier_path = remote / layout.barrier_identifier;
+    std::filesystem::create_directories(barrier_path.parent_path());
+    kasumi::test::write_text(barrier_path, "corrupt-payload");
+
+    const auto result = kasumi::application::execute(
+        {Request{.operation = Operation::RemoveBarrier,
+                 .profile_name = "demo",
+                 .confirm_abandoned = true},
+         Credentials{key()},
+         env});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, kasumi::application::ErrorCode::BarrierRemovalFailure);
+    ASSERT_TRUE(result.error().barrier_removal.has_value());
+    EXPECT_EQ(result.error().barrier_removal->barrier_identifier, layout.barrier_identifier);
+    EXPECT_EQ(result.error().barrier_removal->stage, kasumi::application::BarrierRemovalStage::ValidatingPayload);
+    EXPECT_EQ(result.error().barrier_removal->mutation_state, kasumi::application::BarrierRemovalMutationState::NotAttempted);
+}
 } // namespace

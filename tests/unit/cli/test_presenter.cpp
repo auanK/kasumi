@@ -1905,4 +1905,135 @@ TEST(CliPresenterTest, PresentsTrustedContentWarningWhenReused) {
     EXPECT_NE(output.find("kasumi fsck"), std::string::npos);
 }
 
+
+TEST(CliPresenterTest, RemoteWritersPresentsBarrierIdentifierWhenPresent) {
+    const ScopedLanguage lang_en{kasumi::cli::i18n::Language::English};
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(kasumi::application::InspectionResponse{
+                  .operation = kasumi::application::InspectionOperation::RemoteWriters,
+                  .payload = kasumi::application::RemoteWritersReport{
+                      .barrier_present = true,
+                      .barrier_identifier = "gc/v1/barrier/sample-barrier-id",
+                      .writers = {}}}),
+              0);
+    const auto output_en = testing::internal::GetCapturedStdout();
+    EXPECT_NE(output_en.find("Barrier: present"), std::string::npos);
+    EXPECT_NE(output_en.find("Identifier: gc/v1/barrier/sample-barrier-id"), std::string::npos);
+
+    const ScopedLanguage lang_pt{kasumi::cli::i18n::Language::Portuguese};
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(kasumi::application::InspectionResponse{
+                  .operation = kasumi::application::InspectionOperation::RemoteWriters,
+                  .payload = kasumi::application::RemoteWritersReport{
+                      .barrier_present = true,
+                      .barrier_identifier = "gc/v1/barrier/sample-barrier-id",
+                      .writers = {}}}),
+              0);
+    const auto output_pt = testing::internal::GetCapturedStdout();
+    EXPECT_NE(output_pt.find("Barrier: presente"), std::string::npos);
+    EXPECT_NE(output_pt.find("Identificador: gc/v1/barrier/sample-barrier-id"), std::string::npos);
+}
+
+TEST(CliPresenterTest, RemoteWritersOmitsBarrierIdentifierWhenAbsent) {
+    const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(kasumi::application::InspectionResponse{
+                  .operation = kasumi::application::InspectionOperation::RemoteWriters,
+                  .payload = kasumi::application::RemoteWritersReport{
+                      .barrier_present = false,
+                      .barrier_identifier = std::nullopt,
+                      .writers = {}}}),
+              0);
+    const auto output = testing::internal::GetCapturedStdout();
+    EXPECT_NE(output.find("Barrier: absent"), std::string::npos);
+    EXPECT_EQ(output.find("Identifier:"), std::string::npos);
+}
+
+TEST(CliPresenterTest, ManualBarrierRemovalPresentation) {
+    const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
+
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(kasumi::application::Response{
+                  .operation = kasumi::application::Operation::RemoveBarrier,
+                  .data = kasumi::application::ManualBarrierRemovalCompleted{
+                      .identifier = "history/gc/v1/barrier",
+                      .outcome = kasumi::application::BarrierRemovalOutcome::Removed,
+                      .active_writers_count = 0,
+                  }}),
+              0);
+    const auto removed_clean = testing::internal::GetCapturedStdout();
+    EXPECT_NE(removed_clean.find("Removed maintenance barrier: history/gc/v1/barrier"), std::string::npos);
+
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(kasumi::application::Response{
+                  .operation = kasumi::application::Operation::RemoveBarrier,
+                  .data = kasumi::application::ManualBarrierRemovalCompleted{
+                      .identifier = "history/gc/v1/barrier",
+                      .outcome = kasumi::application::BarrierRemovalOutcome::Removed,
+                      .active_writers_count = 2,
+                  }}),
+              0);
+    const auto removed_with_writers = testing::internal::GetCapturedStdout();
+    EXPECT_NE(removed_with_writers.find("Removed maintenance barrier: history/gc/v1/barrier"), std::string::npos);
+    EXPECT_NE(removed_with_writers.find("remove-writer"), std::string::npos);
+
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(kasumi::application::Response{
+                  .operation = kasumi::application::Operation::RemoveBarrier,
+                  .data = kasumi::application::ManualBarrierRemovalCompleted{
+                      .identifier = "history/gc/v1/barrier",
+                      .outcome = kasumi::application::BarrierRemovalOutcome::AlreadyAbsent,
+                      .active_writers_count = 0,
+                  }}),
+              0);
+    const auto absent = testing::internal::GetCapturedStdout();
+    EXPECT_NE(absent.find("already absent"), std::string::npos);
+}
+
+TEST(CliPresenterTest, ManualBarrierRemovalErrorPresentationWithDiagnostics) {
+    const ScopedLanguage lang_en{kasumi::cli::i18n::Language::English};
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(kasumi::application::Error{
+                  .operation = kasumi::application::Operation::RemoveBarrier,
+                  .code = kasumi::application::ErrorCode::BarrierRemovalFailure,
+                  .detail = "could not remove maintenance barrier: transport error: timeout: connection reset (native_code=10054)",
+                  .barrier_removal = kasumi::application::BarrierRemovalFailure{
+                      .barrier_identifier = "gc/v1/barrier",
+                      .stage = kasumi::application::BarrierRemovalStage::Removing,
+                      .mutation_state = kasumi::application::BarrierRemovalMutationState::Uncertain,
+                      .transport_error = kasumi::transport::Error{
+                          .code = kasumi::transport::ErrorCode::Timeout,
+                          .message = "connection reset",
+                          .native_code = 10054,
+                      },
+                  }}),
+              1);
+    const auto output_en = testing::internal::GetCapturedStdout();
+    EXPECT_NE(output_en.find("Failed to remove maintenance barrier"), std::string::npos);
+    EXPECT_NE(output_en.find("Stage: Removing barrier"), std::string::npos);
+    EXPECT_NE(output_en.find("Mutation state: Uncertain"), std::string::npos);
+    EXPECT_NE(output_en.find("Transport error: timeout: connection reset (native_code=10054)"), std::string::npos);
+
+    const ScopedLanguage lang_pt{kasumi::cli::i18n::Language::Portuguese};
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(kasumi::application::Error{
+                  .operation = kasumi::application::Operation::RemoveBarrier,
+                  .code = kasumi::application::ErrorCode::BarrierRemovalFailure,
+                  .detail = "could not remove maintenance barrier",
+                  .barrier_removal = kasumi::application::BarrierRemovalFailure{
+                      .barrier_identifier = "gc/v1/barrier",
+                      .stage = kasumi::application::BarrierRemovalStage::ConfirmingAbsence,
+                      .mutation_state = kasumi::application::BarrierRemovalMutationState::Uncertain,
+                      .transport_error = kasumi::transport::Error{
+                          .code = kasumi::transport::ErrorCode::Io,
+                          .message = "disk full",
+                          .native_code = 28,
+                      },
+                  }}),
+              1);
+    const auto output_pt = testing::internal::GetCapturedStdout();
+    EXPECT_NE(output_pt.find("Etapa: Confirmando ausência da barreira"), std::string::npos);
+    EXPECT_NE(output_pt.find("Estado da mutação: Incerta"), std::string::npos);
+    EXPECT_NE(output_pt.find("Erro de transporte: io: disk full (native_code=28)"), std::string::npos);
+}
 } // namespace
