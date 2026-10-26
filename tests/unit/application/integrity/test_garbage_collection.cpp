@@ -349,6 +349,330 @@ Repository seed_repository(kasumi::transport::Transport& transport,
     };
 }
 
+TEST(GarbageCollectionTest, BarrierReplacementBeforeApplyPreventsAllDeletes) {
+    for (const bool physical_hash : {false, true}) {
+        SCOPED_TRACE(physical_hash);
+        FakeFixture fixture("gc-pre-apply-replacement");
+        seed_repository(fixture.transport, fixture.workspace);
+        fixture.state->physical_hash_supported = physical_hash;
+        auto expected = fixture.state->objects;
+        std::vector<std::uint8_t> replacement;
+
+        const auto result =
+            fixture.collect([&](const GarbageCollectProgress& progress) {
+                if (progress.stage == GarbageCollectStage::Applying &&
+                    progress.removed_objects == 0) {
+                    replace_barrier_contents(fixture.state,
+                                             layout().barrier_identifier);
+                    replacement =
+                        fixture.state->objects.at(layout().barrier_identifier);
+                }
+            });
+
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code,
+                  kasumi::application::integrity::ErrorCode::ConcurrentChange);
+        ASSERT_TRUE(result.error().garbage_collection.has_value());
+        const auto& diagnostic = *result.error().garbage_collection;
+        EXPECT_EQ(diagnostic.candidate_objects, 2U);
+        EXPECT_EQ(diagnostic.confirmed_removed, 0U);
+        EXPECT_EQ(
+            diagnostic.mutation_state,
+            kasumi::application::GarbageCollectMutationState::NotAttempted);
+        EXPECT_FALSE(diagnostic.barrier_release_attempted);
+        EXPECT_FALSE(diagnostic.barrier_release_confirmed);
+        EXPECT_TRUE(diagnostic.barrier_cleanup_error.has_value());
+        EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
+        EXPECT_EQ(barrier_remove_attempts(*fixture.state), 0U);
+        expected[layout().barrier_identifier] = replacement;
+        EXPECT_EQ(fixture.state->objects, expected);
+    }
+}
+
+TEST(GarbageCollectionTest, BarrierDisappearanceBeforeApplyPreventsAllDeletes) {
+    for (const bool physical_hash : {false, true}) {
+        SCOPED_TRACE(physical_hash);
+        FakeFixture fixture("gc-pre-apply-disappearance");
+        seed_repository(fixture.transport, fixture.workspace);
+        fixture.state->physical_hash_supported = physical_hash;
+        const auto expected = fixture.state->objects;
+
+        const auto result =
+            fixture.collect([&](const GarbageCollectProgress& progress) {
+                if (progress.stage == GarbageCollectStage::Applying &&
+                    progress.removed_objects == 0) {
+                    fixture.state->objects.erase(layout().barrier_identifier);
+                    fixture.state->physical_hashes.erase(
+                        layout().barrier_identifier);
+                }
+            });
+
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code,
+                  kasumi::application::integrity::ErrorCode::ConcurrentChange);
+        ASSERT_TRUE(result.error().garbage_collection.has_value());
+        EXPECT_EQ(result.error().garbage_collection->confirmed_removed, 0U);
+        EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
+        EXPECT_EQ(barrier_remove_attempts(*fixture.state), 0U);
+        EXPECT_EQ(fixture.state->objects, expected);
+    }
+}
+
+TEST(GarbageCollectionTest,
+     PreApplyOwnershipTransportFailureKeepsOriginalError) {
+    FakeFixture fixture("gc-pre-apply-transport");
+    seed_repository(fixture.transport, fixture.workspace);
+    fixture.state->physical_hash_supported = true;
+    auto expected = fixture.state->objects;
+    std::size_t hashes_before_apply = 0;
+
+    const auto result =
+        fixture.collect([&](const GarbageCollectProgress& progress) {
+            if (progress.stage == GarbageCollectStage::Applying &&
+                progress.removed_objects == 0) {
+                hashes_before_apply = fixture.state->physical_hash_count;
+                fixture.state->physical_hash_failure_identifier =
+                    layout().barrier_identifier;
+                fixture.state->physical_hash_failure =
+                    kasumi::transport::ErrorCode::Timeout;
+                fixture.state->physical_hash_failure_native_code = 10060;
+                expected[layout().barrier_identifier] =
+                    fixture.state->objects.at(layout().barrier_identifier);
+            }
+        });
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code,
+              kasumi::application::integrity::ErrorCode::TransportFailure);
+    ASSERT_TRUE(result.error().transport_failure.has_value());
+    EXPECT_EQ(result.error().transport_failure->code,
+              kasumi::transport::ErrorCode::Timeout);
+    EXPECT_EQ(result.error().transport_failure->native_code, 10060);
+    ASSERT_TRUE(result.error().garbage_collection.has_value());
+    const auto& diagnostic = *result.error().garbage_collection;
+    EXPECT_EQ(diagnostic.candidate_objects, 2U);
+    EXPECT_EQ(diagnostic.confirmed_removed, 0U);
+    EXPECT_EQ(diagnostic.mutation_state,
+              kasumi::application::GarbageCollectMutationState::NotAttempted);
+    ASSERT_TRUE(diagnostic.transport_error.has_value());
+    EXPECT_EQ(diagnostic.transport_error->native_code, 10060);
+    EXPECT_TRUE(diagnostic.barrier_cleanup_error.has_value());
+    EXPECT_FALSE(diagnostic.barrier_release_attempted);
+    EXPECT_FALSE(diagnostic.barrier_release_confirmed);
+    EXPECT_EQ(fixture.state->physical_hash_count - hashes_before_apply, 2U);
+    EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
+    EXPECT_EQ(barrier_remove_attempts(*fixture.state), 0U);
+    EXPECT_EQ(fixture.state->objects, expected);
+}
+
+TEST(GarbageCollectionTest,
+     CancellationBeforeFirstDeleteCleansUpWithoutMutation) {
+    FakeFixture fixture("gc-cancel-before-delete");
+    seed_repository(fixture.transport, fixture.workspace);
+    const auto expected = fixture.state->objects;
+    struct ResetCancellation {
+        ~ResetCancellation() {
+            kasumi::platform::cancellation::reset();
+        }
+    } reset_guard;
+    kasumi::platform::cancellation::reset();
+
+    const auto result =
+        fixture.collect([](const GarbageCollectProgress& progress) {
+            if (progress.stage == GarbageCollectStage::Applying) {
+                kasumi::platform::cancellation::request();
+            }
+        });
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(result.error().detail.find("cancelled"), std::string::npos);
+    ASSERT_TRUE(result.error().garbage_collection.has_value());
+    const auto& diagnostic = *result.error().garbage_collection;
+    EXPECT_EQ(diagnostic.candidate_objects, 2U);
+    EXPECT_EQ(diagnostic.confirmed_removed, 0U);
+    EXPECT_FALSE(diagnostic.failed_identifier.has_value());
+    EXPECT_EQ(diagnostic.mutation_state,
+              kasumi::application::GarbageCollectMutationState::NotAttempted);
+    EXPECT_TRUE(diagnostic.barrier_release_confirmed);
+    EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
+    EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
+    EXPECT_EQ(fixture.state->objects, expected);
+}
+
+TEST(GarbageCollectionTest,
+     DeleteExceptionAfterPartialApplyAndCleanupIsNotRetried) {
+    FakeFixture fixture("gc-partial-exception-cleanup");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+    std::vector<std::string> orphans;
+    for (const auto name : {"exception-a", "exception-b", "exception-c"}) {
+        orphans.push_back(
+            put_content(fixture.transport, fixture.workspace, name, name));
+    }
+    std::ranges::sort(orphans);
+    fixture.state->on_operation =
+        [&](FakeState&, std::string_view op, std::string_view id) {
+            if (op == "after_remove" && id == orphans[1]) {
+                throw std::runtime_error("candidate exception after effect");
+            }
+            if (op == "before_remove" && id == layout().barrier_identifier) {
+                throw std::runtime_error("cleanup exception");
+            }
+        };
+
+    const auto result = fixture.collect();
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(result.error().detail.find("candidate exception after effect"),
+              std::string::npos);
+    ASSERT_TRUE(result.error().garbage_collection.has_value());
+    const auto& diagnostic = *result.error().garbage_collection;
+    EXPECT_EQ(diagnostic.confirmed_removed, 1U);
+    EXPECT_EQ(diagnostic.failed_identifier,
+              std::optional<std::string>{orphans[1]});
+    EXPECT_EQ(diagnostic.mutation_state,
+              kasumi::application::GarbageCollectMutationState::Uncertain);
+    ASSERT_TRUE(diagnostic.barrier_cleanup_error.has_value());
+    EXPECT_NE(diagnostic.barrier_cleanup_error->find("cleanup exception"),
+              std::string::npos);
+    EXPECT_TRUE(diagnostic.barrier_release_attempted);
+    EXPECT_FALSE(diagnostic.barrier_release_confirmed);
+    EXPECT_EQ(candidate_remove_attempts(*fixture.state), 2U);
+    EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
+    EXPECT_FALSE(fixture.state->objects.contains(orphans[0]));
+    EXPECT_FALSE(fixture.state->objects.contains(orphans[1]));
+    EXPECT_TRUE(fixture.state->objects.contains(orphans[2]));
+    EXPECT_TRUE(fixture.state->objects.contains(layout().barrier_identifier));
+}
+
+TEST(GarbageCollectionTest, DeleteErrorCategoryDoesNotProveNoMutation) {
+    using kasumi::transport::ErrorCode;
+    for (const auto code : {ErrorCode::PermissionDenied,
+                            ErrorCode::ProtocolFailure,
+                            ErrorCode::Unknown,
+                            ErrorCode::Timeout}) {
+        SCOPED_TRACE(kasumi::transport::error_code_name(code));
+        FakeFixture fixture("gc-delete-error-state");
+        publish_object(fixture.transport,
+                       fixture.workspace,
+                       commit_with_file("live"),
+                       "head");
+        put_content(fixture.transport, fixture.workspace, "live", "live");
+        std::vector<std::string> orphans;
+        for (const auto name : {"error-a", "error-b", "error-c"}) {
+            orphans.push_back(
+                put_content(fixture.transport, fixture.workspace, name, name));
+        }
+        std::ranges::sort(orphans);
+        fixture.state->remove_then_fail_identifier = orphans[1];
+        fixture.state->fail_remove_code = code;
+        fixture.state->remove_failure_native_code = 10054;
+
+        const auto result = fixture.collect();
+
+        ASSERT_FALSE(result.has_value());
+        ASSERT_TRUE(result.error().garbage_collection.has_value());
+        const auto& diagnostic = *result.error().garbage_collection;
+        EXPECT_EQ(diagnostic.confirmed_removed, 1U);
+        EXPECT_EQ(diagnostic.failed_identifier,
+                  std::optional<std::string>{orphans[1]});
+        EXPECT_EQ(diagnostic.mutation_state,
+                  kasumi::application::GarbageCollectMutationState::Uncertain);
+        ASSERT_TRUE(diagnostic.transport_error.has_value());
+        EXPECT_EQ(diagnostic.transport_error->code, code);
+        EXPECT_EQ(diagnostic.transport_error->native_code, 10054);
+        EXPECT_TRUE(diagnostic.barrier_release_confirmed);
+        EXPECT_EQ(candidate_remove_attempts(*fixture.state), 2U);
+        EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
+        EXPECT_FALSE(fixture.state->objects.contains(orphans[0]));
+        EXPECT_FALSE(fixture.state->objects.contains(orphans[1]));
+        EXPECT_TRUE(fixture.state->objects.contains(orphans[2]));
+    }
+}
+
+TEST(GarbageCollectionTest, OwnershipChecksStayFixedWithOneThousandCandidates) {
+    for (const bool physical_hash : {false, true}) {
+        for (const std::size_t count : {1U, 1000U}) {
+            SCOPED_TRACE(physical_hash);
+            SCOPED_TRACE(count);
+            FakeFixture fixture("gc-fixed-ownership-checks");
+            publish_object(fixture.transport,
+                           fixture.workspace,
+                           commit_with_file("live"),
+                           "head");
+            put_content(fixture.transport, fixture.workspace, "live", "live");
+            for (std::size_t index = 0; index < count; ++index) {
+                const auto contents = "fixed-" + std::to_string(index);
+                put_corrupt_content(
+                    fixture.transport, fixture.workspace, contents, contents);
+                fixture.state->observed_payload_identifiers.insert(
+                    content_identifier(contents));
+            }
+            fixture.state->physical_hash_supported = physical_hash;
+            std::size_t control_gets = 0;
+            std::array<std::size_t, 3> before_apply{}, after_apply{};
+            std::chrono::steady_clock::time_point apply_started;
+            std::int64_t first_delete_delay_us = 0;
+            fixture.state->on_operation = [&](FakeState&,
+                                              std::string_view op,
+                                              std::string_view id) {
+                if (op == "get" && id == layout().barrier_identifier) {
+                    ++control_gets;
+                }
+                if (op == "before_remove" &&
+                    fixture.state->candidate_remove_count == 1 &&
+                    !protocol::is_control_object(layout(), id)) {
+                    first_delete_delay_us =
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - apply_started)
+                            .count();
+                }
+            };
+
+            const auto result =
+                fixture.collect([&](const GarbageCollectProgress& progress) {
+                    const std::array counters{fixture.state->get_count,
+                                              fixture.state->list_count,
+                                              fixture.state->presence_count};
+                    if (progress.stage == GarbageCollectStage::Applying &&
+                        progress.removed_objects == 0) {
+                        before_apply = counters;
+                        apply_started = std::chrono::steady_clock::now();
+                    } else if (progress.stage ==
+                               GarbageCollectStage::Finalizing) {
+                        after_apply = counters;
+                    }
+                });
+
+            ASSERT_TRUE(result.has_value()) << result.error().detail;
+            EXPECT_EQ(result->candidate_objects, count);
+            EXPECT_EQ(result->removed_objects, count);
+            const auto ownership_hashes = std::ranges::count(
+                fixture.state->gc_events,
+                "physical_hash:" + layout().barrier_identifier);
+            EXPECT_EQ(
+                ownership_hashes,
+                5U); // Acquisition, admission, pre-Apply, two cleanup checks.
+            EXPECT_EQ(control_gets, physical_hash ? 0U : 5U);
+            EXPECT_EQ(after_apply[0] - before_apply[0],
+                      physical_hash ? 0U : 1U);
+            EXPECT_EQ(after_apply[1], before_apply[1]);
+            EXPECT_EQ(after_apply[2], before_apply[2]);
+            EXPECT_EQ(fixture.state->full_list_count, 1U);
+            EXPECT_EQ(fixture.state->commit_get_count, 1U);
+            EXPECT_EQ(fixture.state->marker_get_count, 1U);
+            EXPECT_EQ(fixture.state->orphan_payload_get_count, 0U);
+            EXPECT_EQ(candidate_remove_attempts(*fixture.state), count);
+            EXPECT_EQ(fixture.state->remove_batch_count, 0U);
+            std::cout << "GC_PRE_APPLY candidates=" << count
+                      << " physical_hash=" << physical_hash
+                      << " first_delete_delay_us=" << first_delete_delay_us
+                      << '\n';
+        }
+    }
+}
+
 TEST(GarbageCollectionTest, RemovesAuthenticatedOrphanContent) {
     LocalFixture fixture;
     const auto orphan = put_content(fixture.storage.transport,

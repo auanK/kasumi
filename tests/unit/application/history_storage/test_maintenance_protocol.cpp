@@ -388,6 +388,84 @@ TEST(ManualBarrierRemovalTest, CoexistenceWithActiveWritersDoesNotDeadlock) {
     EXPECT_TRUE(state->objects.contains(writer2));
 }
 
+TEST(ManualBarrierRemovalTest, DeleteErrorCategoryDoesNotProveNoMutation) {
+    using kasumi::transport::ErrorCode;
+    for (const auto code : {ErrorCode::PermissionDenied,
+                            ErrorCode::ProtocolFailure,
+                            ErrorCode::Unknown,
+                            ErrorCode::Timeout}) {
+        SCOPED_TRACE(kasumi::transport::error_code_name(code));
+        FakeState* state = nullptr;
+        auto storage = make_fake_transport(state);
+        const auto layout = history::derive_remote_layout(test_key());
+        auto workspace =
+            kasumi::test::make_temp_workspace("barrier-delete-error-state");
+        state->objects[layout.barrier_identifier] =
+            protocol::testing::format_payload(
+                "barrier", "0123456789abcdef0123456789abcdef");
+        state->remove_then_fail_identifier = layout.barrier_identifier;
+        state->fail_remove_code = code;
+        state->remove_failure_native_code = 10054;
+
+        const auto result = protocol::remove_barrier(
+            storage, layout, kasumi::test::workspace_root(workspace));
+
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().stage,
+                  protocol::BarrierRemovalStage::Removing);
+        EXPECT_EQ(result.error().mutation_state,
+                  protocol::BarrierRemovalMutationState::Uncertain);
+        ASSERT_TRUE(result.error().transport_failure.has_value());
+        EXPECT_EQ(result.error().transport_failure->code, code);
+        EXPECT_EQ(result.error().transport_failure->native_code, 10054);
+        EXPECT_EQ(state->remove_count, 1U);
+        EXPECT_FALSE(state->objects.contains(layout.barrier_identifier));
+    }
+}
+
+TEST(ManualBarrierRemovalTest,
+     AlreadyAbsentDeleteStillRequiresAbsenceConfirmation) {
+    for (const bool fail_confirmation : {false, true}) {
+        SCOPED_TRACE(fail_confirmation);
+        FakeState* state = nullptr;
+        auto storage = make_fake_transport(state);
+        const auto layout = history::derive_remote_layout(test_key());
+        auto workspace =
+            kasumi::test::make_temp_workspace("barrier-already-absent-delete");
+        state->objects[layout.barrier_identifier] =
+            protocol::testing::format_payload(
+                "barrier", "0123456789abcdef0123456789abcdef");
+        state->on_operation =
+            [&](FakeState& current, std::string_view op, std::string_view id) {
+                if (op == "before_remove" && id == layout.barrier_identifier) {
+                    current.objects.erase(layout.barrier_identifier);
+                }
+            };
+        if (fail_confirmation) {
+            state->fail_presence_after_removal_identifier =
+                layout.barrier_identifier;
+        }
+        const auto presence_before = state->presence_count;
+
+        const auto result = protocol::remove_barrier(
+            storage, layout, kasumi::test::workspace_root(workspace));
+
+        EXPECT_EQ(state->remove_count, 1U);
+        EXPECT_EQ(state->presence_count - presence_before, 2U);
+        if (fail_confirmation) {
+            ASSERT_FALSE(result.has_value());
+            EXPECT_EQ(result.error().stage,
+                      protocol::BarrierRemovalStage::ConfirmingAbsence);
+            EXPECT_EQ(result.error().mutation_state,
+                      protocol::BarrierRemovalMutationState::Uncertain);
+        } else {
+            ASSERT_TRUE(result.has_value()) << result.error().detail;
+            EXPECT_EQ(result->outcome,
+                      protocol::BarrierRemovalOutcome::AlreadyAbsent);
+        }
+    }
+}
+
 TEST(ManualBarrierRemovalTest, TransportErrorsAndAmbiguousDeleteHandling) {
     FakeState* state = nullptr;
     auto storage = make_fake_transport(state);
@@ -406,7 +484,7 @@ TEST(ManualBarrierRemovalTest, TransportErrorsAndAmbiguousDeleteHandling) {
     EXPECT_EQ(state->remove_count, 0U);
     state->fail_barrier_presence = false;
 
-    // 2. Definitive non-ambiguous DELETE error (e.g. InvalidPath / ObjectNotFound)
+    // 2. The error category alone does not prove that DELETE had no effect.
     state->fail_remove_identifier = layout.barrier_identifier;
     state->fail_remove_code = kasumi::transport::ErrorCode::PermissionDenied;
     state->remove_failure_native_code = 400;
@@ -414,7 +492,8 @@ TEST(ManualBarrierRemovalTest, TransportErrorsAndAmbiguousDeleteHandling) {
     ASSERT_FALSE(delete_failed.has_value());
     EXPECT_EQ(delete_failed.error().code, protocol::ErrorCode::TransportFailure);
     EXPECT_EQ(delete_failed.error().stage, protocol::BarrierRemovalStage::Removing);
-    EXPECT_EQ(delete_failed.error().mutation_state, protocol::BarrierRemovalMutationState::NotAttempted);
+    EXPECT_EQ(delete_failed.error().mutation_state,
+              protocol::BarrierRemovalMutationState::Uncertain);
     ASSERT_TRUE(delete_failed.error().transport_failure.has_value());
     EXPECT_EQ(delete_failed.error().transport_failure->native_code, 400);
     state->fail_remove_identifier.clear();

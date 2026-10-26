@@ -276,6 +276,7 @@ struct FakeState {
     std::string observed_payload_identifier;
     std::set<std::string> observed_payload_identifiers;
     std::optional<kasumi::transport::ErrorCode> physical_hash_failure;
+    int physical_hash_failure_native_code = 0;
     bool physical_hash_batch_supported = false;
     std::size_t physical_hash_batch_min_objects = 2;
     std::optional<kasumi::transport::ErrorCode> physical_hash_batch_failure;
@@ -906,7 +907,8 @@ std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
          identifier == state->physical_hash_failure_identifier)) {
         return std::unexpected(kasumi::transport::Error{
             .code = *state->physical_hash_failure,
-            .message = "injected physical hash failure"});
+            .message = "injected physical hash failure",
+            .native_code = state->physical_hash_failure_native_code});
     }
     if (!state->physical_hash_supported || algorithm != "sha256" ||
         identifier == state->physical_hash_unsupported_identifier) {
