@@ -1492,7 +1492,11 @@ TEST(RcloneSystemTest, WriterPhysicalHashAvoidsReadback) {
     ASSERT_TRUE(std::filesystem::create_directories(writer_workspace));
 
     auto registration = kasumi::application::history_storage::
-        maintenance_protocol::register_writer(*storage, writer_workspace);
+        maintenance_protocol::register_writer(
+            *storage,
+            kasumi::application::history_storage::derive_remote_layout(
+                test_key()),
+            writer_workspace);
     ASSERT_TRUE(registration.has_value()) << registration.error().detail;
     ASSERT_TRUE(kasumi::application::history_storage::maintenance_protocol::
                     release_registration(*registration));

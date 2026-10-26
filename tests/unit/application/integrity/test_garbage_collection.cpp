@@ -673,6 +673,163 @@ TEST(GarbageCollectionTest, OwnershipChecksStayFixedWithOneThousandCandidates) {
     }
 }
 
+struct ScopedGcTrace {
+    ScopedGcTrace() {
+        kasumi::platform::perf_trace::force_enable(true);
+        kasumi::platform::perf_trace::reset();
+    }
+    ~ScopedGcTrace() {
+        kasumi::platform::perf_trace::reset();
+        kasumi::platform::perf_trace::force_enable(false);
+    }
+};
+
+TEST(GarbageCollectionTest, TraceMeasuresInventoryPlanAndPreApplySeparately) {
+    FakeFixture fixture("gc-trace-inventory");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+    for (const auto name : {"metric-a", "metric-b", "metric-c"}) {
+        put_corrupt_content(fixture.transport, fixture.workspace, name, name);
+    }
+    ScopedGcTrace tracing;
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    using kasumi::platform::perf_trace::get_count;
+    EXPECT_EQ(get_count("gc.physical_object_count"), 7U);
+    EXPECT_EQ(get_count("gc.physical_content_count"), 4U);
+    EXPECT_EQ(get_count("gc.protected_content_count"), 1U);
+    EXPECT_EQ(get_count("gc.protected_object_count"), 2U);
+    EXPECT_EQ(get_count("gc.plan_build_us"), 1U);
+    EXPECT_EQ(get_count("gc.plan_validation_us"), 1U);
+    EXPECT_EQ(get_count("gc.pre_apply_ownership_us"), 1U);
+    EXPECT_EQ(get_count("gc.analysis_observations"), 1U);
+    EXPECT_EQ(get_count("gc.history_reconstructions"), 1U);
+    testing::internal::CaptureStderr();
+    kasumi::platform::perf_trace::report("success");
+    const auto output = testing::internal::GetCapturedStderr();
+    for (const auto metric : {"gc.candidate_remove_errors",
+                              "gc.barrier_cleanup_errors",
+                              "gc.errors",
+                              "gc.content_get_calls"}) {
+        EXPECT_NE(output.find(std::string{"KASUMI_PERF name="} + metric +
+                              " calls=0 "),
+                  std::string::npos)
+            << metric;
+    }
+}
+
+TEST(GarbageCollectionTest,
+     TracePartialFailureMatchesAcknowledgementsAndCleanup) {
+    for (const bool throws : {false, true}) {
+        SCOPED_TRACE(throws);
+        FakeFixture fixture("gc-trace-partial");
+        publish_object(fixture.transport,
+                       fixture.workspace,
+                       commit_with_file("live"),
+                       "head");
+        put_content(fixture.transport, fixture.workspace, "live", "live");
+        for (const auto name :
+             {"partial-a", "partial-b", "partial-c", "partial-d"}) {
+            put_corrupt_content(
+                fixture.transport, fixture.workspace, name, name);
+        }
+        fixture.state->fail_candidate_remove_at = 3;
+        fixture.state->fail_remove_identifier = layout().barrier_identifier;
+        fixture.state->on_operation = [throws](FakeState& state,
+                                               std::string_view op,
+                                               std::string_view) {
+            if (throws && op == "before_remove" &&
+                state.candidate_remove_count == 3) {
+                throw std::runtime_error("injected traced DELETE exception");
+            }
+        };
+        ScopedGcTrace tracing;
+        const auto result = fixture.collect();
+        ASSERT_FALSE(result.has_value());
+        ASSERT_TRUE(result.error().garbage_collection.has_value());
+        const auto& diagnostic = *result.error().garbage_collection;
+        using kasumi::platform::perf_trace::get_count;
+        EXPECT_EQ(get_count("gc.candidate_remove_attempts"), 3U);
+        EXPECT_EQ(get_count("gc.candidate_remove_acknowledged"), 2U);
+        EXPECT_EQ(get_count("gc.confirmed_removed"),
+                  diagnostic.confirmed_removed);
+        EXPECT_EQ(get_count("gc.candidate_remove_errors"), 1U);
+        EXPECT_EQ(get_count("gc.barrier_cleanup_errors"), 1U);
+        EXPECT_EQ(get_count("gc.errors"), 1U);
+        EXPECT_EQ(diagnostic.confirmed_removed, 2U);
+        EXPECT_EQ(diagnostic.mutation_state,
+                  kasumi::application::GarbageCollectMutationState::Uncertain);
+        EXPECT_TRUE(diagnostic.barrier_cleanup_error.has_value());
+        EXPECT_FALSE(diagnostic.barrier_release_confirmed);
+        EXPECT_EQ(candidate_remove_attempts(*fixture.state), 3U);
+        EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
+    }
+}
+
+TEST(GarbageCollectionTest,
+     TraceOwnershipAndHistoryReadsStayFixedAsCandidatesGrow) {
+    std::optional<std::uint64_t> fixed_checks;
+    for (const auto count : {1U, 100U, 1000U}) {
+        SCOPED_TRACE(count);
+        FakeFixture fixture("gc-trace-fixed-cost");
+        publish_object(fixture.transport,
+                       fixture.workspace,
+                       commit_with_file("live"),
+                       "head");
+        put_content(fixture.transport, fixture.workspace, "live", "live");
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto contents = "counter-" + std::to_string(index);
+            put_corrupt_content(
+                fixture.transport, fixture.workspace, contents, contents);
+            fixture.state->observed_payload_identifiers.insert(
+                content_identifier(contents));
+        }
+        ScopedGcTrace tracing;
+        const auto result = fixture.collect();
+        ASSERT_TRUE(result.has_value()) << result.error().detail;
+        using kasumi::platform::perf_trace::get_count;
+        const auto checks = get_count("gc.barrier_ownership_verifications");
+        if (!fixed_checks) {
+            fixed_checks = checks;
+        }
+        EXPECT_GT(checks, 0U);
+        EXPECT_EQ(checks, *fixed_checks);
+        EXPECT_EQ(get_count("gc.candidate_remove_attempts"), count);
+        EXPECT_EQ(get_count("gc.candidate_remove_acknowledged"), count);
+        EXPECT_EQ(get_count("gc.confirmed_removed"), count);
+        EXPECT_EQ(get_count("gc.history_reconstructions"), 1U);
+        EXPECT_EQ(get_count("gc.analysis_get_calls"), 2U);
+        EXPECT_EQ(get_count("gc.apply_get_calls"), 0U);
+        EXPECT_EQ(get_count("gc.apply_presence_calls"), 0U);
+        EXPECT_EQ(fixture.state->orphan_payload_get_count, 0U);
+        for (const auto& id : fixture.state->observed_payload_identifiers) {
+            EXPECT_EQ(std::ranges::count(fixture.state->gc_events,
+                                         "physical_hash:" + id),
+                      0);
+        }
+    }
+}
+
+TEST(GarbageCollectionTest, TracingDisabledPreservesCollectionBehavior) {
+    kasumi::platform::perf_trace::force_enable(false);
+    ASSERT_FALSE(kasumi::platform::perf_trace::enabled());
+    FakeFixture fixture("gc-tracing-disabled");
+    const auto repository =
+        seed_repository(fixture.transport, fixture.workspace);
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->removed_objects, 2U);
+    EXPECT_EQ(candidate_remove_attempts(*fixture.state), 2U);
+    EXPECT_TRUE(fixture.state->objects.contains(repository.live_content));
+    EXPECT_TRUE(fixture.state->objects.contains(object_path(repository.head)));
+    EXPECT_FALSE(fixture.state->objects.contains(repository.orphan_content));
+    EXPECT_FALSE(fixture.state->objects.contains(layout().barrier_identifier));
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("gc.candidate_remove_attempts"),
+        0U);
+}
+
 TEST(GarbageCollectionTest, RemovesAuthenticatedOrphanContent) {
     LocalFixture fixture;
     const auto orphan = put_content(fixture.storage.transport,
