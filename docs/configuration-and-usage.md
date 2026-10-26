@@ -197,8 +197,11 @@ prints the version. Calling without arguments shows Help and returns 1.
 
 Unknown or duplicate options, missing values and incompatible combinations fail
 before execution with a localized diagnostic and the relevant Help command on
-stderr. Quote arguments containing spaces; an option-looking path can be
-pass `--` before an option-looking path (such as `--notes.txt` or `-draft.txt`) to treat following arguments as literal operands. Unicode spelling is preserved.
+stderr. Quote arguments containing spaces; pass `--` before an option-looking
+path (such as `--notes.txt` or `-draft.txt`) to treat following arguments as
+literal operands. Unicode spelling is preserved. On Windows, native command-line arguments are
+converted to UTF-8 independently of the system ANSI code page; this does not
+change the domain rules for profile names or synchronized paths.
 
 ## Operation Output
 

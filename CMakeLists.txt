@@ -223,6 +223,9 @@ if(WIN32)
 endif()
 
 add_executable(kasumi src/main.cpp ${KASUMI_EXTRA_SOURCES})
+if(MINGW)
+    target_link_options(kasumi PRIVATE -municode)
+endif()
 
 if(POLICY CMP0218)
     cmake_policy(SET CMP0218 OLD)
