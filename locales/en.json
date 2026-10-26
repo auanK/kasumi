@@ -27,7 +27,8 @@
     "ancestral": "ANCESTRAL",
     "stage": "Stage",
     "mutation_state": "Mutation state",
-    "transport_error": "Transport error"
+    "transport_error": "Transport error",
+    "duration": "Duration: {}"
   },
   "sync": {
     "in_progress": "Synchronizing...",
@@ -369,5 +370,10 @@
     "remote_writers": "Usage: kasumi remote writers <profile>\n\nList writers and the maintenance barrier.\n",
     "remote_health": "Usage: kasumi remote health <profile>\n\nFull remote health diagnostic. Findings still return 0; inspection failure returns 1.\nDoes not replace the fsck payload audit.\n",
     "options": "\nGlobal option: --lang <code>, before the command (en, pt-BR or external catalog).\nHelp: -h, --help. Duplicate, unknown or valueless options are rejected.\n"
+  },
+  "resolve_missing": {
+    "singular": "resolved 1 missing path",
+    "plural": "resolved {} missing paths",
+    "none": "no unresolved missing paths to resolve"
   }
 }

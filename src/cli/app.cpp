@@ -11,11 +11,15 @@
 #include "cli/wizard.hpp"
 #include "platform/cancellation.hpp"
 
+#include <chrono>
 #include <csignal>
 #include <print>
 #include <string>
 #include <string_view>
 #include <vector>
+#ifndef _WIN32
+#include <signal.h>
+#endif
 
 namespace {
 
@@ -101,19 +105,41 @@ int run(int argc, char* argv[]) {
         return present_help(help->topic);
     }
 
+    const auto started = std::chrono::steady_clock::now();
+    const auto finish = [&](int code) {
+        present_duration(std::chrono::steady_clock::now() - started);
+        return code;
+    };
     platform::cancellation::reset();
+#ifdef _WIN32
     std::signal(SIGINT, request_cancellation);
     std::signal(SIGTERM, request_cancellation);
+#else
+    if (std::holds_alternative<ConfigureInvocation>(*parse_result)) {
+        // The wizard's blocking stdin read must not restart after SIGINT.
+        struct sigaction action {};
+        action.sa_handler = request_cancellation;
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = 0;
+        sigaction(SIGINT, &action, nullptr);
+        sigaction(SIGTERM, &action, nullptr);
+    } else {
+        std::signal(SIGINT, request_cancellation);
+        std::signal(SIGTERM, request_cancellation);
+    }
+#endif
 
     if (std::holds_alternative<UpdateInvocation>(*parse_result)) {
-        return update::run(effective_argc, effective_argv);
+        return finish(update::run(effective_argc, effective_argv));
     }
 
     const auto environment = application::default_execution_environment();
 
     if (std::holds_alternative<ConfigureInvocation>(*parse_result)) {
-        run_config_wizard(environment);
-        return platform::cancellation::requested() ? 130 : 0;
+        const int code = run_config_wizard(environment);
+        return finish(
+            code == 130 ? present_cancellation(application::Operation::Preview)
+                        : code);
     }
     if (std::holds_alternative<application::InspectionRequest>(*parse_result)) {
         auto request = std::get<application::InspectionRequest>(*parse_result);
@@ -133,13 +159,14 @@ int run(int argc, char* argv[]) {
         application::wipe_credentials(initial_credentials);
 
         if (platform::cancellation::requested()) {
-            return present_cancellation(application::Operation::Preview);
+            return finish(
+                present_cancellation(application::Operation::Preview));
         }
 
         if (result) {
-            return present(*result);
+            return finish(present(*result));
         }
-        return present(result.error());
+        return finish(present(result.error()));
     }
 
     auto request = std::get<application::Request>(*parse_result);
@@ -218,13 +245,13 @@ int run(int argc, char* argv[]) {
     application::wipe_credentials(initial_credentials);
 
     if (platform::cancellation::requested()) {
-        return present_cancellation(request.operation);
+        return finish(present_cancellation(request.operation));
     }
 
     if (result) {
-        return present(*result, full);
+        return finish(present(*result, full));
     } else {
-        return present(result.error());
+        return finish(present(result.error()));
     }
 }
 

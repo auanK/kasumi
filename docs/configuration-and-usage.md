@@ -18,6 +18,10 @@ Launch the interactive configuration wizard:
 kasumi config
 ```
 
+A configuration read failure returns 1; cancellation or EOF at a wizard prompt
+returns 130. EOF or interruption during a prompt stops before that profile
+mutation.
+
 The wizard lists profiles and allows creating, editing, renaming, and deleting them. During creation, it prompts for the profile name, local synchronized path, remote destination, Password, and Password Salt. Profile names contain only letters, digits, `_`, or `-`; the local path must be absolute. Editing changes the configured local and remote paths, not the key. Renaming moves private profile state. Deleting removes local configuration, key, and state, while leaving the synchronized folder and remote objects intact. See [Profile Management](architecture/profile-management.md) for the lifecycle and rollback boundaries. For operational guidance, see [Best Practices](best-practices.md); for troubleshooting operational issues, see [Troubleshooting](troubleshooting.md).
 
 * **Password**: Minimum 12 characters.
@@ -115,6 +119,9 @@ Kasumi downloads the platform archive and its published SHA-256 checksum, verifi
 
 On Windows, Kasumi uses the built-in `tar` command and starts a helper that waits for the original process to exit before replacing the executable. If installation permissions require administrator privileges and the current process lacks them, the updater cancels and instructs the user to run as administrator; it completes the update directly when permissions are sufficient.
 
+Windows update duration ends at installer handoff, not at the separate installer's completion.
+Cancellation is observed at safe stage boundaries and can wait for an ongoing native or network call.
+
 On Linux, `curl`, `tar`, and `sha256sum` must be available. Kasumi installs without root when the executable's directory is writable. If permissions deny replacement, it attempts `pkexec`; it falls back to `sudo` only when authentication through `pkexec` is unavailable and the terminal is interactive.
 
 Installations managed by a package manager must be updated through that manager.
@@ -192,6 +199,19 @@ Unknown or duplicate options, missing values and incompatible combinations fail
 before execution with a localized diagnostic and the relevant Help command on
 stderr. Quote arguments containing spaces; an option-looking path can be
 pass `--` before an option-looking path (such as `--notes.txt` or `-draft.txt`) to treat following arguments as literal operands. Unicode spelling is preserved.
+
+## Operation Output
+
+Each executed public operation prints one final elapsed-time line on stdout:
+`Duration: 12.614 s` (English) or `Duração: 12.614 s` (Portuguese). A monotonic
+clock measures real elapsed time in seconds with three decimal places, including
+success, failure, pending results and cancellation. Sync has one duration line;
+internal operational metrics are separate. Help, version and invalid invocations
+have no operation duration.
+
+Operation messages and errors use stdout; invocation diagnostics and optional
+performance traces use stderr. Interpret the [exit code](#exit-codes) with the
+output; partial results are not full success.
 
 ## Language Selection (i18n)
 

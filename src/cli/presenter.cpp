@@ -93,45 +93,16 @@ std::string format_size(std::uint64_t bytes) {
 }
 
 std::string format_duration(std::chrono::nanoseconds duration) {
-    if (duration < std::chrono::nanoseconds::zero()) {
-        duration = std::chrono::nanoseconds::zero();
-    }
-    if (duration < std::chrono::seconds(1)) {
-        const auto ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(duration)
-                .count();
-        return std::format("{} ms", ms);
-    }
-    if (duration < std::chrono::minutes(1)) {
-        const double s = std::chrono::duration<double>(duration).count();
-        std::string s_str = std::format("{:.1f}", s);
-        if (s_str.ends_with(".0")) {
-            s_str.erase(s_str.size() - 2);
-        }
-        return std::format("{} s", s_str);
-    }
-    const auto total_secs =
-        std::chrono::duration_cast<std::chrono::seconds>(duration).count();
-    const auto mins = total_secs / 60;
-    const auto rem_secs = total_secs % 60;
-    if (mins >= 60) {
-        const auto hours = mins / 60;
-        const auto rem_mins = mins % 60;
-        if (rem_mins > 0 && rem_secs > 0) {
-            return std::format("{} h {} min {} s", hours, rem_mins, rem_secs);
-        }
-        if (rem_mins > 0) {
-            return std::format("{} h {} min", hours, rem_mins);
-        }
-        if (rem_secs > 0) {
-            return std::format("{} h {} s", hours, rem_secs);
-        }
-        return std::format("{} h", hours);
-    }
-    if (rem_secs > 0) {
-        return std::format("{} min {} s", mins, rem_secs);
-    }
-    return std::format("{} min", mins);
+    return std::format("{:.3f} s",
+                       std::chrono::duration<double>(
+                           std::max(duration, std::chrono::nanoseconds::zero()))
+                           .count());
+}
+
+void present_duration(std::chrono::nanoseconds duration) {
+    std::println(
+        "{}",
+        i18n::format(i18n::Key::OperationDuration, format_duration(duration)));
 }
 
 int present_cancellation(application::Operation operation) {
@@ -973,13 +944,6 @@ int present(const application::Response& response, bool full) {
         if (sync->partial) {
             render_pending_paths(sync->pending_paths, full);
             exit_code = 2;
-        } else if (sync->duration.has_value()) {
-            std::println("{}{}{} {}",
-                         style::green,
-                         i18n::tr(i18n::Key::LabelOk),
-                         style::reset,
-                         i18n::format(i18n::Key::SyncCompletedWithDuration,
-                                      format_duration(*sync->duration)));
         } else {
             std::println("{}{}{} {}",
                          style::green,
@@ -1103,13 +1067,18 @@ int present(const application::Response& response, bool full) {
             std::get_if<application::ResolveMissingCompleted>(&response.data);
         ptr && response.operation == application::Operation::ResolveMissing) {
         if (ptr->resolved_count > 0) {
-            std::println("{}{}{} resolved {} missing paths",
+            const auto message =
+                ptr->resolved_count == 1
+                    ? std::string{i18n::tr(i18n::Key::ResolveMissingSingular)}
+                    : i18n::format(i18n::Key::ResolveMissingPlural,
+                                   ptr->resolved_count);
+            std::println("{}{}{} {}",
                          style::green,
                          i18n::tr(i18n::Key::LabelOk),
                          style::reset,
-                         ptr->resolved_count);
+                         message);
         } else {
-            std::println("no unresolved missing paths to resolve");
+            std::println("{}", i18n::tr(i18n::Key::ResolveMissingNone));
         }
         return 0;
     }

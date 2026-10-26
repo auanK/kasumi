@@ -33,6 +33,7 @@ std::string format_size(std::uint64_t bytes);
 
 // Formats a duration into a human-readable representation.
 std::string format_duration(std::chrono::nanoseconds duration);
+void present_duration(std::chrono::nanoseconds duration);
 
 // Displays cancellation message and returns 130.
 int present_cancellation(

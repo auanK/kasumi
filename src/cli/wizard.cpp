@@ -14,8 +14,17 @@
 
 namespace kasumi::cli {
 
-void run_config_wizard(const application::ExecutionEnvironment& environment) {
-    while (true) {
+int run_config_wizard(const application::ExecutionEnvironment& environment) {
+    const auto read_input = [](std::string& value) {
+        if (platform::cancellation::requested())
+            return false;
+        if (!std::getline(std::cin, value)) {
+            platform::cancellation::request();
+            return false;
+        }
+        return !platform::cancellation::requested();
+    };
+    while (!platform::cancellation::requested()) {
         auto profiles_res = application::list_profiles(environment);
         if (!profiles_res) {
             std::println("{}{}{} {}{}",
@@ -24,7 +33,7 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
                          style::reset,
                          i18n::tr(i18n::Key::WizardConfigReadFailed),
                          profiles_res.error().detail);
-            break;
+            return 1;
         }
         std::vector<application::Profile> profiles = std::move(*profiles_res);
 
@@ -42,7 +51,7 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
 
         std::print("{}", i18n::tr(i18n::Key::WizardMenu));
         std::string choice;
-        if (!std::getline(std::cin, choice))
+        if (!read_input(choice))
             break;
         std::println("");
 
@@ -51,7 +60,8 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
         } else if (choice == "n" || choice == "N") {
             std::string new_profile, new_local, new_remote;
             std::print("{}", i18n::tr(i18n::Key::WizardPromptProfileName));
-            std::getline(std::cin, new_profile);
+            if (!read_input(new_profile))
+                break;
             std::println("");
             if (std::ranges::any_of(profiles, [&](const auto& profile) {
                     return profile.name == new_profile;
@@ -66,10 +76,12 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
             }
 
             std::print("{}", i18n::tr(i18n::Key::WizardPromptLocalPath));
-            std::getline(std::cin, new_local);
+            if (!read_input(new_local))
+                break;
             std::println("");
             std::print("{}", i18n::tr(i18n::Key::WizardPromptRemotePath));
-            std::getline(std::cin, new_remote);
+            if (!read_input(new_remote))
+                break;
             std::println("");
             if (!platform::path::from_utf8(new_local).is_absolute()) {
                 std::println(
@@ -123,7 +135,8 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
         } else if (choice == "d" || choice == "D") {
             std::print("{}", i18n::tr(i18n::Key::WizardPromptProfileToDelete));
             std::string target;
-            std::getline(std::cin, target);
+            if (!read_input(target))
+                break;
             std::println("");
 
             auto res = application::delete_profile(environment, target);
@@ -145,7 +158,8 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
         } else if (choice == "e" || choice == "E") {
             std::print("{}", i18n::tr(i18n::Key::WizardPromptProfileToEdit));
             std::string target;
-            std::getline(std::cin, target);
+            if (!read_input(target))
+                break;
             std::println("");
 
             auto it = std::ranges::find_if(profiles, [&](const auto& p) {
@@ -157,13 +171,15 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
                 auto old_remote = it->remote_dir;
 
                 i18n::print(i18n::Key::WizardPromptNewLocalPath, old_local);
-                std::getline(std::cin, new_local);
+                if (!read_input(new_local))
+                    break;
                 std::println("");
                 if (new_local.empty())
                     new_local = old_local;
 
                 i18n::print(i18n::Key::WizardPromptNewRemotePath, old_remote);
-                std::getline(std::cin, new_remote);
+                if (!read_input(new_remote))
+                    break;
                 std::println("");
                 if (new_remote.empty())
                     new_remote = old_remote;
@@ -199,12 +215,14 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
         } else if (choice == "r" || choice == "R") {
             std::print("{}", i18n::tr(i18n::Key::WizardPromptProfileToRename));
             std::string target;
-            std::getline(std::cin, target);
+            if (!read_input(target))
+                break;
             std::println("");
 
             std::print("{}", i18n::tr(i18n::Key::WizardPromptNewProfileName));
             std::string new_name;
-            std::getline(std::cin, new_name);
+            if (!read_input(new_name))
+                break;
             std::println("");
 
             auto res =
@@ -231,6 +249,7 @@ void run_config_wizard(const application::ExecutionEnvironment& environment) {
                          i18n::tr(i18n::Key::WizardInvalidOption));
         }
     }
+    return platform::cancellation::requested() ? 130 : 0;
 }
 
 } // namespace kasumi::cli

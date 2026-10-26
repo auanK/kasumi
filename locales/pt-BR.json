@@ -27,7 +27,8 @@
     "ancestral": "ANCESTRAL",
     "stage": "Etapa",
     "mutation_state": "Estado da mutação",
-    "transport_error": "Erro de transporte"
+    "transport_error": "Erro de transporte",
+    "duration": "Duração: {}"
   },
   "sync": {
     "in_progress": "Sincronizando...",
@@ -369,5 +370,10 @@
     "remote_writers": "Uso: kasumi remote writers <perfil>\n\nLista writers e a barrier de manutenção.\n",
     "remote_health": "Uso: kasumi remote health <perfil>\n\nDiagnóstico remoto completo. Achados retornam 0; falha de inspeção retorna 1.\nNão substitui auditoria de conteúdo do fsck.\n",
     "options": "\nOpção global: --lang <código>, antes do comando (en, pt-BR ou catálogo externo).\nAjuda: -h, --help. Opções repetidas, desconhecidas ou sem valor são rejeitadas.\n"
+  },
+  "resolve_missing": {
+    "singular": "1 caminho ausente resolvido",
+    "plural": "{} caminhos ausentes resolvidos",
+    "none": "Nenhum caminho ausente pendente para resolver"
   }
 }

@@ -1,6 +1,8 @@
 #include "cli/update.hpp"
 
 #include "cli/i18n.hpp"
+#include "cli/presenter.hpp"
+#include "platform/cancellation.hpp"
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
 #include "platform/random.hpp"
@@ -2356,6 +2358,9 @@ void select_helper_language(std::string_view language) {
 }
 
 int report_failure(std::string_view detail) {
+    if (platform::cancellation::requested()) {
+        return present_cancellation(application::Operation::Preview);
+    }
     std::println("{}", i18n::format(i18n::Key::UpdateFailed, detail));
     return 1;
 }
@@ -3211,6 +3216,9 @@ int run_linux_install_helper(int argc, char* argv[]) {
 #endif
 
 int run_public_update(bool allow_elevation = true) {
+    if (platform::cancellation::requested()) {
+        return present_cancellation(application::Operation::Preview);
+    }
 #if defined(_WIN32)
     (void)allow_elevation;
 #endif
@@ -3293,6 +3301,9 @@ int run_public_update(bool allow_elevation = true) {
     if (!releases) {
         return report_failure(releases.error());
     }
+    if (platform::cancellation::requested()) {
+        return present_cancellation(application::Operation::Preview);
+    }
     const auto selected = select_release_index(*releases);
     if (!selected) {
         return report_failure(
@@ -3343,6 +3354,9 @@ int run_public_update(bool allow_elevation = true) {
         prepare_verified_package(archive, digest, *package, *workspace);
     if (!prepared) {
         return report_failure(prepared.error());
+    }
+    if (platform::cancellation::requested()) {
+        return present_cancellation(application::Operation::Preview);
     }
     std::println("{}", i18n::tr(i18n::Key::UpdateInstalling));
 #if defined(_WIN32)

@@ -8,7 +8,7 @@
 namespace kasumi::cli {
 
 // Interactively creates or edits profiles.
-void run_config_wizard(const application::ExecutionEnvironment& environment);
+int run_config_wizard(const application::ExecutionEnvironment& environment);
 
 } // namespace kasumi::cli
 

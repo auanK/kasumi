@@ -37,6 +37,10 @@ constexpr KeyMapping KEY_MAPPINGS[] = {
     {Key::LabelStage, "labels.stage"},
     {Key::LabelMutationState, "labels.mutation_state"},
     {Key::LabelTransportError, "labels.transport_error"},
+    {Key::OperationDuration, "labels.duration"},
+    {Key::ResolveMissingSingular, "resolve_missing.singular"},
+    {Key::ResolveMissingPlural, "resolve_missing.plural"},
+    {Key::ResolveMissingNone, "resolve_missing.none"},
 
     {Key::HelpText, "help_text"},
     {Key::HelpSync, "command_help.sync"},

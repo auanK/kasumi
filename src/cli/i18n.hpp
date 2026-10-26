@@ -28,6 +28,10 @@ enum class Key {
     LabelStage,
     LabelMutationState,
     LabelTransportError,
+    OperationDuration,
+    ResolveMissingSingular,
+    ResolveMissingPlural,
+    ResolveMissingNone,
 
     // Help Text
     HelpText,

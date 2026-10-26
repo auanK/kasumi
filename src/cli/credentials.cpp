@@ -213,7 +213,8 @@ std::string read_secret(const char* environment_name,
     std::cout << prompt << std::flush;
     auto secret = interactive ? read_console_secret() : [&] {
         std::string value;
-        std::getline(std::cin, value);
+        if (!std::getline(std::cin, value))
+            platform::cancellation::request();
         return value;
     }();
     std::cout << "\n\n";
