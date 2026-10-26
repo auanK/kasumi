@@ -394,7 +394,7 @@ TEST(GarbageCollectionTest, RemovesOnlyRedundantValidCommitVariants) {
         object_present(fixture.storage.transport, repository.orphan_content));
 }
 
-TEST(GarbageCollectionTest, PreservesCorruptOrphanContent) {
+TEST(GarbageCollectionTest, RemovesCorruptOrphanContent) {
     LocalFixture fixture;
     publish_object(fixture.storage.transport,
                    fixture.storage.workspace,
@@ -414,10 +414,10 @@ TEST(GarbageCollectionTest, PreservesCorruptOrphanContent) {
 
     const auto result = fixture.collect();
     ASSERT_TRUE(result.has_value()) << result.error().detail;
-    EXPECT_EQ(result->candidate_objects, 1U);
-    EXPECT_EQ(result->removed_objects, 1U);
+    EXPECT_EQ(result->candidate_objects, 2U);
+    EXPECT_EQ(result->removed_objects, 2U);
     EXPECT_FALSE(object_present(fixture.storage.transport, valid));
-    EXPECT_TRUE(object_present(fixture.storage.transport, corrupt));
+    EXPECT_FALSE(object_present(fixture.storage.transport, corrupt));
 }
 
 TEST(GarbageCollectionTest, PreservesReachableContentAndRequiredHistory) {
@@ -912,7 +912,7 @@ TEST(GarbageCollectionTest,
     EXPECT_TRUE(object_present(fixture.transport, orphans[2]));
 }
 
-TEST(GarbageCollectionTest, AnalysisOnlyDoesNotCountCorruptCandidates) {
+TEST(GarbageCollectionTest, AnalysisOnlyCountsCorruptCandidates) {
     FakeFixture fixture("gc-analysis-only-corrupt");
     publish_object(
         fixture.transport, fixture.workspace, commit_with_file("live"), "head");
@@ -925,7 +925,7 @@ TEST(GarbageCollectionTest, AnalysisOnlyDoesNotCountCorruptCandidates) {
     const auto result = fixture.collect();
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_TRUE(result->analysis_only);
-    EXPECT_EQ(result->candidate_objects, 0U);
+    EXPECT_EQ(result->candidate_objects, 1U);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
 }
 
@@ -1299,7 +1299,8 @@ TEST(GarbageCollectionTest, ObjectsAppearingAfterObservationAreNotPlanned) {
         object_present(fixture.transport, object_path(repository.redundant_variant)));
 }
 
-TEST(GarbageCollectionTest, CandidateMissingDuringAnalysisIsNotPlanned) {
+TEST(GarbageCollectionTest,
+     CandidateMissingAfterListRemainsInFrozenPlanAndAcknowledgesAbsent) {
     FakeFixture fixture("gc-missing-candidate");
     publish_object(
         fixture.transport, fixture.workspace, commit_with_file("live"), "head");
@@ -1317,9 +1318,123 @@ TEST(GarbageCollectionTest, CandidateMissingDuringAnalysisIsNotPlanned) {
 
     const auto result = fixture.collect();
     ASSERT_TRUE(result.has_value()) << result.error().detail;
-    EXPECT_EQ(result->candidate_objects, 0U);
-    EXPECT_EQ(result->removed_objects, 0U);
-    EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
+    EXPECT_EQ(result->candidate_objects, 1U);
+    EXPECT_EQ(result->removed_objects, 1U);
+    EXPECT_EQ(candidate_remove_attempts(*fixture.state), 1U);
+}
+
+TEST(GarbageCollectionTest, OrphanContentRemovedWithoutPayloadGet) {
+    FakeFixture fixture("gc-orphan-no-get");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    const auto live =
+        put_content(fixture.transport, fixture.workspace, "live", "live");
+    const auto orphan =
+        put_content(fixture.transport, fixture.workspace, "orphan", "orphan");
+    fixture.state->observed_payload_identifiers.insert(orphan);
+
+    std::vector<std::string> get_calls;
+    fixture.state->on_operation =
+        [&](FakeState&, std::string_view op, std::string_view id) {
+            if (op == "get") {
+                get_calls.emplace_back(id);
+            }
+        };
+
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->candidate_objects, 1U);
+    EXPECT_EQ(result->removed_objects, 1U);
+    EXPECT_TRUE(object_present(fixture.transport, live));
+    EXPECT_FALSE(object_present(fixture.transport, orphan));
+    EXPECT_EQ(fixture.state->orphan_payload_get_count, 0U);
+    EXPECT_EQ(std::ranges::count(get_calls, orphan), 0);
+}
+
+TEST(GarbageCollectionTest, OrphanRemovalSucceedsWhenContentGetFails) {
+    FakeFixture fixture("gc-orphan-get-fail");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    const auto live =
+        put_content(fixture.transport, fixture.workspace, "live", "live");
+    const auto orphan =
+        put_content(fixture.transport, fixture.workspace, "orphan", "orphan");
+    fixture.state->fail_get_identifier = orphan;
+
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->candidate_objects, 1U);
+    EXPECT_EQ(result->removed_objects, 1U);
+    EXPECT_TRUE(object_present(fixture.transport, live));
+    EXPECT_FALSE(object_present(fixture.transport, orphan));
+}
+
+TEST(GarbageCollectionTest, ManyOrphansCollectedWithZeroContentGets) {
+    FakeFixture fixture("gc-many-orphans");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    const auto live =
+        put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    std::unordered_set<std::string> orphan_ids;
+    for (std::size_t i = 0; i < 50; ++i) {
+        const auto id = put_content(fixture.transport,
+                                    fixture.workspace,
+                                    "orphan-" + std::to_string(i),
+                                    "orphan-" + std::to_string(i));
+        orphan_ids.insert(id);
+        fixture.state->observed_payload_identifiers.insert(id);
+    }
+
+    std::vector<std::string> get_calls;
+    fixture.state->on_operation =
+        [&](FakeState&, std::string_view op, std::string_view id) {
+            if (op == "get") {
+                get_calls.emplace_back(id);
+            }
+        };
+
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->candidate_objects, 50U);
+    EXPECT_EQ(result->removed_objects, 50U);
+    EXPECT_TRUE(object_present(fixture.transport, live));
+    EXPECT_EQ(fixture.state->orphan_payload_get_count, 0U);
+    EXPECT_EQ(fixture.state->full_list_count, 1U);
+    for (const auto& id : orphan_ids) {
+        EXPECT_FALSE(object_present(fixture.transport, id));
+        EXPECT_EQ(std::ranges::count(get_calls, id), 0);
+        EXPECT_EQ(std::ranges::count(fixture.state->gc_events,
+                                     "physical_hash:" + id),
+                  0);
+    }
+}
+
+TEST(GarbageCollectionTest, ReferencedCorruptContentIsPreservedWithoutGet) {
+    FakeFixture fixture("gc-referenced-corrupt");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_corrupt_content(fixture.transport, fixture.workspace, "live", "live");
+    const auto live = content_identifier("live");
+    const auto orphan =
+        put_content(fixture.transport, fixture.workspace, "orphan", "orphan");
+
+    std::vector<std::string> get_calls;
+    fixture.state->on_operation =
+        [&](FakeState&, std::string_view op, std::string_view id) {
+            if (op == "get") {
+                get_calls.emplace_back(id);
+            }
+        };
+
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->candidate_objects, 1U);
+    EXPECT_EQ(result->removed_objects, 1U);
+    EXPECT_TRUE(object_present(fixture.transport, live));
+    EXPECT_FALSE(object_present(fixture.transport, orphan));
+    EXPECT_EQ(std::ranges::count(get_calls, live), 0);
+    EXPECT_EQ(std::ranges::count(get_calls, orphan), 0);
 }
 
 TEST(GarbageCollectionTest, RemovalFailureIsNotRetried) {
