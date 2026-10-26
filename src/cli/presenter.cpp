@@ -17,6 +17,54 @@
 
 namespace kasumi::cli {
 
+int present_help(std::string_view topic) {
+    constexpr std::pair<std::string_view, i18n::Key> topics[]{
+        {"sync", i18n::Key::HelpSync},
+        {"status", i18n::Key::HelpStatus},
+        {"fsck", i18n::Key::HelpFsck},
+        {"gc", i18n::Key::HelpGc},
+        {"gc remove-writer", i18n::Key::HelpGcRemoveWriter},
+        {"gc remove-barrier", i18n::Key::HelpGcRemoveBarrier},
+        {"resolve-missing", i18n::Key::HelpResolveMissing},
+        {"remote", i18n::Key::HelpRemote},
+        {"config", i18n::Key::HelpConfig},
+        {"update", i18n::Key::HelpUpdate},
+        {"remote heads", i18n::Key::HelpRemoteHeads},
+        {"remote tree", i18n::Key::HelpRemoteTree},
+        {"remote commits", i18n::Key::HelpRemoteCommits},
+        {"remote summary", i18n::Key::HelpRemoteSummary},
+        {"remote stat", i18n::Key::HelpRemoteStat},
+        {"remote commit", i18n::Key::HelpRemoteCommit},
+        {"remote get", i18n::Key::HelpRemoteGet},
+        {"remote epochs", i18n::Key::HelpRemoteEpochs},
+        {"remote epoch", i18n::Key::HelpRemoteEpoch},
+        {"remote contents", i18n::Key::HelpRemoteContents},
+        {"remote content", i18n::Key::HelpRemoteContent},
+        {"remote markers", i18n::Key::HelpRemoteMarkers},
+        {"remote objects", i18n::Key::HelpRemoteObjects},
+        {"remote orphans", i18n::Key::HelpRemoteOrphans},
+        {"remote writers", i18n::Key::HelpRemoteWriters},
+        {"remote health", i18n::Key::HelpRemoteHealth},
+    };
+    for (const auto& [name, key] : topics) {
+        if (name == topic) {
+            std::print("{}{}", i18n::tr(key), i18n::tr(i18n::Key::HelpOptions));
+            return 0;
+        }
+    }
+    std::print("{}", i18n::tr(i18n::Key::HelpText));
+    return 0;
+}
+
+int present_parse_error(std::string_view topic) {
+    const std::string suffix = topic.empty() ? "" : " " + std::string{topic};
+    std::println(stderr,
+                 "{} {}",
+                 i18n::tr(i18n::Key::LabelError),
+                 i18n::format(i18n::Key::ErrorInvalidArguments, suffix));
+    return 1;
+}
+
 std::string format_size(std::uint64_t bytes) {
     if (bytes < 1024) {
         return std::format("{} bytes", bytes);
@@ -1000,12 +1048,13 @@ int present(const application::Response& response, bool full) {
                 std::get_if<application::ManualBarrierRemovalCompleted>(
                     &response.data)) {
             if (ptr->outcome == application::BarrierRemovalOutcome::Removed) {
-                std::println("{}{}{} {}",
-                             style::green,
-                             i18n::tr(i18n::Key::LabelOk),
-                             style::reset,
-                             i18n::format(i18n::Key::ManualBarrierRemovalCompleted,
-                                          ptr->identifier));
+                std::println(
+                    "{}{}{} {}",
+                    style::green,
+                    i18n::tr(i18n::Key::LabelOk),
+                    style::reset,
+                    i18n::format(i18n::Key::ManualBarrierRemovalCompleted,
+                                 ptr->identifier));
             } else {
                 std::println("{}{}{} {}",
                              style::green,
@@ -1014,10 +1063,11 @@ int present(const application::Response& response, bool full) {
                              i18n::tr(i18n::Key::ManualBarrierRemovalAbsent));
             }
             if (ptr->active_writers_count > 0) {
-                std::println("{} {}",
-                             i18n::tr(i18n::Key::LabelWarning),
-                             i18n::format(i18n::Key::ManualBarrierRemovalWritersRemain,
-                                          ptr->active_writers_count));
+                std::println(
+                    "{} {}",
+                    i18n::tr(i18n::Key::LabelWarning),
+                    i18n::format(i18n::Key::ManualBarrierRemovalWritersRemain,
+                                 ptr->active_writers_count));
             }
             return 0;
         }
@@ -1296,34 +1346,44 @@ int present(const application::Error& error) {
                                       error.detail));
             if (error.barrier_removal) {
                 const auto& br = *error.barrier_removal;
-                i18n::Key stage_key = i18n::Key::BarrierRemovalStageCheckingPresence;
+                i18n::Key stage_key =
+                    i18n::Key::BarrierRemovalStageCheckingPresence;
                 switch (br.stage) {
                     case application::BarrierRemovalStage::CheckingPresence:
-                        stage_key = i18n::Key::BarrierRemovalStageCheckingPresence;
+                        stage_key =
+                            i18n::Key::BarrierRemovalStageCheckingPresence;
                         break;
                     case application::BarrierRemovalStage::DownloadingPayload:
-                        stage_key = i18n::Key::BarrierRemovalStageDownloadingPayload;
+                        stage_key =
+                            i18n::Key::BarrierRemovalStageDownloadingPayload;
                         break;
                     case application::BarrierRemovalStage::ValidatingPayload:
-                        stage_key = i18n::Key::BarrierRemovalStageValidatingPayload;
+                        stage_key =
+                            i18n::Key::BarrierRemovalStageValidatingPayload;
                         break;
                     case application::BarrierRemovalStage::CheckingWriters:
-                        stage_key = i18n::Key::BarrierRemovalStageCheckingWriters;
+                        stage_key =
+                            i18n::Key::BarrierRemovalStageCheckingWriters;
                         break;
-                    case application::BarrierRemovalStage::VerifyingPhysicalIdentity:
-                        stage_key = i18n::Key::BarrierRemovalStageVerifyingPhysicalIdentity;
+                    case application::BarrierRemovalStage::
+                        VerifyingPhysicalIdentity:
+                        stage_key = i18n::Key::
+                            BarrierRemovalStageVerifyingPhysicalIdentity;
                         break;
                     case application::BarrierRemovalStage::Removing:
                         stage_key = i18n::Key::BarrierRemovalStageRemoving;
                         break;
                     case application::BarrierRemovalStage::ConfirmingAbsence:
-                        stage_key = i18n::Key::BarrierRemovalStageConfirmingAbsence;
+                        stage_key =
+                            i18n::Key::BarrierRemovalStageConfirmingAbsence;
                         break;
                 }
-                i18n::Key state_key = i18n::Key::BarrierRemovalMutationNotAttempted;
+                i18n::Key state_key =
+                    i18n::Key::BarrierRemovalMutationNotAttempted;
                 switch (br.mutation_state) {
                     case application::BarrierRemovalMutationState::NotAttempted:
-                        state_key = i18n::Key::BarrierRemovalMutationNotAttempted;
+                        state_key =
+                            i18n::Key::BarrierRemovalMutationNotAttempted;
                         break;
                     case application::BarrierRemovalMutationState::Confirmed:
                         state_key = i18n::Key::BarrierRemovalMutationConfirmed;

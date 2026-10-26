@@ -4,7 +4,8 @@ The CLI handles profile management, binary update, application operations, and
 remote inspection. Application operations include Sync, Preview, Status, Fsck,
 Garbage Collection, Resolve Missing, and manual writer removal. Preview and
 Status share a planner; remote inspection and binary update have separate
-flows. The CLI selects language, strips the display-only `--full` switch,
+flows. The CLI selects language from a global `--lang <code>` prefix, recognizes
+`--full` only in Sync/Status command options,
 installs interruption handlers, obtains environment credentials, and presents
 results and errors. Syntax and environment variables are in
 [Configuration and Usage](../configuration-and-usage.md).

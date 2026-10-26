@@ -2,14 +2,51 @@
 
 #include "application/history_storage/remote_layout.hpp"
 
+#include <algorithm>
+#include <array>
 #include <string_view>
 
 namespace kasumi::cli {
 namespace {
 
+constexpr std::array<std::string_view, 26> help_topics{"sync",
+                                                       "status",
+                                                       "fsck",
+                                                       "gc",
+                                                       "gc remove-writer",
+                                                       "gc remove-barrier",
+                                                       "resolve-missing",
+                                                       "remote",
+                                                       "config",
+                                                       "update",
+                                                       "remote heads",
+                                                       "remote tree",
+                                                       "remote commits",
+                                                       "remote summary",
+                                                       "remote stat",
+                                                       "remote commit",
+                                                       "remote get",
+                                                       "remote epochs",
+                                                       "remote epoch",
+                                                       "remote contents",
+                                                       "remote content",
+                                                       "remote markers",
+                                                       "remote objects",
+                                                       "remote orphans",
+                                                       "remote writers",
+                                                       "remote health"};
+
+bool operand(const char* value) {
+    return value != nullptr && value[0] != '\0' && value[0] != '-';
+}
+
+bool literal_operand(const char* value) noexcept {
+    return value != nullptr && value[0] != '\0';
+}
+
 std::expected<Invocation, ParseError>
 request(application::Operation operation, int argc, char* argv[]) {
-    if (argc != 3 || argv[2] == nullptr || argv[2][0] == '\0') {
+    if (argc != 3 || !operand(argv[2])) {
         return std::unexpected(ParseError{});
     }
     return application::Request{.operation = operation,
@@ -32,11 +69,54 @@ bool valid_commit_id(std::string_view id) {
 
 } // namespace
 
+std::string help_topic(int argc, char* argv[]) {
+    if (argc < 2 || argv == nullptr || argv[1] == nullptr)
+        return {};
+    const std::string command{argv[1]};
+    if (std::ranges::find(help_topics, command) == help_topics.end())
+        return {};
+    if ((command == "remote" || command == "gc") && argc > 2 &&
+        argv[2] != nullptr) {
+        const auto topic = command + " " + argv[2];
+        if (std::ranges::find(help_topics, topic) != help_topics.end())
+            return topic;
+    }
+    return command;
+}
+
 std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
     if (argc < 2 || argv == nullptr || argv[1] == nullptr) {
         return std::unexpected(ParseError{});
     }
+    for (int index = 1; index < argc; ++index) {
+        if (argv[index] == nullptr)
+            return std::unexpected(ParseError{});
+    }
     const std::string_view command{argv[1]};
+    if (argc == 2 && (command == "--help" || command == "-h")) {
+        return HelpInvocation{};
+    }
+    bool has_delimiter = false;
+    for (int index = 1; index < argc - 1; ++index) {
+        if (argv[index] != nullptr && std::string_view{argv[index]} == "--") {
+            has_delimiter = true;
+            break;
+        }
+    }
+    const std::string_view last{argv[argc - 1]};
+    if (!has_delimiter && (last == "--help" || last == "-h")) {
+        const auto topic = help_topic(argc - 1, argv);
+        const int topic_arguments =
+            topic.find(' ') == std::string::npos ? 1 : 2;
+        if (!topic.empty() && argc == topic_arguments + 2)
+            return HelpInvocation{topic};
+        const auto invocation = parse(argc - 1, argv);
+        if (invocation &&
+            !std::holds_alternative<HelpInvocation>(*invocation)) {
+            return HelpInvocation{topic};
+        }
+        return std::unexpected(ParseError{});
+    }
     if (command == "update") {
         return argc == 2
                    ? std::expected<Invocation, ParseError>{UpdateInvocation{}}
@@ -48,11 +128,7 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                          : std::unexpected(ParseError{});
     }
     if (command == "sync") {
-        if (argc < 3 || argc > 5 || argv[2] == nullptr || argv[2][0] == '\0') {
-            return std::unexpected(ParseError{});
-        }
-        const std::string_view profile{argv[2]};
-        if (profile.starts_with("--")) {
+        if (argc < 3 || argc > 5 || !operand(argv[2])) {
             return std::unexpected(ParseError{});
         }
         bool dry_run = false;
@@ -65,16 +141,20 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
             }
             const std::string_view flag{argv[i]};
             if (flag == "--dry-run") {
-                if (dry_run) return std::unexpected(ParseError{});
+                if (dry_run)
+                    return std::unexpected(ParseError{});
                 dry_run = true;
             } else if (flag == "--initial") {
-                if (initial) return std::unexpected(ParseError{});
+                if (initial)
+                    return std::unexpected(ParseError{});
                 initial = true;
             } else if (flag == "--audit-inventory") {
-                if (audit_inventory) return std::unexpected(ParseError{});
+                if (audit_inventory)
+                    return std::unexpected(ParseError{});
                 audit_inventory = true;
             } else if (flag == "--trust-existing-content") {
-                if (trust_existing_content) return std::unexpected(ParseError{});
+                if (trust_existing_content)
+                    return std::unexpected(ParseError{});
                 trust_existing_content = true;
             } else {
                 return std::unexpected(ParseError{});
@@ -107,8 +187,7 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
     if (command == "gc") {
         if (argc >= 3 && argv[2] != nullptr &&
             std::string_view{argv[2]} == "remove-writer") {
-            if (argc != 5 || argv[3] == nullptr || argv[3][0] == '\0' ||
-                argv[4] == nullptr ||
+            if (argc != 5 || !operand(argv[3]) || argv[4] == nullptr ||
                 !application::history_storage::valid_writer_identifier(
                     argv[4])) {
                 return std::unexpected(ParseError{});
@@ -120,9 +199,7 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         }
         if (argc >= 3 && argv[2] != nullptr &&
             std::string_view{argv[2]} == "remove-barrier") {
-            if (argc != 5 || argv[3] == nullptr || argv[3][0] == '\0' ||
-                std::string_view{argv[3]}.starts_with("--") ||
-                argv[4] == nullptr ||
+            if (argc != 5 || !operand(argv[3]) || argv[4] == nullptr ||
                 std::string_view{argv[4]} != "--confirm-abandoned") {
                 return std::unexpected(ParseError{});
             }
@@ -142,6 +219,8 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
             return std::unexpected(ParseError{});
         }
         const std::string_view inspection{argv[2]};
+        if (!operand(argv[3]))
+            return std::unexpected(ParseError{});
         if (inspection == "heads" && argc == 4) {
             return application::InspectionRequest{
                 .operation = application::InspectionOperation::RemoteHeads,
@@ -154,7 +233,7 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         }
         if (inspection == "tree" && argc == 6 && argv[4] != nullptr &&
             argv[5] != nullptr && std::string_view{argv[4]} == "--head" &&
-            !std::string_view{argv[5]}.empty()) {
+            operand(argv[5])) {
             return application::InspectionRequest{
                 .operation = application::InspectionOperation::RemoteTree,
                 .profile_name = argv[3],
@@ -170,12 +249,21 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 .operation = application::InspectionOperation::RemoteSummary,
                 .profile_name = argv[3]};
         }
-        if (inspection == "stat" && argc == 5 && argv[4] != nullptr &&
-            !std::string_view{argv[4]}.empty()) {
-            return application::InspectionRequest{
-                .operation = application::InspectionOperation::RemoteStat,
-                .profile_name = argv[3],
-                .logical_path = std::string{argv[4]}};
+        if (inspection == "stat") {
+            if (argc == 5 && argv[4] != nullptr && operand(argv[4])) {
+                return application::InspectionRequest{
+                    .operation = application::InspectionOperation::RemoteStat,
+                    .profile_name = argv[3],
+                    .logical_path = std::string{argv[4]}};
+            }
+            if (argc == 6 && argv[4] != nullptr && argv[5] != nullptr &&
+                std::string_view{argv[4]} == "--" && literal_operand(argv[5])) {
+                return application::InspectionRequest{
+                    .operation = application::InspectionOperation::RemoteStat,
+                    .profile_name = argv[3],
+                    .logical_path = std::string{argv[5]}};
+            }
+            return std::unexpected(ParseError{});
         }
         if (inspection == "commit" && argc == 5 && argv[4] != nullptr &&
             valid_commit_id(argv[4])) {
@@ -184,14 +272,35 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 .profile_name = argv[3],
                 .commit_id = std::string{argv[4]}};
         }
-        if (inspection == "get" && argc == 6 && argv[4] != nullptr &&
-            argv[5] != nullptr && !std::string_view{argv[4]}.empty() &&
-            !std::string_view{argv[5]}.empty()) {
-            return application::InspectionRequest{
-                .operation = application::InspectionOperation::RemoteGet,
-                .profile_name = argv[3],
-                .logical_path = std::string{argv[4]},
-                .destination_path = std::string{argv[5]}};
+        if (inspection == "get") {
+            if (argc == 6 && argv[4] != nullptr && argv[5] != nullptr &&
+                operand(argv[4]) && operand(argv[5])) {
+                return application::InspectionRequest{
+                    .operation = application::InspectionOperation::RemoteGet,
+                    .profile_name = argv[3],
+                    .logical_path = std::string{argv[4]},
+                    .destination_path = std::string{argv[5]}};
+            }
+            if (argc == 7 && argv[4] != nullptr && argv[5] != nullptr &&
+                argv[6] != nullptr) {
+                if (std::string_view{argv[4]} == "--" &&
+                    literal_operand(argv[5]) && literal_operand(argv[6])) {
+                    return application::InspectionRequest{
+                        .operation = application::InspectionOperation::RemoteGet,
+                        .profile_name = argv[3],
+                        .logical_path = std::string{argv[5]},
+                        .destination_path = std::string{argv[6]}};
+                }
+                if (operand(argv[4]) && std::string_view{argv[5]} == "--" &&
+                    literal_operand(argv[6])) {
+                    return application::InspectionRequest{
+                        .operation = application::InspectionOperation::RemoteGet,
+                        .profile_name = argv[3],
+                        .logical_path = std::string{argv[4]},
+                        .destination_path = std::string{argv[6]}};
+                }
+            }
+            return std::unexpected(ParseError{});
         }
         if (inspection == "epochs" && argc == 4) {
             return application::InspectionRequest{
@@ -199,25 +308,23 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 .profile_name = argv[3]};
         }
         if (inspection == "epoch" && argc == 5 && argv[4] != nullptr &&
-            !std::string_view{argv[4]}.empty()) {
+            operand(argv[4])) {
             return application::InspectionRequest{
                 .operation = application::InspectionOperation::RemoteEpoch,
                 .profile_name = argv[3],
                 .epoch_selector = std::string{argv[4]}};
         }
-        if (inspection == "contents" && argc == 4 &&
-            std::string_view{argv[3]} != "--audit") {
+        if (inspection == "contents" && argc == 4) {
             return application::InspectionRequest{
                 .operation = application::InspectionOperation::RemoteContents,
                 .profile_name = argv[3]};
         }
         if (inspection == "contents" && argc == 5 && argv[4] != nullptr &&
-            std::string_view{argv[3]} == "--audit" &&
-            !std::string_view{argv[4]}.empty()) {
+            std::string_view{argv[4]} == "--audit") {
             return application::InspectionRequest{
                 .operation =
                     application::InspectionOperation::RemoteContentsAudit,
-                .profile_name = argv[4]};
+                .profile_name = argv[3]};
         }
         if (inspection == "content" && argc == 5 && argv[4] != nullptr &&
             valid_commit_id(argv[4])) {

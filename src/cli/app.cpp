@@ -32,16 +32,32 @@ int run(int argc, char* argv[]) {
         std::string_view{argv[1]}.starts_with("--kasumi-update-")) {
         return update::run(argc, argv);
     }
+    if (argc < 1 || argv == nullptr) {
+        i18n::set_language(i18n::Language::English);
+        return present_parse_error({});
+    }
+    for (int index = 0; index < argc; ++index) {
+        if (argv[index] == nullptr) {
+            i18n::init_language(0, nullptr);
+            return present_parse_error({});
+        }
+    }
     i18n::init_language(argc, argv);
     const auto sanitized = i18n::extract_language_argument(argc, argv);
+    const bool supports_full =
+        sanitized.size() > 2 && !sanitized[2].empty() &&
+        sanitized[2].front() != '-' &&
+        (sanitized[1] == "sync" || sanitized[1] == "status");
     bool full = false;
+    bool invalid_options = false;
     std::vector<std::string> without_full;
-    without_full.reserve(sanitized.size());
-    for (const auto& arg : sanitized) {
-        if (arg == "--full") {
+    for (std::size_t index = 0; index < sanitized.size(); ++index) {
+        const auto& argument = sanitized[index];
+        if (supports_full && index >= 3 && argument == "--full") {
+            invalid_options |= full;
             full = true;
         } else {
-            without_full.push_back(arg);
+            without_full.push_back(argument);
         }
     }
     std::vector<char*> sanitized_ptrs;
@@ -51,40 +67,43 @@ int run(int argc, char* argv[]) {
     }
     const int effective_argc = static_cast<int>(sanitized_ptrs.size());
     char** effective_argv = sanitized_ptrs.data();
+    if (invalid_options) {
+        i18n::init_language(argc, argv);
+        return present_parse_error(help_topic(effective_argc, effective_argv));
+    }
 
-    const bool no_args = effective_argc == 1;
-    const bool is_help = effective_argc == 2 && effective_argv != nullptr &&
-                         effective_argv[1] != nullptr &&
-                         (std::string_view{effective_argv[1]} == "help" ||
-                          std::string_view{effective_argv[1]} == "--help" ||
-                          std::string_view{effective_argv[1]} == "-h");
+    const bool no_args = argc == 1;
     const bool is_version =
         effective_argc == 2 && effective_argv != nullptr &&
         effective_argv[1] != nullptr &&
-        (std::string_view{effective_argv[1]} == "version" ||
-         std::string_view{effective_argv[1]} == "--version" ||
+        (std::string_view{effective_argv[1]} == "--version" ||
          std::string_view{effective_argv[1]} == "-v");
 
-    if (no_args || is_help) {
-        std::print("{}", i18n::tr(i18n::Key::HelpText));
-        return no_args ? 1 : 0;
+    if (no_args) {
+        present_help({});
+        return 1;
     }
 
     if (is_version) {
         std::print("kasumi version {}\n", KASUMI_VERSION);
         return 0;
     }
-    platform::cancellation::reset();
-    std::signal(SIGINT, request_cancellation);
-    std::signal(SIGTERM, request_cancellation);
     auto parse_result = parse(effective_argc, effective_argv);
     if (!parse_result) {
         if (parse_result.error().unsupported_sync_audit_combination) {
             std::println(
                 stderr, "{}", i18n::tr(i18n::Key::ErrorSyncAuditCombination));
         }
+        present_parse_error(help_topic(effective_argc, effective_argv));
         return parse_result.error().exit_code;
     }
+    if (const auto* help = std::get_if<HelpInvocation>(&*parse_result)) {
+        return present_help(help->topic);
+    }
+
+    platform::cancellation::reset();
+    std::signal(SIGINT, request_cancellation);
+    std::signal(SIGTERM, request_cancellation);
 
     if (std::holds_alternative<UpdateInvocation>(*parse_result)) {
         return update::run(effective_argc, effective_argv);

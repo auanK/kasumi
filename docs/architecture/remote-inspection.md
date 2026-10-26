@@ -17,7 +17,7 @@ These are point-in-time diagnostics, **not** a consistent remote snapshot agains
 | Question | Operation owner |
 |---|---|
 | Which heads, Commits, selected Snapshot, summary, or Epochs exist? | [History and Epoch Inspection](remote-history-inspection.md): `heads`, `tree`, `commits`, `commit`, `summary`, `epochs`, `epoch` |
-| What is in the effective tree, and which content bytes authenticate? | [Content Inspection](remote-content-inspection.md): `stat`, `get`, `contents`, `contents --audit`, `content` |
+| What is in the effective tree, and which content bytes authenticate? | [Content Inspection](remote-content-inspection.md): `stat`, `get`, `contents`, `contents <profile> --audit`, `content` |
 | Which physical markers/objects, orphan candidates, writers, or health reasons exist? | [Maintenance Inspection](remote-maintenance-inspection.md): `markers`, `objects`, `orphans`, `writers`, `health` |
 
 The [Remote Layout](remote-layout.md) defines keyed object names and Commit ID versus Ciphertext ID; [History and Concurrency](history-and-concurrency.md) explains logical heads and effective-tree resolution. For operations that **change** remote state, see [Synchronization](synchronization.md) and [Garbage Collection](garbage-collection.md). GC performs direct deletion only after one authenticated observation and validation of the complete global deletion plan.

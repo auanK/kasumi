@@ -232,8 +232,8 @@ For a real rclone backend, obtain explicit permission for a dedicated parent
 outside any existing vault, inspect that exact path read-only, and start small:
 
 ```powershell
-rclone lsf "kasumi:g-cert" --max-depth 1
-python tests/operational/benchmark_gc.py --binary build-bench/tests/kasumi_benchmark_gc.exe --output benchmark-results/gc-remote-100 --remote-parent "kasumi:g-cert" --confirm-disposable-parent --candidates 100 --samples 1
+rclone lsf "test-remote:disposable-parent" --max-depth 1
+python tests/operational/benchmark_gc.py --binary build-bench/tests/kasumi_benchmark_gc.exe --output benchmark-results/gc-remote-100 --remote-parent "test-remote:disposable-parent" --confirm-disposable-parent --candidates 100 --samples 1
 ```
 
 Pass the parent as `remote:path` without a trailing slash. The harness creates a
@@ -253,7 +253,7 @@ Inspect the 100-object result before scheduling 1,000 or 5,000 objects in anothe
 new output directory. A 20,000-object remote run additionally requires
 `--confirm-large-remote` after reviewing provider costs and limits. The default
 local candidate list includes 20,000, so always specify remote sizes explicitly.
-Each run performs sequential candidate DELETEs and may be slow or rate limited.
+Each run performs bounded batches of at most eight candidate DELETEs and may be slow or rate limited.
 The report keeps Kasumi transport/RC metrics separate from unavailable internal
 provider retries (`null`); successful local/rclone-local tests do not certify a
 cloud provider. Never use purge/delete commands or automatic barrier recovery
@@ -264,8 +264,8 @@ physical SQLite databases, and real rclone local/cloud storage. Keep all output
 outside the repository; each run preserves its exclusive namespace and artifacts:
 
 ```powershell
-python tests/operational/benchmark_journal_e2e.py --binary build-clang64-release/kasumi.exe --rclone-config C:/private/rclone.conf --output D:/kj --group-commit
-python tests/operational/test_journal_preparation_e2e.py --binary build-clang64-release/kasumi.exe --rclone "C:/Program Files/rclone/rclone.exe" --rclone-config C:/private/rclone.conf --output D:/kj
+python tests/operational/benchmark_journal_e2e.py --binary build-clang64-release/kasumi.exe --rclone-config C:/private/rclone.conf --output <external-output-directory> --group-commit
+python tests/operational/test_journal_preparation_e2e.py --binary build-clang64-release/kasumi.exe --rclone "C:/Program Files/rclone/rclone.exe" --rclone-config C:/private/rclone.conf --output <external-output-directory>
 ```
 
 The preparation regression checks two file counts after verifying all ten real
@@ -277,7 +277,7 @@ For deterministic abrupt-process recovery tests, use a **separate test build**:
 ```powershell
 cmake -S . -B build-journal-fault -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DKASUMI_BUILD_JOURNAL_FAULT_TESTS=ON
 cmake --build build-journal-fault --target kasumi
-python tests/operational/test_journal_recovery_e2e.py --binary build-journal-fault/kasumi.exe --rclone "C:/Program Files/rclone/rclone.exe" --output D:/kj --expect-grouped
+python tests/operational/test_journal_recovery_e2e.py --binary build-journal-fault/kasumi.exe --rclone "C:/Program Files/rclone/rclone.exe" --output <external-output-directory> --expect-grouped
 ```
 
 This runner creates its own rclone `type=local` configuration and does not read

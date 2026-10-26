@@ -39,6 +39,34 @@ constexpr KeyMapping KEY_MAPPINGS[] = {
     {Key::LabelTransportError, "labels.transport_error"},
 
     {Key::HelpText, "help_text"},
+    {Key::HelpSync, "command_help.sync"},
+    {Key::HelpStatus, "command_help.status"},
+    {Key::HelpFsck, "command_help.fsck"},
+    {Key::HelpGc, "command_help.gc"},
+    {Key::HelpGcRemoveWriter, "command_help.gc_remove-writer"},
+    {Key::HelpGcRemoveBarrier, "command_help.gc_remove-barrier"},
+    {Key::HelpResolveMissing, "command_help.resolve-missing"},
+    {Key::HelpRemote, "command_help.remote"},
+    {Key::HelpConfig, "command_help.config"},
+    {Key::HelpUpdate, "command_help.update"},
+    {Key::HelpRemoteHeads, "command_help.remote_heads"},
+    {Key::HelpRemoteTree, "command_help.remote_tree"},
+    {Key::HelpRemoteCommits, "command_help.remote_commits"},
+    {Key::HelpRemoteSummary, "command_help.remote_summary"},
+    {Key::HelpRemoteStat, "command_help.remote_stat"},
+    {Key::HelpRemoteCommit, "command_help.remote_commit"},
+    {Key::HelpRemoteGet, "command_help.remote_get"},
+    {Key::HelpRemoteEpochs, "command_help.remote_epochs"},
+    {Key::HelpRemoteEpoch, "command_help.remote_epoch"},
+    {Key::HelpRemoteContents, "command_help.remote_contents"},
+    {Key::HelpRemoteContent, "command_help.remote_content"},
+    {Key::HelpRemoteMarkers, "command_help.remote_markers"},
+    {Key::HelpRemoteObjects, "command_help.remote_objects"},
+    {Key::HelpRemoteOrphans, "command_help.remote_orphans"},
+    {Key::HelpRemoteWriters, "command_help.remote_writers"},
+    {Key::HelpRemoteHealth, "command_help.remote_health"},
+    {Key::HelpOptions, "command_help.options"},
+    {Key::ErrorInvalidArguments, "errors.invalid_arguments"},
     {Key::VersionText, "version_text"},
     {Key::UpdateChecking, "update.checking"},
     {Key::UpdateCurrentVersion, "update.current_version"},
@@ -132,17 +160,27 @@ constexpr KeyMapping KEY_MAPPINGS[] = {
     {Key::ManualBarrierRemovalWarning, "manual_barrier_removal.warning"},
     {Key::ManualBarrierRemovalCompleted, "manual_barrier_removal.completed"},
     {Key::ManualBarrierRemovalAbsent, "manual_barrier_removal.absent"},
-    {Key::ManualBarrierRemovalWritersRemain, "manual_barrier_removal.writers_remain"},
-    {Key::BarrierRemovalStageCheckingPresence, "manual_barrier_removal.stage_checking_presence"},
-    {Key::BarrierRemovalStageDownloadingPayload, "manual_barrier_removal.stage_downloading_payload"},
-    {Key::BarrierRemovalStageValidatingPayload, "manual_barrier_removal.stage_validating_payload"},
-    {Key::BarrierRemovalStageCheckingWriters, "manual_barrier_removal.stage_checking_writers"},
-    {Key::BarrierRemovalStageVerifyingPhysicalIdentity, "manual_barrier_removal.stage_verifying_physical_identity"},
+    {Key::ManualBarrierRemovalWritersRemain,
+     "manual_barrier_removal.writers_remain"},
+    {Key::BarrierRemovalStageCheckingPresence,
+     "manual_barrier_removal.stage_checking_presence"},
+    {Key::BarrierRemovalStageDownloadingPayload,
+     "manual_barrier_removal.stage_downloading_payload"},
+    {Key::BarrierRemovalStageValidatingPayload,
+     "manual_barrier_removal.stage_validating_payload"},
+    {Key::BarrierRemovalStageCheckingWriters,
+     "manual_barrier_removal.stage_checking_writers"},
+    {Key::BarrierRemovalStageVerifyingPhysicalIdentity,
+     "manual_barrier_removal.stage_verifying_physical_identity"},
     {Key::BarrierRemovalStageRemoving, "manual_barrier_removal.stage_removing"},
-    {Key::BarrierRemovalStageConfirmingAbsence, "manual_barrier_removal.stage_confirming_absence"},
-    {Key::BarrierRemovalMutationNotAttempted, "manual_barrier_removal.mutation_not_attempted"},
-    {Key::BarrierRemovalMutationConfirmed, "manual_barrier_removal.mutation_confirmed"},
-    {Key::BarrierRemovalMutationUncertain, "manual_barrier_removal.mutation_uncertain"},
+    {Key::BarrierRemovalStageConfirmingAbsence,
+     "manual_barrier_removal.stage_confirming_absence"},
+    {Key::BarrierRemovalMutationNotAttempted,
+     "manual_barrier_removal.mutation_not_attempted"},
+    {Key::BarrierRemovalMutationConfirmed,
+     "manual_barrier_removal.mutation_confirmed"},
+    {Key::BarrierRemovalMutationUncertain,
+     "manual_barrier_removal.mutation_uncertain"},
     {Key::GcWarningHeaderSingular, "gc.warning_header_singular"},
     {Key::GcWarningHeaderPlural, "gc.warning_header_plural"},
     {Key::GcWarningDetail1, "gc.warning_detail1"},
@@ -566,23 +604,19 @@ bool load_custom_catalog(std::string_view json_content) {
 std::vector<std::string> extract_language_argument(int argc,
                                                    char* argv[]) noexcept {
     std::vector<std::string> sanitized;
-    sanitized.reserve(static_cast<std::size_t>(argc));
-
-    for (int i = 0; i < argc; ++i) {
-        if (argv[i] == nullptr) {
-            continue;
-        }
-        std::string_view arg{argv[i]};
-        if (arg == "--lang") {
-            if (i + 1 < argc && argv[i + 1] != nullptr) {
-                set_language(argv[i + 1]);
-                ++i;
-            }
-        } else if (arg.starts_with("--lang=")) {
-            set_language(arg.substr(7));
-        } else {
-            sanitized.emplace_back(argv[i]);
-        }
+    if (argc < 1 || argv == nullptr || argv[0] == nullptr)
+        return sanitized;
+    sanitized.emplace_back(argv[0]);
+    int command_index = 1;
+    if (argc >= 4 && argv[1] != nullptr &&
+        std::string_view{argv[1]} == "--lang" && argv[2] != nullptr &&
+        argv[2][0] != '\0' && argv[2][0] != '-') {
+        set_language(argv[2]);
+        command_index = 3;
+    }
+    for (int index = command_index; index < argc; ++index) {
+        if (argv[index] != nullptr)
+            sanitized.emplace_back(argv[index]);
     }
     return sanitized;
 }
@@ -596,21 +630,10 @@ void init_language(int argc, char* argv[]) noexcept {
         set_language(env_lang);
     }
 
-    // 3. Command-line flags override environment variable
-    for (int i = 1; i < argc; ++i) {
-        if (argv[i] == nullptr) {
-            continue;
-        }
-        std::string_view arg{argv[i]};
-        if (arg == "--lang") {
-            if (i + 1 < argc && argv[i + 1] != nullptr) {
-                set_language(argv[i + 1]);
-                break;
-            }
-        } else if (arg.starts_with("--lang=")) {
-            set_language(arg.substr(7));
-            break;
-        }
+    if (argc >= 3 && argv != nullptr && argv[1] != nullptr &&
+        std::string_view{argv[1]} == "--lang" && argv[2] != nullptr &&
+        argv[2][0] != '\0' && argv[2][0] != '-') {
+        set_language(argv[2]);
     }
 }
 

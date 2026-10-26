@@ -10,8 +10,12 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace kasumi::cli {
+
+int present_help(std::string_view topic);
+int present_parse_error(std::string_view topic);
 
 struct FsckProgressDisplayState {
     std::optional<application::FsckStage> last_stage;

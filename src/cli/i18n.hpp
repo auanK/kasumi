@@ -31,6 +31,34 @@ enum class Key {
 
     // Help Text
     HelpText,
+    HelpSync,
+    HelpStatus,
+    HelpFsck,
+    HelpGc,
+    HelpGcRemoveWriter,
+    HelpGcRemoveBarrier,
+    HelpResolveMissing,
+    HelpRemote,
+    HelpConfig,
+    HelpUpdate,
+    HelpRemoteHeads,
+    HelpRemoteTree,
+    HelpRemoteCommits,
+    HelpRemoteSummary,
+    HelpRemoteStat,
+    HelpRemoteCommit,
+    HelpRemoteGet,
+    HelpRemoteEpochs,
+    HelpRemoteEpoch,
+    HelpRemoteContents,
+    HelpRemoteContent,
+    HelpRemoteMarkers,
+    HelpRemoteObjects,
+    HelpRemoteOrphans,
+    HelpRemoteWriters,
+    HelpRemoteHealth,
+    HelpOptions,
+    ErrorInvalidArguments,
 
     // Version
     VersionText,
@@ -373,8 +401,7 @@ std::string_view tr(Key key) noexcept;
 
 bool load_custom_catalog(std::string_view json_content);
 
-// Processes arguments, extracts and removes --lang <val> / --lang=<val>
-// and returns the sanitized arguments without the language flag.
+// Removes the optional --lang <code> prefix before the command.
 std::vector<std::string> extract_language_argument(int argc,
                                                    char* argv[]) noexcept;
 

@@ -24,6 +24,6 @@ detail only as text. Incomplete audits remain failures.
 | View | What it proves or changes |
 |---|---|
 | Fsck | Authenticated history/namespace plus full AEAD, logical-hash, size, and keyed-ID binding for **referenced** content; private checkpoint and possible preceding recovery effects. No repair or deletion in the audit. |
-| [`remote contents --audit`](remote-content-inspection.md) | Inspection inventory plus byte validation of **all physically present** content, including orphans; reports per-object states, without Fsck's checkpoint or prior transaction recovery. |
+| [`remote contents <profile> --audit`](remote-content-inspection.md) | Inspection inventory plus byte validation of **all physically present** content, including orphans; reports per-object states, without Fsck's checkpoint or prior transaction recovery. |
 | [`remote health`](remote-maintenance-inspection.md) | Diagnostic composition of history, availability, reachability, controls, and unknowns; no content-payload AEAD audit by default. |
 | [Garbage Collection](garbage-collection.md) | Direct removal of eligible orphan Content and redundant CommitVariants under cooperative maintenance controls. |

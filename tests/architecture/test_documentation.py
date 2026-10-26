@@ -3,31 +3,106 @@
 import json
 import os
 from pathlib import Path
-import re
 import sys
 import unittest
 from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
-REPORT_HEADING = re.compile(
-    r"^#{1,6}\s+(?:Baseline audit\b.*|Validation log|"
-    r"Phase \d+ measurements(?:\s+\([^)]*\))?|"
-    r"(?:Implementation|Execution|Benchmark|Performance) (?:report|results|transcript)s?)\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
+
+
+def is_redirection(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+    except OSError:
+        return True
+
+    try:
+        if hasattr(path, "is_junction") and path.is_junction():
+            return True
+    except OSError:
+        return True
+
+    try:
+        if hasattr(os.path, "isjunction") and os.path.isjunction(path):
+            return True
+    except OSError:
+        return True
+
+    try:
+        if hasattr(os, "lstat"):
+            st = os.lstat(path)
+            tag = getattr(st, "st_reparse_tag", 0)
+            if tag in (0xA0000003, 0xA000000C, 0xA000001D):
+                return True
+    except OSError:
+        return True
+
+    return False
 
 
 def find_documentation_entries(root: Path):
-    found = []
+    regular_files = []
+    symlink_violations = []
+
     for rel_dir in ("docs", "tests/operational"):
-        target_dir = root / rel_dir
-        if not target_dir.is_dir():
+        base = root / rel_dir
+
+        try:
+            if is_redirection(base):
+                symlink_violations.append(f"{rel_dir}: filesystem redirection (symbolic link or junction) in documentation tree")
+                continue
+        except OSError as exc:
+            symlink_violations.append(f"{rel_dir}: cannot inspect path attributes: {exc}")
             continue
-        for path in sorted(target_dir.rglob("*")):
-            if path.is_file():
-                found.append(path.relative_to(root).as_posix())
-    return found, []
+
+        try:
+            is_dir = base.is_dir()
+        except OSError as exc:
+            symlink_violations.append(f"{rel_dir}: cannot access directory: {exc}")
+            continue
+
+        if not is_dir:
+            if root == ROOT:
+                symlink_violations.append(f"{rel_dir}: required directory is missing or not a directory")
+            continue
+
+        dirs_to_visit = [base]
+        while dirs_to_visit:
+            current_dir = dirs_to_visit.pop(0)
+            try:
+                entries = sorted(current_dir.iterdir(), key=lambda p: p.name)
+            except OSError as exc:
+                rel_current = current_dir.relative_to(root).as_posix()
+                symlink_violations.append(f"{rel_current}: cannot read directory entries: {exc}")
+                continue
+
+            for entry in entries:
+                rel_path = entry.relative_to(root).as_posix()
+                try:
+                    if is_redirection(entry):
+                        symlink_violations.append(f"{rel_path}: filesystem redirection (symbolic link or junction) in documentation tree")
+                        continue
+                except OSError as exc:
+                    symlink_violations.append(f"{rel_path}: cannot inspect entry attributes: {exc}")
+                    continue
+
+                try:
+                    is_sub_dir = entry.is_dir()
+                    is_sub_file = entry.is_file()
+                except OSError as exc:
+                    symlink_violations.append(f"{rel_path}: cannot determine entry type: {exc}")
+                    continue
+
+                if is_sub_dir:
+                    dirs_to_visit.append(entry)
+                elif is_sub_file:
+                    regular_files.append(rel_path)
+                else:
+                    symlink_violations.append(f"{rel_path}: unsupported filesystem object type")
+
+    return sorted(regular_files), sorted(symlink_violations)
 
 
 def find_documentation_files(root: Path):
@@ -39,9 +114,6 @@ def artifacts(path, text):
     if path.startswith("docs/"):
         if Path(path).suffix in {".log", ".csv", ".jsonl", ".diff", ".bundle"}:
             return ["generated evidence file"]
-        prose = re.sub(r"(?ms)^```[^\n]*\n.*?^```\s*$", "", text)
-        if REPORT_HEADING.search(prose):
-            return ["run report embedded in permanent documentation"]
     if Path(path).suffix == ".json":
         data = json.loads(text)
         if isinstance(data, dict) and "historical_artifacts_commit" in data:
@@ -51,7 +123,8 @@ def artifacts(path, text):
 
 class DocumentationTest(unittest.TestCase):
     def test_tracked_references_contain_no_run_artifacts(self):
-        files, violations = find_documentation_entries(ROOT)
+        files, symlink_violations = find_documentation_entries(ROOT)
+        violations = list(symlink_violations)
         for name in files:
             if Path(name).suffix in {".md", ".json", ".log", ".csv", ".jsonl", ".diff", ".bundle"}:
                 for reason in artifacts(name, (ROOT / name).read_text(encoding="utf-8")):

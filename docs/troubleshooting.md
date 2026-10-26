@@ -148,12 +148,12 @@ A content payload referenced by the history DAG is absent from remote storage or
 
 ### Safe Next Steps
 1. Run `kasumi fsck <profile>` to audit the full vault and determine all affected paths.
-2. Run `kasumi remote contents --audit <profile>` to inspect physical content states across the entire vault.
+2. Run `kasumi remote contents <profile> --audit` to inspect physical content states across the entire vault.
 3. **Repair from Intact Client**: If an intact version of the affected file exists locally on any client machine:
    * Verify the file content on that machine.
    * Run `kasumi sync <profile>` from that machine. Even if no local file changed, the required-content probe detects the absent remote object, reuses the existing local source only after hash/size authentication, and restores the physical object without changing logical history.
 4. If the payload is permanently lost from remote storage and no client has a copy, restore the file from an external backup into the synchronized folder on one client and run `kasumi sync <profile>`.
-5. If Sync reports a transport failure or a LIST/PRESENCE disagreement instead of repairing, treat the content as unverified rather than logically deleted. Rerun after the backend is consistent and inspect with `kasumi remote contents --audit <profile>`. Do not delete protocol objects manually or run `resolve-missing` merely to silence the error.
+5. If Sync reports a transport failure or a LIST/PRESENCE disagreement instead of repairing, treat the content as unverified rather than logically deleted. Rerun after the backend is consistent and inspect with `kasumi remote contents <profile> --audit`. Do not delete protocol objects manually or run `resolve-missing` merely to silence the error.
 
 ### Related Documentation
 * [Fsck Architecture](architecture/fsck.md)
@@ -389,9 +389,9 @@ The operating system user account running Kasumi lacks sufficient filesystem per
 
 GC checks barrier ownership after acquisition and immediately before Apply. Loss detected before Apply prevents every candidate DELETE. Apply stops on observed cancellation or failure; ownership lost after the pre-Apply check may only be detected during cleanup. No periodic ownership checkpoints or history reobservations run during Apply: they would add latency without fencing and could suggest false concurrency safety.
 
-The error carries the candidate total, transport-acknowledged removals, failed identifier when one exists, stage, transport category/message/native code when available, mutation state, and barrier-cleanup status. `NotAttempted` means no DELETE was started for this failure, including cancellation before the next candidate. `Confirmed` counts acknowledged `Removed` and `AlreadyAbsent` results, not independently audited absence. `Uncertain` means an attempted DELETE has an unproven effect, including exceptions and removal errors whose category cannot guarantee no mutation. The transport provides no no-effect guarantee for these errors, so `NotApplied` is not emitted. A failed DELETE is never labelled `NotAttempted`.
+The error carries the candidate total, transport-acknowledged removals, failed identifier when one exists, stage, transport category/message/native code when available, mutation state, and barrier-cleanup status. `NotAttempted` means no DELETE was started for this failure, including cancellation before the next batch. `Confirmed` counts acknowledged `Removed` and `AlreadyAbsent` results, not independently audited absence. `Uncertain` means an attempted DELETE has an unproven effect, including exceptions and removal errors whose category cannot guarantee no mutation. The transport provides no no-effect guarantee for these errors, so `NotApplied` is not emitted. A failed DELETE is never labelled `NotAttempted`.
 
-Partial failures preserve the exact previous acknowledgement count and stop further DELETEs without retry, rollback, or compensation. The primary error and any cleanup error remain separate; failed or throwing cleanup leaves barrier release unconfirmed and is not retried by the destructor. Successful candidate REMOVE calls are not read back with PRESENCE. Manual barrier removal still verifies absence after either acknowledged REMOVE result.
+Partial failures preserve acknowledgements from completed batches, including successful peers of a failed item, and stop further batches without retry, rollback, or compensation. The primary error and any cleanup error remain separate; failed or throwing cleanup leaves barrier release unconfirmed and is not retried by the destructor. Successful candidate REMOVE calls are not read back with PRESENCE. Manual barrier removal still verifies absence after either acknowledged REMOVE result.
 
 **GC is not safe to run concurrently with Sync on the same vault.** Stop all Syncs and other GC processes before starting, and resume Sync only after healthy completion or resolution of maintenance uncertainty. The barrier is cooperative; pre-Apply and cleanup checks provide neither distributed exclusivity nor fencing and cannot close the TOCTOU window between verification and DELETE. Running `gc remove-barrier --confirm-abandoned` while a GC is active can break exclusivity and cause data loss.
 
@@ -427,8 +427,8 @@ For a slow GC, enable `KASUMI_PERF_TRACE=1` and compare `gc.analysis_list_us`,
 `gc.confirmed_removed` retains only acknowledged operations. These timers nest:
 do not add DELETE time to Apply time or control subtimers to total time.
 Measure with [disposable benchmark fixtures](build-and-test.md#gc-performance),
-never an existing vault. Slow individual cloud DELETEs do not authorize batching,
-parallel deletion or concurrent Sync. There are deliberately no periodic
+never an existing vault. Slow cloud DELETEs do not justify increasing the fixed concurrency limit or
+running concurrent Sync. There are deliberately no periodic
 ownership checkpoints or distributed CAS.
 
 If a benchmark fails or times out, preserve its output directory, `result.json`,
@@ -437,11 +437,9 @@ are unavailable, not zero. Stop all writers for that disposable vault and inspec
 the exact namespace and recorded ownership before manual recovery. Do not run
 `gc remove-barrier`, cleanup, purge or a new GC automatically after an uncertain
 result. A fresh run uses a new child; it never reuses the failed run's decision.
-An RC HTTP 500 during fixture PUT is not a GC performance measurement and does
-not prove that the write had no effect. Treat the response status separately
-from the provider's underlying error; an object appearing in a later listing
-does not turn the failed operation into an acknowledgement. A manually requested
-repeat creates a new child and preserves the earlier uncertain namespace.
+An ambiguous fixture-write error is not a GC measurement or proof that no write
+occurred. A later listing does not turn a rejected operation into an acknowledgement;
+a new run uses a fresh isolated child and preserves the uncertain namespace.
 
 ### Related Documentation
 * [Garbage Collection Architecture](architecture/garbage-collection.md)
@@ -462,7 +460,7 @@ Sync requires a definitive physical-availability answer before repairing or plan
 ### Safe Next Steps
 
 1. **Retry after checking connectivity and backend health**. Do not interpret the error as evidence that the Content is gone.
-2. **Inspect the vault** with `kasumi remote contents --audit <profile>` and `kasumi fsck <profile>` once the transport is stable.
+2. **Inspect the vault** with `kasumi remote contents <profile> --audit` and `kasumi fsck <profile>` once the transport is stable.
 3. **Check provider consistency** if LIST and PRESENCE continue to disagree. Confirm completed writes and listings are visible as required by [Transport](architecture/transport.md) and [Garbage Collection](architecture/garbage-collection.md#operational-contract).
 4. **Repair from a verified local source** by running Sync on a client whose file still matches the expected logical hash and size. Never remove the logical row, HEAD, journal, or remote Content object merely to make the diagnostic disappear.
 
@@ -513,7 +511,7 @@ The table below clarifies the purpose and operational behavior of Kasumi's diagn
 | `kasumi gc remove-writer <profile> <writer-id>` | Remove one explicitly selected writer marker | No | No | Exclusive | Operator verifies liveness; other markers still block GC |
 | `kasumi gc remove-barrier <profile> --confirm-abandoned` | Remove an abandoned maintenance barrier | No | No | Exclusive | Operator verifies liveness; breaks deadlock with coexisting writers |
 | `kasumi remote health <profile>` | Operational diagnostic | No | No | None | Point-in-time observation |
-| `kasumi remote contents --audit <profile>` | Audit all physical payloads | Yes (all present) | No | None | Point-in-time observation |
+| `kasumi remote contents <profile> --audit` | Audit all physical payloads | Yes (all present) | No | None | Point-in-time observation |
 | `kasumi remote summary <profile>` | Overview of vault state | No | No | None | Point-in-time observation |
 
 The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck and GC run pending Sync transaction recovery first, which may change local files or complete remote publication. Manual writer removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit itself does not intentionally modify remote objects. GC modifies remote objects only after its barrier, probe, single authenticated observation, and global plan validation pass.

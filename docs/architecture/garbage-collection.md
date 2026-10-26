@@ -1,7 +1,7 @@
 # Garbage Collection
 
 GC acquires cooperative exclusivity per vault, observes authenticated history
-once, validates a global deletion plan, removes candidates sequentially, and
+once, validates a global deletion plan, removes candidates in bounded batches of eight, and
 releases the maintenance barrier.
 
 ## Admission and analysis contract
@@ -90,36 +90,29 @@ are not inferred safe to delete. Epoch objects are never candidates.
 
 ## Destructive phase
 
-Apply iterates the frozen plan in deterministic order and issues exactly one
-`REMOVE` per candidate:
+Apply consumes the frozen, deterministically ordered plan in batches of at most
+8 candidates. The transport may execute these DELETEs concurrently. Cancellation
+is checked before the first batch and between batches; an in-flight batch drains
+before the next decision. When batching is unsupported, GC falls back to individual
+removals only if no item was submitted.
 
-```text
-verify_barrier_ownership()
-for candidate in deletion_plan:
-    check_cancellation()
-    result = transport.remove(candidate)
+A complete batch report must identify every submitted candidate exactly once.
+Acknowledgements from all items in the batch are retained, including successful
+peers of a failed item. A failed batch, malformed report, exception or cancellation
+stops admission of later batches, without retry or compensation. A whole-batch
+failure can leave the failed identifier unavailable and effects uncertain.
 
-    if result is successful:
-        increment acknowledged_removals
-        continue
-
-    preserve failure diagnostic
-    stop applying further candidates
-```
-
-After the fixed pre-Apply ownership check, Apply consumes the frozen plan without
-per-candidate observation, writer or barrier checks, batching, or readback. It
-performs no candidate `GET`, `LIST`, or `PRESENCE` calls. Periodic checkpoints,
-whether by object count or elapsed time, are deliberately absent: they would add
-latency without providing fencing and could suggest false concurrency safety.
+After the fixed pre-Apply ownership check, Apply performs no candidate `GET`,
+`LIST` or `PRESENCE`, no history reobservation and no periodic ownership
+checkpoints. Additional checks would add latency without providing fencing.
 
 A `Removed` or `AlreadyAbsent` result increments `removed_objects` /
 `confirmed_removed`: these count **REMOVE operations acknowledged by the API**,
 not independently verified physical absence.
 
 On a failed `REMOVE`, the collector preserves the transport error category,
-message, native code, and candidate identifier; keeps the count of previously
-acknowledged removals; stops further deletion without retry or compensation;
+message, native code, and candidate identifier when available; keeps the count of all
+acknowledged removals, including successful peers in the completed batch; stops further deletion without retry or compensation;
 attempts barrier cleanup through the normal path; and returns the partial
 diagnostic. Exceptions during DELETE also leave the candidate `Uncertain` and
 preserve earlier acknowledgements. A later GC run starts from a new observation
@@ -127,7 +120,7 @@ and does not reuse the old plan.
 
 | Mutation state | Meaning |
 |---|---|
-| `NotAttempted` | No candidate DELETE was started for this failure, including cancellation before the next candidate |
+| `NotAttempted` | No candidate DELETE was started for this failure, including cancellation before the next batch |
 | `Confirmed` | A candidate REMOVE returned `Removed` or `AlreadyAbsent`; this is transport acknowledgement, not an independent absence audit |
 | `Uncertain` | DELETE was attempted, but its remote effect cannot be proven; error categories alone do not establish absence of effects |
 
@@ -135,7 +128,7 @@ and does not reuse the old plan.
 mutation. The current transport does not provide that evidence for removal
 errors, so no such state is emitted or added to the enum. A failed DELETE is
 never reported as `NotAttempted`. Cancellation observed before a subsequent
-DELETE stops Apply with `NotAttempted` and keeps the exact previous
+batch stops Apply with `NotAttempted` and keeps the exact previous
 acknowledgement count; it does not retry or restore earlier objects.
 
 Barrier cleanup remains special. It verifies ownership, attempts release at most
@@ -196,125 +189,10 @@ report is `null`, not zero. Counts never reinterpret a failed DELETE as success.
 
 Use the [GC benchmark harness](../build-and-test.md#gc-performance) for isolated
 fixtures and separate fixture/GC/FSCK/cleanup timings. Apply throughput includes
-sequential DELETE latency, loop overhead and the fixed pre-Apply check. Small
+batch DELETE latency, loop overhead and the fixed pre-Apply check. Small
 encrypted payloads do not model large payload transfer workloads. Cloud latency,
 throttling and provider retries must be measured rather than extrapolated from
 local storage; Kasumi's lack of retries does not prove the provider made none.
-
-### Phase 4 measurements (2026-10-26)
-
-Release/GCC on Windows, small encrypted orphan payloads, one protected Commit,
-one HEAD and one Content. Local baseline production is `644a3a1`; the GREEN
-changes add measurements without changing the deletion algorithm. Each local
-size has two successful samples. Wall-clock differences between these small
-sample sets are not evidence of a speedup or regression; the host was not
-isolated from other work. Values below are seconds.
-
-| Orphans | Preparing median | Analysis median | Apply median | Finalizing median | GREEN GC median (min–max) |
-|---:|---:|---:|---:|---:|---:|
-| 0 | 0.0106 | 0.0128 | 0.0020 | 0.0040 | 0.0294 (0.0289–0.0298) |
-| 100 | 0.0107 | 0.1244 | 0.0262 | 0.0042 | 0.1655 (0.1654–0.1657) |
-| 1,000 | 0.0102 | 1.1612 | 0.2856 | 0.0045 | 1.4615 (1.4357–1.4874) |
-| 5,000 | 0.0099 | 5.3287 | 1.3893 | 0.0041 | 6.7320 (6.6780–6.7860) |
-| 20,000 | 0.0135 | 30.7682 | 7.2241 | 0.0051 | 38.0108 (36.3076–39.7140) |
-
-| Orphans | Phase 3 GC median (min–max) | GREEN fixture median | FSCK median | Fixture cleanup median |
-|---:|---:|---:|---:|---:|
-| 0 | 0.0302 (0.0270–0.0334) | 0.0314 | 0.0358 | 0.0074 |
-| 100 | 0.1609 (0.1608–0.1610) | 0.4052 | 0.0317 | 0.0070 |
-| 1,000 | 1.6735 (1.3972–1.9498) | 3.8144 | 0.0321 | 0.0076 |
-| 5,000 | 8.3687 (7.8062–8.9312) | 18.8605 | 0.0300 | 0.0067 |
-| 20,000 | 34.7056 (32.3009–37.1103) | 86.0035 | 0.0406 | 0.0098 |
-
-The local bottleneck is LIST: at 20,000 orphans its median is 30.7283 s,
-compared with 7.2241 s for Apply. Content classification and plan work are small;
-plan construction plus validation is approximately 0.013 s at that size.
-History authentication uses exactly two GETs at every size. These fixtures do
-not measure growth in protected history. Process peak working set grows from
-about 7.5 MiB at zero orphans to 29.7 MiB at 20,000, including fixture memory;
-this is not a measurement of GC-exclusive heap use.
-
-All successful local sizes observed one full LIST plus five prefix LISTs, eight
-GETs (two history, six fixed control reads), two PRESENCE calls, four ownership
-verifications, N candidate REMOVE attempts/acknowledgements, and N+2 total
-REMOVE calls (the probe and barrier are additional). Content classification
-and candidate readback GETs remain zero, as do candidate/cleanup GC errors.
-The fixture has N+3 physical objects before GC; analysis observes N+4 including
-the active barrier. It classifies N+1 Content objects with one protected Content,
-zero CommitVariant candidates and one history reconstruction. The explicit
-plan-protected count is two; the protected HEAD is excluded separately.
-
-One initial local 20,000-object fixture preparation failed during encryption
-before GC started. Its workspace was preserved; the exact cause was not
-determined. Two new fixtures subsequently produced valid baseline samples.
-The failed preparation is not included in successful GC timing statistics.
-
-The currently authorized rclone parent is `kasumi:g-cert` (pass it without a
-trailing slash). Its backend reports `IsLocal=false` and SHA-256 support. The
-100- and 1,000-object rows marked "prior" were measured on a different disposable
-parent, `kasumi:kasumi-benchmarks-gc-v090`; they remain historical backend
-measurements, not a substitute for a fresh isolated run. The current g-cert
-100-object run is recorded separately below. Rclone system tests and the
-three-object harness test used disposable **local** alias backends, separately
-from these real remote measurements.
-
-| Remote run | Fixture | Preparing | Analysis | Apply | Finalizing | GC total | Fixture cleanup |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Phase 3 / 100 (prior) | 236.9841 | 10.0583 | 4.0927 | 86.2004 | 1.7823 | 102.1336 | 11.6399 |
-| GREEN / 100 (prior) | 228.6140 | 10.0097 | 4.2557 | 83.5578 | 1.6366 | 99.4598 | 11.5843 |
-| GREEN / 100 (g-cert) | 223.6727 | 9.9004 | 4.4511 | 80.2448 | 1.6205 | 96.2168 | 11.1609 |
-| GREEN / 1,000 first attempt (prior) | 1972.9008 (failed preparation) | unavailable | unavailable | unavailable | unavailable | unavailable | not attempted |
-| GREEN / 1,000 repeat (prior) | 2010.9799 | 9.6970 | 6.3929 | 814.1836 | 1.7166 | 831.9903 | 12.2598 |
-
-The real remote 100-object baseline spent 85.8868 s inside DELETE calls out of
-102.1336 s of GC: unlike the local backend, sequential DELETE latency dominates
-this sample. The GREEN 100-object GC took 99.4598 s; each version has one remote
-sample, so this difference is not an optimization result. Both runs acknowledged
-100 candidate DELETEs, passed FSCK, and completed owned cleanup. The GREEN
-1,000-object repeat spent 813.8993 s inside DELETE calls out of 831.9903 s of GC
-and acknowledged all 1,000 candidates; its 33.5-minute fixture preparation is
-recorded separately and is not GC time. The current g-cert 100-object run spent
-79.9603 s inside DELETE calls out of 96.2168 s of GC; it acknowledged all 100
-candidates, passed FSCK and removed four owned cleanup objects. Its unique child
-was `kasumi:g-cert/kasumi-gc-live-96ded05f9705442eeb6a749e1622d60b`; only that
-child belonged to the run.
-
-Each 100-object remote run observed two history GETs, six LISTs, two PRESENCE
-calls, four ownership verifications and 102 REMOVE calls. The RC layer recorded
-120 HTTP requests: 102 deletefile, four copyfile, six hashsumfile, six list and
-two stat. Its 119 completed / one failed HTTP responses are distinct from the
-successful GC outcome: handled negative control replies can count as RC HTTP
-failures. The 1,000-object repeat observed the same fixed history/control
-counters and 1,002 REMOVE calls; its RC layer recorded 1,020 attempts, 1,019
-completed and one failed response. Do not interpret these counters alone as
-provider throttling or GC failure. Internal provider retries are unavailable,
-not assumed absent.
-
-The first 1,000-object remote fixture stopped on its 877th orphan PUT with
-`protocol_failure`, native **RC HTTP 500**. This is the RC response status, not
-a confirmed provider HTTP status; the underlying provider/rclone cause was not
-established. GC never started, so its timings and counters are unavailable.
-A subsequent read-only listing found 880 objects in that disposable vault;
-this does not acknowledge the rejected PUT or establish a safe cleanup decision.
-The failed child, external owner marker, private test key and inventory evidence
-were preserved without automatic retry or cleanup. The user separately requested
-a new preparation in a fresh child, leaving the failed child intact.
-
-Remote 5,000 and 20,000 scenarios were not executed in this campaign: the
-1,000-object fixture took 33.5 minutes and its GC 831.99 s, so larger volumes
-were not scheduled without an additional cost/limit decision; 20,000 also
-requires the harness's explicit `--confirm-large-remote` flag. No Batch DELETE,
-parallel deletion, periodic ownership checkpoints, candidate
-readback or history reobservation was added. Plan allocation/sorting changes
-are not justified by these timings. Future local LIST work should investigate
-path/metadata costs while preserving symlink/security checks; any remote
-DELETE optimization needs a separate failure-contract review.
-
-Raw local artifacts are in `build-rel/gc-performance-baseline/`,
-`build-rel/gc-performance-green-local/` and `build-rel/gc-performance-phase4-local/`;
-remote reports are in the corresponding `build-rel/gc-performance-remote-*`
-directories. These campaign artifacts are local, not checked in; use the harness
-to reproduce them.
 
 ## Operational contract
 

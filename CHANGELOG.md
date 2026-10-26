@@ -119,13 +119,6 @@
 - Kasumi provides **no backward compatibility between 0.x releases**. There is no automatic SQLite, journal, configuration, credential, or remote-format migration, no cross-version client interoperability contract, and no supported downgrade procedure.
 - Current SQLite validation, fingerprint encoding, journal codec/envelopes, and key-derived remote layout must not be treated as an in-place upgrade path from older releases. The updater replaces only the executable. Preserve incompatible state and independent copies of files/credentials; do not delete `db.sqlite` or recovery evidence to force synchronization. See [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi).
 
-### Validation
-
-- Stabilization records include complete Debug regression runs on five local toolchains, with platform/privilege-dependent skips. Hosted Ubuntu [CI](https://github.com/auanK/kasumi/actions/runs/38844759389) and Windows [CI](https://github.com/auanK/kasumi/actions/runs/38844759361) passed for the corrected commit `e1a0ce3`, including Debug/Release builds and tests on all five configured toolchains.
-- Real Google Drive/rclone validation used Windows 11 and Ubuntu WSL2/ext4, independent profiles, bidirectional changes, 1/10/100 MiB files and a 100 MiB update, conflicts, simultaneous publication, abrupt process/transport failure, reconnection/recovery, payload audits, and a 100-file workload. The interrupted large-file scenario used 10 MiB. Cross-client BLAKE3 and SHA-256 matched after convergence.
-- GC blocked observed abandoned writers, then completed after verified manual marker removal with zero candidates and zero purged objects. No eligible-object purge or quarantine repair/restoration was established by that run.
-- The provider runner's current scope and safety limits are documented in [Provider Certification](docs/provider-certification.md#requirements-and-limits). Historical validation above remains specific to its recorded builds and provider setup.
-
 ## [0.6.1]
 
 Kasumi - Multi-client bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.
@@ -145,7 +138,7 @@ Kasumi - Multi-client bidirectional file synchronization with client-side encryp
 - **Fail-Closed Transaction Safety**: Strengthens recovery invariants to abort and fail closed if transaction journals encounter conflicting remote publications or missing rollback evidence, while keeping read-only commands strictly isolated from recovery side effects.
 - **Concurrent Integrity Audits**: Parallelizes `kasumi fsck` payload validation with bounded workers controlled by `KASUMI_CONTENT_CONCURRENCY`, backed by crash-safe authenticated local checkpoint metadata and localized progress displays.
 - **Garbage Collection Efficiency**: Adds verified same-storage copy for quarantine staging, batches metadata publications and purge operations through rclone, verifies maintenance barrier ownership via remote physical hash, and adds live staged progress tracking.
-- **Storage Provider Certification**: Successfully validated across 11 storage backends passing all 16 certification test scenarios and clean ownership teardown.
+- **Storage Provider Certification**: Provider-neutral transport and application certification runner with ownership-safe cleanup.
 
 ### Added
 
@@ -194,29 +187,6 @@ Kasumi - Multi-client bidirectional file synchronization with client-side encryp
 - **Automation Handling of Exit Code 2**: `kasumi sync` exits with status code 2 when synchronization completes partially with pending materializations (accepted metadata, but missing remote payloads). Automated workflows should treat exit code 2 as a non-fatal partial synchronization. Pending materializations can be downloaded or repaired by a later synchronization once the required payloads are available.
 - **Fsck Checkpoint Metadata**: `kasumi fsck` creates authenticated local checkpoint and progress metadata (`fsck_checkpoint.bin.enc`) in the profile directory to track audit progress across interruptions. Checkpoint metadata does not allow referenced payloads to skip cryptographic verification: every referenced payload is still downloaded and authenticated during audit runs.
 - **Manual Data-Loss Operations**: `gc purge-quarantine` intentionally bypasses normal quarantine retention/reachability safeguards and can permanently remove the only remaining copy of referenced encrypted content. `gc repair-quarantine` removes eligible orphaned quarantine metadata, not missing payloads. Both require `--confirm-permanent-loss` and must not be treated as routine GC. `resolve-missing` publishes logical deletions for eligible unresolved content. Read the operational documentation before using any of them.
-
-### Validation
-
-- **Provider Certification Matrix**: Kasumi's provider-neutral certification suite was validated against 11 storage backends in the repository test history. All 11 backends passed all 16 certification scenarios and completed ownership-safe cleanup:
-
-| Provider | Remote physical SHA-256 |
-|---|---|
-| Local Filesystem | Unsupported |
-| Google Drive | Supported |
-| OneDrive | Unsupported |
-| SFTP | Not recorded |
-| FTP | Unsupported |
-| Explicit FTPS | Unsupported |
-| WebDAV | Unsupported |
-| Dropbox | Unsupported |
-| Backblaze B2 | Unsupported |
-| Azure Blob Storage | Unsupported |
-| S3-compatible (MinIO) | Unsupported |
-
-  *Remote physical SHA-256 is an optional transport optimization. Storage providers without remote SHA-256 support remain certified through Kasumi's verified client-side fallback path.*
-
-- **Test Hardening in Delta**: The v0.5.5..HEAD delta incorporates regression coverage for Invariant 08B recovery safety, deterministic merge-base selection, multi-target certification regressions, thread-safe fake history transport, and compiler warning cleanups across MSVC, GCC, and Clang.
-- **Release Validation Status**: The provider matrix above reflects prior certification evidence; it is not a claim that the v0.6.0 release artifacts or all platform CI jobs have passed. Validate the final release commit and both platform packages before publishing.
 
 ## [0.5.5] - 2026-09-19
 

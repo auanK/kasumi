@@ -62,32 +62,44 @@ New profiles default to a minimum retention depth of 5 commits and a minimum ret
 
 ## Core Commands
 
-| Command | Action |
-|---|---|
-| `kasumi config` | Launches interactive profile configuration wizard |
-| `kasumi status <profile> [--full]` | Computes and displays the currently observed synchronization plan/status |
-| `kasumi sync <profile> --dry-run [--full]` | Computes and displays the synchronization plan without executing its synchronization mutations |
-| `kasumi sync <profile>` | Runs synchronization |
-| `kasumi sync <profile> --initial` | Initializes a missing local database and publishes new history |
-| `kasumi sync <profile> --audit-inventory` | Runs Sync, then structurally audits the complete remote inventory |
-| `kasumi update` | Downloads and verifies the official GitHub release, then updates this Kasumi executable |
-| `kasumi fsck <profile>` | Validates observed remote history and audits content objects referenced by the effective remote state |
-| `kasumi gc <profile>` | Directly removes unreachable orphan Content (determined by reachability, without downloading payloads) and eligible redundant CommitVariants using a globally validated deletion plan under cooperative maintenance controls |
-| `kasumi gc remove-writer <profile> <writer-id>` | Manually removes exactly one listed remote writer marker |
-| `kasumi gc remove-barrier <profile> --confirm-abandoned` | Manually removes an abandoned remote maintenance barrier after verifying no maintenance process is active |
-| `kasumi resolve-missing <profile>` | Explicitly resolves eligible pending missing remote payloads as logical deletions; **may publish permanent data loss** |
+Use `kasumi <command> --help` for the complete arguments, options and examples.
 
-* `status` and `sync --dry-run` dispatch through the same planner and return a `PlanReport`. Both enumerate the managed tree and read metadata, reusing persisted BLAKE3 hashes only when path, regular-file type, size, nanosecond mtime, and native identity match. Cache misses, changed files, and insufficient identity require content hashing; an effective ignore projection differing from local rules uses full hashing. Neither executes the plan, recovers a transaction, advances accepted state, publishes history, or saves cache deltas. They acquire the local profile lock; private-path permission normalization can still occur. A later Sync reobserves and independently verifies destructive local targets. See [Preview and Status](architecture/planning-and-status.md).
-* **Plan Truncation & `--full`**: When a synchronization plan contains more than 10 items, Kasumi truncates output to display the first 5 and last 5 items, separated by an ellipsis line (`... (N more items) ...` / `... (mais N itens) ...`) to maintain clean terminal output. Pass `--full` to list all items without truncation (useful for inspection scripts, complete audits, or piping to log files).
-* `sync` applies local tree modifications, transfers content payloads, and publishes Commit and HEAD records when logical state changes. It checks physical availability only for Content required by the current work; a true no-op does not probe every Content ID. Missing objects unrelated to current work are not discovered or repaired automatically. See [Synchronization](architecture/synchronization.md#required-content-availability).
-* `sync --audit-inventory` is opt-in and runs normal Sync before a structural audit of the complete remote inventory. The audit reports referenced/present/missing Content across reachable history, orphan Content, and unknown physical identifiers. It rejects listing errors, incomplete history, writers or barriers observed in the initial listing, and changes detected between its two full listings. Matching listings do not provide an atomic snapshot or rule out transient changes between observations. The audit phase performs no repair, upload, deletion, publication, or accepted-state mutation; normal Sync may have changed or published state, which is not rolled back if the audit fails. The audit checks presence and reachability, not Content payload bytes; use Fsck or `remote contents --audit` for deeper payload checks. A complete Sync with no findings returns `0`; findings or a partial Sync return `2`; audit failure returns `1`. This flag cannot be combined with `--dry-run` or `--initial`. See [Optional Remote Inventory Audit](architecture/synchronization.md#optional-remote-inventory-audit).
-* `sync --initial` explicitly initializes a missing local database when no SQLite sidecars or unfinished transaction evidence exist. It supports two scenarios: bootstrapping a new vault when the remote history namespace is empty (publishing genesis history from local files), or enrolling into an existing authenticated remote vault (reconciling against observed remote history). Reusable pre-existing local databases without accepted state (e.g., from an interrupted initial run) are safely reused. See [Initial Sync](architecture/synchronization.md#initial-sync).
-* `sync --initial --trust-existing-content` is an opt-in bootstrap optimization exclusively for empty remote history namespaces. It skips verification GETs for pre-existing remote Content matching logical keys and elides redundant upload PUTs. If remote history is observed concurrently, it fails closed to prevent unverified reuse.
-* See [Updating Kasumi](#updating-kasumi) for update behavior, platform requirements, and compatibility notes.
-* `gc` permanently removes eligible candidates using a global deletion plan based on reachability (without downloading or auditing orphan Content payloads). Stop Sync on every client and serialize maintenance across the vault; see [Garbage Collection](architecture/garbage-collection.md#operational-contract).
-* `gc remove-writer` is a manual recovery command for one exact identifier from `kasumi remote writers <profile>`. Kasumi refuses removal when a maintenance barrier is present, but this check does not coordinate distributed operations. Verify that no Sync or maintenance operation is running before removal. It does not run Sync or GC.
-* `gc remove-barrier` is a controlled manual recovery command for an abandoned maintenance barrier left by an interrupted GC run. Pass `--confirm-abandoned` after verifying that no GC or Sync process is active on any device. It verifies barrier payload structure and physical hash, avoids deadlock if writers coexist, and confirms absence after removal. It does not run Sync or GC and operates even without an accepted local SQLite database.
-* `fsck` validates observed remote history and physical identifiers, downloads referenced content, checks authentication, size, and logical hashes, and reports missing or corrupted objects. It may update a private checkpoint but does not use that checkpoint to skip payload audits. See [Fsck](architecture/fsck.md).
+| Purpose | Command |
+|---|---|
+| Manage local profiles | `kasumi config` |
+| Inspect the current plan | `kasumi status <profile>` or `kasumi sync <profile> --dry-run` |
+| Synchronize | `kasumi sync <profile>` |
+| Audit referenced payloads | `kasumi fsck <profile>` |
+| Reclaim eligible remote storage | `kasumi gc <profile>` |
+| Resolve permanently missing content as logical deletion | `kasumi resolve-missing <profile>` |
+| Update the executable | `kasumi update` |
+
+`--full` belongs only to Sync and Status, after the profile. It displays every
+plan and pending-path item; otherwise lists longer than ten items show the first
+and last five. Preview and Status do not execute the plan, recover transactions
+or persist file-hash cache changes. See [Preview and Status](architecture/planning-and-status.md).
+
+`sync --initial` requires no SQLite sidecars or unfinished transaction evidence.
+It can bootstrap empty remote history or enroll into an authenticated vault.
+`--trust-existing-content` requires `--initial` and empty remote history: it
+reuses matching remote Content without payload verification, so audit it with
+Fsck afterwards. See [Initial Sync](architecture/synchronization.md#initial-sync).
+
+`sync --audit-inventory` runs Sync and then a structural inventory audit. It
+cannot combine with `--dry-run` or `--initial`. The audit does not authenticate
+payload bytes and its failure does not undo Sync's effects or publication.
+See [Inventory Audit](architecture/synchronization.md#optional-remote-inventory-audit).
+
+**GC permanently deletes eligible objects.** Stop Sync on every client and
+serialize maintenance across the vault. Manual `gc remove-writer` requires an
+exact marker whose process is verified inactive. `gc remove-barrier` requires
+`--confirm-abandoned` after verifying no Sync or maintenance is active; barrier
+age alone is insufficient. See the [GC operational contract](architecture/garbage-collection.md#operational-contract).
+
+Fsck audits referenced payloads; transaction recovery before Fsck or GC can
+have local and remote effects. Ordinary Sync only probes Content required by
+its current work; a no-op is not a full integrity audit. See
+[Synchronization](architecture/synchronization.md#required-content-availability).
 
 ### Updating Kasumi
 
@@ -115,8 +127,6 @@ When `kasumi sync <profile>` has unresolved missing payloads required by its cur
 
 `kasumi resolve-missing <profile>` is an explicit, potentially destructive resolution path: it first recovers any pending synchronization transaction, then validates the accepted state and current observations and may publish logical deletions for eligible unresolved paths that have no local source. It is not a download/repair command. Use it only when losing those files is an informed decision.
 
-Quarantine and the `gc purge-quarantine`, `gc repair-quarantine`, and `remote quarantine` commands have been removed. Legacy quarantine objects are left untouched and are not deletion candidates. See [Troubleshooting](troubleshooting.md#gc-partial-failures-and-uncertain-deletions) for handling GC failures.
-
 ### Interruption and Recovery
 
 Synchronization records phase and progress in the private `transaction.bin.enc/`
@@ -143,37 +153,45 @@ For the recovery state transitions, see [Transactions and Recovery](architecture
 
 These commands do not publish synchronization changes or run garbage collection. Complete-history inspection may maintain the local private `inspection-history-v1.cache`; `remote get` writes the requested destination after authenticating the payload. See [Remote Inspection](architecture/remote-inspection.md) for each family's data flow and failure behavior.
 
-| Command | Description |
-|---|---|
-| `kasumi remote heads <profile>` | Lists the current logical heads |
-| `kasumi remote tree <profile>` | Displays the tree when a single logical head is present |
-| `kasumi remote tree <profile> --head <id>` | Displays the tree for a specified current logical head |
-| `kasumi remote commits <profile>` | Lists reachable commits in the history DAG |
-| `kasumi remote summary <profile>` | Summarizes vault history, conflicts, contents, and active writers |
-| `kasumi remote stat <profile> <path>` | Displays properties of a path in the resolved effective remote tree; `/` selects its root |
-| `kasumi remote commit <profile> <id>` | Shows parents, metadata, and physical variants of a commit |
-| `kasumi remote get <profile> <path> <dst>` | Authenticates and decrypts a file in the resolved effective remote tree, then atomically installs it at `<dst>` without running synchronization; its parent directory must exist |
-| `kasumi remote epochs <profile>` | Lists the authenticated Epoch chain |
-| `kasumi remote epoch <profile> <id-or-sequence>` | Displays details for a specific Epoch by 64-hex ID or canonical decimal sequence |
-| `kasumi remote contents <profile>` | Lists structural content inventory by metadata |
-| `kasumi remote contents --audit <profile>` | Builds the inventory and downloads physically present content objects for authentication and validation; `--audit` precedes the profile |
-| `kasumi remote content <profile> <id>` | Displays details of a specific content ID |
-| `kasumi remote markers <profile>` | Validates and classifies physical HEAD markers |
-| `kasumi remote objects <profile>` | Lists and categorizes objects in the raw physical namespace |
-| `kasumi remote orphans <profile>` | Lists orphaned objects outside the reachable/retained set without running garbage collection |
-| `kasumi remote writers <profile>` | Shows active writer markers and barrier registration state |
-| `kasumi remote health <profile>` | Runs remote health inspection checks |
+Use `kasumi remote --help` to choose a view, and
+`kasumi remote <subcommand> --help` for its required arguments. For example:
 
-Commit IDs and Content IDs supplied as selectors are 64 lowercase hex characters. `remote tree --head` selects only a current logical head; without it, multiple heads require an explicit choice. `remote stat` and `remote get` use the resolved effective tree, which can combine heads. `remote health` is a diagnostic summary, not a replacement for `fsck`'s payload audit.
+```sh
+kasumi remote summary Programming
+kasumi remote tree Programming --head <commit>
+kasumi remote contents Programming --audit
+```
+
+`contents` is a structural inventory; `contents <profile> --audit` downloads and
+authenticates every physically present Content object, including orphans.
+Fsck instead audits referenced content and has its own checkpoint/recovery flow.
+See [Content Inspection](architecture/remote-content-inspection.md).
+
+Commit and Content selectors require 64 lowercase hex characters. `tree --head`
+selects a current logical head and is required for multiple heads. `stat` and
+`get` use the resolved effective tree; `get` authenticates the requested file and
+writes its explicit destination, whose parent must exist. Health diagnostics
+are observations rather than a substitute for a payload audit.
 
 ## General Options
 
-| Option | Description |
-|---|---|
-| `-h`, `--help`, `help` | Displays help message and command syntax |
-| `-v`, `--version`, `version` | Displays Kasumi version |
-| `--lang <en\|pt-BR>` | Sets CLI language (defaults to English; see below) |
-| `--full` | Displays all items in a Preview or Status plan without truncation; it is a presentation switch stripped before command parsing |
+```text
+kasumi [--lang <code>] <command> [subcommand] [arguments] [options]
+```
+
+`--lang <code>` is the optional global prefix, before the command. Command
+options follow required arguments; `--full` is available only to Sync and Status.
+`config` and `update` take no profile.
+
+`kasumi --help` (`-h`) shows global Help. Add `--help` or `-h` after a command,
+subcommand or otherwise valid invocation for contextual Help. Help returns 0
+without credentials, transport, database access or locks. `--version` (`-v`)
+prints the version. Calling without arguments shows Help and returns 1.
+
+Unknown or duplicate options, missing values and incompatible combinations fail
+before execution with a localized diagnostic and the relevant Help command on
+stderr. Quote arguments containing spaces; an option-looking path can be
+pass `--` before an option-looking path (such as `--notes.txt` or `-draft.txt`) to treat following arguments as literal operands. Unicode spelling is preserved.
 
 ## Language Selection (i18n)
 
@@ -183,7 +201,7 @@ To switch to **Portuguese**:
 * Command line: `kasumi --lang pt-BR <command> <profile>` (or `--lang pt`)
 * Environment variable: set `KASUMI_LANG=pt-BR` (or `pt`)
 
-To add a custom community language catalog, place `<lang>.json` in `%APPDATA%/kasumi/locales/` (Windows) or `$XDG_CONFIG_HOME/kasumi/locales/` (Linux; fallback `$HOME/.config/kasumi/locales/`) and pass `kasumi --lang <lang>`.
+To add a custom community language catalog, place `<lang>.json` in `%APPDATA%/kasumi/locales/` (Windows) or `$XDG_CONFIG_HOME/kasumi/locales/` (Linux; fallback `$HOME/.config/kasumi/locales/`) and select it with `kasumi --lang <lang> <command> ...`.
 
 ## Automation & Environment Variables
 

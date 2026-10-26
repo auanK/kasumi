@@ -5,6 +5,7 @@
 #include "application/request.hpp"
 
 #include <expected>
+#include <string>
 #include <variant>
 
 namespace kasumi::cli {
@@ -12,12 +13,16 @@ namespace kasumi::cli {
 // Requests opening the interactive configuration wizard.
 struct ConfigureInvocation {};
 struct UpdateInvocation {};
+struct HelpInvocation {
+    std::string topic;
+};
 
 // Valid command-line parsing result.
 using Invocation = std::variant<application::Request,
                                 application::InspectionRequest,
                                 ConfigureInvocation,
-                                UpdateInvocation>;
+                                UpdateInvocation,
+                                HelpInvocation>;
 
 // Command-line argument parsing failure.
 struct ParseError {
@@ -28,6 +33,9 @@ struct ParseError {
 
 // Parses command-line arguments into an application invocation.
 std::expected<Invocation, ParseError> parse(int argc, char* argv[]);
+
+// Closest recognized command for Help and parse-error guidance.
+std::string help_topic(int argc, char* argv[]);
 
 } // namespace kasumi::cli
 
