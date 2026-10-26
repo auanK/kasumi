@@ -21,9 +21,10 @@ The collector preserves this order:
    observation.
 4. After these preconditions, GC performs **one complete authenticated
    observation**: physical listing, HEAD/Commit/Epoch reachability, commit
-   variants, content references, and orphan-content payload classification.
-   Malformed history, unknown objects, missing required content, invalid
-   control state, or transport errors stop collection before candidate deletion.
+   variants, content references, and structural reachability classification
+   (without orphan payload downloads). Malformed history, unknown objects,
+   missing required content, invalid control state, or transport errors stop
+   collection before candidate deletion.
 5. GC builds the complete deletion plan and validates the plan as a set before
    the first `REMOVE`. If online mutation cannot be established, the collector
    returns `analysis_only` and performs no candidate deletion.
@@ -35,12 +36,26 @@ identifiers. It is discarded at the end of the run. Eligible candidates are:
 
 | Candidate | Eligibility |
 |---|---|
-| Orphan Content | Physically present Content not referenced by protected reachable history, with its payload authenticated before deletion is authorized |
+| Orphan Content | Physically present Content not referenced by protected reachable history, eligible for deletion without downloading or auditing its payload |
 | Redundant CommitVariant | Valid ciphertext of a reachable Commit that is not a required variant |
 
-The observation authenticates history and classifies deletion eligibility.
-GC authenticates orphan candidate bytes; [Fsck](fsck.md) audits every payload
-referenced by the effective remote tree.
+The observation authenticates history and classifies deletion eligibility based strictly on reachability:
+
+```text
+Physically observed Content
++
+Structurally valid identifier
++
+Not referenced by protected authenticated history
++
+Globally validated deletion plan
+=
+Eligible for deletion
+```
+
+Under Kasumi v0.9.0, GC does not authenticate orphan candidate bytes, download ciphertexts, or decrypt payloads before deletion. Unreferenced content is discarded based solely on reachability. Corrupted orphan ciphertext does not alter its reachability: a corrupted unreferenced content object is still an orphan and remains eligible for deletion without downloading its payload. Conversely, all Content referenced by protected history remains strictly protected; if a referenced Content object is damaged, its integrity is audited and reported by [Fsck](fsck.md), not downloaded or repaired by GC.
+
+The controlled remote vault namespace contract assumes that physical storage objects within the vault scope adhere to protocol identity structure. Unknown or ambiguous storage objects (such as alien files or malformed identifiers) are never inferred safe to delete and trigger fail-closed aborts before any deletion. The maintenance barrier coordinates cooperative clients but provides no distributed compare-and-swap (CAS).
 
 The protected set includes:
 
@@ -125,9 +140,10 @@ gc.history_reconstructions
 ```
 
 Apply counters for `GET`, `LIST`, and `PRESENCE` stay at zero. Analysis reads
-depend on distinct history objects and orphan payloads, rather than a full
-reconstruction per candidate. Barrier/probe operations are separate from
-candidate traffic.
+depend exclusively on distinct authenticated history objects (markers, commits, epochs);
+`gc.analysis_get_calls` reflects necessary history downloads, while `GET` calls for
+orphan Content payloads remain strictly zero (`GET(orphan content) == 0`).
+Barrier/probe operations are separate from candidate traffic.
 
 ## Operational contract
 

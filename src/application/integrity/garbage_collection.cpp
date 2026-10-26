@@ -617,33 +617,6 @@ observe(transport::Transport& storage,
     std::vector<std::string> orphan_ids = content->orphan_content_ids;
     std::ranges::sort(orphan_ids);
     orphan_ids.erase(std::ranges::unique(orphan_ids).begin(), orphan_ids.end());
-    std::vector<std::string> valid_orphans;
-    if (!orphan_ids.empty()) {
-        platform::perf_trace::count("gc.candidate_audit_batches");
-        platform::perf_trace::count("gc.candidate_audit_objects",
-                                    orphan_ids.size());
-        auto audited = [&] {
-            PerfTimer trace{"gc.candidate_audit_us"};
-            return history_storage::inventory_content_reachability(
-                storage,
-                key,
-                std::span<const std::string>{orphan_ids},
-                *history,
-                workspace_root,
-                true);
-        }();
-        if (!audited) {
-            return std::unexpected(history_error(audited.error()));
-        }
-        for (const auto& entry : audited->contents) {
-            if (!entry.reachable &&
-                entry.state == history_storage::ContentObjectState::Present &&
-                std::ranges::binary_search(orphan_ids, entry.content_id)) {
-                valid_orphans.push_back(entry.content_id);
-            }
-        }
-    }
-    std::ranges::sort(valid_orphans);
 
     DeletionPlan plan;
     plan.protected_objects = required_variants(*history, layout);
@@ -661,7 +634,7 @@ observe(transport::Transport& storage,
         std::ranges::unique(plan.protected_objects).begin(),
         plan.protected_objects.end());
 
-    for (const auto& identifier : valid_orphans) {
+    for (const auto& identifier : orphan_ids) {
         plan.candidates.push_back(Candidate{
             .kind = CandidateKind::Content,
             .identifier = identifier,
@@ -697,7 +670,7 @@ observe(transport::Transport& storage,
         plan.candidates.end());
 
     if (auto valid =
-            validate_deletion_plan(plan, *history, valid_orphans, layout);
+            validate_deletion_plan(plan, *history, orphan_ids, layout);
         !valid) {
         return std::unexpected(valid.error());
     }

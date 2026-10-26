@@ -411,7 +411,7 @@ GC stops on an analysis failure, transport error, ownership loss, or ambiguous D
    ```bash
    kasumi remote health <profile>
    ```
-4. **Use Fsck for Integrity**: `kasumi fsck <profile>` audits referenced content; GC is not required for integrity verification.
+4. **Use Fsck for Integrity**: `kasumi fsck <profile>` audits referenced content and verifies payload integrity; GC relies strictly on reachability and does not certify or download orphan payloads.
 5. **Investigate Before Retrying**: Treat `Uncertain` mutation state and barrier-cleanup errors as reasons to inspect the remote namespace and retry only after the state is understood. Do not substitute ad-hoc provider deletion for GC. See [Garbage Collection Architecture](architecture/garbage-collection.md).
 
 ### Related Documentation
@@ -480,7 +480,7 @@ The table below clarifies the purpose and operational behavior of Kasumi's diagn
 | `kasumi status <profile>` | Preview pending changes | No | No | Exclusive | Point-in-time observation |
 | `kasumi sync <profile> --dry-run` | Preview pending changes | No | No | Exclusive | Point-in-time observation |
 | `kasumi fsck <profile>` | Audit referenced payloads | Yes | Yes | Exclusive | Audit may overlap writers |
-| `kasumi gc <profile>` | Storage reclamation | No Fsck-style audit | Yes | Exclusive | Barrier plus writer/ownership checks; not distributed exclusion |
+| `kasumi gc <profile>` | Storage reclamation | Reachability-only (zero orphan payload GETs) | Yes | Exclusive | Barrier plus writer/ownership checks; not distributed exclusion |
 | `kasumi gc remove-writer <profile> <writer-id>` | Remove one explicitly selected writer marker | No | No | Exclusive | Operator verifies liveness; other markers still block GC |
 | `kasumi gc remove-barrier <profile> --confirm-abandoned` | Remove an abandoned maintenance barrier | No | No | Exclusive | Operator verifies liveness; breaks deadlock with coexisting writers |
 | `kasumi remote health <profile>` | Operational diagnostic | No | No | None | Point-in-time observation |
