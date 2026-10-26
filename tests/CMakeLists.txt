@@ -231,6 +231,11 @@ kasumi_add_test_suite(
     LIBRARIES kasumi_cli
 )
 
+add_test(NAME kasumi_cli_process_contract
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/cli/test_process.py
+        --binary $<TARGET_FILE:kasumi>)
+set_tests_properties(kasumi_cli_process_contract PROPERTIES LABELS "integration.cli")
+
 add_executable(
     kasumi_test_i18n_generator_collision
     unit/cli/test_i18n_generator_collision.cpp
