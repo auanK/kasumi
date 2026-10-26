@@ -49,6 +49,9 @@ function(kasumi_add_test_suite target label)
 endfunction()
 
 add_subdirectory(support)
+add_test(NAME kasumi_gc_benchmark_collector
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/unit/operational/test_gc_benchmark.py)
+set_tests_properties(kasumi_gc_benchmark_collector PROPERTIES LABELS "benchmark;unit.operational")
 
 kasumi_add_test_suite(
     kasumi_test_unit_platform
@@ -390,6 +393,20 @@ add_test(
 )
 
 if(KASUMI_BUILD_BENCHMARKS)
+add_executable(kasumi_benchmark_gc
+    operational/benchmark_gc.cpp
+    operational/gc_live_preflight_support.cpp
+    operational/remote_copy_smoke_support.cpp)
+target_link_libraries(kasumi_benchmark_gc PRIVATE
+    kasumi_application kasumi_warnings nlohmann_json::nlohmann_json reproc++)
+target_include_directories(kasumi_benchmark_gc PRIVATE ${PROJECT_SOURCE_DIR}/src)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
+    target_link_options(kasumi_benchmark_gc PRIVATE -static-libgcc -static-libstdc++ -Wl,--allow-multiple-definition)
+endif()
+if(WIN32)
+    target_link_libraries(kasumi_benchmark_gc PRIVATE psapi)
+endif()
+
 add_executable(
     kasumi_benchmark_local_scan
     operational/benchmark_local_scan.cpp

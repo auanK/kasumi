@@ -198,6 +198,67 @@ cmake --build build-bench --parallel
 
 Benchmark executables and scripts are located in `tests/operational/`.
 
+### GC performance
+
+Build `kasumi_benchmark_gc` with `KASUMI_BUILD_BENCHMARKS=ON`, then run:
+
+```powershell
+New-Item -ItemType Directory -Force benchmark-results | Out-Null
+python tests/operational/benchmark_gc.py --binary build-bench/tests/kasumi_benchmark_gc.exe --output benchmark-results/gc-local --candidates 0 100 1000 5000 20000 --samples 2
+python tests/unit/operational/test_gc_benchmark.py
+```
+
+The output directory must be new. Each sample creates a fresh, isolated vault,
+random test key and authenticated history with one protected Content object.
+Orphan payloads are encrypted small files; fixture creation, the direct GC call
+on an already-open transport, post-GC FSCK and fixture cleanup have separate
+timings. These are not end-to-end CLI startup/recovery measurements. Tracing is
+enabled only for GC by the executable; `KASUMI_PERF_TRACE=1` enables the same
+instrumentation for normal commands. Peak RSS is the benchmark process only:
+it excludes rclone children, includes fixture memory and is not a GC-only
+allocation measurement.
+
+`results.json` retains each sample, raw metrics, binary SHA-256, and median/min/max
+for successful samples. A missing metric is `null`, never an invented zero.
+Malformed/truncated output, a missing result, process failure, uncertain cleanup
+or timeout stops the campaign without retry. The workspace, private test key,
+owned-object inventory and available diagnostics remain for investigation.
+Successful fixture cleanup removes only known objects; empty directories and
+local evidence may remain. Timings have no fixed pass/fail budget.
+During rclone GC, `GC_PROGRESS` lines expose the existing progress callback in
+the sample's live stderr log. They add no remote observation or ownership check.
+
+For a real rclone backend, obtain explicit permission for a dedicated parent
+outside any existing vault, inspect that exact path read-only, and start small:
+
+```powershell
+rclone lsf "kasumi:g-cert" --max-depth 1
+python tests/operational/benchmark_gc.py --binary build-bench/tests/kasumi_benchmark_gc.exe --output benchmark-results/gc-remote-100 --remote-parent "kasumi:g-cert" --confirm-disposable-parent --candidates 100 --samples 1
+```
+
+Pass the parent as `remote:path` without a trailing slash. The harness creates a
+random child below it and never writes to the parent directly. If the parent is
+new, `lsf` reports `directory not found`; the preflight still proves the random
+child unused from transport and raw-RC missing-directory evidence before the
+first write creates the prefix.
+`--confirm-disposable-parent` records previously obtained authorization; it does
+not make an existing vault disposable. The harness rejects a remote root,
+placeholders, traversal and any `Programming` path component. It uses the
+existing GC-live preflight to prove a random child unused, checks its empty
+listing, verifies a separate owner marker, and puts the vault below that child.
+No production profile, credentials database or SQLite state is used. Configure
+`RCLONE_CONFIG` separately if needed; do not put credentials in command arguments.
+
+Inspect the 100-object result before scheduling 1,000 or 5,000 objects in another
+new output directory. A 20,000-object remote run additionally requires
+`--confirm-large-remote` after reviewing provider costs and limits. The default
+local candidate list includes 20,000, so always specify remote sizes explicitly.
+Each run performs sequential candidate DELETEs and may be slow or rate limited.
+The report keeps Kasumi transport/RC metrics separate from unavailable internal
+provider retries (`null`); successful local/rclone-local tests do not certify a
+cloud provider. Never use purge/delete commands or automatic barrier recovery
+to clean an uncertain run. See [GC](architecture/garbage-collection.md#tracing).
+
 The journal E2E campaign uses the real CLI, official Publisher/Receiver profiles,
 physical SQLite databases, and real rclone local/cloud storage. Keep all output
 outside the repository; each run preserves its exclusive namespace and artifacts:

@@ -420,6 +420,29 @@ Partial failures preserve the exact previous acknowledgement count and stop furt
 4. **Use Fsck for Integrity**: `kasumi fsck <profile>` audits referenced content and verifies payload integrity; GC relies strictly on reachability and does not certify or download orphan payloads.
 5. **Investigate Before Retrying**: Treat `Uncertain` mutation state and barrier-cleanup errors as reasons to inspect the remote namespace and retry only after the state is understood. Do not substitute ad-hoc provider deletion for GC. See [Garbage Collection Architecture](architecture/garbage-collection.md).
 
+For a slow GC, enable `KASUMI_PERF_TRACE=1` and compare `gc.analysis_list_us`,
+`gc.content_classification_us`, plan build/validation, `gc.pre_apply_ownership_us`,
+`gc.remove_us` and `gc.barrier_cleanup_us` against the four phase timers.
+`gc.candidate_remove_attempts` can exceed acknowledgements on failure;
+`gc.confirmed_removed` retains only acknowledged operations. These timers nest:
+do not add DELETE time to Apply time or control subtimers to total time.
+Measure with [disposable benchmark fixtures](build-and-test.md#gc-performance),
+never an existing vault. Slow individual cloud DELETEs do not authorize batching,
+parallel deletion or concurrent Sync. There are deliberately no periodic
+ownership checkpoints or distributed CAS.
+
+If a benchmark fails or times out, preserve its output directory, `result.json`,
+`owned-objects.json`, private test key and reported namespace. Missing metrics
+are unavailable, not zero. Stop all writers for that disposable vault and inspect
+the exact namespace and recorded ownership before manual recovery. Do not run
+`gc remove-barrier`, cleanup, purge or a new GC automatically after an uncertain
+result. A fresh run uses a new child; it never reuses the failed run's decision.
+An RC HTTP 500 during fixture PUT is not a GC performance measurement and does
+not prove that the write had no effect. Treat the response status separately
+from the provider's underlying error; an object appearing in a later listing
+does not turn the failed operation into an acknowledgement. A manually requested
+repeat creates a new child and preserves the earlier uncertain namespace.
+
 ### Related Documentation
 * [Garbage Collection Architecture](architecture/garbage-collection.md)
 * [Physical and Maintenance Inspection](architecture/remote-maintenance-inspection.md)
