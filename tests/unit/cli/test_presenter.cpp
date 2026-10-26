@@ -997,17 +997,18 @@ TEST(CliPresenterTest, FormatsSizesAccuratelyAndConsistently) {
     EXPECT_EQ(format_size(1524713390), "1.42 GB");
 }
 
-TEST(CliPresenterTest, FormatsDurationsInMsSecondsAndMinutes) {
+TEST(CliPresenterTest, FormatsDurationsAsSecondsWithThreeDecimals) {
     using kasumi::cli::format_duration;
-    EXPECT_EQ(format_duration(std::chrono::milliseconds(0)), "0 ms");
-    EXPECT_EQ(format_duration(std::chrono::milliseconds(320)), "320 ms");
-    EXPECT_EQ(format_duration(std::chrono::milliseconds(999)), "999 ms");
-    EXPECT_EQ(format_duration(std::chrono::milliseconds(4800)), "4.8 s");
-    EXPECT_EQ(format_duration(std::chrono::milliseconds(5000)), "5 s");
-    EXPECT_EQ(format_duration(std::chrono::seconds(72)), "1 min 12 s");
-    EXPECT_EQ(format_duration(std::chrono::seconds(60)), "1 min");
-    EXPECT_EQ(format_duration(std::chrono::seconds(125)), "2 min 5 s");
-    EXPECT_EQ(format_duration(std::chrono::seconds(3665)), "1 h 1 min 5 s");
+    EXPECT_EQ(format_duration(std::chrono::milliseconds(-1)), "0.000 s");
+    EXPECT_EQ(format_duration(std::chrono::milliseconds(0)), "0.000 s");
+    EXPECT_EQ(format_duration(std::chrono::milliseconds(320)), "0.320 s");
+    EXPECT_EQ(format_duration(std::chrono::milliseconds(999)), "0.999 s");
+    EXPECT_EQ(format_duration(std::chrono::milliseconds(4800)), "4.800 s");
+    EXPECT_EQ(format_duration(std::chrono::milliseconds(5000)), "5.000 s");
+    EXPECT_EQ(format_duration(std::chrono::seconds(72)), "72.000 s");
+    EXPECT_EQ(format_duration(std::chrono::seconds(60)), "60.000 s");
+    EXPECT_EQ(format_duration(std::chrono::seconds(125)), "125.000 s");
+    EXPECT_EQ(format_duration(std::chrono::seconds(3665)), "3665.000 s");
 }
 
 TEST(CliPresenterTest, PresentsCancellationAsWarningWithExitCode130) {
@@ -1176,7 +1177,7 @@ TEST(CliPresenterTest, PresentsErrorsWithStageContextInPortugueseAndEnglish) {
 }
 
 TEST(CliPresenterTest,
-     PresentsSyncSummaryWithFormattedSizesAndCompletionDuration) {
+     PresentsSyncSummaryWithoutEmbeddingDomainDuration) {
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::Portuguese);
     {
         testing::internal::CaptureStdout();
@@ -1207,7 +1208,7 @@ TEST(CliPresenterTest,
                       "137 alterações | ↑ 92 (1.42 GB) | ↓ 31 (284 MB) | - 14"),
                   std::string::npos);
         EXPECT_NE(output.find("[OK]"), std::string::npos);
-        EXPECT_NE(output.find("Sincronização concluída em 4.8 s."),
+        EXPECT_NE(output.find("Sincronização concluída."),
                   std::string::npos);
     }
 
@@ -1239,7 +1240,7 @@ TEST(CliPresenterTest,
             output.find("137 changes | ↑ 92 (1.42 GB) | ↓ 31 (284 MB) | - 14"),
             std::string::npos);
         EXPECT_NE(output.find("[OK]"), std::string::npos);
-        EXPECT_NE(output.find("Synchronization completed in 4.8 s."),
+        EXPECT_NE(output.find("Synchronization completed."),
                   std::string::npos);
     }
 }
@@ -2037,3 +2038,20 @@ TEST(CliPresenterTest, ManualBarrierRemovalErrorPresentationWithDiagnostics) {
     EXPECT_NE(output_pt.find("Erro de transporte: io: disk full (native_code=28)"), std::string::npos);
 }
 } // namespace
+
+TEST(CliPresenterTest, ResolveMissingSuccessIsLocalized) {
+    kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::Portuguese);
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(kasumi::application::Response{
+        .operation = kasumi::application::Operation::ResolveMissing,
+        .data = kasumi::application::ResolveMissingCompleted{.resolved_count = 2}}), 0);
+    const auto resolved = testing::internal::GetCapturedStdout();
+    EXPECT_NE(resolved.find("2 caminhos ausentes resolvidos"), std::string::npos);
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(kasumi::cli::present(kasumi::application::Response{
+        .operation = kasumi::application::Operation::ResolveMissing,
+        .data = kasumi::application::ResolveMissingCompleted{}}), 0);
+    const auto empty = testing::internal::GetCapturedStdout();
+    EXPECT_NE(empty.find("Nenhum caminho ausente pendente para resolver"), std::string::npos);
+    kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
+}

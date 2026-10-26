@@ -1,5 +1,6 @@
 #include "cli/parser.hpp"
 #include "cli/update.hpp"
+#include "platform/cancellation.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/durability.hpp"
 #include "platform/workspace.hpp"
@@ -1336,3 +1337,17 @@ TEST(CliUpdateTest,
     }
 }
 #endif
+
+TEST(CliUpdateTest, PublicUpdateHonorsCancellationBeforeAnyInstallationWork) {
+    kasumi::platform::cancellation::request();
+    char executable[] = "kasumi";
+    char command[] = "update";
+    char* argv[]{executable, command};
+    testing::internal::CaptureStdout();
+    const int code = kasumi::cli::update::run(2, argv);
+    const auto output = testing::internal::GetCapturedStdout();
+    kasumi::platform::cancellation::reset();
+    EXPECT_EQ(code, 130);
+    EXPECT_EQ(output.find("Checking"), std::string::npos);
+    EXPECT_EQ(output.find("installation destination"), std::string::npos);
+}

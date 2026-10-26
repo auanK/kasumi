@@ -223,6 +223,14 @@ target_compile_definitions(kasumi_test_unit_cli PRIVATE
     "KASUMI_I18N_EMBEDDED_HEADER=\"${I18N_EMBEDDED_HEADER}\""
 )
 
+# Substitute Application entry points to exercise CLI outcomes without I/O.
+kasumi_add_test_suite(
+    kasumi_test_cli_boundary
+    "unit.cli"
+    SOURCES unit/cli/test_boundary.cpp
+    LIBRARIES kasumi_cli
+)
+
 add_executable(
     kasumi_test_i18n_generator_collision
     unit/cli/test_i18n_generator_collision.cpp
@@ -360,6 +368,7 @@ kasumi_add_test_suite(
     "integration.contracts"
     SOURCES
         integration/contracts/test_application_contracts.cpp
+        integration/contracts/test_cli.cpp
         integration/contracts/test_remote_heads.cpp
         integration/contracts/test_sync_maintenance.cpp
         support/src/provider_scenarios.cpp

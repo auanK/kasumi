@@ -4,9 +4,18 @@
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 
+#include <csignal>
+#include <future>
 #include <gtest/gtest.h>
+#include <iostream>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
+#ifndef _WIN32
+#include <pthread.h>
+#include <unistd.h>
+#endif
 namespace {
 struct Output {
     int code;
@@ -266,5 +275,196 @@ TEST_F(CliInterfaceTest,
     EXPECT_EQ(output.out.find("[arguments]"), std::string::npos);
     EXPECT_EQ(output.out.find("[options]"), std::string::npos);
 }
+
+TEST_F(CliInterfaceTest,
+       WizardSuccessAndTerminalFailureHaveDurationAndCorrectExitCodes) {
+    std::istringstream input{"q\n"};
+    auto* previous = std::cin.rdbuf(input.rdbuf());
+    const auto success = run({"kasumi", "config"});
+    std::cin.rdbuf(previous);
+    std::cin.clear();
+    EXPECT_EQ(success.code, 0);
+    EXPECT_NE(success.out.find("Duration:"), std::string::npos);
+
+    kasumi::test::write_text(
+        kasumi::test::workspace_path(workspace, "kasumi/config.toml"),
+        "[invalid toml");
+    const auto failure = run({"kasumi", "config"});
+    EXPECT_EQ(failure.code, 1);
+    EXPECT_NE(failure.out.find("[ERROR]"), std::string::npos);
+    EXPECT_NE(failure.out.find("Duration:"), std::string::npos);
+}
+
+TEST_F(CliInterfaceTest, WizardCancellationHasDurationAndExit130) {
+    struct CancelInput : std::streambuf {
+        int_type underflow() override {
+            std::raise(SIGINT);
+            return traits_type::eof();
+        }
+    } input;
+    auto* previous = std::cin.rdbuf(&input);
+    const auto output = run({"kasumi", "config"});
+    std::cin.rdbuf(previous);
+    std::cin.clear();
+    EXPECT_EQ(output.code, 130);
+    EXPECT_NE(output.out.find("cancelled"), std::string::npos);
+    EXPECT_NE(output.out.find("Duration:"), std::string::npos);
+}
+
+TEST_F(CliInterfaceTest, WizardEndOfInputIsCancellation) {
+    std::istringstream input;
+    auto* previous = std::cin.rdbuf(input.rdbuf());
+    const auto output = run({"kasumi", "config"});
+    std::cin.rdbuf(previous);
+    std::cin.clear();
+    EXPECT_EQ(output.code, 130);
+    EXPECT_NE(output.out.find("Operation cancelled"), std::string::npos);
+    EXPECT_NE(output.out.find("Duration:"), std::string::npos);
+    EXPECT_TRUE(
+        std::filesystem::is_empty(kasumi::test::workspace_root(workspace)));
+}
+
+TEST_F(CliInterfaceTest,
+       CancellationDuringDeletePromptDoesNotDeleteTheProfile) {
+    const kasumi::application::ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "kasumi")};
+    const kasumi::application::Profile profile{
+        "existing",
+        kasumi::test::workspace_path(workspace, "local"),
+        kasumi::test::workspace_path(workspace, "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment,
+        profile,
+        kasumi::application::MasterKeyHex{std::string(64, '1')}));
+    struct CancelAtEof : std::stringbuf {
+        CancelAtEof() : std::stringbuf("d\nexisting") {
+        }
+        int_type underflow() override {
+            if (!raised) {
+                raised = true;
+                std::raise(SIGINT);
+            }
+            return traits_type::eof();
+        }
+        bool raised = false;
+    } input;
+    auto* previous = std::cin.rdbuf(&input);
+    const auto output = run({"kasumi", "config"});
+    std::cin.rdbuf(previous);
+    std::cin.clear();
+    EXPECT_EQ(output.code, 130);
+    const auto profiles = kasumi::application::list_profiles(environment);
+    ASSERT_TRUE(profiles.has_value());
+    ASSERT_EQ(profiles->size(), 1u);
+    EXPECT_EQ(profiles->front().name, "existing");
+}
+
+TEST_F(CliInterfaceTest,
+       CancellationWhileReadingDeleteTargetDoesNotDeleteTheProfile) {
+    const kasumi::application::ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "kasumi")};
+    const kasumi::application::Profile profile{
+        "existing",
+        kasumi::test::workspace_path(workspace, "local"),
+        kasumi::test::workspace_path(workspace, "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment,
+        profile,
+        kasumi::application::MasterKeyHex{std::string(64, '1')}));
+    struct CancelWhileReadingTarget : std::streambuf {
+        int_type underflow() override {
+            if (position == 2)
+                std::raise(SIGINT);
+            if (position == input.size())
+                return traits_type::eof();
+            current = input[position++];
+            setg(&current, &current, &current + 1);
+            return traits_type::to_int_type(current);
+        }
+        std::string input{"d\nexisting\n"};
+        std::size_t position = 0;
+        char current = '\0';
+    } input;
+    auto* previous = std::cin.rdbuf(&input);
+    const auto output = run({"kasumi", "config"});
+    std::cin.rdbuf(previous);
+    std::cin.clear();
+    EXPECT_EQ(output.code, 130);
+    const auto profiles = kasumi::application::list_profiles(environment);
+    ASSERT_TRUE(profiles.has_value());
+    ASSERT_EQ(profiles->size(), 1u);
+    EXPECT_EQ(profiles->front().name, "existing");
+}
+
+#ifndef _WIN32
+TEST_F(CliInterfaceTest, SignalCancelsBlockedWizardInput) {
+    int descriptors[2];
+    ASSERT_EQ(::pipe(descriptors), 0);
+    std::promise<void> input_started;
+    auto input_started_future = input_started.get_future();
+    struct BlockingInput : std::streambuf {
+        BlockingInput(int input_descriptor,
+                      std::promise<void>& input_started)
+            : descriptor(input_descriptor), started(input_started) {}
+        int_type underflow() override {
+            if (!announced) {
+                announced = true;
+                started.set_value();
+            }
+            if (::read(descriptor, &current, 1) != 1)
+                return traits_type::eof();
+            setg(&current, &current, &current + 1);
+            return traits_type::to_int_type(current);
+        }
+        int descriptor;
+        std::promise<void>& started;
+        bool announced = false;
+        char current = '\0';
+    } input{descriptors[0], input_started};
+    auto* previous = std::cin.rdbuf(&input);
+    std::promise<Output> completion;
+    auto completion_future = completion.get_future();
+    std::thread cli([&] {
+        completion.set_value(run({"kasumi", "config"}));
+    });
+
+    const bool input_started_in_time =
+        input_started_future.wait_for(std::chrono::seconds(5)) ==
+        std::future_status::ready;
+    bool interrupted = false;
+    if (input_started_in_time) {
+        for (int attempt = 0; attempt < 20; ++attempt) {
+            if (completion_future.wait_for(std::chrono::milliseconds(0)) ==
+                std::future_status::ready) {
+                interrupted = true;
+                break;
+            }
+            EXPECT_EQ(::pthread_kill(cli.native_handle(), SIGINT), 0);
+            interrupted =
+                completion_future.wait_for(std::chrono::milliseconds(50)) ==
+                std::future_status::ready;
+            if (interrupted)
+                break;
+        }
+    }
+    if (!interrupted) {
+        const char quit[] = "q\n";
+        EXPECT_EQ(::write(descriptors[1], quit, sizeof(quit) - 1),
+                  static_cast<ssize_t>(sizeof(quit) - 1));
+    }
+    cli.join();
+    std::cin.rdbuf(previous);
+    std::cin.clear();
+    ::close(descriptors[0]);
+    ::close(descriptors[1]);
+
+    EXPECT_TRUE(input_started_in_time);
+    EXPECT_TRUE(interrupted);
+    const auto output = completion_future.get();
+    EXPECT_EQ(output.code, 130);
+    EXPECT_TRUE(
+        std::filesystem::is_empty(kasumi::test::workspace_root(workspace)));
+}
+#endif
 
 } // namespace
