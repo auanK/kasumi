@@ -68,6 +68,13 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
             .detail = "--audit-inventory cannot be combined with --initial",
         });
     }
+    if (operation == Operation::RemoveBarrier && !input.request.confirm_abandoned) {
+        return std::unexpected(Error{
+            .operation = operation,
+            .code = ErrorCode::RuntimeFailure,
+            .detail = "--confirm-abandoned is required to remove a maintenance barrier",
+        });
+    }
     const auto access_mode =
         (operation == Operation::Sync || operation == Operation::ResolveMissing)
             ? runtime::AccessMode::ReadWrite
@@ -237,7 +244,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
                 check_empty_directory(profile_directory / ".transactions")) {
             return reject_initial(*error);
         }
-    } else if (!state_storage::validate(runtime_data->database_path)) {
+    } else if (operation != Operation::RemoveBarrier && !state_storage::validate(runtime_data->database_path)) {
         platform::perf_trace::finish("operation preparation",
                                      preparation_trace);
         wipe_operation(output);

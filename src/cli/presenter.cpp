@@ -617,6 +617,9 @@ int present_remote_writers(const application::RemoteWritersReport& report) {
     i18n::println(i18n::Key::FieldBarrier,
                   report.barrier_present ? i18n::tr(i18n::Key::FieldPresent)
                                          : i18n::tr(i18n::Key::FieldAbsent));
+    if (report.barrier_identifier.has_value()) {
+        i18n::println(i18n::Key::FieldIdentifier, *report.barrier_identifier);
+    }
     i18n::println(i18n::Key::FieldMaintenanceBlocked,
                   yes_no(report.maintenance_blocked));
     i18n::println(i18n::Key::FieldProtocolConsistent,
@@ -992,6 +995,33 @@ int present(const application::Response& response, bool full) {
             return 0;
         }
     }
+    if (response.operation == application::Operation::RemoveBarrier) {
+        if (const auto* ptr =
+                std::get_if<application::ManualBarrierRemovalCompleted>(
+                    &response.data)) {
+            if (ptr->outcome == application::BarrierRemovalOutcome::Removed) {
+                std::println("{}{}{} {}",
+                             style::green,
+                             i18n::tr(i18n::Key::LabelOk),
+                             style::reset,
+                             i18n::format(i18n::Key::ManualBarrierRemovalCompleted,
+                                          ptr->identifier));
+            } else {
+                std::println("{}{}{} {}",
+                             style::green,
+                             i18n::tr(i18n::Key::LabelOk),
+                             style::reset,
+                             i18n::tr(i18n::Key::ManualBarrierRemovalAbsent));
+            }
+            if (ptr->active_writers_count > 0) {
+                std::println("{} {}",
+                             i18n::tr(i18n::Key::LabelWarning),
+                             i18n::format(i18n::Key::ManualBarrierRemovalWritersRemain,
+                                          ptr->active_writers_count));
+            }
+            return 0;
+        }
+    }
     if (const auto* ptr =
             std::get_if<application::GarbageCollectCompleted>(&response.data);
         ptr && response.operation == application::Operation::GarbageCollect) {
@@ -1256,6 +1286,64 @@ int present(const application::Error& error) {
                          style::reset,
                          i18n::format(i18n::Key::ErrorWriterRemovalFailed,
                                       error.detail));
+            break;
+        case application::ErrorCode::BarrierRemovalFailure:
+            std::println("{}{}{} {}",
+                         style::red,
+                         i18n::tr(i18n::Key::LabelError),
+                         style::reset,
+                         i18n::format(i18n::Key::ErrorBarrierRemovalFailed,
+                                      error.detail));
+            if (error.barrier_removal) {
+                const auto& br = *error.barrier_removal;
+                i18n::Key stage_key = i18n::Key::BarrierRemovalStageCheckingPresence;
+                switch (br.stage) {
+                    case application::BarrierRemovalStage::CheckingPresence:
+                        stage_key = i18n::Key::BarrierRemovalStageCheckingPresence;
+                        break;
+                    case application::BarrierRemovalStage::DownloadingPayload:
+                        stage_key = i18n::Key::BarrierRemovalStageDownloadingPayload;
+                        break;
+                    case application::BarrierRemovalStage::ValidatingPayload:
+                        stage_key = i18n::Key::BarrierRemovalStageValidatingPayload;
+                        break;
+                    case application::BarrierRemovalStage::CheckingWriters:
+                        stage_key = i18n::Key::BarrierRemovalStageCheckingWriters;
+                        break;
+                    case application::BarrierRemovalStage::VerifyingPhysicalIdentity:
+                        stage_key = i18n::Key::BarrierRemovalStageVerifyingPhysicalIdentity;
+                        break;
+                    case application::BarrierRemovalStage::Removing:
+                        stage_key = i18n::Key::BarrierRemovalStageRemoving;
+                        break;
+                    case application::BarrierRemovalStage::ConfirmingAbsence:
+                        stage_key = i18n::Key::BarrierRemovalStageConfirmingAbsence;
+                        break;
+                }
+                i18n::Key state_key = i18n::Key::BarrierRemovalMutationNotAttempted;
+                switch (br.mutation_state) {
+                    case application::BarrierRemovalMutationState::NotAttempted:
+                        state_key = i18n::Key::BarrierRemovalMutationNotAttempted;
+                        break;
+                    case application::BarrierRemovalMutationState::Confirmed:
+                        state_key = i18n::Key::BarrierRemovalMutationConfirmed;
+                        break;
+                    case application::BarrierRemovalMutationState::Uncertain:
+                        state_key = i18n::Key::BarrierRemovalMutationUncertain;
+                        break;
+                }
+                std::println("  {}: {}",
+                             i18n::tr(i18n::Key::LabelStage),
+                             i18n::tr(stage_key));
+                std::println("  {}: {}",
+                             i18n::tr(i18n::Key::LabelMutationState),
+                             i18n::tr(state_key));
+                if (br.transport_error) {
+                    std::println("  {}: {}",
+                                 i18n::tr(i18n::Key::LabelTransportError),
+                                 transport::describe(*br.transport_error));
+                }
+            }
             break;
         case application::ErrorCode::InventoryAuditFailure:
             std::println("{}{}{} {}",

@@ -23,7 +23,9 @@ enum class Operation {
     // Resolves unavailable pending materializations as logical deletions.
     ResolveMissing,
     // Explicit manual removal of one remote writer marker.
-    RemoveWriter
+    RemoveWriter,
+    // Explicit manual removal of an abandoned remote maintenance barrier.
+    RemoveBarrier
 };
 
 // Request structure defining action to perform and target profile.
@@ -34,6 +36,7 @@ struct Request {
     bool initial = false;
     bool audit_inventory = false;
     bool trust_existing_content = false;
+    bool confirm_abandoned = false;
 };
 
 } // namespace kasumi::application

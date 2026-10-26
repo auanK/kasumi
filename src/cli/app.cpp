@@ -129,6 +129,11 @@ int run(int argc, char* argv[]) {
                      i18n::tr(i18n::Key::LabelWarning),
                      i18n::tr(i18n::Key::ManualWriterRemovalWarning));
     }
+    if (request.operation == application::Operation::RemoveBarrier) {
+        std::println("{} {}",
+                     i18n::tr(i18n::Key::LabelWarning),
+                     i18n::tr(i18n::Key::ManualBarrierRemovalWarning));
+    }
     auto initial_credentials = credentials::from_environment();
 
     application::ProgressCallback on_progress{};

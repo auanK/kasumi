@@ -24,7 +24,10 @@
     "yes": "sim",
     "no": "não",
     "ancestral_marker": "MARKER ANCESTRAL",
-    "ancestral": "ANCESTRAL"
+    "ancestral": "ANCESTRAL",
+    "stage": "Etapa",
+    "mutation_state": "Estado da mutação",
+    "transport_error": "Erro de transporte"
   },
   "sync": {
     "in_progress": "Sincronizando...",
@@ -126,7 +129,8 @@
     "sync_audit_combination": "--audit-inventory não pode ser combinada com --dry-run ou --initial.",
     "inconsistent_inspection": "resposta de inspeção inconsistente.",
     "available_heads": "\nHeads disponíveis:",
-    "use_remote_tree_head": "\nUse: kasumi remote tree <perfil> --head <commit-id>"
+    "use_remote_tree_head": "\nUse: kasumi remote tree <perfil> --head <commit-id>",
+    "barrier_removal_failed": "Falha ao remover a barreira de manutenção: {}"
   },
   "remote": {
     "heads_none": "Nenhuma head remota publicada.",
@@ -319,5 +323,21 @@
     "profile_renamed": "Perfil renomeado para '{}'.",
     "invalid_option": "Opção inválida.",
     "config_read_failed": "Falha ao ler config: {}"
+  },
+  "manual_barrier_removal": {
+    "warning": "O Kasumi não pode determinar se uma coleta de lixo ou manutenção ainda está ativa em outros dispositivos. A verificação da barreira não pode garantir que nenhuma operação esteja em execução. Certifique-se de que nenhuma coleta ou manutenção esteja ativa antes da remoção.",
+    "completed": "Barreira de manutenção removida: {}",
+    "absent": "A barreira de manutenção já está ausente.",
+    "writers_remain": "Marcadores de writer ativos permanecem ({}). Eles agora podem ser removidos com 'kasumi gc remove-writer <profile> <writer-id>'.",
+    "stage_checking_presence": "Verificando presença da barreira",
+    "stage_downloading_payload": "Baixando conteúdo da barreira",
+    "stage_validating_payload": "Validando token de controle da barreira",
+    "stage_checking_writers": "Consultando escritores ativos",
+    "stage_verifying_physical_identity": "Verificando identidade física da barreira",
+    "stage_removing": "Removendo barreira",
+    "stage_confirming_absence": "Confirmando ausência da barreira",
+    "mutation_not_attempted": "Não tentada",
+    "mutation_confirmed": "Confirmada",
+    "mutation_uncertain": "Incerta"
   }
 }

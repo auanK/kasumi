@@ -29,11 +29,30 @@ enum class ErrorCode {
     InvalidControlObject,
 };
 
+enum class BarrierRemovalStage : std::uint8_t {
+    CheckingPresence,
+    DownloadingPayload,
+    ValidatingPayload,
+    CheckingWriters,
+    VerifyingPhysicalIdentity,
+    Removing,
+    ConfirmingAbsence,
+};
+
+enum class BarrierRemovalMutationState : std::uint8_t {
+    NotAttempted,
+    Confirmed,
+    Uncertain,
+};
+
 struct Error {
     ErrorCode code = ErrorCode::InvalidInput;
     std::string detail;
     // Preserves the backend category and native code when available.
     std::optional<transport::Error> transport_failure;
+    std::optional<std::string> identifier;
+    std::optional<BarrierRemovalStage> stage;
+    std::optional<BarrierRemovalMutationState> mutation_state;
 };
 
 struct RegistrationState {
@@ -76,6 +95,23 @@ active_writers(transport::Transport& storage, const RemoteLayout& layout);
 std::expected<void, Error> remove_writer(transport::Transport& storage,
                                          const RemoteLayout& layout,
                                          std::string_view identifier);
+
+enum class BarrierRemovalOutcome : std::uint8_t {
+    Removed,
+    AlreadyAbsent,
+};
+
+struct BarrierRemovalResult {
+    BarrierRemovalOutcome outcome = BarrierRemovalOutcome::Removed;
+    std::size_t active_writers_count = 0;
+};
+
+// Removes an abandoned maintenance barrier after verifying its structure,
+// control token, and observed physical identity.
+std::expected<BarrierRemovalResult, Error>
+remove_barrier(transport::Transport& storage,
+               const RemoteLayout& layout,
+               const std::filesystem::path& workspace_root);
 
 // Confirms immediate read-after-write and read-after-delete visibility in
 // listings.

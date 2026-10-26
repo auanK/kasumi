@@ -106,6 +106,56 @@ std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
     return run_garbage_collect_operation(context);
 }
 
+std::expected<Response, Error> run_remove_barrier(OperationContext& context) {
+    const auto layout = history_storage::derive_remote_layout(context.key);
+    auto workspace_root = context.runtime.database_path.parent_path();
+    std::error_code ec;
+    if (workspace_root.empty() || !std::filesystem::exists(workspace_root, ec)) {
+        workspace_root = context.runtime.local_dir.parent_path();
+    }
+    if (workspace_root.empty() || !std::filesystem::exists(workspace_root, ec)) {
+        workspace_root = std::filesystem::temp_directory_path();
+    }
+    auto removed = history_storage::maintenance_protocol::remove_barrier(
+        context.storage, layout, workspace_root);
+    if (!removed) {
+        const auto& err = removed.error();
+        const auto stage = err.stage.has_value()
+            ? static_cast<BarrierRemovalStage>(*err.stage)
+            : BarrierRemovalStage::CheckingPresence;
+        const auto mutation_state = err.mutation_state.has_value()
+            ? static_cast<BarrierRemovalMutationState>(*err.mutation_state)
+            : BarrierRemovalMutationState::NotAttempted;
+
+        return std::unexpected(Error{
+            .operation = context.operation,
+            .code = ErrorCode::BarrierRemovalFailure,
+            .detail = err.detail,
+            .runtime = context.summary,
+            .barrier_removal = BarrierRemovalFailure{
+                .barrier_identifier = err.identifier.value_or(layout.barrier_identifier),
+                .stage = stage,
+                .mutation_state = mutation_state,
+                .transport_error = err.transport_failure,
+            },
+        });
+    }
+    const auto outcome = (removed->outcome ==
+                          history_storage::maintenance_protocol::
+                              BarrierRemovalOutcome::Removed)
+                             ? BarrierRemovalOutcome::Removed
+                             : BarrierRemovalOutcome::AlreadyAbsent;
+    return Response{
+        .operation = context.operation,
+        .runtime = context.summary,
+        .data = ManualBarrierRemovalCompleted{
+            .identifier = layout.barrier_identifier,
+            .outcome = outcome,
+            .active_writers_count = removed->active_writers_count,
+        },
+    };
+}
+
 std::expected<Response, Error> run_remove_writer(OperationContext& context) {
     const auto layout = history_storage::derive_remote_layout(context.key);
     auto removed = history_storage::maintenance_protocol::remove_writer(

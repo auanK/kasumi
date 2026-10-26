@@ -392,11 +392,21 @@ GC stops on an analysis failure, transport error, ownership loss, or ambiguous D
 ### Safe Next Steps
 
 1. **Preserve Protocol Objects**: Do not delete legacy quarantine objects or other protocol objects directly through the provider.
-2. **Inspect Writer Markers**:
+2. **Inspect Writer Markers and Barrier**:
    ```bash
    kasumi remote writers <profile>
    ```
-   If you know another client is synchronizing, wait for it to finish. Before removal, verify that no Sync or maintenance operation is running; the barrier check is not distributed exclusion. Then copy only that writer's exact identifier and run `kasumi gc remove-writer <profile> <writer-id>`. Kasumi cannot establish process liveness; removal is the operator's responsibility. The command removes only the selected marker and does not run GC.
+   If you know another client is synchronizing, wait for it to finish.
+   - If a maintenance barrier is present from an interrupted GC run (`Barrier: present`), inspect its identifier. Ensure that no GC process is active on any device (never assume a barrier is abandoned merely because of its age or timestamp), then recover it:
+     ```bash
+     kasumi gc remove-barrier <profile> --confirm-abandoned
+     ```
+     If removal exits with an `Uncertain` mutation state (e.g. after a network timeout or connection reset during DELETE or post-removal verification), do not perform manual provider mutations. Re-run `kasumi remote writers <profile>` to inspect actual remote state. If the barrier is already absent, a subsequent `remove-barrier` will report `Already absent` with zero deletes. If it remains present and maintenance is verified inactive, retry the command.
+   - If writer markers remain, verify that no Sync or maintenance operation is running, copy that writer's exact identifier, and run:
+     ```bash
+     kasumi gc remove-writer <profile> <writer-id>
+     ```
+   Kasumi cannot establish process liveness; removal is the operator's responsibility. The command removes only the selected control object and does not run GC or Sync.
 3. **Inspect Remote Health**:
    ```bash
    kasumi remote health <profile>
@@ -472,6 +482,7 @@ The table below clarifies the purpose and operational behavior of Kasumi's diagn
 | `kasumi fsck <profile>` | Audit referenced payloads | Yes | Yes | Exclusive | Audit may overlap writers |
 | `kasumi gc <profile>` | Storage reclamation | No Fsck-style audit | Yes | Exclusive | Barrier plus writer/ownership checks; not distributed exclusion |
 | `kasumi gc remove-writer <profile> <writer-id>` | Remove one explicitly selected writer marker | No | No | Exclusive | Operator verifies liveness; other markers still block GC |
+| `kasumi gc remove-barrier <profile> --confirm-abandoned` | Remove an abandoned maintenance barrier | No | No | Exclusive | Operator verifies liveness; breaks deadlock with coexisting writers |
 | `kasumi remote health <profile>` | Operational diagnostic | No | No | None | Point-in-time observation |
 | `kasumi remote contents --audit <profile>` | Audit all physical payloads | Yes (all present) | No | None | Point-in-time observation |
 | `kasumi remote summary <profile>` | Overview of vault state | No | No | None | Point-in-time observation |

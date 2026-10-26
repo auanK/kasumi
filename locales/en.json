@@ -1,5 +1,5 @@
 {
-  "help_text": "Usage: kasumi <command> [options]\n\nCommands:\n  kasumi config                                Interactive profile wizard.\n  kasumi update                               Check and install the latest supported release.\n  kasumi sync <profile>                        Synchronize with remote storage.\n  kasumi sync <profile> --dry-run              Simulate without altering data.\n  kasumi sync <profile> --initial              Initialize a missing local database (bootstrap or enroll).\n  kasumi sync <profile> --initial --trust-existing-content\n                                               Bootstrap trusting pre-existing remote content without download.\n  kasumi sync <profile> --audit-inventory      Sync, then structurally audit remote inventory.\n  kasumi status <profile>                      Show pending local changes.\n  kasumi fsck <profile>                        Audit remote integrity.\n  kasumi gc <profile>                          Analyze garbage collection candidates and remove safe objects.\n  kasumi gc remove-writer <profile> <writer-id>\n                                               Remove one exact writer marker; verify its process is inactive.\n  kasumi resolve-missing <profile>             Resolve unavailable content as deleted.\n\nRemote inspection (read-only):\n  kasumi remote heads <profile>                Current logical heads.\n  kasumi remote tree <profile> [--head <id>]   Tree of a specific head.\n  kasumi remote commits <profile>              Reachable commits.\n  kasumi remote summary <profile>              General vault summary.\n  kasumi remote stat <profile> <path>          Properties of a specific path.\n  kasumi remote commit <profile> <id>          Commit details.\n  kasumi remote get <profile> <path> <dst>     Download authenticated file.\n  kasumi remote epochs <profile>               Epoch chain.\n  kasumi remote epoch <profile> <id>           Epoch details.\n  kasumi remote contents <profile>             Contents by metadata.\n  kasumi remote contents --audit <profile>     Cryptographic audit.\n  kasumi remote content <profile> <id>         Content details.\n  kasumi remote markers <profile>              Classify physical markers.\n  kasumi remote objects <profile>              Physical namespace.\n  kasumi remote orphans <profile>              List orphans; does not run GC.\n  kasumi remote writers <profile>              Writers and barrier.\n  kasumi remote health <profile>               Full remote health diagnostic.\n\nGeneral options:\n  -h, --help, help                             Show this help message.\n  -v, --version, version                       Show Kasumi version.\n  --lang <en|pt-BR>                            Set language (English default).\n  --full                                       Display all items in sync plan.\n",
+  "help_text": "Usage: kasumi <command> [options]\n\nCommands:\n  kasumi config                                Interactive profile wizard.\n  kasumi update                               Check and install the latest supported release.\n  kasumi sync <profile>                        Synchronize with remote storage.\n  kasumi sync <profile> --dry-run              Simulate without altering data.\n  kasumi sync <profile> --initial              Initialize a missing local database (bootstrap or enroll).\n  kasumi sync <profile> --initial --trust-existing-content\n                                               Bootstrap trusting pre-existing remote content without download.\n  kasumi sync <profile> --audit-inventory      Sync, then structurally audit remote inventory.\n  kasumi status <profile>                      Show pending local changes.\n  kasumi fsck <profile>                        Audit remote integrity.\n  kasumi gc <profile>                          Analyze garbage collection candidates and remove safe objects.\n  kasumi gc remove-writer <profile> <writer-id>\n                                               Remove one exact writer marker; verify its process is inactive.\n  kasumi gc remove-barrier <profile> --confirm-abandoned\n                                               Remove an abandoned maintenance barrier after manual verification.\n  kasumi resolve-missing <profile>             Resolve unavailable content as deleted.\n\nRemote inspection (read-only):\n  kasumi remote heads <profile>                Current logical heads.\n  kasumi remote tree <profile> [--head <id>]   Tree of a specific head.\n  kasumi remote commits <profile>              Reachable commits.\n  kasumi remote summary <profile>              General vault summary.\n  kasumi remote stat <profile> <path>          Properties of a specific path.\n  kasumi remote commit <profile> <id>          Commit details.\n  kasumi remote get <profile> <path> <dst>     Download authenticated file.\n  kasumi remote epochs <profile>               Epoch chain.\n  kasumi remote epoch <profile> <id>           Epoch details.\n  kasumi remote contents <profile>             Contents by metadata.\n  kasumi remote contents --audit <profile>     Cryptographic audit.\n  kasumi remote content <profile> <id>         Content details.\n  kasumi remote markers <profile>              Classify physical markers.\n  kasumi remote objects <profile>              Physical namespace.\n  kasumi remote orphans <profile>              List orphans; does not run GC.\n  kasumi remote writers <profile>              Writers and barrier.\n  kasumi remote health <profile>               Full remote health diagnostic.\n\nGeneral options:\n  -h, --help, help                             Show this help message.\n  -v, --version, version                       Show Kasumi version.\n  --lang <en|pt-BR>                            Set language (English default).\n  --full                                       Display all items in sync plan.\n",
   "version_text": "kasumi version {}\n",
   "update": {
     "checking": "Checking for updates...\n",
@@ -24,7 +24,10 @@
     "yes": "yes",
     "no": "no",
     "ancestral_marker": "ANCESTRAL MARKER",
-    "ancestral": "ANCESTRAL"
+    "ancestral": "ANCESTRAL",
+    "stage": "Stage",
+    "mutation_state": "Mutation state",
+    "transport_error": "Transport error"
   },
   "sync": {
     "in_progress": "Synchronizing...",
@@ -126,7 +129,8 @@
     "sync_audit_combination": "--audit-inventory cannot be combined with --dry-run or --initial.",
     "inconsistent_inspection": "Inconsistent inspection response.",
     "available_heads": "\nAvailable heads:",
-    "use_remote_tree_head": "\nUse: kasumi remote tree <profile> --head <commit-id>"
+    "use_remote_tree_head": "\nUse: kasumi remote tree <profile> --head <commit-id>",
+    "barrier_removal_failed": "Failed to remove maintenance barrier: {}"
   },
   "remote": {
     "heads_none": "No remote heads published.",
@@ -319,5 +323,21 @@
     "profile_renamed": "Profile renamed to '{}'.",
     "invalid_option": "Invalid option.",
     "config_read_failed": "Failed to read config: {}"
+  },
+  "manual_barrier_removal": {
+    "warning": "Kasumi cannot determine whether an active garbage collection or maintenance operation is still running on other devices. Its barrier check cannot guarantee that no operations are running. Verify that no garbage collection or maintenance operation is active before removal.",
+    "completed": "Removed maintenance barrier: {}",
+    "absent": "Maintenance barrier is already absent.",
+    "writers_remain": "Active writer markers remain ({}). They can now be removed with 'kasumi gc remove-writer <profile> <writer-id>'.",
+    "stage_checking_presence": "Checking barrier presence",
+    "stage_downloading_payload": "Downloading barrier payload",
+    "stage_validating_payload": "Validating barrier control token",
+    "stage_checking_writers": "Checking active writers",
+    "stage_verifying_physical_identity": "Verifying barrier physical identity",
+    "stage_removing": "Removing barrier",
+    "stage_confirming_absence": "Confirming barrier absence",
+    "mutation_not_attempted": "Not attempted",
+    "mutation_confirmed": "Confirmed",
+    "mutation_uncertain": "Uncertain"
   }
 }

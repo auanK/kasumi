@@ -158,13 +158,52 @@ struct ManualWriterRemovalCompleted {
     std::string identifier;
 };
 
+enum class BarrierRemovalOutcome : std::uint8_t {
+    Removed,
+    AlreadyAbsent,
+};
+
+struct ManualBarrierRemovalCompleted {
+    std::string identifier;
+    BarrierRemovalOutcome outcome = BarrierRemovalOutcome::Removed;
+    std::size_t active_writers_count = 0;
+};
+
+// Stage of the manual barrier removal operation.
+enum class BarrierRemovalStage : std::uint8_t {
+    CheckingPresence,
+    DownloadingPayload,
+    ValidatingPayload,
+    CheckingWriters,
+    VerifyingPhysicalIdentity,
+    Removing,
+    ConfirmingAbsence,
+};
+
+// State of the mutation associated with a barrier-removal failure.
+enum class BarrierRemovalMutationState : std::uint8_t {
+    NotAttempted,
+    Confirmed,
+    Uncertain,
+};
+
+// Diagnostic context for a barrier-removal failure.
+struct BarrierRemovalFailure {
+    std::string barrier_identifier;
+    BarrierRemovalStage stage = BarrierRemovalStage::CheckingPresence;
+    BarrierRemovalMutationState mutation_state =
+        BarrierRemovalMutationState::NotAttempted;
+    std::optional<transport::Error> transport_error;
+};
+
 // Possible payload variants for a successful response.
 using ResponseData = std::variant<SyncCompleted,
                                   PlanReport,
                                   FsckCompleted,
                                   GarbageCollectCompleted,
                                   ResolveMissingCompleted,
-                                  ManualWriterRemovalCompleted>;
+                                  ManualWriterRemovalCompleted,
+                                  ManualBarrierRemovalCompleted>;
 
 // Successful operation response.
 struct Response {
@@ -187,6 +226,7 @@ enum class ErrorCode {
     FsckFailure,
     GarbageCollectionFailure,
     WriterRemovalFailure,
+    BarrierRemovalFailure,
     SynchronizationFailure,
     RecoveryFailure,
     InventoryAuditFailure
@@ -202,6 +242,8 @@ struct Error {
     // Present when garbage collection failed after acquiring execution context
     // sufficient to report candidate and cleanup diagnostics.
     std::optional<GarbageCollectFailure> garbage_collection;
+    // Present when manual barrier removal failed.
+    std::optional<BarrierRemovalFailure> barrier_removal;
     // Sync succeeded before a subsequent inventory audit failed.
     std::optional<SyncCompleted> sync_completed;
 };

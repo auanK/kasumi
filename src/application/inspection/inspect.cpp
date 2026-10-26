@@ -1568,6 +1568,9 @@ make_writers_report(const history_storage::RemoteLayout& layout,
     report.barrier_present =
         std::ranges::find(identifiers, layout.barrier_identifier) !=
             identifiers.end();
+    if (report.barrier_present) {
+        report.barrier_identifier = layout.barrier_identifier;
+    }
     for (const auto& identifier : identifiers) {
         if (!identifier.starts_with(layout.writers_prefix)) {
             continue;

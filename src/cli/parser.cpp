@@ -118,6 +118,19 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 .profile_name = argv[3],
                 .writer_identifier = argv[4]};
         }
+        if (argc >= 3 && argv[2] != nullptr &&
+            std::string_view{argv[2]} == "remove-barrier") {
+            if (argc != 5 || argv[3] == nullptr || argv[3][0] == '\0' ||
+                std::string_view{argv[3]}.starts_with("--") ||
+                argv[4] == nullptr ||
+                std::string_view{argv[4]} != "--confirm-abandoned") {
+                return std::unexpected(ParseError{});
+            }
+            return application::Request{
+                .operation = application::Operation::RemoveBarrier,
+                .profile_name = argv[3],
+                .confirm_abandoned = true};
+        }
         return request(application::Operation::GarbageCollect, argc, argv);
     }
     if (command == "resolve-missing") {

@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -260,6 +261,7 @@ struct RemoteWriterInfo {
 
 struct RemoteWritersReport {
     bool barrier_present = false;
+    std::optional<std::string> barrier_identifier;
     bool maintenance_blocked = false;
     bool protocol_consistent = true;
     std::vector<RemoteWriterInfo> writers;

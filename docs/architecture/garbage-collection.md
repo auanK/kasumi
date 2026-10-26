@@ -179,6 +179,78 @@ associated process is still active, so the operator must verify that no Sync or
 maintenance operation is running before proceeding. It neither removes barriers
 nor runs Sync or GC.
 
+## Manual barrier removal
+
+`kasumi gc remove-barrier <profile> --confirm-abandoned` is a controlled, diagnostic
+manual recovery operation for an abandoned remote maintenance barrier left behind
+when a Garbage Collection process was terminated abruptly (e.g., killed process,
+power loss, or ungraceful shutdown).
+
+When an abandoned barrier remains on remote storage, subsequent GC runs fail
+immediately with:
+
+```text
+another maintenance barrier is already present
+```
+
+### Protocol and Operational Principles
+
+1. **Inspection**: Use `kasumi remote writers <profile>` to inspect whether a
+   barrier is present. When present, Kasumi displays its full remote identifier
+   (derived deterministically from the vault's key layout):
+   ```text
+   Maintenance barrier:
+     Present: Yes
+     Identifier: <barrier-identifier>
+
+   Writers: 0
+   Maintenance blocked: Yes
+   ```
+2. **Mandatory Confirmation (`--confirm-abandoned`)**: Because Kasumi operates
+   over passive storage backends that lack distributed process liveness detection, it
+   cannot determine whether an active GC process is still executing on another
+   device or machine. Never assume a barrier is abandoned merely because of its
+   age or timestamp. The operator must verify externally that no maintenance or sync
+   operation is active before passing `--confirm-abandoned`.
+3. **Control Token Verification**: The barrier object contains a control payload
+   token (`kasumi-gc-v1:barrier:<32-hex-token>`). Kasumi downloads and performs
+   structural validation of this token (checking prefix and canonical 32-character
+   hexadecimal format) before attempting removal, rejecting corrupted or foreign
+   objects. This token is an internal control token; it is not a cryptographic
+   signature or MAC.
+4. **Physical Identity Verification vs. Absence of Distributed CAS**: Prior to
+   deletion, Kasumi verifies the object's physical identity (via remote SHA-256
+   hash or verified GET readback fallback) against the downloaded copy to ensure
+   it has not been altered. However, physical identity verification is **not** an
+   atomic conditional delete (compare-and-swap / CAS). Because passive object
+   storage lacks distributed CAS, a concurrent process could replace or recreate
+   the barrier in the residual window between revalidation and DELETE. Kasumi
+   does not pretend to eliminate this residual race; this fundamental limitation
+   is why operator confirmation is mandatory. If the barrier is replaced prior to
+   revalidation, removal is aborted and the replacement is preserved.
+5. **Post-removal Confirmation and Diagnostic Mutation States**: After issuing a
+   DELETE call, Kasumi immediately re-checks absence via transport PRESENCE.
+   Failures are classified into three explicit mutation states:
+   - `NotAttempted`: Failure occurred before any DELETE was sent (e.g., control
+     token validation failure or physical identity mismatch).
+   - `Confirmed`: DELETE was acknowledged and post-removal PRESENCE confirmed absence.
+   - `Uncertain`: DELETE was issued, but its final consequence could not be proven
+     (e.g., ambiguous transport error such as timeout or network drop, or post-removal
+     PRESENCE check failed or reported the barrier still present).
+   Kasumi never converts an ambiguous error into success and never retries DELETE
+   automatically after an uncertain result. When an operation returns `Uncertain`,
+   the operator must re-inspect the remote state using `kasumi remote writers <profile>`.
+   Any subsequent recovery attempt observes fresh remote state rather than reusing
+   stale decisions.
+6. **Deadlock Elimination with Writers**: If an interrupted process left both a
+   barrier and writer markers, `remove-barrier` does not deadlock. It removes the
+   barrier and reports any remaining active writers, allowing the operator to
+   subsequently remove those writers using `kasumi gc remove-writer <profile> <writer-id>`.
+7. **Isolation**: Barrier recovery runs under the local exclusive profile lock,
+   operates even if the local SQLite state database is absent or unaccepted
+   (requiring only valid profile configuration and credentials), and never executes
+   Sync, GC, or local file modifications.
+
 ## Inspecting before maintenance
 
 Prefer `kasumi remote health <profile>`, `kasumi remote writers <profile>`,
