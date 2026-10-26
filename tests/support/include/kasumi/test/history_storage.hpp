@@ -200,6 +200,8 @@ struct FakeState {
     std::size_t remove_batch_count = 0;
     std::size_t remove_batch_item_count = 0;
     std::size_t remove_batch_concurrency = 0;
+    std::vector<std::size_t> remove_batch_sizes;
+    std::vector<std::string> batch_lifecycle_events;
     std::size_t commit_put_count = 0;
     std::size_t marker_put_count = 0;
     std::size_t commit_get_count = 0;
@@ -243,6 +245,15 @@ struct FakeState {
     bool remove_batch_supported = false;
     std::optional<kasumi::transport::ErrorCode> remove_batch_failure;
     std::size_t remove_batch_fail_after_items = 0;
+    bool remove_batch_reverse_report = false;
+    bool remove_batch_incomplete_report = false;
+    bool remove_batch_duplicate_report = false;
+    bool remove_batch_unknown_item_report = false;
+    std::optional<std::size_t> remove_batch_fail_single_index;
+    std::optional<std::size_t> remove_batch_fail_at_batch_index;
+    std::function<std::optional<kasumi::transport::RemoveBatchResult>(
+        FakeState&, const kasumi::transport::RemoveBatch&)>
+        remove_batch_hook;
     bool fail_commit_get = false;
     bool fail_content_get = false;
     bool fail_marker_put = false;
@@ -315,6 +326,8 @@ FakeState* fake_state(void* context) {
     state.remove_batch_count = 0;
     state.remove_batch_item_count = 0;
     state.remove_batch_concurrency = 0;
+    state.remove_batch_sizes.clear();
+    state.batch_lifecycle_events.clear();
     state.commit_get_count = state.marker_get_count = state.epoch_get_count = 0;
     state.orphan_payload_get_count = 0;
     state.orphan_payload_get_bytes = 0;
@@ -853,27 +866,80 @@ kasumi::transport::RemovalResult fake_remove(void* context,
 inline kasumi::transport::RemoveBatchResult
 fake_remove_batch(void* context, const kasumi::transport::RemoveBatch& batch) {
     auto* state = fake_state(context);
-    ++state->remove_batch_count;
+    const std::size_t batch_idx = state->remove_batch_count++;
+    const std::size_t batch_num = batch_idx + 1;
+    state->batch_lifecycle_events.push_back("batch_" + std::to_string(batch_num) + "_started");
+    struct LifecycleGuard {
+        FakeState* s;
+        std::size_t num;
+        ~LifecycleGuard() {
+            s->batch_lifecycle_events.push_back("batch_" + std::to_string(num) + "_completed");
+        }
+    } lifecycle_guard{state, batch_num};
     state->remove_batch_item_count += batch.items.size();
     state->remove_batch_concurrency = batch.concurrency;
+    state->remove_batch_sizes.push_back(batch.items.size());
     state->gc_events.emplace_back("remove_batch:" +
                                   std::to_string(batch.items.size()));
+    if (state->on_operation) {
+        state->on_operation(
+            *state, "remove_batch", std::to_string(batch.items.size()));
+    }
+    if (state->remove_batch_hook) {
+        if (auto custom = state->remove_batch_hook(*state, batch);
+            custom.has_value()) {
+            return std::move(*custom);
+        }
+    }
     if (!state->remove_batch_supported) {
         return std::unexpected(kasumi::transport::Error{
             .code = kasumi::transport::ErrorCode::Unsupported,
             .message = "explicit remove batch unavailable"});
     }
+    if (state->remove_batch_fail_at_batch_index &&
+        batch_idx == *state->remove_batch_fail_at_batch_index &&
+        state->remove_batch_failure &&
+        state->remove_batch_fail_after_items == 0 &&
+        !state->remove_batch_fail_single_index) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = *state->remove_batch_failure,
+            .message = "injected remove batch failure",
+            .native_code = state->remove_failure_native_code});
+    }
+    if (state->remove_batch_failure &&
+        !state->remove_batch_fail_at_batch_index &&
+        state->remove_batch_fail_after_items == 0 &&
+        !state->remove_batch_fail_single_index) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = *state->remove_batch_failure,
+            .message = "injected remove batch failure",
+            .native_code = state->remove_failure_native_code});
+    }
     kasumi::transport::RemoveBatchReport report;
     report.items.reserve(batch.items.size());
     for (std::size_t index = 0; index < batch.items.size(); ++index) {
-        if (state->remove_batch_failure &&
-            state->remove_batch_fail_after_items != 0 &&
-            index + 1 >= state->remove_batch_fail_after_items) {
+        bool should_fail_item = false;
+        if (state->remove_batch_failure) {
+            const bool batch_matches =
+                !state->remove_batch_fail_at_batch_index ||
+                batch_idx == *state->remove_batch_fail_at_batch_index;
+            if (batch_matches) {
+                if (state->remove_batch_fail_single_index &&
+                    index == *state->remove_batch_fail_single_index) {
+                    should_fail_item = true;
+                } else if (state->remove_batch_fail_after_items != 0 &&
+                           index + 1 >= state->remove_batch_fail_after_items) {
+                    should_fail_item = true;
+                }
+            }
+        }
+        if (should_fail_item) {
             report.items.push_back(kasumi::transport::RemoveBatchItemResult{
                 .identifier = batch.items[index].identifier,
                 .result = std::unexpected(kasumi::transport::Error{
                     .code = *state->remove_batch_failure,
-                    .message = "injected remove batch item failure"}),
+                    .message = "injected remove batch item failure",
+                    .native_code = state->remove_failure_native_code}),
             });
             continue;
         }
@@ -883,11 +949,19 @@ fake_remove_batch(void* context, const kasumi::transport::RemoveBatch& batch) {
             .result = result,
         });
     }
-    if (state->remove_batch_failure &&
-        state->remove_batch_fail_after_items == 0) {
-        return std::unexpected(kasumi::transport::Error{
-            .code = *state->remove_batch_failure,
-            .message = "injected remove batch failure"});
+    if (state->remove_batch_reverse_report) {
+        std::reverse(report.items.begin(), report.items.end());
+    }
+    if (state->remove_batch_incomplete_report && !report.items.empty()) {
+        report.items.pop_back();
+    }
+    if (state->remove_batch_duplicate_report && report.items.size() >= 2) {
+        report.items[1] = report.items[0];
+    }
+    if (state->remove_batch_unknown_item_report && !report.items.empty()) {
+        report.items[0].identifier =
+            "unknown-0000000000000000000000000000000000000000000000000000000000"
+            "000000";
     }
     return report;
 }

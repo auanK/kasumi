@@ -2780,4 +2780,682 @@ TEST(GarbageCollectionTest, GlobalPlanPreservesAnchoredCommitVariant) {
               inventory->reachable_commits.end());
 }
 
+struct FakeBatchFixture : FakeFixture {
+    explicit FakeBatchFixture(std::string_view name) : FakeFixture(name) {
+        enable_fake_remove_batch(transport, *state);
+    }
+};
+
+// 1. Divisao exata dos lotes em 0, 1, 7, 8, 9, 16, 17 e 1.000 candidatos.
+TEST(GarbageCollectionTest, BatchDivisionExactForVariousCandidateCounts) {
+    struct Case {
+        std::size_t candidate_count;
+        std::size_t expected_batches;
+        std::vector<std::size_t> expected_batch_sizes;
+    };
+
+    const std::vector<Case> cases = {
+        {0, 0, {}},
+        {1, 1, {1}},
+        {7, 1, {7}},
+        {8, 1, {8}},
+        {9, 2, {8, 1}},
+        {16, 2, {8, 8}},
+        {17, 3, {8, 8, 1}},
+        {1000, 125, std::vector<std::size_t>(125, 8)},
+    };
+
+    for (const auto& [candidate_count, expected_batches, expected_batch_sizes] : cases) {
+        SCOPED_TRACE("candidate_count " + std::to_string(candidate_count));
+        FakeBatchFixture fixture("gc-batch-div-" + std::to_string(candidate_count));
+        publish_object(
+            fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+        put_content(fixture.transport, fixture.workspace, "live", "live");
+
+        std::vector<std::string> orphans;
+        orphans.reserve(candidate_count);
+        for (std::size_t index = 0; index < candidate_count; ++index) {
+            orphans.push_back(put_content(
+                fixture.transport,
+                fixture.workspace,
+                "orphan-" + std::to_string(index),
+                "orphan-" + std::to_string(index)));
+        }
+
+        const auto result = fixture.collect();
+        ASSERT_TRUE(result.has_value()) << result.error().detail;
+        EXPECT_EQ(result->candidate_objects, candidate_count);
+        EXPECT_EQ(result->removed_objects, candidate_count);
+        EXPECT_EQ(fixture.state->remove_batch_count, expected_batches);
+        EXPECT_EQ(fixture.state->remove_batch_sizes, expected_batch_sizes);
+        if (expected_batches > 0) {
+            EXPECT_EQ(fixture.state->remove_batch_concurrency, 8U);
+        }
+    }
+}
+
+// 2. concurrency == 8, com nenhum lote contendo mais de oito identificadores.
+TEST(GarbageCollectionTest, BatchConcurrencyIsEightAndBatchesNeverExceedEight) {
+    FakeBatchFixture fixture("gc-batch-concurrency");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    for (std::size_t index = 0; index < 20; ++index) {
+        put_content(fixture.transport,
+                    fixture.workspace,
+                    "batch20-" + std::to_string(index),
+                    "batch20-" + std::to_string(index));
+    }
+
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->removed_objects, 20U);
+    EXPECT_EQ(fixture.state->remove_batch_count, 3U);
+    EXPECT_EQ(fixture.state->remove_batch_concurrency, 8U);
+    const std::vector<std::size_t> expected_sizes = {8, 8, 4};
+    EXPECT_EQ(fixture.state->remove_batch_sizes, expected_sizes);
+    for (const auto size : fixture.state->remove_batch_sizes) {
+        EXPECT_LE(size, 8U);
+    }
+}
+
+// 3. Ausencia de lote seguinte enquanto o anterior nao tiver sido concluido.
+TEST(GarbageCollectionTest, BatchDoesNotStartNextBeforePreviousCompletes) {
+    FakeBatchFixture fixture("gc-batch-sequence");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    for (std::size_t index = 0; index < 16; ++index) {
+        put_content(fixture.transport,
+                    fixture.workspace,
+                    "seq-" + std::to_string(index),
+                    "seq-" + std::to_string(index));
+    }
+
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->removed_objects, 16U);
+    EXPECT_EQ(fixture.state->remove_batch_count, 2U);
+    const std::vector<std::string> expected_events = {
+        "batch_1_started",
+        "batch_1_completed",
+        "batch_2_started",
+        "batch_2_completed",
+    };
+    EXPECT_EQ(fixture.state->batch_lifecycle_events, expected_events);
+}
+
+// 4. Fallback sequencial quando a capacidade nativa nao existe.
+TEST(GarbageCollectionTest, BatchFallbackToSequentialWhenNativeUnsupported) {
+    FakeFixture fixture("gc-batch-fallback-native");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    std::vector<std::string> orphans;
+    for (std::size_t index = 0; index < 10; ++index) {
+        orphans.push_back(put_content(fixture.transport,
+                                      fixture.workspace,
+                                      "native-fall-" + std::to_string(index),
+                                      "native-fall-" + std::to_string(index)));
+    }
+
+    ASSERT_EQ(fixture.transport.storage.remove_batch, nullptr);
+    ScopedGcTrace tracing;
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->removed_objects, 10U);
+    EXPECT_EQ(fixture.state->remove_batch_count, 0U);
+    EXPECT_EQ(fixture.state->source_remove_count, 10U);
+    for (const auto& orphan : orphans) {
+        EXPECT_FALSE(object_present(fixture.transport, orphan));
+    }
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidate_remove_attempts"), 10U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidate_remove_acknowledged"), 10U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.confirmed_removed"), 10U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.remove_batch_fallback_used"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.remove_batches_submitted"), 0U);
+}
+
+// 5. Fallback apos Unsupported comprovadamente sem submissao.
+TEST(GarbageCollectionTest, BatchFallbackAfterUnsupportedErrorWithoutSubmission) {
+    FakeBatchFixture fixture("gc-batch-fallback-unsupported");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    std::vector<std::string> orphans;
+    for (std::size_t index = 0; index < 17; ++index) {
+        orphans.push_back(put_content(fixture.transport,
+                                      fixture.workspace,
+                                      "unsupp-fall-" + std::to_string(index),
+                                      "unsupp-fall-" + std::to_string(index)));
+    }
+
+    fixture.state->remove_batch_supported = false; // Returns Unsupported before submitting
+    ScopedGcTrace tracing;
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->removed_objects, 17U);
+    EXPECT_EQ(fixture.state->remove_batch_count, 1U); // Attempted batch once, then fallback
+    EXPECT_EQ(fixture.state->source_remove_count, 17U); // All 17 deleted via sequential fallback
+    for (const auto& orphan : orphans) {
+        EXPECT_FALSE(object_present(fixture.transport, orphan));
+    }
+}
+
+// 5a. Fallback e contadores nao duplicados
+TEST(GarbageCollectionTest, BatchFallbackCountersAreNotDuplicated) {
+    FakeBatchFixture fixture("gc-batch-fallback-counters");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    for (std::size_t index = 0; index < 8; ++index) {
+        put_content(fixture.transport,
+                    fixture.workspace,
+                    "fall-cnt-" + std::to_string(index),
+                    "fall-cnt-" + std::to_string(index));
+    }
+
+    fixture.state->remove_batch_supported = false; // Unsupported before submission
+    ScopedGcTrace tracing;
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->removed_objects, 8U);
+    EXPECT_EQ(fixture.state->remove_batch_count, 1U);
+    EXPECT_EQ(fixture.state->source_remove_count, 8U);
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidate_remove_attempts"), 8U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidate_remove_acknowledged"), 8U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.confirmed_removed"), 8U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.remove_batch_fallback_used"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.remove_batches_submitted"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.remove_batch_items_submitted"), 8U);
+}
+
+// 5b. Fallback com mais de um lote segue exclusivamente sequencial
+TEST(GarbageCollectionTest, BatchFallbackAcrossMultipleBatchesFollowsSequentialOnly) {
+    FakeBatchFixture fixture("gc-batch-fallback-multi");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    for (std::size_t index = 0; index < 17; ++index) {
+        put_content(fixture.transport,
+                    fixture.workspace,
+                    "multi-fall-" + std::to_string(index),
+                    "multi-fall-" + std::to_string(index));
+    }
+
+    fixture.state->remove_batch_supported = false;
+    ScopedGcTrace tracing;
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->removed_objects, 17U);
+    EXPECT_EQ(fixture.state->remove_batch_count, 1U); // No more batches attempted
+    EXPECT_EQ(fixture.state->source_remove_count, 17U);
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidate_remove_attempts"), 17U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.candidate_remove_acknowledged"), 17U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.confirmed_removed"), 17U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.remove_batch_fallback_used"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.remove_batches_submitted"), 1U);
+}
+
+// 6. Erro parcial dentro do primeiro lote.
+TEST(GarbageCollectionTest, BatchPartialFailureWithinFirstBatchStopsSubsequentBatches) {
+    FakeBatchFixture fixture("gc-batch-partial-first");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    std::vector<std::string> orphans;
+    for (std::size_t index = 0; index < 8; ++index) {
+        orphans.push_back(put_content(fixture.transport,
+                                      fixture.workspace,
+                                      "batch-part-" + std::to_string(index),
+                                      "batch-part-" + std::to_string(index)));
+    }
+    std::ranges::sort(orphans);
+
+    // Fail candidate at index 2 (third item)
+    fixture.state->remove_batch_failure = kasumi::transport::ErrorCode::Io;
+    fixture.state->remove_batch_fail_single_index = 2;
+    fixture.state->remove_failure_native_code = 987;
+
+    const auto result = fixture.collect();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code,
+              kasumi::application::integrity::ErrorCode::TransportFailure);
+    ASSERT_TRUE(result.error().garbage_collection.has_value());
+    const auto& diagnostic = *result.error().garbage_collection;
+    EXPECT_EQ(diagnostic.candidate_objects, 8U);
+    EXPECT_EQ(diagnostic.confirmed_removed, 7U); // 7 items acknowledged
+    EXPECT_EQ(diagnostic.failed_identifier, std::optional<std::string>{orphans[2]});
+    EXPECT_EQ(diagnostic.stage, GarbageCollectStage::Applying);
+    EXPECT_EQ(diagnostic.mutation_state,
+              kasumi::application::GarbageCollectMutationState::Uncertain);
+    ASSERT_TRUE(diagnostic.transport_error.has_value());
+    EXPECT_EQ(diagnostic.transport_error->code, kasumi::transport::ErrorCode::Io);
+    EXPECT_EQ(diagnostic.transport_error->native_code, 987);
+    EXPECT_EQ(fixture.state->remove_batch_count, 1U);
+    EXPECT_TRUE(diagnostic.barrier_release_attempted);
+    EXPECT_TRUE(diagnostic.barrier_release_confirmed);
+}
+
+// 7. Erro parcial depois de lotes completos.
+TEST(GarbageCollectionTest, BatchPartialFailureAfterFullBatchesPreservesCounts) {
+    FakeBatchFixture fixture("gc-batch-partial-second");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    std::vector<std::string> orphans;
+    for (std::size_t index = 0; index < 16; ++index) {
+        orphans.push_back(put_content(fixture.transport,
+                                      fixture.workspace,
+                                      "batch-two-" + std::to_string(index),
+                                      "batch-two-" + std::to_string(index)));
+    }
+    std::ranges::sort(orphans);
+
+    // Batch 0 (8 items) succeeds. Batch 1 (8 items) fails at index 1 (item 9 overall).
+    fixture.state->remove_batch_failure = kasumi::transport::ErrorCode::Io;
+    fixture.state->remove_batch_fail_at_batch_index = 1;
+    fixture.state->remove_batch_fail_single_index = 1;
+    fixture.state->remove_failure_native_code = 555;
+
+    const auto result = fixture.collect();
+    ASSERT_FALSE(result.has_value());
+    ASSERT_TRUE(result.error().garbage_collection.has_value());
+    const auto& diagnostic = *result.error().garbage_collection;
+    EXPECT_EQ(diagnostic.candidate_objects, 16U);
+    EXPECT_EQ(diagnostic.confirmed_removed, 15U); // 8 from batch 0 + 7 from batch 1
+    EXPECT_EQ(diagnostic.failed_identifier, std::optional<std::string>{orphans[9]});
+    EXPECT_EQ(diagnostic.mutation_state,
+              kasumi::application::GarbageCollectMutationState::Uncertain);
+    EXPECT_EQ(fixture.state->remove_batch_count, 2U);
+}
+
+// 8. Resultados individuais fora de ordem.
+TEST(GarbageCollectionTest, BatchReportResultsOutOfOrderAreCorrectlyMatched) {
+    FakeBatchFixture fixture("gc-batch-reorder");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    std::vector<std::string> orphans;
+    for (std::size_t index = 0; index < 8; ++index) {
+        orphans.push_back(put_content(fixture.transport,
+                                      fixture.workspace,
+                                      "reorder-" + std::to_string(index),
+                                      "reorder-" + std::to_string(index)));
+    }
+
+    fixture.state->remove_batch_reverse_report = true;
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->removed_objects, 8U);
+    EXPECT_EQ(fixture.state->remove_batch_count, 1U);
+    for (const auto& orphan : orphans) {
+        EXPECT_FALSE(object_present(fixture.transport, orphan));
+    }
+}
+
+// 9. Relatorio incompleto, duplicado ou invalido.
+TEST(GarbageCollectionTest, BatchInvalidOrIncompleteReportYieldsUncertainMutation) {
+    // 9a: Incomplete report (omits item)
+    {
+        FakeBatchFixture fixture("gc-batch-incomplete");
+        publish_object(
+            fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+        put_content(fixture.transport, fixture.workspace, "live", "live");
+        for (std::size_t index = 0; index < 8; ++index) {
+            put_content(fixture.transport,
+                        fixture.workspace,
+                        "incomp-" + std::to_string(index),
+                        "incomp-" + std::to_string(index));
+        }
+        fixture.state->remove_batch_incomplete_report = true;
+        const auto result = fixture.collect();
+        ASSERT_FALSE(result.has_value());
+        ASSERT_TRUE(result.error().garbage_collection.has_value());
+        const auto& diagnostic = *result.error().garbage_collection;
+        EXPECT_EQ(diagnostic.mutation_state,
+                  kasumi::application::GarbageCollectMutationState::Uncertain);
+        EXPECT_FALSE(diagnostic.failed_identifier.has_value());
+    }
+
+    // 9b: Duplicate report
+    {
+        FakeBatchFixture fixture("gc-batch-duplicate");
+        publish_object(
+            fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+        put_content(fixture.transport, fixture.workspace, "live", "live");
+        for (std::size_t index = 0; index < 8; ++index) {
+            put_content(fixture.transport,
+                        fixture.workspace,
+                        "dup-" + std::to_string(index),
+                        "dup-" + std::to_string(index));
+        }
+        fixture.state->remove_batch_duplicate_report = true;
+        const auto result = fixture.collect();
+        ASSERT_FALSE(result.has_value());
+        ASSERT_TRUE(result.error().garbage_collection.has_value());
+        const auto& diagnostic = *result.error().garbage_collection;
+        EXPECT_EQ(diagnostic.mutation_state,
+                  kasumi::application::GarbageCollectMutationState::Uncertain);
+        EXPECT_FALSE(diagnostic.failed_identifier.has_value());
+    }
+
+    // 9c: Unknown item in report
+    {
+        FakeBatchFixture fixture("gc-batch-unknown-item");
+        publish_object(
+            fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+        put_content(fixture.transport, fixture.workspace, "live", "live");
+        for (std::size_t index = 0; index < 8; ++index) {
+            put_content(fixture.transport,
+                        fixture.workspace,
+                        "unkn-" + std::to_string(index),
+                        "unkn-" + std::to_string(index));
+        }
+        fixture.state->remove_batch_unknown_item_report = true;
+        const auto result = fixture.collect();
+        ASSERT_FALSE(result.has_value());
+        ASSERT_TRUE(result.error().garbage_collection.has_value());
+        const auto& diagnostic = *result.error().garbage_collection;
+        EXPECT_EQ(diagnostic.mutation_state,
+                  kasumi::application::GarbageCollectMutationState::Uncertain);
+        EXPECT_FALSE(diagnostic.failed_identifier.has_value());
+    }
+}
+
+// 10. Timeout ou erro ambiguo do batch inteiro.
+TEST(GarbageCollectionTest, BatchAmbiguousErrorYieldsUncertainMutationWithoutFallback) {
+    FakeBatchFixture fixture("gc-batch-timeout");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    for (std::size_t index = 0; index < 8; ++index) {
+        put_content(fixture.transport,
+                    fixture.workspace,
+                    "timeout-" + std::to_string(index),
+                    "timeout-" + std::to_string(index));
+    }
+
+    fixture.state->remove_batch_failure = kasumi::transport::ErrorCode::Timeout;
+    fixture.state->remove_batch_fail_after_items = 0; // entire batch call fails with Timeout
+    fixture.state->remove_failure_native_code = 504;
+
+    const auto result = fixture.collect();
+    ASSERT_FALSE(result.has_value());
+    ASSERT_TRUE(result.error().garbage_collection.has_value());
+    const auto& diagnostic = *result.error().garbage_collection;
+    EXPECT_EQ(diagnostic.mutation_state,
+              kasumi::application::GarbageCollectMutationState::Uncertain);
+    EXPECT_FALSE(diagnostic.failed_identifier.has_value());
+    EXPECT_EQ(diagnostic.confirmed_removed, 0U);
+    ASSERT_TRUE(diagnostic.transport_error.has_value());
+    EXPECT_EQ(diagnostic.transport_error->code, kasumi::transport::ErrorCode::Timeout);
+    EXPECT_EQ(diagnostic.transport_error->native_code, 504);
+    EXPECT_EQ(fixture.state->remove_batch_count, 1U);
+    EXPECT_EQ(fixture.state->source_remove_count, 0U); // No sequential fallback attempt
+}
+
+// 10a. Falha de lote inteiro deixa failed_identifier vazio
+TEST(GarbageCollectionTest, BatchWholeFailureLeavesFailedIdentifierEmpty) {
+    FakeBatchFixture fixture("gc-batch-whole-failure");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    for (std::size_t index = 0; index < 8; ++index) {
+        put_content(fixture.transport,
+                    fixture.workspace,
+                    "whole-fail-" + std::to_string(index),
+                    "whole-fail-" + std::to_string(index));
+    }
+
+    fixture.state->remove_batch_failure = kasumi::transport::ErrorCode::Timeout;
+    fixture.state->remove_batch_fail_after_items = 0; // whole batch fails without report
+    fixture.state->remove_failure_native_code = 504;
+
+    const auto result = fixture.collect();
+    ASSERT_FALSE(result.has_value());
+    ASSERT_TRUE(result.error().garbage_collection.has_value());
+    const auto& diagnostic = *result.error().garbage_collection;
+    EXPECT_EQ(diagnostic.mutation_state,
+              kasumi::application::GarbageCollectMutationState::Uncertain);
+    EXPECT_FALSE(diagnostic.failed_identifier.has_value()); // Must NOT attribute to candidate 0
+    EXPECT_EQ(diagnostic.confirmed_removed, 0U);
+    ASSERT_TRUE(diagnostic.transport_error.has_value());
+    EXPECT_EQ(diagnostic.transport_error->code, kasumi::transport::ErrorCode::Timeout);
+    EXPECT_EQ(diagnostic.transport_error->native_code, 504);
+}
+
+// 10b. Segundo lote falha integralmente: preserva confirmados do primeiro e deixa failed_identifier vazio
+TEST(GarbageCollectionTest, BatchSecondBatchWholeFailureLeavesFailedIdentifierEmptyAndPreservesFirstBatch) {
+    FakeBatchFixture fixture("gc-batch-second-whole-fail");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    for (std::size_t index = 0; index < 16; ++index) {
+        put_content(fixture.transport,
+                    fixture.workspace,
+                    "second-fail-" + std::to_string(index),
+                    "second-fail-" + std::to_string(index));
+    }
+
+    // Batch 0 succeeds (8 items removed). Batch 1 fails at batch level with NetworkError.
+    fixture.state->remove_batch_fail_at_batch_index = 1;
+    fixture.state->remove_batch_failure = kasumi::transport::ErrorCode::BackendUnavailable;
+    fixture.state->remove_batch_fail_after_items = 0; // Whole batch failure on batch 1
+    fixture.state->remove_failure_native_code = 503;
+
+    const auto result = fixture.collect();
+    ASSERT_FALSE(result.has_value());
+    ASSERT_TRUE(result.error().garbage_collection.has_value());
+    const auto& diagnostic = *result.error().garbage_collection;
+    EXPECT_EQ(diagnostic.confirmed_removed, 8U); // 8 from batch 0
+    EXPECT_FALSE(diagnostic.failed_identifier.has_value()); // Whole batch failure, no individual candidate
+    EXPECT_EQ(diagnostic.mutation_state,
+              kasumi::application::GarbageCollectMutationState::Uncertain);
+    ASSERT_TRUE(diagnostic.transport_error.has_value());
+    EXPECT_EQ(diagnostic.transport_error->code, kasumi::transport::ErrorCode::BackendUnavailable);
+    EXPECT_EQ(diagnostic.transport_error->native_code, 503);
+    EXPECT_EQ(fixture.state->remove_batch_count, 2U);
+}
+
+// 11. Cancelamento antes do lote e entre dois lotes.
+TEST(GarbageCollectionTest, BatchCancellationCheckedBeforeAndBetweenBatches) {
+    struct ResetCancellation {
+        ~ResetCancellation() {
+            kasumi::platform::cancellation::reset();
+        }
+    } reset_guard;
+
+    // 11a: Cancellation before first batch
+    {
+        kasumi::platform::cancellation::reset();
+        FakeBatchFixture fixture("gc-batch-cancel-before");
+        publish_object(
+            fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+        put_content(fixture.transport, fixture.workspace, "live", "live");
+        for (std::size_t index = 0; index < 8; ++index) {
+            put_content(fixture.transport,
+                        fixture.workspace,
+                        "cbef-" + std::to_string(index),
+                        "cbef-" + std::to_string(index));
+        }
+        const auto result =
+            fixture.collect([](const GarbageCollectProgress& progress) {
+                if (progress.stage == GarbageCollectStage::Applying) {
+                    kasumi::platform::cancellation::request();
+                }
+            });
+        ASSERT_FALSE(result.has_value());
+        EXPECT_NE(result.error().detail.find("cancelled"), std::string::npos);
+        ASSERT_TRUE(result.error().garbage_collection.has_value());
+        const auto& diagnostic = *result.error().garbage_collection;
+        EXPECT_EQ(diagnostic.stage, GarbageCollectStage::Applying);
+        EXPECT_EQ(diagnostic.mutation_state,
+                  kasumi::application::GarbageCollectMutationState::NotAttempted);
+        EXPECT_EQ(diagnostic.confirmed_removed, 0U);
+        EXPECT_EQ(fixture.state->remove_batch_count, 0U);
+    }
+
+    // 11b: Cancellation between batch 1 and batch 2
+    {
+        kasumi::platform::cancellation::reset();
+        FakeBatchFixture fixture("gc-batch-cancel-between");
+        publish_object(
+            fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+        put_content(fixture.transport, fixture.workspace, "live", "live");
+        for (std::size_t index = 0; index < 16; ++index) {
+            put_content(fixture.transport,
+                        fixture.workspace,
+                        "cbetw-" + std::to_string(index),
+                        "cbetw-" + std::to_string(index));
+        }
+
+        fixture.state->on_operation = [&](FakeState& state,
+                                          std::string_view op,
+                                          std::string_view) {
+            if (op == "remove_batch" && state.remove_batch_count == 1) {
+                kasumi::platform::cancellation::request();
+            }
+        };
+
+        const auto result = fixture.collect();
+        ASSERT_FALSE(result.has_value());
+        EXPECT_NE(result.error().detail.find("cancelled"), std::string::npos);
+        ASSERT_TRUE(result.error().garbage_collection.has_value());
+        const auto& diagnostic = *result.error().garbage_collection;
+        EXPECT_EQ(diagnostic.confirmed_removed, 8U); // Batch 1 completed
+        EXPECT_EQ(diagnostic.mutation_state,
+                  kasumi::application::GarbageCollectMutationState::NotAttempted);
+        EXPECT_EQ(fixture.state->remove_batch_count, 1U); // Batch 2 never submitted
+        EXPECT_TRUE(diagnostic.barrier_release_attempted);
+        EXPECT_TRUE(diagnostic.barrier_release_confirmed);
+    }
+}
+
+// 12. Cleanup do barrier apos falha parcial.
+TEST(GarbageCollectionTest, BatchBarrierCleanupExecutedAndConfirmedAfterPartialFailure) {
+    FakeBatchFixture fixture("gc-batch-cleanup-partial");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    for (std::size_t index = 0; index < 8; ++index) {
+        put_content(fixture.transport,
+                    fixture.workspace,
+                    "cleanpart-" + std::to_string(index),
+                    "cleanpart-" + std::to_string(index));
+    }
+
+    fixture.state->remove_batch_failure = kasumi::transport::ErrorCode::Io;
+    fixture.state->remove_batch_fail_single_index = 4;
+
+    const auto result = fixture.collect();
+    ASSERT_FALSE(result.has_value());
+    ASSERT_TRUE(result.error().garbage_collection.has_value());
+    const auto& diagnostic = *result.error().garbage_collection;
+    EXPECT_TRUE(diagnostic.barrier_release_attempted);
+    EXPECT_TRUE(diagnostic.barrier_release_confirmed);
+    EXPECT_FALSE(object_present(fixture.transport, layout().barrier_identifier));
+}
+
+// 13. Zero GETs de Content orfao.
+TEST(GarbageCollectionTest, BatchDeletionPerformsZeroContentPayloadGets) {
+    FakeBatchFixture fixture("gc-batch-zero-gets");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    std::unordered_set<std::string> orphan_ids;
+    for (std::size_t index = 0; index < 24; ++index) {
+        const auto id = put_content(fixture.transport,
+                                    fixture.workspace,
+                                    "zeroget-" + std::to_string(index),
+                                    "zeroget-" + std::to_string(index));
+        orphan_ids.insert(id);
+    }
+
+    std::vector<std::string> get_calls;
+    fixture.state->on_operation =
+        [&](FakeState&, std::string_view op, std::string_view id) {
+            if (op == "get") {
+                get_calls.emplace_back(id);
+            }
+        };
+
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->removed_objects, 24U);
+    EXPECT_EQ(fixture.state->remove_batch_count, 3U);
+    EXPECT_EQ(fixture.state->orphan_payload_get_count, 0U);
+    for (const auto& orphan : orphan_ids) {
+        EXPECT_EQ(std::ranges::count(get_calls, orphan), 0);
+    }
+}
+
+// 14. Protecao de Content referenciado e objetos de controle.
+TEST(GarbageCollectionTest, BatchDeletionProtectsReachableContentAndControlObjects) {
+    FakeBatchFixture fixture("gc-batch-protection");
+    const auto repo = seed_repository(fixture.transport, fixture.workspace);
+
+    std::vector<std::string> orphans;
+    for (std::size_t index = 0; index < 8; ++index) {
+        orphans.push_back(put_content(fixture.transport,
+                                      fixture.workspace,
+                                      "prot-orph-" + std::to_string(index),
+                                      "prot-orph-" + std::to_string(index)));
+    }
+
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->removed_objects, 10U);
+
+    // Protected objects must still exist
+    EXPECT_TRUE(object_present(fixture.transport, repo.live_content));
+    EXPECT_TRUE(object_present(fixture.transport, object_path(repo.head)));
+
+    // Verify no batch contained any protected object
+    for (const auto& event : fixture.state->gc_events) {
+        for (const auto& protected_id : {repo.live_content,
+                                         object_path(repo.head)}) {
+            EXPECT_EQ(event.find(protected_id), std::string::npos);
+        }
+    }
+}
+
+// 15. Nenhuma revalidacao remota por candidato.
+TEST(GarbageCollectionTest, BatchDeletionPerformsNoReadbackOrPresenceVerificationPerCandidate) {
+    FakeBatchFixture fixture("gc-batch-no-presence");
+    publish_object(
+        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    put_content(fixture.transport, fixture.workspace, "live", "live");
+
+    for (std::size_t index = 0; index < 16; ++index) {
+        put_content(fixture.transport,
+                    fixture.workspace,
+                    "nopresence-" + std::to_string(index),
+                    "nopresence-" + std::to_string(index));
+    }
+
+    ScopedGcTrace tracing;
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->removed_objects, 16U);
+    EXPECT_EQ(fixture.state->remove_batch_count, 2U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("gc.apply_presence_calls"), 0U);
+}
+
 } // namespace
