@@ -15,20 +15,26 @@ def is_redirection(path: Path) -> bool:
     try:
         if path.is_symlink():
             return True
+    except FileNotFoundError:
+        return False
     except OSError:
-        return True
+        raise
 
     try:
         if hasattr(path, "is_junction") and path.is_junction():
             return True
+    except FileNotFoundError:
+        return False
     except OSError:
-        return True
+        raise
 
     try:
         if hasattr(os.path, "isjunction") and os.path.isjunction(path):
             return True
+    except FileNotFoundError:
+        return False
     except OSError:
-        return True
+        raise
 
     try:
         if hasattr(os, "lstat"):
@@ -36,8 +42,10 @@ def is_redirection(path: Path) -> bool:
             tag = getattr(st, "st_reparse_tag", 0)
             if tag in (0xA0000003, 0xA000000C, 0xA000001D):
                 return True
+    except FileNotFoundError:
+        return False
     except OSError:
-        return True
+        raise
 
     return False
 
@@ -194,13 +202,14 @@ class DocumentationTest(unittest.TestCase):
                 fake_dir.mkdir()
                 (fake_dir / "inside.md").write_text("dummy", encoding="utf-8")
 
-                original_islink = os.path.islink
-                def mock_islink(path):
+                original_is_symlink = Path.is_symlink
+                def mock_is_symlink(path):
                     if Path(path).name in ("mock_link.md", "mock_dir"):
                         return True
-                    return original_islink(path)
+                    return original_is_symlink(path)
 
-                with patch("os.path.islink", side_effect=mock_islink):
+                with patch.object(Path, "is_symlink", autospec=True,
+                                  side_effect=mock_is_symlink):
                     files, violations = find_documentation_entries(temp_root)
                     self.assertNotIn("docs/mock_link.md", files)
                     self.assertNotIn("docs/mock_dir/inside.md", files)
