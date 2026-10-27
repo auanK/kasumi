@@ -357,6 +357,7 @@ stage_attempt(const runtime::RuntimeData& runtime_data,
               const reconciliation::Input& input,
               const reconciliation::Result& result,
               const std::filesystem::path& profile,
+              std::span<const std::uint8_t, crypto::KEY_SIZE> key,
               std::optional<platform::Workspace>& workspace) {
     auto record = journal::create_record(
         input.local_generation,
@@ -369,7 +370,7 @@ stage_attempt(const runtime::RuntimeData& runtime_data,
         return std::unexpected(detail::journal_error(record.error()));
     }
     auto created =
-        detail::create_transaction_workspace(profile, record->operation_id);
+        detail::create_transaction_workspace(profile, record->operation_id, key);
     if (!created) {
         return std::unexpected(created.error());
     }
@@ -671,9 +672,9 @@ stabilize(const runtime::RuntimeData& runtime_data,
         std::optional<platform::Workspace> workspace;
         if (!result.plan.operations.empty()) {
             auto staged =
-                stage_attempt(runtime_data, input, result, *profile, workspace);
+                stage_attempt(runtime_data, input, result, *profile, key, workspace);
             if (!staged) {
-                auto removed = detail::remove_transaction_workspace(workspace);
+                auto removed = detail::remove_transaction_workspace(workspace, key);
                 if (!removed) {
                     return std::unexpected(removed.error());
                 }
@@ -689,7 +690,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
             input.storage.marked_head_identifiers,
             session);
         if (!observed) {
-            auto removed = detail::remove_transaction_workspace(workspace);
+            auto removed = detail::remove_transaction_workspace(workspace, key);
             if (!removed) {
                 return std::unexpected(removed.error());
             }
@@ -708,7 +709,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
                 ErrorCode::ObservationFailure, observed.error().detail));
         }
         if (trust_existing_content && observed->storage.history_present) {
-            auto removed = detail::remove_transaction_workspace(workspace);
+            auto removed = detail::remove_transaction_workspace(workspace, key);
             if (!removed) {
                 return std::unexpected(removed.error());
             }
@@ -722,7 +723,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
         auto local_after_storage = observation::collect_local_tree(
             runtime_data.local_dir, session, observed->ignore_list);
         if (!local_after_storage) {
-            auto removed = detail::remove_transaction_workspace(workspace);
+            auto removed = detail::remove_transaction_workspace(workspace, key);
             if (!removed) {
                 return std::unexpected(removed.error());
             }
@@ -734,7 +735,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
         }
         auto recalculated = reconciliation::reconcile(*observed);
         if (!recalculated) {
-            auto removed = detail::remove_transaction_workspace(workspace);
+            auto removed = detail::remove_transaction_workspace(workspace, key);
             if (!removed) {
                 return std::unexpected(removed.error());
             }
@@ -754,7 +755,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
             trust_existing_content,
             initial_content_identifiers);
         if (!reobserved_availability) {
-            auto removed = detail::remove_transaction_workspace(workspace);
+            auto removed = detail::remove_transaction_workspace(workspace, key);
             if (!removed) {
                 return std::unexpected(removed.error());
             }
@@ -762,7 +763,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
         }
         recalculated = reconciliation::reconcile(*observed);
         if (!recalculated) {
-            auto removed = detail::remove_transaction_workspace(workspace);
+            auto removed = detail::remove_transaction_workspace(workspace, key);
             if (!removed) {
                 return std::unexpected(removed.error());
             }
@@ -770,7 +771,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
                 ErrorCode::ObservationFailure, recalculated.error().detail));
         }
         if (same_observation(input, *observed)) {
-            auto removed = detail::remove_transaction_workspace(workspace);
+            auto removed = detail::remove_transaction_workspace(workspace, key);
             if (!removed) {
                 return std::unexpected(removed.error());
             }
@@ -778,7 +779,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
                                    .result = std::move(*recalculated)};
         }
 
-        auto removed = detail::remove_transaction_workspace(workspace);
+        auto removed = detail::remove_transaction_workspace(workspace, key);
         if (!removed) {
             return std::unexpected(removed.error());
         }

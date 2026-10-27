@@ -130,8 +130,8 @@ put_verified(transport::Transport& storage,
     if (!temporary) {
         return std::unexpected(history_error(temporary.error()));
     }
-    const auto source = (*temporary)->root / "marker.source";
-    const auto copy = (*temporary)->root / "marker.copy";
+    const auto source = (*temporary)->workspace.root / "marker.source";
+    const auto copy = (*temporary)->workspace.root / "marker.copy";
     if (auto written = detail::write_file(source, bytes); !written) {
         return std::unexpected(history_error(written.error()));
     }
@@ -192,7 +192,7 @@ marker_matches(transport::Transport& storage,
     if (!temporary) {
         return std::unexpected(history_error(temporary.error()));
     }
-    const auto copy = (*temporary)->root / "marker.copy";
+    const auto copy = (*temporary)->workspace.root / "marker.copy";
     auto downloaded = transport::get(storage, identifier, copy);
     if (!downloaded) {
         if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
@@ -595,7 +595,7 @@ remove_barrier(transport::Transport& storage,
         err.identifier = layout.barrier_identifier;
         return std::unexpected(err);
     }
-    const auto copy = (*temporary)->root / "barrier.copy";
+    const auto copy = (*temporary)->workspace.root / "barrier.copy";
     auto downloaded = transport::get(storage, layout.barrier_identifier, copy);
     if (!downloaded) {
         if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {

@@ -82,8 +82,8 @@ void remove_file(const std::filesystem::path& path) noexcept {
 
 void remove_workspace(TemporaryWorkspaceData* workspace) noexcept {
     const auto trace = platform::perf_trace::begin();
-    if (workspace != nullptr && !workspace->root.empty()) {
-        platform::cleanup_workspace(platform::Workspace{workspace->root});
+    if (workspace != nullptr && !workspace->workspace.root.empty()) {
+        platform::cleanup_workspace(workspace->workspace);
     }
     delete workspace;
     platform::perf_trace::finish("workspace cleanup", trace);
@@ -106,9 +106,9 @@ make_workspace(const std::filesystem::path& root) {
                 error(ErrorCode::WorkspaceFailure, id.error()));
         }
         const auto candidate = root / (".kasumi-history-" + *id);
-        auto created = platform::private_storage::create_directory(candidate);
+        auto created = platform::create_workspace_at(candidate);
         if (created) {
-            return TemporaryWorkspace{new TemporaryWorkspaceData{candidate},
+            return TemporaryWorkspace{new TemporaryWorkspaceData{*created},
                                       remove_workspace};
         }
         filesystem_error.clear();
@@ -671,7 +671,7 @@ LoadResult load_impl(transport::Transport& storage,
                     : layout.commits_prefix;
             transport::GetBatch batch{
                 .source_prefix = commits_dir,
-                .destination_root = (*temporary)->root,
+                .destination_root = (*temporary)->workspace.root,
             };
             for (const auto& [unused, references] :
                  inventory->commit_variants) {
@@ -766,7 +766,7 @@ LoadResult load_impl(transport::Transport& storage,
                                      : inspect_marker(storage,
                                                       layout,
                                                       reference,
-                                                      (*marker_temporary)->root,
+                                                      (*marker_temporary)->workspace.root,
                                                       sequence);
                     if (!state) {
                         platform::perf_trace::finish("head loading",
@@ -919,7 +919,7 @@ LoadResult load_impl(transport::Transport& storage,
                         : inspect_marker(storage,
                                          layout,
                                          reference,
-                                         (*temporary)->root,
+                                         (*temporary)->workspace.root,
                                          sequence);
                 if (!state) {
                     return std::unexpected(state.error());
@@ -1007,7 +1007,7 @@ LoadResult load_impl(transport::Transport& storage,
                                         layout,
                                         key,
                                         variants_for_attempt(),
-                                        (*temporary)->root,
+                                        (*temporary)->workspace.root,
                                         commit_sequence,
                                         &authenticated_reference);
         if (!commit && scoped && marker_found != marker_candidates.end() &&
@@ -1023,7 +1023,7 @@ LoadResult load_impl(transport::Transport& storage,
                                        layout,
                                        key,
                                        variants_for_attempt(),
-                                       (*temporary)->root,
+                                       (*temporary)->workspace.root,
                                        commit_sequence,
                                        &authenticated_reference);
         }

@@ -110,8 +110,8 @@ load_remote_ignore_list(transport::Transport& storage,
     if (!temporary) {
         return std::unexpected(temporary.error().detail);
     }
-    const auto encrypted = temporary->get()->root / "ignore.enc";
-    const auto plaintext = temporary->get()->root / "ignore.txt";
+    const auto encrypted = temporary->get()->workspace.root / "ignore.enc";
+    const auto plaintext = temporary->get()->workspace.root / "ignore.txt";
     const auto identifier = crypto::content_identifier(key, row.hash);
     const auto downloaded = transport::get(storage, identifier, encrypted);
     if (!downloaded) {

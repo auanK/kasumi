@@ -237,7 +237,7 @@ load_exact_reference(transport::Transport& storage,
         return std::unexpected(identifier.error());
     }
     const auto copy =
-        temporary->root / ("epoch-" + std::to_string(request_index));
+        temporary->workspace.root / ("epoch-" + std::to_string(request_index));
     platform::perf_trace::count("epoch.get_calls", 1);
     const auto get_trace = platform::perf_trace::begin();
     auto downloaded = detail::download(storage, *identifier, copy);
@@ -706,7 +706,7 @@ publish(transport::Transport& storage,
         return std::unexpected(
             error(ErrorCode::WorkspaceFailure, temporary.error().detail));
     }
-    const auto source = (*temporary)->root / "epoch.source";
+    const auto source = (*temporary)->workspace.root / "epoch.source";
     if (auto written = detail::write_file(source, sealed.bytes); !written) {
         return std::unexpected(
             error(ErrorCode::WorkspaceFailure, written.error().detail));
@@ -744,7 +744,7 @@ verify(transport::Transport& storage,
         return std::unexpected(
             error(ErrorCode::WorkspaceFailure, temporary.error().detail));
     }
-    const auto copy = (*temporary)->root / "epoch.copy";
+    const auto copy = (*temporary)->workspace.root / "epoch.copy";
     if (auto downloaded = detail::download(storage, *identifier, copy);
         !downloaded) {
         return std::unexpected(

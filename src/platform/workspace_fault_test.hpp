@@ -10,9 +10,9 @@
 #include <utility>
 #endif
 
+#ifdef KASUMI_WORKSPACE_FAULT_TESTS
 namespace kasumi::platform::workspace_fault_test {
 
-#ifdef KASUMI_WORKSPACE_FAULT_TESTS
 using RetryHook = std::function<void(
     const std::filesystem::path&, std::size_t, std::error_code)>;
 using CleanupInterruptHook =
@@ -55,16 +55,8 @@ inline void clear_cleanup_interrupt_hook() {
 inline bool interrupt_cleanup(const std::filesystem::path& path) {
     return cleanup_interrupt_hook() && cleanup_interrupt_hook()(path);
 }
-#else
-inline void before_retry(const std::filesystem::path&,
-                         std::size_t,
-                         std::error_code) noexcept {}
-
-inline bool interrupt_cleanup(const std::filesystem::path&) noexcept {
-    return false;
-}
-#endif
 
 } // namespace kasumi::platform::workspace_fault_test
+#endif
 
 #endif

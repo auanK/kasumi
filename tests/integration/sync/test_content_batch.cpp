@@ -1118,9 +1118,12 @@ TEST(SyncContentBatchTest, RecoveryUsesSharedContentConcurrency) {
     ASSERT_TRUE(paths.has_value());
     ASSERT_TRUE(kasumi::application::sync::journal::save(
         *paths, *record, fixture->key));
-    const auto transaction_root =
-        fixture->profile / ".transactions" / record->operation_id;
-    ASSERT_TRUE(std::filesystem::create_directories(transaction_root));
+    auto transaction_workspace =
+        kasumi::application::sync::coordinator::detail::create_transaction_workspace(
+            fixture->profile, record->operation_id, fixture->key);
+    ASSERT_TRUE(transaction_workspace.has_value())
+        << transaction_workspace.error().detail;
+    const auto transaction_root = transaction_workspace->root;
 
     const auto tree =
         kasumi::application::observation::collect_local_tree(fixture->local);

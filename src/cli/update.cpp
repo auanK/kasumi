@@ -5,6 +5,7 @@
 #include "platform/cancellation.hpp"
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
+#include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 #include "platform/workspace.hpp"
 
@@ -1174,7 +1175,8 @@ prepare_verified_package(const std::filesystem::path& archive,
         return std::unexpected(executable_hash.error());
     }
     return PreparedExecutable{.path = executable_path,
-                              .sha256 = *executable_hash};
+                              .sha256 = *executable_hash,
+                              .workspace = workspace};
 }
 
 } // namespace
@@ -2084,27 +2086,17 @@ prepare_archive_for_install(const std::filesystem::path& archive,
     if (error || size == 0 || size > PACKAGE_LIMIT) {
         return std::unexpected("update package has an invalid size");
     }
-    platform::Workspace workspace{
-        .root = root / platform::path::from_utf8(extraction_name)};
-    if (!std::filesystem::create_directory(workspace.root, error) || error) {
+    auto workspace = platform::create_workspace_at(
+        root / platform::path::from_utf8(extraction_name));
+    if (!workspace) {
         return std::unexpected(
-            "could not create package verification directory");
+            "could not create package verification directory: " +
+            workspace.error());
     }
-#if !defined(_WIN32)
-    std::filesystem::permissions(workspace.root,
-                                 std::filesystem::perms::owner_all,
-                                 std::filesystem::perm_options::replace,
-                                 error);
-    if (error) {
-        platform::cleanup_workspace(workspace);
-        return std::unexpected(
-            "could not secure package verification directory");
-    }
-#endif
     auto prepared =
-        prepare_verified_package(archive, checksum, package, workspace);
+        prepare_verified_package(archive, checksum, package, *workspace);
     if (!prepared) {
-        platform::cleanup_workspace(workspace);
+        platform::cleanup_workspace(*workspace);
         return std::unexpected(prepared.error());
     }
     return *prepared;
@@ -2767,6 +2759,7 @@ start_windows_helper(const std::filesystem::path& executable,
     const auto language_w = widen_ascii(language_code());
     const auto identity_w = widen_ascii(windows_identity_text(target_identity));
     if (!version_w || !language_w || !identity_w ||
+        !workspace.identity.valid ||
         !windows_path_has_no_reparse_points(executable) ||
         !windows_file_identity_matches(executable, target_identity)) {
         std::filesystem::remove(helper, error);
@@ -2779,7 +2772,10 @@ start_windows_helper(const std::filesystem::path& executable,
                                 *version_w,
                                 *language_w,
                                 std::to_wstring(self_process),
-                                *identity_w});
+                                *identity_w,
+                                std::to_wstring(workspace.identity.volume_or_dev),
+                                std::to_wstring(workspace.identity.file_id_low),
+                                std::to_wstring(workspace.identity.file_id_high)});
     std::vector<wchar_t> mutable_command(command_line.begin(),
                                          command_line.end());
     mutable_command.push_back(L'\0');
@@ -2821,8 +2817,9 @@ start_windows_helper(const std::filesystem::path& executable,
 }
 
 int run_windows_wait_helper(int argc, char* argv[]) {
-    if (argc != 7 || argv[2] == nullptr || argv[3] == nullptr ||
-        argv[4] == nullptr || argv[5] == nullptr || argv[6] == nullptr) {
+    if (argc != 10 || argv[2] == nullptr || argv[3] == nullptr ||
+        argv[4] == nullptr || argv[5] == nullptr || argv[6] == nullptr ||
+        argv[7] == nullptr || argv[8] == nullptr || argv[9] == nullptr) {
         return report_failure("invalid installer handoff");
     }
     select_helper_language(argv[4]);
@@ -2841,7 +2838,21 @@ int run_windows_wait_helper(int argc, char* argv[]) {
         return report_failure("invalid installer parent process");
     }
     const auto expected_identity = parse_windows_identity(argv[6]);
+    const auto parse_workspace_identity = [](const char* text)
+        -> std::optional<std::uint64_t> {
+        std::uint64_t value = 0;
+        const auto finish = text + std::char_traits<char>::length(text);
+        const auto [position, error] = std::from_chars(text, finish, value);
+        if (error != std::errc{} || position != finish) {
+            return std::nullopt;
+        }
+        return value;
+    };
+    const auto workspace_volume = parse_workspace_identity(argv[7]);
+    const auto workspace_id_low = parse_workspace_identity(argv[8]);
+    const auto workspace_id_high = parse_workspace_identity(argv[9]);
     if (!expected_identity ||
+        !workspace_volume || !workspace_id_low || !workspace_id_high ||
         windows_parent_process_id(GetCurrentProcessId()) != parent_id) {
         return report_failure(
             "installer was not started by the original Kasumi process");
@@ -2871,6 +2882,16 @@ int run_windows_wait_helper(int argc, char* argv[]) {
         return report_failure("update staging directory is invalid");
     }
     const auto ready = root / platform::path::from_utf8("helper-ready");
+    const platform::Workspace handoff_workspace{
+        .root = root,
+        .identity = {.volume_or_dev = *workspace_volume,
+                     .file_id_low = *workspace_id_low,
+                     .file_id_high = *workspace_id_high,
+                     .valid = true}};
+    if (platform::private_storage::query_directory_identity(root) !=
+        handoff_workspace.identity) {
+        return report_failure("update staging workspace identity changed");
+    }
     {
         std::ofstream marker(ready, std::ios::binary | std::ios::trunc);
         if (!marker) {
@@ -2879,14 +2900,14 @@ int run_windows_wait_helper(int argc, char* argv[]) {
         marker << "ready";
     }
     struct HandoffCleanup {
-        std::filesystem::path root;
+        platform::Workspace workspace;
         std::filesystem::path helper;
         ~HandoffCleanup() {
-            platform::cleanup_workspace(platform::Workspace{.root = root});
+            platform::cleanup_workspace(workspace);
             static_cast<void>(MoveFileExW(
                 helper.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT));
         }
-    } cleanup{.root = root, .helper = *helper};
+    } cleanup{.workspace = handoff_workspace, .helper = *helper};
     const DWORD parent_wait = WaitForSingleObject(parent, INFINITE);
     if (parent_wait != WAIT_OBJECT_0) {
         return report_failure("could not wait for the running Kasumi process");
@@ -2897,7 +2918,7 @@ int run_windows_wait_helper(int argc, char* argv[]) {
             i18n::format(i18n::Key::UpdateManagedInstallation, manager));
     }
     auto digest = refetch_official_digest(
-        archive, version, *package, platform::Workspace{.root = root});
+        archive, version, *package, handoff_workspace);
     if (!digest) {
         return report_failure(digest.error());
     }
@@ -2924,8 +2945,7 @@ int run_windows_wait_helper(int argc, char* argv[]) {
     };
     auto installed = install_prepared_executable(
         prepared->path, target, prepared->sha256, &target_identity_hook);
-    platform::cleanup_workspace(
-        platform::Workspace{.root = prepared->path.parent_path()});
+    platform::cleanup_workspace(prepared->workspace);
     if (!installed) {
         if (installed.error().kind == InstallFailure::Kind::PermissionDenied) {
             return report_failure(i18n::tr(i18n::Key::UpdateAdminRequired));

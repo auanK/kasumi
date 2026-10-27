@@ -3,6 +3,8 @@
 #include "application/integrity/maintenance.hpp"
 #include "application/observation/file_metadata.hpp"
 #include "application/observation/history_detail.hpp"
+#include "application/sync/coordinator.hpp"
+#include "application/sync/coordinator_detail.hpp"
 #include "application/sync/journal.hpp"
 #include "application/sync/reobservation.hpp"
 #include "application/use_cases/context.hpp"
@@ -896,7 +898,11 @@ TEST(SyncRemoteAvailabilityTest, NoOpFastPathRecoversPendingJournalFirst) {
     const auto workspace = transaction_root / record->operation_id;
     ASSERT_TRUE(kasumi::application::sync::journal::save(
         *paths, *record, harness.key()));
-    ASSERT_TRUE(std::filesystem::create_directories(workspace));
+    auto transaction_workspace =
+        kasumi::application::sync::coordinator::detail::create_transaction_workspace(
+            profile, record->operation_id, harness.key());
+    ASSERT_TRUE(transaction_workspace.has_value())
+        << transaction_workspace.error().detail;
     ASSERT_TRUE(std::filesystem::exists(paths->final_path));
 
     const auto no_op = harness.sync();

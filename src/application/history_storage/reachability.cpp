@@ -162,7 +162,7 @@ ReachabilityResult inventory_impl(
                                      : layout.commits_prefix;
         transport::GetBatch batch{
             .source_prefix = std::string{commits_dir},
-            .destination_root = (*temporary)->root,
+            .destination_root = (*temporary)->workspace.root,
         };
         for (const auto& [unused, references] : listed->commit_variants) {
             static_cast<void>(unused);
@@ -192,7 +192,7 @@ ReachabilityResult inventory_impl(
         commit.variants.reserve(references.size());
         for (const auto& reference : references) {
             auto loaded = detail::try_load_variant(
-                storage, key, reference, (*temporary)->root, sequence++);
+                storage, key, reference, (*temporary)->workspace.root, sequence++);
             if (!loaded) {
                 return std::unexpected(loaded.error());
             }
@@ -255,7 +255,7 @@ ReachabilityResult inventory_impl(
                 continue;
             }
             const auto path =
-                (*temporary)->root / ("epoch-" + std::to_string(sequence++));
+                (*temporary)->workspace.root / ("epoch-" + std::to_string(sequence++));
             const auto get_trace = platform::perf_trace::begin();
             auto downloaded = detail::download(storage, identifier, path);
             platform::perf_trace::finish("rc/get_epoch", get_trace);
@@ -317,7 +317,7 @@ ReachabilityResult inventory_impl(
             continue;
         }
         auto inspected = detail::inspect_marker(
-            storage, layout, *marker.reference, (*temporary)->root, sequence);
+            storage, layout, *marker.reference, (*temporary)->workspace.root, sequence);
         if (!inspected) {
             return std::unexpected(inspected.error());
         }

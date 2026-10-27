@@ -130,6 +130,7 @@ TEST(WorkspaceTest, RefusesToRemoveAReplacedDirectory) {
     ASSERT_EQ(workspace->root.parent_path(),
               kasumi::test::workspace_root(fixture));
 
+    kasumi::test::write_text(workspace->root / "original.txt", "original");
     const auto displaced = kasumi::test::workspace_root(fixture) / "displaced";
     std::error_code error;
     std::filesystem::rename(workspace->root, displaced, error);
@@ -145,12 +146,40 @@ TEST(WorkspaceTest, RefusesToRemoveAReplacedDirectory) {
     ASSERT_TRUE(std::filesystem::exists(sentinel));
     EXPECT_EQ(kasumi::test::read_text(sentinel), "keep this replacement");
     EXPECT_TRUE(std::filesystem::is_directory(displaced));
+    EXPECT_EQ(kasumi::test::read_text(displaced / "original.txt"), "original");
+}
+
+TEST(WorkspaceTest, RemovesDirectoryWithCapturedIdentity) {
+    auto fixture = kasumi::test::make_temp_workspace("workspace-owned-removal");
+    const auto root = kasumi::test::workspace_root(fixture) / "owned";
+    auto workspace = kasumi::platform::create_workspace_at(root);
+    ASSERT_TRUE(workspace) << workspace.error();
+    kasumi::test::write_text(root / "owned.txt", "workspace data");
+
+    const auto removed = kasumi::platform::remove_workspace(*workspace);
+    ASSERT_TRUE(removed.has_value()) << removed.error();
+    EXPECT_FALSE(std::filesystem::exists(root));
+}
+
+TEST(WorkspaceTest, PathOnlyWorkspaceCannotRemoveExistingDirectory) {
+    auto fixture = kasumi::test::make_temp_workspace("workspace-unknown-owner");
+    const auto root = kasumi::test::workspace_root(fixture) / "unowned";
+    ASSERT_TRUE(std::filesystem::create_directory(root));
+    kasumi::test::write_text(root / "keep.txt", "unowned data");
+
+    const auto removed =
+        kasumi::platform::remove_workspace({.root = root});
+    EXPECT_FALSE(removed.has_value());
+    EXPECT_EQ(kasumi::test::read_text(root / "keep.txt"), "unowned data");
 }
 
 #if defined(_WIN32)
 TEST(PrivateStorageTest, RemovesWorkspaceWithNestedLongPath) {
     auto owner = kasumi::test::make_temp_workspace("long-workspace-cleanup");
-    const auto root = kasumi::test::workspace_root(owner);
+    auto workspace = kasumi::platform::create_workspace_at(
+        kasumi::test::workspace_root(owner) / "owned-workspace");
+    ASSERT_TRUE(workspace) << workspace.error();
+    const auto root = workspace->root;
     auto nested = root;
     std::vector<std::filesystem::path> directories;
     const std::wstring segment(64, L'a');
@@ -180,7 +209,7 @@ TEST(PrivateStorageTest, RemovesWorkspaceWithNestedLongPath) {
     expect_private_dacl(extended_file);
 
     const auto removed =
-        kasumi::platform::remove_workspace(kasumi::platform::Workspace{root});
+        kasumi::platform::remove_workspace(*workspace);
     EXPECT_TRUE(removed.has_value()) << (removed ? "" : removed.error());
     EXPECT_FALSE(std::filesystem::exists(root));
     if (!removed) {

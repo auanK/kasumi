@@ -146,7 +146,7 @@ inspect_commit_variants(transport::Transport& storage,
                                            layout,
                                            key,
                                            reference,
-                                           (*temporary)->root,
+                                           (*temporary)->workspace.root,
                                            sequence++);
             if (!loaded) {
                 return std::unexpected(loaded.error());

@@ -1,6 +1,8 @@
 #ifndef KASUMI_CLI_UPDATE_HPP
 #define KASUMI_CLI_UPDATE_HPP
 
+#include "platform/workspace.hpp"
+
 #include <array>
 #include <compare>
 #include <cstdint>
@@ -44,6 +46,7 @@ struct PackageNames {
 struct PreparedExecutable {
     std::filesystem::path path;
     std::string sha256;
+    platform::Workspace workspace;
 };
 
 struct HttpResponse {

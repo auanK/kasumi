@@ -1,6 +1,8 @@
 #ifndef KASUMI_PLATFORM_WORKSPACE_HPP
 #define KASUMI_PLATFORM_WORKSPACE_HPP
 
+#include "platform/private_storage.hpp"
+
 #include <cstddef>
 #include <expected>
 #include <filesystem>
@@ -12,11 +14,16 @@ namespace kasumi::platform {
 // Isolated temporary directory used by an operation.
 struct Workspace {
     std::filesystem::path root;
+    private_storage::DirectoryIdentity identity{};
 };
 
 // Creates an exclusive temporary directory for the specified purpose.
 std::expected<Workspace, std::string>
 create_workspace(std::string_view purpose);
+
+// Creates a workspace at an exact path; the final directory must not exist.
+std::expected<Workspace, std::string>
+create_workspace_at(const std::filesystem::path& root);
 
 // Builds an indexed path; returns empty path if extension is unsafe.
 std::filesystem::path workspace_file(const Workspace& workspace,

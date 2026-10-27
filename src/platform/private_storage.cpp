@@ -685,6 +685,62 @@ FileIdentity query_file_identity(const std::filesystem::path& path) noexcept {
 #endif
 }
 
+DirectoryIdentity
+query_directory_identity(const std::filesystem::path& path) noexcept {
+    if (path.empty()) {
+        return {};
+    }
+#if defined(_WIN32)
+    const auto handle =
+        CreateFileW(path.c_str(),
+                    FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                    nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+    FILE_ATTRIBUTE_TAG_INFO attributes{};
+    FILE_ID_INFO id{};
+    DirectoryIdentity result{};
+    if (GetFileInformationByHandleEx(
+            handle, FileAttributeTagInfo, &attributes, sizeof(attributes)) &&
+        (attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+        GetFileInformationByHandleEx(handle, FileIdInfo, &id, sizeof(id))) {
+        result.volume_or_dev = id.VolumeSerialNumber;
+        std::memcpy(
+            &result.file_id_low, id.FileId.Identifier, sizeof(std::uint64_t));
+        std::memcpy(&result.file_id_high,
+                    id.FileId.Identifier + sizeof(std::uint64_t),
+                    sizeof(std::uint64_t));
+        result.valid = true;
+    }
+    CloseHandle(handle);
+    return result;
+#else
+    const int descriptor = ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW
+#ifdef O_CLOEXEC
+                                  | O_CLOEXEC
+#endif
+    );
+    if (descriptor < 0) {
+        return {};
+    }
+    struct stat status{};
+    DirectoryIdentity result{};
+    if (::fstat(descriptor, &status) == 0 && S_ISDIR(status.st_mode)) {
+        result.volume_or_dev = static_cast<std::uint64_t>(status.st_dev);
+        result.file_id_low = static_cast<std::uint64_t>(status.st_ino);
+        result.valid = true;
+    }
+    static_cast<void>(::close(descriptor));
+    return result;
+#endif
+}
+
 std::expected<void, std::string>
 publish_private_file(PrivateOutputFile& file,
                      const std::filesystem::path& target_path) {

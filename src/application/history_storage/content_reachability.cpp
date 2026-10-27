@@ -270,7 +270,7 @@ inventory_impl(transport::Transport& storage,
                                                 content.remote_id,
                                                 content.plaintext_hash,
                                                 content.references.front().size,
-                                                temporary->root,
+                                                temporary->workspace.root,
                                                 sequence++);
                     if (!audited) {
                         return std::unexpected(audited.error());
@@ -305,7 +305,7 @@ inventory_impl(transport::Transport& storage,
                                             content_id,
                                             std::nullopt,
                                             std::nullopt,
-                                            temporary->root,
+                                            temporary->workspace.root,
                                             sequence++);
                 if (!audited) {
                     return std::unexpected(audited.error());

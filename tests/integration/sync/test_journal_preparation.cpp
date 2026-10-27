@@ -72,15 +72,15 @@ TEST(JournalPreparationTest,
         ASSERT_TRUE(paths);
         const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
         ASSERT_TRUE(sync::journal::save(*paths, *record, key));
-        const kasumi::platform::Workspace workspace{
-            .root = profile / ".transactions" / record->operation_id};
-        ASSERT_TRUE(std::filesystem::create_directories(workspace.root));
+        auto workspace = sync::coordinator::detail::create_transaction_workspace(
+            profile, record->operation_id, key);
+        ASSERT_TRUE(workspace) << workspace.error().detail;
         for (std::size_t i = 0; i < prepared_count; ++i) {
             auto prepared =
                 sync::mutation::prepare_operation(record->plan.operations[i],
                                                   i,
                                                   local,
-                                                  workspace,
+                                                  *workspace,
                                                   record->progress[i],
                                                   record->plan.operations);
             ASSERT_TRUE(prepared) << prepared.error().detail;
@@ -107,7 +107,7 @@ TEST(JournalPreparationTest,
         ASSERT_TRUE(recovered) << recovered.error().detail;
         EXPECT_EQ(*recovered, sync::coordinator::RecoveryResult::RolledBack);
         EXPECT_FALSE(std::filesystem::exists(paths->final_path));
-        EXPECT_FALSE(std::filesystem::exists(workspace.root));
+        EXPECT_FALSE(std::filesystem::exists(workspace->root));
         EXPECT_FALSE(std::filesystem::exists(runtime.database_path));
         for (const auto* name :
              {"upload.txt", "download.txt", "delete.txt", "rename.txt"}) {
@@ -150,18 +150,18 @@ TEST(JournalPreparationTest, PreparationFailureRollsBackMemoryOnlyBackups) {
     ASSERT_TRUE(paths);
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
     ASSERT_TRUE(sync::journal::save(*paths, *record, key));
-    const kasumi::platform::Workspace workspace{
-        .root = profile / ".transactions" / record->operation_id};
-    ASSERT_TRUE(std::filesystem::create_directories(workspace.root));
+    auto workspace = sync::coordinator::detail::create_transaction_workspace(
+        profile, record->operation_id, key);
+    ASSERT_TRUE(workspace) << workspace.error().detail;
     auto prepared = sync::mutation::prepare_operation(
-        record->plan.operations[0], 0, local, workspace, record->progress[0]);
+        record->plan.operations[0], 0, local, *workspace, record->progress[0]);
     ASSERT_TRUE(prepared);
     record->progress[0] = *prepared;
     auto failed = sync::mutation::prepare_operation(
-        record->plan.operations[1], 1, local, workspace, record->progress[1]);
+        record->plan.operations[1], 1, local, *workspace, record->progress[1]);
     ASSERT_FALSE(failed);
     auto rolled = sync::coordinator::detail::rollback_transaction(
-        *paths, *record, workspace, local, key);
+        *paths, *record, *workspace, local, key);
     ASSERT_TRUE(rolled) << rolled.error().detail;
     EXPECT_EQ(kasumi::test::read_text(local / "file.txt"), "ORIGINAL");
     EXPECT_TRUE(std::filesystem::is_directory(local / "invalid.txt"));
@@ -286,16 +286,16 @@ TEST(JournalPreparationTest, RollbackRemovesInterruptedOwnedDownloadCandidate) {
               .size = 8}},
             0));
     ASSERT_TRUE(record);
-    const kasumi::platform::Workspace workspace{profile / ".transactions" /
-                                                record->operation_id};
-    std::filesystem::create_directories(workspace.root);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    auto workspace = sync::coordinator::detail::create_transaction_workspace(
+        profile, record->operation_id, key);
+    ASSERT_TRUE(workspace) << workspace.error().detail;
     record->phase = kasumi::transaction::Phase::FilesStaged;
     record->progress[0].state = kasumi::transaction::OperationState::Applied;
     record->progress[1].state =
         kasumi::transaction::OperationState::BackupCreated;
     auto paths = sync::journal::make_paths(profile);
     ASSERT_TRUE(paths);
-    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
     ASSERT_TRUE(sync::journal::save(*paths, *record, key));
     std::filesystem::create_directory(local / "new-dir");
     const auto candidate =
@@ -332,16 +332,16 @@ TEST(JournalPreparationTest, RollbackPreservesUnownedDownloadCandidate) {
               .size = 8}},
             0));
     ASSERT_TRUE(record);
-    const kasumi::platform::Workspace workspace{profile / ".transactions" /
-                                                record->operation_id};
-    std::filesystem::create_directories(workspace.root);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    auto workspace = sync::coordinator::detail::create_transaction_workspace(
+        profile, record->operation_id, key);
+    ASSERT_TRUE(workspace) << workspace.error().detail;
     record->phase = kasumi::transaction::Phase::FilesStaged;
     record->progress[0].state = kasumi::transaction::OperationState::Applied;
     record->progress[1].state =
         kasumi::transaction::OperationState::BackupCreated;
     auto paths = sync::journal::make_paths(profile);
     ASSERT_TRUE(paths);
-    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
     ASSERT_TRUE(sync::journal::save(*paths, *record, key));
     std::filesystem::create_directory(local / "new-dir");
     const auto candidate =

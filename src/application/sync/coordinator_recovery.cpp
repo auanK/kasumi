@@ -23,30 +23,10 @@ namespace kasumi::application::sync::coordinator {
 namespace {
 
 std::expected<std::optional<platform::Workspace>, Error>
-open_workspace(const std::filesystem::path& profile, std::string_view id) {
-    auto directory = detail::transactions_directory(profile, false);
-    if (!directory)
-        return std::unexpected(directory.error());
-    auto status = detail::read_status(*directory);
-    if (!status)
-        return std::unexpected(status.error());
-    if (detail::missing(*status))
-        return std::optional<platform::Workspace>{};
-    auto root = *directory / platform::path::from_utf8(id);
-    status = detail::read_status(root);
-    if (!status)
-        return std::unexpected(status.error());
-    if (detail::missing(*status))
-        return std::optional<platform::Workspace>{};
-    if (std::filesystem::is_symlink(*status) ||
-        !std::filesystem::is_directory(*status)) {
-        return std::unexpected(detail::make_error(
-            ErrorCode::WorkspaceFailure,
-            "invalid transaction workspace '" + platform::path::to_utf8(root) +
-                "': expected a physical directory"));
-    }
-    return std::optional<platform::Workspace>{
-        platform::Workspace{.root = root}};
+open_workspace(const std::filesystem::path& profile,
+               std::string_view id,
+               std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+    return detail::open_transaction_workspace(profile, id, key);
 }
 
 std::expected<void, Error>
@@ -921,7 +901,7 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
         auto profile = detail::profile_directory(runtime_data);
         if (!profile)
             return std::unexpected(profile.error());
-        auto cleaned = detail::cleanup_orphan_workspaces(*profile);
+        auto cleaned = detail::cleanup_orphan_workspaces(*profile, key);
         if (!cleaned)
             return std::unexpected(cleaned.error());
         return RecoveryResult::NoJournal;
@@ -930,7 +910,7 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
     auto profile = detail::profile_directory(runtime_data);
     if (!profile)
         return std::unexpected(profile.error());
-    auto workspace = open_workspace(*profile, (*record)->operation_id);
+    auto workspace = open_workspace(*profile, (*record)->operation_id, key);
     if (!workspace)
         return std::unexpected(workspace.error());
     if ((*record)->phase == transaction::Phase::CleanupCompleted) {

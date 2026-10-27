@@ -128,8 +128,8 @@ publish_commit_object_impl(transport::Transport& storage,
     if (!temporary) {
         return std::unexpected(temporary.error());
     }
-    const auto plaintext = (*temporary)->root / "commit.kcom";
-    const auto ciphertext = (*temporary)->root / "commit.ciphertext";
+    const auto plaintext = (*temporary)->workspace.root / "commit.kcom";
+    const auto ciphertext = (*temporary)->workspace.root / "commit.ciphertext";
     if (auto written = detail::write_file(plaintext, *canonical); !written) {
         return std::unexpected(written.error());
     }
@@ -149,7 +149,7 @@ publish_commit_object_impl(transport::Transport& storage,
         found != inventory->commit_variants.end()) {
         for (const auto& candidate : found->second) {
             auto loaded = detail::try_load_variant(
-                storage, key, candidate, (*temporary)->root, sequence++);
+                storage, key, candidate, (*temporary)->workspace.root, sequence++);
             if (!loaded) {
                 return std::unexpected(loaded.error());
             }
@@ -160,7 +160,7 @@ publish_commit_object_impl(transport::Transport& storage,
             auto loaded_bytes = history::serialize(loaded->commit->commit);
             if (loaded_bytes && *loaded_bytes == *canonical) {
                 auto marker_state = detail::inspect_marker(
-                    storage, layout, candidate, (*temporary)->root, sequence);
+                    storage, layout, candidate, (*temporary)->workspace.root, sequence);
                 if (!marker_state) {
                     return std::unexpected(marker_state.error());
                 }
@@ -275,7 +275,7 @@ verify_commit_object_impl(transport::Transport& storage,
     }
     std::size_t sequence = 0;
     return detail::verify_published_commit(
-        storage, layout, key, commit, reference, (*temporary)->root, sequence);
+        storage, layout, key, commit, reference, (*temporary)->workspace.root, sequence);
 }
 
 PublishHeadResult
@@ -305,7 +305,7 @@ publish_head_marker_impl(transport::Transport& storage,
     if (!temporary) {
         return std::unexpected(temporary.error());
     }
-    const auto marker = (*temporary)->root / "marker.head";
+    const auto marker = (*temporary)->workspace.root / "marker.head";
     auto marker_bytes = encode_marker(reference);
     if (!marker_bytes) {
         return std::unexpected(marker_bytes.error());
@@ -318,7 +318,7 @@ publish_head_marker_impl(transport::Transport& storage,
     if (!delta.adds_marker_object) {
         std::size_t sequence = 0;
         auto inspected = detail::inspect_marker(
-            storage, layout, reference, (*temporary)->root, sequence);
+            storage, layout, reference, (*temporary)->workspace.root, sequence);
         if (!inspected) {
             return std::unexpected(inspected.error());
         }
@@ -387,7 +387,7 @@ verify_head_marker_impl(transport::Transport& storage,
     }
     std::size_t sequence = 0;
     auto state = detail::inspect_marker(
-        storage, layout, reference, (*temporary)->root, sequence);
+        storage, layout, reference, (*temporary)->workspace.root, sequence);
     if (!state) {
         return std::unexpected(state.error());
     }
@@ -413,7 +413,7 @@ inspect_head_marker_impl(transport::Transport& storage,
     }
     std::size_t sequence = 0;
     auto state = detail::inspect_marker(
-        storage, layout, reference, (*temporary)->root, sequence);
+        storage, layout, reference, (*temporary)->workspace.root, sequence);
     if (!state) {
         return std::unexpected(state.error());
     }

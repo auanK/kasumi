@@ -29,6 +29,8 @@ struct FileIdentity {
     constexpr bool operator==(const FileIdentity&) const = default;
 };
 
+using DirectoryIdentity = FileIdentity;
+
 void close_raw_handle(std::intptr_t handle) noexcept;
 
 struct PrivateHandle {
@@ -117,6 +119,8 @@ flush_and_close_private_file(PrivateOutputFile& file);
 void close_private_file(PrivateOutputFile& file) noexcept;
 
 FileIdentity query_file_identity(const std::filesystem::path& path) noexcept;
+DirectoryIdentity
+query_directory_identity(const std::filesystem::path& path) noexcept;
 
 CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept;
 

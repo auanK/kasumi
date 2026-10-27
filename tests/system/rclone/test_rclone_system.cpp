@@ -157,7 +157,7 @@ sync_client(const TestClient& client) {
 }
 
 struct RcloneHarness {
-    kasumi::test::TempWorkspace workspace;
+    kasumi::platform::Workspace workspace;
     CurrentDirectory current_directory{nullptr, restore_current_directory};
     kasumi::test::ScopedEnvironmentVariable rclone_config{
         nullptr, kasumi::test::restore_environment_variable};
@@ -165,17 +165,16 @@ struct RcloneHarness {
         nullptr, kasumi::test::restore_environment_variable};
 
     ~RcloneHarness() {
-        if (!workspace) {
+        if (workspace.root.empty()) {
             return;
         }
-        const auto root = kasumi::test::workspace_root(workspace);
+        const auto root = workspace.root;
         rclone_cache.reset();
         rclone_config.reset();
         current_directory.reset();
-        const auto removed = kasumi::platform::remove_workspace(
-            kasumi::platform::Workspace{.root = root});
+        const auto removed = kasumi::platform::remove_workspace(workspace);
         EXPECT_TRUE(removed) << (removed ? "" : removed.error());
-        workspace.reset();
+        workspace = {};
         EXPECT_FALSE(std::filesystem::exists(root))
             << kasumi::platform::path::to_utf8(root);
     }
@@ -183,11 +182,16 @@ struct RcloneHarness {
 
 const std::filesystem::path&
 harness_root(const RcloneHarness& harness) noexcept {
-    return kasumi::test::workspace_root(harness.workspace);
+    return harness.workspace.root;
+}
+
+std::filesystem::path harness_path(const RcloneHarness& harness,
+                                   const std::filesystem::path& relative) {
+    return harness.workspace.root / relative;
 }
 
 std::filesystem::path storage_root(const RcloneHarness& harness) {
-    return kasumi::test::workspace_path(harness.workspace, remote_backend) /
+    return harness_path(harness, remote_backend) /
            remote_root;
 }
 
@@ -201,8 +205,7 @@ open_transport(const RcloneHarness& harness) {
         .remote_name = std::string{remote_name},
         .remote_root = std::string{remote_root},
         .executable = std::filesystem::path{KASUMI_SYSTEM_RCLONE_EXECUTABLE},
-        .config_path =
-            kasumi::test::workspace_path(harness.workspace, "rclone.conf")};
+        .config_path = harness_path(harness, "rclone.conf")};
     auto opened = kasumi::transport::detail::open_rclone_backend(configuration);
     if (!opened) {
         return std::unexpected(opened.error());
@@ -216,8 +219,7 @@ open_transport(const RcloneHarness& harness) {
 
 TestClient make_test_client(const RcloneHarness& harness,
                             std::string_view name) {
-    const auto base =
-        kasumi::test::workspace_path(harness.workspace, std::string{name});
+    const auto base = harness_path(harness, std::string{name});
     create_system_directory(base / "app-data");
     create_system_directory(base / "local");
     return TestClient{
@@ -235,7 +237,14 @@ void create_profile(const RcloneHarness& harness, const TestClient& client) {
 }
 
 RcloneHarness make_rclone_harness() {
-    auto workspace = kasumi::test::make_temp_workspace("system-rclone");
+    auto created = kasumi::platform::create_workspace("system-rclone");
+    if (!created) {
+        throw std::runtime_error(created.error());
+    }
+    auto workspace = std::move(*created);
+    const auto path = [&](const std::filesystem::path& relative) {
+        return workspace.root / relative;
+    };
 
     for (const std::string_view path : {"cwd-trap",
                                         "r",
@@ -247,30 +256,26 @@ RcloneHarness make_rclone_harness() {
                                         "client-b/local",
                                         "client-c/app-data",
                                         "client-c/local"}) {
-        create_system_directory(kasumi::test::workspace_path(workspace, path));
+        create_system_directory(workspace.root / path);
     }
 
     auto current_directory = use_current_directory(
-        kasumi::test::workspace_path(workspace, "cwd-trap"));
+        path("cwd-trap"));
     auto rclone_config = kasumi::test::scoped_environment_variable(
         "RCLONE_CONFIG",
-        kasumi::platform::path::to_utf8(
-            kasumi::test::workspace_path(workspace, "rclone.conf")));
+        kasumi::platform::path::to_utf8(path("rclone.conf")));
     auto rclone_cache = kasumi::test::scoped_environment_variable(
         "RCLONE_CACHE_DIR",
-        kasumi::platform::path::to_utf8(
-            kasumi::test::workspace_path(workspace, "rclone-cache")));
+        kasumi::platform::path::to_utf8(path("rclone-cache")));
 
-    std::ofstream config(
-        kasumi::test::workspace_path(workspace, "rclone.conf"));
+    std::ofstream config(path("rclone.conf"));
     if (!config) {
         throw std::runtime_error("could not create temporary rclone.conf");
     }
     config << "[kasumi-test]\n"
            << "type = alias\n"
            << "remote = "
-           << kasumi::platform::path::to_logical_utf8(
-                  kasumi::test::workspace_path(workspace, remote_backend))
+           << kasumi::platform::path::to_logical_utf8(path(remote_backend))
            << "\n";
     if (!config.good()) {
         throw std::runtime_error("could not write temporary rclone.conf");
@@ -412,7 +417,7 @@ TEST(RcloneSystemTest, SpawnedRcUsesRcloneServerTimeoutDefaults) {
         .remote_root = std::string{remote_root},
         .executable = std::filesystem::path{KASUMI_SYSTEM_RCLONE_EXECUTABLE},
         .config_path =
-            kasumi::test::workspace_path(harness.workspace, "rclone.conf")};
+            harness_path(harness, "rclone.conf")};
     auto started = kasumi::transport::rclone_detail::start_state(configuration);
     ASSERT_TRUE(started.has_value())
         << (started ? "" : started.error().message);
@@ -443,7 +448,7 @@ TEST(RcloneSystemTest, KilledOwnedRcloneFailsClosedAndCleansUp) {
         .remote_root = std::string{remote_root},
         .executable = std::filesystem::path{KASUMI_SYSTEM_RCLONE_EXECUTABLE},
         .config_path =
-            kasumi::test::workspace_path(harness.workspace, "rclone.conf")};
+            harness_path(harness, "rclone.conf")};
     auto started = kasumi::transport::rclone_detail::start_state(configuration);
     ASSERT_TRUE(started.has_value())
         << (started ? "" : started.error().message);

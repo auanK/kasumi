@@ -3,6 +3,7 @@
 
 #include "application/history_storage/history_storage.hpp"
 #include "application/history_storage/remote_layout.hpp"
+#include "platform/workspace.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -99,7 +100,7 @@ void remove_file(const std::filesystem::path& path) noexcept;
 
 // Isolated temporary workspace.
 struct TemporaryWorkspaceData {
-    std::filesystem::path root;
+    platform::Workspace workspace;
 };
 
 // Temporary workspace cleaned up automatically.

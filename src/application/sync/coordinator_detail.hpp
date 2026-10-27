@@ -52,10 +52,19 @@ transactions_directory(const std::filesystem::path& profile, bool create);
 // Creates an isolated temporary workspace for a transaction.
 std::expected<platform::Workspace, Error>
 create_transaction_workspace(const std::filesystem::path& profile,
-                             std::string_view id);
+                             std::string_view id,
+                             std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+// Opens a persisted workspace only when its owner marker authenticates; older
+// workspaces are returned without deletion authority for recovery compatibility.
+std::expected<std::optional<platform::Workspace>, Error>
+open_transaction_workspace(
+    const std::filesystem::path& profile,
+    std::string_view id,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key);
 // Removes the temporary transaction workspace, if it exists.
 std::expected<void, Error> remove_transaction_workspace(
-    const std::optional<platform::Workspace>& workspace);
+    const std::optional<platform::Workspace>& workspace,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key);
 // Cleans up the journal and temporary workspace after completion.
 std::expected<void, Error>
 finish_transaction_cleanup(const journal::Paths& paths,
@@ -64,7 +73,9 @@ finish_transaction_cleanup(const journal::Paths& paths,
                            journal::Session* session = nullptr);
 // Cleans up orphan workspaces without a matching transaction.
 std::expected<void, Error>
-cleanup_orphan_workspaces(const std::filesystem::path& profile);
+cleanup_orphan_workspaces(
+    const std::filesystem::path& profile,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key);
 // Resolves transaction journal paths within the profile.
 std::expected<journal::Paths, Error>
 make_journal_paths(const runtime::RuntimeData& runtime_data);

@@ -8,6 +8,41 @@ old StoredState + durable journal → staged/applied plan → verified Commit
     → new StoredState in SQLite → marker/workspace/journal cleanup
 ```
 
+## Workspace ownership and cleanup
+
+Each newly created workspace keeps its native directory identity (Windows
+volume/file ID; Linux device/inode). Transaction workspaces also carry an
+owner marker authenticated with the vault key and bound to the operation ID
+and that identity. Before recursive deletion, cleanup durably writes the same
+proof beside the workspace in `.transactions`; recovery checks its MAC, the
+operation ID, and the current directory identity. The sidecar remains until
+tree removal and its parent-directory sync complete, then is removed before
+the journal is retired. Recovery may still inspect an older unmarked workspace,
+but it cannot delete it: if recovery finishes while such a directory remains,
+it clears the terminal journal, reports a cleanup error, and preserves the
+directory as an orphan.
+
+Cleanup checks the saved identity, atomically moves the directory to a unique
+sibling quarantine (`MoveFileW` on Windows; `renameat2(RENAME_NOREPLACE)` on
+Linux), checks the identity again, and deletes the quarantined tree. Transaction
+quarantines retain the operation ID, so recovery can find an interrupted cleanup
+and remove it only when the journal key authenticates the internal marker or
+durable sidecar and the saved directory identity still matches. A sidecar left
+after full tree removal authorizes removal of that proof file only; it cannot
+authorize deleting a new directory at the old path. A changed
+root or a symlink/junction fails closed. If recursive removal fails, Kasumi
+restores the partial tree to its original path when possible; otherwise the
+error identifies the quarantine path. Best-effort destructor cleanup records
+a failure metric and never treats an unowned path as removable.
+
+These checks protect against a workspace root replaced before cleanup or
+between identity validation and root isolation. They do not make recursive
+removal safe against a privileged or same-user process racing entries inside
+the quarantined tree. Private directory permissions exclude other ordinary
+accounts, but are access control rather than identity proof. A fully hostile
+same-user filesystem requires handle-relative recursive deletion and stronger
+coordination than this implementation provides.
+
 ## Durable phases
 
 The phase is the **last saved checkpoint**, not proof that a following filesystem or network call never started. Recovery inspects real state whenever a crash could fall between an effect and the next journal write. `publication_required=false` skips the Commit/HEAD/Epoch rows entirely.
