@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <csignal>
+#include <cmath>
 #include <gtest/gtest.h>
 #include <print>
 #include <regex>
@@ -26,13 +27,18 @@ enum class Outcome {
 Outcome outcome = Outcome::Success;
 int calls = 0;
 std::string profile_received;
+double operation_elapsed = 0.0;
 constexpr auto delay = std::chrono::milliseconds(25);
 constexpr auto transport_detail =
     "timeout: connection reset (native_code=10054)";
 
 void perform() {
     ++calls;
+    const auto start = std::chrono::steady_clock::now();
     std::this_thread::sleep_for(delay);
+    operation_elapsed =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+            .count();
     if (outcome == Outcome::Cancelled)
         std::raise(SIGINT);
 }
@@ -45,6 +51,7 @@ struct Output {
 };
 
 Output run(std::vector<std::string> arguments) {
+    operation_elapsed = 0.0;
     std::vector<char*> argv;
     for (auto& argument : arguments)
         argv.push_back(argument.data());
@@ -70,9 +77,12 @@ void expect_duration(const Output& output,
     ASSERT_TRUE(std::regex_search(
         text, match, std::regex(label + R"(: ([0-9]+\.[0-9]{3}) s\r?\n)")))
         << text;
-    EXPECT_GE(std::stod(match[1]),
-              std::chrono::duration<double>(delay).count() - 0.001);
-    EXPECT_LE(std::stod(match[1]), output.elapsed + 0.001);
+    const auto reported = std::stod(match[1]);
+    EXPECT_TRUE(std::isfinite(reported));
+    EXPECT_GE(reported, 0.0);
+    EXPECT_GT(operation_elapsed, 0.001);
+    EXPECT_GE(reported, operation_elapsed - 0.001);
+    EXPECT_LE(reported, output.elapsed + 0.001);
     EXPECT_EQ(
         text.find(label + ":",
                   static_cast<std::size_t>(match.position() + match.length())),
