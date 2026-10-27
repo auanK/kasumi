@@ -386,6 +386,8 @@ constexpr KeyMapping KEY_MAPPINGS[] = {
     {Key::WizardPromptProfileToRename, "wizard.prompt_profile_to_rename"},
     {Key::WizardPromptNewProfileName, "wizard.prompt_new_profile_name"},
     {Key::WizardProfileRenamed, "wizard.profile_renamed"},
+    {Key::WizardPromptSourceProfile, "wizard.prompt_source_profile"},
+    {Key::WizardProfileCloned, "wizard.profile_cloned"},
     {Key::WizardInvalidOption, "wizard.invalid_option"},
     {Key::WizardConfigReadFailed, "wizard.config_read_failed"},
 };

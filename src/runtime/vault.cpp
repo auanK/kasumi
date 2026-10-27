@@ -1,5 +1,6 @@
 #include "runtime/vault.hpp"
 
+#include "platform/durability.hpp"
 #include "platform/private_storage.hpp"
 
 #include <cstdlib>
@@ -114,6 +115,48 @@ std::expected<void, runtime::Error> write(const std::filesystem::path& path,
     if (!saved) {
         return std::unexpected(
             Error{.code = ErrorCode::KeyWriteFailure, .detail = saved.error()});
+    }
+    return {};
+}
+
+std::expected<void, runtime::Error>
+write_new(const std::filesystem::path& path,
+          const KeyBytes& clear_key,
+          platform::private_storage::FileIdentity& identity) {
+    identity = {};
+    auto parent =
+        platform::private_storage::ensure_directory(path.parent_path());
+    if (!parent) {
+        return std::unexpected(
+            Error{.code = ErrorCode::IoFailure, .detail = parent.error()});
+    }
+    auto file = platform::private_storage::create_private_file(path);
+    if (!file) {
+        return std::unexpected(Error{
+            .code = ErrorCode::KeyWriteFailure,
+            .detail = file.error().message,
+        });
+    }
+    identity = file->identity;
+    KeyBytes stored = clear_key;
+    obscure(stored);
+    const auto written = platform::private_storage::write_private_file(
+        *file, stored.data(), stored.size());
+    crypto_wipe(stored.data(), stored.size());
+    if (!written) {
+        return std::unexpected(Error{.code = ErrorCode::KeyWriteFailure,
+                                     .detail = written.error()});
+    }
+    auto flushed =
+        platform::private_storage::flush_and_close_private_file(*file);
+    if (!flushed) {
+        return std::unexpected(
+            Error{.code = ErrorCode::KeyWriteFailure, .detail = flushed.error()});
+    }
+    auto synced = platform::durability::sync_parent_directory(path);
+    if (!synced) {
+        return std::unexpected(
+            Error{.code = ErrorCode::KeyWriteFailure, .detail = synced.error()});
     }
     return {};
 }

@@ -305,7 +305,7 @@
     "header": "\n=== Kasumi Profiles ===",
     "no_profiles": "No profiles registered.",
     "profile_list_entry": "- {}  [ Local: {} | Remote: {} ]",
-    "menu": "\n[e] Edit  [n] New  [d] Delete  [r] Rename  [q] Quit\n\n> ",
+    "menu": "\n[e] Edit  [n] New  [c] Clone  [d] Delete  [r] Rename  [q] Quit\n\n> ",
     "prompt_profile_name": "Profile name: ",
     "profile_already_exists": "The profile '{}' already exists.",
     "prompt_local_path": "Synchronized local path (e.g. C:/MyData): ",
@@ -324,7 +324,9 @@
     "prompt_new_profile_name": "New profile name: ",
     "profile_renamed": "Profile renamed to '{}'.",
     "invalid_option": "Invalid option.",
-    "config_read_failed": "Failed to read config: {}"
+    "config_read_failed": "Failed to read config: {}",
+    "prompt_source_profile": "Source profile: ",
+    "profile_cloned": "Profile \"{}\" created from \"{}\"."
   },
   "manual_barrier_removal": {
     "warning": "Kasumi cannot determine whether an active garbage collection or maintenance operation is still running on other devices. Its barrier check cannot guarantee that no operations are running. Verify that no garbage collection or maintenance operation is active before removal.",
@@ -351,7 +353,7 @@
     "gc_remove-barrier": "Usage: kasumi gc remove-barrier <profile> --confirm-abandoned\n\nRemove an abandoned maintenance barrier after manual verification.\n--confirm-abandoned is required; verify no GC or Sync is active on any device.\nVerifies physical identity and confirms absence; never runs Sync or GC.\nExample: kasumi gc remove-barrier Programming --confirm-abandoned\n",
     "resolve-missing": "Usage: kasumi resolve-missing <profile>\n\nResolve unavailable content as logical deletions. Review pending paths first.\nExample: kasumi resolve-missing Programming\n",
     "remote": "Usage: kasumi remote <subcommand> <profile> [arguments] [options]\n\nRemote inspection. Subcommands:\n  heads, tree, commits, summary, stat, commit, get, epochs, epoch,\n  contents, content, markers, objects, orphans, writers, health\nUse kasumi remote <subcommand> --help for required arguments and restrictions.\nExample: kasumi remote summary Programming\n",
-    "config": "Usage: kasumi config\n\nInteractive profile wizard: create, edit, rename and delete profiles.\nNo profile operand. Changes are saved by each wizard action.\nExample: kasumi config\n",
+    "config": "Usage: kasumi config\n\nInteractive profile wizard: create, clone, edit, rename and delete profiles.\nNo profile operand. Changes are saved by each wizard action.\nExample: kasumi config\n",
     "update": "Usage: kasumi update\n\nCheck and install the latest supported official release. No profile operand.\nRequires network access and installation permissions. Windows may hand off to an installer.\nExample: kasumi update\n",
     "remote_heads": "Usage: kasumi remote heads <profile>\n\nList current logical heads.\n",
     "remote_tree": "Usage: kasumi remote tree <profile> [--head <selector>]\n\nShow a remote tree. --head must select a current logical head; required when multiple heads exist.\nExample: kasumi remote tree Programming --head <commit>\n",

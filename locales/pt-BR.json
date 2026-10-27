@@ -305,7 +305,7 @@
     "header": "\n=== Perfis Kasumi ===",
     "no_profiles": "Nenhum perfil cadastrado.",
     "profile_list_entry": "- {}  [ Local: {} | Destino: {} ]",
-    "menu": "\n[e] Editar  [n] Novo  [d] Deletar  [r] Renomear  [q] Sair\n\n> ",
+    "menu": "\n[e] Editar  [n] Novo  [c] Clonar  [d] Deletar  [r] Renomear  [q] Sair\n\n> ",
     "prompt_profile_name": "Nome do Perfil: ",
     "profile_already_exists": "O perfil '{}' ja existe.",
     "prompt_local_path": "Caminho local sincronizado (ex: C:/MeusDados): ",
@@ -324,7 +324,9 @@
     "prompt_new_profile_name": "Novo nome do perfil: ",
     "profile_renamed": "Perfil renomeado para '{}'.",
     "invalid_option": "Opção inválida.",
-    "config_read_failed": "Falha ao ler config: {}"
+    "config_read_failed": "Falha ao ler config: {}",
+    "prompt_source_profile": "Perfil de origem: ",
+    "profile_cloned": "Perfil \"{}\" criado a partir de \"{}\"."
   },
   "manual_barrier_removal": {
     "warning": "O Kasumi não pode determinar se uma coleta de lixo ou manutenção ainda está ativa em outros dispositivos. A verificação da barreira não pode garantir que nenhuma operação esteja em execução. Certifique-se de que nenhuma coleta ou manutenção esteja ativa antes da remoção.",
@@ -351,7 +353,7 @@
     "gc_remove-barrier": "Uso: kasumi gc remove-barrier <perfil> --confirm-abandoned\n\nRemove uma barrier de manutenção abandonada após verificação manual.\n--confirm-abandoned é obrigatório; confirme que não há GC ou Sync ativo em dispositivo algum.\nVerifica identidade física e confirma ausência; não executa Sync nem GC.\nExemplo: kasumi gc remove-barrier Programming --confirm-abandoned\n",
     "resolve-missing": "Uso: kasumi resolve-missing <perfil>\n\nResolve conteúdo indisponível como exclusões lógicas. Revise as pendências antes.\nExemplo: kasumi resolve-missing Programming\n",
     "remote": "Uso: kasumi remote <subcomando> <perfil> [argumentos] [opções]\n\nInspeção remota. Subcomandos:\n  heads, tree, commits, summary, stat, commit, get, epochs, epoch,\n  contents, content, markers, objects, orphans, writers, health\nUse kasumi remote <subcomando> --help para argumentos e restrições.\nExemplo: kasumi remote summary Programming\n",
-    "config": "Uso: kasumi config\n\nAssistente interativo: criar, editar, renomear e excluir perfis.\nNão recebe perfil como argumento. Cada ação salva suas alterações.\nExemplo: kasumi config\n",
+    "config": "Uso: kasumi config\n\nAssistente interativo: criar, clonar, editar, renomear e excluir perfis.\nNão recebe perfil como argumento. Cada ação salva suas alterações.\nExemplo: kasumi config\n",
     "update": "Uso: kasumi update\n\nVerifica e instala a versão oficial compatível mais recente. Não recebe perfil.\nExige rede e permissão de instalação. Windows pode iniciar um instalador auxiliar.\nExemplo: kasumi update\n",
     "remote_heads": "Uso: kasumi remote heads <perfil>\n\nLista heads lógicas atuais.\n",
     "remote_tree": "Uso: kasumi remote tree <perfil> [--head <seletor>]\n\nExibe árvore remota. --head deve selecionar uma head lógica atual; obrigatório com múltiplas heads.\nExemplo: kasumi remote tree Programming --head <commit>\n",

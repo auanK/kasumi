@@ -385,6 +385,8 @@ enum class Key {
     WizardPromptProfileToRename,
     WizardPromptNewProfileName,
     WizardProfileRenamed,
+    WizardPromptSourceProfile,
+    WizardProfileCloned,
     WizardInvalidOption,
     WizardConfigReadFailed,
 };

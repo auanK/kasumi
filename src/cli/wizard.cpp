@@ -132,6 +132,35 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                          style::reset,
                          i18n::tr(i18n::Key::WizardProfileCreated));
 
+        } else if (choice == "c" || choice == "C") {
+            std::print("{}", i18n::tr(i18n::Key::WizardPromptSourceProfile));
+            std::string source;
+            if (!read_input(source))
+                break;
+            std::println("");
+
+            std::print("{}", i18n::tr(i18n::Key::WizardPromptNewProfileName));
+            std::string new_name;
+            if (!read_input(new_name))
+                break;
+            std::println("");
+
+            auto res = application::clone_profile(environment, source, new_name);
+            if (res) {
+                std::println(
+                    "{}{}{} {}",
+                    style::green,
+                    i18n::tr(i18n::Key::LabelOk),
+                    style::reset,
+                    i18n::format(i18n::Key::WizardProfileCloned, new_name, source));
+            } else {
+                std::println("{}{}{} {}",
+                             style::red,
+                             i18n::tr(i18n::Key::LabelError),
+                             style::reset,
+                             res.error().detail);
+            }
+
         } else if (choice == "d" || choice == "D") {
             std::print("{}", i18n::tr(i18n::Key::WizardPromptProfileToDelete));
             std::string target;

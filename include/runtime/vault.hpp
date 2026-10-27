@@ -10,6 +10,10 @@
 #include <span>
 #include <string_view>
 
+namespace kasumi::platform::private_storage {
+struct FileIdentity;
+}
+
 namespace kasumi::runtime::vault {
 
 // Key size in bytes.
@@ -34,6 +38,12 @@ read_only(const std::filesystem::path& path);
 // Masks and writes the local key.
 std::expected<void, runtime::Error> write(const std::filesystem::path& path,
                                           const KeyBytes& clear_key);
+
+// Creates a new key file and returns its identity for ownership-aware rollback.
+std::expected<void, runtime::Error>
+write_new(const std::filesystem::path& path,
+          const KeyBytes& clear_key,
+          platform::private_storage::FileIdentity& identity);
 
 // Derives the key from password and reproducible password salt.
 std::expected<KeyBytes, runtime::Error> derive(std::string_view password,
