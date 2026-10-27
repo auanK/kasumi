@@ -31,7 +31,8 @@ enum class ProfileErrorCode {
     NotFound,
     ConfigFailure,
     CredentialFailure,
-    StorageFailure
+    StorageFailure,
+    LockFailure
 };
 
 // Error encountered while managing a profile.
@@ -64,6 +65,14 @@ std::expected<void, ProfileError>
 rename_profile(const ExecutionEnvironment& environment,
                std::string_view current_name,
                std::string_view new_name);
+
+// Clones an existing profile configuration and cryptographic identity
+// into a new profile with independent local state storage.
+// Does not access remote storage, does not synchronize.
+std::expected<void, ProfileError>
+clone_profile(const ExecutionEnvironment& environment,
+              std::string_view source_profile_name,
+              std::string_view destination_profile_name);
 
 } // namespace kasumi::application
 

@@ -369,4 +369,15 @@ rename_profile(const ExecutionEnvironment& environment,
     return {};
 }
 
+
+std::expected<void, ProfileError>
+clone_profile(const ExecutionEnvironment& /*environment*/,
+              std::string_view /*source_profile_name*/,
+              std::string_view /*destination_profile_name*/) {
+    return std::unexpected(ProfileError{
+        .code = ProfileErrorCode::StorageFailure,
+        .detail = "not implemented",
+    });
+}
+
 } // namespace kasumi::application

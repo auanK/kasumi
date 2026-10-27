@@ -101,6 +101,14 @@ INSTANTIATE_TEST_SUITE_P(
         {"remote", "orphans"},
         {"remote", "writers"},
         {"remote", "health"}}));
+TEST_F(CliInterfaceTest, ConfigHelpIncludesCloneInBothLanguages) {
+    const auto english = run({"kasumi", "config", "--help"});
+    EXPECT_NE(english.out.find("clone"), std::string::npos);
+
+    const auto portuguese =
+        run({"kasumi", "--lang", "pt-BR", "config", "--help"});
+    EXPECT_NE(portuguese.out.find("clonar"), std::string::npos);
+}
 TEST_F(CliInterfaceTest, GlobalLanguageAppliesToContextualHelpAndDiagnostics) {
     const auto help =
         run({"kasumi", "--lang", "pt-BR", "remote", "tree", "--help"});
