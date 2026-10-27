@@ -42,8 +42,12 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             std::println("{}", i18n::tr(i18n::Key::WizardNoProfiles));
         } else {
             for (const auto& prof : profiles) {
+                const auto state =
+                    application::inspect_profile_local_state(environment,
+                                                             prof.name);
                 i18n::println(i18n::Key::WizardProfileListEntry,
                               prof.name,
+                              application::to_string(state),
                               platform::path::to_utf8(prof.local_dir),
                               prof.remote_dir);
             }

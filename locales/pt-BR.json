@@ -304,7 +304,7 @@
   "wizard": {
     "header": "\n=== Perfis Kasumi ===",
     "no_profiles": "Nenhum perfil cadastrado.",
-    "profile_list_entry": "- {}  [ Local: {} | Destino: {} ]",
+    "profile_list_entry": "- {} [{}]  [ Local: {} | Destino: {} ]",
     "menu": "\n[e] Editar  [n] Novo  [c] Clonar  [d] Deletar  [r] Renomear  [q] Sair\n\n> ",
     "prompt_profile_name": "Nome do Perfil: ",
     "profile_already_exists": "O perfil '{}' ja existe.",

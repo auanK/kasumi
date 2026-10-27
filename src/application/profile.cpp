@@ -1,26 +1,44 @@
 #include "application/profile.hpp"
 #include "application/profile_directory_identity.hpp"
+#include "application/sync/journal.hpp"
 
+#include "crypto/content.hpp"
 #include "core/history.hpp"
 #include "crypto/secure_memory.hpp"
 #include "runtime/error.hpp"
 #include "runtime/paths.hpp"
 #include "runtime/profile.hpp"
 #include "runtime/vault.hpp"
-#include "state_storage/database.hpp"
-#include "transport/transport.hpp"
+#include "platform/path.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/profile_lock.hpp"
+#include "platform/random.hpp"
+#include "state_storage/database.hpp"
+#include "transport/transport.hpp"
 #ifdef KASUMI_MUTATION_FAULT_TESTS
 #include "application/profile_fault_test.hpp"
 #endif
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <optional>
 #include <thread>
 #include <utility>
 #include <vector>
 
-#include <algorithm>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace kasumi::application {
 
@@ -118,6 +136,464 @@ private:
     std::intptr_t handle_ = platform::invalid_profile_lock;
 };
 
+enum class EntryState { Absent, Present, Error };
+
+struct EntryInfo {
+    EntryState state = EntryState::Error;
+    bool directory = false;
+    bool regular = false;
+    bool link = false;
+    std::uintmax_t size = 0;
+};
+
+bool path_missing(const std::error_code& error) noexcept {
+    return error == std::errc::no_such_file_or_directory;
+}
+
+// Filesystem presence must be distinguished from access errors: an unreadable
+// artifact is never treated as absent.
+EntryInfo query_entry(const std::filesystem::path& path) {
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (fault_test::g_inspect_fault_stage ==
+            fault_test::InspectFaultStage::FailMetadataQuery &&
+        fault_test::g_inspect_fault_path == path) {
+        return EntryInfo{.state = EntryState::Error};
+    }
+#endif
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    if (path_missing(error) ||
+        (!error &&
+         status.type() == std::filesystem::file_type::not_found)) {
+        return EntryInfo{.state = EntryState::Absent};
+    }
+    if (error) {
+        return EntryInfo{.state = EntryState::Error};
+    }
+    EntryInfo info{.state = EntryState::Present,
+                   .directory = std::filesystem::is_directory(status),
+                   .regular = std::filesystem::is_regular_file(status),
+                   .link = std::filesystem::is_symlink(status)};
+    if (!info.link && has_reparse_point(path)) {
+        info.link = true;
+    }
+    if (info.regular) {
+        error.clear();
+        const auto size = std::filesystem::file_size(path, error);
+        if (error) {
+            return EntryInfo{.state = EntryState::Error};
+        }
+        info.size = size;
+    }
+    return info;
+}
+
+enum class LockProbe { Inactive, Active, Error };
+
+bool can_read_first_byte(const std::filesystem::path& path) {
+#if defined(_WIN32)
+    const HANDLE handle = CreateFileW(path.c_str(),
+                                      GENERIC_READ,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE |
+                                          FILE_SHARE_DELETE,
+                                      nullptr,
+                                      OPEN_EXISTING,
+                                      FILE_FLAG_OPEN_REPARSE_POINT,
+                                      nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    char byte = 0;
+    DWORD read = 0;
+    const bool result = ReadFile(handle, &byte, 1, &read, nullptr) && read == 1;
+    CloseHandle(handle);
+    return result;
+#else
+    int flags = O_RDONLY;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    const int handle = ::open(path.c_str(), flags);
+    if (handle < 0) {
+        return false;
+    }
+    char byte = 0;
+    const auto count = ::read(handle, &byte, 1);
+    static_cast<void>(::close(handle));
+    return count == 1;
+#endif
+}
+
+// Opening an existing lock without creating or modifying it: only an absent
+// lock is inactive; any unexpected failure is an error.
+LockProbe probe_profile_lock(const std::filesystem::path& path) {
+    const auto entry = query_entry(path);
+    if (entry.state == EntryState::Absent) {
+        return LockProbe::Inactive;
+    }
+    if (entry.state == EntryState::Error || !entry.regular || entry.link) {
+        return LockProbe::Error;
+    }
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (fault_test::g_inspect_fault_path == path &&
+        fault_test::g_inspect_fault_stage ==
+            fault_test::InspectFaultStage::FailLockOpen) {
+        return LockProbe::Error;
+    }
+#endif
+#if defined(_WIN32)
+    const auto handle =
+        CreateFileW(path.c_str(),
+                    GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    nullptr,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                    nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        const DWORD code = GetLastError();
+        if (code == ERROR_SHARING_VIOLATION || code == ERROR_LOCK_VIOLATION) {
+            return LockProbe::Active;
+        }
+        if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
+            return LockProbe::Inactive;
+        }
+        return LockProbe::Error;
+    }
+    CloseHandle(handle);
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (fault_test::g_inspect_fault_path == path &&
+        fault_test::g_inspect_fault_stage ==
+            fault_test::InspectFaultStage::FailLockAcquire) {
+        return LockProbe::Error;
+    }
+#endif
+    return LockProbe::Inactive;
+#else
+    int flags = O_RDONLY;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    const int handle = ::open(path.c_str(), flags);
+    if (handle < 0) {
+        return errno == ENOENT ? LockProbe::Inactive : LockProbe::Error;
+    }
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (fault_test::g_inspect_fault_path == path &&
+        fault_test::g_inspect_fault_stage ==
+            fault_test::InspectFaultStage::FailLockAcquire) {
+        static_cast<void>(::close(handle));
+        return LockProbe::Error;
+    }
+#endif
+    if (::flock(handle, LOCK_EX | LOCK_NB) == 0) {
+        static_cast<void>(::flock(handle, LOCK_UN));
+        static_cast<void>(::close(handle));
+        return LockProbe::Inactive;
+    }
+    const int code = errno;
+    static_cast<void>(::close(handle));
+    if (code == EWOULDBLOCK || code == EAGAIN) {
+        return LockProbe::Active;
+    }
+    return LockProbe::Error;
+#endif
+}
+
+struct InspectionTempDirectory {
+    std::filesystem::path path;
+    DirectoryIdentity identity;
+    bool owns = false;
+
+    explicit InspectionTempDirectory(const std::filesystem::path& value)
+        : path(value) {}
+
+    bool perform_cleanup() {
+        if (!owns) {
+            return true;
+        }
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+        ++fault_test::g_inspect_cleanup_attempts;
+        if (fault_test::inject_cleanup_failure_once(
+                fault_test::InspectFaultStage::FailCleanup)) {
+            return false;
+        }
+#endif
+        std::error_code error;
+        const auto status = std::filesystem::symlink_status(path, error);
+        if (path_missing(error) ||
+            (!error &&
+             status.type() == std::filesystem::file_type::not_found)) {
+            owns = false;
+            return true;
+        }
+        if (error || !std::filesystem::is_directory(status) ||
+            std::filesystem::is_symlink(status) || has_reparse_point(path)) {
+            return false;
+        }
+        // Ownership is confirmed before deleting anything, so a substituted
+        // directory is preserved.
+        if (!(query_directory_identity(path) == identity)) {
+            return false;
+        }
+
+        bool safe = true;
+        std::vector<std::filesystem::path> removable;
+        std::filesystem::directory_iterator entry(path, error);
+        const std::filesystem::directory_iterator end;
+        while (!error && entry != end) {
+            const auto name = entry->path().filename().string();
+            const bool known = name == "db.sqlite" ||
+                               name == "db.sqlite-wal" ||
+                               name == "db.sqlite-shm" ||
+                               name == "db.sqlite-journal";
+            const auto info = query_entry(entry->path());
+            if (info.state != EntryState::Present || !info.regular ||
+                info.link || !known) {
+                safe = false;
+            } else {
+                removable.push_back(entry->path());
+            }
+            entry.increment(error);
+        }
+        if (error) {
+            safe = false;
+        }
+
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+        if (fault_test::inject_cleanup_failure_once(
+                fault_test::InspectFaultStage::FailCleanupFileRemove)) {
+            return false;
+        }
+#endif
+
+        bool removed = true;
+        for (const auto& file : removable) {
+            std::error_code remove_error;
+            std::filesystem::remove(file, remove_error);
+            if (remove_error) {
+                removed = false;
+            }
+        }
+        if (!safe || !removed) {
+            return false;
+        }
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+        if (fault_test::inject_cleanup_failure_once(
+                fault_test::InspectFaultStage::FailCleanupDirectoryRemove)) {
+            return false;
+        }
+#endif
+        std::error_code remove_error;
+        std::filesystem::remove(path, remove_error);
+        if (remove_error) {
+            return false;
+        }
+        std::error_code verify_error;
+        if (std::filesystem::exists(path, verify_error) || verify_error) {
+            return false;
+        }
+        owns = false;
+        return true;
+    }
+
+    ~InspectionTempDirectory() {
+        static_cast<void>(perform_cleanup());
+    }
+
+    InspectionTempDirectory(const InspectionTempDirectory&) = delete;
+    InspectionTempDirectory& operator=(const InspectionTempDirectory&) = delete;
+    InspectionTempDirectory(InspectionTempDirectory&&) = delete;
+    InspectionTempDirectory& operator=(InspectionTempDirectory&&) = delete;
+};
+
+struct SnapshotFileMetadata {
+    platform::private_storage::FileIdentity identity;
+    std::int64_t last_write = 0;
+    std::int64_t change_time = 0;
+    bool operator==(const SnapshotFileMetadata&) const = default;
+};
+
+// SQLite rollback restores bytes but does not restore native change times.
+std::optional<SnapshotFileMetadata>
+snapshot_file_metadata(const std::filesystem::path& path) {
+#if defined(_WIN32)
+    const auto handle = CreateFileW(path.c_str(),
+                                    FILE_READ_ATTRIBUTES,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE |
+                                        FILE_SHARE_DELETE,
+                                    nullptr,
+                                    OPEN_EXISTING,
+                                    FILE_FLAG_OPEN_REPARSE_POINT,
+                                    nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return std::nullopt;
+    }
+    FILE_BASIC_INFO basic{};
+    const bool read = GetFileInformationByHandleEx(
+        handle, FileBasicInfo, &basic, sizeof(basic));
+    CloseHandle(handle);
+    const auto identity = platform::private_storage::query_file_identity(path);
+    if (!read || !identity.valid) {
+        return std::nullopt;
+    }
+    return SnapshotFileMetadata{.identity = identity,
+                                .last_write = basic.LastWriteTime.QuadPart,
+                                .change_time = basic.ChangeTime.QuadPart};
+#else
+    struct stat status {};
+    if (::lstat(path.c_str(), &status) != 0 || !S_ISREG(status.st_mode)) {
+        return std::nullopt;
+    }
+    return SnapshotFileMetadata{
+        .identity = {.volume_or_dev = static_cast<std::uint64_t>(status.st_dev),
+                     .file_id_low = static_cast<std::uint64_t>(status.st_ino),
+                     .file_id_high = 0,
+                     .valid = true},
+        .last_write =
+            static_cast<std::int64_t>(status.st_mtim.tv_sec) * 1'000'000'000LL +
+            static_cast<std::int64_t>(status.st_mtim.tv_nsec),
+        .change_time =
+            static_cast<std::int64_t>(status.st_ctim.tv_sec) * 1'000'000'000LL +
+            static_cast<std::int64_t>(status.st_ctim.tv_nsec)};
+#endif
+}
+
+struct SnapshotFileState {
+    Hash hash;
+    SnapshotFileMetadata metadata;
+    bool operator==(const SnapshotFileState&) const = default;
+};
+
+std::optional<SnapshotFileState>
+snapshot_file_state(const std::filesystem::path& path) {
+    const auto before = snapshot_file_metadata(path);
+    if (!before) {
+        return std::nullopt;
+    }
+    const auto hash = crypto::content::hash_file(path);
+    const auto after = snapshot_file_metadata(path);
+    if (!hash || !after || *before != *after) {
+        return std::nullopt;
+    }
+    return SnapshotFileState{.hash = *hash, .metadata = *after};
+}
+
+// Copy a stable database and its transaction sidecars before SQLite opens the
+// disposable copy and applies any hot journal.
+bool take_sqlite_snapshot(const std::filesystem::path& source,
+                          const std::filesystem::path& destination,
+                          bool wal_was_present,
+                          bool rollback_was_present) {
+    auto wal_source = source;
+    wal_source += "-wal";
+    auto rollback_source = source;
+    rollback_source += "-journal";
+    const auto wal = query_entry(wal_source);
+    const auto rollback = query_entry(rollback_source);
+    if ((wal_was_present && wal.state != EntryState::Present) ||
+        (rollback_was_present &&
+         (rollback.state != EntryState::Present || rollback.size == 0)) ||
+        wal.state == EntryState::Error ||
+        (wal.state == EntryState::Present && (!wal.regular || wal.link)) ||
+        rollback.state == EntryState::Error ||
+        (rollback.state == EntryState::Present &&
+         (!rollback.regular || rollback.link)) ||
+        (wal.state == EntryState::Present && wal.size > 0 &&
+         rollback.state == EntryState::Present && rollback.size > 0)) {
+        return false;
+    }
+
+    const auto database_before = snapshot_file_state(source);
+    if (!database_before) {
+        return false;
+    }
+    std::optional<SnapshotFileState> wal_before;
+    std::optional<SnapshotFileState> rollback_before;
+    if (wal.state == EntryState::Present) {
+        wal_before = snapshot_file_state(wal_source);
+        if (!wal_before) {
+            return false;
+        }
+    }
+    if (rollback.state == EntryState::Present && rollback.size > 0) {
+        rollback_before = snapshot_file_state(rollback_source);
+        if (!rollback_before) {
+            return false;
+        }
+    }
+
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (fault_test::g_inspect_fault_stage ==
+            fault_test::InspectFaultStage::ConcurrentSnapshotBarrier &&
+        fault_test::g_inspect_fault_observer) {
+        fault_test::g_inspect_fault_observer(
+            fault_test::InspectFaultStage::ConcurrentSnapshotBarrier);
+    }
+#endif
+    std::error_code error;
+    if (!std::filesystem::copy_file(source, destination, error) || error) {
+        return false;
+    }
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (fault_test::g_inspect_fault_stage ==
+            fault_test::InspectFaultStage::ConcurrentSnapshotBarrier &&
+        fault_test::g_inspect_fault_observer) {
+        fault_test::g_inspect_fault_observer(
+            fault_test::InspectFaultStage::SnapshotDatabaseCopied);
+    }
+#endif
+    if (wal_before) {
+        auto wal_destination = destination;
+        wal_destination += "-wal";
+        error.clear();
+        if (!std::filesystem::copy_file(
+                wal_source, wal_destination, error) || error) {
+            return false;
+        }
+    }
+    if (rollback_before) {
+        auto rollback_destination = destination;
+        rollback_destination += "-journal";
+        error.clear();
+        if (!std::filesystem::copy_file(
+                rollback_source, rollback_destination, error) || error) {
+            return false;
+        }
+    }
+    const auto database_after = snapshot_file_state(source);
+    if (!database_after || *database_after != *database_before) {
+        return false;
+    }
+    if (wal_before) {
+        const auto state = snapshot_file_state(wal_source);
+        if (!state || *state != *wal_before) {
+            return false;
+        }
+    }
+    if (rollback_before) {
+        const auto state = snapshot_file_state(rollback_source);
+        if (!state || *state != *rollback_before) {
+            return false;
+        }
+    }
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (fault_test::g_inspect_fault_stage ==
+            fault_test::InspectFaultStage::ConcurrentSnapshotBarrier &&
+        fault_test::g_inspect_fault_observer) {
+        fault_test::g_inspect_fault_path = destination;
+        fault_test::g_inspect_fault_observer(
+            fault_test::InspectFaultStage::SnapshotReady);
+    }
+#endif
+    return true;
+}
 } // namespace
 
 std::expected<std::vector<Profile>, ProfileError>
@@ -863,9 +1339,218 @@ clone_profile(const ExecutionEnvironment& environment,
 }
 
 ProfileLocalState inspect_profile_local_state(
-    const ExecutionEnvironment& /*environment*/,
-    std::string_view /*profile_name*/) {
-    return ProfileLocalState::Problem;
+    const ExecutionEnvironment& environment,
+    std::string_view profile_name) {
+    if (!runtime::is_valid_profile_name(profile_name)) {
+        return ProfileLocalState::Problem;
+    }
+
+    auto paths =
+        runtime::resolve_profile_paths(environment.app_data_dir, profile_name);
+    if (!paths) {
+        return ProfileLocalState::Problem;
+    }
+
+    const auto profiles_dir = paths->profile_dir.parent_path();
+    for (const auto& directory :
+         {environment.app_data_dir, profiles_dir, paths->profile_dir}) {
+        const auto entry = query_entry(directory);
+        if (entry.state != EntryState::Present || !entry.directory ||
+            entry.link) {
+            return ProfileLocalState::Problem;
+        }
+    }
+
+    const auto key = query_entry(paths->key_path);
+    if (key.state != EntryState::Present || !key.regular || key.link ||
+        key.size != crypto::KEY_SIZE) {
+        return ProfileLocalState::Problem;
+    }
+    auto key_bytes = runtime::vault::read_only(paths->key_path);
+    if (!key_bytes) {
+        return ProfileLocalState::Problem;
+    }
+
+    const auto database = query_entry(paths->database_path);
+    if (database.state != EntryState::Present || !database.regular ||
+        database.link) {
+        return ProfileLocalState::Problem;
+    }
+
+    const auto lock_path =
+        environment.app_data_dir /
+        ("profile-" + std::string(profile_name) + ".lock");
+    if (probe_profile_lock(lock_path) != LockProbe::Inactive) {
+        return ProfileLocalState::Problem;
+    }
+
+    const auto wal = query_entry(paths->profile_dir / "db.sqlite-wal");
+    if (wal.state == EntryState::Error ||
+        (wal.state == EntryState::Present && (!wal.regular || wal.link))) {
+        return ProfileLocalState::Problem;
+    }
+    const auto shm = query_entry(paths->profile_dir / "db.sqlite-shm");
+    if (shm.state == EntryState::Error ||
+        (shm.state == EntryState::Present && (!shm.regular || shm.link))) {
+        return ProfileLocalState::Problem;
+    }
+    const auto rollback = query_entry(paths->profile_dir / "db.sqlite-journal");
+    if (rollback.state == EntryState::Error ||
+        (rollback.state == EntryState::Present &&
+         (!rollback.regular || rollback.link))) {
+        return ProfileLocalState::Problem;
+    }
+    if (rollback.state == EntryState::Present && rollback.size > 0 &&
+        !can_read_first_byte(paths->profile_dir / "db.sqlite-journal")) {
+        return ProfileLocalState::Problem;
+    }
+
+    auto journal_paths = sync::journal::make_paths(paths->profile_dir);
+    if (!journal_paths) {
+        return ProfileLocalState::Problem;
+    }
+    const auto journal = sync::journal::inspect(*journal_paths, *key_bytes);
+    if (journal == sync::journal::InspectionResult::Corrupted) {
+        return ProfileLocalState::Problem;
+    }
+    const bool active_journal =
+        journal == sync::journal::InspectionResult::Active;
+    bool active_rollback_journal =
+        rollback.state == EntryState::Present && rollback.size > 0;
+
+    auto random_id = platform::random::hex_id(16);
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (fault_test::g_inspect_fault_stage ==
+        fault_test::InspectFaultStage::FailRandomId) {
+        random_id = std::unexpected("injected random id failure");
+    }
+#endif
+    if (!random_id || random_id->empty()) {
+        return ProfileLocalState::Problem;
+    }
+
+    std::error_code temp_error;
+    const auto temp_root = std::filesystem::temp_directory_path(temp_error);
+    if (temp_error) {
+        return ProfileLocalState::Problem;
+    }
+
+    std::filesystem::path candidate;
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (fault_test::g_inspect_fault_stage ==
+        fault_test::InspectFaultStage::SimulateTempDirCollision) {
+        candidate = fault_test::g_inspect_fault_path.empty()
+                        ? temp_root / "kasumi_insp_collision_test_dir"
+                        : fault_test::g_inspect_fault_path;
+    } else {
+        candidate = temp_root / ("kasumi_insp_" + *random_id);
+    }
+#else
+    candidate = temp_root / ("kasumi_insp_" + *random_id);
+#endif
+    if (query_entry(candidate).state != EntryState::Absent) {
+        return ProfileLocalState::Problem;
+    }
+    if (!platform::private_storage::create_directory(candidate)) {
+        return ProfileLocalState::Problem;
+    }
+    InspectionTempDirectory temporary{candidate};
+    temporary.owns = true;
+    temporary.identity = query_directory_identity(candidate);
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (fault_test::g_inspect_fault_stage ==
+            fault_test::InspectFaultStage::FailDirectoryIdentity &&
+        !fault_test::g_inspect_identity_failure_consumed) {
+        fault_test::g_inspect_identity_failure_consumed = true;
+        temporary.identity = {};
+    }
+#endif
+    if (!temporary.identity.valid) {
+        return ProfileLocalState::Problem;
+    }
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (fault_test::g_inspect_fault_observer &&
+        fault_test::g_inspect_fault_stage !=
+            fault_test::InspectFaultStage::ConcurrentSnapshotBarrier) {
+        fault_test::g_inspect_fault_observer(fault_test::g_inspect_fault_stage);
+    }
+#endif
+    {
+        const auto entry = query_entry(candidate);
+        if (entry.state != EntryState::Present || !entry.directory ||
+            entry.link ||
+            !(query_directory_identity(candidate) == temporary.identity)) {
+            return ProfileLocalState::Problem;
+        }
+    }
+
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (fault_test::g_inspect_fault_stage ==
+            fault_test::InspectFaultStage::FailSnapshot ||
+        fault_test::g_inspect_fault_stage ==
+            fault_test::InspectFaultStage::FailSqliteCopy) {
+        return ProfileLocalState::Problem;
+    }
+#endif
+
+    const auto copy_path = candidate / "db.sqlite";
+    if (query_entry(copy_path).state != EntryState::Absent) {
+        return ProfileLocalState::Problem;
+    }
+    if (!take_sqlite_snapshot(paths->database_path,
+                              copy_path,
+                              wal.state == EntryState::Present,
+                              active_rollback_journal)) {
+        return ProfileLocalState::Problem;
+    }
+
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (fault_test::g_inspect_fault_stage ==
+        fault_test::InspectFaultStage::SimulateConcurrentModification) {
+        return ProfileLocalState::Problem;
+    }
+#endif
+
+    auto loaded = state_storage::load_state(copy_path);
+    if (!loaded.has_value()) {
+        return ProfileLocalState::Problem;
+    }
+
+    const auto final_journal =
+        sync::journal::inspect(*journal_paths, *key_bytes);
+    if (final_journal == sync::journal::InspectionResult::Corrupted) {
+        return ProfileLocalState::Problem;
+    }
+    const auto final_rollback =
+        query_entry(paths->profile_dir / "db.sqlite-journal");
+    if (final_rollback.state == EntryState::Error ||
+        (final_rollback.state == EntryState::Present &&
+         (!final_rollback.regular || final_rollback.link)) ||
+        (final_rollback.state == EntryState::Present &&
+         final_rollback.size > 0 &&
+         !can_read_first_byte(paths->profile_dir / "db.sqlite-journal"))) {
+        return ProfileLocalState::Problem;
+    }
+    active_rollback_journal =
+        active_rollback_journal ||
+        (final_rollback.state == EntryState::Present &&
+         final_rollback.size > 0);
+
+    if (!temporary.perform_cleanup()) {
+        return ProfileLocalState::Problem;
+    }
+
+    if (active_journal || active_rollback_journal ||
+        final_journal == sync::journal::InspectionResult::Active) {
+        return ProfileLocalState::Pending;
+    }
+    if (!loaded->has_value()) {
+        return ProfileLocalState::Initialized;
+    }
+    if (!(*loaded)->pending_materializations.empty()) {
+        return ProfileLocalState::Pending;
+    }
+    return ProfileLocalState::Ready;
 }
 
 std::string_view to_string(ProfileLocalState state) noexcept {

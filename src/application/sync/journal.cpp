@@ -12,7 +12,12 @@
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 
-#ifndef _WIN32
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <cerrno>
 #include <sys/stat.h>
 #endif
@@ -64,6 +69,18 @@ enum DeltaFlag : std::uint8_t {
 // exclusion.
 std::mutex journal_mutex;
 inline constexpr std::uint64_t maximum_log_size = 128ULL * 1024ULL * 1024ULL;
+
+// Passive inspection validates and reads artifacts but must never harden
+// permissions or otherwise rewrite them.
+thread_local bool passive_inspection = false;
+
+struct PassiveInspectionScope {
+    PassiveInspectionScope() : previous(std::exchange(passive_inspection, true)) {}
+    ~PassiveInspectionScope() { passive_inspection = previous; }
+    PassiveInspectionScope(const PassiveInspectionScope&) = delete;
+    PassiveInspectionScope& operator=(const PassiveInspectionScope&) = delete;
+    bool previous;
+};
 inline constexpr std::uint64_t maximum_delta_count = 1'000'000;
 
 bool path_not_found(const std::error_code& error) noexcept {
@@ -180,6 +197,9 @@ validate_parent_directory(const std::filesystem::path& path,
         !std::filesystem::is_directory(*status)) {
         return std::unexpected("journal parent directory is invalid");
     }
+    if (passive_inspection) {
+        return {};
+    }
     return platform::private_storage::protect_directory(parent);
 }
 
@@ -198,6 +218,9 @@ validate_file_or_absent(const std::filesystem::path& path,
         !std::filesystem::is_regular_file(*status)) {
         return std::unexpected(std::string{label} +
                                " must be a regular file or absent");
+    }
+    if (passive_inspection) {
+        return {};
     }
     return platform::private_storage::protect_file(path);
 }
@@ -2008,9 +2031,152 @@ clear(const Paths& paths,
 }
 
 InspectionResult
-inspect(const Paths& /*paths*/,
-        std::span<const std::uint8_t, crypto::KEY_SIZE> /*key*/) {
-    return InspectionResult::Corrupted;
+inspect(const Paths& paths,
+        std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+    try {
+        PassiveInspectionScope passive;
+        std::lock_guard lock(journal_mutex);
+        auto structural = validate_paths(paths);
+        if (!structural) {
+            return InspectionResult::Corrupted;
+        }
+
+        const auto active = paths.final_path.parent_path();
+        const auto retired = retired_path(paths);
+
+        auto active_status = read_status(active);
+        auto retired_status = read_status(retired);
+        if (!active_status || !retired_status) {
+            return InspectionResult::Corrupted;
+        }
+
+        if (!missing(*active_status) &&
+            (!std::filesystem::is_directory(*active_status) ||
+             std::filesystem::is_symlink(*active_status))) {
+            return InspectionResult::Corrupted;
+        }
+        if (!missing(*retired_status) &&
+            (!std::filesystem::is_directory(*retired_status) ||
+             std::filesystem::is_symlink(*retired_status))) {
+            return InspectionResult::Corrupted;
+        }
+
+#if defined(_WIN32)
+        if (!missing(*active_status)) {
+            const DWORD attrs = GetFileAttributesW(active.c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES &&
+                (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                return InspectionResult::Corrupted;
+            }
+        }
+        if (!missing(*retired_status)) {
+            const DWORD attrs = GetFileAttributesW(retired.c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES &&
+                (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                return InspectionResult::Corrupted;
+            }
+        }
+#endif
+
+        if (!missing(*active_status) && !missing(*retired_status)) {
+            return InspectionResult::Corrupted;
+        }
+
+        if (missing(*active_status) && missing(*retired_status)) {
+            return InspectionResult::Absent;
+        }
+
+        KeyGuard journal_key{crypto::derive_key(key, crypto::KeyPurpose::Journal)};
+
+        if (!missing(*retired_status)) {
+            std::error_code ec;
+            if (std::filesystem::is_empty(retired, ec)) {
+                return InspectionResult::Corrupted;
+            }
+            bool has_retired_file = false;
+            for (const auto& entry :
+                 std::filesystem::directory_iterator(retired, ec)) {
+                if (ec) {
+                    return InspectionResult::Corrupted;
+                }
+                const auto name = entry.path().filename().string();
+                if (name != "snapshot.enc" && name != "snapshot.enc.new" &&
+                    name != "transaction.log.enc" && name != "confirmed.enc" &&
+                    name != "confirmed.enc.new" && name != "retired.enc" &&
+                    name != "retired.enc.new") {
+                    return InspectionResult::Corrupted;
+                }
+                if (name == "retired.enc") {
+                    has_retired_file = true;
+                }
+                auto validated =
+                    validate_file_or_absent(entry.path(), "journal artifact");
+                if (!validated) {
+                    return InspectionResult::Corrupted;
+                }
+            }
+            if (!has_retired_file) {
+                return InspectionResult::Corrupted;
+            }
+            const Paths root_paths{retired / "snapshot.enc",
+                                   retired / "snapshot.enc.new",
+                                   retired / "transaction.log.enc"};
+            auto proof = read_tip(root_paths, journal_key.value, true);
+            if (!proof) {
+                return InspectionResult::Corrupted;
+            }
+            auto matching =
+                validate_retirement(root_paths, *proof, journal_key.value);
+            if (!matching) {
+                return InspectionResult::Corrupted;
+            }
+            return InspectionResult::Retired;
+        }
+
+        std::error_code ec;
+        for (const auto& entry :
+             std::filesystem::directory_iterator(active, ec)) {
+            if (ec) {
+                return InspectionResult::Corrupted;
+            }
+            const auto name = entry.path().filename().string();
+            if (name != "snapshot.enc" && name != "snapshot.enc.new" &&
+                name != "transaction.log.enc" && name != "confirmed.enc" &&
+                name != "confirmed.enc.new" && name != "retired.enc" &&
+                name != "retired.enc.new") {
+                return InspectionResult::Corrupted;
+            }
+            auto validated =
+                validate_file_or_absent(entry.path(), "journal artifact");
+            if (!validated) {
+                return InspectionResult::Corrupted;
+            }
+        }
+
+        auto retirement_file_status = read_status(retirement_path(paths));
+        if (!retirement_file_status) {
+            return InspectionResult::Corrupted;
+        }
+        if (!missing(*retirement_file_status)) {
+            auto proof = read_tip(paths, journal_key.value, true);
+            if (!proof) {
+                return InspectionResult::Corrupted;
+            }
+            auto matching = validate_retirement(paths, *proof, journal_key.value);
+            if (!matching) {
+                return InspectionResult::Corrupted;
+            }
+            return InspectionResult::Retired;
+        }
+
+        auto replayed = replay(paths, journal_key.value);
+        if (!replayed) {
+            return InspectionResult::Corrupted;
+        }
+        return InspectionResult::Active;
+    } catch (...) {
+        return InspectionResult::Corrupted;
+    }
 }
 
 } // namespace kasumi::application::sync::journal

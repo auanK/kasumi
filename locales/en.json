@@ -304,7 +304,7 @@
   "wizard": {
     "header": "\n=== Kasumi Profiles ===",
     "no_profiles": "No profiles registered.",
-    "profile_list_entry": "- {}  [ Local: {} | Remote: {} ]",
+    "profile_list_entry": "- {} [{}]  [ Local: {} | Remote: {} ]",
     "menu": "\n[e] Edit  [n] New  [c] Clone  [d] Delete  [r] Rename  [q] Quit\n\n> ",
     "prompt_profile_name": "Profile name: ",
     "profile_already_exists": "The profile '{}' already exists.",
