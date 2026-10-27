@@ -144,6 +144,18 @@ class DocumentationTest(unittest.TestCase):
             self.assertEqual(files, ["docs/reference.md", "tests/operational/schema.json"])
             self.assertEqual(violations, [])
 
+    def test_missing_required_directory_is_not_a_redirection(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            (temp_root / "tests" / "operational").mkdir(parents=True)
+            with patch(__name__ + ".ROOT", temp_root):
+                files, violations = find_documentation_entries(temp_root)
+            self.assertEqual(files, [])
+            self.assertTrue(any("docs: required directory is missing" in item
+                                for item in violations), violations)
+            self.assertFalse(is_redirection(temp_root / "docs"))
+
     def test_symlink_paths_are_rejected_without_following_or_reading_target(self):
         import tempfile
 
@@ -204,18 +216,26 @@ class DocumentationTest(unittest.TestCase):
             (outside_docs / "external.md").write_text("# External\n", encoding="utf-8")
 
             docs_path = temp_root / "docs"
-            docs_path.mkdir()
+            try:
+                docs_path.symlink_to(outside_docs, target_is_directory=True)
+                patched = None
+            except OSError:
+                original_is_symlink = Path.is_symlink
+                def mock_is_symlink(path):
+                    return path == docs_path or original_is_symlink(path)
+                patched = patch.object(Path, "is_symlink", autospec=True,
+                                       side_effect=mock_is_symlink)
 
-            original_islink = os.path.islink
-            def mock_islink(path):
-                if Path(path) == docs_path:
-                    return True
-                return original_islink(path)
-
-            with patch("os.path.islink", side_effect=mock_islink):
+            if patched is not None:
+                patched.start()
+            try:
                 files, violations = find_documentation_entries(temp_root)
                 self.assertEqual(files, [])
                 self.assertTrue(any("docs" in v and ("symbolic link" in v or "redirection" in v) for v in violations))
+                self.assertNotIn("docs/external.md", files)
+            finally:
+                if patched is not None:
+                    patched.stop()
 
     def test_junction_paths_are_rejected_without_traversal(self):
         import tempfile
@@ -272,13 +292,14 @@ class DocumentationTest(unittest.TestCase):
             forbidden = docs_dir / "forbidden"
             forbidden.mkdir()
 
-            original_scandir = os.scandir
-            def mock_scandir(path="."):
-                if Path(path).name == "forbidden":
+            original_iterdir = Path.iterdir
+            def mock_iterdir(path):
+                if path == forbidden:
                     raise PermissionError("Access denied")
-                return original_scandir(path)
+                return original_iterdir(path)
 
-            with patch("os.scandir", side_effect=mock_scandir):
+            with patch.object(Path, "iterdir", autospec=True,
+                              side_effect=mock_iterdir):
                 files, violations = find_documentation_entries(temp_root)
                 self.assertTrue(
                     any("docs/forbidden" in v and ("cannot read" in v or "permission" in v or "access" in v) for v in violations),
