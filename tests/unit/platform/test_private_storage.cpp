@@ -1,4 +1,5 @@
 #include "kasumi/test/filesystem.hpp"
+#include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/workspace.hpp"
@@ -109,6 +110,41 @@ TEST(PrivateStorageTest, CreatesRestrictedDirectoryAndFile) {
     expect_mode(directory, 0700);
     expect_mode(file, 0600);
 #endif
+}
+
+TEST(WorkspaceTest, RefusesToRemoveAReplacedDirectory) {
+    auto fixture = kasumi::test::make_temp_workspace("workspace-replacement");
+#if defined(_WIN32)
+    const auto temporary_path = kasumi::test::workspace_root(fixture).wstring();
+    const auto temp = kasumi::test::scoped_windows_environment_variable(
+        L"TEMP", temporary_path);
+    const auto tmp = kasumi::test::scoped_windows_environment_variable(
+        L"TMP", temporary_path);
+#else
+    const auto temp = kasumi::test::scoped_environment_variable(
+        "TMPDIR", kasumi::test::workspace_root(fixture).string());
+#endif
+
+    auto workspace = kasumi::platform::create_workspace("replacement");
+    ASSERT_TRUE(workspace) << workspace.error();
+    ASSERT_EQ(workspace->root.parent_path(),
+              kasumi::test::workspace_root(fixture));
+
+    const auto displaced = kasumi::test::workspace_root(fixture) / "displaced";
+    std::error_code error;
+    std::filesystem::rename(workspace->root, displaced, error);
+    ASSERT_FALSE(error) << error.message();
+    ASSERT_TRUE(std::filesystem::create_directory(workspace->root, error));
+    ASSERT_FALSE(error) << error.message();
+    const auto sentinel = workspace->root / "victim.txt";
+    kasumi::test::write_text(sentinel, "keep this replacement");
+
+    const auto removed = kasumi::platform::remove_workspace(*workspace);
+    EXPECT_FALSE(removed);
+    EXPECT_TRUE(std::filesystem::is_directory(workspace->root));
+    ASSERT_TRUE(std::filesystem::exists(sentinel));
+    EXPECT_EQ(kasumi::test::read_text(sentinel), "keep this replacement");
+    EXPECT_TRUE(std::filesystem::is_directory(displaced));
 }
 
 #if defined(_WIN32)

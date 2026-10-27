@@ -11617,6 +11617,80 @@ TEST(SyncCoordinatorTest,
     EXPECT_FALSE(std::filesystem::exists(paths->final_path));
 }
 
+TEST(SyncCoordinatorTest, CleanupRecoveryAfterOwnerMarkerWasRemoved) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("transaction-cleanup-owner-marker");
+    const auto profile = kasumi::test::workspace_path(workspace, "profile");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    const auto id = save_recovery_record(
+        profile, kasumi::transaction::Phase::CleanupCompleted, key);
+    ASSERT_FALSE(id.empty());
+    const auto transaction_root = profile / ".transactions" / id;
+    kasumi::test::write_text(transaction_root / "partial.bin", "deleted first");
+    kasumi::test::write_text(transaction_root / "residual.bin", "retain until retry");
+    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    const auto runtime_data = make_runtime(
+        profile, local, kasumi::test::workspace_path(workspace, "storage"));
+    kasumi::transport::Transport unavailable{};
+    bool interrupted_after_partial_removal = false;
+    kasumi::platform::workspace_fault_test::set_cleanup_interrupt_hook(
+        [&](const std::filesystem::path& quarantine) {
+            std::error_code error;
+            const bool removed_payload =
+                std::filesystem::remove(quarantine / "partial.bin", error);
+            if (!error) {
+                const bool removed_owner = std::filesystem::remove(
+                    quarantine / ".kasumi-workspace-owner", error);
+                interrupted_after_partial_removal = removed_payload &&
+                                                    removed_owner && !error;
+            }
+            return interrupted_after_partial_removal;
+        });
+
+    const auto first_recovery =
+        kasumi::application::sync::coordinator::recover_if_needed(
+            runtime_data, unavailable, key);
+    kasumi::platform::workspace_fault_test::clear_cleanup_interrupt_hook();
+
+    ASSERT_TRUE(interrupted_after_partial_removal);
+    ASSERT_FALSE(first_recovery.has_value());
+    EXPECT_NE(first_recovery.error().detail.find("test fault"),
+              std::string::npos);
+    std::filesystem::path quarantine;
+    std::error_code error;
+    for (std::filesystem::directory_iterator entry(
+             profile / ".transactions", error), end;
+         !error && entry != end;
+         entry.increment(error)) {
+        const auto name = kasumi::platform::path::to_utf8(
+            entry->path().filename());
+        if (name.starts_with(".kasumi-cleanup-" + id + "-")) {
+            quarantine = entry->path();
+        }
+    }
+    ASSERT_FALSE(error) << error.message();
+    ASSERT_FALSE(quarantine.empty());
+    EXPECT_FALSE(std::filesystem::exists(
+        quarantine / ".kasumi-workspace-owner"));
+    EXPECT_TRUE(std::filesystem::exists(quarantine / "residual.bin"));
+
+    const auto recovered =
+        kasumi::application::sync::coordinator::recover_if_needed(
+            runtime_data, unavailable, key);
+
+    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+    EXPECT_EQ(
+        *recovered,
+        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    EXPECT_FALSE(std::filesystem::exists(paths->final_path));
+    EXPECT_FALSE(std::filesystem::exists(transaction_root));
+    EXPECT_FALSE(std::filesystem::exists(quarantine));
+}
+
+
 TEST(SyncCoordinatorTest,
      LockedTerminalWorkspacePreservesJournalAndReportsPhysicalPath) {
 #ifndef _WIN32

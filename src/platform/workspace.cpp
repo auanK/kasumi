@@ -337,6 +337,10 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
         return std::unexpected(secured.error());
     }
 
+    if (workspace_fault_test::interrupt_cleanup(quarantine)) {
+        return std::unexpected("workspace cleanup interrupted by test fault");
+    }
+
 #ifdef _WIN32
     const auto attributes = GetFileAttributesW(native_root.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
