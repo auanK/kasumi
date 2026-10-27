@@ -169,6 +169,7 @@ class CliProcessTest(unittest.TestCase):
             import pty
             import select
             import signal
+            import time
 
             master, slave = pty.openpty()
             process = subprocess.Popen(
@@ -179,12 +180,46 @@ class CliProcessTest(unittest.TestCase):
             os.close(slave)
             output = bytearray()
             try:
-                ready, _, _ = select.select([master], [], [], 5)
-                self.assertTrue(ready, "wizard menu was not observable")
-                output += os.read(master, 4096)
-                self.assertIn(b"Quit", output)
+                deadline = time.monotonic() + 5
+                prompt = b"Quit\n\n> "
+
+                def prompt_ready():
+                    return prompt in output.replace(b"\r\n", b"\n")
+
+                while not prompt_ready() and time.monotonic() < deadline:
+                    ready, _, _ = select.select(
+                        [master], [], [],
+                        max(0.0, deadline - time.monotonic()),
+                    )
+                    if not ready:
+                        break
+                    try:
+                        chunk = os.read(master, 4096)
+                    except InterruptedError:
+                        continue
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    output += chunk
+                    if process.poll() is not None and not prompt_ready():
+                        self.fail(
+                            "wizard exited before its prompt appeared: "
+                            f"{bytes(output)!r}"
+                        )
+                self.assertIn(
+                    prompt,
+                    output.replace(b"\r\n", b"\n"),
+                    f"wizard prompt was not observable: {bytes(output)!r}",
+                )
                 os.kill(process.pid, signal.SIGINT)
-                process.wait(timeout=5)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.fail(
+                        "wizard did not exit after SIGINT; "
+                        f"captured PTY output: {bytes(output)!r}"
+                    )
                 while True:
                     ready, _, _ = select.select([master], [], [], 0.2)
                     if not ready:
