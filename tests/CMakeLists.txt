@@ -98,7 +98,26 @@ kasumi_add_test_suite(
         unit/application/integrity/test_fsck_resume.cpp
     LIBRARIES
         kasumi_application
+        kasumi_sqlite3
 )
+
+add_executable(
+    kasumi_inspect_snapshot_child
+    unit/application/inspect_snapshot_child.cpp
+)
+target_link_libraries(
+    kasumi_inspect_snapshot_child
+    PRIVATE kasumi_application kasumi_sqlite3 kasumi_warnings
+)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
+    target_link_options(kasumi_inspect_snapshot_child PRIVATE
+        -static-libgcc -static-libstdc++ -Wl,--allow-multiple-definition)
+endif()
+target_compile_definitions(
+    kasumi_test_unit_application PRIVATE
+    "KASUMI_INSPECT_SNAPSHOT_CHILD_PATH=\"$<TARGET_FILE:kasumi_inspect_snapshot_child>\""
+)
+add_dependencies(kasumi_test_unit_application kasumi_inspect_snapshot_child)
 
 kasumi_add_test_suite(
     kasumi_test_integration_sync

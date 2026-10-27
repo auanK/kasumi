@@ -2007,4 +2007,10 @@ clear(const Paths& paths,
     }
 }
 
+InspectionResult
+inspect(const Paths& /*paths*/,
+        std::span<const std::uint8_t, crypto::KEY_SIZE> /*key*/) {
+    return InspectionResult::Corrupted;
+}
+
 } // namespace kasumi::application::sync::journal

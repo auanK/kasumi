@@ -1,4 +1,6 @@
 #include "application/profile.hpp"
+#include "core/hasher.hpp"
+#include "core/node.hpp"
 #include "cli/app.hpp"
 #include "cli/credentials.hpp"
 #include "cli/i18n.hpp"
@@ -7,11 +9,15 @@
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/cancellation.hpp"
+#include "runtime/paths.hpp"
+#include "state_storage/database.hpp"
 
 #include <cstdio>
+#include <filesystem>
 #include <gtest/gtest.h>
 #include <iostream>
 #include <optional>
+#include <utility>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -425,4 +431,88 @@ TEST(CliWizardTest, EditingProfilePreservesManualRetentionValues) {
     EXPECT_EQ(profiles->front().local_dir, new_local);
     EXPECT_EQ(profiles->front().min_history_depth, 9U);
     EXPECT_EQ(profiles->front().min_history_age_hours, 18U);
+}
+
+TEST(CliWizardTest, ListsAllLocalStatesInBothLanguagesWithoutSideEffects) {
+    auto workspace = kasumi::test::make_temp_workspace("cli-profile-states");
+    const kasumi::application::ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "app")};
+    const std::vector<std::string> names{
+        "initialized", "ready", "pending", "problem"};
+    for (const auto& name : names) {
+        const auto local_dir = kasumi::test::workspace_path(workspace, name);
+        ASSERT_TRUE(std::filesystem::create_directory(local_dir));
+        const kasumi::application::Profile profile{
+            .name = name,
+            .local_dir = local_dir,
+            .remote_dir = "unavailable:must-not-be-read"};
+        ASSERT_TRUE(kasumi::application::create_profile(
+            environment,
+            profile,
+            kasumi::application::MasterKeyHex{std::string(64, '1')}));
+    }
+
+    kasumi::Snapshot tree{{
+        {.path = "", .is_directory = true},
+        {.path = "file.txt",
+         .hash = kasumi::hasher::hash_string("wizard state"),
+         .size = 12,
+         .mtime = 1,
+         .is_directory = false},
+    }};
+    kasumi::finalize_snapshot(tree);
+    for (const auto& name : {std::string{"ready"}, std::string{"pending"}}) {
+        const auto paths = kasumi::runtime::resolve_profile_paths(
+            environment.app_data_dir, name);
+        ASSERT_TRUE(paths.has_value());
+        kasumi::state_storage::StoredState state{
+            .tree = tree,
+            .height = 1,
+            .commit_id = std::string(64, 'a'),
+            .ciphertext_id = {},
+            .epoch_id = {},
+            .epoch_sequence = 0,
+            .pending_materializations = {},
+        };
+        if (name == "pending") {
+            state.pending_materializations.push_back(tree.rows[1]);
+        }
+        ASSERT_TRUE(kasumi::state_storage::save_state(paths->database_path,
+                                                       state));
+    }
+    const auto problem_paths = kasumi::runtime::resolve_profile_paths(
+        environment.app_data_dir, "problem");
+    ASSERT_TRUE(problem_paths.has_value());
+    ASSERT_TRUE(std::filesystem::remove(problem_paths->key_path));
+
+    const auto before =
+        kasumi::test::snapshot_tree(kasumi::test::workspace_root(workspace));
+    const std::vector<std::pair<std::string, std::string>> displayed_states{
+        {"initialized", "Initialized"},
+        {"ready", "Ready"},
+        {"pending", "Pending"},
+        {"problem", "Problem"}};
+    for (const auto language : {kasumi::cli::i18n::Language::English,
+                                kasumi::cli::i18n::Language::Portuguese}) {
+        kasumi::cli::i18n::set_language(language);
+        std::istringstream input{"q\n"};
+        auto* previous_input = std::cin.rdbuf(input.rdbuf());
+        testing::internal::CaptureStdout();
+        const int result = kasumi::cli::run_config_wizard(environment);
+        std::fflush(stdout);
+        const auto output = testing::internal::GetCapturedStdout();
+        std::cin.rdbuf(previous_input);
+        std::cin.clear();
+
+        EXPECT_EQ(result, 0);
+        for (const auto& [name, state] : displayed_states) {
+            EXPECT_NE(output.find("- " + name + " [" + state + "]"),
+                      std::string::npos)
+                << output;
+        }
+    }
+    kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
+    EXPECT_EQ(before,
+              kasumi::test::snapshot_tree(
+                  kasumi::test::workspace_root(workspace)));
 }

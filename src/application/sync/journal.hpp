@@ -162,6 +162,20 @@ clear(const Paths& paths,
       std::span<const std::uint8_t, crypto::KEY_SIZE> key,
       Session* session = nullptr);
 
+
+enum class InspectionResult : std::uint8_t {
+    Absent,
+    Active,
+    Retired,
+    Corrupted
+};
+
+// Passively inspects the journal artifacts without modifying files,
+// performing recovery, clearing, or creating sidecars.
+InspectionResult
+inspect(const Paths& paths,
+        std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+
 } // namespace kasumi::application::sync::journal
 
 #endif

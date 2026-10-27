@@ -862,4 +862,20 @@ clone_profile(const ExecutionEnvironment& environment,
     return {};
 }
 
+ProfileLocalState inspect_profile_local_state(
+    const ExecutionEnvironment& /*environment*/,
+    std::string_view /*profile_name*/) {
+    return ProfileLocalState::Problem;
+}
+
+std::string_view to_string(ProfileLocalState state) noexcept {
+    switch (state) {
+        case ProfileLocalState::Initialized: return "Initialized";
+        case ProfileLocalState::Ready: return "Ready";
+        case ProfileLocalState::Pending: return "Pending";
+        case ProfileLocalState::Problem: return "Problem";
+    }
+    return "Problem";
+}
+
 } // namespace kasumi::application
