@@ -4,6 +4,17 @@ add_test(NAME kasumi_documentation_hygiene
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/architecture/test_documentation.py)
 set_tests_properties(kasumi_documentation_hygiene PROPERTIES LABELS "architecture")
 
+if(CMAKE_NM AND NOT MSVC)
+    add_test(NAME kasumi_fault_hook_isolation
+        COMMAND ${CMAKE_COMMAND}
+            "-DNM=${CMAKE_NM}"
+            "-DAPPLICATION_ARCHIVE=$<TARGET_FILE:kasumi_application>"
+            "-DKASUMI_EXECUTABLE=$<TARGET_FILE:kasumi>"
+            -P ${PROJECT_SOURCE_DIR}/tests/architecture/check_fault_hook_isolation.cmake
+    )
+    set_tests_properties(kasumi_fault_hook_isolation PROPERTIES LABELS "architecture")
+endif()
+
 function(kasumi_add_test_suite target label)
     cmake_parse_arguments(
         ARG "" "" "SOURCES;LIBRARIES" ${ARGN}
@@ -53,6 +64,27 @@ function(kasumi_add_test_suite target label)
 endfunction()
 
 add_subdirectory(support)
+
+add_library(kasumi_application_fault_test_objects OBJECT
+    ${PROJECT_SOURCE_DIR}/src/application/profile_fault_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/application/profile.cpp
+    ${PROJECT_SOURCE_DIR}/src/application/sync/mutation.cpp
+    ${PROJECT_SOURCE_DIR}/src/application/sync/mutation_transaction.cpp
+)
+target_include_directories(kasumi_application_fault_test_objects PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_compile_definitions(kasumi_application_fault_test_objects PRIVATE
+    KASUMI_MUTATION_FAULT_TESTS
+)
+target_link_libraries(kasumi_application_fault_test_objects PRIVATE
+    kasumi_application
+    monocypher
+    kasumi_warnings
+    kasumi_release_optimizations
+    kasumi_hardening
+)
+
 add_test(NAME kasumi_gc_benchmark_collector
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/unit/operational/test_gc_benchmark.py)
 set_tests_properties(kasumi_gc_benchmark_collector PROPERTIES LABELS "benchmark;unit.operational")
@@ -100,6 +132,12 @@ kasumi_add_test_suite(
         kasumi_application
         kasumi_sqlite3
 )
+target_sources(kasumi_test_unit_application PRIVATE
+    $<TARGET_OBJECTS:kasumi_application_fault_test_objects>
+)
+target_compile_definitions(kasumi_test_unit_application PRIVATE
+    KASUMI_MUTATION_FAULT_TESTS
+)
 
 add_executable(
     kasumi_inspect_snapshot_child
@@ -136,6 +174,12 @@ kasumi_add_test_suite(
         kasumi_application
         kasumi_sqlite3
         monocypher
+)
+target_sources(kasumi_test_integration_sync PRIVATE
+    $<TARGET_OBJECTS:kasumi_application_fault_test_objects>
+)
+target_compile_definitions(kasumi_test_integration_sync PRIVATE
+    KASUMI_MUTATION_FAULT_TESTS
 )
 if(KASUMI_BUILD_JOURNAL_FAULT_TESTS)
     target_compile_definitions(

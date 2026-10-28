@@ -38,11 +38,11 @@ enum class InspectFaultStage {
 };
 
 inline thread_local CloneFaultStage g_clone_fault_stage = CloneFaultStage::None;
-inline thread_local std::function<void(CloneFaultStage)> g_clone_fault_observer = nullptr;
+extern thread_local std::function<void(CloneFaultStage)> g_clone_fault_observer;
 
 inline thread_local InspectFaultStage g_inspect_fault_stage = InspectFaultStage::None;
-inline thread_local std::function<void(InspectFaultStage)> g_inspect_fault_observer = nullptr;
-inline thread_local std::filesystem::path g_inspect_fault_path = {};
+extern thread_local std::function<void(InspectFaultStage)> g_inspect_fault_observer;
+extern thread_local std::filesystem::path g_inspect_fault_path;
 inline thread_local bool g_inspect_cleanup_failure_consumed = false;
 inline thread_local bool g_inspect_identity_failure_consumed = false;
 inline thread_local std::size_t g_inspect_cleanup_attempts = 0;

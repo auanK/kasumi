@@ -1660,19 +1660,19 @@ bool grant_everyone_read(const std::filesystem::path& path) {
 #endif
 }
 
-class ScopedDeniedRead {
+class ScopedDeniedDataRead {
 public:
-    explicit ScopedDeniedRead(std::filesystem::path path)
+    explicit ScopedDeniedDataRead(std::filesystem::path path)
         : path_(std::move(path)) {
         deny();
     }
 
-    ~ScopedDeniedRead() {
+    ~ScopedDeniedDataRead() {
         static_cast<void>(restore());
     }
 
-    ScopedDeniedRead(const ScopedDeniedRead&) = delete;
-    ScopedDeniedRead& operator=(const ScopedDeniedRead&) = delete;
+    ScopedDeniedDataRead(const ScopedDeniedDataRead&) = delete;
+    ScopedDeniedDataRead& operator=(const ScopedDeniedDataRead&) = delete;
 
     bool active() const noexcept {
         return active_;
@@ -1754,8 +1754,8 @@ private:
             return;
         }
         EXPLICIT_ACCESSW access{};
-        access.grfAccessPermissions = FILE_READ_DATA | FILE_READ_ATTRIBUTES |
-                                      FILE_READ_EA | SYNCHRONIZE;
+        // Keep FILE_READ_ATTRIBUTES so metadata-only inspection still works.
+        access.grfAccessPermissions = FILE_READ_DATA;
         access.grfAccessMode = DENY_ACCESS;
         access.grfInheritance = NO_INHERITANCE;
         access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
@@ -2613,7 +2613,7 @@ TEST(ApplicationProfileTest, InspectLockPathUnreadableIsProblem) {
         std::ofstream stream(lock_path, std::ios::binary);
         stream << "lock";
     }
-    ScopedDeniedRead denied(lock_path);
+    ScopedDeniedDataRead denied(lock_path);
     if (!denied.active()) {
         GTEST_SKIP() << "access denial is unavailable";
     }
@@ -3395,7 +3395,7 @@ TEST(ApplicationProfileTest,
     ASSERT_TRUE(save_height(fixture.database_path(), 2));
     const auto wal_path = fixture.profile_dir() / "db.sqlite-wal";
     ASSERT_TRUE(std::filesystem::exists(wal_path));
-    ScopedDeniedRead denied(wal_path);
+    ScopedDeniedDataRead denied(wal_path);
     if (!denied.active()) {
         GTEST_SKIP() << "access denial is unavailable";
     }
@@ -3414,7 +3414,7 @@ TEST(ApplicationProfileTest, InspectDoesNotNeedReadableShm) {
     ASSERT_TRUE(save_height(fixture.database_path(), 2));
     const auto shm_path = fixture.profile_dir() / "db.sqlite-shm";
     ASSERT_TRUE(std::filesystem::exists(shm_path));
-    ScopedDeniedRead denied(shm_path);
+    ScopedDeniedDataRead denied(shm_path);
     if (!denied.active()) {
         GTEST_SKIP() << "access denial is unavailable";
     }
@@ -3433,7 +3433,7 @@ TEST(ApplicationProfileTest,
         std::ofstream stream(journal_path, std::ios::binary);
         stream << "rollback journal";
     }
-    ScopedDeniedRead denied(journal_path);
+    ScopedDeniedDataRead denied(journal_path);
     if (!denied.active()) {
         GTEST_SKIP() << "access denial is unavailable";
     }
@@ -3463,7 +3463,7 @@ TEST(ApplicationProfileTest,
      InspectDoesNotTreatUnreadableDatabaseAsAbsent) {
     ProfileFixture fixture{"app-profile-state-db-denied"};
     ASSERT_TRUE(save_height(fixture.database_path(), 1));
-    ScopedDeniedRead denied(fixture.database_path());
+    ScopedDeniedDataRead denied(fixture.database_path());
     if (!denied.active()) {
         GTEST_SKIP() << "access denial is unavailable";
     }

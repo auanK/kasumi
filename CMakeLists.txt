@@ -504,10 +504,6 @@ target_include_directories(
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
 )
 
-if(BUILD_TESTING)
-    target_compile_definitions(kasumi_application PUBLIC KASUMI_MUTATION_FAULT_TESTS)
-endif()
-
 if(KASUMI_BUILD_JOURNAL_FAULT_TESTS)
     target_compile_definitions(kasumi_application PRIVATE KASUMI_JOURNAL_FAULT_TESTS)
 endif()

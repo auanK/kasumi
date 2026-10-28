@@ -303,7 +303,7 @@ class DocumentationTest(unittest.TestCase):
 
             original_iterdir = Path.iterdir
             def mock_iterdir(path):
-                if path == forbidden:
+                if path.resolve() == forbidden.resolve():
                     raise PermissionError("Access denied")
                 return original_iterdir(path)
 
