@@ -646,6 +646,38 @@ TEST(HistoryObservationTest, DoesNotTreatCiphertextVariantsAsHeads) {
     EXPECT_TRUE(view->ancestral_marked_heads.empty());
 }
 
+TEST(HistoryObservationTest, ReconcilesAuthenticatedCrissCrossSnapshots) {
+    auto storage = make_local_storage();
+    const auto base = make_commit(0, {}, make_tree({}));
+    const auto left =
+        make_commit(1, {commit_id(base)}, make_tree({{"left", "L"}}));
+    const auto right =
+        make_commit(1, {commit_id(base)}, make_tree({{"right", "R"}}));
+    const std::vector<std::string> parents{commit_id(left), commit_id(right)};
+    const auto first = make_commit(
+        2, parents, make_tree({{"left", "L"}, {"right", "R"}, {"first", "F"}}));
+    const auto second = make_commit(
+        2,
+        parents,
+        make_tree({{"left", "L"}, {"right", "R"}, {"second", "S"}}));
+    for (const auto& commit : {base, left, right, first, second}) {
+        publish(storage, commit);
+    }
+    const auto view = observe(storage);
+    if (!view) {
+        FAIL() << view.error().detail;
+    }
+    EXPECT_EQ(view->logical_heads.size(), 2U);
+    EXPECT_EQ(view->observed_height, 2U);
+    EXPECT_FALSE(view->has_conflicts);
+    EXPECT_TRUE(same_tree(
+        view->effective_tree,
+        make_tree(
+            {{"left", "L"}, {"right", "R"}, {"first", "F"}, {"second", "S"}})));
+    EXPECT_FALSE(kasumi::test::has_temporary_history_workspace(
+        kasumi::test::workspace_root(storage.workspace)));
+}
+
 TEST(HistoryObservationTest, RejectsAmbiguousCrissCrossMerge) {
     auto storage = make_local_storage();
     const auto base = make_commit(0, {}, make_tree({}));

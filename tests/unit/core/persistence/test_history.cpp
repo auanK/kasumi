@@ -8,6 +8,8 @@
 #include <gtest/gtest.h>
 #include <initializer_list>
 #include <limits>
+#include <random>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -584,6 +586,302 @@ TEST(HistoryTest, HeadFilteringAndMergeBase) {
     EXPECT_FALSE(res_common->has_conflicts);
     EXPECT_EQ(res_common->heads.size(), 2);
     EXPECT_EQ(res_common->height, 1);
+}
+
+std::string append_history(std::vector<LoadedCommit>& graph,
+                           std::vector<std::string> parents,
+                           kasumi::Snapshot tree) {
+    std::uint64_t height = 0;
+    for (const auto& parent : parents) {
+        const auto found = std::ranges::find(graph, parent, &LoadedCommit::id);
+        EXPECT_NE(found, graph.end());
+        if (found == graph.end()) {
+            return {};
+        }
+        height = std::max(height, found->commit.height + 1);
+    }
+    graph.push_back(load_commit(
+        make_commit(height, std::move(parents), std::move(tree), graph.size())
+            .value()));
+    return graph.back().id;
+}
+
+struct CrossHistory {
+    std::vector<LoadedCommit> graph;
+    std::array<std::string, 2> bases;
+    std::array<std::string, 2> heads;
+};
+
+CrossHistory crossing_history(kasumi::Snapshot root,
+                              kasumi::Snapshot left,
+                              kasumi::Snapshot right,
+                              kasumi::Snapshot first,
+                              kasumi::Snapshot second,
+                              bool unequal_heights = false) {
+    CrossHistory history;
+    const auto root_id = append_history(history.graph, {}, root);
+    history.bases[0] =
+        append_history(history.graph, {root_id}, std::move(left));
+    const auto right_parent =
+        unequal_heights ? append_history(history.graph, {root_id}, root)
+                        : root_id;
+    history.bases[1] =
+        append_history(history.graph, {right_parent}, std::move(right));
+    const std::vector<std::string> parents(history.bases.begin(),
+                                           history.bases.end());
+    history.heads[0] = append_history(history.graph, parents, std::move(first));
+    history.heads[1] =
+        append_history(history.graph, parents, std::move(second));
+    return history;
+}
+
+void expect_file_contents(const kasumi::Snapshot& tree,
+                          std::initializer_list<std::string_view> contents) {
+    std::multiset<kasumi::Hash> actual;
+    std::multiset<kasumi::Hash> expected;
+    for (const auto& row : tree.rows) {
+        if (!row.is_directory) {
+            actual.insert(row.hash);
+        }
+    }
+    for (const auto content : contents) {
+        expected.insert(kasumi::hasher::hash_string(content));
+    }
+    EXPECT_EQ(actual, expected);
+    EXPECT_TRUE(kasumi::valid_snapshot(tree, false));
+}
+
+TEST(HistoryMultiBaseTest, CombinesIndependentChangesAndKeepsRealParents) {
+    const auto first = make_tree({make_file("a", "A"),
+                                  make_file("b", "B"),
+                                  make_file("first", "first")});
+    const auto second = make_tree({make_file("a", "A"),
+                                   make_file("b", "B"),
+                                   make_file("second", "second")});
+    const auto history = crossing_history(make_tree({}),
+                                          make_tree({make_file("a", "A")}),
+                                          make_tree({make_file("b", "B")}),
+                                          first,
+                                          second);
+    const auto result = resolve(history.graph, history.heads);
+    if (!result) {
+        FAIL() << result.error().detail;
+    }
+    expect_file_contents(result->tree, {"A", "B", "first", "second"});
+    EXPECT_FALSE(result->has_conflicts);
+    auto parents =
+        std::vector<std::string>(history.heads.begin(), history.heads.end());
+    std::ranges::sort(parents);
+    EXPECT_EQ(result->heads, parents);
+    EXPECT_EQ(result->height, 2U);
+    expect_resolution_publishable(*result);
+}
+
+TEST(HistoryMultiBaseTest, IncomparableBasesAtDifferentHeights) {
+    const auto tree = make_tree({make_file("a", "A"), make_file("b", "B")});
+    const auto history = crossing_history(make_tree({}),
+                                          make_tree({make_file("a", "A")}),
+                                          make_tree({make_file("b", "B")}),
+                                          tree,
+                                          tree,
+                                          true);
+    const auto result = resolve(history.graph, history.heads);
+    if (!result) {
+        FAIL() << result.error().detail;
+    }
+    expect_file_contents(result->tree, {"A", "B"});
+    EXPECT_EQ(result->height, 3U);
+    EXPECT_FALSE(result->has_conflicts);
+}
+
+TEST(HistoryMultiBaseTest, PreservesConcurrentFileVariants) {
+    const auto history =
+        crossing_history(make_tree({}),
+                         make_tree({make_file("a", "A")}),
+                         make_tree({make_file("b", "B")}),
+                         make_tree({make_file("a", "A"),
+                                    make_file("b", "B"),
+                                    make_file("same", "left")}),
+                         make_tree({make_file("a", "A"),
+                                    make_file("b", "B"),
+                                    make_file("same", "right")}));
+    const auto result = resolve(history.graph, history.heads);
+    if (!result) {
+        FAIL() << result.error().detail;
+    }
+    expect_file_contents(result->tree, {"A", "B", "left", "right"});
+    EXPECT_TRUE(result->has_conflicts);
+    const auto& loser = *std::ranges::max_element(history.heads);
+    EXPECT_NE(
+        row_at(result->tree, "same.kasumiconflict_" + loser.substr(0, 12)),
+        nullptr);
+}
+
+TEST(HistoryMultiBaseTest, DeleteModifyKeepsConfirmedModification) {
+    const auto history = crossing_history(
+        make_tree({make_file("same", "old")}),
+        make_tree({make_file("same", "old"), make_file("a", "A")}),
+        make_tree({make_file("same", "old"), make_file("b", "B")}),
+        make_tree({make_file("a", "A"), make_file("b", "B")}),
+        make_tree({make_file("a", "A"),
+                   make_file("b", "B"),
+                   make_file("same", "new")}));
+    const auto result = resolve(history.graph, history.heads);
+    if (!result) {
+        FAIL() << result.error().detail;
+    }
+    expect_file_contents(result->tree, {"A", "B", "new"});
+    EXPECT_TRUE(result->has_conflicts);
+    ASSERT_NE(row_at(result->tree, "same"), nullptr);
+    EXPECT_EQ(row_at(result->tree, "same")->hash,
+              kasumi::hasher::hash_string("new"));
+}
+
+TEST(HistoryMultiBaseTest, DoesNotResurrectDeletedFileOrUnchangedDescendant) {
+    const auto root = make_tree({make_file("gone", "gone"),
+                                 make_directory("dir"),
+                                 make_file("dir/old", "old")});
+    const auto left =
+        make_tree({make_directory("dir"), make_file("dir/old", "old")});
+    const auto right = make_tree({make_file("gone", "gone"),
+                                  make_directory("dir"),
+                                  make_file("dir/old", "old"),
+                                  make_file("b", "B")});
+    const auto history =
+        crossing_history(root,
+                         left,
+                         right,
+                         make_tree({make_file("b", "B")}),
+                         make_tree({make_file("b", "B"),
+                                    make_directory("dir"),
+                                    make_file("dir/new", "new")}));
+    const auto result = resolve(history.graph, history.heads);
+    if (!result) {
+        FAIL() << result.error().detail;
+    }
+    expect_file_contents(result->tree, {"B", "new"});
+    EXPECT_EQ(row_at(result->tree, "gone"), nullptr);
+    EXPECT_EQ(row_at(result->tree, "dir/old"), nullptr);
+    ASSERT_NE(row_at(result->tree, "dir"), nullptr);
+    EXPECT_TRUE(row_at(result->tree, "dir")->is_directory);
+}
+
+TEST(HistoryMultiBaseTest,
+     ReusesConflictProvenanceAndRespectsArtifactDeletion) {
+    std::vector<LoadedCommit> graph;
+    const auto root =
+        append_history(graph, {}, make_tree({make_file("same", "old")}));
+    const auto a =
+        append_history(graph, {root}, make_tree({make_file("same", "A")}));
+    const auto b =
+        append_history(graph, {root}, make_tree({make_file("same", "B")}));
+    const std::array bases{a, b};
+    const auto previous = resolve(graph, bases);
+    ASSERT_TRUE(previous.has_value());
+    ASSERT_TRUE(previous->has_conflicts);
+    const auto m1 = append_history(graph, {a, b}, previous->tree);
+    const auto m2 = append_history(graph, {a, b}, previous->tree);
+    const auto result = resolve(graph, std::array{m1, m2});
+    if (!result) {
+        FAIL() << result.error().detail;
+    }
+    expect_file_contents(result->tree, {"A", "B"});
+    expect_same_snapshot(result->tree, previous->tree);
+    EXPECT_FALSE(result->has_conflicts);
+
+    auto kept = previous->tree;
+    std::erase_if(kept.rows, [](const auto& row) {
+        return row.path.find(".kasumiconflict_") != std::string::npos;
+    });
+    kasumi::finalize_snapshot(kept);
+    graph.resize(3);
+    const auto deleted1 = append_history(graph, {a, b}, kept);
+    const auto deleted2 = append_history(graph, {a, b}, kept);
+    const auto deleted = resolve(graph, std::array{deleted1, deleted2});
+    ASSERT_TRUE(deleted.has_value());
+    expect_same_snapshot(deleted->tree, kept);
+}
+
+TEST(HistoryMultiBaseTest, StructuralFileDirectoryConflictPreservesBoth) {
+    const auto history =
+        crossing_history(make_tree({}),
+                         make_tree({make_file("a", "A")}),
+                         make_tree({make_file("b", "B")}),
+                         make_tree({make_file("a", "A"),
+                                    make_file("b", "B"),
+                                    make_file("node", "file")}),
+                         make_tree({make_file("a", "A"),
+                                    make_file("b", "B"),
+                                    make_directory("node"),
+                                    make_file("node/child", "child")}));
+    const auto result = resolve(history.graph, history.heads);
+    if (!result) {
+        FAIL() << result.error().detail;
+    }
+    expect_file_contents(result->tree, {"A", "B", "file", "child"});
+    EXPECT_TRUE(result->has_conflicts);
+    ASSERT_NE(row_at(result->tree, "node"), nullptr);
+    EXPECT_TRUE(row_at(result->tree, "node")->is_directory);
+}
+
+TEST(HistoryMultiBaseTest, NestedCrissCrossAndPermutationsAreCanonical) {
+    auto history =
+        crossing_history(make_tree({}),
+                         make_tree({make_file("a", "A")}),
+                         make_tree({make_file("b", "B")}),
+                         make_tree({make_file("a", "A"), make_file("b", "B")}),
+                         make_tree({make_file("a", "A"), make_file("b", "B")}));
+    const auto first = append_history(
+        history.graph,
+        {history.heads[0], history.heads[1]},
+        make_tree(
+            {make_file("a", "A"), make_file("b", "B"), make_file("x", "X")}));
+    const auto second = append_history(
+        history.graph,
+        {history.heads[0], history.heads[1]},
+        make_tree(
+            {make_file("a", "A"), make_file("b", "B"), make_file("y", "Y")}));
+    const auto baseline = resolve(history.graph, std::array{first, second});
+    if (!baseline) {
+        FAIL() << baseline.error().detail;
+    }
+    expect_file_contents(baseline->tree, {"A", "B", "X", "Y"});
+    const auto canonical =
+        serialize(make_commit(4, baseline->heads, baseline->tree).value())
+            .value();
+    std::mt19937 random{2026102917U};
+    for (int trial = 0; trial < 32; ++trial) {
+        std::shuffle(history.graph.begin(), history.graph.end(), random);
+        std::array heads{first, second};
+        if (trial % 2)
+            std::ranges::reverse(heads);
+        const auto result = resolve(history.graph, heads);
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(result->tree, baseline->tree);
+        const auto published =
+            make_commit(result->height + 1, result->heads, result->tree)
+                .value();
+        EXPECT_EQ(serialize(published).value(), canonical);
+        EXPECT_EQ(
+            compute_id(published).value(),
+            compute_id(make_commit(4, baseline->heads, baseline->tree).value())
+                .value());
+    }
+}
+
+TEST(HistoryMultiBaseTest, IncompleteTrustedFrontierStillFailsClosed) {
+    auto history = crossing_history(make_tree({}),
+                                    make_tree({make_file("a", "A")}),
+                                    make_tree({make_file("b", "B")}),
+                                    make_tree({}),
+                                    make_tree({}));
+    history.graph.erase(history.graph.begin());
+    history.graph[0].commit.parents.clear();
+    history.graph[1].commit.parents.clear();
+    const auto result = resolve_from_frontier_authenticated(
+        history.graph, history.heads, history.bases);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::AmbiguousMergeBase);
 }
 
 TEST(HistoryTest, AmbiguousMergeBase) {
