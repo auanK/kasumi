@@ -678,7 +678,7 @@ TEST(HistoryObservationTest, ReconcilesAuthenticatedCrissCrossSnapshots) {
         kasumi::test::workspace_root(storage.workspace)));
 }
 
-TEST(HistoryObservationTest, RejectsAmbiguousCrissCrossMerge) {
+TEST(HistoryObservationTest, ReconcilesCrissCrossWithLaterModification) {
     auto storage = make_local_storage();
     const auto base = make_commit(0, {}, make_tree({}));
     const auto left =
@@ -703,9 +703,12 @@ TEST(HistoryObservationTest, RejectsAmbiguousCrissCrossMerge) {
                     make_tree({{"left.txt", "other"}, {"right.txt", "r"}})));
 
     auto view = observe(storage);
-    ASSERT_FALSE(view.has_value());
-    EXPECT_EQ(view.error().code, ErrorCode::ResolutionFailure);
-    EXPECT_NE(view.error().detail.find("ambiguous"), std::string::npos);
+    ASSERT_TRUE(view.has_value());
+    EXPECT_EQ(view->logical_heads.size(), 2U);
+    EXPECT_FALSE(view->has_conflicts);
+    EXPECT_TRUE(
+        same_tree(view->effective_tree,
+                  make_tree({{"left.txt", "other"}, {"right.txt", "r"}})));
     EXPECT_FALSE(kasumi::test::has_temporary_history_workspace(
         kasumi::test::workspace_root(storage.workspace)));
 }

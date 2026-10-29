@@ -77,7 +77,13 @@ When a client observes multiple concurrent heads (`CA` and `CB`), it traverses a
 2. Remove any common ancestor that is an ancestor of another common ancestor (dominated ancestors);
 3. The remaining commits are the best common ancestors (the maximal elements under the ancestry partial order);
 4. If exactly one best common ancestor exists, Kasumi selects it as the **merge base**;
-5. If more than one incomparable best common ancestor exists, resolution stops with an ambiguous merge-base error (`AmbiguousMergeBase`) rather than selecting one arbitrarily.
+5. If several incomparable best common ancestors exist, reconcile all of them into an in-memory **virtual merge base**. Find their own best common ancestors until a unique base is reached, then apply the existing snapshot/conflict merge rules to each layer from oldest to newest. No virtual commit or identifier is published.
+
+Conflict variants retain the real source commit IDs used by the existing naming rules. Later deletions are compared against the reconstructed base, including earlier conflict artifacts; a file absent from every current head cannot be resurrected from that base. Only conflicts introduced while reconciling the current heads set `has_conflicts`.
+
+The virtual base also retains uncertain original conflict paths (and descendants of structural conflicts). Equality with its arbitrary principal variant does not prove a head left that path unchanged: when heads disagree there, every head contributes its choice to the conflict rules. Agreement clears that uncertainty. Generated conflict artifact names are not themselves marked uncertain, so deleting an otherwise unchanged artifact still applies normally.
+
+Virtual reconciliation uses at most 32 bases per layer and 262144 ancestor visits. It is iterative and returns `LimitExceeded` when those bounds are exceeded. If the authenticated loaded frontier omits the common ancestry needed to reconcile its bases, resolution still stops with `AmbiguousMergeBase`. Missing history is never invented.
 
 Commit height is structural metadata and is not sufficient to order incomparable commits causally.
 
@@ -86,7 +92,7 @@ C0 → CA: Mutations on branch A
 C0 → CB: Mutations on branch B
 ```
 
-When the observed heads have a unique merge base and the resulting snapshot is structurally valid, a client can reconcile the observed branches and publish the resulting state. Changes on independent paths (such as Machine A modifying `docs/` while Machine B modifies `src/`) are combined in the merged snapshot without generating conflict artifacts.
+When the observed heads have a unique or safely reconstructed virtual merge base and the resulting snapshot is structurally valid, a client can reconcile the observed branches and publish the resulting state. Changes on independent paths (such as Machine A modifying `docs/` while Machine B modifies `src/`) are combined in the merged snapshot without generating conflict artifacts.
 
 ## Multi-Parent Merge Commits
 

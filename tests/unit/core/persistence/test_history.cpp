@@ -600,9 +600,12 @@ std::string append_history(std::vector<LoadedCommit>& graph,
         }
         height = std::max(height, found->commit.height + 1);
     }
-    graph.push_back(load_commit(
-        make_commit(height, std::move(parents), std::move(tree), graph.size())
-            .value()));
+    graph.push_back(
+        load_commit(make_commit(height,
+                                std::move(parents),
+                                std::move(tree),
+                                static_cast<std::int64_t>(graph.size()))
+                        .value()));
     return graph.back().id;
 }
 
@@ -884,7 +887,218 @@ TEST(HistoryMultiBaseTest, IncompleteTrustedFrontierStillFailsClosed) {
     EXPECT_EQ(result.error().code, ErrorCode::AmbiguousMergeBase);
 }
 
-TEST(HistoryTest, AmbiguousMergeBase) {
+TEST(HistoryMultiBaseTest, ReconcilesAboveAnExplicitTrustedAnchor) {
+    std::vector<LoadedCommit> graph{
+        load_commit(make_bootstrap(make_tree({}), 100).value())};
+    const auto root = graph.front().id;
+    const auto a =
+        append_history(graph, {root}, make_tree({make_file("a", "A")}));
+    const auto b =
+        append_history(graph, {root}, make_tree({make_file("b", "B")}));
+    const auto tree = make_tree({make_file("a", "A"), make_file("b", "B")});
+    const auto first = append_history(graph, {a, b}, tree);
+    const auto second = append_history(graph, {a, b}, tree);
+    const auto result =
+        resolve_from_anchor(graph, std::array{first, second}, root);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->tree, tree);
+    EXPECT_EQ(result->height, 102U);
+    expect_resolution_publishable(*result);
+}
+
+TEST(HistoryMultiBaseTest, ThreeCurrentHeadsPreserveEveryVariant) {
+    auto history = crossing_history(make_tree({}),
+                                    make_tree({make_file("a", "A")}),
+                                    make_tree({make_file("b", "B")}),
+                                    make_tree({make_file("same", "one")}),
+                                    make_tree({make_file("same", "two")}));
+    const auto third = append_history(history.graph,
+                                      {history.bases[0], history.bases[1]},
+                                      make_tree({make_file("same", "three")}));
+    const std::array heads{history.heads[0], history.heads[1], third};
+    const auto result = resolve(history.graph, heads);
+    ASSERT_TRUE(result.has_value());
+    expect_file_contents(result->tree, {"one", "two", "three"});
+    EXPECT_TRUE(result->has_conflicts);
+    EXPECT_EQ(result->heads.size(), 3U);
+    EXPECT_EQ(row_at(result->tree, "a"), nullptr);
+    EXPECT_EQ(row_at(result->tree, "b"), nullptr);
+    expect_resolution_publishable(*result);
+}
+
+TEST(HistoryMultiBaseTest, OccupiedConflictPathUsesExistingCollisionRules) {
+    const std::string first_id(64, 'e');
+    const std::string second_id(64, 'f');
+    const auto occupied = "same.kasumiconflict_" + second_id.substr(0, 12);
+    auto history =
+        crossing_history(make_tree({}),
+                         make_tree({make_file("a", "A")}),
+                         make_tree({make_file("b", "B")}),
+                         make_tree({make_file("a", "A"),
+                                    make_file("b", "B"),
+                                    make_file("same", "left"),
+                                    make_file(occupied, "reserved")}),
+                         make_tree({make_file("a", "A"),
+                                    make_file("b", "B"),
+                                    make_file("same", "right"),
+                                    make_file(occupied, "reserved")}));
+    history.graph[history.graph.size() - 2].id = first_id;
+    history.graph.back().id = second_id;
+    const auto result =
+        resolve_authenticated(history.graph, std::array{first_id, second_id});
+    ASSERT_TRUE(result.has_value());
+    expect_file_contents(result->tree, {"A", "B", "left", "right", "reserved"});
+    ASSERT_NE(row_at(result->tree, occupied), nullptr);
+    EXPECT_EQ(row_at(result->tree, occupied)->hash,
+              kasumi::hasher::hash_string("reserved"));
+    ASSERT_NE(row_at(result->tree, occupied + ".1"), nullptr);
+    EXPECT_EQ(row_at(result->tree, occupied + ".1")->hash,
+              kasumi::hasher::hash_string("right"));
+}
+
+TEST(HistoryMultiBaseTest,
+     OppositeResolutionsOfConflictingBasesKeepBothDecisions) {
+    const auto history = crossing_history(make_tree({make_file("same", "old")}),
+                                          make_tree({make_file("same", "A")}),
+                                          make_tree({make_file("same", "B")}),
+                                          make_tree({make_file("same", "A")}),
+                                          make_tree({make_file("same", "B")}));
+    const auto result = resolve(history.graph, history.heads);
+    ASSERT_TRUE(result.has_value());
+    expect_file_contents(result->tree, {"A", "B"});
+    EXPECT_TRUE(result->has_conflicts);
+    auto reversed = history;
+    std::ranges::reverse(reversed.graph);
+    std::ranges::reverse(reversed.heads);
+    const auto permuted = resolve(reversed.graph, reversed.heads);
+    ASSERT_TRUE(permuted.has_value());
+    EXPECT_EQ(permuted->tree, result->tree);
+    EXPECT_EQ(
+        compute_id(make_commit(result->height + 1, result->heads, result->tree)
+                       .value())
+            .value(),
+        compute_id(
+            make_commit(permuted->height + 1, permuted->heads, permuted->tree)
+                .value())
+            .value());
+}
+
+TEST(HistoryMultiBaseTest,
+     DeletingAnUnchangedConflictArtifactDoesNotResurrectIt) {
+    std::vector<LoadedCommit> graph;
+    const auto root =
+        append_history(graph, {}, make_tree({make_file("same", "old")}));
+    const auto a =
+        append_history(graph, {root}, make_tree({make_file("same", "A")}));
+    const auto b =
+        append_history(graph, {root}, make_tree({make_file("same", "B")}));
+    const auto previous = resolve(graph, std::array{a, b}).value();
+    auto kept = previous.tree;
+    std::erase_if(kept.rows, [](const auto& row) {
+        return row.path.find(".kasumiconflict_") != std::string::npos;
+    });
+    kasumi::finalize_snapshot(kept);
+    const auto first = append_history(graph, {a, b}, kept);
+    const auto second = append_history(graph, {a, b}, previous.tree);
+    const auto result = resolve(graph, std::array{first, second});
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->tree, kept);
+    EXPECT_FALSE(result->has_conflicts);
+}
+
+TEST(HistoryMultiBaseTest, ConsensusOfLaterBasesClearsEarlierUncertainty) {
+    auto history = crossing_history(make_tree({make_file("same", "old")}),
+                                    make_tree({make_file("same", "A")}),
+                                    make_tree({make_file("same", "B")}),
+                                    make_tree({make_file("same", "A")}),
+                                    make_tree({make_file("same", "A")}));
+    const std::vector parents{history.heads[0], history.heads[1]};
+    const auto first = append_history(
+        history.graph, parents, make_tree({make_file("same", "A")}));
+    const auto second = append_history(
+        history.graph, parents, make_tree({make_file("same", "C")}));
+    const auto result = resolve(history.graph, std::array{first, second});
+    ASSERT_TRUE(result.has_value());
+    expect_file_contents(result->tree, {"C"});
+    EXPECT_FALSE(result->has_conflicts);
+}
+
+TEST(HistoryMultiBaseTest,
+     OppositeStructuralResolutionsPreserveFileAndDirectory) {
+    const auto file = make_tree({make_file("node", "file")});
+    const auto directory =
+        make_tree({make_directory("node"), make_file("node/child", "child")});
+    const auto history =
+        crossing_history(make_tree({}), file, directory, file, directory);
+    const auto result = resolve(history.graph, history.heads);
+    if (!result) {
+        FAIL() << result.error().detail;
+    }
+    expect_file_contents(result->tree, {"file", "child"});
+    EXPECT_TRUE(result->has_conflicts);
+}
+
+TEST(HistoryMultiBaseTest, ReconcilesThirtyTwoBasesWithoutSelectingOne) {
+    std::vector<LoadedCommit> graph;
+    const auto root = append_history(graph, {}, make_tree({}));
+    std::vector<std::string> bases;
+    kasumi::Snapshot merged = make_tree({});
+    for (int i = 0; i < 32; ++i) {
+        const auto file =
+            make_file("file-" + std::to_string(i), std::to_string(i));
+        bases.push_back(append_history(graph, {root}, make_tree({file})));
+        merged.rows.push_back(file);
+    }
+    kasumi::finalize_snapshot(merged);
+    const auto first = append_history(graph, bases, merged);
+    const auto second = append_history(graph, bases, merged);
+    const auto result = resolve(graph, std::array{first, second});
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->tree, merged);
+    EXPECT_FALSE(result->has_conflicts);
+    expect_resolution_publishable(*result);
+}
+
+TEST(HistoryMultiBaseTest, ExcessiveBaseWidthFailsClosed) {
+    std::vector<LoadedCommit> graph;
+    const auto root = append_history(graph, {}, make_tree({}));
+    std::vector<std::string> bases;
+    for (int i = 0; i < 33; ++i) {
+        bases.push_back(append_history(
+            graph,
+            {root},
+            make_tree({make_file("f" + std::to_string(i), "x")})));
+    }
+    const std::vector<std::string> left(bases.begin(), bases.begin() + 17);
+    const std::vector<std::string> right(bases.begin() + 17, bases.end());
+    const auto a = append_history(graph, left, make_tree({}));
+    const auto b = append_history(graph, right, make_tree({}));
+    const auto c = append_history(graph, left, make_tree({}));
+    const auto d = append_history(graph, right, make_tree({}));
+    const auto first = append_history(graph, {a, b}, make_tree({}));
+    const auto second = append_history(graph, {c, d}, make_tree({}));
+    const auto result = resolve(graph, std::array{first, second});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::LimitExceeded);
+}
+
+TEST(HistoryMultiBaseTest, RepeatedCrissCrossIsBoundedByAncestryBudget) {
+    std::vector<LoadedCommit> graph;
+    const auto root = append_history(graph, {}, make_tree({}));
+    auto first = append_history(graph, {root}, make_tree({}));
+    auto second = append_history(graph, {root}, make_tree({}));
+    for (int level = 0; level < 400; ++level) {
+        const std::vector<std::string> parents{first, second};
+        first = append_history(graph, parents, make_tree({}));
+        second = append_history(graph, parents, make_tree({}));
+    }
+    const auto result = resolve(graph, std::array{first, second});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::LimitExceeded);
+    EXPECT_NE(result.error().detail.find("budget"), std::string::npos);
+}
+
+TEST(HistoryTest, ReconcilesCrissCrossDirectorySnapshots) {
     auto a = make_empty_bootstrap().value();
     auto ida = compute_id(a).value();
     LoadedCommit lca{ida, a};
@@ -907,11 +1121,15 @@ TEST(HistoryTest, AmbiguousMergeBase) {
 
     auto res = resolve(std::vector<LoadedCommit>{lca, lcb, lcc, lcd, lce},
                        std::vector<std::string>{idd, ide});
-    EXPECT_FALSE(res.has_value());
-    EXPECT_EQ(res.error().code, ErrorCode::AmbiguousMergeBase);
+    ASSERT_TRUE(res.has_value());
+    EXPECT_EQ(res->tree, make_valid_snapshot());
+    EXPECT_EQ(res->height, 2U);
+    EXPECT_EQ(res->heads.size(), 2U);
+    EXPECT_FALSE(res->has_conflicts);
+    expect_resolution_publishable(*res);
 }
 
-TEST(HistoryTest, AmbiguousMergeBaseWithUnequalHeights) {
+TEST(HistoryTest, ReconcilesCrissCrossBasesWithUnequalHeights) {
     auto r = make_empty_bootstrap().value();
     auto id_r = compute_id(r).value();
     LoadedCommit lc_r{id_r, r};
@@ -939,8 +1157,12 @@ TEST(HistoryTest, AmbiguousMergeBaseWithUnequalHeights) {
     auto res =
         resolve(std::vector<LoadedCommit>{lc_r, lc_a, lc_x, lc_b, lc_h1, lc_h2},
                 std::vector<std::string>{id_h1, id_h2});
-    ASSERT_FALSE(res.has_value());
-    EXPECT_EQ(res.error().code, ErrorCode::AmbiguousMergeBase);
+    ASSERT_TRUE(res.has_value());
+    EXPECT_EQ(res->tree, make_valid_snapshot());
+    EXPECT_EQ(res->height, 3U);
+    EXPECT_EQ(res->heads.size(), 2U);
+    EXPECT_FALSE(res->has_conflicts);
+    expect_resolution_publishable(*res);
 }
 
 TEST(HistoryTest, MergeConflict_FileFile) {

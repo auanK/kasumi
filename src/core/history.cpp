@@ -399,6 +399,38 @@ HeadChanges build_head_changes(const Snapshot& base,
     return changes;
 }
 
+std::vector<HeadChanges>
+build_merge_changes(const Index& index,
+                    const Snapshot& base,
+                    const std::vector<std::string>& ids,
+                    const PathSet* uncertain = nullptr) {
+    std::vector<HeadChanges> changes;
+    changes.reserve(ids.size());
+    for (const auto& id : ids) {
+        changes.push_back(
+            build_head_changes(base, id, index.at(id)->commit.tree));
+    }
+    if (uncertain) {
+        for (const auto& path : *uncertain) {
+            const auto* first = find_row(*changes.front().tree, path);
+            if (std::ranges::all_of(changes, [&](const auto& head) {
+                    return same_state(first, find_row(*head.tree, path));
+                })) {
+                continue;
+            }
+            // Equality with an arbitrary virtual winner is not causal
+            // agreement.
+            for (auto& head : changes) {
+                head.directly_changed.insert(path);
+                for (const auto& ancestor : ancestors_of(path)) {
+                    head.changed_subtrees.insert(ancestor);
+                }
+            }
+        }
+    }
+    return changes;
+}
+
 bool conflict_path_is_safe(std::string_view candidate,
                            const std::map<std::string, bool>& reserved) {
     const auto key_candidate = portable_case_key(candidate);
@@ -439,7 +471,8 @@ select_conflict_path(std::string_view path,
 std::expected<Snapshot, Error>
 merge_snapshots(const Snapshot& base,
                 const std::vector<HeadChanges>& heads,
-                bool& has_conflicts) {
+                bool& has_conflicts,
+                PathSet* conflict_paths = nullptr) {
     enum class VariantKind {
         Absent,
         File,
@@ -516,6 +549,18 @@ merge_snapshots(const Snapshot& base,
         }
 
         has_conflicts = true;
+        if (conflict_paths) {
+            conflict_paths->insert(path);
+            if (std::ranges::any_of(variants, [](const auto& variant) {
+                    return variant.kind == VariantKind::Directory;
+                })) {
+                const auto prefix = path + '/';
+                for (auto it = all_paths.lower_bound(prefix);
+                     it != all_paths.end() && it->starts_with(prefix); ++it) {
+                    conflict_paths->insert(*it);
+                }
+            }
+        }
         const auto rank = [](VariantKind kind) {
             switch (kind) {
                 case VariantKind::Directory:
@@ -610,6 +655,77 @@ merge_snapshots(const Snapshot& base,
     Snapshot merged{.rows = std::move(final_rows)};
     finalize_snapshot(merged);
     return merged;
+}
+
+struct VirtualMergeBase {
+    Snapshot tree;
+    PathSet uncertain_paths;
+};
+
+std::expected<VirtualMergeBase, Error>
+reconcile_merge_bases(const Index& index, std::vector<std::string> bases) {
+    std::vector<std::vector<std::string>> layers;
+    auto remaining_visits = maximum_virtual_base_ancestor_visits;
+    while (bases.size() > 1) {
+        if (bases.size() > maximum_parent_count ||
+            layers.size() >= maximum_graph_depth) {
+            return std::unexpected(Error{ErrorCode::LimitExceeded,
+                                         "virtual merge base limit exceeded"});
+        }
+        std::unordered_set<std::string> common;
+        for (std::size_t i = 0; i < bases.size(); ++i) {
+            auto ancestors = collect_ancestors(index, bases[i]);
+            if (!ancestors) {
+                return std::unexpected(ancestors.error());
+            }
+            if (ancestors->size() > remaining_visits) {
+                return std::unexpected(
+                    Error{ErrorCode::LimitExceeded,
+                          "virtual base ancestry budget exceeded"});
+            }
+            remaining_visits -= ancestors->size();
+            if (i == 0) {
+                common = std::move(*ancestors);
+            } else {
+                std::erase_if(common, [&](const auto& id) {
+                    return !ancestors->contains(id);
+                });
+            }
+        }
+        auto next = find_best_common_ancestors(index, common);
+        if (!next) {
+            return std::unexpected(next.error());
+        }
+        if (next->empty()) {
+            return std::unexpected(Error{ErrorCode::AmbiguousMergeBase,
+                                         "cannot reconcile merge bases without "
+                                         "common ancestry in loaded frontier"});
+        }
+        layers.push_back(std::move(bases));
+        bases = std::move(*next);
+    }
+
+    VirtualMergeBase base{.tree = index.at(bases.front())->commit.tree,
+                          .uncertain_paths = {}};
+    for (auto layer = layers.rbegin(); layer != layers.rend(); ++layer) {
+        const auto changes = build_merge_changes(
+            index, base.tree, *layer, &base.uncertain_paths);
+        bool base_conflicts = false;
+        PathSet conflicts;
+        auto merged =
+            merge_snapshots(base.tree, changes, base_conflicts, &conflicts);
+        if (!merged) {
+            return std::unexpected(merged.error());
+        }
+        auto valid = validate_snapshot_structure(*merged);
+        if (!valid) {
+            return std::unexpected(
+                Error{ErrorCode::UnsafeMerge, valid.error().detail});
+        }
+        base.tree = std::move(*merged);
+        base.uncertain_paths = std::move(conflicts);
+    }
+    return base;
 }
 
 } // namespace
@@ -1086,18 +1202,22 @@ resolve_impl(std::span<const LoadedCommit> commits,
         if (best_bases->empty())
             return std::unexpected(
                 Error{ErrorCode::NoCommonAncestor, "no common ancestor found"});
-        if (best_bases->size() > 1)
-            return std::unexpected(
-                Error{ErrorCode::AmbiguousMergeBase,
-                      "ambiguous merge base (multiple best common ancestors)"});
-
-        const auto& base = index.at(best_bases->front())->commit.tree;
-        std::vector<HeadChanges> changes;
-        changes.reserve(logical_heads.size());
-        for (const auto& head : logical_heads) {
-            changes.push_back(
-                build_head_changes(base, head, index.at(head)->commit.tree));
+        std::optional<VirtualMergeBase> virtual_base;
+        if (best_bases->size() > 1) {
+            auto reconciled = reconcile_merge_bases(index, *best_bases);
+            if (!reconciled) {
+                return std::unexpected(reconciled.error());
+            }
+            virtual_base = std::move(*reconciled);
         }
+        const auto& base = virtual_base
+                               ? virtual_base->tree
+                               : index.at(best_bases->front())->commit.tree;
+        const auto changes = build_merge_changes(
+            index,
+            base,
+            logical_heads,
+            virtual_base ? &virtual_base->uncertain_paths : nullptr);
 
         bool has_conflicts = false;
         auto merged = merge_snapshots(base, changes, has_conflicts);

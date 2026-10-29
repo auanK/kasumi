@@ -211,12 +211,12 @@ Multiple machines synchronized and published changes concurrently without synchr
    kasumi sync <profile>
    ```
    For a resolvable multi-head history, Kasumi can:
-   * Identify the unique best common ancestor (merge base);
+   * Identify a unique merge base or reconcile multiple best common ancestors into a virtual base;
    * Reconcile divergent branches, merging independent paths automatically;
    * Deterministically resolve any file conflicts;
    * Publish a multi-parent merge commit (`CM`) for the observed heads. Without another concurrent publication, `CM` becomes the sole logical head.
 
-   If multiple incomparable best common ancestors exist, synchronization stops with `AmbiguousMergeBase`.
+   If the loaded authenticated frontier lacks the common ancestry required to reconcile multiple bases, synchronization stops with `AmbiguousMergeBase`. Virtual base resource limits return `LimitExceeded`.
 
 ### Related Documentation
 * [Physical HEAD Markers vs. Logical Heads](architecture/history-and-concurrency.md#physical-head-markers-vs-logical-heads)

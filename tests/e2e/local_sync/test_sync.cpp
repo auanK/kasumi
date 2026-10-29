@@ -11,6 +11,7 @@
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/hash_mutation.hpp"
 #include "kasumi/test/provider_scenarios.hpp"
+#include "kasumi/test/history_reconciliation.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
@@ -375,6 +376,42 @@ void expect_no_transaction_artifacts(
     if (std::filesystem::exists(transactions)) {
         EXPECT_TRUE(std::filesystem::is_empty(transactions));
     }
+}
+
+TEST(H3LocalSyncTest, OfflineCrissCrossReconcilesThroughRealSync) {
+    auto scenario = make_scenario();
+    const auto a = make_client(scenario, "offline");
+    const auto b = make_client(scenario, "left");
+    const auto c = make_client(scenario, "right");
+    const std::array clients{
+        kasumi::test::scenarios::SyncScenarioClient{
+            client_name(a), client_local_dir(a), client_environment(a)},
+        kasumi::test::scenarios::SyncScenarioClient{
+            client_name(b), client_local_dir(b), client_environment(b)},
+        kasumi::test::scenarios::SyncScenarioClient{
+            client_name(c), client_local_dir(c), client_environment(c)}};
+    kasumi::test::scenarios::ReconciliationEvidence evidence;
+    const auto root = std::get<1>(scenario);
+    const auto verify_owner = [&] {
+        if (root.parent_path() !=
+                kasumi::test::workspace_root(std::get<0>(scenario)) ||
+            !std::filesystem::is_directory(root)) {
+            throw std::runtime_error("local scenario ownership changed");
+        }
+    };
+    ASSERT_NO_THROW(kasumi::test::scenarios::reconcile_offline_criss_cross(
+        kasumi::platform::path::to_utf8(root),
+        root.parent_path() / "scratch",
+        clients,
+        decode_key(),
+        2026102917U,
+        verify_owner,
+        evidence));
+    EXPECT_TRUE(evidence.topology_confirmed);
+    EXPECT_TRUE(evidence.converged);
+    EXPECT_TRUE(evidence.fsck_pass);
+    EXPECT_EQ(evidence.no_op_calls, 3U);
+    expect_converged(scenario, {&a, &b, &c});
 }
 
 TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {

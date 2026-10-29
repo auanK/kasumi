@@ -18,6 +18,9 @@ inline constexpr std::size_t maximum_parent_count = 32;
 inline constexpr std::size_t maximum_loaded_commit_count = 4096;
 inline constexpr std::size_t maximum_marked_head_count = 64;
 inline constexpr std::size_t maximum_graph_depth = 4096;
+// Bound repeated ancestry traversal while constructing virtual merge bases.
+inline constexpr std::size_t maximum_virtual_base_ancestor_visits =
+    maximum_loaded_commit_count * maximum_marked_head_count;
 inline constexpr std::uint64_t maximum_commit_plaintext_size =
     64ULL * 1024ULL * 1024ULL;
 
@@ -35,7 +38,7 @@ enum class ErrorCode {
     HeightMismatch,
     InvalidHead,
     NoCommonAncestor,
-    // More than one incomparable best common ancestor exists.
+    // Multiple bases cannot be reconciled with the available ancestry.
     AmbiguousMergeBase,
     // Merge would produce a structurally invalid snapshot.
     UnsafeMerge,
