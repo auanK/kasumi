@@ -2,10 +2,12 @@
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/private_storage.hpp"
+#include "platform/profile_lock.hpp"
 #include "platform/workspace.hpp"
 
 #include <array>
 #include <cstddef>
+#include <cstdlib>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <string>
@@ -110,6 +112,141 @@ TEST(PrivateStorageTest, CreatesRestrictedDirectoryAndFile) {
     expect_mode(directory, 0700);
     expect_mode(file, 0600);
 #endif
+}
+
+#if defined(_WIN32)
+TEST(ProfileLockTest, ProtectsNewLockAndPreservesExistingChildren) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("profile-lock-private-dacl");
+    const auto directory =
+        kasumi::test::workspace_path(workspace, "shared");
+    ASSERT_TRUE(std::filesystem::create_directory(directory));
+    const auto child = directory / "existing.txt";
+    {
+        std::ofstream stream(child, std::ios::binary);
+        stream << "keep";
+    }
+
+    const auto lock_path = directory / "config.lock";
+    auto lock = kasumi::platform::acquire_profile_lock(lock_path);
+    if (!lock) {
+        FAIL() << "failed to acquire profile lock: " << lock.error();
+    }
+    expect_private_dacl(directory);
+    expect_private_dacl(lock_path);
+    kasumi::platform::release_profile_lock(*lock);
+
+    std::ifstream input(child, std::ios::binary);
+    const std::string contents{std::istreambuf_iterator<char>{input}, {}};
+    EXPECT_EQ(contents, "keep");
+}
+#else
+TEST(ProfileLockTest, OwnerCanRecoverDirectoryWithoutReadPermission) {
+    if (::geteuid() == 0) {
+        GTEST_SKIP() << "permission recovery must run as an unprivileged user";
+    }
+    auto workspace =
+        kasumi::test::make_temp_workspace("profile-lock-recover-directory");
+    const auto directory =
+        kasumi::test::workspace_path(workspace, "shared");
+    ASSERT_TRUE(kasumi::platform::private_storage::create_directory(directory));
+    ASSERT_EQ(::chmod(directory.c_str(), 0300), 0);
+
+    auto lock = kasumi::platform::acquire_profile_lock(directory / "config.lock");
+    const bool acquired = lock.has_value();
+    const std::string detail = acquired ? std::string{} : lock.error();
+    if (acquired) {
+        kasumi::platform::release_profile_lock(*lock);
+    }
+    struct stat status {};
+    const bool inspected = ::lstat(directory.c_str(), &status) == 0;
+    const auto mode = inspected ? status.st_mode & 0777 : mode_t{};
+    const bool restored = ::chmod(directory.c_str(), 0700) == 0;
+
+    EXPECT_TRUE(restored);
+    ASSERT_TRUE(acquired) << detail;
+    ASSERT_TRUE(inspected);
+    EXPECT_EQ(mode, 0700);
+}
+
+TEST(ProfileLockTest, RejectsInvalidAndInaccessibleParents) {
+    if (::geteuid() == 0) {
+        GTEST_SKIP() << "permission checks must run as an unprivileged user";
+    }
+    auto workspace =
+        kasumi::test::make_temp_workspace("profile-lock-invalid-parents");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto target = root / "target";
+    const auto link = root / "link";
+    ASSERT_TRUE(std::filesystem::create_directory(target));
+    std::error_code error;
+    std::filesystem::create_directory_symlink(target, link, error);
+    ASSERT_FALSE(error) << error.message();
+    EXPECT_FALSE(
+        kasumi::platform::acquire_profile_lock(link / "config.lock"));
+
+    const auto regular = root / "regular";
+    {
+        std::ofstream stream(regular, std::ios::binary);
+        stream << "not a directory";
+    }
+    EXPECT_FALSE(
+        kasumi::platform::acquire_profile_lock(regular / "config.lock"));
+
+    const auto inaccessible = root / "inaccessible";
+    ASSERT_TRUE(std::filesystem::create_directory(inaccessible));
+    ASSERT_EQ(::chmod(inaccessible.c_str(), 0000), 0);
+    auto lock = kasumi::platform::acquire_profile_lock(
+        inaccessible / "config.lock");
+    const bool rejected = !lock.has_value();
+    if (lock) {
+        kasumi::platform::release_profile_lock(*lock);
+    }
+    const bool restored = ::chmod(inaccessible.c_str(), 0700) == 0;
+    EXPECT_TRUE(restored);
+    EXPECT_TRUE(rejected);
+}
+#endif
+
+TEST(ProfileLockTest, RejectsSymlinkAndUnexpectedLockObjects) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("profile-lock-unexpected-objects");
+    const auto directory =
+        kasumi::test::workspace_path(workspace, "shared");
+    ASSERT_TRUE(std::filesystem::create_directory(directory));
+
+    const auto link = directory / "config.lock";
+#if defined(_WIN32)
+    const auto target =
+        kasumi::test::workspace_path(workspace, "junction-target");
+    ASSERT_TRUE(std::filesystem::create_directory(target));
+    const std::string command = "cmd.exe /c mklink /J \"" + link.string() +
+                                "\" \"" + target.string() + "\"";
+    ASSERT_EQ(std::system(command.c_str()), 0);
+#else
+    const auto target = directory / "target.txt";
+    {
+        std::ofstream stream(target, std::ios::binary);
+        stream << "target";
+    }
+    std::error_code error;
+    std::filesystem::create_symlink(target, link, error);
+    if (error) {
+        GTEST_SKIP() << "file symlink creation is unavailable: "
+                     << error.message();
+    }
+#endif
+    EXPECT_FALSE(kasumi::platform::acquire_profile_lock(link).has_value());
+
+#if defined(_WIN32)
+    EXPECT_TRUE(RemoveDirectoryW(link.c_str()));
+#else
+    std::filesystem::remove(link);
+#endif
+    const auto directory_lock = directory / "directory.lock";
+    ASSERT_TRUE(std::filesystem::create_directory(directory_lock));
+    EXPECT_FALSE(
+        kasumi::platform::acquire_profile_lock(directory_lock).has_value());
 }
 
 TEST(WorkspaceTest, RefusesToRemoveAReplacedDirectory) {
@@ -248,6 +385,60 @@ TEST(PrivateStorageTest, AtomicWriteReplacesContentAndLeavesNoTemporaryFile) {
     }
     EXPECT_EQ(entries, 1U);
 }
+
+#if defined(_WIN32)
+TEST(PrivateStorageTest, AtomicWritePreservesOpenReaderSnapshot) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("private-storage-open-reader");
+    const auto directory = kasumi::test::workspace_path(workspace, "private");
+    const auto file = directory / "config.toml";
+    ASSERT_TRUE(kasumi::platform::private_storage::create_directory(directory));
+    ASSERT_TRUE(kasumi::platform::private_storage::write_atomically(file, "old"));
+    const auto native = CreateFileW(
+        file.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    ASSERT_NE(native, INVALID_HANDLE_VALUE);
+    kasumi::platform::private_storage::PrivateHandle reader{
+        reinterpret_cast<std::intptr_t>(native)};
+
+    const auto saved =
+        kasumi::platform::private_storage::write_atomically(file, "new");
+    std::array<char, 3> bytes{};
+    DWORD read = 0;
+    ASSERT_TRUE(ReadFile(native, bytes.data(), static_cast<DWORD>(bytes.size()),
+                         &read, nullptr));
+    const std::string snapshot{bytes.data(), read};
+    EXPECT_EQ(snapshot, "old");
+    reader.close();
+    if (!saved) {
+        FAIL() << "failed to atomically replace config: " << saved.error();
+    }
+    EXPECT_EQ(kasumi::test::read_text(file), "new");
+    expect_private_dacl(file);
+    EXPECT_EQ(std::distance(std::filesystem::directory_iterator(directory),
+                            std::filesystem::directory_iterator{}), 1);
+}
+
+TEST(PrivateStorageTest, AtomicWriteRejectsNonSharingReaderAndKeepsOriginal) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("private-storage-denied-reader");
+    const auto directory = kasumi::test::workspace_path(workspace, "private");
+    const auto file = directory / "config.toml";
+    ASSERT_TRUE(kasumi::platform::private_storage::create_directory(directory));
+    ASSERT_TRUE(kasumi::platform::private_storage::write_atomically(file, "old"));
+    std::ifstream reader(file, std::ios::binary);
+    ASSERT_TRUE(reader);
+    const auto saved =
+        kasumi::platform::private_storage::write_atomically(file, "new");
+    reader.close();
+    EXPECT_FALSE(saved.has_value());
+    EXPECT_EQ(kasumi::test::read_text(file), "old");
+    expect_private_dacl(file);
+    EXPECT_EQ(std::distance(std::filesystem::directory_iterator(directory),
+                            std::filesystem::directory_iterator{}), 1);
+}
+#endif
 
 TEST(PrivateStorageTest, RejectsRedirectingPaths) {
     auto workspace = kasumi::test::make_temp_workspace("private-storage-links");

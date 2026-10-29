@@ -8,12 +8,14 @@
 #include "platform/private_storage.hpp"
 #include "runtime/paths.hpp"
 #include "runtime/profile.hpp"
+#include "runtime/resolver.hpp"
 #include "state_storage/database_connection.hpp"
 #include "state_storage/database.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <barrier>
 #include <chrono>
 #include <csignal>
 #include <condition_variable>
@@ -1434,18 +1436,21 @@ TEST(ApplicationProfileTest,
         kasumi::application::create_profile(environment, base_profile, key()));
 
     constexpr std::size_t num_clones = 6;
+    std::barrier start_gate{static_cast<std::ptrdiff_t>(num_clones + 1)};
     std::vector<std::jthread> threads;
     std::vector<std::expected<void, kasumi::application::ProfileError>> results(
         num_clones);
 
     for (std::size_t i = 0; i < num_clones; ++i) {
         threads.emplace_back([&, i] {
+            start_gate.arrive_and_wait();
             std::string dest_name = "clone_" + std::to_string(i);
             results[i] = kasumi::application::clone_profile(
                 environment, "base", dest_name);
         });
     }
 
+    start_gate.arrive_and_wait();
     for (auto& t : threads) {
         if (t.joinable()) {
             t.join();
@@ -1924,6 +1929,285 @@ struct ProfileFixture {
         return paths ? paths->key_path : std::filesystem::path{};
     }
 };
+
+TEST(ApplicationProfileTest, ClonesAndConfigReadersKeepCompleteSnapshots) {
+    ProfileFixture fixture{"app-profile-clone-readers"};
+    ASSERT_TRUE(save_height(fixture.database_path(), 7));
+    const Profile other{"other", fixture.profile.local_dir, "remote:other"};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        fixture.environment, other, key()));
+    const auto other_paths = kasumi::runtime::resolve_profile_paths(
+        fixture.environment.app_data_dir, "other");
+    ASSERT_TRUE(other_paths.has_value());
+    const auto main_key = kasumi::runtime::vault::read_only(fixture.key_path());
+    ASSERT_TRUE(main_key.has_value());
+    const auto main_database = capture_path(fixture.database_path()).sha256;
+    const auto other_key = capture_path(other_paths->key_path).sha256;
+    const auto other_database = capture_path(other_paths->database_path).sha256;
+    const auto config_path = fixture.environment.app_data_dir / "config.toml";
+    auto initial = kasumi::runtime::load_profiles(config_path);
+    if (!initial) {
+        FAIL() << "failed to load initial profiles: " << initial.error().detail;
+    }
+    std::map<std::string, kasumi::runtime::ProfileData> expected;
+    for (const auto& profile : *initial) {
+        expected.emplace(profile.name, profile);
+    }
+    constexpr std::size_t clones = 6;
+    for (std::size_t i = 0; i < clones; ++i) {
+        auto profile = expected.at("main");
+        profile.name = "clone_" + std::to_string(i);
+        expected.emplace(profile.name, std::move(profile));
+    }
+
+    using ReadResult = decltype(kasumi::runtime::load_profiles(config_path));
+    using ResolveResult = decltype(kasumi::runtime::resolve(
+        fixture.environment.app_data_dir, "main",
+        kasumi::runtime::AccessMode::ReadOnly));
+    std::array<std::vector<ReadResult>, 2> reads;
+    std::array<std::vector<ResolveResult>, 2> resolutions;
+    std::array<std::expected<void, kasumi::application::ProfileError>, clones>
+        cloned;
+    std::barrier start_gate{static_cast<std::ptrdiff_t>(clones + reads.size() + 1)};
+    std::vector<std::jthread> workers;
+    for (std::size_t i = 0; i < clones; ++i) {
+        workers.emplace_back([&, i] {
+            start_gate.arrive_and_wait();
+            cloned[i] = kasumi::application::clone_profile(
+                fixture.environment, "main", "clone_" + std::to_string(i));
+        });
+    }
+    for (std::size_t i = 0; i < reads.size(); ++i) {
+        workers.emplace_back([&, i] {
+            start_gate.arrive_and_wait();
+            for (std::size_t round = 0; round < 64; ++round) {
+                reads[i].push_back(kasumi::runtime::load_profiles(config_path));
+                resolutions[i].push_back(kasumi::runtime::resolve(
+                    fixture.environment.app_data_dir, "main",
+                    kasumi::runtime::AccessMode::ReadOnly));
+            }
+        });
+    }
+    start_gate.arrive_and_wait();
+    workers.clear();
+
+    const auto check_snapshot = [&](const auto& profiles) {
+        std::set<std::string> names;
+        for (const auto& profile : profiles) {
+            EXPECT_TRUE(names.insert(profile.name).second);
+            const auto wanted = expected.find(profile.name);
+            ASSERT_NE(wanted, expected.end());
+            EXPECT_EQ(profile.local_dir, wanted->second.local_dir);
+            EXPECT_EQ(profile.remote_dir, wanted->second.remote_dir);
+            EXPECT_EQ(profile.min_history_depth, wanted->second.min_history_depth);
+            EXPECT_EQ(profile.min_history_age_hours,
+                      wanted->second.min_history_age_hours);
+        }
+        EXPECT_TRUE(names.contains("main"));
+        EXPECT_TRUE(names.contains("other"));
+    };
+    int io_failures = 0;
+    int complete_reads = 0;
+    std::string first_io_error;
+    const auto record_error = [&](const kasumi::runtime::Error& error) {
+        EXPECT_EQ(error.code, kasumi::runtime::ErrorCode::IoFailure)
+            << error.detail;
+        ++io_failures;
+        if (first_io_error.empty()) {
+            first_io_error = error.detail;
+        }
+    };
+    for (std::size_t i = 0; i < reads.size(); ++i) {
+        for (const auto& result : reads[i]) {
+            if (result) {
+                check_snapshot(*result);
+                ++complete_reads;
+            } else {
+                record_error(result.error());
+            }
+        }
+        for (const auto& result : resolutions[i]) {
+            if (result) {
+                EXPECT_EQ(result->local_dir, fixture.profile.local_dir);
+                EXPECT_EQ(result->storage_location, fixture.profile.remote_dir);
+                EXPECT_EQ(result->key_path, fixture.key_path());
+                EXPECT_EQ(result->database_path, fixture.database_path());
+            } else {
+                record_error(result.error());
+            }
+        }
+    }
+    RecordProperty("concurrent_read_io_failures", io_failures);
+    RecordProperty("first_concurrent_read_io_error", first_io_error);
+    EXPECT_EQ(io_failures, 0)
+        << "First concurrent read failure: " << first_io_error;
+    EXPECT_GT(complete_reads, 0);
+    for (std::size_t i = 0; i < clones; ++i) {
+        if (!cloned[i]) {
+            ADD_FAILURE() << "clone_" << i << ": "
+                          << cloned[i].error().detail;
+        }
+    }
+    auto final = kasumi::runtime::load_profiles(config_path);
+    if (!final) {
+        FAIL() << "failed to load final profiles: " << final.error().detail;
+    }
+    check_snapshot(*final);
+    EXPECT_EQ(final->size(), expected.size());
+    for (const auto& profile : *final) {
+        const auto paths = kasumi::runtime::resolve_profile_paths(
+            fixture.environment.app_data_dir, profile.name);
+        ASSERT_TRUE(paths.has_value());
+        EXPECT_TRUE(kasumi::state_storage::validate(paths->database_path));
+        if (profile.name != "other") {
+            const auto cloned_key =
+                kasumi::runtime::vault::read_only(paths->key_path);
+            ASSERT_TRUE(cloned_key.has_value());
+            EXPECT_EQ(*cloned_key, *main_key);
+        }
+    }
+    EXPECT_EQ(capture_path(fixture.database_path()).sha256, main_database);
+    EXPECT_EQ(capture_path(other_paths->key_path).sha256, other_key);
+    EXPECT_EQ(capture_path(other_paths->database_path).sha256, other_database);
+}
+
+TEST(ApplicationProfileTest, DistinctProfileLockDoesNotInterfereWithConfigWrites) {
+    ProfileFixture fixture{"app-profile-distinct-locks"};
+    const auto directory = fixture.environment.app_data_dir;
+    const auto config_path = directory / "config.toml";
+    auto profiles = kasumi::runtime::load_profiles(config_path);
+    if (!profiles) {
+        FAIL() << "failed to load profiles: " << profiles.error().detail;
+    }
+    const auto key_before = capture_path(fixture.key_path()).sha256;
+    const auto database_before = capture_path(fixture.database_path()).sha256;
+#if defined(_WIN32)
+    const auto directory_acl = windows_security_hash(directory);
+    const auto config_acl = windows_security_hash(config_path);
+#endif
+    constexpr std::size_t rounds = 64;
+    std::array<std::string, rounds> write_errors;
+    std::array<std::string, rounds> lock_errors;
+    std::string config_lock_error;
+    std::barrier phase{2};
+    std::jthread writer([&] {
+        auto lock = kasumi::platform::acquire_profile_lock(directory / "config.lock");
+        if (!lock) {
+            config_lock_error = lock.error();
+        }
+        for (std::size_t i = 0; i < rounds; ++i) {
+            phase.arrive_and_wait();
+            if (lock) {
+                profiles->front().min_history_depth =
+                    5U + static_cast<std::uint32_t>(i % 2);
+                auto saved = kasumi::runtime::save_profiles(config_path, *profiles);
+                if (!saved) {
+                    write_errors[i] = saved.error().detail;
+                }
+            }
+            phase.arrive_and_wait();
+        }
+        if (lock) {
+            kasumi::platform::release_profile_lock(*lock);
+        }
+    });
+    std::jthread locker([&] {
+        for (std::size_t i = 0; i < rounds; ++i) {
+            phase.arrive_and_wait();
+            auto lock = kasumi::platform::acquire_profile_lock(
+                directory / "profile-main.lock");
+            if (lock) {
+                kasumi::platform::release_profile_lock(*lock);
+            } else {
+                lock_errors[i] = lock.error();
+            }
+            phase.arrive_and_wait();
+        }
+    });
+    writer.join();
+    locker.join();
+    EXPECT_TRUE(config_lock_error.empty()) << config_lock_error;
+    for (std::size_t i = 0; i < rounds; ++i) {
+        EXPECT_TRUE(write_errors[i].empty()) << "write " << i << ": " << write_errors[i];
+        EXPECT_TRUE(lock_errors[i].empty()) << "lock " << i << ": " << lock_errors[i];
+    }
+    const auto final = kasumi::runtime::load_profiles(config_path);
+    if (!final) {
+        FAIL() << "failed to load final profiles: " << final.error().detail;
+    }
+    ASSERT_EQ(final->size(), 1U);
+    EXPECT_EQ(final->front().min_history_depth, 6U);
+    EXPECT_EQ(capture_path(fixture.key_path()).sha256, key_before);
+    EXPECT_EQ(capture_path(fixture.database_path()).sha256, database_before);
+#if defined(_WIN32)
+    EXPECT_EQ(windows_security_hash(directory), directory_acl);
+    EXPECT_EQ(windows_security_hash(config_path), config_acl);
+#endif
+}
+
+#if defined(_WIN32)
+TEST(ApplicationProfileTest, BusyConfigLockDoesNotModifyParentAcl) {
+    ProfileFixture fixture{"app-profile-busy-lock-acl"};
+    const auto directory = fixture.environment.app_data_dir;
+    const auto lock_path = directory / "config.lock";
+    auto held = kasumi::platform::acquire_profile_lock(lock_path);
+    if (!held) {
+        FAIL() << "failed to acquire config lock: " << held.error();
+    }
+
+    ASSERT_TRUE(grant_everyone_read(directory));
+    const auto before = windows_security_hash(directory);
+    const std::array<std::byte, 32> empty_acl{};
+    ASSERT_NE(before, empty_acl);
+    const auto resources_before = capture_directory_snapshot(directory);
+
+    auto contender = kasumi::platform::acquire_profile_lock(lock_path);
+    EXPECT_FALSE(contender.has_value());
+    const auto clone = kasumi::application::clone_profile(
+        fixture.environment, "main", "blocked");
+    EXPECT_FALSE(clone.has_value());
+    if (!clone) {
+        EXPECT_EQ(clone.error().code,
+                  kasumi::application::ProfileErrorCode::LockFailure);
+    }
+    EXPECT_EQ(windows_security_hash(directory), before);
+    EXPECT_EQ(capture_directory_snapshot(directory), resources_before);
+    kasumi::platform::release_profile_lock(*held);
+}
+#else
+TEST(ApplicationProfileTest, RecoversExistingConfigDirectoryWithoutReadAccess) {
+    if (::geteuid() == 0) {
+        GTEST_SKIP() << "permission recovery must run as an unprivileged user";
+    }
+    auto workspace =
+        kasumi::test::make_temp_workspace("app-profile-recover-config-dir");
+    const ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "app")};
+    ASSERT_TRUE(kasumi::platform::private_storage::create_directory(
+        environment.app_data_dir));
+    ASSERT_EQ(::chmod(environment.app_data_dir.c_str(), 0300), 0);
+
+    const Profile profile{
+        "main",
+        kasumi::test::workspace_path(workspace, "local"),
+        "remote:root"};
+    auto result =
+        kasumi::application::create_profile(environment, profile, key());
+    const bool succeeded = result.has_value();
+    const std::string detail = succeeded ? std::string{} : result.error().detail;
+    struct stat status {};
+    const bool inspected =
+        ::lstat(environment.app_data_dir.c_str(), &status) == 0;
+    const auto mode = inspected ? status.st_mode & 0777 : mode_t{};
+    const bool restored =
+        ::chmod(environment.app_data_dir.c_str(), 0700) == 0;
+
+    EXPECT_TRUE(restored);
+    ASSERT_TRUE(succeeded) << detail;
+    ASSERT_TRUE(inspected);
+    EXPECT_EQ(mode, 0700);
+}
+#endif
 
 bool remove_sidecars_after_checkpoint(const std::filesystem::path& db) {
     auto opened = kasumi::sqlite::open(db, SQLITE_OPEN_READWRITE);

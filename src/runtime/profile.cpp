@@ -4,12 +4,20 @@
 #include "platform/private_storage.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdint>
 #include <fstream>
 #include <limits>
 #include <sstream>
 #include <toml++/toml.h>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace kasumi::runtime {
 
@@ -101,6 +109,49 @@ load_profiles(const std::filesystem::path& config_path) {
     }
     toml::table config;
     try {
+#if defined(_WIN32)
+        const auto native = CreateFileW(
+            config_path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        if (native == INVALID_HANDLE_VALUE) {
+            return std::unexpected(Error{
+                .code = ErrorCode::IoFailure,
+                .detail = "failed to open global configuration (native_code=" +
+                          std::to_string(GetLastError()) + ")"});
+        }
+        platform::private_storage::PrivateHandle input{
+            reinterpret_cast<std::intptr_t>(native)};
+        FILE_ATTRIBUTE_TAG_INFO attributes{};
+        if (!GetFileInformationByHandleEx(native, FileAttributeTagInfo,
+                                          &attributes, sizeof(attributes)) ||
+            (attributes.FileAttributes &
+             (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY |
+              FILE_ATTRIBUTE_DEVICE)) != 0) {
+            return std::unexpected(Error{
+                .code = ErrorCode::IoFailure,
+                .detail = "global configuration is not an accessible regular file"});
+        }
+        std::string snapshot;
+        std::array<char, 4096> buffer{};
+        for (;;) {
+            DWORD count = 0;
+            if (!ReadFile(native, buffer.data(),
+                          static_cast<DWORD>(buffer.size()), &count, nullptr)) {
+                return std::unexpected(Error{
+                    .code = ErrorCode::IoFailure,
+                    .detail = "failed to read global configuration (native_code=" +
+                              std::to_string(GetLastError()) + ")"});
+            }
+            if (count == 0) {
+                break;
+            }
+            snapshot.append(buffer.data(), count);
+        }
+        input.close();
+        config = toml::parse(snapshot, platform::path::to_utf8(config_path));
+#else
         std::ifstream input(config_path, std::ios::binary);
         if (!input) {
             return std::unexpected(
@@ -108,6 +159,7 @@ load_profiles(const std::filesystem::path& config_path) {
                       .detail = "failed to open global configuration"});
         }
         config = toml::parse(input, platform::path::to_utf8(config_path));
+#endif
     } catch (const toml::parse_error& error) {
         return std::unexpected(
             Error{.code = ErrorCode::ConfigInvalid,

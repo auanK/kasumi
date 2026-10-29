@@ -4,8 +4,11 @@
 #include "platform/perf_trace.hpp"
 
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
+#include <limits>
 #include <system_error>
+#include <vector>
 
 #if defined(__linux__)
 #include <linux/fs.h>
@@ -149,6 +152,58 @@ replace_atomically(const std::filesystem::path& source,
                     target.wstring().c_str(),
                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
         const auto error = GetLastError();
+#if defined(FILE_RENAME_FLAG_POSIX_SEMANTICS)
+        if (error == ERROR_ACCESS_DENIED) {
+            // MoveFileEx may reject an open target despite delete sharing.
+            // A single POSIX rename keeps those readers on the old snapshot.
+            std::error_code path_error;
+            const auto target_name =
+                std::filesystem::absolute(target, path_error).wstring();
+            if (path_error) {
+                return std::unexpected("replace_atomically: " + path_error.message());
+            }
+            const auto name_bytes = target_name.size() * sizeof(wchar_t);
+            if (name_bytes > std::numeric_limits<DWORD>::max() -
+                                 sizeof(FILE_RENAME_INFO)) {
+                return std::unexpected("replace_atomically: target path is too long");
+            }
+            std::vector<std::byte> buffer(sizeof(FILE_RENAME_INFO) + name_bytes);
+            auto* rename = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
+            rename->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS |
+                            FILE_RENAME_FLAG_POSIX_SEMANTICS;
+            rename->RootDirectory = nullptr;
+            rename->FileNameLength = static_cast<DWORD>(name_bytes);
+            std::memcpy(rename->FileName, target_name.data(), name_bytes);
+            const auto file = CreateFileW(
+                source.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr, OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH, nullptr);
+            if (file == INVALID_HANDLE_VALUE) {
+                return std::unexpected(native_error(
+                    "replace_atomically: open source failed", GetLastError()));
+            }
+            FILE_ATTRIBUTE_TAG_INFO attributes{};
+            if (!GetFileInformationByHandleEx(file, FileAttributeTagInfo,
+                                              &attributes, sizeof(attributes)) ||
+                (attributes.FileAttributes &
+                 (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY |
+                  FILE_ATTRIBUTE_DEVICE)) != 0) {
+                CloseHandle(file);
+                return std::unexpected("replace_atomically: source is not a regular file");
+            }
+            const bool flushed = FlushFileBuffers(file) != 0;
+            const bool renamed = flushed && SetFileInformationByHandle(
+                file, FileRenameInfoEx, rename, static_cast<DWORD>(buffer.size()));
+            const auto rename_error = renamed ? ERROR_SUCCESS : GetLastError();
+            CloseHandle(file);
+            if (!renamed) {
+                return std::unexpected(native_error(
+                    "replace_atomically: POSIX rename failed", rename_error));
+            }
+            return {};
+        }
+#endif
         return std::unexpected(
             native_error("replace_atomically failed", error));
     }

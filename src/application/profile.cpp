@@ -83,16 +83,55 @@ ProfileError map_runtime_error(const runtime::Error& err) {
 }
 class ScopedConfigLock {
 public:
+    // Six-clone contention exceeded 500 ms under load; keep waits bounded at 2 s.
     static std::expected<ScopedConfigLock, ProfileError>
     acquire(const std::filesystem::path& app_data_dir,
-            std::chrono::milliseconds timeout = std::chrono::milliseconds(500)) {
-        auto secured = platform::private_storage::ensure_directory(app_data_dir);
-        if (!secured) {
+            std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
+        namespace storage = platform::private_storage;
+        std::error_code status_error;
+        auto status = std::filesystem::symlink_status(app_data_dir,
+                                                      status_error);
+        const bool missing =
+            status_error == std::errc::no_such_file_or_directory ||
+            (!status_error &&
+             status.type() == std::filesystem::file_type::not_found);
+        if (status_error && !missing) {
             return std::unexpected(ProfileError{
                 .code = ProfileErrorCode::StorageFailure,
-                .detail = secured.error(),
+                .detail = "could not inspect configuration directory: " +
+                          status_error.message(),
             });
         }
+        if (missing) {
+            auto created = storage::create_directory(app_data_dir);
+            status_error.clear();
+            status = std::filesystem::symlink_status(app_data_dir,
+                                                     status_error);
+            if (!created &&
+                (status_error ||
+                 status.type() != std::filesystem::file_type::directory)) {
+                return std::unexpected(ProfileError{
+                    .code = ProfileErrorCode::StorageFailure,
+                    .detail = created.error(),
+                });
+            }
+        }
+        if (status_error ||
+            status.type() != std::filesystem::file_type::directory) {
+            return std::unexpected(ProfileError{
+                .code = ProfileErrorCode::StorageFailure,
+                .detail = "configuration path is not a plain directory",
+            });
+        }
+#if defined(_WIN32)
+        if (!storage::query_directory_identity(app_data_dir).valid) {
+            return std::unexpected(ProfileError{
+                .code = ProfileErrorCode::StorageFailure,
+                .detail = "configuration path is not an accessible plain "
+                          "directory",
+            });
+        }
+#endif
         const auto lock_path = app_data_dir / "config.lock";
         const auto start = std::chrono::steady_clock::now();
         std::string last_error;
