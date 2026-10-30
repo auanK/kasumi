@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.1]
+
+### Fixed
+
+- Fixed downloads directly beneath a trailing-slash symlink synchronization root without permitting symlink traversal inside the synchronized tree.
+
 ## [0.9.0]
 
 ### Added
