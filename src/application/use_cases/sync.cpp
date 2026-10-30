@@ -71,6 +71,9 @@ SyncCompleted compute_sync_summary(const reconciliation::Result& result) {
 
 std::expected<Response, Error> run_sync(OperationContext& context) {
     const auto sync_start = std::chrono::steady_clock::now();
+    platform::perf_trace::count("rc/get_content", 0);
+    platform::perf_trace::count("rc/put_content", 0);
+    platform::perf_trace::count("content batch PUT objects completed", 0);
     platform::perf_trace::maximum(
         "configured content concurrency",
         sync::coordinator::detail::content_concurrency());

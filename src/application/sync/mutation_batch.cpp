@@ -199,6 +199,8 @@ MutationResult transfer_upload_batch(const StagedUploadBatch& batch,
                        batch.objects.front().operation_indices.front()));
     }
 
+    platform::perf_trace::count("content batch PUT objects completed",
+                                request.identifiers.size());
     return {};
 }
 
