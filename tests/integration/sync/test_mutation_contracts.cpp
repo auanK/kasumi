@@ -747,6 +747,85 @@ TEST(MutationRaceCharacterizationTest, LateEditDuringRollbackRemovalHasConsisten
     }
 }
 
+#if !defined(_WIN32)
+TEST(LocalMutationContractTest, DownloadIntoTrailingSlashSymlinkRoot) {
+    auto workspace = test::make_temp_workspace("root-symlink-download");
+    const auto root = test::workspace_root(workspace);
+    const auto real_root = root / "real";
+    const auto link = root / "linked";
+    const auto storage_dir = root / "storage";
+    const platform::Workspace transaction{root / "tx"};
+    std::filesystem::create_directories(real_root);
+    std::filesystem::create_directories(storage_dir);
+    std::filesystem::create_directories(transaction.root);
+    std::filesystem::create_directory_symlink(real_root, link);
+
+    const std::filesystem::path configured_root{link.string() + "/"};
+    test::write_text(root / "remote_src", "REMOTE_R");
+    const auto hash = hasher::hash_string("REMOTE_R");
+    const Operation operation{.action = Action::Download,
+                              .path = "file.txt",
+                              .hash = hash_hex(hash),
+                              .size = 8};
+    const auto prepared = mutation::prepare_operation(
+        operation, 0, configured_root, transaction, {.backup_slot = 0});
+    ASSERT_TRUE(prepared.has_value());
+
+    auto storage = transport::open_transport(storage_dir.string());
+    ASSERT_TRUE(storage.has_value());
+    ASSERT_TRUE(transport::initialize(*storage));
+    stage_remote_object(*storage, root / "remote_src", hash);
+
+    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
+    const auto applied = mutation::apply_operation(
+        operation, 0, configured_root, *storage, key, transaction, *prepared);
+    ASSERT_TRUE(applied.has_value())
+        << (applied ? "" : mutation::describe(applied.error()));
+    EXPECT_EQ(test::read_text(real_root / "file.txt"), "REMOTE_R");
+    EXPECT_TRUE(std::filesystem::is_symlink(std::filesystem::symlink_status(link)));
+}
+
+TEST(LocalMutationContractTest, InternalSymlinkStillRejectedWithLinkedRoot) {
+    auto workspace = test::make_temp_workspace("root-symlink-child");
+    const auto root = test::workspace_root(workspace);
+    const auto real_root = root / "real";
+    const auto outside = root / "outside";
+    const auto link = root / "linked";
+    const platform::Workspace transaction{root / "tx"};
+    std::filesystem::create_directories(real_root);
+    std::filesystem::create_directories(outside);
+    std::filesystem::create_directories(transaction.root);
+    std::filesystem::create_directory_symlink(real_root, link);
+    std::filesystem::create_directory_symlink(outside, real_root / "child");
+
+    const std::filesystem::path configured_root{link.string() + "/"};
+    const Operation operation{.action = Action::Download,
+                              .path = "child/file.txt"};
+    const auto prepared = mutation::prepare_operation(
+        operation, 0, configured_root, transaction, {.backup_slot = 0});
+    ASSERT_FALSE(prepared.has_value());
+    EXPECT_EQ(prepared.error().code, mutation::MutationErrorCode::UnsafePath);
+    EXPECT_FALSE(std::filesystem::exists(outside / "file.txt"));
+}
+
+TEST(LocalMutationContractTest, SymlinkRootWithoutTrailingSlashRemainsRejected) {
+    auto workspace = test::make_temp_workspace("root-symlink-no-slash");
+    const auto root = test::workspace_root(workspace);
+    const auto real_root = root / "real";
+    const auto link = root / "linked";
+    const platform::Workspace transaction{root / "tx"};
+    std::filesystem::create_directories(real_root);
+    std::filesystem::create_directories(transaction.root);
+    std::filesystem::create_directory_symlink(real_root, link);
+    const Operation operation{.action = Action::Download,
+                              .path = "file.txt"};
+    const auto prepared = mutation::prepare_operation(
+        operation, 0, link, transaction, {.backup_slot = 0});
+    ASSERT_FALSE(prepared.has_value());
+    EXPECT_EQ(prepared.error().code, mutation::MutationErrorCode::UnsafePath);
+}
+#endif
+
 // Download after confirmed RenameLocal
 TEST(LocalMutationContractTest, DownloadAfterConfirmedRenameLocal) {
     auto workspace = test::make_temp_workspace("mutation-race-test");

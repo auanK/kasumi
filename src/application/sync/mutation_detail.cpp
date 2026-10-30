@@ -124,7 +124,41 @@ resolve_local_path(const std::filesystem::path& local_root,
                                           operation_index));
     }
 
-    const auto normalized_root = local_root.lexically_normal();
+    auto normalized_root = local_root.lexically_normal();
+#if !defined(_WIN32)
+    if (normalized_root.filename().empty()) {
+        const auto root_link = normalized_root.parent_path();
+        auto link_status = read_status(root_link, operation_index);
+        if (!link_status) {
+            return std::unexpected(link_status.error());
+        }
+        if (std::filesystem::is_symlink(*link_status)) {
+            std::error_code error;
+            auto physical_root = std::filesystem::canonical(normalized_root, error);
+            if (error) {
+                return std::unexpected(make_error(
+                    MutationErrorCode::UnsafePath,
+                    "configured root symlink could not be resolved: " +
+                        error.message(),
+                    local_root,
+                    operation_index));
+            }
+            auto physical_status = read_status(physical_root, operation_index);
+            if (!physical_status) {
+                return std::unexpected(physical_status.error());
+            }
+            if (std::filesystem::is_symlink(*physical_status) ||
+                !std::filesystem::is_directory(*physical_status)) {
+                return std::unexpected(make_error(
+                    MutationErrorCode::UnsafePath,
+                    "configured root does not resolve to a physical directory",
+                    local_root,
+                    operation_index));
+            }
+            normalized_root = std::move(physical_root);
+        }
+    }
+#endif
     const auto candidate = (normalized_root / relative).lexically_normal();
     const auto relative_candidate =
         candidate.lexically_relative(normalized_root);
