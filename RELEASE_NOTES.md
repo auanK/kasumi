@@ -1,30 +1,25 @@
-# Kasumi v0.8.4
+# Kasumi v0.9.0
 
-Release focused on initial vault enrollment, efficient orphan content bootstrapping, and stability fixes.
+Release focused on profile management, reconciliation of concurrent histories, CLI reliability, and more efficient garbage collection.
 
 ## Highlights
 
-### Initial Vault Enrollment
+### Profile Management and Local State
 
-`kasumi sync <profile> --initial` now supports joining an existing authenticated remote vault from an uninitialized client. The client verifies remote history and head markers before reconciling its local directory with the remote snapshot, failing closed if remote history is incomplete or invalid.
+Clone profiles through `kasumi config` to reuse settings and the master key with fresh SQLite state. The wizard shows local profile state without contacting remote storage, and configuration mutations are serialized across local processes.
 
-### Trusted Content Bootstrapping
+### Concurrent History Reconciliation
 
-For initial synchronization against remote storage containing pre-existing orphan Content objects, Kasumi introduces:
+Sync can now reconcile histories with multiple best common ancestors, combining independent edits and preserving conflict variants and later deletions. Previously rejected concurrent histories can converge when the required authenticated ancestry is available; the [history rules](docs/architecture/history-and-concurrency.md#selecting-the-merge-base) describe the limits.
 
-```bash
-kasumi sync <profile> --initial --trust-existing-content
-```
+### CLI and Recovery Reliability
 
-This flag avoids pre-verifying reused remote content and skips redundant uploads for matching Content objects, significantly reducing network operations during initial onboarding. Because remote Content payloads are not inspected prior to reuse, using this flag implies explicit trust in those existing objects; running `kasumi fsck` subsequently is recommended for offline integrity verification. Redundant remote presence queries are avoided by leveraging the initial storage listing.
+The CLI standardizes argument validation and contextual help, reports elapsed time for executed operations, and observes cancellation at safe boundaries. Windows preserves native Unicode arguments and handles concurrent configuration access more reliably. Clone rollback and interrupted Sync cleanup verify ownership before removing temporary state.
 
-### Stability and Concurrency Fixes
+### Garbage Collection
 
-- **Database and State Validation:** SQLite detection rejects symlinks and invalid filesystem objects at the database path, while safely reusing empty databases left by interrupted initial runs.
-- **Fail-Closed Concurrency:** Operations with `--trust-existing-content` fail closed if remote history is published concurrently during bootstrap.
-- **History Authentication:** Remote history is strictly authenticated before the local database is initialized or updated.
+GC classifies orphan Content from authenticated reachability without payload auditing and removes candidates in bounded batches. Explicit abandoned-barrier recovery and clearer partial-removal diagnostics help operators recover interrupted maintenance. Stop Sync on every client before GC and follow the [operational contract](docs/architecture/garbage-collection.md#operational-contract).
 
 ## Compatibility
 
-- **Remote Protocol:** The remote storage layout, ciphertext format, and authentication mechanisms remain fully unchanged.
-- **Standard Sync:** Normal sync and no-op operations retain zero overhead.
+Kasumi provides no backward compatibility between 0.x releases or automatic migration of local and remote formats. Use the same release on all clients and follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi) before replacing binaries. `kasumi update` replaces only the executable.

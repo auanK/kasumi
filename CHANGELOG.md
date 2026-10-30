@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.9.0]
+
+### Added
+
+- Added profile cloning in `kasumi config`, reusing settings and the master key with a new empty SQLite database.
+- Added local profile-state indicators in the configuration wizard without contacting remote storage or modifying persistent profile data.
+- Added explicit recovery of abandoned maintenance barriers with `gc remove-barrier --confirm-abandoned`.
+
+### Changed
+
+- Standardized CLI argument validation, contextual help, elapsed-time reporting, and cancellation at safe operation boundaries.
+- GC revalidates barrier ownership before deletion and reports acknowledged removals and uncertain effects separately.
+
+### Fixed
+
+- Reconciled histories with multiple best common ancestors, preserving independent changes, conflict variants, and later deletions within authenticated history limits.
+- Serialized configuration mutations and corrected concurrent configuration reads, atomic replacement, permissions, and profile-lock handling on Windows.
+- Hardened profile-clone rollback and interrupted Sync cleanup with filesystem identity and ownership checks.
+- Preserved native Unicode command-line arguments on Windows independently of the system ANSI code page.
+
+### Performance
+
+- Reduced GC remote I/O by classifying orphan Content through authenticated reachability without payload auditing and applying candidate deletions in bounded batches.
+
 ## [0.8.4]
 
 ### Added
