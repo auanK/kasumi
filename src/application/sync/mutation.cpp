@@ -58,11 +58,17 @@ move_local_without_replace(const std::filesystem::path& source,
     if (!source_status) {
         return std::unexpected(source_status.error());
     }
-    if (std::filesystem::is_symlink(*source_status) ||
-        !std::filesystem::is_regular_file(*source_status)) {
+    if (std::filesystem::is_symlink(*source_status)) {
         return std::unexpected(
-            make_error(MutationErrorCode::DestinationConflict,
-                       "source is not a regular file without symlink",
+            make_error(MutationErrorCode::UnsafePath,
+                       "source is a symlink",
+                       source,
+                       operation_index));
+    }
+    if (!std::filesystem::is_regular_file(*source_status)) {
+        return std::unexpected(
+            make_error(MutationErrorCode::LocalIo,
+                       "source is not a regular file",
                        source,
                        operation_index));
     }
