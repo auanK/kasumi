@@ -11,12 +11,12 @@
 #include "application/sync/mutation_detail.hpp"
 #include "application/sync/publication.hpp"
 #include "coordinator_detail.hpp"
+#include "core/hasher.hpp"
 #include "core/history.hpp"
 #include "core/reconciliation/plan.hpp"
 #include "core/transaction/types.hpp"
-#include "journal_fault_test.hpp"
 #include "crypto/key_derivation.hpp"
-#include "core/hasher.hpp"
+#include "journal_fault_test.hpp"
 #include "platform/clock.hpp"
 #include "platform/durability.hpp"
 #include "platform/metadata.hpp"
@@ -53,6 +53,7 @@ inline constexpr std::array<std::string_view, ActionCount> action_metrics{
     "action/Upload",
     "action/CreateLocalDirectory",
     "action/CreateRemoteDirectory",
+    "action/MoveLocal",
     "action/Download",
     "action/DeleteLocal",
     "action/DeleteLocalDirectory",
@@ -171,16 +172,16 @@ constexpr std::string_view workspace_owner_sidecar_prefix =
     ".kasumi-workspace-owner-";
 constexpr std::string_view workspace_quarantine_prefix = ".kasumi-cleanup-";
 
-std::filesystem::path workspace_owner_sidecar(
-    const std::filesystem::path& directory,
-    std::string_view id) {
-    return directory / platform::path::from_utf8(
-                           std::string{workspace_owner_sidecar_prefix} +
-                           std::string{id});
+std::filesystem::path
+workspace_owner_sidecar(const std::filesystem::path& directory,
+                        std::string_view id) {
+    return directory /
+           platform::path::from_utf8(
+               std::string{workspace_owner_sidecar_prefix} + std::string{id});
 }
 
-std::optional<std::string> transaction_id_from_owner_sidecar(
-    std::string_view name) {
+std::optional<std::string>
+transaction_id_from_owner_sidecar(std::string_view name) {
     if (!name.starts_with(workspace_owner_sidecar_prefix)) {
         return std::nullopt;
     }
@@ -191,8 +192,8 @@ std::optional<std::string> transaction_id_from_owner_sidecar(
     return std::string{id};
 }
 
-std::optional<std::string> transaction_id_from_quarantine(
-    std::string_view name) {
+std::optional<std::string>
+transaction_id_from_quarantine(std::string_view name) {
     if (!name.starts_with(workspace_quarantine_prefix)) {
         return std::nullopt;
     }
@@ -216,9 +217,9 @@ std::string workspace_owner_payload(
            std::to_string(identity.file_id_high) + "\n";
 }
 
-std::string workspace_owner_mac(
-    std::string_view payload,
-    std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+std::string
+workspace_owner_mac(std::string_view payload,
+                    std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
     const auto bytes = std::span{
         reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size()};
     return hash_hex(crypto::derive_identifier(
@@ -229,7 +230,8 @@ std::optional<std::uint64_t> parse_workspace_id(std::string_view text) {
     std::uint64_t value = 0;
     const auto [end, error] =
         std::from_chars(text.data(), text.data() + text.size(), value);
-    if (text.empty() || error != std::errc{} || end != text.data() + text.size()) {
+    if (text.empty() || error != std::errc{} ||
+        end != text.data() + text.size()) {
         return std::nullopt;
     }
     return value;
@@ -244,10 +246,10 @@ std::expected<void, Error> write_workspace_owner(
     const auto text = payload + workspace_owner_mac(payload, key) + "\n";
     auto written = platform::private_storage::write_atomically(marker, text);
     if (!written) {
-        return std::unexpected(workspace_error(
-            "failed to persist transaction workspace ownership",
-            marker,
-            written.error()));
+        return std::unexpected(
+            workspace_error("failed to persist transaction workspace ownership",
+                            marker,
+                            written.error()));
     }
     return {};
 }
@@ -272,10 +274,10 @@ read_workspace_owner_marker(
     }
     if (std::filesystem::is_symlink(status) ||
         !std::filesystem::is_regular_file(status)) {
-        return std::unexpected(workspace_error(
-            "invalid transaction workspace owner marker",
-            marker,
-            "expected a regular file"));
+        return std::unexpected(
+            workspace_error("invalid transaction workspace owner marker",
+                            marker,
+                            "expected a regular file"));
     }
     const auto size = std::filesystem::file_size(marker, error);
     if (error || size > 256) {
@@ -287,51 +289,51 @@ read_workspace_owner_marker(
     std::ifstream input(marker, std::ios::binary);
     const std::string text{std::istreambuf_iterator<char>{input}, {}};
     if (input.bad()) {
-        return std::unexpected(workspace_error(
-            "failed to read transaction workspace owner marker",
-            marker,
-            "read failed"));
+        return std::unexpected(
+            workspace_error("failed to read transaction workspace owner marker",
+                            marker,
+                            "read failed"));
     }
     std::array<std::string_view, 6> lines{};
     std::string_view remaining{text};
     for (auto& line : lines) {
         const auto newline = remaining.find('\n');
         if (newline == std::string_view::npos) {
-            return std::unexpected(workspace_error(
-                "invalid transaction workspace owner marker",
-                marker,
-                "malformed marker"));
+            return std::unexpected(
+                workspace_error("invalid transaction workspace owner marker",
+                                marker,
+                                "malformed marker"));
         }
         line = remaining.substr(0, newline);
         remaining.remove_prefix(newline + 1);
     }
     if (!remaining.empty() || lines[0] != "kasumi-transaction-workspace-v1" ||
         lines[1] != id) {
-        return std::unexpected(workspace_error(
-            "invalid transaction workspace owner marker",
-            marker,
-            "operation identifier or format mismatch"));
+        return std::unexpected(
+            workspace_error("invalid transaction workspace owner marker",
+                            marker,
+                            "operation identifier or format mismatch"));
     }
     const auto volume = parse_workspace_id(lines[2]);
     const auto low = parse_workspace_id(lines[3]);
     const auto high = parse_workspace_id(lines[4]);
     if (!volume || !low || !high) {
-        return std::unexpected(workspace_error(
-            "invalid transaction workspace owner marker",
-            marker,
-            "invalid directory identity"));
+        return std::unexpected(
+            workspace_error("invalid transaction workspace owner marker",
+                            marker,
+                            "invalid directory identity"));
     }
-    platform::private_storage::DirectoryIdentity identity{
-        .volume_or_dev = *volume,
-        .file_id_low = *low,
-        .file_id_high = *high,
-        .valid = true};
+    platform::private_storage::DirectoryIdentity identity{.volume_or_dev =
+                                                              *volume,
+                                                          .file_id_low = *low,
+                                                          .file_id_high = *high,
+                                                          .valid = true};
     const auto payload = workspace_owner_payload(id, identity);
     if (lines[5] != workspace_owner_mac(payload, key)) {
-        return std::unexpected(workspace_error(
-            "invalid transaction workspace owner marker",
-            marker,
-            "authentication mismatch"));
+        return std::unexpected(
+            workspace_error("invalid transaction workspace owner marker",
+                            marker,
+                            "authentication mismatch"));
     }
     return std::optional{identity};
 }
@@ -341,8 +343,8 @@ std::expected<std::optional<platform::private_storage::DirectoryIdentity>,
 read_workspace_owner(const std::filesystem::path& root,
                      std::string_view id,
                      std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
-    const auto internal = read_workspace_owner_marker(
-        root / workspace_owner_file, id, key);
+    const auto internal =
+        read_workspace_owner_marker(root / workspace_owner_file, id, key);
     if (!internal) {
         return std::unexpected(internal.error());
     }
@@ -352,18 +354,18 @@ read_workspace_owner(const std::filesystem::path& root,
         return std::unexpected(sidecar.error());
     }
     if (*internal && *sidecar && **internal != **sidecar) {
-        return std::unexpected(workspace_error(
-            "invalid transaction workspace owner marker",
-            workspace_owner_sidecar(root.parent_path(), id),
-            "internal and durable ownership proofs disagree"));
+        return std::unexpected(
+            workspace_error("invalid transaction workspace owner marker",
+                            workspace_owner_sidecar(root.parent_path(), id),
+                            "internal and durable ownership proofs disagree"));
     }
     const auto owner = *internal ? *internal : *sidecar;
     if (owner &&
         platform::private_storage::query_directory_identity(root) != *owner) {
-        return std::unexpected(workspace_error(
-            "invalid transaction workspace owner marker",
-            root / workspace_owner_file,
-            "directory identity mismatch"));
+        return std::unexpected(
+            workspace_error("invalid transaction workspace owner marker",
+                            root / workspace_owner_file,
+                            "directory identity mismatch"));
     }
     return owner;
 }
@@ -381,10 +383,10 @@ std::expected<void, Error> retire_workspace_owner(
         return {};
     }
     if (!identity.valid || **owner != identity) {
-        return std::unexpected(workspace_error(
-            "invalid transaction workspace owner marker",
-            sidecar,
-            "saved directory identity mismatch"));
+        return std::unexpected(
+            workspace_error("invalid transaction workspace owner marker",
+                            sidecar,
+                            "saved directory identity mismatch"));
     }
     std::error_code error;
     std::filesystem::remove(sidecar, error);
@@ -406,10 +408,10 @@ std::expected<void, Error> retire_workspace_owner(
 
 } // namespace
 
-std::expected<platform::Workspace, Error>
-create_transaction_workspace(const std::filesystem::path& profile,
-                             std::string_view id,
-                             std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+std::expected<platform::Workspace, Error> create_transaction_workspace(
+    const std::filesystem::path& profile,
+    std::string_view id,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
     if (!transaction::valid_transaction_id(id)) {
         return std::unexpected(make_error(ErrorCode::WorkspaceFailure,
                                           "invalid transaction identifier"));
@@ -448,10 +450,10 @@ create_transaction_workspace(const std::filesystem::path& profile,
         return std::unexpected(pending.error());
     }
     if (*pending) {
-        return std::unexpected(workspace_error(
-            "transaction workspace cleanup is pending",
-            (**pending).root,
-            "preserving existing ownership proof"));
+        return std::unexpected(
+            workspace_error("transaction workspace cleanup is pending",
+                            (**pending).root,
+                            "preserving existing ownership proof"));
     }
     auto created = platform::create_workspace_at(root);
     if (!created) {
@@ -491,11 +493,12 @@ open_transaction_workspace(
     if (!status) {
         return std::unexpected(status.error());
     }
-    if (!missing(*status) &&
-        (std::filesystem::is_symlink(*status) ||
-         !std::filesystem::is_directory(*status))) {
-        return std::unexpected(workspace_error(
-            "invalid transaction workspace", root, "expected a physical directory"));
+    if (!missing(*status) && (std::filesystem::is_symlink(*status) ||
+                              !std::filesystem::is_directory(*status))) {
+        return std::unexpected(
+            workspace_error("invalid transaction workspace",
+                            root,
+                            "expected a physical directory"));
     }
 
     std::optional<platform::Workspace> quarantined;
@@ -506,18 +509,18 @@ open_transaction_workspace(
     if (!missing(*directory_status)) {
         if (std::filesystem::is_symlink(*directory_status) ||
             !std::filesystem::is_directory(*directory_status)) {
-            return std::unexpected(workspace_error(
-                "invalid transactions directory",
-                *directory,
-                "expected a physical directory"));
+            return std::unexpected(
+                workspace_error("invalid transactions directory",
+                                *directory,
+                                "expected a physical directory"));
         }
         std::error_code error;
         std::filesystem::directory_iterator entry(*directory, error), end;
         if (error) {
-            return std::unexpected(workspace_error(
-                "failed to enumerate transaction workspaces",
-                *directory,
-                error.message()));
+            return std::unexpected(
+                workspace_error("failed to enumerate transaction workspaces",
+                                *directory,
+                                error.message()));
         }
         while (entry != end) {
             const auto candidate = entry->path().lexically_normal();
@@ -545,8 +548,8 @@ open_transaction_workspace(
                         candidate,
                         "ownership proof is missing or duplicated"));
                 }
-                quarantined = platform::Workspace{
-                    .root = candidate, .identity = **identity};
+                quarantined = platform::Workspace{.root = candidate,
+                                                  .identity = **identity};
             }
             entry.increment(error);
             if (error) {
@@ -575,14 +578,16 @@ open_transaction_workspace(
         if (!*owner) {
             return std::optional<platform::Workspace>{};
         }
-        return std::optional<platform::Workspace>{platform::Workspace{
-            .root = root, .identity = **owner}};
+        return std::optional<platform::Workspace>{
+            platform::Workspace{.root = root, .identity = **owner}};
     }
     const auto current_identity =
         platform::private_storage::query_directory_identity(root);
     if (!current_identity.valid) {
-        return std::unexpected(workspace_error(
-            "invalid transaction workspace", root, "expected a physical directory"));
+        return std::unexpected(
+            workspace_error("invalid transaction workspace",
+                            root,
+                            "expected a physical directory"));
     }
     auto identity = read_workspace_owner(root, id, key);
     if (!identity) {
@@ -604,10 +609,10 @@ std::expected<void, Error> remove_transaction_workspace(
     if (!transaction::valid_transaction_id(id)) {
         const auto quarantined_id = transaction_id_from_quarantine(id);
         if (!quarantined_id) {
-            return std::unexpected(workspace_error(
-                "invalid transaction workspace path",
-                workspace->root,
-                "operation identifier is unavailable"));
+            return std::unexpected(
+                workspace_error("invalid transaction workspace path",
+                                workspace->root,
+                                "operation identifier is unavailable"));
         }
         id = *quarantined_id;
     }
@@ -618,7 +623,8 @@ std::expected<void, Error> remove_transaction_workspace(
         return std::unexpected(status.error());
     }
     if (missing(*status)) {
-        auto synced = platform::durability::sync_parent_directory(workspace->root);
+        auto synced =
+            platform::durability::sync_parent_directory(workspace->root);
         if (!synced) {
             return std::unexpected(workspace_error(
                 "failed to sync parent directory of transaction workspace",
@@ -635,36 +641,36 @@ std::expected<void, Error> remove_transaction_workspace(
                             "expected a physical directory"));
     }
     if (!workspace->identity.valid) {
-        return std::unexpected(workspace_error(
-            "transaction workspace ownership is unavailable",
-            workspace->root,
-            "preserving existing directory"));
+        return std::unexpected(
+            workspace_error("transaction workspace ownership is unavailable",
+                            workspace->root,
+                            "preserving existing directory"));
     }
     auto owner = read_workspace_owner(workspace->root, id, key);
     if (!owner) {
         return std::unexpected(owner.error());
     }
     if (!*owner || **owner != workspace->identity) {
-        return std::unexpected(workspace_error(
-            "transaction workspace ownership is unavailable",
-            workspace->root,
-            "preserving existing directory"));
+        return std::unexpected(
+            workspace_error("transaction workspace ownership is unavailable",
+                            workspace->root,
+                            "preserving existing directory"));
     }
     auto durable_owner = read_workspace_owner_marker(sidecar, id, key);
     if (!durable_owner) {
         return std::unexpected(durable_owner.error());
     }
     if (!*durable_owner) {
-        auto saved = write_workspace_owner(
-            sidecar, id, workspace->identity, key);
+        auto saved =
+            write_workspace_owner(sidecar, id, workspace->identity, key);
         if (!saved) {
             return std::unexpected(saved.error());
         }
     } else if (**durable_owner != workspace->identity) {
-        return std::unexpected(workspace_error(
-            "invalid transaction workspace owner marker",
-            sidecar,
-            "saved directory identity mismatch"));
+        return std::unexpected(
+            workspace_error("invalid transaction workspace owner marker",
+                            sidecar,
+                            "saved directory identity mismatch"));
     }
     auto removed = platform::remove_workspace(*workspace);
     if (!removed) {
@@ -718,9 +724,8 @@ finish_transaction_cleanup(const journal::Paths& paths,
 }
 
 std::expected<void, Error>
-cleanup_orphan_workspaces(
-    const std::filesystem::path& profile,
-    std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+cleanup_orphan_workspaces(const std::filesystem::path& profile,
+                          std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
     auto directory = transactions_directory(profile, false);
     if (!directory) {
         return std::unexpected(directory.error());
@@ -1885,10 +1890,8 @@ execute(const runtime::RuntimeData& runtime_data,
     if (!saved) {
         return std::unexpected(saved.error());
     }
-    auto workspace =
-        detail::create_transaction_workspace(*profile,
-                                             record->operation_id,
-                                             key);
+    auto workspace = detail::create_transaction_workspace(
+        *profile, record->operation_id, key);
     if (!workspace) {
         return std::unexpected(workspace.error());
     }
@@ -2069,8 +2072,7 @@ execute(const runtime::RuntimeData& runtime_data,
     };
 
     const auto has_applied_uploads = [&]() noexcept {
-        for (std::size_t current = 0;
-             current < record->plan.operations.size();
+        for (std::size_t current = 0; current < record->plan.operations.size();
              ++current) {
             if (record->plan.operations[current].action == Action::Upload &&
                 record->progress[current].state ==
@@ -2084,12 +2086,28 @@ execute(const runtime::RuntimeData& runtime_data,
     const auto fail_mutation = [&](std::size_t index,
                                    const mutation::MutationError& failure)
         -> std::expected<void, Error> {
+        for (std::size_t current = index;
+             current < record->plan.operations.size();
+             ++current) {
+            if (record->plan.operations[current].action == Action::MoveLocal &&
+                record->progress[current].state ==
+                    transaction::OperationState::BackupCreated) {
+                record->progress[current].state =
+                    transaction::OperationState::Prepared;
+            }
+        }
         if (failure.code == mutation::MutationErrorCode::DestinationConflict) {
             // Keep completed peers; the next Sync reobserves the tree.
             for (std::size_t current = 0;
                  current < record->plan.operations.size();
                  ++current) {
-                if (is_local_mutation(record->plan.operations[current].action)) {
+                if (is_local_mutation(
+                        record->plan.operations[current].action) &&
+                    !(record->plan.operations[current].action ==
+                          Action::MoveLocal &&
+                      current < index &&
+                      record->progress[current].state ==
+                          transaction::OperationState::Applied)) {
                     record->progress[current].state =
                         transaction::OperationState::Prepared;
                 }

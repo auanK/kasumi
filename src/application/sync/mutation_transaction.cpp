@@ -22,10 +22,10 @@ namespace kasumi::application::sync::mutation {
 
 using detail::make_error;
 using detail::missing;
-using detail::rollback_candidate_path;
 using detail::read_status;
 using detail::remove_temporary_file;
 using detail::resolve_local_path;
+using detail::rollback_candidate_path;
 
 namespace {
 
@@ -249,6 +249,7 @@ validate_progress(const Operation& operation,
                                           operation_index));
     }
     if (progress.state == transaction::OperationState::Pending &&
+
         (progress.had_original || !progress.previous_hash.empty())) {
         return std::unexpected(
             make_error(MutationErrorCode::InvalidOperation,
@@ -286,6 +287,21 @@ validate_progress(const Operation& operation,
                 return std::unexpected(
                     make_error(MutationErrorCode::InvalidOperation,
                                "invalid local file progress",
+                               operation.path,
+                               operation_index));
+            }
+            break;
+        case Action::MoveLocal:
+            if (!require_slot() || !valid_hash(operation.hash) ||
+                operation.path.empty() || operation.alt_path.empty() ||
+                operation.path == operation.alt_path ||
+                operation.exclusive_destination ||
+                (progress.state != transaction::OperationState::Pending &&
+                 (!progress.had_original ||
+                  progress.previous_hash != operation.hash))) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::InvalidOperation,
+                               "invalid move progress",
                                operation.path,
                                operation_index));
             }
@@ -489,16 +505,18 @@ restore_backup(const std::filesystem::path& backup,
                        operation_index));
     }
 
-    const auto candidate = rollback_candidate_path(
-        destination, transaction_id, operation_index);
+    const auto candidate =
+        rollback_candidate_path(destination, transaction_id, operation_index);
     auto candidate_status = read_status(candidate, operation_index);
     if (!candidate_status) {
         return std::unexpected(candidate_status.error());
     }
     if (missing(*candidate_status)) {
         std::error_code error;
-        if (!std::filesystem::copy_file(
-                backup, candidate, std::filesystem::copy_options::none, error) ||
+        if (!std::filesystem::copy_file(backup,
+                                        candidate,
+                                        std::filesystem::copy_options::none,
+                                        error) ||
             error) {
             remove_temporary_file(candidate);
             return std::unexpected(
@@ -561,11 +579,11 @@ restore_backup(const std::filesystem::path& backup,
             platform::durability::replace_atomically(candidate, destination);
         if (!installed) {
             remove_temporary_file(candidate);
-            return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                              "failed to replace rollback target: " +
-                                                  installed.error(),
-                                              destination,
-                                              operation_index));
+            return std::unexpected(make_error(
+                MutationErrorCode::LocalIo,
+                "failed to replace rollback target: " + installed.error(),
+                destination,
+                operation_index));
         }
     }
     auto destination_metadata =
@@ -615,7 +633,8 @@ rollback_file_operation(const Operation& operation,
             return verified;
     }
 
-    if (operation.action == Action::RenameLocal) {
+    if (operation.action == Action::RenameLocal ||
+        operation.action == Action::MoveLocal) {
         auto destination =
             resolve_local_path(local_root, operation.alt_path, operation_index);
         if (!destination) {
@@ -659,8 +678,8 @@ rollback_file_operation(const Operation& operation,
             return std::unexpected(!source_hash ? source_hash.error()
                                                 : destination_hash.error());
         }
-        const bool rename_applied = source_hash->empty() &&
-                                    *destination_hash == progress.previous_hash;
+        const bool rename_applied =
+            source_hash->empty() && *destination_hash == progress.previous_hash;
         if (progress.state != transaction::OperationState::Applied &&
             !rename_applied &&
             !(*source_hash == progress.previous_hash &&
@@ -733,7 +752,8 @@ rollback_file_operation(const Operation& operation,
                 return {};
             if (*actual == progress.previous_hash)
                 return {};
-            // Before Applied, matching bytes are equivalent, not proof of authorship.
+            // Before Applied, matching bytes are equivalent, not proof of
+            // authorship.
             if (operation.action == Action::Download &&
                 ((progress.state == transaction::OperationState::Applied &&
                   (actual->empty() || *actual == operation.hash)) ||
@@ -747,7 +767,8 @@ rollback_file_operation(const Operation& operation,
                                       tx_id);
             }
             if ((progress.state == transaction::OperationState::Applied ||
-                 progress.state == transaction::OperationState::BackupCreated) &&
+                 progress.state ==
+                     transaction::OperationState::BackupCreated) &&
                 operation.action == Action::DeleteLocal && actual->empty()) {
                 return restore_backup(*backup,
                                       *path,
@@ -775,7 +796,8 @@ rollback_file_operation(const Operation& operation,
             if (actual->empty())
                 return {};
             if ((progress.state == transaction::OperationState::Applied ||
-                 progress.state == transaction::OperationState::BackupCreated) &&
+                 progress.state ==
+                     transaction::OperationState::BackupCreated) &&
                 operation.action == Action::Download &&
                 *actual == operation.hash) {
                 return remove_file_if_hash(
@@ -818,7 +840,9 @@ prepare_operation_impl(const Operation& operation,
             current_progress.had_original &&
             (operation.action == Action::Download ||
              operation.action == Action::DeleteLocal ||
-             operation.action == Action::RenameLocal);
+             operation.action == Action::DeleteLocal ||
+             operation.action == Action::RenameLocal ||
+             operation.action == Action::MoveLocal);
         if (requires_file_backup) {
             auto backup = backup_path(
                 workspace, current_progress, operation.path, operation_index);
@@ -847,7 +871,8 @@ prepare_operation_impl(const Operation& operation,
                                           operation_index));
     }
 
-    if (operation.action == Action::RenameLocal) {
+    if (operation.action == Action::RenameLocal ||
+        operation.action == Action::MoveLocal) {
         auto source = resolve_local_path(
             local_root, operation.path, operation_index, plan_operations);
         auto destination = resolve_local_path(
@@ -881,6 +906,20 @@ prepare_operation_impl(const Operation& operation,
                                *source,
                                operation_index));
             }
+            if (operation.action == Action::MoveLocal) {
+                std::error_code size_error;
+                const auto actual_size =
+                    std::filesystem::file_size(*source, size_error);
+                if (size_error || actual_size != operation.size) {
+                    return std::unexpected(make_error(
+                        size_error ? MutationErrorCode::LocalIo
+                                   : MutationErrorCode::IntegrityMismatch,
+                        size_error ? size_error.message()
+                                   : "move source does not match expected size",
+                        *source,
+                        operation_index));
+                }
+            }
             auto actual = file_hash(*source, operation_index);
             if (!actual)
                 return std::unexpected(actual.error());
@@ -903,7 +942,8 @@ prepare_operation_impl(const Operation& operation,
                 return std::unexpected(created.error());
             return result;
         }
-        if (source_missing && !destination_missing &&
+        if (operation.action == Action::RenameLocal && source_missing &&
+            !destination_missing &&
             std::filesystem::is_regular_file(*destination_status)) {
             auto actual = file_hash(*destination, operation_index);
             if (!actual)
@@ -1304,7 +1344,8 @@ MutationResult detail::validate_prepared_rename(
     const platform::Workspace& workspace,
     const transaction::OperationProgress& progress) {
     // An unprepared pending operation has no authority over a following path.
-    if (progress.state == transaction::OperationState::Pending &&
+    if (operation.action == Action::RenameLocal &&
+        progress.state == transaction::OperationState::Pending &&
         !progress.had_original && progress.previous_hash.empty())
         return {};
     auto valid = validate_progress(operation, progress, index);
@@ -1315,6 +1356,13 @@ MutationResult detail::validate_prepared_rename(
                                           "rename progress does not match plan",
                                           operation.path,
                                           index));
+    if (operation.action == Action::MoveLocal &&
+        progress.state < transaction::OperationState::BackupCreated)
+        return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
+                                          "move lacks prepared progress",
+                                          operation.path,
+                                          index));
+
     valid = validate_workspace(workspace, index);
     if (!valid)
         return valid;
@@ -1339,15 +1387,15 @@ MutationResult detail::validate_prepared_rename(
                                             : destination_hash.error());
     const bool at_destination =
         source_hash->empty() && *destination_hash == progress.previous_hash;
-    const bool at_source = *source_hash == progress.previous_hash &&
-                           destination_hash->empty();
-    const bool matches = progress.state == transaction::OperationState::Applied ||
-                                 !progress.had_original
-                             ? at_destination
-                             : at_source ||
-                                   (progress.state ==
-                                        transaction::OperationState::BackupCreated &&
-                                    at_destination);
+    const bool at_source =
+        *source_hash == progress.previous_hash && destination_hash->empty();
+    const bool matches =
+        progress.state == transaction::OperationState::Applied ||
+                !progress.had_original
+            ? at_destination
+            : at_source || (progress.state ==
+                                transaction::OperationState::BackupCreated &&
+                            at_destination);
     if (!matches)
         return std::unexpected(
             make_error(MutationErrorCode::DestinationConflict,

@@ -410,7 +410,8 @@ std::expected<void, Error> resume_pending_local_mutations(
         if (record.progress[index].state ==
             transaction::OperationState::Pending) {
             if (operation.action == Action::Download ||
-                operation.action == Action::DeleteLocal) {
+                operation.action == Action::DeleteLocal ||
+                operation.action == Action::MoveLocal) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::RecoveryConflict,
                     "unprepared destination cannot be authorized during replay",
@@ -531,8 +532,7 @@ std::expected<void, Error> resume_pending_storage_repairs(
                                    staged_batch.error().operation_index));
         }
 
-        mutation::StagedUploadBatch missing_batch{
-            .root = staged_batch->root};
+        mutation::StagedUploadBatch missing_batch{.root = staged_batch->root};
         const auto listing_trace = platform::perf_trace::begin();
         auto listing = transport::list(storage);
         platform::perf_trace::finish("repair availability LIST", listing_trace);
@@ -545,7 +545,8 @@ std::expected<void, Error> resume_pending_storage_repairs(
 
         for (const auto& object : staged_batch->objects) {
             const bool listed =
-                std::ranges::find(*listing, object.identifier) != listing->end();
+                std::ranges::find(*listing, object.identifier) !=
+                listing->end();
             auto presence = transport::presence(storage, object.identifier);
             if (!presence) {
                 return std::unexpected(detail::make_error(
@@ -570,7 +571,8 @@ std::expected<void, Error> resume_pending_storage_repairs(
             auto verified = mutation::verify_upload_batch(
                 existing_batch, storage, key, *workspace, 1);
             if (!verified) {
-                // Retry a verified byte mismatch; read failures stay fail-closed.
+                // Retry a verified byte mismatch; read failures stay
+                // fail-closed.
                 if (verified.error().code ==
                     mutation::MutationErrorCode::IntegrityMismatch) {
                     missing_batch.objects.push_back(object);
@@ -607,10 +609,10 @@ std::expected<void, Error> resume_pending_storage_repairs(
                                          verification_trace);
 
             if (!verified) {
-                return std::unexpected(detail::make_error(
-                    ErrorCode::MutationFailure,
-                    "failed to verify pending repairs batch",
-                    verified.error().operation_index));
+                return std::unexpected(
+                    detail::make_error(ErrorCode::MutationFailure,
+                                       "failed to verify pending repairs batch",
+                                       verified.error().operation_index));
             }
         }
 
@@ -942,9 +944,8 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
     auto outcome = [&]() -> std::expected<RecoveryResult, Error> {
         try {
             if (remote_write_required) {
-                auto admission =
-                    history_storage::maintenance_protocol::
-                        verify_writer_admission(writer, layout);
+                auto admission = history_storage::maintenance_protocol::
+                    verify_writer_admission(writer, layout);
                 if (!admission) {
                     return std::unexpected(detail::make_error(
                         admission.error().code ==
