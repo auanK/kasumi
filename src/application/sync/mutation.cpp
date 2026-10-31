@@ -36,12 +36,15 @@ std::expected<void, MutationError>
 move_local_without_replace(const std::filesystem::path& source,
                            const std::filesystem::path& destination,
                            std::size_t operation_index) {
+    platform::perf_trace::count("native rename calls");
+    const auto rename_trace = platform::perf_trace::begin();
 #if defined(_WIN32)
     const bool moved = MoveFileExW(source.wstring().c_str(),
                                    destination.wstring().c_str(),
                                    MOVEFILE_WRITE_THROUGH) != 0;
+    const DWORD native_error = moved ? ERROR_SUCCESS : GetLastError();
+    platform::perf_trace::finish("move native rename wall", rename_trace);
     if (!moved) {
-        const auto native_error = GetLastError();
         const auto code = native_error == ERROR_ALREADY_EXISTS ||
                                   native_error == ERROR_FILE_EXISTS
                               ? MutationErrorCode::DestinationConflict
@@ -67,13 +70,16 @@ move_local_without_replace(const std::filesystem::path& source,
                        operation_index));
     }
 
-    if (::syscall(SYS_renameat2,
-                  AT_FDCWD,
-                  source.c_str(),
-                  AT_FDCWD,
-                  destination.c_str(),
-                  RENAME_NOREPLACE) != 0) {
-        const int err = errno;
+    const auto linux_rename_result = ::syscall(SYS_renameat2,
+                                              AT_FDCWD,
+                                              source.c_str(),
+                                              AT_FDCWD,
+                                              destination.c_str(),
+                                              RENAME_NOREPLACE);
+    const int linux_error = (linux_rename_result != 0) ? errno : 0;
+    platform::perf_trace::finish("move native rename wall", rename_trace);
+    if (linux_rename_result != 0) {
+        const int err = linux_error;
         const auto code = (err == EEXIST)
                               ? MutationErrorCode::DestinationConflict
                               : MutationErrorCode::LocalIo;
@@ -783,6 +789,12 @@ apply_move_local(const Operation& operation,
                  const std::filesystem::path& destination,
                  const platform::Workspace& workspace,
                  const transaction::OperationProgress& progress) {
+    struct MoveApplyGuard {
+        platform::perf_trace::Token token;
+        ~MoveApplyGuard() {
+            platform::perf_trace::finish("move apply wall", token);
+        }
+    } move_apply_guard{platform::perf_trace::begin()};
     const auto parent = destination.parent_path();
     auto parent_status = read_status(parent, operation_index);
     if (!parent_status) {
@@ -832,6 +844,7 @@ apply_move_local(const Operation& operation,
                            source,
                            operation_index));
         }
+        platform::perf_trace::count("source hash calls");
         auto verified_source =
             verify_local_file(source, operation, operation_index);
         if (!verified_source) {
@@ -860,8 +873,10 @@ apply_move_local(const Operation& operation,
         }
         mutation_fault_test::hit("after_rename_move", destination);
     } else if (source_missing && !destination_missing) {
+        const auto dest_verif_trace = platform::perf_trace::begin();
         auto verified_dest =
             verify_local_file(destination, operation, operation_index);
+        platform::perf_trace::finish("move destination verification wall", dest_verif_trace);
         if (!verified_dest) {
             return std::unexpected(
                 make_error(MutationErrorCode::DestinationConflict,

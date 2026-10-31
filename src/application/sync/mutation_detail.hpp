@@ -17,6 +17,9 @@
 
 namespace kasumi::application::sync::mutation::detail {
 
+using ::kasumi::Operation;
+using ::kasumi::Action;
+
 // Creates a mutation failure with operation context.
 MutationError make_error(MutationErrorCode code,
                          std::string detail,

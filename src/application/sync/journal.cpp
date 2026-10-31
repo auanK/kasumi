@@ -875,6 +875,7 @@ std::expected<void, std::string> write_file(const std::filesystem::path& path,
     output.write(reinterpret_cast<const char*>(bytes.data() + middle),
                  static_cast<std::streamsize>(bytes.size() - middle));
     platform::perf_trace::count("journal written bytes total", bytes.size());
+    platform::perf_trace::count("journal bytes written", bytes.size());
     if (journal_fault_test::fail("write", record))
         output.setstate(std::ios::badbit);
     if (!output)
@@ -1283,6 +1284,7 @@ save_delta(const Paths& paths,
     const auto trace = platform::perf_trace::begin();
     auto delta = compute_delta(previous, record);
     platform::perf_trace::finish("journal delta calculation", trace);
+    platform::perf_trace::finish("journal delta calculation wall", trace);
     if (mode == SaveMode::Advance) {
         if (record.phase < previous.phase)
             return std::unexpected("checkpoint phase regressed");
@@ -1353,7 +1355,9 @@ save_delta(const Paths& paths,
     if (!payload_size || previous_tip.bytes > maximum_log_size ||
         log_header_size + *payload_size > maximum_log_size - previous_tip.bytes)
         return std::unexpected("journal delta/log exceeds limit");
+    const auto encode_trace = platform::perf_trace::begin();
     auto encoded = encode_delta(delta);
+    platform::perf_trace::finish("journal encode wall", encode_trace);
     PayloadGuard encoded_guard{encoded};
     SensitiveBytes payload(encoded.size());
     std::memcpy(payload.data(), encoded.data(), encoded.size());
@@ -1381,6 +1385,7 @@ save_delta(const Paths& paths,
                      aad.size(),
                      payload.data(),
                      payload.size());
+    const auto durable_write_trace = platform::perf_trace::begin();
     auto written =
         write_file(paths.log_path, bytes, record, true, previous_tip.count);
     if (!written)
@@ -1393,9 +1398,11 @@ save_delta(const Paths& paths,
     ++tip.count;
     tip.chain = hasher::hash_bytes(bytes.data(), bytes.size());
     auto confirmed = write_tip(paths, tip, record, key);
+    platform::perf_trace::finish("journal durable write wall", durable_write_trace);
     if (!confirmed)
         return std::unexpected(confirmed.error());
     platform::perf_trace::count("journal durable saves");
+    platform::perf_trace::count("journal delta count");
     platform::perf_trace::count("journal framing bytes total",
                                 log_header_size + tip_size);
     platform::perf_trace::count("journal serialized bytes total",
@@ -1614,6 +1621,14 @@ save(const Paths& paths,
      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
      SaveMode mode,
      Session* session) {
+    platform::perf_trace::count("journal save calls");
+    const auto save_wall_trace = platform::perf_trace::begin();
+    struct JournalSaveGuard {
+        platform::perf_trace::Token token;
+        ~JournalSaveGuard() {
+            platform::perf_trace::finish("journal save wall", token);
+        }
+    } journal_save_guard{save_wall_trace};
     std::lock_guard lock(journal_mutex);
     KeyGuard journal_key{crypto::derive_key(key, crypto::KeyPurpose::Journal)};
     const auto invalidate = [&] {
@@ -1654,7 +1669,9 @@ save(const Paths& paths,
             invalidate();
             return codec_validation;
         }
+        const auto semantic_trace = platform::perf_trace::begin();
         auto semantic = validate_record_semantics(record, true);
+        platform::perf_trace::finish("journal semantic validation wall", semantic_trace);
         platform::perf_trace::finish("journal validation", validation_trace);
         if (!semantic) {
             invalidate();
