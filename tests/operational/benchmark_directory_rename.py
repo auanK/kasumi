@@ -31,6 +31,7 @@ SCENARIOS = (
     "pure-rename",
     "nested-rename",
     "rename-with-edit",
+    "rename-with-additions",
     "duplicate-content",
     "receiver-edit",
     "changed-source",
@@ -395,6 +396,15 @@ def summarize_sync(run):
         "journal_written_bytes": metric_calls(
             run, "journal written bytes total"
         ),
+        "local_reuse_candidates_matched": metric_calls(
+            run, "local reuse candidates matched"
+        ),
+        "local_reuse_moves_completed": metric_calls(
+            run, "local reuse moves completed"
+        ),
+        "local_reuse_bytes_moved": metric_calls(
+            run, "local reuse bytes moved"
+        ),
         "physical_content_bytes": None,
     }
 
@@ -532,6 +542,18 @@ def run_scenario(kasumi, rclone, config, run_root, run_id, scenario_name):
             "size": 311,
             "sha256": hashlib.sha256(edited_path.read_bytes()).hexdigest(),
         }
+    elif scenario_name == "rename-with-additions":
+        for idx, rel in enumerate(
+            ("added/alpha.txt", "added/beta.txt", "added/gamma.txt"), start=1
+        ):
+            added_path = new_a / rel
+            added_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = deterministic_bytes(f"added-file-{idx}", 512 + idx * 37)
+            added_path.write_bytes(payload)
+            expected_renamed[rel] = {
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
     renamed_a_root = project_tree(client_a[0], result_root_name)
     renamed_a_manifest = file_manifest(renamed_a_root)
     write_manifest(reports, "a-before-rename-sync", renamed_a_manifest)
@@ -631,6 +653,7 @@ def run_scenario(kasumi, rclone, config, run_root, run_id, scenario_name):
         "pure-rename",
         "nested-rename",
         "rename-with-edit",
+        "rename-with-additions",
         "duplicate-content",
     ):
         a_noop = run_sync(
