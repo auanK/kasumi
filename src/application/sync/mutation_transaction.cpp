@@ -1185,6 +1185,24 @@ MutationResult detail::validate_prepared_destination(
         if (!verified)
             return verified;
     }
+    if (condition && condition->source_backup) {
+        if (!condition->source_backup->had_original ||
+            condition->source_backup->previous_hash != operation.hash) {
+            return std::unexpected(
+                make_error(MutationErrorCode::InvalidOperation,
+                           "local reuse source backup metadata mismatch",
+                           destination,
+                           operation_index));
+        }
+        auto backup = backup_path(
+            workspace, *condition->source_backup, destination, operation_index);
+        if (!backup)
+            return std::unexpected(backup.error());
+        auto verified = validate_backup(
+            *backup, condition->source_backup->previous_hash, operation_index);
+        if (!verified)
+            return verified;
+    }
     auto status = read_status(destination, operation_index);
     if (!status)
         return std::unexpected(status.error());
@@ -1219,6 +1237,8 @@ detail::destination_dependencies(std::span<const Operation> operations) {
     const auto none = std::numeric_limits<std::size_t>::max();
     std::vector<std::size_t> result(operations.size(), none);
     std::unordered_map<std::filesystem::path, std::size_t> renamed;
+    std::unordered_map<std::filesystem::path, std::size_t> local_reuse;
+    std::size_t matched_local_reuse = 0;
     for (std::size_t index = 0; index < operations.size(); ++index) {
         const auto& operation = operations[index];
         if (operation.action == Action::RenameLocal) {
@@ -1226,20 +1246,43 @@ detail::destination_dependencies(std::span<const Operation> operations) {
             renamed[operation.alt_path] = index;
         } else if (operation.action == Action::Download) {
             if (!operation.alt_path.empty() && !operation.exclusive_destination) {
-                renamed[operation.alt_path] = index;
-            }
-            const auto found = renamed.find(operation.path);
-            if (found != renamed.end()) {
-                result[index] = found->second;
-                platform::perf_trace::count("destination dependency links");
+                if (operation.path == operation.alt_path ||
+                    operation.hash.empty() ||
+                    renamed.contains(operation.path) ||
+                    renamed.contains(operation.alt_path) ||
+                    !local_reuse.emplace(operation.alt_path, index).second) {
+                    return {};
+                }
+            } else {
+                const auto found = renamed.find(operation.path);
+                if (found != renamed.end()) {
+                    result[index] = found->second;
+                    platform::perf_trace::count("destination dependency links");
+                }
             }
         } else if (operation.action == Action::DeleteLocal) {
+            const auto reuse = local_reuse.find(operation.path);
+            if (reuse != local_reuse.end()) {
+                if (reuse->second >= index ||
+                    result[reuse->second] != none ||
+                    renamed.contains(operation.path)) {
+                    return {};
+                }
+                result[index] = reuse->second;
+                result[reuse->second] = index;
+                ++matched_local_reuse;
+                platform::perf_trace::count("destination dependency links");
+                continue;
+            }
             const auto found = renamed.find(operation.path);
             if (found != renamed.end()) {
                 result[index] = found->second;
                 platform::perf_trace::count("destination dependency links");
             }
         }
+    }
+    if (matched_local_reuse != local_reuse.size()) {
+        return {};
     }
     platform::perf_trace::count("destination dependency entries",
                                 operations.size());
@@ -1259,9 +1302,50 @@ detail::effective_destination(const transaction::Record& record,
                        {},
                        index));
     const auto preceding = dependencies[index];
+    const auto& operation = record.plan.operations[index];
+    if (operation.action == Action::Download &&
+        !operation.exclusive_destination && !operation.alt_path.empty()) {
+        if (preceding == std::numeric_limits<std::size_t>::max() ||
+            preceding <= index ||
+            preceding >= record.plan.operations.size()) {
+            return std::unexpected(
+                make_error(MutationErrorCode::InvalidOperation,
+                           "local reuse download missing paired delete dependency",
+                           operation.path,
+                           index));
+        }
+        const auto& delete_op = record.plan.operations[preceding];
+        const auto& delete_progress = record.progress[preceding];
+        const auto& progress = record.progress[index];
+        auto valid = validate_progress(operation, progress, index);
+        if (!valid)
+            return std::unexpected(valid.error());
+        valid = validate_progress(delete_op, delete_progress, preceding);
+        if (!valid)
+            return std::unexpected(valid.error());
+        if (delete_op.action != Action::DeleteLocal ||
+            delete_op.path != operation.alt_path ||
+            operation.path == operation.alt_path ||
+            operation.hash.empty() ||
+            progress.had_original ||
+            !progress.previous_hash.empty() ||
+            delete_progress.state < transaction::OperationState::BackupCreated ||
+            !delete_progress.had_original ||
+            delete_progress.previous_hash != operation.hash) {
+            return std::unexpected(
+                make_error(MutationErrorCode::DestinationConflict,
+                           "local reuse download does not match prepared delete backup",
+                           operation.path,
+                           index));
+        }
+        return DestinationPrecondition{
+            .hash = std::string{},
+            .backup = std::nullopt,
+            .source_backup = delete_progress,
+            .self_restore_on_rollback = false};
+    }
     if (preceding == std::numeric_limits<std::size_t>::max())
         return std::nullopt;
-    const auto& operation = record.plan.operations[index];
     if (preceding >= index)
         return std::unexpected(
             make_error(MutationErrorCode::InvalidOperation,
@@ -1279,7 +1363,13 @@ detail::effective_destination(const transaction::Record& record,
         return std::unexpected(valid.error());
     if (rename.action == Action::Download && !rename.exclusive_destination) {
         if (operation.action != Action::DeleteLocal ||
-            rename.alt_path != operation.path) {
+            rename.alt_path != operation.path ||
+            rename.path == rename.alt_path ||
+            rename.hash.empty() ||
+            previous.had_original ||
+            !previous.previous_hash.empty() ||
+            !progress.had_original ||
+            progress.previous_hash != rename.hash) {
             return std::unexpected(
                 make_error(MutationErrorCode::DestinationConflict,
                            "invalid download local reuse dependency",

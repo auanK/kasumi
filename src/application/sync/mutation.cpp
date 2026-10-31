@@ -413,6 +413,13 @@ apply_download(const Operation& operation,
     }
 
     if (!operation.alt_path.empty() && !operation.exclusive_destination) {
+        if (condition == nullptr || !condition->source_backup.has_value()) {
+            return std::unexpected(make_error(
+                MutationErrorCode::InvalidOperation,
+                "local reuse download requires verified source backup",
+                destination,
+                operation_index));
+        }
         auto source =
             resolve_local_path(local_root, operation.alt_path, operation_index);
         if (!source) {
@@ -425,6 +432,18 @@ apply_download(const Operation& operation,
 
         if (std::filesystem::is_regular_file(*destination_status)) {
             if (missing(*source_status)) {
+                auto replay_progress = progress;
+                replay_progress.state = transaction::OperationState::Applied;
+                auto backup_valid = detail::validate_prepared_destination(
+                    operation,
+                    operation_index,
+                    destination,
+                    workspace,
+                    replay_progress,
+                    condition);
+                if (!backup_valid) {
+                    return backup_valid;
+                }
                 std::error_code error;
                 const auto size = std::filesystem::file_size(destination, error);
                 if (!error && size == operation.size) {
@@ -484,6 +503,16 @@ apply_download(const Operation& operation,
         }
 
         mutation_fault_test::hit("before_local_reuse_verify", *source);
+        auto backup_valid = detail::validate_prepared_destination(
+            operation,
+            operation_index,
+            destination,
+            workspace,
+            progress,
+            condition);
+        if (!backup_valid) {
+            return backup_valid;
+        }
 
         std::error_code size_error;
         const auto size = std::filesystem::file_size(*source, size_error);

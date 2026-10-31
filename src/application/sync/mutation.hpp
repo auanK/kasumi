@@ -56,6 +56,7 @@ using PreparationResult =
 struct DestinationPrecondition {
     std::string hash;
     std::optional<transaction::OperationProgress> backup;
+    std::optional<transaction::OperationProgress> source_backup;
     bool self_restore_on_rollback = false;
 };
 

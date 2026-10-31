@@ -681,10 +681,36 @@ Error invalid_tree_error(ErrorCode code, std::string detail) {
 } // namespace
 
 bool has_safe_paths(const SyncPlan& plan) {
-    return std::ranges::all_of(sync_plan_operations(plan),
-                               [](const Operation& operation) {
-                                   return kasumi::has_safe_paths(operation);
-                               });
+    const auto operations = sync_plan_operations(plan);
+    if (!std::ranges::all_of(operations, [](const Operation& operation) {
+            return kasumi::has_safe_paths(operation);
+        })) {
+        return false;
+    }
+
+    std::unordered_map<std::filesystem::path, std::size_t> local_reuse_sources;
+    std::unordered_set<std::filesystem::path> matched_deletes;
+    for (std::size_t index = 0; index < operations.size(); ++index) {
+        const auto& operation = operations[index];
+        if (operation.action == Action::Download &&
+            !operation.exclusive_destination &&
+            !operation.alt_path.empty()) {
+            if (operation.path == operation.alt_path ||
+                operation.hash.empty() ||
+                !local_reuse_sources.emplace(operation.alt_path, index).second) {
+                return false;
+            }
+        } else if (operation.action == Action::DeleteLocal) {
+            if (const auto found = local_reuse_sources.find(operation.path);
+                found != local_reuse_sources.end()) {
+                if (found->second >= index ||
+                    !matched_deletes.insert(operation.path).second) {
+                    return false;
+                }
+            }
+        }
+    }
+    return matched_deletes.size() == local_reuse_sources.size();
 }
 
 std::expected<Snapshot, Error>
