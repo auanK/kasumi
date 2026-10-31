@@ -510,6 +510,165 @@ TEST(LocalFileReuseTest, OccupiedDownloadDestinationUsesNormalReplacement) {
     ASSERT_TRUE(audited.has_value()) << audited.error().detail;
 }
 
+// 8.18 Missing source backup before move fails closed:
+TEST(LocalFileReuseTest, MissingSourceBackupBeforeMoveFailsClosed) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("missing-backup-before-move");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto storage_path = root / "storage";
+    std::filesystem::create_directories(storage_path);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    auto client_a = make_client(root, "client_a", storage_path);
+    auto client_b = make_client(root, "client_b", storage_path);
+
+    std::filesystem::create_directories(client_a.local / "Old");
+    kasumi::test::write_text(client_a.local / "Old" / "a.bin", "PROTECTED_BY_BACKUP_H1");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+    ASSERT_TRUE(sync_client(client_b, storage_path, key).has_value());
+
+    std::filesystem::rename(client_a.local / "Old", client_a.local / "New");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+
+    bool backup_deleted = false;
+    bool move_attempted = false;
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& /*path*/) {
+            if (point == "before_local_reuse_verify") {
+                for (const auto& entry :
+                     std::filesystem::recursive_directory_iterator(
+                         client_b.profile / ".transactions")) {
+                    if (entry.is_regular_file() &&
+                        entry.path().extension() == ".backup") {
+                        if (kasumi::test::read_text(entry.path()) ==
+                            "PROTECTED_BY_BACKUP_H1") {
+                            std::filesystem::remove(entry.path());
+                            backup_deleted = true;
+                        }
+                    }
+                }
+            }
+            if (point == "before_local_reuse_move") {
+                move_attempted = true;
+            }
+        });
+
+    auto res_b = sync_client(client_b, storage_path, key);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_TRUE(backup_deleted);
+    EXPECT_FALSE(res_b.has_value());
+    EXPECT_FALSE(move_attempted);
+    EXPECT_TRUE(std::filesystem::exists(client_b.local / "Old" / "a.bin"));
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "Old" / "a.bin"),
+              "PROTECTED_BY_BACKUP_H1");
+    EXPECT_FALSE(std::filesystem::exists(client_b.local / "New" / "a.bin"));
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/get_content"), 0U);
+
+    // Verify recovery attempt fails safely without overwriting or discarding existing files:
+    auto storage = kasumi::transport::open_transport(storage_path.string());
+    ASSERT_TRUE(storage.has_value());
+    auto recovery_result = kasumi::application::sync::coordinator::recover_if_needed(
+        client_b.runtime, *storage, key);
+    EXPECT_TRUE(std::filesystem::exists(client_b.local / "Old" / "a.bin"));
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "Old" / "a.bin"),
+              "PROTECTED_BY_BACKUP_H1");
+    EXPECT_FALSE(std::filesystem::exists(client_b.local / "New" / "a.bin"));
+}
+
+// 8.19 Recreated source during rollback is preserved:
+TEST(LocalFileReuseTest, RecreatedSourceDuringRollbackIsPreserved) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("recreated-source-rollback");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto storage_path = root / "storage";
+    std::filesystem::create_directories(storage_path);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    auto client_a = make_client(root, "client_a", storage_path);
+    auto client_b = make_client(root, "client_b", storage_path);
+
+    std::filesystem::create_directories(client_a.local / "Old");
+    kasumi::test::write_text(client_a.local / "Old" / "a.bin", "ORIGINAL_H1_PAYLOAD");
+    kasumi::test::write_text(client_a.local / "Old" / "b.bin", "ORIGINAL_H2_PAYLOAD");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+    ASSERT_TRUE(sync_client(client_b, storage_path, key).has_value());
+
+    std::filesystem::rename(client_a.local / "Old", client_a.local / "New");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+
+    bool first_moved = false;
+    bool source_recreated = false;
+    bool second_faulted = false;
+
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "after_local_reuse_move" &&
+                path.filename() == "a.bin") {
+                first_moved = std::filesystem::exists(client_b.local / "New" / "a.bin") &&
+                              !std::filesystem::exists(client_b.local / "Old" / "a.bin");
+                // External process recreates Old/a.bin with HX:
+                kasumi::test::write_text(client_b.local / "Old" / "a.bin",
+                                         "RECREATED_SOURCE_EXTERNAL_HX");
+                source_recreated = true;
+            }
+            if (point == "before_local_reuse_move" &&
+                path.filename() == "b.bin") {
+                second_faulted = true;
+                std::filesystem::remove(path);
+            }
+        });
+
+    auto res_b = sync_client(client_b, storage_path, key);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_TRUE(first_moved);
+    EXPECT_TRUE(source_recreated);
+    EXPECT_TRUE(second_faulted);
+    EXPECT_FALSE(res_b.has_value());
+
+    // Invariant assertions:
+    // 1. Old/a.bin contains HX (not overwritten, not removed).
+    ASSERT_TRUE(std::filesystem::exists(client_b.local / "Old" / "a.bin"));
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "Old" / "a.bin"),
+              "RECREATED_SOURCE_EXTERNAL_HX");
+
+    // 2. H1 remains preserved at New/a.bin (not lost or deleted).
+    ASSERT_TRUE(std::filesystem::exists(client_b.local / "New" / "a.bin"));
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "New" / "a.bin"),
+              "ORIGINAL_H1_PAYLOAD");
+
+    // 3. Rollback does not claim success when it cannot safely restore the old path.
+    EXPECT_FALSE(res_b.has_value());
+
+    // 4. Recovery evidence (transaction / journal) remains available.
+    bool tx_evidence_exists = false;
+    for (const auto& entry :
+         std::filesystem::recursive_directory_iterator(
+             client_b.profile / ".transactions")) {
+        if (entry.is_regular_file()) {
+            tx_evidence_exists = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(tx_evidence_exists);
+
+    // 5. Attempt recovery again without changing conflicting file:
+    // Second attempt must also fail safely and not destroy evidence.
+    auto storage = kasumi::transport::open_transport(storage_path.string());
+    ASSERT_TRUE(storage.has_value());
+    auto second_recovery = kasumi::application::sync::coordinator::recover_if_needed(
+        client_b.runtime, *storage, key);
+    EXPECT_FALSE(second_recovery.has_value());
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "Old" / "a.bin"),
+              "RECREATED_SOURCE_EXTERNAL_HX");
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "New" / "a.bin"),
+              "ORIGINAL_H1_PAYLOAD");
+}
+
 // 8.11 Multi-file duplicate content with occupied and vacant destinations:
 TEST(LocalFileReuseTest, DuplicateContentWithOccupiedAndVacantDestinations) {
     auto workspace =
@@ -557,6 +716,165 @@ TEST(LocalFileReuseTest, DuplicateContentWithOccupiedAndVacantDestinations) {
 
     auto audited = fsck_client(client_b, storage_path, key);
     ASSERT_TRUE(audited.has_value()) << audited.error().detail;
+}
+
+// 8.18 Missing source backup before move fails closed:
+TEST(LocalFileReuseTest, MissingSourceBackupBeforeMoveFailsClosed) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("missing-backup-before-move");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto storage_path = root / "storage";
+    std::filesystem::create_directories(storage_path);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    auto client_a = make_client(root, "client_a", storage_path);
+    auto client_b = make_client(root, "client_b", storage_path);
+
+    std::filesystem::create_directories(client_a.local / "Old");
+    kasumi::test::write_text(client_a.local / "Old" / "a.bin", "PROTECTED_BY_BACKUP_H1");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+    ASSERT_TRUE(sync_client(client_b, storage_path, key).has_value());
+
+    std::filesystem::rename(client_a.local / "Old", client_a.local / "New");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+
+    bool backup_deleted = false;
+    bool move_attempted = false;
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& /*path*/) {
+            if (point == "before_local_reuse_verify") {
+                for (const auto& entry :
+                     std::filesystem::recursive_directory_iterator(
+                         client_b.profile / ".transactions")) {
+                    if (entry.is_regular_file() &&
+                        entry.path().extension() == ".backup") {
+                        if (kasumi::test::read_text(entry.path()) ==
+                            "PROTECTED_BY_BACKUP_H1") {
+                            std::filesystem::remove(entry.path());
+                            backup_deleted = true;
+                        }
+                    }
+                }
+            }
+            if (point == "before_local_reuse_move") {
+                move_attempted = true;
+            }
+        });
+
+    auto res_b = sync_client(client_b, storage_path, key);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_TRUE(backup_deleted);
+    EXPECT_FALSE(res_b.has_value());
+    EXPECT_FALSE(move_attempted);
+    EXPECT_TRUE(std::filesystem::exists(client_b.local / "Old" / "a.bin"));
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "Old" / "a.bin"),
+              "PROTECTED_BY_BACKUP_H1");
+    EXPECT_FALSE(std::filesystem::exists(client_b.local / "New" / "a.bin"));
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/get_content"), 0U);
+
+    // Verify recovery attempt fails safely without overwriting or discarding existing files:
+    auto storage = kasumi::transport::open_transport(storage_path.string());
+    ASSERT_TRUE(storage.has_value());
+    auto recovery_result = kasumi::application::sync::coordinator::recover_if_needed(
+        client_b.runtime, *storage, key);
+    EXPECT_TRUE(std::filesystem::exists(client_b.local / "Old" / "a.bin"));
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "Old" / "a.bin"),
+              "PROTECTED_BY_BACKUP_H1");
+    EXPECT_FALSE(std::filesystem::exists(client_b.local / "New" / "a.bin"));
+}
+
+// 8.19 Recreated source during rollback is preserved:
+TEST(LocalFileReuseTest, RecreatedSourceDuringRollbackIsPreserved) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("recreated-source-rollback");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto storage_path = root / "storage";
+    std::filesystem::create_directories(storage_path);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    auto client_a = make_client(root, "client_a", storage_path);
+    auto client_b = make_client(root, "client_b", storage_path);
+
+    std::filesystem::create_directories(client_a.local / "Old");
+    kasumi::test::write_text(client_a.local / "Old" / "a.bin", "ORIGINAL_H1_PAYLOAD");
+    kasumi::test::write_text(client_a.local / "Old" / "b.bin", "ORIGINAL_H2_PAYLOAD");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+    ASSERT_TRUE(sync_client(client_b, storage_path, key).has_value());
+
+    std::filesystem::rename(client_a.local / "Old", client_a.local / "New");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+
+    bool first_moved = false;
+    bool source_recreated = false;
+    bool second_faulted = false;
+
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "after_local_reuse_move" &&
+                path.filename() == "a.bin") {
+                first_moved = std::filesystem::exists(client_b.local / "New" / "a.bin") &&
+                              !std::filesystem::exists(client_b.local / "Old" / "a.bin");
+                // External process recreates Old/a.bin with HX:
+                kasumi::test::write_text(client_b.local / "Old" / "a.bin",
+                                         "RECREATED_SOURCE_EXTERNAL_HX");
+                source_recreated = true;
+            }
+            if (point == "before_local_reuse_move" &&
+                path.filename() == "b.bin") {
+                second_faulted = true;
+                std::filesystem::remove(path);
+            }
+        });
+
+    auto res_b = sync_client(client_b, storage_path, key);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_TRUE(first_moved);
+    EXPECT_TRUE(source_recreated);
+    EXPECT_TRUE(second_faulted);
+    EXPECT_FALSE(res_b.has_value());
+
+    // Invariant assertions:
+    // 1. Old/a.bin contains HX (not overwritten, not removed).
+    ASSERT_TRUE(std::filesystem::exists(client_b.local / "Old" / "a.bin"));
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "Old" / "a.bin"),
+              "RECREATED_SOURCE_EXTERNAL_HX");
+
+    // 2. H1 remains preserved at New/a.bin (not lost or deleted).
+    ASSERT_TRUE(std::filesystem::exists(client_b.local / "New" / "a.bin"));
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "New" / "a.bin"),
+              "ORIGINAL_H1_PAYLOAD");
+
+    // 3. Rollback does not claim success when it cannot safely restore the old path.
+    EXPECT_FALSE(res_b.has_value());
+
+    // 4. Recovery evidence (transaction / journal) remains available.
+    bool tx_evidence_exists = false;
+    for (const auto& entry :
+         std::filesystem::recursive_directory_iterator(
+             client_b.profile / ".transactions")) {
+        if (entry.is_regular_file()) {
+            tx_evidence_exists = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(tx_evidence_exists);
+
+    // 5. Attempt recovery again without changing conflicting file:
+    // Second attempt must also fail safely and not destroy evidence.
+    auto storage = kasumi::transport::open_transport(storage_path.string());
+    ASSERT_TRUE(storage.has_value());
+    auto second_recovery = kasumi::application::sync::coordinator::recover_if_needed(
+        client_b.runtime, *storage, key);
+    EXPECT_FALSE(second_recovery.has_value());
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "Old" / "a.bin"),
+              "RECREATED_SOURCE_EXTERNAL_HX");
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "New" / "a.bin"),
+              "ORIGINAL_H1_PAYLOAD");
 }
 
 // 8.12 Rollback after first reuse move when second operation fails:
@@ -999,5 +1317,163 @@ TEST(LocalFileReuseTest, NormalSyncFastPathPerformsZeroLocalReuseMoves) {
     ASSERT_TRUE(audited.has_value()) << audited.error().detail;
 }
 
-} // namespace
+// 8.18 Missing source backup before move fails closed:
+TEST(LocalFileReuseTest, MissingSourceBackupBeforeMoveFailsClosed) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("missing-backup-before-move");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto storage_path = root / "storage";
+    std::filesystem::create_directories(storage_path);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
 
+    auto client_a = make_client(root, "client_a", storage_path);
+    auto client_b = make_client(root, "client_b", storage_path);
+
+    std::filesystem::create_directories(client_a.local / "Old");
+    kasumi::test::write_text(client_a.local / "Old" / "a.bin", "PROTECTED_BY_BACKUP_H1");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+    ASSERT_TRUE(sync_client(client_b, storage_path, key).has_value());
+
+    std::filesystem::rename(client_a.local / "Old", client_a.local / "New");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+
+    bool backup_deleted = false;
+    bool move_attempted = false;
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& /*path*/) {
+            if (point == "before_local_reuse_verify") {
+                for (const auto& entry :
+                     std::filesystem::recursive_directory_iterator(
+                         client_b.profile / ".transactions")) {
+                    if (entry.is_regular_file() &&
+                        entry.path().extension() == ".backup") {
+                        if (kasumi::test::read_text(entry.path()) ==
+                            "PROTECTED_BY_BACKUP_H1") {
+                            std::filesystem::remove(entry.path());
+                            backup_deleted = true;
+                        }
+                    }
+                }
+            }
+            if (point == "before_local_reuse_move") {
+                move_attempted = true;
+            }
+        });
+
+    auto res_b = sync_client(client_b, storage_path, key);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_TRUE(backup_deleted);
+    EXPECT_FALSE(res_b.has_value());
+    EXPECT_FALSE(move_attempted);
+    EXPECT_TRUE(std::filesystem::exists(client_b.local / "Old" / "a.bin"));
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "Old" / "a.bin"),
+              "PROTECTED_BY_BACKUP_H1");
+    EXPECT_FALSE(std::filesystem::exists(client_b.local / "New" / "a.bin"));
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/get_content"), 0U);
+
+    // Verify recovery attempt fails safely without overwriting or discarding existing files:
+    auto storage = kasumi::transport::open_transport(storage_path.string());
+    ASSERT_TRUE(storage.has_value());
+    auto recovery_result = kasumi::application::sync::coordinator::recover_if_needed(
+        client_b.runtime, *storage, key);
+    EXPECT_TRUE(std::filesystem::exists(client_b.local / "Old" / "a.bin"));
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "Old" / "a.bin"),
+              "PROTECTED_BY_BACKUP_H1");
+    EXPECT_FALSE(std::filesystem::exists(client_b.local / "New" / "a.bin"));
+}
+
+// 8.19 Recreated source during rollback is preserved:
+TEST(LocalFileReuseTest, RecreatedSourceDuringRollbackIsPreserved) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("recreated-source-rollback");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto storage_path = root / "storage";
+    std::filesystem::create_directories(storage_path);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    auto client_a = make_client(root, "client_a", storage_path);
+    auto client_b = make_client(root, "client_b", storage_path);
+
+    std::filesystem::create_directories(client_a.local / "Old");
+    kasumi::test::write_text(client_a.local / "Old" / "a.bin", "ORIGINAL_H1_PAYLOAD");
+    kasumi::test::write_text(client_a.local / "Old" / "b.bin", "ORIGINAL_H2_PAYLOAD");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+    ASSERT_TRUE(sync_client(client_b, storage_path, key).has_value());
+
+    std::filesystem::rename(client_a.local / "Old", client_a.local / "New");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+
+    bool first_moved = false;
+    bool source_recreated = false;
+    bool second_faulted = false;
+
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "after_local_reuse_move" &&
+                path.filename() == "a.bin") {
+                first_moved = std::filesystem::exists(client_b.local / "New" / "a.bin") &&
+                              !std::filesystem::exists(client_b.local / "Old" / "a.bin");
+                // External process recreates Old/a.bin with HX:
+                kasumi::test::write_text(client_b.local / "Old" / "a.bin",
+                                         "RECREATED_SOURCE_EXTERNAL_HX");
+                source_recreated = true;
+            }
+            if (point == "before_local_reuse_move" &&
+                path.filename() == "b.bin") {
+                second_faulted = true;
+                std::filesystem::remove(path);
+            }
+        });
+
+    auto res_b = sync_client(client_b, storage_path, key);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_TRUE(first_moved);
+    EXPECT_TRUE(source_recreated);
+    EXPECT_TRUE(second_faulted);
+    EXPECT_FALSE(res_b.has_value());
+
+    // Invariant assertions:
+    // 1. Old/a.bin contains HX (not overwritten, not removed).
+    ASSERT_TRUE(std::filesystem::exists(client_b.local / "Old" / "a.bin"));
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "Old" / "a.bin"),
+              "RECREATED_SOURCE_EXTERNAL_HX");
+
+    // 2. H1 remains preserved at New/a.bin (not lost or deleted).
+    ASSERT_TRUE(std::filesystem::exists(client_b.local / "New" / "a.bin"));
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "New" / "a.bin"),
+              "ORIGINAL_H1_PAYLOAD");
+
+    // 3. Rollback does not claim success when it cannot safely restore the old path.
+    EXPECT_FALSE(res_b.has_value());
+
+    // 4. Recovery evidence (transaction / journal) remains available.
+    bool tx_evidence_exists = false;
+    for (const auto& entry :
+         std::filesystem::recursive_directory_iterator(
+             client_b.profile / ".transactions")) {
+        if (entry.is_regular_file()) {
+            tx_evidence_exists = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(tx_evidence_exists);
+
+    // 5. Attempt recovery again without changing conflicting file:
+    // Second attempt must also fail safely and not destroy evidence.
+    auto storage = kasumi::transport::open_transport(storage_path.string());
+    ASSERT_TRUE(storage.has_value());
+    auto second_recovery = kasumi::application::sync::coordinator::recover_if_needed(
+        client_b.runtime, *storage, key);
+    EXPECT_FALSE(second_recovery.has_value());
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "Old" / "a.bin"),
+              "RECREATED_SOURCE_EXTERNAL_HX");
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "New" / "a.bin"),
+              "ORIGINAL_H1_PAYLOAD");
+}
+
+} // namespace
