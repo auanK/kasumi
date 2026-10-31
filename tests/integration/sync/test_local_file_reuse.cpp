@@ -503,7 +503,7 @@ TEST(LocalFileReuseTest, OccupiedDownloadDestinationUsesNormalReplacement) {
     ASSERT_TRUE(std::filesystem::exists(client_b.local / "Target" / "file.bin"));
     EXPECT_EQ(kasumi::test::read_text(client_b.local / "Target" / "file.bin"),
               "PAYLOAD_H1_REPLACEMENT");
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse moves applied"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse moves completed"), 0U);
     EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/get_content"), 1U);
 
     auto audited = fsck_client(client_b, storage_path, key);
@@ -546,7 +546,7 @@ TEST(LocalFileReuseTest, DuplicateContentWithOccupiedAndVacantDestinations) {
 
     // Vacant/dest.bin reuses one local source (1 local move), while Occupied/dest.bin
     // uses normal download replacement (1 Content GET).
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse moves applied"), 1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse moves completed"), 1U);
     EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/get_content"), 1U);
     EXPECT_FALSE(std::filesystem::exists(client_b.local / "Old" / "s1.bin"));
     EXPECT_FALSE(std::filesystem::exists(client_b.local / "Old" / "s2.bin"));
@@ -968,20 +968,20 @@ TEST(LocalFileReuseTest, NormalSyncFastPathPerformsZeroLocalReuseMoves) {
     kasumi::platform::perf_trace::reset();
     ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
     EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse candidates matched"), 0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse moves applied"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse moves completed"), 0U);
 
     // 2. Download-only on B:
     kasumi::platform::perf_trace::reset();
     ASSERT_TRUE(sync_client(client_b, storage_path, key).has_value());
     EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse candidates matched"), 0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse moves applied"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse moves completed"), 0U);
     EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/get_content"), 2U);
 
     // 3. No-op on B:
     kasumi::platform::perf_trace::reset();
     ASSERT_TRUE(sync_client(client_b, storage_path, key).has_value());
     EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse candidates matched"), 0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse moves applied"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse moves completed"), 0U);
     EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/get_content"), 0U);
 
     // 4. Delete-only (A deletes one.txt, B syncs):
@@ -990,7 +990,7 @@ TEST(LocalFileReuseTest, NormalSyncFastPathPerformsZeroLocalReuseMoves) {
     kasumi::platform::perf_trace::reset();
     ASSERT_TRUE(sync_client(client_b, storage_path, key).has_value());
     EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse candidates matched"), 0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse moves applied"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local reuse moves completed"), 0U);
     EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/get_content"), 0U);
     EXPECT_FALSE(std::filesystem::exists(client_b.local / "Docs" / "one.txt"));
     EXPECT_TRUE(std::filesystem::exists(client_b.local / "Docs" / "two.txt"));

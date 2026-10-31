@@ -726,9 +726,32 @@ void pair_local_reuse_candidates(SyncPlan& plan,
         return;
     }
 
+    const auto is_vacant_reuse_destination = [&](const Operation& op) {
+        if (op.exclusive_destination || !op.alt_path.empty() ||
+            op.hash.empty() || !has_safe_paths(op)) {
+            return false;
+        }
+        const auto utf8_dest = platform::path::to_logical_utf8(op.path);
+        if (utf8_dest.empty() ||
+            utf8_dest.find(".kasumiconflict_") != std::string::npos ||
+            find_row(local_tree, utf8_dest) != nullptr) {
+            return false;
+        }
+        for (std::size_t slash = utf8_dest.find('/');
+             slash != std::string::npos;
+             slash = utf8_dest.find('/', slash + 1)) {
+            const auto* ancestor =
+                find_row(local_tree, utf8_dest.substr(0, slash));
+            if (ancestor != nullptr && !ancestor->is_directory) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     bool has_candidate_download = false;
     for (const auto& op : downloads) {
-        if (!op.exclusive_destination && op.alt_path.empty() && !op.hash.empty() && has_safe_paths(op)) {
+        if (is_vacant_reuse_destination(op)) {
             has_candidate_download = true;
             break;
         }
@@ -794,11 +817,7 @@ void pair_local_reuse_candidates(SyncPlan& plan,
     }
 
     for (auto& download_op : downloads) {
-        if (download_op.exclusive_destination || !download_op.alt_path.empty() || download_op.hash.empty() || !has_safe_paths(download_op)) {
-            continue;
-        }
-        const auto utf8_dest = platform::path::to_logical_utf8(download_op.path);
-        if (utf8_dest.find(".kasumiconflict_") != std::string::npos) {
+        if (!is_vacant_reuse_destination(download_op)) {
             continue;
         }
 

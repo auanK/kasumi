@@ -1876,6 +1876,10 @@ execute(const runtime::RuntimeData& runtime_data,
     for (const auto& operation : record->plan.operations) {
         platform::perf_trace::count(
             detail::action_metrics[action_index(operation.action)]);
+        if (operation.action == Action::Download &&
+            !operation.exclusive_destination && !operation.alt_path.empty()) {
+            platform::perf_trace::count("local reuse candidates matched");
+        }
     }
     const auto preparation_saves_before =
         platform::perf_trace::get_count("journal durable saves");
@@ -1893,12 +1897,6 @@ execute(const runtime::RuntimeData& runtime_data,
         return std::unexpected(workspace.error());
     }
     std::optional<platform::Workspace> transaction_workspace{*workspace};
-
-    for (const auto& op : record->plan.operations) {
-        if (op.action == Action::Download && !op.exclusive_destination && !op.alt_path.empty()) {
-            platform::perf_trace::count("local reuse candidates matched");
-        }
-    }
 
     for (std::size_t index = 0; index < record->plan.operations.size();
          ++index) {
@@ -2197,6 +2195,8 @@ execute(const runtime::RuntimeData& runtime_data,
                     const auto& operation =
                         record->plan.operations[apply_order[end]];
                     if (operation.action != Action::Download ||
+                        !(operation.alt_path.empty() ||
+                          operation.exclusive_destination) ||
                         download_counts[operation.hash + ':' +
                                         std::to_string(operation.size)] != 1) {
                         break;
