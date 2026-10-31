@@ -1,3 +1,4 @@
+#include "application/sync/mutation_fault_test.hpp"
 #include "application/use_cases/context.hpp"
 #include "crypto/content.hpp"
 #include "kasumi/test/filesystem.hpp"
@@ -7,15 +8,18 @@
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace kasumi::application::detail {
 std::expected<Response, Error> run_sync(OperationContext& context);
@@ -35,6 +39,9 @@ struct ContentCounterState {
     std::size_t content_puts = 0;
     std::size_t content_presences = 0;
     std::size_t content_copies = 0;
+    std::vector<std::string> get_identifiers;
+    std::vector<std::string> put_identifiers;
+    std::vector<std::string> presence_identifiers;
 };
 
 void destroy_counter_state(void*) noexcept {
@@ -51,6 +58,7 @@ kasumi::transport::Result counter_put(void* context,
     auto* state = static_cast<ContentCounterState*>(context);
     if (is_content_identifier(identifier)) {
         ++state->content_puts;
+        state->put_identifiers.emplace_back(identifier);
     }
     return kasumi::transport::put(*state->base, source, identifier);
 }
@@ -61,6 +69,7 @@ counter_put_batch(void* context, const kasumi::transport::PutBatch& batch) {
     for (const auto& identifier : batch.identifiers) {
         if (is_content_identifier(identifier)) {
             ++state->content_puts;
+            state->put_identifiers.push_back(identifier);
         }
     }
     return kasumi::transport::put_batch(*state->base, batch);
@@ -71,10 +80,12 @@ counter_put_files_batch(void* context,
                         const kasumi::transport::PutFilesBatch& batch) {
     auto* state = static_cast<ContentCounterState*>(context);
     auto result = kasumi::transport::put_files_batch(*state->base, batch);
-    if (result || result.error().code != kasumi::transport::ErrorCode::Unsupported) {
+    if (result ||
+        result.error().code != kasumi::transport::ErrorCode::Unsupported) {
         for (const auto& item : batch.items) {
             if (is_content_identifier(item.destination_identifier)) {
                 ++state->content_puts;
+                state->put_identifiers.push_back(item.destination_identifier);
             }
         }
     }
@@ -88,6 +99,7 @@ counter_get(void* context,
     auto* state = static_cast<ContentCounterState*>(context);
     if (is_content_identifier(identifier)) {
         ++state->content_gets;
+        state->get_identifiers.emplace_back(identifier);
     }
     return kasumi::transport::get(*state->base, identifier, destination);
 }
@@ -99,6 +111,7 @@ counter_get_batch(void* context, const kasumi::transport::GetBatch& batch) {
         for (const auto& identifier : batch.identifiers) {
             if (is_content_identifier(identifier)) {
                 ++state->content_gets;
+                state->get_identifiers.push_back(identifier);
             }
         }
     }
@@ -112,7 +125,8 @@ counter_copy(void* context,
     auto* state = static_cast<ContentCounterState*>(context);
     auto result = kasumi::transport::copy(
         *state->base, source_identifier, destination_identifier);
-    if (result || result.error().code != kasumi::transport::ErrorCode::Unsupported) {
+    if (result ||
+        result.error().code != kasumi::transport::ErrorCode::Unsupported) {
         if (is_content_identifier(source_identifier) ||
             is_content_identifier(destination_identifier)) {
             ++state->content_copies;
@@ -125,7 +139,8 @@ kasumi::transport::Result
 counter_copy_batch(void* context, const kasumi::transport::CopyBatch& batch) {
     auto* state = static_cast<ContentCounterState*>(context);
     auto result = kasumi::transport::copy_batch(*state->base, batch);
-    if (result || result.error().code != kasumi::transport::ErrorCode::Unsupported) {
+    if (result ||
+        result.error().code != kasumi::transport::ErrorCode::Unsupported) {
         for (const auto& item : batch.items) {
             if (is_content_identifier(item.source_identifier) ||
                 is_content_identifier(item.destination_identifier)) {
@@ -141,6 +156,7 @@ counter_presence(void* context, std::string_view identifier) {
     auto* state = static_cast<ContentCounterState*>(context);
     if (is_content_identifier(identifier)) {
         ++state->content_presences;
+        state->presence_identifiers.emplace_back(identifier);
     }
     return kasumi::transport::presence(*state->base, identifier);
 }
@@ -150,21 +166,22 @@ kasumi::transport::ListingResult counter_list(void* context) {
     return kasumi::transport::list(*state->base);
 }
 
-kasumi::transport::ListingResult
-counter_list_prefix(void* context, std::string_view prefix) {
+kasumi::transport::ListingResult counter_list_prefix(void* context,
+                                                     std::string_view prefix) {
     auto* state = static_cast<ContentCounterState*>(context);
     return kasumi::transport::list(*state->base, prefix);
 }
 
 kasumi::transport::ControlReadBatchResponse counter_control_read_batch(
-    void* context,
-    const kasumi::transport::ControlReadBatchRequest& request) {
+    void* context, const kasumi::transport::ControlReadBatchRequest& request) {
     auto* state = static_cast<ContentCounterState*>(context);
     auto result = kasumi::transport::control_read_batch(*state->base, request);
-    if (result || result.error().code != kasumi::transport::ErrorCode::Unsupported) {
+    if (result ||
+        result.error().code != kasumi::transport::ErrorCode::Unsupported) {
         for (const auto& identifier : request.presence_identifiers) {
             if (is_content_identifier(identifier)) {
                 ++state->content_presences;
+                state->presence_identifiers.push_back(identifier);
             }
         }
     }
@@ -187,8 +204,8 @@ counter_remove_batch(void* context,
 kasumi::transport::Transport
 make_counting_transport(ContentCounterState& state) {
     return kasumi::transport::Transport{
-        .state = kasumi::transport::TransportStateHandle{
-            &state, destroy_counter_state},
+        .state = kasumi::transport::TransportStateHandle{&state,
+                                                         destroy_counter_state},
         .storage =
             kasumi::transport::StorageOperations{
                 .initialize = counter_initialize,
@@ -239,8 +256,7 @@ bool init_sync_node(SyncNode& node,
         !std::filesystem::create_directories(node.local)) {
         return false;
     }
-    auto opened =
-        kasumi::transport::open_transport(node.storage_root.string());
+    auto opened = kasumi::transport::open_transport(node.storage_root.string());
     if (!opened) {
         return false;
     }
@@ -282,8 +298,7 @@ void rename_local_entry(const SyncNode& node,
                         std::string_view to_relative) {
     const auto from =
         node.local / kasumi::platform::path::from_utf8(from_relative);
-    const auto to =
-        node.local / kasumi::platform::path::from_utf8(to_relative);
+    const auto to = node.local / kasumi::platform::path::from_utf8(to_relative);
     std::filesystem::create_directories(to.parent_path());
     std::filesystem::rename(from, to);
 }
@@ -294,8 +309,7 @@ void remove_local_subtree(const SyncNode& node,
         node.local / kasumi::platform::path::from_utf8(relative_path));
 }
 
-bool local_entry_exists(const SyncNode& node,
-                        std::string_view relative_path) {
+bool local_entry_exists(const SyncNode& node, std::string_view relative_path) {
     return std::filesystem::exists(
         node.local / kasumi::platform::path::from_utf8(relative_path));
 }
@@ -317,15 +331,30 @@ void reset_content_counts(SyncNode& node) noexcept {
     node.counters.content_puts = 0;
     node.counters.content_presences = 0;
     node.counters.content_copies = 0;
+    node.counters.get_identifiers.clear();
+    node.counters.put_identifiers.clear();
+    node.counters.presence_identifiers.clear();
+}
+
+std::string content_identifier_for_payload(const SyncNode& node,
+                                           std::string_view payload) {
+    const auto digest = kasumi::hasher::hash_string(payload);
+    return kasumi::crypto::content_identifier(node.key, digest);
+}
+
+bool contains_identifier(const std::vector<std::string>& list,
+                         std::string_view identifier) noexcept {
+    return std::ranges::find(list, identifier) != list.end();
 }
 
 // RED 1 — Renomeação pura entre dois clientes
-TEST(DirectoryLocalMoveTest, PureDirectoryRenameBetweenClientsHasZeroContentIo) {
+TEST(DirectoryLocalMoveTest,
+     PureDirectoryRenameBetweenClientsHasZeroContentIo) {
     SyncNode sender;
     ASSERT_TRUE(init_sync_node(sender, "dir-rename-red1-sender"));
     SyncNode receiver;
-    ASSERT_TRUE(
-        init_sync_node(receiver, "dir-rename-red1-receiver", sender.storage_root));
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-red1-receiver", sender.storage_root));
 
     write_local_file(sender, "A/main.cpp", "int main() { return 0; }\n");
     write_local_file(
@@ -382,8 +411,8 @@ TEST(DirectoryLocalMoveTest, DirectoryMovedToAnotherParentHasZeroContentIo) {
     SyncNode sender;
     ASSERT_TRUE(init_sync_node(sender, "dir-rename-red2-sender"));
     SyncNode receiver;
-    ASSERT_TRUE(
-        init_sync_node(receiver, "dir-rename-red2-receiver", sender.storage_root));
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-red2-receiver", sender.storage_root));
 
     write_local_file(
         sender, "Projects/A/file.bin", "binary-payload-projects-a");
@@ -422,12 +451,13 @@ TEST(DirectoryLocalMoveTest, DirectoryMovedToAnotherParentHasZeroContentIo) {
 }
 
 // RED 3 — Diretórios aninhados
-TEST(DirectoryLocalMoveTest, NestedDirectoriesRenamePreservesStructureWithZeroContentIo) {
+TEST(DirectoryLocalMoveTest,
+     NestedDirectoriesRenamePreservesStructureWithZeroContentIo) {
     SyncNode sender;
     ASSERT_TRUE(init_sync_node(sender, "dir-rename-red3-sender"));
     SyncNode receiver;
-    ASSERT_TRUE(
-        init_sync_node(receiver, "dir-rename-red3-receiver", sender.storage_root));
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-red3-receiver", sender.storage_root));
 
     write_local_file(sender, "A/B/C/file.bin", "deeply-nested-payload");
     write_local_file(sender, "A/B/sibling.bin", "intermediate-level-payload");
@@ -470,8 +500,8 @@ TEST(DirectoryLocalMoveTest, SingleFileRenameHasZeroContentIo) {
     SyncNode sender;
     ASSERT_TRUE(init_sync_node(sender, "dir-rename-red4-sender"));
     SyncNode receiver;
-    ASSERT_TRUE(
-        init_sync_node(receiver, "dir-rename-red4-receiver", sender.storage_root));
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-red4-receiver", sender.storage_root));
 
     write_local_file(sender, "A/file.bin", "single-file-move-payload");
 
@@ -504,6 +534,434 @@ TEST(DirectoryLocalMoveTest, SingleFileRenameHasZeroContentIo) {
               "single-file-move-payload");
     EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
               kasumi::test::snapshot_tree(receiver.local));
+}
+
+TEST(DirectoryLocalMoveTest, DirectoryRenameWithAddedFileTransfersOnlyNewFile) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-added-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-added-receiver", sender.storage_root));
+
+    write_local_file(sender, "A/1.bin", "payload-h1");
+    write_local_file(sender, "A/2.bin", "payload-h2");
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    reset_content_counts(sender);
+    reset_content_counts(receiver);
+
+    rename_local_entry(sender, "A", "B");
+    write_local_file(sender, "B/3.bin", "payload-h3-new");
+
+    const auto id_h1 = content_identifier_for_payload(sender, "payload-h1");
+    const auto id_h2 = content_identifier_for_payload(sender, "payload-h2");
+    const auto id_h3 = content_identifier_for_payload(sender, "payload-h3-new");
+
+    const auto sender_sync = run_node_sync(sender);
+    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
+    EXPECT_EQ(sender.counters.content_puts, 1U);
+    EXPECT_EQ(sender.counters.content_presences, 0U);
+    EXPECT_EQ(sender.counters.content_copies, 0U);
+    EXPECT_FALSE(contains_identifier(sender.counters.put_identifiers, id_h1));
+    EXPECT_FALSE(contains_identifier(sender.counters.put_identifiers, id_h2));
+    EXPECT_TRUE(contains_identifier(sender.counters.put_identifiers, id_h3));
+    EXPECT_FALSE(contains_identifier(sender.counters.get_identifiers, id_h1));
+    EXPECT_FALSE(contains_identifier(sender.counters.get_identifiers, id_h2));
+
+    const auto receiver_sync = run_node_sync(receiver);
+    ASSERT_TRUE(receiver_sync.has_value()) << receiver_sync.error().detail;
+    EXPECT_EQ(receiver.counters.content_gets, 1U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    EXPECT_FALSE(contains_identifier(receiver.counters.get_identifiers, id_h1));
+    EXPECT_FALSE(contains_identifier(receiver.counters.get_identifiers, id_h2));
+    EXPECT_TRUE(contains_identifier(receiver.counters.get_identifiers, id_h3));
+    EXPECT_FALSE(
+        contains_identifier(receiver.counters.presence_identifiers, id_h1));
+    EXPECT_FALSE(
+        contains_identifier(receiver.counters.presence_identifiers, id_h2));
+
+    const auto* summary =
+        std::get_if<kasumi::application::SyncCompleted>(&receiver_sync->data);
+    ASSERT_NE(summary, nullptr);
+    EXPECT_EQ(summary->downloaded, 1U);
+    EXPECT_EQ(summary->renamed, 2U);
+
+    EXPECT_FALSE(local_entry_exists(receiver, "A"));
+    EXPECT_EQ(read_local_file(receiver, "B/1.bin"), "payload-h1");
+    EXPECT_EQ(read_local_file(receiver, "B/2.bin"), "payload-h2");
+    EXPECT_EQ(read_local_file(receiver, "B/3.bin"), "payload-h3-new");
+    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
+              kasumi::test::snapshot_tree(receiver.local));
+}
+
+TEST(DirectoryLocalMoveTest,
+     DirectoryRenameWithModifiedFileTransfersOnlyModifiedFile) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-mod-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-mod-receiver", sender.storage_root));
+
+    write_local_file(sender, "A/1.bin", "payload-h1-unchanged");
+    write_local_file(sender, "A/2.bin", "payload-h2-original");
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    reset_content_counts(sender);
+    reset_content_counts(receiver);
+
+    rename_local_entry(sender, "A", "B");
+    write_local_file(sender, "B/2.bin", "payload-h3-modified");
+
+    const auto id_h1 =
+        content_identifier_for_payload(sender, "payload-h1-unchanged");
+    const auto id_h2 =
+        content_identifier_for_payload(sender, "payload-h2-original");
+    const auto id_h3 =
+        content_identifier_for_payload(sender, "payload-h3-modified");
+
+    const auto sender_sync = run_node_sync(sender);
+    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
+    EXPECT_EQ(sender.counters.content_puts, 1U);
+    EXPECT_EQ(sender.counters.content_presences, 0U);
+    EXPECT_EQ(sender.counters.content_copies, 0U);
+    EXPECT_FALSE(contains_identifier(sender.counters.put_identifiers, id_h1));
+    EXPECT_FALSE(contains_identifier(sender.counters.put_identifiers, id_h2));
+    EXPECT_TRUE(contains_identifier(sender.counters.put_identifiers, id_h3));
+    EXPECT_FALSE(contains_identifier(sender.counters.get_identifiers, id_h1));
+    EXPECT_FALSE(contains_identifier(sender.counters.get_identifiers, id_h2));
+
+    const auto receiver_sync = run_node_sync(receiver);
+    ASSERT_TRUE(receiver_sync.has_value()) << receiver_sync.error().detail;
+    EXPECT_EQ(receiver.counters.content_gets, 1U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    EXPECT_FALSE(contains_identifier(receiver.counters.get_identifiers, id_h1));
+    EXPECT_FALSE(contains_identifier(receiver.counters.get_identifiers, id_h2));
+    EXPECT_TRUE(contains_identifier(receiver.counters.get_identifiers, id_h3));
+    EXPECT_FALSE(
+        contains_identifier(receiver.counters.presence_identifiers, id_h1));
+
+    const auto* summary =
+        std::get_if<kasumi::application::SyncCompleted>(&receiver_sync->data);
+    ASSERT_NE(summary, nullptr);
+    EXPECT_EQ(summary->downloaded, 1U);
+    EXPECT_EQ(summary->renamed, 1U);
+
+    EXPECT_FALSE(local_entry_exists(receiver, "A"));
+    EXPECT_EQ(read_local_file(receiver, "B/1.bin"), "payload-h1-unchanged");
+    EXPECT_EQ(read_local_file(receiver, "B/2.bin"), "payload-h3-modified");
+    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
+              kasumi::test::snapshot_tree(receiver.local));
+}
+
+TEST(DirectoryLocalMoveTest,
+     DirectoryRenameWithDuplicateContentPairsSourcesOneToOne) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-dup-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-dup-receiver", sender.storage_root));
+
+    write_local_file(sender, "A/one.bin", "identical-duplicate-content");
+    write_local_file(sender, "A/two.bin", "identical-duplicate-content");
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    reset_content_counts(sender);
+    reset_content_counts(receiver);
+
+    rename_local_entry(sender, "A", "B");
+
+    const auto sender_sync = run_node_sync(sender);
+    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
+    EXPECT_EQ(sender.counters.content_gets, 0U);
+    EXPECT_EQ(sender.counters.content_puts, 0U);
+    EXPECT_EQ(sender.counters.content_presences, 0U);
+    EXPECT_EQ(sender.counters.content_copies, 0U);
+
+    const auto receiver_sync = run_node_sync(receiver);
+    ASSERT_TRUE(receiver_sync.has_value()) << receiver_sync.error().detail;
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+    EXPECT_EQ(receiver.counters.content_presences, 0U);
+    EXPECT_EQ(receiver.counters.content_copies, 0U);
+
+    const auto* summary =
+        std::get_if<kasumi::application::SyncCompleted>(&receiver_sync->data);
+    ASSERT_NE(summary, nullptr);
+    EXPECT_EQ(summary->downloaded, 0U);
+    EXPECT_EQ(summary->renamed, 2U);
+
+    EXPECT_FALSE(local_entry_exists(receiver, "A"));
+    EXPECT_EQ(read_local_file(receiver, "B/one.bin"),
+              "identical-duplicate-content");
+    EXPECT_EQ(read_local_file(receiver, "B/two.bin"),
+              "identical-duplicate-content");
+    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
+              kasumi::test::snapshot_tree(receiver.local));
+}
+
+TEST(DirectoryLocalMoveTest,
+     EmptyDirectoryRenamePreservesStructureWithZeroContentIo) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-empty-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-empty-receiver", sender.storage_root));
+
+    std::error_code ec;
+    ASSERT_TRUE(
+        std::filesystem::create_directories(sender.local / "A/Empty", ec));
+    ASSERT_FALSE(ec);
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(local_entry_exists(receiver, "A/Empty"));
+
+    reset_content_counts(sender);
+    reset_content_counts(receiver);
+
+    ASSERT_TRUE(
+        std::filesystem::create_directories(sender.local / "B/Empty", ec));
+    ASSERT_FALSE(ec);
+    remove_local_subtree(sender, "A");
+
+    const auto sender_sync = run_node_sync(sender);
+    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
+    EXPECT_EQ(sender.counters.content_gets, 0U);
+    EXPECT_EQ(sender.counters.content_puts, 0U);
+    EXPECT_EQ(sender.counters.content_presences, 0U);
+    EXPECT_EQ(sender.counters.content_copies, 0U);
+
+    const auto receiver_sync = run_node_sync(receiver);
+    ASSERT_TRUE(receiver_sync.has_value()) << receiver_sync.error().detail;
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+    EXPECT_EQ(receiver.counters.content_presences, 0U);
+    EXPECT_EQ(receiver.counters.content_copies, 0U);
+
+    EXPECT_FALSE(local_entry_exists(receiver, "A"));
+    EXPECT_TRUE(local_entry_exists(receiver, "B/Empty"));
+    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
+              kasumi::test::snapshot_tree(receiver.local));
+}
+
+TEST(DirectoryLocalMoveTest,
+     CopyPreservingSourceUsesDownloadAndDoesNotConsumeSource) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-copy-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-copy-receiver", sender.storage_root));
+
+    write_local_file(sender, "A/file.bin", "copy-must-not-consume-source");
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    reset_content_counts(sender);
+    reset_content_counts(receiver);
+
+    write_local_file(sender, "B/file.bin", "copy-must-not-consume-source");
+
+    const auto sender_sync = run_node_sync(sender);
+    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
+    EXPECT_EQ(sender.counters.content_puts, 0U);
+
+    const auto receiver_sync = run_node_sync(receiver);
+    ASSERT_TRUE(receiver_sync.has_value()) << receiver_sync.error().detail;
+    EXPECT_EQ(receiver.counters.content_gets, 1U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+
+    const auto* summary =
+        std::get_if<kasumi::application::SyncCompleted>(&receiver_sync->data);
+    ASSERT_NE(summary, nullptr);
+    EXPECT_EQ(summary->downloaded, 1U);
+    EXPECT_EQ(summary->renamed, 0U);
+
+    EXPECT_EQ(read_local_file(receiver, "A/file.bin"),
+              "copy-must-not-consume-source");
+    EXPECT_EQ(read_local_file(receiver, "B/file.bin"),
+              "copy-must-not-consume-source");
+    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
+              kasumi::test::snapshot_tree(receiver.local));
+}
+
+TEST(DirectoryLocalMoveTest, DirectoryRenameWithUnicodePathsHasZeroContentIo) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-unicode-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-unicode-receiver", sender.storage_root));
+
+    write_local_file(sender,
+                     "Projetos/Aplicação_日本語/código/núcleo_α.cpp",
+                     "unicode-cpp-1");
+    write_local_file(
+        sender, "Projetos/Aplicação_日本語/leia_me_çãõ.md", "unicode-md-2");
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    reset_content_counts(sender);
+    reset_content_counts(receiver);
+
+    write_local_file(
+        sender, "Arquivo/Motor_日本語_v2/código/núcleo_α.cpp", "unicode-cpp-1");
+    write_local_file(
+        sender, "Arquivo/Motor_日本語_v2/leia_me_çãõ.md", "unicode-md-2");
+    remove_local_subtree(sender, "Projetos");
+
+    const auto sender_sync = run_node_sync(sender);
+    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
+    EXPECT_EQ(sender.counters.content_gets, 0U);
+    EXPECT_EQ(sender.counters.content_puts, 0U);
+    EXPECT_EQ(sender.counters.content_presences, 0U);
+    EXPECT_EQ(sender.counters.content_copies, 0U);
+
+    const auto receiver_sync = run_node_sync(receiver);
+    ASSERT_TRUE(receiver_sync.has_value()) << receiver_sync.error().detail;
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+    EXPECT_EQ(receiver.counters.content_presences, 0U);
+    EXPECT_EQ(receiver.counters.content_copies, 0U);
+
+    EXPECT_FALSE(local_entry_exists(receiver, "Projetos"));
+    EXPECT_EQ(read_local_file(receiver,
+                              "Arquivo/Motor_日本語_v2/código/núcleo_α.cpp"),
+              "unicode-cpp-1");
+    EXPECT_EQ(
+        read_local_file(receiver, "Arquivo/Motor_日本語_v2/leia_me_çãõ.md"),
+        "unicode-md-2");
+    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
+              kasumi::test::snapshot_tree(receiver.local));
+}
+
+TEST(DirectoryLocalMoveTest,
+     OccupiedDestinationFailsSafelyWithoutOverwritingExternalContent) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-occupied-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-occupied-receiver", sender.storage_root));
+
+    write_local_file(sender, "A/1.bin", "payload-1");
+    write_local_file(sender, "A/2.bin", "payload-2");
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    rename_local_entry(sender, "A", "B");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    reset_content_counts(receiver);
+
+    // Inject an external file at B/2.bin right before A/2.bin is moved.
+    const auto target_source =
+        receiver.local / kasumi::platform::path::from_utf8("A/2.bin");
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "before_rename_move" && path == target_source) {
+                write_local_file(
+                    receiver, "B/2.bin", "external-do-not-overwrite");
+            }
+        });
+
+    const auto receiver_sync = run_node_sync(receiver);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_FALSE(receiver_sync.has_value());
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(read_local_file(receiver, "B/2.bin"),
+              "external-do-not-overwrite");
+    EXPECT_EQ(read_local_file(receiver, "A/1.bin"), "payload-1");
+    EXPECT_EQ(read_local_file(receiver, "A/2.bin"), "payload-2");
+    EXPECT_FALSE(local_entry_exists(receiver, "B/1.bin"));
+}
+
+TEST(DirectoryLocalMoveTest,
+     SourceModifiedDuringExecutionFailsSafelyWithoutMovingCorruptedBytes) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-srcmod-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-srcmod-receiver", sender.storage_root));
+
+    write_local_file(sender, "A/1.bin", "payload-1");
+    write_local_file(sender, "A/2.bin", "payload-2");
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    rename_local_entry(sender, "A", "B");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    reset_content_counts(receiver);
+
+    const auto target_source =
+        receiver.local / kasumi::platform::path::from_utf8("A/2.bin");
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "before_rename_move" && path == target_source) {
+                write_local_file(
+                    receiver, "A/2.bin", "concurrently-modified-source");
+            }
+        });
+
+    const auto receiver_sync = run_node_sync(receiver);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_FALSE(receiver_sync.has_value());
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_FALSE(local_entry_exists(receiver, "B/2.bin"));
+    EXPECT_FALSE(local_entry_exists(receiver, "B/1.bin"));
+    EXPECT_EQ(read_local_file(receiver, "A/1.bin"), "payload-1");
+    EXPECT_EQ(read_local_file(receiver, "A/2.bin"),
+              "concurrently-modified-source");
+}
+
+TEST(DirectoryLocalMoveTest,
+     SourceMissingAtExecutionFailsSafelyWithoutSilentDownload) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-srcmissing-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-srcmissing-receiver", sender.storage_root));
+
+    write_local_file(sender, "A/1.bin", "payload-1");
+    write_local_file(sender, "A/2.bin", "payload-2");
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    rename_local_entry(sender, "A", "B");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    reset_content_counts(receiver);
+
+    const auto target_source =
+        receiver.local / kasumi::platform::path::from_utf8("A/2.bin");
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "before_rename_move" && path == target_source) {
+                remove_local_subtree(receiver, "A/2.bin");
+            }
+        });
+
+    const auto receiver_sync = run_node_sync(receiver);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_FALSE(receiver_sync.has_value());
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_FALSE(local_entry_exists(receiver, "B/2.bin"));
+    EXPECT_FALSE(local_entry_exists(receiver, "B/1.bin"));
+    EXPECT_EQ(read_local_file(receiver, "A/1.bin"), "payload-1");
 }
 
 } // namespace
