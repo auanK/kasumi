@@ -60,6 +60,7 @@ inline constexpr std::array<std::string_view, ActionCount> action_metrics{
     "action/DeleteLocalDirectory",
     "action/DeleteRemote",
     "action/DeleteRemoteDirectory",
+    "action/CopyLocal",
 };
 
 Error make_error(ErrorCode code,

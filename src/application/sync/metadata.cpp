@@ -53,6 +53,7 @@ metadata_restore_paths(const transaction::Record& record,
                 break;
             case Action::RenameLocal:
             case Action::MoveLocal:
+            case Action::CopyLocal:
                 add_path_and_ancestors(paths, path, true);
                 add_path_and_ancestors(
                     paths,

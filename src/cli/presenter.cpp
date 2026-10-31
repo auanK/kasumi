@@ -202,7 +202,8 @@ void render_plan_report(const application::PlanReport& report,
                                             "DeleteLocal",
                                             "DeleteLocalDirectory",
                                             "DeleteRemote",
-                                            "DeleteRemoteDirectory"};
+                                            "DeleteRemoteDirectory",
+                                            "CopyLocal"};
 
     auto print_item = [&](const application::PlanItem& item) {
         auto idx = static_cast<std::size_t>(item.action);
@@ -211,7 +212,8 @@ void render_plan_report(const application::PlanReport& report,
                        ACTION_NAMES[idx],
                        platform::path::to_utf8(item.path));
             if (item.action == application::PlanAction::RenameLocal ||
-                item.action == application::PlanAction::MoveLocal) {
+                item.action == application::PlanAction::MoveLocal ||
+                item.action == application::PlanAction::CopyLocal) {
                 std::print(" -> {}",
                            platform::path::to_utf8(item.alternative_path));
             }

@@ -39,6 +39,8 @@ core_action_to_plan_action(Action action) {
             return PlanAction::DeleteRemote;
         case Action::DeleteRemoteDirectory:
             return PlanAction::DeleteRemoteDirectory;
+        case Action::CopyLocal:
+            return PlanAction::CopyLocal;
         case Action::Count:
             return std::unexpected("count action is not a valid plan");
     }

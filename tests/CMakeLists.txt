@@ -172,6 +172,7 @@ kasumi_add_test_suite(
         integration/sync/test_remote_availability.cpp
         integration/sync/test_reobservation_safeguards.cpp
         integration/sync/test_mutation_contracts.cpp
+        integration/sync/test_local_copy.cpp
     LIBRARIES
         kasumi_application
         kasumi_sqlite3
@@ -188,6 +189,24 @@ if(KASUMI_BUILD_JOURNAL_FAULT_TESTS)
         kasumi_test_integration_sync PRIVATE KASUMI_JOURNAL_FAULT_TESTS)
 endif()
 target_compile_definitions(kasumi_test_integration_sync PRIVATE KASUMI_WORKSPACE_FAULT_TESTS)
+
+kasumi_add_test_suite(
+    kasumi_test_integration_local_copy
+    "integration.local_copy"
+    SOURCES
+        integration/sync/test_local_copy.cpp
+    LIBRARIES
+        kasumi_application
+        kasumi_sqlite3
+        monocypher
+)
+target_sources(kasumi_test_integration_local_copy PRIVATE
+    $<TARGET_OBJECTS:kasumi_application_fault_test_objects>
+)
+target_compile_definitions(kasumi_test_integration_local_copy PRIVATE
+    KASUMI_MUTATION_FAULT_TESTS
+)
+
 
 add_executable(
     kasumi_sync_gc_crash_child

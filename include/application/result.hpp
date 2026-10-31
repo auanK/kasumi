@@ -34,6 +34,7 @@ enum class PlanAction {
     DeleteLocalDirectory,
     DeleteRemote,
     DeleteRemoteDirectory,
+    CopyLocal,
     Count
 };
 
