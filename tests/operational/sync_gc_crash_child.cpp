@@ -1,5 +1,7 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/maintenance.hpp"
+#include "application/sync/coordinator.hpp"
+#include "application/sync/mutation_fault_test.hpp"
 #include "application/use_cases/context.hpp"
 #include "platform/path.hpp"
 #include "runtime/vault.hpp"
@@ -99,8 +101,8 @@ int main() {
     const auto profile = environment_path("KASUMI_CRASH_TEST_PROFILE");
     const auto local = environment_path("KASUMI_CRASH_TEST_LOCAL");
     const auto remote = environment_path("KASUMI_CRASH_TEST_STORAGE");
-    if ((mode != "sync" && mode != "gc") || profile.empty() || local.empty() ||
-        remote.empty()) {
+    if ((mode != "sync" && mode != "recover" && mode != "gc") ||
+        profile.empty() || local.empty() || remote.empty()) {
         std::cerr << "invalid crash child configuration\n";
         return 2;
     }
@@ -131,6 +133,12 @@ int main() {
     };
     auto storage = crash_storage(*opened);
 
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [](std::string_view point, const std::filesystem::path& path) {
+            kasumi::platform::process_crash_test_hook::pause_at(
+                point, kasumi::platform::path::to_utf8(path));
+        });
+
     if (mode == "sync") {
         kasumi::application::detail::OperationContext context{
             .operation = kasumi::application::Operation::Sync,
@@ -144,6 +152,17 @@ int main() {
             std::cerr << "child Sync failed before crash point: "
                       << result.error().detail << '\n';
             return 5;
+        }
+        return 0;
+    }
+
+    if (mode == "recover") {
+        auto result = kasumi::application::sync::coordinator::recover_if_needed(
+            runtime, storage, key);
+        if (!result) {
+            std::cerr << "child recover failed before crash point: "
+                      << result.error().detail << '\n';
+            return 7;
         }
         return 0;
     }

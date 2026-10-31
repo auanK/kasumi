@@ -1,5 +1,6 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/maintenance.hpp"
+#include "application/sync/coordinator.hpp"
 #include "application/use_cases/context.hpp"
 #include "core/hasher.hpp"
 #include "crypto/content.hpp"
@@ -54,6 +55,7 @@ using kasumi::transport::Transport;
 struct CountingStorageState {
     Transport* base = nullptr;
     std::size_t content_puts = 0;
+    std::size_t content_gets = 0;
 };
 
 void destroy_counting_storage(void*) noexcept {
@@ -79,8 +81,12 @@ kasumi::transport::Result counting_get(
     void* context,
     std::string_view identifier,
     const std::filesystem::path& destination) {
+    auto* state = static_cast<CountingStorageState*>(context);
+    if (identifier.find('/') == std::string_view::npos) {
+        ++state->content_gets;
+    }
     return kasumi::transport::get(
-        *static_cast<CountingStorageState*>(context)->base,
+        *state->base,
         identifier,
         destination);
 }
@@ -133,6 +139,8 @@ public:
         : workspace_(kasumi::test::make_temp_workspace("sync-gc-crash")),
           profile_(kasumi::test::workspace_path(workspace_, "profile")),
           local_(kasumi::test::workspace_path(workspace_, "local")),
+          peer_profile_(kasumi::test::workspace_path(workspace_, "peer-profile")),
+          peer_local_(kasumi::test::workspace_path(workspace_, "peer-local")),
           storage_root_(kasumi::test::workspace_path(workspace_, "storage")),
           database_(profile_ / "state.db"), key_(test_key()) {
         std::error_code error;
@@ -140,9 +148,14 @@ public:
         valid_ = !error;
         std::filesystem::create_directories(local_, error);
         valid_ = valid_ && !error;
+        std::filesystem::create_directories(peer_profile_, error);
+        valid_ = valid_ && !error;
+        std::filesystem::create_directories(peer_local_, error);
+        valid_ = valid_ && !error;
         std::filesystem::create_directories(storage_root_, error);
         valid_ = valid_ && !error &&
-                 kasumi::state_storage::initialize(database_);
+                 kasumi::state_storage::initialize(database_) &&
+                 kasumi::state_storage::initialize(peer_profile_ / "state.db");
         auto opened = kasumi::transport::open_transport(
             kasumi::platform::path::to_utf8(storage_root_));
         if (!opened) {
@@ -176,6 +189,45 @@ public:
         const auto path = local_ / kasumi::platform::path::from_utf8(relative);
         std::filesystem::create_directories(path.parent_path());
         kasumi::test::write_text(path, contents);
+    }
+
+    void peer_write(std::string_view relative, std::string_view contents) {
+        const auto path = peer_local_ / kasumi::platform::path::from_utf8(relative);
+        std::filesystem::create_directories(path.parent_path());
+        kasumi::test::write_text(path, contents);
+    }
+
+    void peer_rename(std::string_view from_rel, std::string_view to_rel) {
+        std::filesystem::rename(
+            peer_local_ / kasumi::platform::path::from_utf8(from_rel),
+            peer_local_ / kasumi::platform::path::from_utf8(to_rel));
+    }
+
+    std::expected<kasumi::application::Response,
+                  kasumi::application::Error>
+    peer_sync() {
+        kasumi::runtime::RuntimeData peer_runtime{
+            .local_dir = peer_local_,
+            .database_path = peer_profile_ / "state.db",
+            .key_path = peer_profile_ / "key.bin",
+            .storage_location = runtime_.storage_location,
+        };
+        kasumi::application::detail::OperationContext peer_context{
+            .operation = kasumi::application::Operation::Sync,
+            .runtime = peer_runtime,
+            .summary = {.local_dir = peer_local_,
+                        .remote_dir = runtime_.storage_location},
+            .key = key_,
+            .storage = make_counting_storage(counting_state_),
+        };
+        return kasumi::application::detail::run_sync(peer_context);
+    }
+
+    std::expected<kasumi::application::sync::coordinator::RecoveryResult,
+                  kasumi::application::sync::coordinator::Error>
+    recover() {
+        return kasumi::application::sync::coordinator::recover_if_needed(
+            runtime_, context_.storage, key_);
     }
 
     std::expected<kasumi::application::Response,
@@ -292,11 +344,17 @@ public:
         return counting_state_.content_puts;
     }
     void reset_content_puts() noexcept { counting_state_.content_puts = 0; }
+    std::size_t content_gets() const noexcept {
+        return counting_state_.content_gets;
+    }
+    void reset_content_gets() noexcept { counting_state_.content_gets = 0; }
 
 private:
     kasumi::test::TempWorkspace workspace_;
     std::filesystem::path profile_;
     std::filesystem::path local_;
+    std::filesystem::path peer_profile_;
+    std::filesystem::path peer_local_;
     std::filesystem::path storage_root_;
     std::filesystem::path database_;
     kasumi::runtime::vault::KeyBytes key_{};
@@ -738,6 +796,180 @@ TEST(SyncGcCrashTest,
     ASSERT_TRUE(after.has_value() && *after);
     EXPECT_EQ((*after)->commit_id, (*before)->commit_id);
     EXPECT_EQ((*after)->tree, (*before)->tree);
+    auto audited = fixture.fsck();
+    ASSERT_TRUE(audited.has_value()) << audited.error().detail;
+}
+
+TEST(SyncGcCrashTest, KilledAfterLocalReuseMoveBeforeCheckpointRecoversSafely) {
+    CrashFixture fixture;
+    ASSERT_TRUE(fixture.valid());
+    fixture.peer_write("Old/a.bin", "crash local reuse alpha");
+    fixture.peer_write("Old/b.bin", "crash local reuse beta");
+    ASSERT_TRUE(fixture.peer_sync().has_value());
+    ASSERT_TRUE(fixture.sync().has_value());
+    ASSERT_TRUE(std::filesystem::is_regular_file(fixture.local() / "Old/a.bin"));
+    ASSERT_TRUE(std::filesystem::is_regular_file(fixture.local() / "Old/b.bin"));
+
+    auto before = fixture.state();
+    ASSERT_TRUE(before.has_value() && *before);
+
+    fixture.peer_rename("Old", "New");
+    ASSERT_TRUE(fixture.peer_sync().has_value());
+
+    const auto target_a =
+        kasumi::platform::path::to_utf8(fixture.local() / "New" / "a.bin");
+    const auto signal = fixture.profile() / "crash-local-reuse-move.signal";
+    const auto child = run_child(fixture,
+                                 "sync",
+                                 "after_local_reuse_move",
+                                 target_a,
+                                 signal);
+    ASSERT_TRUE(expect_crash_point(child, "after_local_reuse_move", target_a));
+
+    // At the exact crash point: Old/a.bin has already been moved to New/a.bin,
+    // while the journal has not yet checkpointed Download(New/a.bin) as Applied.
+    EXPECT_TRUE(std::filesystem::is_regular_file(fixture.local() / "New" / "a.bin"));
+    EXPECT_FALSE(std::filesystem::exists(fixture.local() / "Old" / "a.bin"));
+    EXPECT_TRUE(std::filesystem::is_regular_file(fixture.local() / "Old" / "b.bin"));
+    const auto transactions = fixture.profile() / ".transactions";
+    ASSERT_TRUE(std::filesystem::is_directory(transactions));
+    EXPECT_NE(std::filesystem::directory_iterator{transactions},
+              std::filesystem::directory_iterator{});
+
+    // Recovery must roll back the uncommitted transaction: restore Old/a.bin from
+    // the DeleteLocal backup and remove New/a.bin.
+    const auto recovered = fixture.recover();
+    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+    EXPECT_TRUE(std::filesystem::is_regular_file(fixture.local() / "Old" / "a.bin"));
+    EXPECT_EQ(kasumi::test::read_text(fixture.local() / "Old" / "a.bin"),
+              "crash local reuse alpha");
+    EXPECT_TRUE(std::filesystem::is_regular_file(fixture.local() / "Old" / "b.bin"));
+    EXPECT_FALSE(std::filesystem::exists(fixture.local() / "New" / "a.bin"));
+
+    // Subsequent Sync must complete the rename with 0 Content GETs:
+    fixture.reset_content_gets();
+    const auto res = fixture.sync();
+    ASSERT_TRUE(res.has_value()) << res.error().detail;
+    EXPECT_EQ(fixture.content_gets(), 0U);
+    EXPECT_FALSE(std::filesystem::exists(fixture.local() / "Old"));
+    EXPECT_TRUE(std::filesystem::is_regular_file(fixture.local() / "New" / "a.bin"));
+    EXPECT_TRUE(std::filesystem::is_regular_file(fixture.local() / "New" / "b.bin"));
+    EXPECT_EQ(kasumi::test::read_text(fixture.local() / "New" / "a.bin"),
+              "crash local reuse alpha");
+    EXPECT_EQ(kasumi::test::read_text(fixture.local() / "New" / "b.bin"),
+              "crash local reuse beta");
+
+    auto audited = fixture.fsck();
+    ASSERT_TRUE(audited.has_value()) << audited.error().detail;
+}
+
+TEST(SyncGcCrashTest,
+     KilledAcrossLocalReuseFaultWindowsAndDuringRecoveryRecoversSafely) {
+    CrashFixture fixture;
+    ASSERT_TRUE(fixture.valid());
+    fixture.peer_write("Old/a.bin", "window alpha content");
+    fixture.peer_write("Old/b.bin", "window beta content");
+    ASSERT_TRUE(fixture.peer_sync().has_value());
+    ASSERT_TRUE(fixture.sync().has_value());
+
+    fixture.peer_rename("Old", "New");
+    ASSERT_TRUE(fixture.peer_sync().has_value());
+
+    const auto source_a =
+        kasumi::platform::path::to_utf8(fixture.local() / "Old" / "a.bin");
+    const auto target_a =
+        kasumi::platform::path::to_utf8(fixture.local() / "New" / "a.bin");
+
+    // 1. Crash before local reuse verification:
+    {
+        const auto signal = fixture.profile() / "crash-verify.signal";
+        const auto child = run_child(fixture,
+                                     "sync",
+                                     "before_local_reuse_verify",
+                                     source_a,
+                                     signal);
+        ASSERT_TRUE(
+            expect_crash_point(child, "before_local_reuse_verify", source_a));
+        ASSERT_TRUE(fixture.recover().has_value());
+        EXPECT_TRUE(
+            std::filesystem::is_regular_file(fixture.local() / "Old" / "a.bin"));
+        EXPECT_FALSE(
+            std::filesystem::exists(fixture.local() / "New" / "a.bin"));
+    }
+
+    // 2. Crash after verification, before move:
+    {
+        const auto signal = fixture.profile() / "crash-pre-move.signal";
+        const auto child = run_child(fixture,
+                                     "sync",
+                                     "before_local_reuse_move",
+                                     source_a,
+                                     signal);
+        ASSERT_TRUE(
+            expect_crash_point(child, "before_local_reuse_move", source_a));
+        ASSERT_TRUE(fixture.recover().has_value());
+        EXPECT_TRUE(
+            std::filesystem::is_regular_file(fixture.local() / "Old" / "a.bin"));
+        EXPECT_FALSE(
+            std::filesystem::exists(fixture.local() / "New" / "a.bin"));
+    }
+
+    // 3. Crash after Download(New/{a,b}.bin) is Applied, before DeleteLocal(Old/a.bin),
+    // and then crash AGAIN mid-recovery after restoring Old/a.bin:
+    {
+        const auto signal = fixture.profile() / "crash-pre-delete.signal";
+        const auto child = run_child(fixture,
+                                     "sync",
+                                     "before_delete_local",
+                                     source_a,
+                                     signal);
+        ASSERT_TRUE(expect_crash_point(child, "before_delete_local", source_a));
+        EXPECT_TRUE(
+            std::filesystem::is_regular_file(fixture.local() / "New" / "a.bin"));
+        EXPECT_FALSE(
+            std::filesystem::exists(fixture.local() / "Old" / "a.bin"));
+
+        // Kill recovery child mid-rollback right after restoring Old/a.bin:
+        const auto rec_signal =
+            fixture.profile() / "crash-mid-recovery.signal";
+        const auto rec_child = run_child(fixture,
+                                         "recover",
+                                         "after_restore_complete",
+                                         source_a,
+                                         rec_signal);
+        ASSERT_TRUE(expect_crash_point(
+            rec_child, "after_restore_complete", source_a));
+        // Old/a.bin is restored, while New/a.bin is still present because rollback
+        // was killed before rolling back Download(New/a.bin):
+        EXPECT_TRUE(
+            std::filesystem::is_regular_file(fixture.local() / "Old" / "a.bin"));
+        EXPECT_TRUE(
+            std::filesystem::is_regular_file(fixture.local() / "New" / "a.bin"));
+
+        // Re-running recover_if_needed() must finish the interrupted rollback cleanly:
+        const auto recovered = fixture.recover();
+        ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+        EXPECT_TRUE(
+            std::filesystem::is_regular_file(fixture.local() / "Old" / "a.bin"));
+        EXPECT_TRUE(
+            std::filesystem::is_regular_file(fixture.local() / "Old" / "b.bin"));
+        EXPECT_FALSE(
+            std::filesystem::exists(fixture.local() / "New" / "a.bin"));
+        EXPECT_FALSE(
+            std::filesystem::exists(fixture.local() / "New" / "b.bin"));
+    }
+
+    // 4. Final Sync completes with 0 Content GETs and passes fsck:
+    fixture.reset_content_gets();
+    const auto synced = fixture.sync();
+    ASSERT_TRUE(synced.has_value()) << synced.error().detail;
+    EXPECT_EQ(fixture.content_gets(), 0U);
+    EXPECT_FALSE(std::filesystem::exists(fixture.local() / "Old"));
+    EXPECT_TRUE(
+        std::filesystem::is_regular_file(fixture.local() / "New" / "a.bin"));
+    EXPECT_TRUE(
+        std::filesystem::is_regular_file(fixture.local() / "New" / "b.bin"));
+
     auto audited = fixture.fsck();
     ASSERT_TRUE(audited.has_value()) << audited.error().detail;
 }

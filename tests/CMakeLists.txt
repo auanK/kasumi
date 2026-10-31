@@ -192,6 +192,9 @@ add_executable(
     kasumi_sync_gc_crash_child
     operational/sync_gc_crash_child.cpp
 )
+target_sources(kasumi_sync_gc_crash_child PRIVATE
+    $<TARGET_OBJECTS:kasumi_application_fault_test_objects>
+)
 target_link_libraries(
     kasumi_sync_gc_crash_child
     PRIVATE kasumi_application kasumi_sqlite3 monocypher kasumi_warnings
@@ -201,7 +204,10 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
         -static-libgcc -static-libstdc++ -Wl,--allow-multiple-definition)
 endif()
 target_include_directories(kasumi_sync_gc_crash_child PRIVATE ${PROJECT_SOURCE_DIR}/src)
-target_compile_definitions(kasumi_sync_gc_crash_child PRIVATE KASUMI_PROCESS_CRASH_TESTS)
+target_compile_definitions(kasumi_sync_gc_crash_child PRIVATE
+    KASUMI_PROCESS_CRASH_TESTS
+    KASUMI_MUTATION_FAULT_TESTS
+)
 if(WIN32)
     target_sources(kasumi_sync_gc_crash_child PRIVATE
         "${PROJECT_BINARY_DIR}/long_path_aware.rc")
