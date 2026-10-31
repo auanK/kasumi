@@ -30,6 +30,7 @@ constexpr std::array actions{
     Action::Upload,
     Action::CreateLocalDirectory,
     Action::CreateRemoteDirectory,
+    Action::MoveLocal,
     Action::Download,
     Action::DeleteLocal,
     Action::DeleteLocalDirectory,
@@ -45,7 +46,10 @@ SyncPlan plan_with_all_actions() {
             .action = action,
             .path = "path-" + std::to_string(kasumi::action_index(action)),
             .hash = "hash-" + std::to_string(kasumi::action_index(action)),
-            .alt_path = action == Action::RenameLocal ? "old-path" : "",
+            .alt_path =
+                (action == Action::RenameLocal || action == Action::MoveLocal)
+                    ? "old-path"
+                    : "",
             .size = 100 + kasumi::action_index(action),
             .exclusive_destination = action == Action::Upload,
         };
@@ -118,6 +122,215 @@ std::vector<std::byte> minimal_record(std::uint8_t phase,
     wire::write<std::uint8_t>(writer, state);
     wire::write<std::uint8_t>(writer, 0);
     return writer_bytes(writer);
+}
+
+struct WireOperationSpec {
+    std::uint8_t wire_action = 0;
+    std::string path;
+    std::string alt_path;
+    std::string hash;
+    std::uint64_t size = 0;
+    bool exclusive_destination = false;
+    std::string previous_hash;
+    std::uint32_t backup_slot = 0;
+    std::uint8_t state = 0;
+    bool had_original = false;
+};
+
+std::vector<std::byte>
+build_wire_record_with_operations(std::span<const WireOperationSpec> ops) {
+    wire::Writer writer;
+    wire::write<std::uint8_t>(writer, 9);
+    wire::write_string(writer, std::string(32, '0'));
+    wire::write<std::uint8_t>(writer,
+                              static_cast<std::uint8_t>(Phase::Started));
+    wire::write<std::uint8_t>(writer, 1);
+    wire::write_string(writer, "");
+    wire::write_string(writer, "");
+    wire::write<std::uint64_t>(writer, 10);
+    wire::write<std::uint64_t>(writer, 76);
+    wire::write<std::uint32_t>(writer, 0);
+    wire::write<std::uint32_t>(writer, 0);
+    wire::write<std::uint64_t>(writer, 77);
+    wire::write_string(writer, "");
+    wire::write_string(writer, "");
+    wire::write_string(writer, "");
+    wire::write_string(writer, "");
+    wire::write_string(writer, "");
+    wire::write<std::int64_t>(writer, 0);
+    wire::write<std::uint32_t>(writer, 0);
+    wire::write<std::uint32_t>(writer, 0);
+    wire::write<std::uint32_t>(writer, 0);
+    wire::write<std::uint32_t>(writer, static_cast<std::uint32_t>(ops.size()));
+    for (const auto& op : ops) {
+        wire::write<std::uint8_t>(writer, op.wire_action);
+        wire::write_string(writer, op.path);
+        wire::write_string(writer, op.alt_path);
+        wire::write_string(writer, op.hash);
+        wire::write<std::uint64_t>(writer, op.size);
+        wire::write<std::uint8_t>(writer, op.exclusive_destination ? 1 : 0);
+        wire::write_string(writer, op.previous_hash);
+        wire::write<std::uint32_t>(writer, op.backup_slot);
+        wire::write<std::uint8_t>(writer, op.state);
+        wire::write<std::uint8_t>(writer, op.had_original ? 1 : 0);
+    }
+    return writer_bytes(writer);
+}
+
+std::vector<std::uint8_t>
+extract_persisted_action_bytes(std::span<const std::byte> data) {
+    wire::Reader reader{data};
+    (void)wire::read<std::uint8_t>(reader);
+    (void)wire::read_string(reader, 4096);
+    (void)wire::read<std::uint8_t>(reader);
+    (void)wire::read<std::uint8_t>(reader);
+    (void)wire::read_string(reader, 4096);
+    (void)wire::read_string(reader, 4096);
+    (void)wire::read<std::uint64_t>(reader);
+    (void)wire::read<std::uint64_t>(reader);
+    for (int list_idx = 0; list_idx < 2; ++list_idx) {
+        const auto count = wire::read<std::uint32_t>(reader);
+        if (!count) {
+            return {};
+        }
+        for (std::uint32_t i = 0; i < *count; ++i) {
+            (void)wire::read_string(reader, 4096);
+        }
+    }
+    (void)wire::read<std::uint64_t>(reader);
+    for (int str_idx = 0; str_idx < 5; ++str_idx) {
+        (void)wire::read_string(reader, 4096);
+    }
+    (void)wire::read<std::int64_t>(reader);
+    (void)wire::read<std::uint32_t>(reader);
+    (void)wire::read<std::uint32_t>(reader);
+    const auto parents = wire::read<std::uint32_t>(reader);
+    if (!parents) {
+        return {};
+    }
+    for (std::uint32_t i = 0; i < *parents; ++i) {
+        (void)wire::read_string(reader, 4096);
+    }
+    const auto op_count = wire::read<std::uint32_t>(reader);
+    if (!op_count) {
+        return {};
+    }
+    std::vector<std::uint8_t> result;
+    result.reserve(*op_count);
+    for (std::uint32_t i = 0; i < *op_count; ++i) {
+        const auto action_raw = wire::read<std::uint8_t>(reader);
+        if (!action_raw) {
+            return {};
+        }
+        result.push_back(*action_raw);
+        (void)wire::read_string(reader, 4096);
+        (void)wire::read_string(reader, 4096);
+        (void)wire::read_string(reader, 4096);
+        (void)wire::read<std::uint64_t>(reader);
+        (void)wire::read<std::uint8_t>(reader);
+        (void)wire::read_string(reader, 4096);
+        (void)wire::read<std::uint32_t>(reader);
+        (void)wire::read<std::uint8_t>(reader);
+        (void)wire::read<std::uint8_t>(reader);
+    }
+    return result;
+}
+
+std::vector<std::byte> make_v091_all_legacy_actions_fixture() {
+    const auto no_backup = std::numeric_limits<std::uint32_t>::max();
+    const std::array<WireOperationSpec, 9> specs{{
+        {.wire_action = 0,
+         .path = "legacy-0",
+         .alt_path = "old-0",
+         .hash = "hash-0",
+         .size = 100,
+         .exclusive_destination = false,
+         .previous_hash = "prev-0",
+         .backup_slot = 0,
+         .state = static_cast<std::uint8_t>(OperationState::Prepared),
+         .had_original = true},
+        {.wire_action = 1,
+         .path = "legacy-1",
+         .alt_path = "",
+         .hash = "hash-1",
+         .size = 101,
+         .exclusive_destination = true,
+         .previous_hash = "prev-1",
+         .backup_slot = no_backup,
+         .state = static_cast<std::uint8_t>(OperationState::Prepared),
+         .had_original = false},
+        {.wire_action = 2,
+         .path = "legacy-2",
+         .alt_path = "",
+         .hash = "hash-2",
+         .size = 102,
+         .exclusive_destination = false,
+         .previous_hash = "prev-2",
+         .backup_slot = 1,
+         .state = static_cast<std::uint8_t>(OperationState::Prepared),
+         .had_original = true},
+        {.wire_action = 3,
+         .path = "legacy-3",
+         .alt_path = "",
+         .hash = "hash-3",
+         .size = 103,
+         .exclusive_destination = false,
+         .previous_hash = "prev-3",
+         .backup_slot = no_backup,
+         .state = static_cast<std::uint8_t>(OperationState::Prepared),
+         .had_original = false},
+        {.wire_action = 4,
+         .path = "legacy-4",
+         .alt_path = "",
+         .hash = "hash-4",
+         .size = 104,
+         .exclusive_destination = false,
+         .previous_hash = "prev-4",
+         .backup_slot = 2,
+         .state = static_cast<std::uint8_t>(OperationState::Prepared),
+         .had_original = true},
+        {.wire_action = 5,
+         .path = "legacy-5",
+         .alt_path = "",
+         .hash = "hash-5",
+         .size = 105,
+         .exclusive_destination = false,
+         .previous_hash = "prev-5",
+         .backup_slot = 3,
+         .state = static_cast<std::uint8_t>(OperationState::Prepared),
+         .had_original = true},
+        {.wire_action = 6,
+         .path = "legacy-6",
+         .alt_path = "",
+         .hash = "hash-6",
+         .size = 106,
+         .exclusive_destination = false,
+         .previous_hash = "prev-6",
+         .backup_slot = 4,
+         .state = static_cast<std::uint8_t>(OperationState::Prepared),
+         .had_original = true},
+        {.wire_action = 7,
+         .path = "legacy-7",
+         .alt_path = "",
+         .hash = "hash-7",
+         .size = 107,
+         .exclusive_destination = false,
+         .previous_hash = "prev-7",
+         .backup_slot = no_backup,
+         .state = static_cast<std::uint8_t>(OperationState::Prepared),
+         .had_original = false},
+        {.wire_action = 8,
+         .path = "legacy-8",
+         .alt_path = "",
+         .hash = "hash-8",
+         .size = 108,
+         .exclusive_destination = false,
+         .previous_hash = "prev-8",
+         .backup_slot = no_backup,
+         .state = static_cast<std::uint8_t>(OperationState::Prepared),
+         .had_original = false},
+    }};
+    return build_wire_record_with_operations(specs);
 }
 
 TEST(TransactionTypesTest,
@@ -344,6 +557,7 @@ TEST(TransactionCodecTest, UnicodeOperationPathsRoundTrip) {
         "pasta-日本/usuário-☁.txt",
         "Ä/ä.txt",
     };
+
     auto original = representative_record();
     for (std::size_t index = 0; index < original.plan.operations.size();
          ++index) {
@@ -567,6 +781,239 @@ TEST(TransactionCodecTest, RejectsInvalidEnumsAndInvalidRecords) {
     invalid_pending.pending_paths = {"same.txt", "same.txt"};
     EXPECT_FALSE(
         kasumi::transaction::codec::encode(invalid_pending).has_value());
+}
+
+// Teste A — Identificadores históricos (0..8)
+TEST(TransactionCodecTest, EncodesHistoricalV091ActionIdentifiers) {
+    constexpr std::array<std::pair<Action, std::uint8_t>, 9> legacy_mapping{{
+        {Action::RenameLocal, 0U},
+        {Action::Upload, 1U},
+        {Action::CreateLocalDirectory, 2U},
+        {Action::CreateRemoteDirectory, 3U},
+        {Action::Download, 4U},
+        {Action::DeleteLocal, 5U},
+        {Action::DeleteLocalDirectory, 6U},
+        {Action::DeleteRemote, 7U},
+        {Action::DeleteRemoteDirectory, 8U},
+    }};
+
+    std::vector<Operation> operations;
+    operations.reserve(legacy_mapping.size());
+    for (std::size_t idx = 0; idx < legacy_mapping.size(); ++idx) {
+        const auto action = legacy_mapping[idx].first;
+        operations.push_back(Operation{
+            .action = action,
+            .path = "legacy-" + std::to_string(idx),
+            .hash = "hash-" + std::to_string(idx),
+            .alt_path = action == Action::RenameLocal ? "old-0" : "",
+            .size = 100 + idx,
+            .exclusive_destination = action == Action::Upload,
+        });
+    }
+
+    auto record = kasumi::transaction::make_record(
+        std::string(32, '0'),
+        10,
+        76,
+        kasumi::make_sync_plan(std::move(operations), 77));
+    ASSERT_TRUE(record.has_value());
+
+    const auto encoded = kasumi::transaction::codec::encode(*record);
+    ASSERT_TRUE(encoded.has_value()) << encoded.error();
+
+    const auto persisted_ids = extract_persisted_action_bytes(*encoded);
+    ASSERT_EQ(persisted_ids.size(), legacy_mapping.size());
+    for (std::size_t idx = 0; idx < legacy_mapping.size(); ++idx) {
+        EXPECT_EQ(persisted_ids[idx], legacy_mapping[idx].second)
+            << "Action mismatch at index " << idx;
+    }
+}
+
+// Teste B — Decode de registros produzidos pela v0.9.1
+TEST(TransactionCodecTest,
+     DecodesHistoricalV091WireBytesWithoutConfusingDownloadWithMoveLocal) {
+    const auto v091_bytes = make_v091_all_legacy_actions_fixture();
+    const auto decoded = kasumi::transaction::codec::decode(v091_bytes);
+    ASSERT_TRUE(decoded.has_value()) << decoded.error();
+    ASSERT_EQ(decoded->plan.operations.size(), 9U);
+
+    EXPECT_EQ(decoded->plan.operations[0].action, Action::RenameLocal);
+    EXPECT_EQ(decoded->plan.operations[1].action, Action::Upload);
+    EXPECT_EQ(decoded->plan.operations[2].action, Action::CreateLocalDirectory);
+    EXPECT_EQ(decoded->plan.operations[3].action,
+              Action::CreateRemoteDirectory);
+    EXPECT_EQ(decoded->plan.operations[4].action, Action::Download);
+    EXPECT_NE(decoded->plan.operations[4].action, Action::MoveLocal);
+    EXPECT_EQ(decoded->plan.operations[5].action, Action::DeleteLocal);
+    EXPECT_EQ(decoded->plan.operations[6].action, Action::DeleteLocalDirectory);
+    EXPECT_EQ(decoded->plan.operations[7].action, Action::DeleteRemote);
+    EXPECT_EQ(decoded->plan.operations[8].action,
+              Action::DeleteRemoteDirectory);
+}
+
+// Teste C — MoveLocal novo (identificador persistido = 9)
+TEST(TransactionCodecTest,
+     EncodesMoveLocalAsWireIdentifierNineAndRoundTripsFields) {
+    const auto hash_hex = std::string(64, 'a');
+    auto record = kasumi::transaction::make_record(
+        std::string(32, '4'),
+        2,
+        5,
+        kasumi::make_sync_plan(
+            {Operation{.action = Action::MoveLocal,
+                       .path = "Haruka/src/main.cpp",
+                       .hash = hash_hex,
+                       .alt_path = "HarukaEngine/src/main.cpp",
+                       .size = 4096,
+                       .exclusive_destination = false}},
+            6));
+    ASSERT_TRUE(record.has_value());
+    record->progress[0].previous_hash = hash_hex;
+    record->progress[0].backup_slot = 0;
+    record->progress[0].state = OperationState::BackupCreated;
+    record->progress[0].had_original = true;
+
+    EXPECT_EQ(kasumi::action_index(Action::MoveLocal), 4U);
+
+    const auto encoded = kasumi::transaction::codec::encode(*record);
+    ASSERT_TRUE(encoded.has_value()) << encoded.error();
+
+    const auto persisted_ids = extract_persisted_action_bytes(*encoded);
+    ASSERT_EQ(persisted_ids.size(), 1U);
+    EXPECT_EQ(persisted_ids[0], 9U);
+
+    const auto decoded = kasumi::transaction::codec::decode(*encoded);
+    ASSERT_TRUE(decoded.has_value()) << decoded.error();
+    ASSERT_EQ(decoded->plan.operations.size(), 1U);
+    const auto& op = decoded->plan.operations[0];
+    const auto& prog = decoded->progress[0];
+    EXPECT_EQ(op.action, Action::MoveLocal);
+    EXPECT_EQ(kasumi::platform::path::to_logical_utf8(op.path),
+              "Haruka/src/main.cpp");
+    EXPECT_EQ(kasumi::platform::path::to_logical_utf8(op.alt_path),
+              "HarukaEngine/src/main.cpp");
+    EXPECT_EQ(op.hash, hash_hex);
+    EXPECT_EQ(op.size, 4096U);
+    EXPECT_FALSE(op.exclusive_destination);
+    EXPECT_EQ(prog.previous_hash, hash_hex);
+    EXPECT_EQ(prog.backup_slot, 0U);
+    EXPECT_EQ(prog.state, OperationState::BackupCreated);
+    EXPECT_TRUE(prog.had_original);
+}
+
+// Teste D — Ordem canônica e offsets com ações legadas + MoveLocal
+TEST(TransactionCodecTest,
+     PreservesCanonicalInternalPhaseOrderAndOffsetsAcrossMoveLocalAndLegacy) {
+    const auto original = representative_record();
+    const auto encoded = kasumi::transaction::codec::encode(original);
+    ASSERT_TRUE(encoded.has_value()) << encoded.error();
+
+    const auto persisted_ids = extract_persisted_action_bytes(*encoded);
+    const std::vector<std::uint8_t> expected_wire_sequence{
+        0U, 1U, 2U, 3U, 9U, 4U, 5U, 6U, 7U, 8U};
+    EXPECT_EQ(persisted_ids, expected_wire_sequence);
+
+    const auto decoded = kasumi::transaction::codec::decode(*encoded);
+    ASSERT_TRUE(decoded.has_value()) << decoded.error();
+    EXPECT_EQ(decoded->plan.offsets, original.plan.offsets);
+    EXPECT_EQ(decoded->plan.operations[4].action, Action::MoveLocal);
+    EXPECT_EQ(decoded->plan.operations[5].action, Action::Download);
+    EXPECT_EQ(kasumi::sync_plan_phase(decoded->plan, Action::MoveLocal).size(),
+              1U);
+    EXPECT_EQ(kasumi::sync_plan_phase(decoded->plan, Action::Download).size(),
+              1U);
+
+    // Wire ordering where Download (4) precedes MoveLocal (9) violates internal
+    // canonical phase ordering (MoveLocal < Download) and must be rejected.
+    const std::array<WireOperationSpec, 2> out_of_order_specs{{
+        {.wire_action = 4,
+         .path = "dl.bin",
+         .alt_path = "",
+         .hash = std::string(64, 'b'),
+         .size = 10,
+         .exclusive_destination = false,
+         .previous_hash = "",
+         .backup_slot = 0,
+         .state = static_cast<std::uint8_t>(OperationState::Pending),
+         .had_original = false},
+        {.wire_action = 9,
+         .path = "src.bin",
+         .alt_path = "dst.bin",
+         .hash = std::string(64, 'c'),
+         .size = 20,
+         .exclusive_destination = false,
+         .previous_hash = "",
+         .backup_slot = 1,
+         .state = static_cast<std::uint8_t>(OperationState::Pending),
+         .had_original = false},
+    }};
+    const auto out_of_order_bytes =
+        build_wire_record_with_operations(out_of_order_specs);
+    EXPECT_FALSE(
+        kasumi::transaction::codec::decode(out_of_order_bytes).has_value());
+}
+
+// Teste E — Identificadores inválidos (10, 255) e MoveLocal inválido
+TEST(TransactionCodecTest,
+     RejectsUnknownActionWireIdentifiersAndInvalidMoveLocalRecords) {
+    for (const std::uint8_t unknown_id :
+         {std::uint8_t{10}, std::uint8_t{11}, std::uint8_t{255}}) {
+        SCOPED_TRACE(static_cast<unsigned>(unknown_id));
+        const auto invalid_bytes =
+            minimal_record(static_cast<std::uint8_t>(Phase::Started),
+                           unknown_id,
+                           0,
+                           std::numeric_limits<std::uint32_t>::max());
+        EXPECT_FALSE(
+            kasumi::transaction::codec::decode(invalid_bytes).has_value());
+    }
+
+    // MoveLocal without local-mutation backup_slot (no_backup instead of 0) or
+    // with unsafe path must be rejected by record validation.
+    const std::array<WireOperationSpec, 1> missing_backup_slot_spec{{
+        {.wire_action = 9,
+         .path = "A/1.bin",
+         .alt_path = "B/1.bin",
+         .hash = std::string(64, 'a'),
+         .size = 16,
+         .exclusive_destination = false,
+         .previous_hash = "",
+         .backup_slot = std::numeric_limits<std::uint32_t>::max(),
+         .state = static_cast<std::uint8_t>(OperationState::Pending),
+         .had_original = false},
+    }};
+    EXPECT_FALSE(
+        kasumi::transaction::codec::decode(
+            build_wire_record_with_operations(missing_backup_slot_spec))
+            .has_value());
+
+    const std::array<WireOperationSpec, 1> unsafe_alt_path_spec{{
+        {.wire_action = 9,
+         .path = "A/1.bin",
+         .alt_path = "../outside.bin",
+         .hash = std::string(64, 'a'),
+         .size = 16,
+         .exclusive_destination = false,
+         .previous_hash = "",
+         .backup_slot = 0,
+         .state = static_cast<std::uint8_t>(OperationState::Pending),
+         .had_original = false},
+    }};
+    EXPECT_FALSE(kasumi::transaction::codec::decode(
+                     build_wire_record_with_operations(unsafe_alt_path_spec))
+                     .has_value());
+}
+
+// Teste F — Compatibilidade de bytes antigos (decode v0.9.1 -> encode novo)
+TEST(TransactionCodecTest,
+     DecodingAndReencodingHistoricalV091BytesPreservesBinaryRepresentation) {
+    const auto v091_bytes = make_v091_all_legacy_actions_fixture();
+    const auto decoded = kasumi::transaction::codec::decode(v091_bytes);
+    ASSERT_TRUE(decoded.has_value()) << decoded.error();
+
+    const auto reencoded = kasumi::transaction::codec::encode(*decoded);
+    ASSERT_TRUE(reencoded.has_value()) << reencoded.error();
+    EXPECT_EQ(*reencoded, v091_bytes);
 }
 
 } // namespace

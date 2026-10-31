@@ -14,11 +14,11 @@
 #if defined(_WIN32)
 #include <windows.h>
 #elif defined(__linux__)
-#include <sys/syscall.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include <cerrno>
 #include <cstring>
+#include <fcntl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #endif
 
 namespace kasumi::application::sync::mutation {
@@ -36,12 +36,15 @@ std::expected<void, MutationError>
 move_local_without_replace(const std::filesystem::path& source,
                            const std::filesystem::path& destination,
                            std::size_t operation_index) {
+    platform::perf_trace::count("native rename calls");
+    const auto rename_trace = platform::perf_trace::begin();
 #if defined(_WIN32)
     const bool moved = MoveFileExW(source.wstring().c_str(),
                                    destination.wstring().c_str(),
                                    MOVEFILE_WRITE_THROUGH) != 0;
+    const DWORD native_error = moved ? ERROR_SUCCESS : GetLastError();
+    platform::perf_trace::finish("move native rename wall", rename_trace);
     if (!moved) {
-        const auto native_error = GetLastError();
         const auto code = native_error == ERROR_ALREADY_EXISTS ||
                                   native_error == ERROR_FILE_EXISTS
                               ? MutationErrorCode::DestinationConflict
@@ -67,22 +70,25 @@ move_local_without_replace(const std::filesystem::path& source,
                        operation_index));
     }
 
-    if (::syscall(SYS_renameat2,
-                  AT_FDCWD,
-                  source.c_str(),
-                  AT_FDCWD,
-                  destination.c_str(),
-                  RENAME_NOREPLACE) != 0) {
-        const int err = errno;
+    const auto linux_rename_result = ::syscall(SYS_renameat2,
+                                              AT_FDCWD,
+                                              source.c_str(),
+                                              AT_FDCWD,
+                                              destination.c_str(),
+                                              RENAME_NOREPLACE);
+    const int linux_error = (linux_rename_result != 0) ? errno : 0;
+    platform::perf_trace::finish("move native rename wall", rename_trace);
+    if (linux_rename_result != 0) {
+        const int err = linux_error;
         const auto code = (err == EEXIST)
                               ? MutationErrorCode::DestinationConflict
                               : MutationErrorCode::LocalIo;
-        return std::unexpected(
-            make_error(code,
-                       "failed to rename without replace (errno=" +
-                           std::to_string(err) + ": " + std::strerror(err) + ")",
-                       destination,
-                       operation_index));
+        return std::unexpected(make_error(
+            code,
+            "failed to rename without replace (errno=" + std::to_string(err) +
+                ": " + std::strerror(err) + ")",
+            destination,
+            operation_index));
     }
 #else
     return std::unexpected(
@@ -424,12 +430,12 @@ apply_download(const Operation& operation,
             std::error_code error;
             const auto size = std::filesystem::file_size(destination, error);
             if (error || size != operation.size)
-                return std::unexpected(make_error(
-                    MutationErrorCode::IntegrityMismatch,
-                    error ? error.message()
-                          : "file size does not match expected size",
-                    destination,
-                    operation_index));
+                return std::unexpected(
+                    make_error(MutationErrorCode::IntegrityMismatch,
+                               error ? error.message()
+                                     : "file size does not match expected size",
+                               destination,
+                               operation_index));
             return {};
         }
     } else if (!missing(*destination_status)) {
@@ -636,7 +642,8 @@ apply_download(const Operation& operation,
         }
     }
 
-    // shortcut: validation and replace are separate; upgrade if external-writer isolation becomes required.
+    // shortcut: validation and replace are separate; upgrade if external-writer
+    // isolation becomes required.
     prepared = detail::validate_prepared_destination(operation,
                                                      operation_index,
                                                      destination,
@@ -656,15 +663,15 @@ apply_download(const Operation& operation,
                                               candidate,
                                               operation_index));
         }
-        auto installed = platform::durability::replace_atomically(
-            candidate, destination);
+        auto installed =
+            platform::durability::replace_atomically(candidate, destination);
         if (!installed) {
             remove_temporary_file(candidate);
-            return std::unexpected(make_error(
-                MutationErrorCode::LocalIo,
-                "failed to replace local file: " + installed.error(),
-                destination,
-                operation_index));
+            return std::unexpected(
+                make_error(MutationErrorCode::LocalIo,
+                           "failed to replace local file: " + installed.error(),
+                           destination,
+                           operation_index));
         }
         mutation_fault_test::hit("after_download_replace", destination);
         synced = platform::durability::sync_parent_directory(destination);
@@ -773,6 +780,127 @@ MutationResult apply_rename(const Operation& operation,
                    "rename source and destination do not exist",
                    operation.path,
                    operation_index));
+}
+
+MutationResult
+apply_move_local(const Operation& operation,
+                 std::size_t operation_index,
+                 const std::filesystem::path& source,
+                 const std::filesystem::path& destination,
+                 const platform::Workspace& workspace,
+                 const transaction::OperationProgress& progress) {
+    struct MoveApplyGuard {
+        platform::perf_trace::Token token;
+        ~MoveApplyGuard() {
+            platform::perf_trace::finish("move apply wall", token);
+        }
+    } move_apply_guard{platform::perf_trace::begin()};
+    const auto parent = destination.parent_path();
+    auto parent_status = read_status(parent, operation_index);
+    if (!parent_status) {
+        return std::unexpected(parent_status.error());
+    }
+    if (std::filesystem::is_symlink(*parent_status) ||
+        !std::filesystem::is_directory(*parent_status)) {
+        return std::unexpected(
+            make_error(MutationErrorCode::UnsafePath,
+                       "destination parent directory is invalid",
+                       parent,
+                       operation_index));
+    }
+
+    mutation_fault_test::hit("before_rename_move", source);
+
+    auto source_status = read_status(source, operation_index);
+    if (!source_status) {
+        return std::unexpected(source_status.error());
+    }
+    auto destination_status = read_status(destination, operation_index);
+    if (!destination_status) {
+        return std::unexpected(destination_status.error());
+    }
+    if (std::filesystem::is_symlink(*source_status) ||
+        std::filesystem::is_symlink(*destination_status)) {
+        return std::unexpected(make_error(
+            MutationErrorCode::UnsafePath,
+            "move does not accept symlink",
+            std::filesystem::is_symlink(*source_status) ? source : destination,
+            operation_index));
+    }
+
+    const bool source_missing = missing(*source_status);
+    const bool destination_missing = missing(*destination_status);
+    if (source_missing && destination_missing) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "move source does not exist",
+                                          source,
+                                          operation_index));
+    }
+    if (!source_missing) {
+        if (!std::filesystem::is_regular_file(*source_status)) {
+            return std::unexpected(
+                make_error(MutationErrorCode::DestinationConflict,
+                           "move source is not a regular file",
+                           source,
+                           operation_index));
+        }
+        platform::perf_trace::count("source hash calls");
+        auto verified_source =
+            verify_local_file(source, operation, operation_index);
+        if (!verified_source) {
+            return std::unexpected(verified_source.error());
+        }
+        if (!destination_missing) {
+            return std::unexpected(
+                make_error(MutationErrorCode::DestinationConflict,
+                           "move destination already exists",
+                           destination,
+                           operation_index));
+        }
+    }
+
+    auto prepared = detail::validate_prepared_rename(
+        operation, operation_index, source, destination, workspace, progress);
+    if (!prepared) {
+        return prepared;
+    }
+
+    if (!source_missing && destination_missing) {
+        auto moved =
+            move_local_without_replace(source, destination, operation_index);
+        if (!moved) {
+            return std::unexpected(moved.error());
+        }
+        mutation_fault_test::hit("after_rename_move", destination);
+    } else if (source_missing && !destination_missing) {
+        const auto dest_verif_trace = platform::perf_trace::begin();
+        auto verified_dest =
+            verify_local_file(destination, operation, operation_index);
+        platform::perf_trace::finish("move destination verification wall", dest_verif_trace);
+        if (!verified_dest) {
+            return std::unexpected(
+                make_error(MutationErrorCode::DestinationConflict,
+                           verified_dest.error().detail,
+                           destination,
+                           operation_index));
+        }
+    }
+
+    auto dest_synced = platform::durability::sync_parent_directory(destination);
+    if (!dest_synced) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          dest_synced.error(),
+                                          destination,
+                                          operation_index));
+    }
+    auto source_synced = platform::durability::sync_parent_directory(source);
+    if (!source_synced) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          source_synced.error(),
+                                          source,
+                                          operation_index));
+    }
+    return {};
 }
 
 std::string mutation_code_name(MutationErrorCode code) noexcept {
@@ -906,6 +1034,25 @@ apply_operation(const Operation& operation,
             }
             return {};
 
+        case Action::MoveLocal: {
+            auto source =
+                resolve_local_path(local_root, operation.path, operation_index);
+            if (!source) {
+                return std::unexpected(source.error());
+            }
+            auto destination = resolve_local_path(
+                local_root, operation.alt_path, operation_index);
+            if (!destination) {
+                return std::unexpected(destination.error());
+            }
+            return apply_move_local(operation,
+                                    operation_index,
+                                    *source,
+                                    *destination,
+                                    workspace,
+                                    progress);
+        }
+
         case Action::Download: {
             auto destination =
                 resolve_local_path(local_root, operation.path, operation_index);
@@ -939,7 +1086,8 @@ apply_operation(const Operation& operation,
             if (!prepared)
                 return prepared;
             mutation_fault_test::hit("before_delete_local", *path);
-            // shortcut: validation and removal are separate; upgrade if external-writer isolation becomes required.
+            // shortcut: validation and removal are separate; upgrade if
+            // external-writer isolation becomes required.
             auto status = read_status(*path, operation_index);
             if (!status) {
                 return std::unexpected(status.error());
@@ -964,11 +1112,11 @@ apply_operation(const Operation& operation,
             std::error_code error;
             std::filesystem::remove(*path, error);
             if (error)
-                return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                                  "failed to remove file: " +
-                                                      error.message(),
-                                                  *path,
-                                                  operation_index));
+                return std::unexpected(
+                    make_error(MutationErrorCode::LocalIo,
+                               "failed to remove file: " + error.message(),
+                               *path,
+                               operation_index));
             auto synced = platform::durability::sync_parent_directory(*path);
             if (!synced) {
                 return std::unexpected(make_error(MutationErrorCode::LocalIo,

@@ -29,6 +29,63 @@ bool valid_operation_strings(const kasumi::Operation& operation,
            valid_string(operation.hash) && valid_string(progress.previous_hash);
 }
 
+constexpr std::optional<std::uint8_t>
+persisted_action_id(kasumi::Action action) noexcept {
+    switch (action) {
+        case kasumi::Action::RenameLocal:
+            return 0;
+        case kasumi::Action::Upload:
+            return 1;
+        case kasumi::Action::CreateLocalDirectory:
+            return 2;
+        case kasumi::Action::CreateRemoteDirectory:
+            return 3;
+        case kasumi::Action::Download:
+            return 4;
+        case kasumi::Action::DeleteLocal:
+            return 5;
+        case kasumi::Action::DeleteLocalDirectory:
+            return 6;
+        case kasumi::Action::DeleteRemote:
+            return 7;
+        case kasumi::Action::DeleteRemoteDirectory:
+            return 8;
+        case kasumi::Action::MoveLocal:
+            return 9;
+        case kasumi::Action::Count:
+            return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+constexpr std::optional<kasumi::Action>
+action_from_persisted_id(std::uint8_t id) noexcept {
+    switch (id) {
+        case 0:
+            return kasumi::Action::RenameLocal;
+        case 1:
+            return kasumi::Action::Upload;
+        case 2:
+            return kasumi::Action::CreateLocalDirectory;
+        case 3:
+            return kasumi::Action::CreateRemoteDirectory;
+        case 4:
+            return kasumi::Action::Download;
+        case 5:
+            return kasumi::Action::DeleteLocal;
+        case 6:
+            return kasumi::Action::DeleteLocalDirectory;
+        case 7:
+            return kasumi::Action::DeleteRemote;
+        case 8:
+            return kasumi::Action::DeleteRemoteDirectory;
+        case 9:
+            return kasumi::Action::MoveLocal;
+        default:
+            return std::nullopt;
+    }
+}
+
 } // namespace
 
 std::expected<void, std::string> validate(const Record& record) {
@@ -121,8 +178,11 @@ EncodeResult encode(const Record& record) {
             const auto& operation = record.plan.operations[index];
             const auto& progress = record.progress[index];
 
-            wire::write<std::uint8_t>(
-                writer, static_cast<std::uint8_t>(operation.action));
+            const auto action_id = persisted_action_id(operation.action);
+            if (!action_id) {
+                return std::unexpected("invalid action");
+            }
+            wire::write<std::uint8_t>(writer, *action_id);
             wire::write_string(writer,
                                platform::path::to_logical_utf8(operation.path));
             wire::write_string(
@@ -270,7 +330,8 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
                 !had_original) {
                 return std::unexpected("truncated operation");
             }
-            if (!is_valid_action(static_cast<kasumi::Action>(*action_raw))) {
+            const auto action = action_from_persisted_id(*action_raw);
+            if (!action) {
                 return std::unexpected("invalid action");
             }
             if (*exclusive > 1 || *had_original > 1) {
@@ -283,7 +344,7 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
             }
 
             record.plan.operations.push_back(kasumi::Operation{
-                .action = static_cast<kasumi::Action>(*action_raw),
+                .action = *action,
                 .path = platform::path::from_utf8(*path),
                 .hash = std::move(*hash),
                 .alt_path = platform::path::from_utf8(*alt_path),

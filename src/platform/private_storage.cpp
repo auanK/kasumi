@@ -1,3 +1,4 @@
+#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 
 #include "platform/durability.hpp"
@@ -9,6 +10,7 @@
 #include <fstream>
 #include <system_error>
 #include <utility>
+#include <array>
 #include <vector>
 
 #if defined(_WIN32)
@@ -89,8 +91,144 @@ security_descriptor(bool directory) {
     return descriptor;
 }
 
+struct ProcessSecurityContext {
+    std::array<std::byte, SECURITY_MAX_SID_SIZE> user_sid{};
+    std::array<std::byte, SECURITY_MAX_SID_SIZE> system_sid{};
+    bool valid = false;
+};
+
+ProcessSecurityContext get_process_security_context() noexcept {
+    ProcessSecurityContext context{};
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        return context;
+    }
+    std::array<std::byte, sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE> buffer{};
+    DWORD returned_size = 0;
+    const BOOL token_ok = GetTokenInformation(
+        token,
+        TokenUser,
+        buffer.data(),
+        static_cast<DWORD>(buffer.size()),
+        &returned_size);
+    CloseHandle(token);
+    if (!token_ok) {
+        return context;
+    }
+
+    const auto* token_user =
+        reinterpret_cast<const TOKEN_USER*>(buffer.data());
+    if (!token_user->User.Sid || !IsValidSid(token_user->User.Sid)) {
+        return context;
+    }
+    const DWORD sid_length = GetLengthSid(token_user->User.Sid);
+    if (sid_length == 0 || sid_length > context.user_sid.size()) {
+        return context;
+    }
+    std::memcpy(context.user_sid.data(), token_user->User.Sid, sid_length);
+
+    DWORD system_sid_size = static_cast<DWORD>(context.system_sid.size());
+    if (!CreateWellKnownSid(WinLocalSystemSid,
+                            nullptr,
+                            context.system_sid.data(),
+                            &system_sid_size) ||
+        !IsValidSid(context.system_sid.data())) {
+        return context;
+    }
+
+    context.valid = true;
+    return context;
+}
+
+bool is_dacl_compliant(const std::filesystem::path& path,
+                       bool directory) noexcept {
+    const auto context = get_process_security_context();
+    if (!context.valid) {
+        return false;
+    }
+
+    PACL current_dacl = nullptr;
+    PSECURITY_DESCRIPTOR current_sd = nullptr;
+    const auto get_res = GetNamedSecurityInfoW(
+        const_cast<wchar_t*>(path.c_str()),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION,
+        nullptr,
+        nullptr,
+        &current_dacl,
+        nullptr,
+        &current_sd);
+    if (get_res != ERROR_SUCCESS || !current_sd || !current_dacl) {
+        if (current_sd) {
+            LocalFree(current_sd);
+        }
+        return false;
+    }
+
+    SECURITY_DESCRIPTOR_CONTROL control{};
+    DWORD revision = 0;
+    if (!GetSecurityDescriptorControl(current_sd, &control, &revision) ||
+        (control & SE_DACL_PROTECTED) == 0) {
+        LocalFree(current_sd);
+        return false;
+    }
+
+    ACL_SIZE_INFORMATION info{};
+    if (!GetAclInformation(
+            current_dacl, &info, sizeof(info), AclSizeInformation) ||
+        info.AceCount != 2) {
+        LocalFree(current_sd);
+        return false;
+    }
+
+    const DWORD expected_flags =
+        directory ? (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) : 0;
+    bool user_seen = false;
+    bool system_seen = false;
+
+    for (DWORD i = 0; i < info.AceCount; ++i) {
+        void* ace_ptr = nullptr;
+        if (!GetAce(current_dacl, i, &ace_ptr) || !ace_ptr) {
+            LocalFree(current_sd);
+            return false;
+        }
+        const auto* header = static_cast<const ACE_HEADER*>(ace_ptr);
+        if (header->AceType != ACCESS_ALLOWED_ACE_TYPE ||
+            (header->AceFlags & INHERITED_ACE) != 0 ||
+            header->AceFlags != expected_flags) {
+            LocalFree(current_sd);
+            return false;
+        }
+        const auto* ace = static_cast<const ACCESS_ALLOWED_ACE*>(ace_ptr);
+        if ((ace->Mask & FILE_ALL_ACCESS) != FILE_ALL_ACCESS) {
+            LocalFree(current_sd);
+            return false;
+        }
+        auto* sid = const_cast<DWORD*>(&ace->SidStart);
+        if (EqualSid(sid, const_cast<std::byte*>(context.user_sid.data()))) {
+            user_seen = true;
+        } else if (EqualSid(sid,
+                            const_cast<std::byte*>(context.system_sid.data()))) {
+            system_seen = true;
+        } else {
+            LocalFree(current_sd);
+            return false;
+        }
+    }
+    LocalFree(current_sd);
+    return user_seen && system_seen;
+}
+
 std::expected<void, std::string> apply_acl(const std::filesystem::path& path,
                                            bool directory) {
+    platform::perf_trace::count("apply_acl calls");
+
+    if (is_dacl_compliant(path, directory)) {
+        platform::perf_trace::count("acl.already_compliant");
+        return {};
+    }
+
+    platform::perf_trace::count("acl.repair_required");
     auto descriptor = security_descriptor(directory);
     if (!descriptor) {
         return std::unexpected(descriptor.error());
@@ -105,6 +243,7 @@ std::expected<void, std::string> apply_acl(const std::filesystem::path& path,
         LocalFree(*descriptor);
         return std::unexpected(error);
     }
+    const auto acl_trace = platform::perf_trace::begin();
     auto writable = path.wstring();
     const auto result = SetNamedSecurityInfoW(
         writable.data(),
@@ -114,11 +253,13 @@ std::expected<void, std::string> apply_acl(const std::filesystem::path& path,
         nullptr,
         dacl,
         nullptr);
+    platform::perf_trace::finish("apply_acl wall", acl_trace);
     LocalFree(*descriptor);
     if (result != ERROR_SUCCESS) {
         return std::unexpected(
             windows_error("SetNamedSecurityInfoW failed", result));
     }
+    platform::perf_trace::count("acl.writes_applied");
     return {};
 }
 
@@ -261,11 +402,13 @@ create_directory(const std::filesystem::path& path) {
         return std::unexpected(error);
     }
     LocalFree(*descriptor);
+    platform::perf_trace::count("acl.writes_applied");
 #else
     if (::mkdir(path.c_str(), 0700) != 0) {
         return std::unexpected(system_error(
             "mkdir failed", std::error_code{errno, std::generic_category()}));
     }
+    platform::perf_trace::count("acl.writes_applied");
 #endif
     return {};
 }
@@ -294,11 +437,18 @@ protect_directory(const std::filesystem::path& path) {
         return std::unexpected("directory expected at '" +
                                platform::path::to_utf8(path) + "'");
     }
+    platform::perf_trace::count("apply_acl calls");
+    if ((status->st_mode & 0777) == 0700) {
+        platform::perf_trace::count("acl.already_compliant");
+        return {};
+    }
+    platform::perf_trace::count("acl.repair_required");
     if (::chmod(path.c_str(), 0700) != 0) {
         return std::unexpected(
             system_error("chmod 0700 failed",
                          std::error_code{errno, std::generic_category()}));
     }
+    platform::perf_trace::count("acl.writes_applied");
     return {};
 #endif
 }
@@ -446,6 +596,7 @@ create_private_file(const std::filesystem::path& path) {
                 id.FileId.Identifier + sizeof(std::uint64_t),
                 sizeof(std::uint64_t));
     identity.valid = true;
+    platform::perf_trace::count("acl.writes_applied");
     return PrivateOutputFile{
         .handle = reinterpret_cast<std::intptr_t>(file),
         .path = path,
@@ -1046,11 +1197,18 @@ protect_file(const std::filesystem::path& path) {
         return std::unexpected("regular file expected at '" +
                                platform::path::to_utf8(path) + "'");
     }
+    platform::perf_trace::count("apply_acl calls");
+    if ((status->st_mode & 0777) == 0600) {
+        platform::perf_trace::count("acl.already_compliant");
+        return {};
+    }
+    platform::perf_trace::count("acl.repair_required");
     if (::chmod(path.c_str(), 0600) != 0) {
         return std::unexpected(
             system_error("chmod 0600 failed",
                          std::error_code{errno, std::generic_category()}));
     }
+    platform::perf_trace::count("acl.writes_applied");
     return {};
 #endif
 }

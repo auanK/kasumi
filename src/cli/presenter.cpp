@@ -197,6 +197,7 @@ void render_plan_report(const application::PlanReport& report,
                                             "Upload",
                                             "CreateLocalDirectory",
                                             "CreateRemoteDirectory",
+                                            "MoveLocal",
                                             "Download",
                                             "DeleteLocal",
                                             "DeleteLocalDirectory",
@@ -209,7 +210,8 @@ void render_plan_report(const application::PlanReport& report,
             std::print("  - [{}] {}",
                        ACTION_NAMES[idx],
                        platform::path::to_utf8(item.path));
-            if (item.action == application::PlanAction::RenameLocal) {
+            if (item.action == application::PlanAction::RenameLocal ||
+                item.action == application::PlanAction::MoveLocal) {
                 std::print(" -> {}",
                            platform::path::to_utf8(item.alternative_path));
             }

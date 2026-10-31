@@ -27,6 +27,8 @@ core_action_to_plan_action(Action action) {
             return PlanAction::CreateLocalDirectory;
         case Action::CreateRemoteDirectory:
             return PlanAction::CreateRemoteDirectory;
+        case Action::MoveLocal:
+            return PlanAction::MoveLocal;
         case Action::Download:
             return PlanAction::Download;
         case Action::DeleteLocal:
@@ -116,13 +118,13 @@ std::expected<Response, Error> run_plan(OperationContext& context) {
     observation::LocalObservationSession observation_session;
     observation_session.database_path = context.runtime.database_path;
 
-    auto collected = observation::collect_reconciliation_input(
-        context.runtime,
-        context.storage,
-        context.key,
-        false,
-        {},
-        &observation_session);
+    auto collected =
+        observation::collect_reconciliation_input(context.runtime,
+                                                  context.storage,
+                                                  context.key,
+                                                  false,
+                                                  {},
+                                                  &observation_session);
     if (!collected) {
         auto err = plan_error(
             context.operation, collected.error().detail, context.summary);

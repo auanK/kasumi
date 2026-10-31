@@ -10,12 +10,13 @@ The output is a `SyncPlan` plus a **candidate shared tree** and flags for local 
 2. `Upload`
 3. `CreateLocalDirectory`
 4. `CreateRemoteDirectory`
-5. `Download`
-6. `DeleteLocal`
-7. `DeleteLocalDirectory`
-8. `DeleteRemote`
-9. `DeleteRemoteDirectory`
+5. `MoveLocal`
+6. `Download`
+7. `DeleteLocal`
+8. `DeleteLocalDirectory`
+9. `DeleteRemote`
+10. `DeleteRemoteDirectory`
 
-Directory creation is parent-first and removal child-first. The remote-directory and remote-delete actions change the logical publication tree; storage contains content-addressed payloads and history objects, not a mirrored plaintext directory. Plan validation checks phase boundaries, action grouping, and path safety before execution.
+Directory creation is parent-first and removal child-first. When a remote file or directory is renamed or moved, reconciliation deterministically pairs eligible `DeleteLocal` sources (whose `(hash, size)` matches a `Download` destination and whose source path is not retained in the candidate shared tree) 1-to-1 into `MoveLocal` (`path = source`, `alt_path = destination`, `hash`, `size`) after `CreateLocalDirectory` and before `Download` / `DeleteLocalDirectory`. When a local file or directory is renamed or moved, uploads whose `(hash, size)` is already accounted for in the accepted `StoredState` tree reuse the accepted remote content without re-uploading. The remote-directory and remote-delete actions change the logical publication tree; storage contains content-addressed payloads and history objects, not a mirrored plaintext directory. Plan validation checks phase boundaries, action grouping, and path safety before execution.
 
-Normal planning does not perform a full physical content audit. Stabilization probes content needed for the plan, records known missing payloads, and recalculates. A compatible local file can repair missing remote content without changing the logical tree; otherwise an accepted logical file may remain as a **pending materialization** until content becomes available. The candidate shared tree describes the intended logical result; [synchronization execution](synchronization.md) validates an actual publication tree after file operations. Publication is required for initial history, multiple logical heads, or a changed shared tree. A local-only download or accepted-state advance can complete without a new Commit.
+Normal planning does not perform a full physical content audit. Stabilization probes content needed for the plan, records known missing payloads, and recalculates. A compatible local file can repair missing remote content without changing the logical tree; otherwise an accepted logical file may remain as a **pending materialization** until content becomes available. The candidate shared tree describes the intended logical result; [synchronization execution](synchronization.md) validates an actual publication tree after file operations. Publication is required for initial history, multiple logical heads, or a changed shared tree. A local-only download, local move, or accepted-state advance can complete without a new Commit.

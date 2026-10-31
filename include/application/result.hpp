@@ -28,6 +28,7 @@ enum class PlanAction {
     Upload,
     CreateLocalDirectory,
     CreateRemoteDirectory,
+    MoveLocal,
     Download,
     DeleteLocal,
     DeleteLocalDirectory,

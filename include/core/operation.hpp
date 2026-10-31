@@ -21,18 +21,20 @@ enum class Action : std::uint8_t {
     CreateLocalDirectory = 2,
     // Adds a directory to the logical remote tree.
     CreateRemoteDirectory = 3,
+    // Moves a verified local file from path to alt_path.
+    MoveLocal = 4,
     // Downloads remote content for hash to local.
-    Download = 4,
+    Download = 5,
     // Removes a local file.
-    DeleteLocal = 5,
+    DeleteLocal = 6,
     // Removes an empty local directory.
-    DeleteLocalDirectory = 6,
+    DeleteLocalDirectory = 7,
     // Removes a file from the logical remote tree.
-    DeleteRemote = 7,
+    DeleteRemote = 8,
     // Removes a directory from the logical remote tree.
-    DeleteRemoteDirectory = 8,
+    DeleteRemoteDirectory = 9,
     // Sentinel used to dimension the phases.
-    Count = 9
+    Count = 10
 };
 
 // Number of executable values in Action.
@@ -59,6 +61,7 @@ inline constexpr bool is_local_mutation(Action action) noexcept {
         true,
         true,
         true,
+        true,
         false,
         false,
     };
@@ -80,8 +83,8 @@ struct Operation {
     std::filesystem::path path;
     // BLAKE3 hash used in file transfers.
     std::string hash;
-    // Alternate path: RenameLocal destination or trusted remote source path
-    // for an exclusive conflict Download.
+    // Alternate path: RenameLocal/MoveLocal destination or trusted remote
+    // source path for an exclusive conflict Download.
     std::filesystem::path alt_path;
     // Logical file size in bytes.
     std::uint64_t size = 0;
