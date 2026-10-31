@@ -170,6 +170,7 @@ kasumi_add_test_suite(
         integration/sync/test_remote_availability.cpp
         integration/sync/test_reobservation_safeguards.cpp
         integration/sync/test_mutation_contracts.cpp
+        integration/sync/test_local_file_reuse.cpp
     LIBRARIES
         kasumi_application
         kasumi_sqlite3
