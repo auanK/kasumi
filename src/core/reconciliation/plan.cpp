@@ -500,6 +500,30 @@ candidate_shared_tree(const Input& input,
                 upsert_row(result.tree, std::move(row));
                 break;
             }
+            case Action::MoveLocal: {
+                const auto expected_hash = hash_from_hex(operation.hash);
+                const auto source_path =
+                    platform::path::to_logical_utf8(operation.path);
+                const auto dest_path =
+                    platform::path::to_logical_utf8(operation.alt_path);
+                const auto* local_row = find_row(input.local_tree, source_path);
+                const auto* storage_row =
+                    find_row(input.storage.tree, dest_path);
+                if (!expected_hash || local_row == nullptr ||
+                    local_row->is_directory ||
+                    local_row->hash != *expected_hash ||
+                    local_row->size != operation.size ||
+                    storage_row == nullptr || storage_row->is_directory ||
+                    storage_row->hash != *expected_hash ||
+                    storage_row->size != operation.size) {
+                    return std::unexpected(Error{
+                        .code = ErrorCode::UnsafePlan,
+                        .detail = "local move does not match observed trees",
+                        .paths = {operation.path, operation.alt_path},
+                    });
+                }
+                break;
+            }
             case Action::Download: {
                 if (!operation.exclusive_destination) {
                     break;
@@ -678,13 +702,195 @@ Error invalid_tree_error(ErrorCode code, std::string detail) {
     };
 }
 
+struct ContentIdentityKey {
+    std::string hash;
+    std::uint64_t size = 0;
+
+    bool operator==(const ContentIdentityKey&) const noexcept = default;
+};
+
+struct ContentIdentityKeyHash {
+    std::size_t operator()(const ContentIdentityKey& key) const noexcept {
+        return std::hash<std::string>{}(key.hash) ^
+               (std::hash<std::uint64_t>{}(key.size) << 1);
+    }
+};
+
+struct SourceBucket {
+    std::vector<std::size_t> indices;
+    std::size_t cursor = 0;
+};
+
+void plan_local_moves(std::vector<Operation>& operations,
+                      const Snapshot& local_tree) {
+    const auto is_eligible_destination = [&](const Operation& op) {
+        if (op.action != Action::Download || op.exclusive_destination ||
+            !op.alt_path.empty() || op.path.empty() || op.hash.empty() ||
+            !kasumi::has_safe_paths(op)) {
+            return false;
+        }
+        const auto utf8_dest = platform::path::to_logical_utf8(op.path);
+        if (utf8_dest.empty() ||
+            utf8_dest.find(".kasumiconflict_") != std::string::npos ||
+            find_row(local_tree, utf8_dest) != nullptr) {
+            return false;
+        }
+        for (std::size_t slash = utf8_dest.find('/');
+             slash != std::string::npos;
+             slash = utf8_dest.find('/', slash + 1)) {
+            const auto* ancestor =
+                find_row(local_tree, utf8_dest.substr(0, slash));
+            if (ancestor != nullptr && !ancestor->is_directory) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    bool has_eligible_destination = false;
+    bool has_delete_local = false;
+    for (const auto& op : operations) {
+        if (op.action == Action::DeleteLocal) {
+            has_delete_local = true;
+        } else if (!has_eligible_destination && is_eligible_destination(op)) {
+            has_eligible_destination = true;
+        }
+    }
+    if (!has_eligible_destination || !has_delete_local) {
+        return;
+    }
+
+    std::unordered_set<std::string> reserved_paths;
+    for (const auto& op : operations) {
+        if (op.action != Action::DeleteLocal &&
+            op.action != Action::DeleteLocalDirectory) {
+            reserved_paths.insert(platform::path::to_logical_utf8(op.path));
+            if (!op.alt_path.empty()) {
+                reserved_paths.insert(
+                    platform::path::to_logical_utf8(op.alt_path));
+            }
+        }
+    }
+
+    std::unordered_map<ContentIdentityKey, SourceBucket, ContentIdentityKeyHash>
+        candidates;
+    std::unordered_set<std::string> seen_sources;
+    for (std::size_t index = 0; index < operations.size(); ++index) {
+        const auto& op = operations[index];
+        if (op.action != Action::DeleteLocal || op.path.empty() ||
+            !op.alt_path.empty() || op.exclusive_destination ||
+            !kasumi::has_safe_paths(op)) {
+            continue;
+        }
+        const auto utf8_path = platform::path::to_logical_utf8(op.path);
+        if (utf8_path.empty() ||
+            utf8_path.find(".kasumiconflict_") != std::string::npos ||
+            reserved_paths.contains(utf8_path) ||
+            !seen_sources.insert(utf8_path).second) {
+            continue;
+        }
+        const auto* row = find_row(local_tree, utf8_path);
+        if (row == nullptr || row->is_directory || row->hash == Hash{}) {
+            continue;
+        }
+        candidates[ContentIdentityKey{.hash = hash_hex(row->hash),
+                                      .size = row->size}]
+            .indices.push_back(index);
+    }
+    if (candidates.empty()) {
+        return;
+    }
+
+    for (auto& [key, bucket] : candidates) {
+        std::ranges::sort(bucket.indices, [&](std::size_t a, std::size_t b) {
+            return path_less(
+                platform::path::to_logical_utf8(operations[a].path),
+                platform::path::to_logical_utf8(operations[b].path));
+        });
+    }
+
+    std::vector<std::uint8_t> consumed(operations.size(), 0);
+    std::unordered_set<std::string> used_destinations;
+    bool any_matched = false;
+    for (std::size_t index = 0; index < operations.size(); ++index) {
+        auto& op = operations[index];
+        if (!is_eligible_destination(op)) {
+            continue;
+        }
+        const auto utf8_dest = platform::path::to_logical_utf8(op.path);
+        if (!used_destinations.insert(utf8_dest).second) {
+            continue;
+        }
+        auto found = candidates.find(
+            ContentIdentityKey{.hash = op.hash, .size = op.size});
+        if (found == candidates.end() ||
+            found->second.cursor >= found->second.indices.size()) {
+            continue;
+        }
+        const auto source_index = found->second.indices[found->second.cursor++];
+        auto source_path = std::move(operations[source_index].path);
+        auto dest_path = std::move(op.path);
+        auto expected_hash = std::move(op.hash);
+        const auto expected_size = op.size;
+        op = Operation{
+            .action = Action::MoveLocal,
+            .path = std::move(source_path),
+            .hash = std::move(expected_hash),
+            .alt_path = std::move(dest_path),
+            .size = expected_size,
+            .exclusive_destination = false,
+        };
+        consumed[source_index] = 1;
+        any_matched = true;
+    }
+
+    if (any_matched) {
+        std::size_t write_index = 0;
+        for (std::size_t read_index = 0; read_index < operations.size();
+             ++read_index) {
+            if (consumed[read_index] != 0) {
+                continue;
+            }
+            if (write_index != read_index) {
+                operations[write_index] = std::move(operations[read_index]);
+            }
+            ++write_index;
+        }
+        operations.resize(write_index);
+    }
+}
+
 } // namespace
 
 bool has_safe_paths(const SyncPlan& plan) {
-    return std::ranges::all_of(sync_plan_operations(plan),
-                               [](const Operation& operation) {
-                                   return kasumi::has_safe_paths(operation);
-                               });
+    const auto operations = sync_plan_operations(plan);
+    if (!std::ranges::all_of(operations, [](const Operation& operation) {
+            return kasumi::has_safe_paths(operation);
+        })) {
+        return false;
+    }
+
+    std::unordered_set<std::string> move_sources;
+    std::unordered_set<std::string> move_destinations;
+    for (const auto& operation : operations) {
+        if (operation.action != Action::MoveLocal) {
+            continue;
+        }
+        if (operation.path.empty() || operation.alt_path.empty() ||
+            operation.path == operation.alt_path || operation.hash.empty() ||
+            operation.exclusive_destination) {
+            return false;
+        }
+        const auto source = platform::path::to_logical_utf8(operation.path);
+        const auto destination =
+            platform::path::to_logical_utf8(operation.alt_path);
+        if (source.empty() || destination.empty() || source == destination ||
+            !move_sources.insert(source).second ||
+            !move_destinations.insert(destination).second) {
+            return false;
+        }
+    }
+    return true;
 }
 
 std::expected<Snapshot, Error>
@@ -888,6 +1094,8 @@ ReconcileResult reconcile(const Input& input) {
     std::ranges::sort(repair_upload_paths);
     repair_upload_paths.erase(std::ranges::unique(repair_upload_paths).begin(),
                               repair_upload_paths.end());
+
+    plan_local_moves(operations, input.local_tree);
 
     const bool requires_local_mutation =
         std::ranges::any_of(operations, [](const Operation& operation) {

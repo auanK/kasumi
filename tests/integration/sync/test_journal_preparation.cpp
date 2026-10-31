@@ -3,6 +3,7 @@
 #include "application/sync/journal.hpp"
 #include "application/sync/mutation.hpp"
 #include "core/hasher.hpp"
+#include "core/wire.hpp"
 #include "crypto/key_derivation.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
@@ -72,8 +73,9 @@ TEST(JournalPreparationTest,
         ASSERT_TRUE(paths);
         const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
         ASSERT_TRUE(sync::journal::save(*paths, *record, key));
-        auto workspace = sync::coordinator::detail::create_transaction_workspace(
-            profile, record->operation_id, key);
+        auto workspace =
+            sync::coordinator::detail::create_transaction_workspace(
+                profile, record->operation_id, key);
         ASSERT_TRUE(workspace) << workspace.error().detail;
         for (std::size_t i = 0; i < prepared_count; ++i) {
             auto prepared =
@@ -404,6 +406,172 @@ TEST(JournalPreparationTest, RollbackPreservesUnexpectedDownloadCandidateType) {
     ASSERT_FALSE(recovered);
     EXPECT_TRUE(std::filesystem::is_directory(candidate));
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
+}
+
+std::vector<std::byte>
+build_legacy_v091_recovery_payload(std::string_view op_id,
+                                   std::string_view download_path,
+                                   std::string_view download_hash,
+                                   std::string_view dl_prev_hash,
+                                   std::string_view delete_path,
+                                   std::string_view del_hash,
+                                   std::string_view del_prev_hash) {
+    wire::Writer writer;
+    wire::write<std::uint8_t>(writer, 9);
+    wire::write_string(writer, op_id);
+    wire::write<std::uint8_t>(
+        writer, static_cast<std::uint8_t>(kasumi::transaction::Phase::Started));
+    wire::write<std::uint8_t>(writer, 1);
+    wire::write_string(writer, "");
+    wire::write_string(writer, "");
+    wire::write<std::uint64_t>(writer, 0);
+    wire::write<std::uint64_t>(writer, 0);
+    wire::write<std::uint32_t>(writer, 0);
+    wire::write<std::uint32_t>(writer, 0);
+    wire::write<std::uint64_t>(writer, 0);
+    wire::write_string(writer, "");
+    wire::write_string(writer, "");
+    wire::write_string(writer, "");
+    wire::write_string(writer, "");
+    wire::write_string(writer, "");
+    wire::write<std::int64_t>(writer, 0);
+    wire::write<std::uint32_t>(writer, 0);
+    wire::write<std::uint32_t>(writer, 0);
+    wire::write<std::uint32_t>(writer, 0);
+    wire::write<std::uint32_t>(writer, 2);
+
+    // Op 0: Historical Download (wire 4 in v0.9.1)
+    wire::write<std::uint8_t>(writer, 4);
+    wire::write_string(writer, download_path);
+    wire::write_string(writer, "");
+    wire::write_string(writer, download_hash);
+    wire::write<std::uint64_t>(writer, 8);
+    wire::write<std::uint8_t>(writer, 0);
+    wire::write_string(writer, dl_prev_hash);
+    wire::write<std::uint32_t>(writer, 0);
+    wire::write<std::uint8_t>(
+        writer,
+        static_cast<std::uint8_t>(
+            kasumi::transaction::OperationState::Applied));
+    wire::write<std::uint8_t>(writer, 1);
+
+    // Op 1: Historical DeleteLocal (wire 5 in v0.9.1)
+    wire::write<std::uint8_t>(writer, 5);
+    wire::write_string(writer, delete_path);
+    wire::write_string(writer, "");
+    wire::write_string(writer, del_hash);
+    wire::write<std::uint64_t>(writer, 8);
+    wire::write<std::uint8_t>(writer, 0);
+    wire::write_string(writer, del_prev_hash);
+    wire::write<std::uint32_t>(writer, 1);
+    wire::write<std::uint8_t>(
+        writer,
+        static_cast<std::uint8_t>(
+            kasumi::transaction::OperationState::Applied));
+    wire::write<std::uint8_t>(writer, 1);
+
+    return writer.buffer;
+}
+
+TEST(JournalPreparationTest,
+     RecoversHistoricalV091JournalRecordThroughCoordinator) {
+    auto owner = kasumi::test::make_temp_workspace("v091-historical-recovery");
+    const auto profile = kasumi::test::workspace_path(owner, "profile");
+    const auto local = kasumi::test::workspace_path(owner, "local");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+
+    const std::string op_id = "0123456789abcdef0123456789abcdef";
+    const auto dl_new_content = "NEW_DOWNLOAD";
+    const auto dl_old_content = "OLD_DOWNLOAD";
+    const auto del_old_content = "OLD_DELETE";
+
+    kasumi::test::write_text(local / "download.txt", dl_new_content);
+
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    auto workspace = sync::coordinator::detail::create_transaction_workspace(
+        profile, op_id, key);
+    ASSERT_TRUE(workspace) << workspace.error().detail;
+    kasumi::test::write_text(workspace->root / "0.backup", dl_old_content);
+    kasumi::test::write_text(workspace->root / "1.backup", del_old_content);
+
+    const auto dl_new_hash =
+        kasumi::hash_hex(kasumi::hasher::hash_string(dl_new_content));
+    const auto dl_old_hash =
+        kasumi::hash_hex(kasumi::hasher::hash_string(dl_old_content));
+    const auto del_old_hash =
+        kasumi::hash_hex(kasumi::hasher::hash_string(del_old_content));
+
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths);
+    auto init_record =
+        sync::journal::create_record(0, 0, kasumi::make_sync_plan({}, 0));
+    ASSERT_TRUE(init_record);
+    ASSERT_TRUE(sync::journal::save(*paths, *init_record, key));
+
+    const auto payload = build_legacy_v091_recovery_payload(op_id,
+                                                            "download.txt",
+                                                            dl_new_hash,
+                                                            dl_old_hash,
+                                                            "delete.txt",
+                                                            del_old_hash,
+                                                            del_old_hash);
+
+    auto journal_key =
+        kasumi::crypto::derive_key(key, kasumi::crypto::KeyPurpose::Journal);
+    std::vector<std::uint8_t> encrypted(52 + payload.size());
+    encrypted[0] = 'K';
+    encrypted[1] = 'T';
+    encrypted[2] = 'X';
+    encrypted[3] = '3';
+    const std::uint64_t payload_len = payload.size();
+    std::memcpy(encrypted.data() + 4, &payload_len, sizeof(payload_len));
+    crypto_aead_lock(encrypted.data() + 52,
+                     encrypted.data() + 36,
+                     journal_key.data(),
+                     encrypted.data() + 12,
+                     encrypted.data(),
+                     12,
+                     reinterpret_cast<const std::uint8_t*>(payload.data()),
+                     payload.size());
+    kasumi::test::write_binary(
+        paths->final_path,
+        std::vector<std::byte>{
+            reinterpret_cast<const std::byte*>(encrypted.data()),
+            reinterpret_cast<const std::byte*>(encrypted.data() +
+                                               encrypted.size())});
+    const auto confirmation_path =
+        paths->final_path.parent_path() / "confirmed.enc";
+    auto confirmation = kasumi::test::read_binary(confirmation_path);
+    const auto hash =
+        kasumi::hasher::hash_bytes(encrypted.data(), encrypted.size());
+    std::copy(hash.begin(), hash.end(), confirmation.begin() + 4);
+    std::copy(hash.begin(), hash.end(), confirmation.begin() + 52);
+    auto* bytes = reinterpret_cast<std::uint8_t*>(confirmation.data());
+    crypto_aead_lock(nullptr,
+                     bytes + 108,
+                     journal_key.data(),
+                     bytes + 84,
+                     bytes,
+                     84,
+                     nullptr,
+                     0);
+    crypto_wipe(journal_key.data(), journal_key.size());
+    kasumi::test::write_binary(confirmation_path, confirmation);
+
+    const kasumi::runtime::RuntimeData runtime{.local_dir = local,
+                                               .database_path =
+                                                   profile / "state.db",
+                                               .key_path = profile / "key.bin"};
+    kasumi::transport::Transport unavailable{};
+    auto recovered =
+        sync::coordinator::recover_if_needed(runtime, unavailable, key);
+    ASSERT_TRUE(recovered) << (recovered ? "" : recovered.error().detail);
+    EXPECT_EQ(*recovered, sync::coordinator::RecoveryResult::RolledBack);
+    EXPECT_EQ(kasumi::test::read_text(local / "download.txt"), dl_old_content);
+    EXPECT_EQ(kasumi::test::read_text(local / "delete.txt"), del_old_content);
+    EXPECT_FALSE(std::filesystem::exists(paths->final_path));
+    EXPECT_FALSE(std::filesystem::exists(workspace->root));
 }
 
 } // namespace

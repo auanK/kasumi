@@ -1,6 +1,7 @@
 #include "core/diff.hpp"
 #include "core/hasher.hpp"
 #include "core/node.hpp"
+#include "core/reconciliation/plan.hpp"
 #include "platform/path.hpp"
 
 #include <algorithm>
@@ -58,6 +59,9 @@ std::string action_name(Action action) {
         case Action::CreateLocalDirectory:
             return "CreateLocalDirectory";
         case Action::CreateRemoteDirectory:
+            return "CreateRemoteDirectory";
+        case Action::MoveLocal:
+            return "MoveLocal";
             return "CreateRemoteDirectory";
         case Action::Download:
             return "Download";
@@ -590,4 +594,126 @@ TEST(DiffThreeWayTest, NegatedIgnoreRuleReincludesRemoteFile) {
     }));
 }
 
+kasumi::reconciliation::Input
+make_reconcile_input(const Snapshot& local_tree,
+                     const Snapshot& base_tree,
+                     const Snapshot& remote_tree) {
+    return {
+        .local_tree = local_tree,
+        .base_tree = base_tree,
+        .base_commit_id = "commit-1",
+        .base_state_present = true,
+        .storage =
+            {
+                .tree = remote_tree,
+                .reachable_commits = {kasumi::history::LoadedCommit{
+                                          .id = "commit-1",
+                                          .commit = {.height = 1,
+                                                     .tree = base_tree},
+                                      },
+                                      kasumi::history::LoadedCommit{
+                                          .id = "commit-2",
+                                          .commit = {.height = 2,
+                                                     .parents = {"commit-1"},
+                                                     .tree = remote_tree},
+                                      }},
+                .reachable_commit_ids = {"commit-1", "commit-2"},
+                .marked_heads = {"commit-2"},
+                .logical_heads = {"commit-2"},
+                .generation = 2,
+                .history_present = true,
+            },
+        .local_generation = 1,
+    };
+}
+
+TEST(ReconciliationLocalMoveTest,
+     PlansDirectoryAndNestedFileMovesDeterministically) {
+    const auto f1 = file("Haruka/CMakeLists.txt", "cmake-content", test_mtime);
+    const auto f2 = file("Haruka/src/main.cpp", "main-content", test_mtime);
+    const auto f1_moved = file(
+        "Archive/HarukaEngine/CMakeLists.txt", "cmake-content", test_mtime);
+    const auto f2_moved =
+        file("Archive/HarukaEngine/src/main.cpp", "main-content", test_mtime);
+
+    const auto before =
+        tree({directory("Haruka"), directory("Haruka/src"), f1, f2});
+    const auto after = tree({directory("Archive"),
+                             directory("Archive/HarukaEngine"),
+                             directory("Archive/HarukaEngine/src"),
+                             f1_moved,
+                             f2_moved});
+
+    const auto result = kasumi::reconciliation::reconcile(
+        make_reconcile_input(before, before, after));
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_FALSE(result->has_conflicts);
+    EXPECT_FALSE(result->requires_publication);
+    EXPECT_TRUE(result->requires_local_mutation);
+    EXPECT_TRUE(
+        kasumi::sync_plan_phase(result->plan, Action::Download).empty());
+    EXPECT_TRUE(
+        kasumi::sync_plan_phase(result->plan, Action::DeleteLocal).empty());
+
+    expect_operations(
+        result->plan.operations,
+        {signature(Action::CreateLocalDirectory, "Archive"),
+         signature(Action::CreateLocalDirectory, "Archive/HarukaEngine"),
+         signature(Action::CreateLocalDirectory, "Archive/HarukaEngine/src"),
+         signature(Action::MoveLocal,
+                   "Haruka/CMakeLists.txt",
+                   kasumi::hash_hex(f1.hash),
+                   "Archive/HarukaEngine/CMakeLists.txt",
+                   f1.size),
+         signature(Action::MoveLocal,
+                   "Haruka/src/main.cpp",
+                   kasumi::hash_hex(f2.hash),
+                   "Archive/HarukaEngine/src/main.cpp",
+                   f2.size),
+         signature(Action::DeleteLocalDirectory, "Haruka/src"),
+         signature(Action::DeleteLocalDirectory, "Haruka")});
+}
+
+TEST(ReconciliationLocalMoveTest,
+     PairsDuplicateContentOneToOneAndNeverMovesCopy) {
+    const auto dup1 = file("A/one.bin", "same-bytes", test_mtime);
+    const auto dup2 = file("A/two.bin", "same-bytes", test_mtime);
+    const auto dest1 = file("B/one.bin", "same-bytes", test_mtime);
+    const auto dest2 = file("B/two.bin", "same-bytes", test_mtime);
+
+    const auto before_dup = tree({directory("A"), dup1, dup2});
+    const auto after_dup = tree({directory("B"), dest1, dest2});
+
+    const auto dup_result = kasumi::reconciliation::reconcile(
+        make_reconcile_input(before_dup, before_dup, after_dup));
+    ASSERT_TRUE(dup_result.has_value()) << dup_result.error().detail;
+    expect_operations(dup_result->plan.operations,
+                      {signature(Action::CreateLocalDirectory, "B"),
+                       signature(Action::MoveLocal,
+                                 "A/one.bin",
+                                 kasumi::hash_hex(dup1.hash),
+                                 "B/one.bin",
+                                 dup1.size),
+                       signature(Action::MoveLocal,
+                                 "A/two.bin",
+                                 kasumi::hash_hex(dup2.hash),
+                                 "B/two.bin",
+                                 dup2.size),
+                       signature(Action::DeleteLocalDirectory, "A")});
+
+    const auto before_copy = tree({directory("A"), dup1});
+    const auto after_copy = tree({directory("A"), directory("B"), dup1, dest1});
+    const auto copy_result = kasumi::reconciliation::reconcile(
+        make_reconcile_input(before_copy, before_copy, after_copy));
+    ASSERT_TRUE(copy_result.has_value()) << copy_result.error().detail;
+    EXPECT_TRUE(
+        kasumi::sync_plan_phase(copy_result->plan, Action::MoveLocal).empty());
+    expect_operations(copy_result->plan.operations,
+                      {signature(Action::CreateLocalDirectory, "B"),
+                       signature(Action::Download,
+                                 "B/one.bin",
+                                 kasumi::hash_hex(dest1.hash),
+                                 {},
+                                 dest1.size)});
+}
 } // namespace

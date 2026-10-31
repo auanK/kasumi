@@ -24,6 +24,7 @@ constexpr std::array<Action, kasumi::ActionCount> all_actions{
     Action::Upload,
     Action::CreateLocalDirectory,
     Action::CreateRemoteDirectory,
+    Action::MoveLocal,
     Action::Download,
     Action::DeleteLocal,
     Action::DeleteLocalDirectory,
@@ -62,9 +63,9 @@ SyncPlan make_populated_plan() {
 
 TEST(ActionTest, ClassifiesEveryDefinedAction) {
     constexpr std::array<bool, kasumi::ActionCount> expected_local_mutation{
-        true, false, true, false, true, true, true, false, false};
+        true, false, true, false, true, true, true, true, false, false};
     constexpr std::array<bool, kasumi::ActionCount> expected_logical_mutation{
-        false, false, false, true, false, false, false, true, true};
+        false, false, false, true, false, false, false, false, true, true};
 
     EXPECT_EQ(kasumi::ActionCount, all_actions.size());
     for (std::size_t index = 0; index < all_actions.size(); ++index) {
@@ -136,7 +137,7 @@ TEST(SyncPlanTest, UsesCanonicalOffsetsAndExposesConstRanges) {
     EXPECT_TRUE(kasumi::valid_sync_plan(plan));
     EXPECT_EQ(plan.offsets,
               (std::array<std::uint32_t, kasumi::ActionCount + 1>{
-                  0, 0, 1, 1, 1, 2, 2, 2, 2, 2}));
+                  0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2}));
 
     auto rebuilt = plan;
     rebuilt.offsets.fill(0);
