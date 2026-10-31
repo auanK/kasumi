@@ -19,6 +19,7 @@
 #include <exception>
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -75,13 +76,13 @@ bool same_rows(std::span<const NodeRow> left,
     return left.size() == right.size() && std::ranges::equal(left, right);
 }
 
-std::expected<bool, Error> verify_existing_content(
-    transport::Transport& storage,
-    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-    const Hash& hash,
-    std::uint64_t size,
-    const platform::Workspace& workspace,
-    std::size_t index) {
+std::expected<bool, Error>
+verify_existing_content(transport::Transport& storage,
+                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                        const Hash& hash,
+                        std::uint64_t size,
+                        const platform::Workspace& workspace,
+                        std::size_t index) {
     const auto encrypted =
         platform::workspace_file(workspace, index, ".initial.enc");
     const auto plaintext =
@@ -92,9 +93,9 @@ std::expected<bool, Error> verify_existing_content(
         if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
             return false;
         }
-        return std::unexpected(detail::make_error(
-            ErrorCode::ObservationFailure,
-            transport::describe(downloaded.error())));
+        return std::unexpected(
+            detail::make_error(ErrorCode::ObservationFailure,
+                               transport::describe(downloaded.error())));
     }
     if (!crypto::decrypt_file(encrypted, plaintext, key)) {
         return false;
@@ -120,8 +121,8 @@ std::expected<bool, Error> verify_existing_content(
     }
     const auto actual_hash = crypto::content::hash_file(plaintext);
     if (!actual_hash) {
-        return std::unexpected(detail::make_error(
-            ErrorCode::ObservationFailure, actual_hash.error()));
+        return std::unexpected(detail::make_error(ErrorCode::ObservationFailure,
+                                                  actual_hash.error()));
     }
     return *actual_hash == hash;
 }
@@ -134,10 +135,35 @@ std::expected<void, Error> observe_content_availability(
     std::span<const Hash> confirmed_missing,
     bool allow_unreferenced_content_reuse,
     bool trust_existing_content = false,
-    const std::unordered_set<std::string>* initial_content_identifiers = nullptr) {
+    const std::unordered_set<std::string>* initial_content_identifiers =
+        nullptr) {
     HashSet hashes{0, hash_key};
     HashSet upload_hashes{0, hash_key};
     std::unordered_set<std::string> upload_identities;
+    std::unordered_map<std::string, std::size_t> relocated_delete_counts;
+    if (input.base_state_present && input.storage.history_present &&
+        !allow_unreferenced_content_reuse) {
+        for (const auto& base_row : input.base_tree.rows) {
+            if (base_row.is_directory) {
+                continue;
+            }
+            const auto* remote_row =
+                find_row(input.storage.tree, base_row.path);
+            const auto* candidate_row =
+                find_row(result.candidate_shared_tree, base_row.path);
+            if (remote_row != nullptr && !remote_row->is_directory &&
+                remote_row->hash == base_row.hash &&
+                remote_row->size == base_row.size &&
+                !input.known_missing_content_objects.contains(
+                    remote_row->hash) &&
+                (candidate_row == nullptr || candidate_row->is_directory ||
+                 candidate_row->hash != base_row.hash ||
+                 candidate_row->size != base_row.size)) {
+                ++relocated_delete_counts[hash_hex(remote_row->hash) + ':' +
+                                          std::to_string(remote_row->size)];
+            }
+        }
+    }
     const auto add_hash = [&](const Hash& hash) {
         hashes.insert(hash);
     };
@@ -148,10 +174,15 @@ std::expected<void, Error> observe_content_availability(
                 if (allow_unreferenced_content_reuse) {
                     upload_hashes.insert(*hash);
                     add_hash(*hash);
+                } else if (const auto relocated = relocated_delete_counts.find(
+                               hash_hex(*hash) + ':' +
+                               std::to_string(candidate.size));
+                           relocated != relocated_delete_counts.end() &&
+                           relocated->second > 0) {
+                    --relocated->second;
                 } else {
-                    upload_identities.insert(
-                        hash_hex(*hash) + ':' +
-                        std::to_string(candidate.size));
+                    upload_identities.insert(hash_hex(*hash) + ':' +
+                                             std::to_string(candidate.size));
                 }
             }
         } else if (candidate.action == Action::Download) {
@@ -193,7 +224,8 @@ std::expected<void, Error> observe_content_availability(
     add_relevant_pending(result.pending_storage_rows);
 
     if (allow_unreferenced_content_reuse && trust_existing_content &&
-        initial_content_identifiers != nullptr && !input.audit_storage_objects) {
+        initial_content_identifiers != nullptr &&
+        !input.audit_storage_objects) {
         const auto operations = sync_plan_operations(result.plan);
         for (const auto& candidate : operations) {
             if (candidate.action != Action::Upload) {
@@ -222,7 +254,9 @@ std::expected<void, Error> observe_content_availability(
     platform::Workspace reuse_workspace;
     struct WorkspaceCleanup {
         platform::Workspace& workspace;
-        ~WorkspaceCleanup() { platform::cleanup_workspace(workspace); }
+        ~WorkspaceCleanup() {
+            platform::cleanup_workspace(workspace);
+        }
     } cleanup{reuse_workspace};
     if (!upload_hashes.empty()) {
         auto created = platform::create_workspace("sync-initial-content");
@@ -307,8 +341,8 @@ std::expected<void, Error> observe_content_availability(
         if (allow_unreferenced_content_reuse && present &&
             upload_hashes.contains(hash)) {
             const auto operations = sync_plan_operations(result.plan);
-            const auto operation = std::ranges::find_if(
-                operations, [&](const auto& candidate) {
+            const auto operation =
+                std::ranges::find_if(operations, [&](const auto& candidate) {
                     return candidate.action == Action::Upload &&
                            candidate.hash == hash_hex(hash);
                 });
@@ -323,12 +357,7 @@ std::expected<void, Error> observe_content_availability(
                 continue;
             }
             const auto verified = verify_existing_content(
-                storage,
-                key,
-                hash,
-                operation->size,
-                reuse_workspace,
-                index);
+                storage, key, hash, operation->size, reuse_workspace, index);
             if (!verified) {
                 return std::unexpected(verified.error());
             }
@@ -369,8 +398,8 @@ stage_attempt(const runtime::RuntimeData& runtime_data,
     if (!record) {
         return std::unexpected(detail::journal_error(record.error()));
     }
-    auto created =
-        detail::create_transaction_workspace(profile, record->operation_id, key);
+    auto created = detail::create_transaction_workspace(
+        profile, record->operation_id, key);
     if (!created) {
         return std::unexpected(created.error());
     }
@@ -428,7 +457,8 @@ std::expected<bool, coordinator::Error> verify_destructive_local_operations(
     bool modified = false;
     for (const auto& op : sync_plan_operations(result.plan)) {
         if (op.action != Action::DeleteLocal && op.action != Action::Download &&
-            op.action != Action::RenameLocal) {
+            op.action != Action::RenameLocal &&
+            op.action != Action::MoveLocal) {
             continue;
         }
 
@@ -527,7 +557,9 @@ std::expected<bool, coordinator::Error> verify_destructive_local_operations(
         if (!verified_source) {
             return std::unexpected(verified_source.error());
         }
-        if (op.action == Action::RenameLocal && !op.alt_path.empty()) {
+        if ((op.action == Action::RenameLocal ||
+             op.action == Action::MoveLocal) &&
+            !op.alt_path.empty()) {
             auto verified_dest = verify_target(op.alt_path, true);
             if (!verified_dest) {
                 return std::unexpected(verified_dest.error());
@@ -547,15 +579,15 @@ refresh_content_availability(
     bool allow_unreferenced_content_reuse,
     bool trust_existing_content,
     const std::unordered_set<std::string>* initial_content_identifiers) {
-    auto availability = observe_content_availability(
-        input,
-        reconciliation_result,
-        storage,
-        key,
-        confirmed_missing,
-        allow_unreferenced_content_reuse,
-        trust_existing_content,
-        initial_content_identifiers);
+    auto availability =
+        observe_content_availability(input,
+                                     reconciliation_result,
+                                     storage,
+                                     key,
+                                     confirmed_missing,
+                                     allow_unreferenced_content_reuse,
+                                     trust_existing_content,
+                                     initial_content_identifiers);
     if (!availability) {
         return std::unexpected(availability.error());
     }
@@ -580,22 +612,25 @@ stabilize(const runtime::RuntimeData& runtime_data,
           bool trust_existing_content,
           const std::unordered_set<std::string>* initial_content_identifiers) {
     if (trust_existing_content && observed_input.storage.history_present) {
-        return std::unexpected(detail::make_error(
-            ErrorCode::ConcurrentModification,
-            "remote history was published concurrently during initial sync with "
-            "--trust-existing-content; operation was rejected to prevent unverified "
-            "content reuse"));
+        return std::unexpected(
+            detail::make_error(ErrorCode::ConcurrentModification,
+                               "remote history was published concurrently "
+                               "during initial sync with "
+                               "--trust-existing-content; operation was "
+                               "rejected to prevent unverified "
+                               "content reuse"));
     }
 
     if (!content_availability_is_current) {
-        auto available = refresh_content_availability(observed_input,
-                                                      reconciliation_result,
-                                                      storage,
-                                                      key,
-                                                      confirmed_missing,
-                                                      allow_unreferenced_content_reuse,
-                                                      trust_existing_content,
-                                                      initial_content_identifiers);
+        auto available =
+            refresh_content_availability(observed_input,
+                                         reconciliation_result,
+                                         storage,
+                                         key,
+                                         confirmed_missing,
+                                         allow_unreferenced_content_reuse,
+                                         trust_existing_content,
+                                         initial_content_identifiers);
         if (!available) {
             return std::unexpected(available.error());
         }
@@ -641,15 +676,15 @@ stabilize(const runtime::RuntimeData& runtime_data,
                     detail::make_error(ErrorCode::ObservationFailure,
                                        recalculated.error().detail));
             }
-            auto reobserved_availability = observe_content_availability(
-                input,
-                *recalculated,
-                storage,
-                key,
-                confirmed_missing,
-                allow_unreferenced_content_reuse,
-                trust_existing_content,
-                initial_content_identifiers);
+            auto reobserved_availability =
+                observe_content_availability(input,
+                                             *recalculated,
+                                             storage,
+                                             key,
+                                             confirmed_missing,
+                                             allow_unreferenced_content_reuse,
+                                             trust_existing_content,
+                                             initial_content_identifiers);
             if (!reobserved_availability) {
                 return std::unexpected(reobserved_availability.error());
             }
@@ -671,10 +706,11 @@ stabilize(const runtime::RuntimeData& runtime_data,
 
         std::optional<platform::Workspace> workspace;
         if (!result.plan.operations.empty()) {
-            auto staged =
-                stage_attempt(runtime_data, input, result, *profile, key, workspace);
+            auto staged = stage_attempt(
+                runtime_data, input, result, *profile, key, workspace);
             if (!staged) {
-                auto removed = detail::remove_transaction_workspace(workspace, key);
+                auto removed =
+                    detail::remove_transaction_workspace(workspace, key);
                 if (!removed) {
                     return std::unexpected(removed.error());
                 }
@@ -713,11 +749,13 @@ stabilize(const runtime::RuntimeData& runtime_data,
             if (!removed) {
                 return std::unexpected(removed.error());
             }
-            return std::unexpected(detail::make_error(
-                ErrorCode::ConcurrentModification,
-                "remote history was published concurrently during initial sync with "
-                "--trust-existing-content; operation was rejected to prevent unverified "
-                "content reuse"));
+            return std::unexpected(
+                detail::make_error(ErrorCode::ConcurrentModification,
+                                   "remote history was published concurrently "
+                                   "during initial sync with "
+                                   "--trust-existing-content; operation was "
+                                   "rejected to prevent unverified "
+                                   "content reuse"));
         }
         observed->pending_deletion_authority = input.pending_deletion_authority;
         auto local_after_storage = observation::collect_local_tree(
@@ -745,15 +783,15 @@ stabilize(const runtime::RuntimeData& runtime_data,
         const bool current_allow_unreferenced_reuse =
             allow_unreferenced_content_reuse &&
             !observed->storage.history_present;
-        auto reobserved_availability = observe_content_availability(
-            *observed,
-            *recalculated,
-            storage,
-            key,
-            confirmed_missing,
-            current_allow_unreferenced_reuse,
-            trust_existing_content,
-            initial_content_identifiers);
+        auto reobserved_availability =
+            observe_content_availability(*observed,
+                                         *recalculated,
+                                         storage,
+                                         key,
+                                         confirmed_missing,
+                                         current_allow_unreferenced_reuse,
+                                         trust_existing_content,
+                                         initial_content_identifiers);
         if (!reobserved_availability) {
             auto removed = detail::remove_transaction_workspace(workspace, key);
             if (!removed) {

@@ -52,6 +52,9 @@ SyncCompleted compute_sync_summary(const reconciliation::Result& result) {
             case Action::RenameLocal:
                 ++summary.renamed;
                 break;
+            case Action::MoveLocal:
+                ++summary.renamed;
+                break;
             case Action::CreateLocalDirectory:
             case Action::CreateRemoteDirectory:
                 ++summary.created_dirs;
@@ -132,12 +135,13 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             }
             if (context.trust_existing_content &&
                 collected->storage.history_present) {
-                auto err = plan_error(
-                    context.operation,
-                    "remote history was published concurrently during initial sync with "
-                    "--trust-existing-content; operation was rejected to prevent unverified "
-                    "content reuse",
-                    context.summary);
+                auto err = plan_error(context.operation,
+                                      "remote history was published "
+                                      "concurrently during initial sync with "
+                                      "--trust-existing-content; operation was "
+                                      "rejected to prevent unverified "
+                                      "content reuse",
+                                      context.summary);
                 err.stage = SyncStage::Observing;
                 return std::unexpected(err);
             }
@@ -313,9 +317,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             std::vector<Hash> confirmed_missing;
             std::expected<void, sync::coordinator::Error> synchronized;
             for (std::size_t attempt = 0; attempt < 3; ++attempt) {
-                auto admission =
-                    history_storage::maintenance_protocol::
-                        verify_writer_admission(writer, layout);
+                auto admission = history_storage::maintenance_protocol::
+                    verify_writer_admission(writer, layout);
                 if (!admission) {
                     synchronized = std::unexpected(sync::coordinator::Error{
                         .code = admission.error().code ==
