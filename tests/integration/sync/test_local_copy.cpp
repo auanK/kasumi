@@ -25,6 +25,8 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iomanip>
+#include <iostream>
 #include <mutex>
 #include <span>
 #include <string>
@@ -1540,4 +1542,161 @@ TEST(LocalCopyIntegrationTest, CopyConvergesToNoop) {
     ASSERT_TRUE(noop.has_value());
     EXPECT_EQ(node_b.counters.content_gets, 0U);
     EXPECT_EQ(node_b.counters.content_puts, 0U);
+}
+
+
+struct ControlledCopyMetrics {
+    std::size_t n = 0;
+    std::uint64_t total_bytes = 0;
+    double total_sync_s = 0.0;
+    double prep_wall_s = 0.0;
+    double prep_source_hash_wall_s = 0.0;
+    double apply_wall_s = 0.0;
+    double staging_wall_s = 0.0;
+    double dest_verif_wall_s = 0.0;
+    double durability_wall_s = 0.0;
+    double install_wall_s = 0.0;
+    double journal_save_wall_s = 0.0;
+    double journal_delta_calc_s = 0.0;
+    double journal_sem_val_s = 0.0;
+    double journal_encode_s = 0.0;
+    double journal_durable_write_s = 0.0;
+    double final_val_wall_s = 0.0;
+    std::uint64_t copy_planned = 0;
+    std::uint64_t copy_applied = 0;
+    std::uint64_t copy_bytes_copied = 0;
+    std::uint64_t source_hash_calls = 0;
+    std::uint64_t journal_save_calls = 0;
+    std::uint64_t journal_delta_count = 0;
+    std::uint64_t journal_bytes_written = 0;
+    std::size_t content_gets = 0;
+    std::size_t content_puts = 0;
+    std::size_t content_presences = 0;
+    std::size_t content_copies = 0;
+};
+
+ControlledCopyMetrics run_controlled_copy_reproduction(std::size_t count, std::size_t file_payload_size = 1024) {
+    kasumi::platform::perf_trace::force_enable(true);
+    SyncNode sender;
+    SyncNode receiver;
+    EXPECT_TRUE(init_sync_node(sender, "copy-diag-sender-" + std::to_string(count)));
+    EXPECT_TRUE(init_sync_node(receiver, "copy-diag-receiver-" + std::to_string(count), sender.storage_root));
+
+    ControlledCopyMetrics m;
+    m.n = count;
+
+    for (std::size_t i = 0; i < count; ++i) {
+        std::string payload = "content-" + std::to_string(i) + "-" + std::string(file_payload_size, 'A');
+        m.total_bytes += payload.size();
+        write_local_file(sender, "source_dir/file_" + std::to_string(i) + ".bin", payload);
+    }
+
+    auto s1 = run_node_sync(sender);
+    EXPECT_TRUE(s1.has_value()) << (s1 ? "" : s1.error().detail);
+    auto r1 = run_node_sync(receiver);
+    EXPECT_TRUE(r1.has_value()) << (r1 ? "" : r1.error().detail);
+
+    // Sender copies each file from source_dir to copy_dir
+    for (std::size_t i = 0; i < count; ++i) {
+        std::string payload = "content-" + std::to_string(i) + "-" + std::string(file_payload_size, 'A');
+        write_local_file(sender, "copy_dir/file_" + std::to_string(i) + ".bin", payload);
+    }
+    auto s2 = run_node_sync(sender);
+    EXPECT_TRUE(s2.has_value()) << (s2 ? "" : s2.error().detail);
+
+    reset_content_counts(receiver);
+    kasumi::platform::perf_trace::reset();
+
+    const auto start = std::chrono::steady_clock::now();
+    auto r2 = run_node_sync(receiver);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    EXPECT_TRUE(r2.has_value()) << (r2 ? "" : r2.error().detail);
+
+    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
+              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+    EXPECT_EQ(receiver.counters.content_presences, 0U);
+    EXPECT_EQ(receiver.counters.content_copies, 0U);
+
+    m.total_sync_s = std::chrono::duration<double>(elapsed).count();
+    m.prep_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("copy preparation wall")) / 1e6;
+    m.prep_source_hash_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("copy source hash wall")) / 1e6;
+    m.apply_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("copy apply wall")) / 1e6;
+    m.staging_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("copy staging wall")) / 1e6;
+    m.dest_verif_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("copy destination verification wall")) / 1e6;
+    m.durability_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("copy durability wall")) / 1e6;
+    m.install_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("copy install wall")) / 1e6;
+    m.journal_save_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("journal save wall")) / 1e6;
+    m.journal_delta_calc_s = static_cast<double>(kasumi::platform::perf_trace::get_time("journal delta calculation wall")) / 1e6;
+    m.journal_sem_val_s = static_cast<double>(kasumi::platform::perf_trace::get_time("journal semantic validation wall")) / 1e6;
+    m.journal_encode_s = static_cast<double>(kasumi::platform::perf_trace::get_time("journal encode wall")) / 1e6;
+    m.journal_durable_write_s = static_cast<double>(kasumi::platform::perf_trace::get_time("journal durable write wall")) / 1e6;
+    m.final_val_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("final local validation wall")) / 1e6;
+
+    m.copy_planned = kasumi::platform::perf_trace::get_count("copy planned count");
+    m.copy_applied = kasumi::platform::perf_trace::get_count("copy applied count");
+    m.copy_bytes_copied = kasumi::platform::perf_trace::get_count("copy bytes copied");
+    m.source_hash_calls = kasumi::platform::perf_trace::get_count("source hash calls");
+    m.journal_save_calls = kasumi::platform::perf_trace::get_count("journal save calls");
+    m.journal_delta_count = kasumi::platform::perf_trace::get_count("journal delta count");
+    m.journal_bytes_written = kasumi::platform::perf_trace::get_count("journal bytes written");
+
+    m.content_gets = receiver.counters.content_gets;
+    m.content_puts = receiver.counters.content_puts;
+    m.content_presences = receiver.counters.content_presences;
+    m.content_copies = receiver.counters.content_copies;
+
+    std::cout << "\n=======================================================\n";
+    std::cout << "DIAGNOSTIC COPY METRICS REPORT FOR N = " << count << "\n";
+    std::cout << "=======================================================\n";
+    std::cout << std::fixed << std::setprecision(6);
+    std::cout << "Total sync duration:          " << m.total_sync_s << " s\n";
+    std::cout << "Copy planned count:           " << m.copy_planned << "\n";
+    std::cout << "Copy applied count:           " << m.copy_applied << "\n";
+    std::cout << "Copy bytes copied:            " << m.copy_bytes_copied << " bytes\n";
+    std::cout << "Copy preparation wall:        " << m.prep_wall_s << " s\n";
+    std::cout << "Copy source hash wall:        " << m.prep_source_hash_wall_s << " s\n";
+    std::cout << "Copy apply wall:              " << m.apply_wall_s << " s\n";
+    std::cout << "Copy staging wall:            " << m.staging_wall_s << " s\n";
+    std::cout << "Copy dest verification wall:  " << m.dest_verif_wall_s << " s\n";
+    std::cout << "Copy durability wall:         " << m.durability_wall_s << " s\n";
+    std::cout << "Copy install wall:            " << m.install_wall_s << " s\n";
+    std::cout << "Journal save calls:           " << m.journal_save_calls << "\n";
+    std::cout << "Journal save wall:            " << m.journal_save_wall_s << " s\n";
+    std::cout << "Apply ACL calls:              " << kasumi::platform::perf_trace::get_count("apply_acl calls") << "\n";
+    std::cout << "Apply ACL wall:               " << static_cast<double>(kasumi::platform::perf_trace::get_time("apply_acl wall")) / 1e6 << " s\n";
+    std::cout << "Journal delta count:          " << m.journal_delta_count << "\n";
+    std::cout << "Journal bytes written:        " << m.journal_bytes_written << " bytes\n";
+    std::cout << "Journal delta calc wall:      " << m.journal_delta_calc_s << " s\n";
+    std::cout << "Journal sem validation wall:  " << m.journal_sem_val_s << " s\n";
+    std::cout << "Journal encode wall:          " << m.journal_encode_s << " s\n";
+    std::cout << "Journal durable write wall:   " << m.journal_durable_write_s << " s\n";
+    std::cout << "Final local validation wall:  " << m.final_val_wall_s << " s\n";
+    std::cout << "Content GET / PUT / PRESENCE: " << m.content_gets << " / " << m.content_puts << " / " << m.content_presences << "\n";
+    std::cout << "=======================================================\n\n";
+
+    kasumi::platform::perf_trace::force_enable(false);
+    return m;
+}
+
+TEST(LocalCopyIntegrationTest, DiagnosticCopyReproduction16) {
+    const auto m = run_controlled_copy_reproduction(16);
+    EXPECT_EQ(m.copy_planned, 16U);
+    EXPECT_EQ(m.copy_applied, 16U);
+    EXPECT_EQ(m.content_gets, 0U);
+}
+
+TEST(LocalCopyIntegrationTest, DiagnosticCopyReproduction128) {
+    const auto m = run_controlled_copy_reproduction(128);
+    EXPECT_EQ(m.copy_planned, 128U);
+    EXPECT_EQ(m.copy_applied, 128U);
+    EXPECT_EQ(m.content_gets, 0U);
+}
+
+TEST(LocalCopyIntegrationTest, DiagnosticCopyReproduction512) {
+    const auto m = run_controlled_copy_reproduction(512);
+    EXPECT_EQ(m.copy_planned, 512U);
+    EXPECT_EQ(m.copy_applied, 512U);
+    EXPECT_EQ(m.content_gets, 0U);
 }

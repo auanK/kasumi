@@ -832,13 +832,13 @@ TEST(DirectoryLocalMoveTest,
 
     const auto receiver_sync = run_node_sync(receiver);
     ASSERT_TRUE(receiver_sync.has_value()) << receiver_sync.error().detail;
-    EXPECT_EQ(receiver.counters.content_gets, 1U);
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
     EXPECT_EQ(receiver.counters.content_puts, 0U);
 
     const auto* summary =
         std::get_if<kasumi::application::SyncCompleted>(&receiver_sync->data);
     ASSERT_NE(summary, nullptr);
-    EXPECT_EQ(summary->downloaded, 1U);
+    EXPECT_EQ(summary->downloaded, 0U);
     EXPECT_EQ(summary->renamed, 0U);
 
     EXPECT_EQ(read_local_file(receiver, "A/file.bin"),

@@ -28,6 +28,28 @@ inline constexpr std::uint64_t upload_batch_max_bytes =
     256 * 1024 * 1024; // 256 MiB
 inline constexpr auto transaction_resumption_ttl = std::chrono::hours(24);
 
+constexpr int execution_priority(Action action) noexcept {
+    switch (action) {
+        case Action::CreateLocalDirectory:
+            return 1;
+        case Action::CopyLocal:
+            return 2;
+        case Action::Download:
+            return 3;
+        case Action::RenameLocal:
+        case Action::MoveLocal:
+            return 4;
+        case Action::DeleteLocal:
+            return 5;
+        case Action::DeleteLocalDirectory:
+            return 6;
+        case Action::Upload:
+            return 7;
+        default:
+            return 8;
+    }
+}
+
 // Creates a coordinator failure with optional operation context.
 Error make_error(ErrorCode code,
                  std::string detail,

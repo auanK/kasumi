@@ -399,6 +399,8 @@ std::expected<void, Error> resume_pending_local_mutations(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
     const auto dependencies =
         mutation::detail::destination_dependencies(record.plan.operations);
+    std::vector<std::size_t> replay_order;
+    replay_order.reserve(record.plan.operations.size());
     for (std::size_t index = 0; index < record.plan.operations.size();
          ++index) {
         const auto& operation = record.plan.operations[index];
@@ -411,7 +413,8 @@ std::expected<void, Error> resume_pending_local_mutations(
             transaction::OperationState::Pending) {
             if (operation.action == Action::Download ||
                 operation.action == Action::DeleteLocal ||
-                operation.action == Action::MoveLocal) {
+                operation.action == Action::MoveLocal ||
+                operation.action == Action::CopyLocal) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::RecoveryConflict,
                     "unprepared destination cannot be authorized during replay",
@@ -435,6 +438,13 @@ std::expected<void, Error> resume_pending_local_mutations(
                 return std::unexpected(saved.error());
             }
         }
+        replay_order.push_back(index);
+    }
+    std::ranges::stable_sort(replay_order, {}, [&](std::size_t index) {
+        return detail::execution_priority(record.plan.operations[index].action);
+    });
+    for (const auto index : replay_order) {
+        const auto& operation = record.plan.operations[index];
         auto condition = mutation::detail::effective_destination(
             record, index, dependencies);
         if (!condition)

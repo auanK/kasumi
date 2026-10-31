@@ -524,6 +524,30 @@ candidate_shared_tree(const Input& input,
                 }
                 break;
             }
+            case Action::CopyLocal: {
+                const auto expected_hash = hash_from_hex(operation.hash);
+                const auto source_path =
+                    platform::path::to_logical_utf8(operation.path);
+                const auto dest_path =
+                    platform::path::to_logical_utf8(operation.alt_path);
+                const auto* local_row = find_row(input.local_tree, source_path);
+                const auto* storage_row =
+                    find_row(input.storage.tree, dest_path);
+                if (!expected_hash || local_row == nullptr ||
+                    local_row->is_directory ||
+                    local_row->hash != *expected_hash ||
+                    local_row->size != operation.size ||
+                    storage_row == nullptr || storage_row->is_directory ||
+                    storage_row->hash != *expected_hash ||
+                    storage_row->size != operation.size) {
+                    return std::unexpected(Error{
+                        .code = ErrorCode::UnsafePlan,
+                        .detail = "local copy does not match observed trees",
+                        .paths = {operation.path, operation.alt_path},
+                    });
+                }
+                break;
+            }
             case Action::Download: {
                 if (!operation.exclusive_destination) {
                     break;
@@ -860,6 +884,101 @@ void plan_local_moves(std::vector<Operation>& operations,
     }
 }
 
+void plan_local_copies(std::vector<Operation>& operations,
+                       const Snapshot& local_tree) {
+    const auto is_eligible_destination = [&](const Operation& op) {
+        if (op.action != Action::Download || op.exclusive_destination ||
+            !op.alt_path.empty() || op.path.empty() || op.hash.empty() ||
+            !kasumi::has_safe_paths(op)) {
+            return false;
+        }
+        const auto utf8_dest = platform::path::to_logical_utf8(op.path);
+        if (utf8_dest.empty() ||
+            utf8_dest.find(".kasumiconflict_") != std::string::npos ||
+            find_row(local_tree, utf8_dest) != nullptr) {
+            return false;
+        }
+        for (std::size_t slash = utf8_dest.find('/');
+             slash != std::string::npos;
+             slash = utf8_dest.find('/', slash + 1)) {
+            const auto* ancestor =
+                find_row(local_tree, utf8_dest.substr(0, slash));
+            if (ancestor != nullptr && !ancestor->is_directory) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    bool has_eligible_destination = false;
+    for (const auto& op : operations) {
+        if (is_eligible_destination(op)) {
+            has_eligible_destination = true;
+            break;
+        }
+    }
+    if (!has_eligible_destination) {
+        return;
+    }
+
+    std::unordered_map<ContentIdentityKey, std::vector<std::string>, ContentIdentityKeyHash>
+        candidates;
+    for (const auto& row : local_tree.rows) {
+        if (row.is_directory || row.hash == Hash{} || row.path.empty() ||
+            row.path.find(".kasumiconflict_") != std::string::npos) {
+            continue;
+        }
+        Operation check_op{
+            .action = Action::CopyLocal,
+            .path = platform::path::from_utf8(row.path),
+            .hash = hash_hex(row.hash),
+            .alt_path = "dest.txt",
+            .size = row.size,
+        };
+        if (!kasumi::has_safe_paths(check_op)) {
+            continue;
+        }
+        candidates[ContentIdentityKey{.hash = hash_hex(row.hash),
+                                      .size = row.size}]
+            .push_back(row.path);
+    }
+    if (candidates.empty()) {
+        return;
+    }
+
+    for (auto& [key, paths] : candidates) {
+        std::ranges::sort(paths, path_less);
+    }
+
+    std::unordered_set<std::string> used_destinations;
+    for (auto& op : operations) {
+        if (!is_eligible_destination(op)) {
+            continue;
+        }
+        const auto utf8_dest = platform::path::to_logical_utf8(op.path);
+        if (!used_destinations.insert(utf8_dest).second) {
+            continue;
+        }
+        auto found = candidates.find(
+            ContentIdentityKey{.hash = op.hash, .size = op.size});
+        if (found == candidates.end() || found->second.empty()) {
+            continue;
+        }
+        const auto& best_source = found->second.front();
+        auto dest_path = std::move(op.path);
+        auto expected_hash = std::move(op.hash);
+        const auto expected_size = op.size;
+        op = Operation{
+            .action = Action::CopyLocal,
+            .path = platform::path::from_utf8(best_source),
+            .hash = std::move(expected_hash),
+            .alt_path = std::move(dest_path),
+            .size = expected_size,
+            .exclusive_destination = false,
+        };
+    }
+}
+
 } // namespace
 
 bool has_safe_paths(const SyncPlan& plan) {
@@ -887,6 +1006,25 @@ bool has_safe_paths(const SyncPlan& plan) {
         if (source.empty() || destination.empty() || source == destination ||
             !move_sources.insert(source).second ||
             !move_destinations.insert(destination).second) {
+            return false;
+        }
+    }
+
+    std::unordered_set<std::string> copy_destinations;
+    for (const auto& operation : operations) {
+        if (operation.action != Action::CopyLocal) {
+            continue;
+        }
+        if (operation.path.empty() || operation.alt_path.empty() ||
+            operation.path == operation.alt_path || operation.hash.empty() ||
+            operation.exclusive_destination) {
+            return false;
+        }
+        const auto source = platform::path::to_logical_utf8(operation.path);
+        const auto destination =
+            platform::path::to_logical_utf8(operation.alt_path);
+        if (source.empty() || destination.empty() || source == destination ||
+            !copy_destinations.insert(destination).second) {
             return false;
         }
     }
@@ -1096,6 +1234,7 @@ ReconcileResult reconcile(const Input& input) {
                               repair_upload_paths.end());
 
     plan_local_moves(operations, input.local_tree);
+    plan_local_copies(operations, input.local_tree);
 
     const bool requires_local_mutation =
         std::ranges::any_of(operations, [](const Operation& operation) {

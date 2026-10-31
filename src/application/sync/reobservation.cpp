@@ -458,7 +458,8 @@ std::expected<bool, coordinator::Error> verify_destructive_local_operations(
     for (const auto& op : sync_plan_operations(result.plan)) {
         if (op.action != Action::DeleteLocal && op.action != Action::Download &&
             op.action != Action::RenameLocal &&
-            op.action != Action::MoveLocal) {
+            op.action != Action::MoveLocal &&
+            op.action != Action::CopyLocal) {
             continue;
         }
 
@@ -558,7 +559,8 @@ std::expected<bool, coordinator::Error> verify_destructive_local_operations(
             return std::unexpected(verified_source.error());
         }
         if ((op.action == Action::RenameLocal ||
-             op.action == Action::MoveLocal) &&
+             op.action == Action::MoveLocal ||
+             op.action == Action::CopyLocal) &&
             !op.alt_path.empty()) {
             auto verified_dest = verify_target(op.alt_path, true);
             if (!verified_dest) {

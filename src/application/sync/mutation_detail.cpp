@@ -92,6 +92,17 @@ download_candidate_path(const std::filesystem::path& destination,
             "-" + std::to_string(operation_index));
 }
 
+std::filesystem::path
+copy_candidate_path(const std::filesystem::path& destination,
+                    const platform::Workspace& workspace,
+                    std::size_t operation_index) {
+    return platform::path::temporary_sibling_path(
+        destination,
+        ".",
+        ".kasumi-copy-" + platform::path::to_utf8(workspace.root.filename()) +
+            "-" + std::to_string(operation_index));
+}
+
 std::expected<std::filesystem::path, MutationError>
 resolve_local_path(const std::filesystem::path& local_root,
                    const std::filesystem::path& relative,

@@ -87,6 +87,11 @@ download_candidate_path(const std::filesystem::path& destination,
                         const platform::Workspace& workspace,
                         std::size_t operation_index);
 
+std::filesystem::path
+copy_candidate_path(const std::filesystem::path& destination,
+                    const platform::Workspace& workspace,
+                    std::size_t operation_index);
+
 // Resolves a relative path without allowing escape from the root.
 std::expected<std::filesystem::path, MutationError>
 resolve_local_path(const std::filesystem::path& local_root,

@@ -320,6 +320,21 @@ validate_progress(const Operation& operation,
                                operation_index));
             }
             break;
+        case Action::CopyLocal:
+            if (!require_slot() || !valid_hash(operation.hash) ||
+                operation.path.empty() || operation.alt_path.empty() ||
+                operation.path == operation.alt_path ||
+                operation.exclusive_destination ||
+                (progress.state != transaction::OperationState::Pending &&
+                 !progress.previous_hash.empty() &&
+                 progress.previous_hash != operation.hash)) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::InvalidOperation,
+                               "invalid copy progress",
+                               operation.path,
+                               operation_index));
+            }
+            break;
         case Action::RenameLocal:
             if (!require_slot() ||
                 (progress.state != transaction::OperationState::Pending &&
@@ -645,6 +660,50 @@ rollback_file_operation(const Operation& operation,
             *transferred, condition->backup->previous_hash, operation_index);
         if (!verified)
             return verified;
+    }
+
+    if (operation.action == Action::CopyLocal) {
+        auto destination =
+            resolve_local_path(local_root, operation.alt_path, operation_index);
+        if (!destination) {
+            return std::unexpected(destination.error());
+        }
+        auto candidate = detail::copy_candidate_path(
+            *destination, workspace, operation_index);
+        std::error_code candidate_error;
+        std::filesystem::remove(candidate, candidate_error);
+
+        auto dest_status = read_status(*destination, operation_index);
+        if (!dest_status) {
+            return std::unexpected(dest_status.error());
+        }
+        if (missing(*dest_status)) {
+            return {};
+        }
+        if (std::filesystem::is_symlink(*dest_status) ||
+            !std::filesystem::is_regular_file(*dest_status)) {
+            return std::unexpected(
+                make_error(MutationErrorCode::DestinationConflict,
+                           "copy destination is not a regular file during rollback",
+                           *destination,
+                           operation_index));
+        }
+        auto actual = current_file_hash(*destination, *dest_status, operation_index);
+        if (!actual) {
+            return std::unexpected(actual.error());
+        }
+        if (actual->empty()) {
+            return {};
+        }
+        if (*actual == operation.hash) {
+            return remove_file_if_hash(
+                *destination, operation.hash, operation_index);
+        }
+        return std::unexpected(
+            make_error(MutationErrorCode::DestinationConflict,
+                       "copy destination was externally modified",
+                       *destination,
+                       operation_index));
     }
 
     if (operation.action == Action::RenameLocal ||
@@ -991,6 +1050,103 @@ prepare_operation_impl(const Operation& operation,
                        "initial rename state is ambiguous",
                        operation.path,
                        operation_index));
+    }
+
+    if (operation.action == Action::CopyLocal) {
+        struct CopyPrepGuard {
+            platform::perf_trace::Token token;
+            ~CopyPrepGuard() {
+                platform::perf_trace::finish("copy preparation wall", token);
+            }
+        } copy_prep_guard{platform::perf_trace::begin()};
+        auto source = resolve_local_path(
+            local_root, operation.path, operation_index, plan_operations);
+        auto destination = resolve_local_path(
+            local_root, operation.alt_path, operation_index, plan_operations);
+        if (!source)
+            return std::unexpected(source.error());
+        if (!destination)
+            return std::unexpected(destination.error());
+        auto source_status = read_status(*source, operation_index);
+        auto destination_status = read_status(*destination, operation_index);
+        if (!source_status)
+            return std::unexpected(source_status.error());
+        if (!destination_status)
+            return std::unexpected(destination_status.error());
+        if (std::filesystem::is_symlink(*source_status) ||
+            std::filesystem::is_symlink(*destination_status)) {
+            return std::unexpected(make_error(MutationErrorCode::UnsafePath,
+                                              "copy does not accept symlink",
+                                              operation.path,
+                                              operation_index));
+        }
+        if (missing(*source_status)) {
+            return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                              "copy source does not exist",
+                                              *source,
+                                              operation_index));
+        }
+        if (!std::filesystem::is_regular_file(*source_status)) {
+            return std::unexpected(
+                make_error(MutationErrorCode::DestinationConflict,
+                           "copy source is not a regular file",
+                           *source,
+                           operation_index));
+        }
+        if (!missing(*destination_status)) {
+            return std::unexpected(
+                make_error(MutationErrorCode::DestinationConflict,
+                           "copy destination already exists",
+                           *destination,
+                           operation_index));
+        }
+        const auto parent = destination->parent_path();
+        auto parent_status = read_status(parent, operation_index);
+        if (!parent_status) {
+            return std::unexpected(parent_status.error());
+        }
+        if (!missing(*parent_status)) {
+            if (std::filesystem::is_symlink(*parent_status) ||
+                !std::filesystem::is_directory(*parent_status)) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::UnsafePath,
+                               "destination parent directory is invalid",
+                               parent,
+                               operation_index));
+            }
+        }
+
+        std::error_code size_error;
+        const auto actual_size =
+            std::filesystem::file_size(*source, size_error);
+        if (size_error || actual_size != operation.size) {
+            return std::unexpected(make_error(
+                size_error ? MutationErrorCode::LocalIo
+                           : MutationErrorCode::IntegrityMismatch,
+                size_error ? size_error.message()
+                           : "copy source does not match expected size",
+                *source,
+                operation_index));
+        }
+        platform::perf_trace::count("source hash calls");
+        const auto source_hash_trace = platform::perf_trace::begin();
+        auto actual = file_hash(*source, operation_index);
+        platform::perf_trace::finish("copy source hash wall", source_hash_trace);
+        if (!actual)
+            return std::unexpected(actual.error());
+        if (!operation.hash.empty() && *actual != operation.hash) {
+            return std::unexpected(
+                make_error(MutationErrorCode::IntegrityMismatch,
+                           "copy source does not match expected hash",
+                           *source,
+                           operation_index));
+        }
+
+        auto result = current_progress;
+        result.state = transaction::OperationState::Prepared;
+        result.had_original = false;
+        result.previous_hash = *actual;
+        return result;
     }
 
     auto path = resolve_local_path(
