@@ -377,6 +377,7 @@ apply_upload(const Operation& operation,
 MutationResult
 apply_download(const Operation& operation,
                std::size_t operation_index,
+               const std::filesystem::path& local_root,
                const std::filesystem::path& destination,
                transport::Transport& storage,
                const platform::Workspace& workspace,
@@ -409,6 +410,139 @@ apply_download(const Operation& operation,
                                           "destination is a symlink",
                                           destination,
                                           operation_index));
+    }
+
+    if (!operation.alt_path.empty() && !operation.exclusive_destination) {
+        auto source =
+            resolve_local_path(local_root, operation.alt_path, operation_index);
+        if (!source) {
+            return std::unexpected(source.error());
+        }
+        auto source_status = read_status(*source, operation_index);
+        if (!source_status) {
+            return std::unexpected(source_status.error());
+        }
+
+        if (std::filesystem::is_regular_file(*destination_status)) {
+            if (missing(*source_status)) {
+                std::error_code error;
+                const auto size = std::filesystem::file_size(destination, error);
+                if (!error && size == operation.size) {
+                    auto verified =
+                        verify_local_file(destination, operation, operation_index);
+                    if (verified) {
+                        return {};
+                    }
+                }
+            }
+            return std::unexpected(make_error(
+                MutationErrorCode::DestinationConflict,
+                "local reuse destination already exists",
+                destination,
+                operation_index));
+        }
+
+        if (!missing(*destination_status)) {
+            return std::unexpected(make_error(
+                MutationErrorCode::DestinationConflict,
+                "destination is not a regular file",
+                destination,
+                operation_index));
+        }
+
+        if (missing(*source_status)) {
+            return std::unexpected(make_error(
+                MutationErrorCode::DestinationConflict,
+                "local reuse source was removed",
+                *source,
+                operation_index));
+        }
+        if (std::filesystem::is_symlink(*source_status)) {
+            return std::unexpected(make_error(
+                MutationErrorCode::UnsafePath,
+                "local reuse source is a symlink",
+                *source,
+                operation_index));
+        }
+#if defined(_WIN32)
+        const auto attributes = GetFileAttributesW(source->c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES &&
+            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            return std::unexpected(make_error(
+                MutationErrorCode::UnsafePath,
+                "local reuse source is a reparse point",
+                *source,
+                operation_index));
+        }
+#endif
+        if (!std::filesystem::is_regular_file(*source_status)) {
+            return std::unexpected(make_error(
+                MutationErrorCode::DestinationConflict,
+                "local reuse source is not a regular file",
+                *source,
+                operation_index));
+        }
+
+        mutation_fault_test::hit("before_local_reuse_verify", *source);
+
+        std::error_code size_error;
+        const auto size = std::filesystem::file_size(*source, size_error);
+        if (size_error || size != operation.size) {
+            return std::unexpected(make_error(
+                MutationErrorCode::IntegrityMismatch,
+                size_error ? size_error.message() : "source file size modified",
+                *source,
+                operation_index));
+        }
+
+        auto verified = verify_local_file(*source, operation, operation_index);
+        if (!verified) {
+            return std::unexpected(make_error(
+                MutationErrorCode::IntegrityMismatch,
+                "source file content was modified",
+                *source,
+                operation_index));
+        }
+
+        const auto parent = destination.parent_path();
+        auto parent_status = read_status(parent, operation_index);
+        if (!parent_status || !std::filesystem::is_directory(*parent_status) ||
+            std::filesystem::is_symlink(*parent_status)) {
+            return std::unexpected(make_error(
+                MutationErrorCode::UnsafePath,
+                "destination parent directory is invalid",
+                parent,
+                operation_index));
+        }
+
+        mutation_fault_test::hit("before_local_reuse_move", *source);
+        auto moved =
+            move_local_without_replace(*source, destination, operation_index);
+        if (!moved) {
+            return std::unexpected(moved.error());
+        }
+        mutation_fault_test::hit("after_local_reuse_move", destination);
+
+        auto synced_dest = platform::durability::sync_parent_directory(destination);
+        if (!synced_dest) {
+            return std::unexpected(make_error(
+                MutationErrorCode::LocalIo,
+                synced_dest.error(),
+                destination,
+                operation_index));
+        }
+        auto synced_src = platform::durability::sync_parent_directory(*source);
+        if (!synced_src) {
+            return std::unexpected(make_error(
+                MutationErrorCode::LocalIo,
+                synced_src.error(),
+                *source,
+                operation_index));
+        }
+
+        platform::perf_trace::count("local reuse moves completed");
+        platform::perf_trace::count("local reuse bytes moved", operation.size);
+        return {};
     }
     if (std::filesystem::is_regular_file(*destination_status)) {
         if (progress.state == transaction::OperationState::Applied ||
@@ -914,6 +1048,7 @@ apply_operation(const Operation& operation,
             }
             return apply_download(operation,
                                   operation_index,
+                                  local_root,
                                   *destination,
                                   storage,
                                   workspace,

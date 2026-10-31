@@ -1894,6 +1894,12 @@ execute(const runtime::RuntimeData& runtime_data,
     }
     std::optional<platform::Workspace> transaction_workspace{*workspace};
 
+    for (const auto& op : record->plan.operations) {
+        if (op.action == Action::Download && !op.exclusive_destination && !op.alt_path.empty()) {
+            platform::perf_trace::count("local reuse candidates matched");
+        }
+    }
+
     for (std::size_t index = 0; index < record->plan.operations.size();
          ++index) {
         auto prepared =
@@ -2170,7 +2176,7 @@ execute(const runtime::RuntimeData& runtime_data,
     std::unordered_map<std::string, std::size_t> download_counts;
     for (const auto index : apply_order) {
         const auto& operation = record->plan.operations[index];
-        if (operation.action == Action::Download) {
+        if (operation.action == Action::Download && (operation.alt_path.empty() || operation.exclusive_destination)) {
             ++download_counts[operation.hash + ':' +
                               std::to_string(operation.size)];
         }
@@ -2182,7 +2188,7 @@ execute(const runtime::RuntimeData& runtime_data,
         const auto& first_operation = record->plan.operations[first];
         if (auto prepared = prepare_destination(first); !prepared)
             return std::unexpected(prepared.error());
-        if (first_operation.action == Action::Download) {
+        if (first_operation.action == Action::Download && (first_operation.alt_path.empty() || first_operation.exclusive_destination)) {
             const auto content_key = first_operation.hash + ':' +
                                      std::to_string(first_operation.size);
             if (download_counts[content_key] == 1) {

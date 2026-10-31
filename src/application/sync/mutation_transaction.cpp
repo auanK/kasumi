@@ -728,6 +728,7 @@ rollback_file_operation(const Operation& operation,
             if (!actual)
                 return std::unexpected(actual.error());
             if (condition && *actual == condition->hash &&
+                !condition->self_restore_on_rollback &&
                 (progress.state != transaction::OperationState::Applied ||
                  condition->backup))
                 return {};
@@ -1223,8 +1224,16 @@ detail::destination_dependencies(std::span<const Operation> operations) {
         if (operation.action == Action::RenameLocal) {
             renamed[operation.path] = index;
             renamed[operation.alt_path] = index;
-        } else if (operation.action == Action::Download ||
-                   operation.action == Action::DeleteLocal) {
+        } else if (operation.action == Action::Download) {
+            if (!operation.alt_path.empty() && !operation.exclusive_destination) {
+                renamed[operation.alt_path] = index;
+            }
+            const auto found = renamed.find(operation.path);
+            if (found != renamed.end()) {
+                result[index] = found->second;
+                platform::perf_trace::count("destination dependency links");
+            }
+        } else if (operation.action == Action::DeleteLocal) {
             const auto found = renamed.find(operation.path);
             if (found != renamed.end()) {
                 result[index] = found->second;
@@ -1268,6 +1277,23 @@ detail::effective_destination(const transaction::Record& record,
     valid = validate_progress(rename, previous, preceding);
     if (!valid)
         return std::unexpected(valid.error());
+    if (rename.action == Action::Download && !rename.exclusive_destination) {
+        if (operation.action != Action::DeleteLocal ||
+            rename.alt_path != operation.path) {
+            return std::unexpected(
+                make_error(MutationErrorCode::DestinationConflict,
+                           "invalid download local reuse dependency",
+                           operation.path,
+                           index));
+        }
+        if (previous.state != transaction::OperationState::Applied) {
+            return std::nullopt;
+        }
+        return DestinationPrecondition{
+            .hash = std::string{},
+            .backup = std::nullopt,
+            .self_restore_on_rollback = true};
+    }
     if (rename.action != Action::RenameLocal ||
         (operation.action != Action::Download &&
          operation.action != Action::DeleteLocal) ||

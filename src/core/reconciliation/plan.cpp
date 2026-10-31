@@ -718,6 +718,99 @@ build_publication_tree(Snapshot publication_tree,
     return publication_tree;
 }
 
+void pair_local_reuse_candidates(SyncPlan& plan,
+                                 const Snapshot& local_tree) {
+    auto downloads = sync_plan_phase(plan, Action::Download);
+    auto deletes = sync_plan_phase(plan, Action::DeleteLocal);
+    if (downloads.empty() || deletes.empty()) {
+        return;
+    }
+
+    bool has_candidate_download = false;
+    for (const auto& op : downloads) {
+        if (!op.exclusive_destination && op.alt_path.empty() && !op.hash.empty() && has_safe_paths(op)) {
+            has_candidate_download = true;
+            break;
+        }
+    }
+    if (!has_candidate_download) {
+        return;
+    }
+
+    std::unordered_set<std::string> reserved_destinations;
+    for (const auto& op : sync_plan_operations(plan)) {
+        if (op.action != Action::DeleteLocal && op.action != Action::DeleteLocalDirectory) {
+            reserved_destinations.insert(platform::path::to_logical_utf8(op.path));
+            if (op.action == Action::RenameLocal && !op.alt_path.empty()) {
+                reserved_destinations.insert(platform::path::to_logical_utf8(op.alt_path));
+            }
+        }
+    }
+
+    struct CandidateKey {
+        std::string hash;
+        std::uint64_t size = 0;
+        bool operator==(const CandidateKey& other) const noexcept {
+            return size == other.size && hash == other.hash;
+        }
+    };
+    struct CandidateKeyHash {
+        std::size_t operator()(const CandidateKey& k) const noexcept {
+            return std::hash<std::string>{}(k.hash) ^ (std::hash<std::uint64_t>{}(k.size) << 1);
+        }
+    };
+
+    std::unordered_map<CandidateKey, std::vector<std::filesystem::path>, CandidateKeyHash> candidates;
+
+    for (const auto& op : deletes) {
+        if (op.path.empty() || !has_safe_paths(op)) {
+            continue;
+        }
+        const auto utf8_path = platform::path::to_logical_utf8(op.path);
+        if (utf8_path.find(".kasumiconflict_") != std::string::npos) {
+            continue;
+        }
+        if (reserved_destinations.contains(utf8_path)) {
+            continue;
+        }
+        const auto* row = find_row(local_tree, utf8_path);
+        if (row == nullptr || row->is_directory) {
+            continue;
+        }
+        if (row->hash == Hash{}) {
+            continue;
+        }
+        candidates[CandidateKey{.hash = hash_hex(row->hash), .size = row->size}].push_back(op.path);
+    }
+
+    if (candidates.empty()) {
+        return;
+    }
+
+    for (auto& [key, list] : candidates) {
+        std::ranges::sort(list, [](const auto& a, const auto& b) {
+            return a.native() < b.native();
+        });
+    }
+
+    for (auto& download_op : downloads) {
+        if (download_op.exclusive_destination || !download_op.alt_path.empty() || download_op.hash.empty() || !has_safe_paths(download_op)) {
+            continue;
+        }
+        const auto utf8_dest = platform::path::to_logical_utf8(download_op.path);
+        if (utf8_dest.find(".kasumiconflict_") != std::string::npos) {
+            continue;
+        }
+
+        CandidateKey key{.hash = download_op.hash, .size = download_op.size};
+        auto it = candidates.find(key);
+        if (it != candidates.end() && !it->second.empty()) {
+            download_op.alt_path = it->second.front();
+            it->second.erase(it->second.begin());
+        }
+    }
+}
+
 ReconcileResult reconcile(const Input& input) {
     if (!kasumi::valid_snapshot(input.local_tree, false)) {
         return std::unexpected(invalid_tree_error(ErrorCode::InvalidLocalTree,
@@ -896,6 +989,7 @@ ReconcileResult reconcile(const Input& input) {
     auto plan = make_sync_plan(std::move(operations), 0);
 
     order_directory_operations(plan);
+    pair_local_reuse_candidates(plan, input.local_tree);
 
     if (!valid_sync_plan(plan) || !has_safe_paths(plan)) {
         return std::unexpected(Error{

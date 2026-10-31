@@ -329,5 +329,119 @@ TEST(LocalFileReuseTest, LocalIndependentEditPreservesUserModification) {
               "ORIGINAL_VERSION");
 }
 
+
+// 8.8 Source modified after observation:
+TEST(LocalFileReuseTest, SourceModifiedAfterObservationFailsSafely) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("source-modified-safeguard");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto storage_path = root / "storage";
+    std::filesystem::create_directories(storage_path);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    auto client_a = make_client(root, "client_a", storage_path);
+    auto client_b = make_client(root, "client_b", storage_path);
+
+    std::filesystem::create_directories(client_a.local / "Old");
+    kasumi::test::write_text(client_a.local / "Old" / "file.txt", "INITIAL_DATA");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+    ASSERT_TRUE(sync_client(client_b, storage_path, key).has_value());
+
+    std::filesystem::rename(client_a.local / "Old", client_a.local / "New");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+
+    bool hook_hit = false;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "before_local_reuse_verify") {
+                hook_hit = true;
+                kasumi::test::write_text(path, "TAMPERED_EXTERNALLY");
+            }
+        });
+
+    auto res_b = sync_client(client_b, storage_path, key);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_TRUE(hook_hit);
+    EXPECT_FALSE(res_b.has_value());
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "Old" / "file.txt"),
+              "TAMPERED_EXTERNALLY");
+}
+
+// 8.7 Local source removed after observation:
+TEST(LocalFileReuseTest, SourceRemovedAfterObservationFailsSafely) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("source-removed-safeguard");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto storage_path = root / "storage";
+    std::filesystem::create_directories(storage_path);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    auto client_a = make_client(root, "client_a", storage_path);
+    auto client_b = make_client(root, "client_b", storage_path);
+
+    std::filesystem::create_directories(client_a.local / "Old");
+    kasumi::test::write_text(client_a.local / "Old" / "file.txt", "INITIAL_DATA");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+    ASSERT_TRUE(sync_client(client_b, storage_path, key).has_value());
+
+    std::filesystem::rename(client_a.local / "Old", client_a.local / "New");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+
+    bool hook_hit = false;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "before_local_reuse_move") {
+                hook_hit = true;
+                std::filesystem::remove(path);
+            }
+        });
+
+    auto res_b = sync_client(client_b, storage_path, key);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_TRUE(hook_hit);
+    EXPECT_FALSE(res_b.has_value());
+}
+
+// 8.9 Destination collision prevents overwrite:
+TEST(LocalFileReuseTest, DestinationConflictPreventsOverwrite) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("dest-conflict-safeguard");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto storage_path = root / "storage";
+    std::filesystem::create_directories(storage_path);
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+
+    auto client_a = make_client(root, "client_a", storage_path);
+    auto client_b = make_client(root, "client_b", storage_path);
+
+    std::filesystem::create_directories(client_a.local / "Old");
+    kasumi::test::write_text(client_a.local / "Old" / "file.txt", "INITIAL_DATA");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+    ASSERT_TRUE(sync_client(client_b, storage_path, key).has_value());
+
+    std::filesystem::rename(client_a.local / "Old", client_a.local / "New");
+    ASSERT_TRUE(sync_client(client_a, storage_path, key).has_value());
+
+    bool hook_hit = false;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& /*path*/) {
+            if (point == "before_local_reuse_move") {
+                hook_hit = true;
+                std::filesystem::create_directories(client_b.local / "New");
+                kasumi::test::write_text(client_b.local / "New" / "file.txt", "COLLIDING_DESTINATION");
+            }
+        });
+
+    auto res_b = sync_client(client_b, storage_path, key);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_TRUE(hook_hit);
+    EXPECT_FALSE(res_b.has_value());
+    EXPECT_EQ(kasumi::test::read_text(client_b.local / "New" / "file.txt"),
+              "COLLIDING_DESTINATION");
+}
+
 } // namespace
 
