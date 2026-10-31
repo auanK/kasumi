@@ -1,4 +1,8 @@
 #include "application/sync/mutation_fault_test.hpp"
+#include "platform/perf_trace.hpp"
+#include <chrono>
+#include <iostream>
+#include <iomanip>
 #include "application/use_cases/context.hpp"
 #include "crypto/content.hpp"
 #include "kasumi/test/filesystem.hpp"
@@ -7,6 +11,22 @@
 #include "platform/path.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
+#include "application/sync/mutation.hpp"
+#include "application/sync/mutation_detail.hpp"
+#include "core/hasher.hpp"
+#include "platform/workspace.hpp"
+#include "application/sync/journal.hpp"
+#include <atomic>
+#include <mutex>
+#include <thread>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <aclapi.h>
+#include <windows.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -35,6 +55,7 @@ bool is_content_identifier(std::string_view identifier) noexcept {
 
 struct ContentCounterState {
     kasumi::transport::Transport* base = nullptr;
+    mutable std::mutex mutex{};
     std::size_t content_gets = 0;
     std::size_t content_puts = 0;
     std::size_t content_presences = 0;
@@ -43,6 +64,29 @@ struct ContentCounterState {
     std::vector<std::string> put_identifiers;
     std::vector<std::string> presence_identifiers;
 };
+
+struct ContentCounterSnapshot {
+    std::size_t content_gets = 0;
+    std::size_t content_puts = 0;
+    std::size_t content_presences = 0;
+    std::size_t content_copies = 0;
+    std::vector<std::string> get_identifiers;
+    std::vector<std::string> put_identifiers;
+    std::vector<std::string> presence_identifiers;
+};
+
+inline ContentCounterSnapshot snapshot_content_counts(const ContentCounterState& state) {
+    std::lock_guard lock(state.mutex);
+    return ContentCounterSnapshot{
+        .content_gets = state.content_gets,
+        .content_puts = state.content_puts,
+        .content_presences = state.content_presences,
+        .content_copies = state.content_copies,
+        .get_identifiers = state.get_identifiers,
+        .put_identifiers = state.put_identifiers,
+        .presence_identifiers = state.presence_identifiers,
+    };
+}
 
 void destroy_counter_state(void*) noexcept {
 }
@@ -57,6 +101,7 @@ kasumi::transport::Result counter_put(void* context,
                                       std::string_view identifier) {
     auto* state = static_cast<ContentCounterState*>(context);
     if (is_content_identifier(identifier)) {
+        std::lock_guard lock(state->mutex);
         ++state->content_puts;
         state->put_identifiers.emplace_back(identifier);
     }
@@ -66,10 +111,13 @@ kasumi::transport::Result counter_put(void* context,
 kasumi::transport::Result
 counter_put_batch(void* context, const kasumi::transport::PutBatch& batch) {
     auto* state = static_cast<ContentCounterState*>(context);
-    for (const auto& identifier : batch.identifiers) {
-        if (is_content_identifier(identifier)) {
-            ++state->content_puts;
-            state->put_identifiers.push_back(identifier);
+    {
+        std::lock_guard lock(state->mutex);
+        for (const auto& identifier : batch.identifiers) {
+            if (is_content_identifier(identifier)) {
+                ++state->content_puts;
+                state->put_identifiers.push_back(identifier);
+            }
         }
     }
     return kasumi::transport::put_batch(*state->base, batch);
@@ -82,6 +130,7 @@ counter_put_files_batch(void* context,
     auto result = kasumi::transport::put_files_batch(*state->base, batch);
     if (result ||
         result.error().code != kasumi::transport::ErrorCode::Unsupported) {
+        std::lock_guard lock(state->mutex);
         for (const auto& item : batch.items) {
             if (is_content_identifier(item.destination_identifier)) {
                 ++state->content_puts;
@@ -98,6 +147,7 @@ counter_get(void* context,
             const std::filesystem::path& destination) {
     auto* state = static_cast<ContentCounterState*>(context);
     if (is_content_identifier(identifier)) {
+        std::lock_guard lock(state->mutex);
         ++state->content_gets;
         state->get_identifiers.emplace_back(identifier);
     }
@@ -108,6 +158,7 @@ kasumi::transport::Result
 counter_get_batch(void* context, const kasumi::transport::GetBatch& batch) {
     auto* state = static_cast<ContentCounterState*>(context);
     if (batch.source_prefix.empty()) {
+        std::lock_guard lock(state->mutex);
         for (const auto& identifier : batch.identifiers) {
             if (is_content_identifier(identifier)) {
                 ++state->content_gets;
@@ -129,6 +180,7 @@ counter_copy(void* context,
         result.error().code != kasumi::transport::ErrorCode::Unsupported) {
         if (is_content_identifier(source_identifier) ||
             is_content_identifier(destination_identifier)) {
+            std::lock_guard lock(state->mutex);
             ++state->content_copies;
         }
     }
@@ -141,6 +193,7 @@ counter_copy_batch(void* context, const kasumi::transport::CopyBatch& batch) {
     auto result = kasumi::transport::copy_batch(*state->base, batch);
     if (result ||
         result.error().code != kasumi::transport::ErrorCode::Unsupported) {
+        std::lock_guard lock(state->mutex);
         for (const auto& item : batch.items) {
             if (is_content_identifier(item.source_identifier) ||
                 is_content_identifier(item.destination_identifier)) {
@@ -155,6 +208,7 @@ kasumi::transport::PresenceResult
 counter_presence(void* context, std::string_view identifier) {
     auto* state = static_cast<ContentCounterState*>(context);
     if (is_content_identifier(identifier)) {
+        std::lock_guard lock(state->mutex);
         ++state->content_presences;
         state->presence_identifiers.emplace_back(identifier);
     }
@@ -178,6 +232,7 @@ kasumi::transport::ControlReadBatchResponse counter_control_read_batch(
     auto result = kasumi::transport::control_read_batch(*state->base, request);
     if (result ||
         result.error().code != kasumi::transport::ErrorCode::Unsupported) {
+        std::lock_guard lock(state->mutex);
         for (const auto& identifier : request.presence_identifiers) {
             if (is_content_identifier(identifier)) {
                 ++state->content_presences;
@@ -327,6 +382,7 @@ run_node_sync(SyncNode& node) {
 }
 
 void reset_content_counts(SyncNode& node) noexcept {
+    std::lock_guard lock(node.counters.mutex);
     node.counters.content_gets = 0;
     node.counters.content_puts = 0;
     node.counters.content_presences = 0;
@@ -1296,6 +1352,637 @@ TEST(DirectoryLocalMoveTest,
     EXPECT_EQ(read_local_file(receiver, "B/2.bin"), "payload-2");
     EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
               kasumi::test::snapshot_tree(receiver.local));
+}
+
+
+struct ControlledMetrics {
+    std::size_t n = 0;
+    std::uint64_t total_bytes = 0;
+    double total_sync_s = 0.0;
+    double prep_wall_s = 0.0;
+    double backup_copy_wall_s = 0.0;
+    double backup_durable_wall_s = 0.0;
+    double source_hash_wall_s = 0.0;
+    double backup_hash_wall_s = 0.0;
+    double apply_wall_s = 0.0;
+    double native_rename_wall_s = 0.0;
+    double dest_verif_wall_s = 0.0;
+    double prep_val_wall_s = 0.0;
+    double journal_save_wall_s = 0.0;
+    double journal_delta_calc_s = 0.0;
+    double journal_sem_val_s = 0.0;
+    double journal_encode_s = 0.0;
+    double journal_durable_write_s = 0.0;
+    double final_val_wall_s = 0.0;
+    std::uint64_t move_planned = 0;
+    std::uint64_t move_applied = 0;
+    std::uint64_t backup_files_created = 0;
+    std::uint64_t backup_bytes_copied = 0;
+    std::uint64_t backup_hash_calls = 0;
+    std::uint64_t source_hash_calls = 0;
+    std::uint64_t journal_save_calls = 0;
+    std::uint64_t journal_delta_count = 0;
+    std::uint64_t journal_bytes_written = 0;
+    std::uint64_t native_rename_calls = 0;
+    std::size_t content_gets = 0;
+    std::size_t content_puts = 0;
+    std::size_t content_presences = 0;
+};
+
+ControlledMetrics run_controlled_reproduction(std::size_t count, std::size_t file_payload_size = 1024) {
+    kasumi::platform::perf_trace::force_enable(true);
+    SyncNode sender;
+    SyncNode receiver;
+    EXPECT_TRUE(init_sync_node(sender, "move-diag-sender-" + std::to_string(count)));
+    EXPECT_TRUE(init_sync_node(receiver, "move-diag-receiver-" + std::to_string(count), sender.storage_root));
+
+    ControlledMetrics m;
+    m.n = count;
+
+    for (std::size_t i = 0; i < count; ++i) {
+        std::string payload = "content-" + std::to_string(i) + "-" + std::string(file_payload_size, 'A');
+        m.total_bytes += payload.size();
+        write_local_file(sender, "source_dir/file_" + std::to_string(i) + ".bin", payload);
+    }
+
+    auto s1 = run_node_sync(sender);
+    EXPECT_TRUE(s1.has_value()) << (s1 ? "" : s1.error().detail);
+    auto r1 = run_node_sync(receiver);
+    EXPECT_TRUE(r1.has_value()) << (r1 ? "" : r1.error().detail);
+
+    rename_local_entry(sender, "source_dir", "renamed_dir");
+    auto s2 = run_node_sync(sender);
+    EXPECT_TRUE(s2.has_value()) << (s2 ? "" : s2.error().detail);
+
+    reset_content_counts(receiver);
+    kasumi::platform::perf_trace::reset();
+
+    const auto start = std::chrono::steady_clock::now();
+    auto r2 = run_node_sync(receiver);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    EXPECT_TRUE(r2.has_value()) << (r2 ? "" : r2.error().detail);
+
+    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
+              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+    EXPECT_EQ(receiver.counters.content_presences, 0U);
+    EXPECT_EQ(receiver.counters.content_copies, 0U);
+
+    m.total_sync_s = std::chrono::duration<double>(elapsed).count();
+    m.prep_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move preparation wall")) / 1e6;
+    m.backup_copy_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move backup copy wall")) / 1e6;
+    m.backup_durable_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move backup durable wall")) / 1e6;
+    m.source_hash_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move source hash wall")) / 1e6;
+    m.backup_hash_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move backup hash wall")) / 1e6;
+    m.apply_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move apply wall")) / 1e6;
+    m.native_rename_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move native rename wall")) / 1e6;
+    m.dest_verif_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move destination verification wall")) / 1e6;
+    m.prep_val_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move prepared validation wall")) / 1e6;
+    m.journal_save_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("journal save wall")) / 1e6;
+    m.journal_delta_calc_s = static_cast<double>(kasumi::platform::perf_trace::get_time("journal delta calculation wall")) / 1e6;
+    m.journal_sem_val_s = static_cast<double>(kasumi::platform::perf_trace::get_time("journal semantic validation wall")) / 1e6;
+    m.journal_encode_s = static_cast<double>(kasumi::platform::perf_trace::get_time("journal encode wall")) / 1e6;
+    m.journal_durable_write_s = static_cast<double>(kasumi::platform::perf_trace::get_time("journal durable write wall")) / 1e6;
+    m.final_val_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("final local validation wall")) / 1e6;
+
+    m.move_planned = kasumi::platform::perf_trace::get_count("move planned count");
+    m.move_applied = kasumi::platform::perf_trace::get_count("move applied count");
+    m.backup_files_created = kasumi::platform::perf_trace::get_count("backup files created");
+    m.backup_bytes_copied = kasumi::platform::perf_trace::get_count("backup bytes copied");
+    m.backup_hash_calls = kasumi::platform::perf_trace::get_count("backup hash calls");
+    m.source_hash_calls = kasumi::platform::perf_trace::get_count("source hash calls");
+    m.journal_save_calls = kasumi::platform::perf_trace::get_count("journal save calls");
+    m.journal_delta_count = kasumi::platform::perf_trace::get_count("journal delta count");
+    m.journal_bytes_written = kasumi::platform::perf_trace::get_count("journal bytes written");
+    m.native_rename_calls = kasumi::platform::perf_trace::get_count("native rename calls");
+
+    m.content_gets = receiver.counters.content_gets;
+    m.content_puts = receiver.counters.content_puts;
+    m.content_presences = receiver.counters.content_presences;
+
+    std::cout << "\n=======================================================\n";
+    std::cout << "DIAGNOSTIC METRICS REPORT FOR N = " << count << "\n";
+    std::cout << "=======================================================\n";
+    std::cout << std::fixed << std::setprecision(6);
+    std::cout << "Total sync duration:          " << m.total_sync_s << " s\n";
+    std::cout << "Move planned count:           " << m.move_planned << "\n";
+    std::cout << "Move applied count:           " << m.move_applied << "\n";
+    std::cout << "Native rename calls:          " << m.native_rename_calls << "\n";
+    std::cout << "Native rename wall:           " << m.native_rename_wall_s << " s\n";
+    std::cout << "Move preparation wall:        " << m.prep_wall_s << " s\n";
+    std::cout << "Backup files created:         " << m.backup_files_created << "\n";
+    std::cout << "Backup bytes copied:          " << m.backup_bytes_copied << " bytes\n";
+    std::cout << "Backup copy wall:             " << m.backup_copy_wall_s << " s\n";
+    std::cout << "Backup durable wall:          " << m.backup_durable_wall_s << " s\n";
+    std::cout << "Source hash calls:            " << m.source_hash_calls << "\n";
+    std::cout << "Source hash wall:             " << m.source_hash_wall_s << " s\n";
+    std::cout << "Backup hash calls:            " << m.backup_hash_calls << "\n";
+    std::cout << "Backup hash wall:             " << m.backup_hash_wall_s << " s\n";
+    std::cout << "Move apply wall:              " << m.apply_wall_s << " s\n";
+    std::cout << "Move prepared validation wall:" << m.prep_val_wall_s << " s\n";
+    std::cout << "Move dest verification wall:  " << m.dest_verif_wall_s << " s\n";
+    std::cout << "Journal save calls:           " << m.journal_save_calls << "\n";
+    std::cout << "Journal save wall:            " << m.journal_save_wall_s << " s\n";
+    std::cout << "Apply ACL calls:              " << kasumi::platform::perf_trace::get_count("apply_acl calls") << "\n";
+    std::cout << "Apply ACL wall:               " << static_cast<double>(kasumi::platform::perf_trace::get_time("apply_acl wall")) / 1e6 << " s\n";
+    std::cout << "Journal delta count:          " << m.journal_delta_count << "\n";
+    std::cout << "Journal bytes written:        " << m.journal_bytes_written << " bytes\n";
+    std::cout << "Journal delta calc wall:      " << m.journal_delta_calc_s << " s\n";
+    std::cout << "Journal sem validation wall:  " << m.journal_sem_val_s << " s\n";
+    std::cout << "Journal encode wall:          " << m.journal_encode_s << " s\n";
+    std::cout << "Journal durable write wall:   " << m.journal_durable_write_s << " s\n";
+    std::cout << "Final local validation wall:  " << m.final_val_wall_s << " s\n";
+    std::cout << "Content GET / PUT / PRESENCE: " << m.content_gets << " / " << m.content_puts << " / " << m.content_presences << "\n";
+    std::cout << "=======================================================\n\n";
+
+    kasumi::platform::perf_trace::force_enable(false);
+    return m;
+}
+
+TEST(DirectoryLocalMoveTest, MoveLocalAvoidsRedundantWorkInvariants) {
+    const auto m = run_controlled_reproduction(16);
+    EXPECT_EQ(m.move_planned, 16U);
+    EXPECT_EQ(m.move_applied, 16U);
+    EXPECT_EQ(m.content_gets, 0U);
+
+    // Cost invariants:
+    // Journal saves must be batched, not 1 flush per file (reduced from 23 down to 7)
+    EXPECT_LE(m.journal_save_calls, 7U);
+    // Source hash calls bounded (reduced from 64 with validate_prepared_rename down to 48)
+    EXPECT_LE(m.source_hash_calls, 48U);
+    // Backup hash calls bounded (reduced from 48 down to 32)
+    EXPECT_LE(m.backup_hash_calls, 48U);
+
+}
+
+TEST(DirectoryLocalMoveTest, DiagnosticReproduction16) {
+    const auto m = run_controlled_reproduction(16);
+    EXPECT_EQ(m.move_planned, 16U);
+    EXPECT_EQ(m.move_applied, 16U);
+    EXPECT_EQ(m.content_gets, 0U);
+}
+
+TEST(DirectoryLocalMoveTest, DiagnosticReproduction128) {
+    const auto m = run_controlled_reproduction(128);
+    EXPECT_EQ(m.move_planned, 128U);
+    EXPECT_EQ(m.move_applied, 128U);
+    EXPECT_EQ(m.content_gets, 0U);
+}
+
+TEST(DirectoryLocalMoveTest, DiagnosticReproduction512) {
+    const auto m = run_controlled_reproduction(512);
+    EXPECT_EQ(m.move_planned, 512U);
+    EXPECT_EQ(m.move_applied, 512U);
+    EXPECT_EQ(m.content_gets, 0U);
+}
+
+
+TEST(DirectoryLocalMoveTest, BackupCorruptedSameSizeRejectedByPreparedValidation) {
+    auto workspace_dir = kasumi::test::make_temp_workspace("backup-corrupted-same-size");
+    const auto local_root = kasumi::test::workspace_path(workspace_dir, "local");
+    std::filesystem::create_directories(local_root);
+    const auto tx_dir = kasumi::test::workspace_path(workspace_dir, "tx");
+    std::filesystem::create_directories(tx_dir);
+    kasumi::platform::Workspace workspace{tx_dir};
+
+    const auto source = local_root / "source.bin";
+    const auto destination = local_root / "destination.bin";
+    const std::string content = "original-content-for-testing-123456"; // 35 bytes
+    kasumi::test::write_text(source, content);
+
+    auto hash_result = kasumi::crypto::content::hash_file(source);
+    ASSERT_TRUE(hash_result.has_value());
+
+    kasumi::Operation op;
+    op.action = kasumi::Action::MoveLocal;
+    op.path = "source.bin";
+    op.alt_path = "destination.bin";
+    op.size = content.size();
+    op.hash = kasumi::hash_hex(*hash_result);
+
+    std::vector<kasumi::Operation> plan_ops{op};
+    kasumi::transaction::OperationProgress progress;
+    progress.backup_slot = 0;
+
+    auto prep_res = kasumi::application::sync::mutation::prepare_operation(
+        op, 0, local_root, workspace, progress, plan_ops);
+    ASSERT_TRUE(prep_res.has_value()) << prep_res.error().detail;
+    progress = *prep_res;
+
+    const auto backup = kasumi::platform::workspace_file(workspace, progress.backup_slot, ".backup");
+    ASSERT_TRUE(std::filesystem::exists(backup));
+    EXPECT_EQ(std::filesystem::file_size(backup), content.size());
+
+    // Corrupt backup keeping exact same size (35 bytes)
+    const std::string corrupted = "corrupted-bytes-for-testing-1234567";
+    ASSERT_EQ(corrupted.size(), content.size());
+    kasumi::test::write_text(backup, corrupted);
+
+    auto val_res = kasumi::application::sync::mutation::detail::validate_prepared_rename(
+        op, 0, source, destination, workspace, progress);
+
+    EXPECT_FALSE(val_res.has_value());
+    if (!val_res.has_value()) {
+        EXPECT_EQ(val_res.error().code,
+                  kasumi::application::sync::mutation::MutationErrorCode::IntegrityMismatch);
+    }
+}
+
+TEST(DirectoryLocalMoveTest, SourceModifiedAfterPreparationRejectedByPreparedValidation) {
+    auto workspace_dir = kasumi::test::make_temp_workspace("source-modified-after-prep");
+    const auto local_root = kasumi::test::workspace_path(workspace_dir, "local");
+    std::filesystem::create_directories(local_root);
+    const auto tx_dir = kasumi::test::workspace_path(workspace_dir, "tx");
+    std::filesystem::create_directories(tx_dir);
+    kasumi::platform::Workspace workspace{tx_dir};
+
+    const auto source = local_root / "source.bin";
+    const auto destination = local_root / "destination.bin";
+    const std::string content = "original-content-for-testing-123456"; // 35 bytes
+    kasumi::test::write_text(source, content);
+
+    auto hash_result = kasumi::crypto::content::hash_file(source);
+    ASSERT_TRUE(hash_result.has_value());
+
+    kasumi::Operation op;
+    op.action = kasumi::Action::MoveLocal;
+    op.path = "source.bin";
+    op.alt_path = "destination.bin";
+    op.size = content.size();
+    op.hash = kasumi::hash_hex(*hash_result);
+
+    std::vector<kasumi::Operation> plan_ops{op};
+    kasumi::transaction::OperationProgress progress;
+    progress.backup_slot = 0;
+
+    auto prep_res = kasumi::application::sync::mutation::prepare_operation(
+        op, 0, local_root, workspace, progress, plan_ops);
+    ASSERT_TRUE(prep_res.has_value()) << prep_res.error().detail;
+    progress = *prep_res;
+
+    // Modify source on disk keeping exact same size (35 bytes)
+    const std::string modified = "modified-source-for-testing-1234567";
+    ASSERT_EQ(modified.size(), content.size());
+    kasumi::test::write_text(source, modified);
+
+    auto val_res = kasumi::application::sync::mutation::detail::validate_prepared_rename(
+        op, 0, source, destination, workspace, progress);
+
+    EXPECT_FALSE(val_res.has_value());
+    if (!val_res.has_value()) {
+        EXPECT_EQ(val_res.error().code,
+                  kasumi::application::sync::mutation::MutationErrorCode::DestinationConflict);
+    }
+}
+
+TEST(DirectoryLocalMoveTest, DownloadMetricsDoNotContaminateMoveMetrics) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "download-metrics-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(receiver, "download-metrics-receiver", sender.storage_root));
+
+    write_local_file(sender, "new_file.txt", "download-content-sample");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("move planned count"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("move applied count"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("native rename calls"), 0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_time("move destination verification wall"), 0);
+
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
+void run_eight_file_move_recovery_scenario(std::size_t interrupt_after_k_moves,
+                                          bool interrupt_after_applied_checkpoint = false,
+                                          bool tamper_destination_after_move = false,
+                                          bool tamper_backup_after_move = false) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "eight-move-sender-" + std::to_string(interrupt_after_k_moves) +
+                                       (interrupt_after_applied_checkpoint ? "-ckpt" : "") +
+                                       (tamper_destination_after_move ? "-tdest" : "") +
+                                       (tamper_backup_after_move ? "-tbkp" : "")));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "eight-move-receiver-" + std::to_string(interrupt_after_k_moves) +
+                  (interrupt_after_applied_checkpoint ? "-ckpt" : "") +
+                  (tamper_destination_after_move ? "-tdest" : "") +
+                  (tamper_backup_after_move ? "-tbkp" : ""), sender.storage_root));
+
+    for (std::size_t i = 1; i <= 8; ++i) {
+        write_local_file(sender, "A/file" + std::to_string(i) + ".bin", "payload-" + std::to_string(i));
+    }
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    rename_local_entry(sender, "A", "B");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    reset_content_counts(receiver);
+
+    std::size_t moves_completed = 0;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path&) {
+            if (point == "after_rename_move") {
+                ++moves_completed;
+                if (!interrupt_after_applied_checkpoint && moves_completed == interrupt_after_k_moves) {
+                    throw SimulatedInterruption{};
+                }
+            } else if (point == "after-MoveLocal-consolidated-checkpoint") {
+                if (interrupt_after_applied_checkpoint) {
+                    throw SimulatedInterruption{};
+                }
+            }
+        });
+
+    EXPECT_THROW(static_cast<void>(run_node_sync(receiver)), SimulatedInterruption);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    // Verify durable state on disk directly produced by the real coordinator
+    {
+        const auto paths = kasumi::application::sync::journal::make_paths(receiver.profile);
+        ASSERT_TRUE(paths.has_value());
+        auto loaded = kasumi::application::sync::journal::load(*paths, receiver.key, nullptr);
+        ASSERT_TRUE(loaded.has_value());
+        ASSERT_TRUE(*loaded);
+        const auto& record = **loaded;
+        if (interrupt_after_applied_checkpoint) {
+            EXPECT_EQ(record.phase, kasumi::transaction::Phase::LocalChangesApplied);
+            std::size_t move_count = 0;
+            for (std::size_t i = 0; i < record.plan.operations.size(); ++i) {
+                if (record.plan.operations[i].action == kasumi::Action::MoveLocal) {
+                    ++move_count;
+                    EXPECT_EQ(record.progress[i].state, kasumi::transaction::OperationState::Applied);
+                }
+            }
+            EXPECT_EQ(move_count, 8U);
+        }
+    }
+
+    if (tamper_destination_after_move) {
+        write_local_file(receiver, "B/file4.bin", "external-conflicting-content");
+        reset_content_counts(receiver);
+        const auto recovery_sync = run_node_sync(receiver);
+        EXPECT_FALSE(recovery_sync.has_value());
+        EXPECT_EQ(read_local_file(receiver, "B/file4.bin"), "external-conflicting-content");
+        return;
+    }
+
+    if (tamper_backup_after_move) {
+        const auto tx_root = receiver.profile / ".transactions";
+        if (std::filesystem::exists(tx_root)) {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(tx_root)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".backup") {
+                    auto sz = std::filesystem::file_size(entry.path());
+                    std::string bad(sz, 'X');
+                    kasumi::test::write_text(entry.path(), bad);
+                    break;
+                }
+            }
+        }
+        reset_content_counts(receiver);
+        const auto recovery_sync = run_node_sync(receiver);
+        EXPECT_FALSE(recovery_sync.has_value());
+        return;
+    }
+
+    reset_content_counts(receiver);
+    const auto recovered_sync = run_node_sync(receiver);
+    ASSERT_TRUE(recovered_sync.has_value()) << recovered_sync.error().detail;
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+    EXPECT_EQ(receiver.counters.content_presences, 0U);
+    EXPECT_EQ(receiver.counters.content_copies, 0U);
+
+    EXPECT_FALSE(local_entry_exists(receiver, "A"));
+    for (std::size_t i = 1; i <= 8; ++i) {
+        EXPECT_EQ(read_local_file(receiver, "B/file" + std::to_string(i) + ".bin"),
+                  "payload-" + std::to_string(i));
+    }
+    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
+              kasumi::test::snapshot_tree(receiver.local));
+
+    // Subsequent sync must be idempotent with zero content I/O
+    reset_content_counts(receiver);
+    const auto subsequent_sync = run_node_sync(receiver);
+    ASSERT_TRUE(subsequent_sync.has_value()) << subsequent_sync.error().detail;
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+    EXPECT_EQ(receiver.counters.content_presences, 0U);
+    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
+              kasumi::test::snapshot_tree(receiver.local));
+}
+
+TEST(DirectoryLocalMoveTest, BatchMoveRecoveryInterruptedAtK1) {
+    run_eight_file_move_recovery_scenario(1);
+}
+
+TEST(DirectoryLocalMoveTest, BatchMoveRecoveryInterruptedAtK4) {
+    run_eight_file_move_recovery_scenario(4);
+}
+
+TEST(DirectoryLocalMoveTest, BatchMoveRecoveryInterruptedAtK7) {
+    run_eight_file_move_recovery_scenario(7);
+}
+
+TEST(DirectoryLocalMoveTest, BatchMoveRecoveryInterruptedAtK8BeforeCheckpoint) {
+    run_eight_file_move_recovery_scenario(8);
+}
+
+TEST(DirectoryLocalMoveTest, BatchMoveRecoveryInterruptedAfterConsolidatedCheckpoint) {
+    run_eight_file_move_recovery_scenario(8, true);
+}
+
+TEST(DirectoryLocalMoveTest, BatchMoveRecoveryFailsClosedOnExternalDestinationConflict) {
+    run_eight_file_move_recovery_scenario(4, false, true, false);
+}
+
+TEST(DirectoryLocalMoveTest, BatchMoveRecoveryFailsClosedOnCorruptedBackupSameSize) {
+    run_eight_file_move_recovery_scenario(4, false, false, true);
+}
+
+
+#if defined(_WIN32)
+void add_unauthorized_dacl_ace(const std::filesystem::path& path) {
+    PSID everyone_sid = nullptr;
+    SID_IDENTIFIER_AUTHORITY world_auth = SECURITY_WORLD_SID_AUTHORITY;
+    ASSERT_TRUE(AllocateAndInitializeSid(&world_auth, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &everyone_sid));
+
+    EXPLICIT_ACCESSW ea{};
+    ea.grfAccessPermissions = GENERIC_READ;
+    ea.grfAccessMode = GRANT_ACCESS;
+    ea.grfInheritance = NO_INHERITANCE;
+    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea.Trustee.ptstrName = static_cast<LPWSTR>(everyone_sid);
+
+    PACL existing_dacl = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    ASSERT_EQ(GetNamedSecurityInfoW(const_cast<wchar_t*>(path.c_str()),
+                                    SE_FILE_OBJECT,
+                                    DACL_SECURITY_INFORMATION,
+                                    nullptr,
+                                    nullptr,
+                                    &existing_dacl,
+                                    nullptr,
+                                    &sd),
+              ERROR_SUCCESS);
+
+    PACL new_dacl = nullptr;
+    ASSERT_EQ(SetEntriesInAclW(1, &ea, existing_dacl, &new_dacl), ERROR_SUCCESS);
+    ASSERT_EQ(SetNamedSecurityInfoW(const_cast<wchar_t*>(path.c_str()),
+                                    SE_FILE_OBJECT,
+                                    DACL_SECURITY_INFORMATION,
+                                    nullptr,
+                                    nullptr,
+                                    new_dacl,
+                                    nullptr),
+              ERROR_SUCCESS);
+
+    LocalFree(new_dacl);
+    LocalFree(sd);
+    FreeSid(everyone_sid);
+}
+
+void expect_private_dacl_hardening(const std::filesystem::path& path) {
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    ASSERT_EQ(GetNamedSecurityInfoW(const_cast<wchar_t*>(path.c_str()),
+                                    SE_FILE_OBJECT,
+                                    DACL_SECURITY_INFORMATION,
+                                    nullptr,
+                                    nullptr,
+                                    &dacl,
+                                    nullptr,
+                                    &descriptor),
+              ERROR_SUCCESS);
+    ASSERT_NE(descriptor, nullptr);
+    ASSERT_NE(dacl, nullptr);
+
+    SECURITY_DESCRIPTOR_CONTROL control{};
+    DWORD revision = 0;
+    ASSERT_TRUE(GetSecurityDescriptorControl(descriptor, &control, &revision));
+    EXPECT_NE(control & SE_DACL_PROTECTED, 0);
+
+    ACL_SIZE_INFORMATION information{};
+    ASSERT_TRUE(GetAclInformation(dacl, &information, sizeof(information), AclSizeInformation));
+    // Hardened private storage has exactly 2 ACEs (user + SYSTEM)
+    EXPECT_EQ(information.AceCount, 2U);
+    LocalFree(descriptor);
+}
+#endif
+
+TEST(DirectoryLocalMoveTest, PrivateStoragePermissionsHardenedOnValidation) {
+#if defined(_WIN32)
+    auto workspace_dir = kasumi::test::make_temp_workspace("private-hardening-test");
+    const auto tx_dir = kasumi::test::workspace_path(workspace_dir, "tx");
+    std::filesystem::create_directories(tx_dir);
+    kasumi::platform::Workspace workspace{tx_dir};
+
+    // 1. Workspace directory hardening
+    ASSERT_TRUE(kasumi::platform::private_storage::protect_directory(workspace.root));
+    add_unauthorized_dacl_ace(workspace.root);
+
+    // Call validate_workspace (via prepare_operation)
+    const auto source = kasumi::test::workspace_path(workspace_dir, "s.bin");
+    kasumi::test::write_text(source, "data");
+    auto h = kasumi::crypto::content::hash_file(source);
+    ASSERT_TRUE(h.has_value());
+
+    kasumi::Operation op;
+    op.action = kasumi::Action::MoveLocal;
+    op.path = "s.bin";
+    op.alt_path = "d.bin";
+    op.size = 4;
+    op.hash = kasumi::hash_hex(*h);
+    std::vector<kasumi::Operation> plan_ops{op};
+    kasumi::transaction::OperationProgress progress;
+    progress.backup_slot = 0;
+
+    auto prep = kasumi::application::sync::mutation::prepare_operation(
+        op, 0, kasumi::test::workspace_root(workspace_dir), workspace, progress, plan_ops);
+    ASSERT_TRUE(prep.has_value());
+
+    // Verify workspace.root was hardened back to 2 ACEs
+    expect_private_dacl_hardening(workspace.root);
+
+    // 2. Backup file hardening
+    const auto bkp = kasumi::platform::workspace_file(workspace, prep->backup_slot, ".backup");
+    ASSERT_TRUE(std::filesystem::exists(bkp));
+    add_unauthorized_dacl_ace(bkp);
+
+    // validate_prepared_rename calls validate_backup which calls protect_file
+    auto vres = kasumi::application::sync::mutation::detail::validate_prepared_rename(
+        op, 0, source, kasumi::test::workspace_path(workspace_dir, "d.bin"), workspace, *prep);
+    ASSERT_TRUE(vres.has_value());
+    expect_private_dacl_hardening(bkp);
+#endif
+}
+
+
+TEST(DirectoryLocalMoveTest, ContentCounterConcurrentCallbacksAreThreadSafe) {
+    kasumi::transport::Transport dummy_transport{
+        .state = kasumi::transport::TransportStateHandle{nullptr, [](void*) noexcept {}},
+        .storage = kasumi::transport::StorageOperations{
+            .initialize = [](void*) -> kasumi::transport::Result { return {}; },
+            .put = [](void*, const std::filesystem::path&, std::string_view) -> kasumi::transport::Result { return {}; },
+            .put_batch = [](void*, const kasumi::transport::PutBatch&) -> kasumi::transport::Result { return {}; },
+            .put_files_batch = [](void*, const kasumi::transport::PutFilesBatch&) -> kasumi::transport::Result { return {}; },
+            .get = [](void*, std::string_view, const std::filesystem::path&) -> kasumi::transport::Result { return {}; },
+            .get_batch = [](void*, const kasumi::transport::GetBatch&) -> kasumi::transport::Result { return {}; },
+            .copy = [](void*, std::string_view, std::string_view) -> kasumi::transport::Result { return {}; },
+            .copy_batch = [](void*, const kasumi::transport::CopyBatch&) -> kasumi::transport::Result { return {}; },
+            .presence = [](void*, std::string_view) -> kasumi::transport::PresenceResult { return kasumi::transport::Presence::Present; },
+            .list = [](void*) -> kasumi::transport::ListingResult { return kasumi::transport::ListingResult{}; },
+            .list_prefix = [](void*, std::string_view) -> kasumi::transport::ListingResult { return kasumi::transport::ListingResult{}; },
+            .control_read_batch = [](void*, const kasumi::transport::ControlReadBatchRequest&) -> kasumi::transport::ControlReadBatchResponse { return kasumi::transport::ControlReadBatchResponse{}; },
+            .remove = [](void*, std::string_view) -> kasumi::transport::RemovalResult { return {}; },
+            .remove_batch = [](void*, const kasumi::transport::RemoveBatch&) -> kasumi::transport::RemoveBatchResult { return kasumi::transport::RemoveBatchResult{}; },
+        },
+    };
+
+    ContentCounterState state;
+    state.base = &dummy_transport;
+
+    constexpr std::size_t num_threads = 8;
+    constexpr std::size_t ops_per_thread = 200;
+    std::atomic<bool> start_gate{false};
+    std::vector<std::thread> workers;
+    workers.reserve(num_threads);
+
+    for (std::size_t t = 0; t < num_threads; ++t) {
+        workers.emplace_back([&state, &start_gate, t]() {
+            while (!start_gate.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            for (std::size_t i = 0; i < ops_per_thread; ++i) {
+                const auto id = "content_thread_" + std::to_string(t) + "_op_" + std::to_string(i);
+                counter_get(&state, id, std::filesystem::path{});
+                counter_put(&state, std::filesystem::path{}, id);
+                counter_presence(&state, id);
+            }
+        });
+    }
+
+    start_gate.store(true, std::memory_order_release);
+    for (auto& w : workers) {
+        w.join();
+    }
+
+    constexpr std::size_t expected_ops = num_threads * ops_per_thread;
+    EXPECT_EQ(state.content_gets, expected_ops);
+    EXPECT_EQ(state.content_puts, expected_ops);
+    EXPECT_EQ(state.content_presences, expected_ops);
+    EXPECT_EQ(state.get_identifiers.size(), expected_ops);
+    EXPECT_EQ(state.put_identifiers.size(), expected_ops);
+    EXPECT_EQ(state.presence_identifiers.size(), expected_ops);
 }
 
 } // namespace

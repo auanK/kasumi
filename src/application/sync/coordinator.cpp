@@ -17,6 +17,7 @@
 #include "core/transaction/types.hpp"
 #include "crypto/key_derivation.hpp"
 #include "journal_fault_test.hpp"
+#include "application/sync/mutation_fault_test.hpp"
 #include "platform/clock.hpp"
 #include "platform/durability.hpp"
 #include "platform/metadata.hpp"
@@ -1881,6 +1882,9 @@ execute(const runtime::RuntimeData& runtime_data,
     for (const auto& operation : record->plan.operations) {
         platform::perf_trace::count(
             detail::action_metrics[action_index(operation.action)]);
+        if (operation.action == Action::MoveLocal) {
+            platform::perf_trace::count("move planned count");
+        }
     }
     const auto preparation_saves_before =
         platform::perf_trace::get_count("journal durable saves");
@@ -2065,6 +2069,10 @@ execute(const runtime::RuntimeData& runtime_data,
     const auto mark_applied =
         [&](std::size_t index) -> std::expected<void, Error> {
         record->progress[index].state = transaction::OperationState::Applied;
+        if (record->plan.operations[index].action == Action::MoveLocal) {
+            platform::perf_trace::count("move applied count");
+            return {};
+        }
         if (is_logical_mutation(record->plan.operations[index].action)) {
             return {};
         }
@@ -2395,6 +2403,8 @@ execute(const runtime::RuntimeData& runtime_data,
     if (!saved)
         return std::unexpected(saved.error());
 
+    mutation_fault_test::hit("after-MoveLocal-consolidated-checkpoint");
+
     const auto& expected_tree =
         record->publication_required
             ? reconciliation_result.candidate_shared_tree
@@ -2414,6 +2424,7 @@ execute(const runtime::RuntimeData& runtime_data,
     auto scanned = observation::collect_local_tree(
         runtime_data.local_dir, session, observed_input.ignore_list);
     platform::perf_trace::finish("final local validation", final_scan_trace);
+    platform::perf_trace::finish("final local validation wall", final_scan_trace);
     if (!scanned) {
         auto rolled = rollback_terminal();
         if (!rolled)

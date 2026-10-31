@@ -1,3 +1,4 @@
+#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 
 #include "platform/durability.hpp"
@@ -105,6 +106,8 @@ std::expected<void, std::string> apply_acl(const std::filesystem::path& path,
         LocalFree(*descriptor);
         return std::unexpected(error);
     }
+    platform::perf_trace::count("apply_acl calls");
+    const auto acl_trace = platform::perf_trace::begin();
     auto writable = path.wstring();
     const auto result = SetNamedSecurityInfoW(
         writable.data(),
@@ -114,6 +117,7 @@ std::expected<void, std::string> apply_acl(const std::filesystem::path& path,
         nullptr,
         dacl,
         nullptr);
+    platform::perf_trace::finish("apply_acl wall", acl_trace);
     LocalFree(*descriptor);
     if (result != ERROR_SUCCESS) {
         return std::unexpected(

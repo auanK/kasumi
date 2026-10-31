@@ -70,6 +70,7 @@ add_library(kasumi_application_fault_test_objects OBJECT
     ${PROJECT_SOURCE_DIR}/src/application/profile.cpp
     ${PROJECT_SOURCE_DIR}/src/application/sync/mutation.cpp
     ${PROJECT_SOURCE_DIR}/src/application/sync/mutation_transaction.cpp
+    ${PROJECT_SOURCE_DIR}/src/application/sync/coordinator.cpp
 )
 target_include_directories(kasumi_application_fault_test_objects PRIVATE
     ${PROJECT_SOURCE_DIR}/src

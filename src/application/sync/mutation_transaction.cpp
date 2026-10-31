@@ -128,7 +128,10 @@ validate_backup(const std::filesystem::path& backup,
                                           operation_index));
     }
     platform::perf_trace::count("mutation backup hash calls");
+    platform::perf_trace::count("backup hash calls");
+    const auto backup_hash_trace = platform::perf_trace::begin();
     auto actual = file_hash(backup, operation_index);
+    platform::perf_trace::finish("move backup hash wall", backup_hash_trace);
     if (!actual) {
         return std::unexpected(actual.error());
     }
@@ -144,7 +147,9 @@ validate_backup(const std::filesystem::path& backup,
 std::expected<void, MutationError>
 make_backup_durable(const std::filesystem::path& backup,
                     std::size_t operation_index) {
+    const auto durable_trace = platform::perf_trace::begin();
     auto synced = platform::durability::sync_file(backup);
+    platform::perf_trace::finish("move backup durable wall", durable_trace);
     if (!synced) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
                                           synced.error(),
@@ -186,10 +191,12 @@ create_backup(const std::filesystem::path& source,
                        source,
                        operation_index));
     }
+    const auto copy_trace = platform::perf_trace::begin();
     std::error_code error;
-    if (!std::filesystem::copy_file(
-            source, backup, std::filesystem::copy_options::none, error) ||
-        error) {
+    const bool copied = std::filesystem::copy_file(
+        source, backup, std::filesystem::copy_options::none, error);
+    platform::perf_trace::finish("move backup copy wall", copy_trace);
+    if (!copied || error) {
         if (error == std::errc::file_exists) {
             auto validated =
                 validate_backup(backup, expected_hash, operation_index);
@@ -203,6 +210,12 @@ create_backup(const std::filesystem::path& source,
                              : "failed to create backup",
                        backup,
                        operation_index));
+    }
+    platform::perf_trace::count("backup files created");
+    std::error_code size_error;
+    const auto backup_size = std::filesystem::file_size(backup, size_error);
+    if (!size_error) {
+        platform::perf_trace::count("backup bytes copied", backup_size);
     }
 
     auto secured = platform::private_storage::protect_file(backup);
@@ -873,6 +886,16 @@ prepare_operation_impl(const Operation& operation,
 
     if (operation.action == Action::RenameLocal ||
         operation.action == Action::MoveLocal) {
+        struct MovePrepGuard {
+            platform::perf_trace::Token token;
+            bool is_move;
+            ~MovePrepGuard() {
+                if (is_move) {
+                    platform::perf_trace::finish("move preparation wall", token);
+                }
+            }
+        } move_prep_guard{platform::perf_trace::begin(),
+                          operation.action == Action::MoveLocal};
         auto source = resolve_local_path(
             local_root, operation.path, operation_index, plan_operations);
         auto destination = resolve_local_path(
@@ -920,7 +943,10 @@ prepare_operation_impl(const Operation& operation,
                         operation_index));
                 }
             }
+            platform::perf_trace::count("source hash calls");
+            const auto source_hash_trace = platform::perf_trace::begin();
             auto actual = file_hash(*source, operation_index);
+            platform::perf_trace::finish("move source hash wall", source_hash_trace);
             if (!actual)
                 return std::unexpected(actual.error());
             if (!operation.hash.empty() && *actual != operation.hash) {
@@ -1343,6 +1369,16 @@ MutationResult detail::validate_prepared_rename(
     const std::filesystem::path& destination,
     const platform::Workspace& workspace,
     const transaction::OperationProgress& progress) {
+    struct MoveValGuard {
+        platform::perf_trace::Token token;
+        bool is_move;
+        ~MoveValGuard() {
+            if (is_move) {
+                platform::perf_trace::finish("move prepared validation wall", token);
+            }
+        }
+    } move_val_guard{platform::perf_trace::begin(),
+                     operation.action == Action::MoveLocal};
     // An unprepared pending operation has no authority over a following path.
     if (operation.action == Action::RenameLocal &&
         progress.state == transaction::OperationState::Pending &&
