@@ -964,4 +964,338 @@ TEST(DirectoryLocalMoveTest,
     EXPECT_EQ(read_local_file(receiver, "A/1.bin"), "payload-1");
 }
 
+struct SimulatedInterruption {};
+
+void corrupt_or_remove_transaction_backups(const SyncNode& node) {
+    const auto tx_root = node.profile / ".transactions";
+    if (!std::filesystem::exists(tx_root)) {
+        return;
+    }
+    for (const auto& entry :
+         std::filesystem::recursive_directory_iterator(tx_root)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".backup") {
+            kasumi::test::write_text(entry.path(), "corrupted-backup-bytes");
+        }
+    }
+}
+
+TEST(DirectoryLocalMoveTest,
+     InterruptedBeforePhysicalMoveRecoversCleanlyWithZeroContentIo) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-int-before-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-int-before-receiver", sender.storage_root));
+
+    write_local_file(sender, "A/1.bin", "payload-1");
+    write_local_file(sender, "A/2.bin", "payload-2");
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    rename_local_entry(sender, "A", "B");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    reset_content_counts(receiver);
+
+    const auto target_source =
+        receiver.local / kasumi::platform::path::from_utf8("A/1.bin");
+    bool interrupted = false;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "before_rename_move" && path == target_source) {
+                interrupted = true;
+                throw SimulatedInterruption{};
+            }
+        });
+
+    EXPECT_THROW(static_cast<void>(run_node_sync(receiver)),
+                 SimulatedInterruption);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+    ASSERT_TRUE(interrupted);
+    EXPECT_TRUE(local_entry_exists(receiver, "A/1.bin"));
+    EXPECT_FALSE(local_entry_exists(receiver, "B/1.bin"));
+
+    reset_content_counts(receiver);
+    const auto recovered_sync = run_node_sync(receiver);
+    ASSERT_TRUE(recovered_sync.has_value()) << recovered_sync.error().detail;
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+    EXPECT_EQ(receiver.counters.content_presences, 0U);
+    EXPECT_EQ(receiver.counters.content_copies, 0U);
+
+    EXPECT_FALSE(local_entry_exists(receiver, "A"));
+    EXPECT_EQ(read_local_file(receiver, "B/1.bin"), "payload-1");
+    EXPECT_EQ(read_local_file(receiver, "B/2.bin"), "payload-2");
+    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
+              kasumi::test::snapshot_tree(receiver.local));
+}
+
+TEST(DirectoryLocalMoveTest,
+     InterruptedAfterPhysicalMoveBeforeCheckpointRecoversWithZeroContentIo) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-int-after-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-int-after-receiver", sender.storage_root));
+
+    write_local_file(sender, "A/1.bin", "payload-1");
+    write_local_file(sender, "A/2.bin", "payload-2");
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    rename_local_entry(sender, "A", "B");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    reset_content_counts(receiver);
+
+    const auto target_dest =
+        receiver.local / kasumi::platform::path::from_utf8("B/1.bin");
+    bool interrupted = false;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "after_rename_move" && path == target_dest) {
+                interrupted = true;
+                throw SimulatedInterruption{};
+            }
+        });
+
+    EXPECT_THROW(static_cast<void>(run_node_sync(receiver)),
+                 SimulatedInterruption);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+    ASSERT_TRUE(interrupted);
+    EXPECT_FALSE(local_entry_exists(receiver, "A/1.bin"));
+    EXPECT_TRUE(local_entry_exists(receiver, "B/1.bin"));
+    EXPECT_TRUE(local_entry_exists(receiver, "A/2.bin"));
+
+    reset_content_counts(receiver);
+    const auto recovered_sync = run_node_sync(receiver);
+    ASSERT_TRUE(recovered_sync.has_value()) << recovered_sync.error().detail;
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+    EXPECT_EQ(receiver.counters.content_presences, 0U);
+    EXPECT_EQ(receiver.counters.content_copies, 0U);
+
+    EXPECT_FALSE(local_entry_exists(receiver, "A"));
+    EXPECT_EQ(read_local_file(receiver, "B/1.bin"), "payload-1");
+    EXPECT_EQ(read_local_file(receiver, "B/2.bin"), "payload-2");
+    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
+              kasumi::test::snapshot_tree(receiver.local));
+}
+
+TEST(DirectoryLocalMoveTest,
+     MultiFileDirectoryMoveRollsBackAppliedMovesWhenLaterOperationFails) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-multirb-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-multirb-receiver", sender.storage_root));
+
+    write_local_file(sender, "Haruka/1.bin", "payload-1");
+    write_local_file(sender, "Haruka/src/2.bin", "payload-2");
+    write_local_file(sender, "Haruka/tests/3.bin", "payload-3");
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    rename_local_entry(sender, "Haruka", "HarukaEngine");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    reset_content_counts(receiver);
+
+    const auto third_source =
+        receiver.local /
+        kasumi::platform::path::from_utf8("Haruka/tests/3.bin");
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "before_rename_move" && path == third_source) {
+                write_local_file(
+                    receiver, "HarukaEngine/tests/3.bin", "external-blocker-3");
+            }
+        });
+
+    const auto receiver_sync = run_node_sync(receiver);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_FALSE(receiver_sync.has_value());
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(read_local_file(receiver, "Haruka/1.bin"), "payload-1");
+    EXPECT_EQ(read_local_file(receiver, "Haruka/src/2.bin"), "payload-2");
+    EXPECT_EQ(read_local_file(receiver, "Haruka/tests/3.bin"), "payload-3");
+    EXPECT_FALSE(local_entry_exists(receiver, "HarukaEngine/1.bin"));
+    EXPECT_FALSE(local_entry_exists(receiver, "HarukaEngine/src/2.bin"));
+    EXPECT_EQ(read_local_file(receiver, "HarukaEngine/tests/3.bin"),
+              "external-blocker-3");
+}
+
+TEST(DirectoryLocalMoveTest,
+     ExternalModificationOfMovedDestinationBeforeRecoveryFailsClosed) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-extdest-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-extdest-receiver", sender.storage_root));
+
+    write_local_file(sender, "A/1.bin", "payload-1");
+    write_local_file(sender, "A/2.bin", "payload-2");
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    rename_local_entry(sender, "A", "B");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    const auto target_dest =
+        receiver.local / kasumi::platform::path::from_utf8("B/1.bin");
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "after_rename_move" && path == target_dest) {
+                throw SimulatedInterruption{};
+            }
+        });
+
+    EXPECT_THROW(static_cast<void>(run_node_sync(receiver)),
+                 SimulatedInterruption);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    write_local_file(receiver, "B/1.bin", "externally-edited-destination");
+
+    reset_content_counts(receiver);
+    const auto recovery_sync = run_node_sync(receiver);
+    EXPECT_FALSE(recovery_sync.has_value());
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(read_local_file(receiver, "B/1.bin"),
+              "externally-edited-destination");
+    EXPECT_EQ(read_local_file(receiver, "A/2.bin"), "payload-2");
+}
+
+TEST(DirectoryLocalMoveTest,
+     ExternalRecreationOfSourceBeforeRecoveryPreservesExternalSource) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-extsrc-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-extsrc-receiver", sender.storage_root));
+
+    write_local_file(sender, "A/1.bin", "payload-1");
+    write_local_file(sender, "A/2.bin", "payload-2");
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    rename_local_entry(sender, "A", "B");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    const auto target_dest =
+        receiver.local / kasumi::platform::path::from_utf8("B/1.bin");
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "after_rename_move" && path == target_dest) {
+                throw SimulatedInterruption{};
+            }
+        });
+
+    EXPECT_THROW(static_cast<void>(run_node_sync(receiver)),
+                 SimulatedInterruption);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    write_local_file(receiver, "A/1.bin", "externally-recreated-source");
+
+    reset_content_counts(receiver);
+    const auto recovery_sync = run_node_sync(receiver);
+    EXPECT_FALSE(recovery_sync.has_value());
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(read_local_file(receiver, "A/1.bin"),
+              "externally-recreated-source");
+    EXPECT_EQ(read_local_file(receiver, "B/1.bin"), "payload-1");
+}
+
+TEST(DirectoryLocalMoveTest,
+     MissingOrInvalidMoveBackupFailsClosedDuringRecovery) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-badbkp-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-badbkp-receiver", sender.storage_root));
+
+    write_local_file(sender, "A/1.bin", "payload-1");
+    write_local_file(sender, "A/2.bin", "payload-2");
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    rename_local_entry(sender, "A", "B");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    const auto target_dest =
+        receiver.local / kasumi::platform::path::from_utf8("B/1.bin");
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "after_rename_move" && path == target_dest) {
+                throw SimulatedInterruption{};
+            }
+        });
+
+    EXPECT_THROW(static_cast<void>(run_node_sync(receiver)),
+                 SimulatedInterruption);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    corrupt_or_remove_transaction_backups(receiver);
+
+    reset_content_counts(receiver);
+    const auto recovery_sync = run_node_sync(receiver);
+    EXPECT_FALSE(recovery_sync.has_value());
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(read_local_file(receiver, "B/1.bin"), "payload-1");
+    EXPECT_EQ(read_local_file(receiver, "A/2.bin"), "payload-2");
+}
+
+TEST(DirectoryLocalMoveTest,
+     RepeatedRecoveryAndSyncAfterMoveInterruptionIsIdempotent) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "dir-rename-idemp-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "dir-rename-idemp-receiver", sender.storage_root));
+
+    write_local_file(sender, "A/1.bin", "payload-1");
+    write_local_file(sender, "A/2.bin", "payload-2");
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    rename_local_entry(sender, "A", "B");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    const auto target_dest =
+        receiver.local / kasumi::platform::path::from_utf8("B/1.bin");
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "after_rename_move" && path == target_dest) {
+                throw SimulatedInterruption{};
+            }
+        });
+
+    EXPECT_THROW(static_cast<void>(run_node_sync(receiver)),
+                 SimulatedInterruption);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    reset_content_counts(receiver);
+    const auto first_sync = run_node_sync(receiver);
+    ASSERT_TRUE(first_sync.has_value()) << first_sync.error().detail;
+    const auto second_sync = run_node_sync(receiver);
+    ASSERT_TRUE(second_sync.has_value()) << second_sync.error().detail;
+
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+    EXPECT_EQ(receiver.counters.content_presences, 0U);
+    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    EXPECT_FALSE(local_entry_exists(receiver, "A"));
+    EXPECT_EQ(read_local_file(receiver, "B/1.bin"), "payload-1");
+    EXPECT_EQ(read_local_file(receiver, "B/2.bin"), "payload-2");
+    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
+              kasumi::test::snapshot_tree(receiver.local));
+}
+
 } // namespace
