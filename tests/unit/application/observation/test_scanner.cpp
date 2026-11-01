@@ -383,6 +383,56 @@ TEST(ScannerTest, IgnoreRulesHandleGlobsAnchorsDirectoriesAndNegation) {
 
 }
 
+TEST(ScannerTest, KasumiIgnoreRemainsManagedUnlessRulesIgnoreIt) {
+    auto workspace = kasumi::test::make_temp_workspace(
+        "scanner-kasumiignore-compatibility");
+    const auto root = kasumi::test::workspace_path(workspace, "local");
+    const std::string rules = "ignored.tmp\n";
+    kasumi::test::write_text(root / ".kasumiignore", rules);
+    kasumi::test::write_text(root / "ignored.tmp", "ignored");
+
+    const auto result = kasumi::application::observation::scanner::scan_result(
+        root,
+        {},
+        kasumi::application::observation::scanner::ScanPolicy::FullHash);
+    ASSERT_TRUE(result.has_value());
+    const auto* ignore_file = kasumi::find_row(result->snapshot, ".kasumiignore");
+    ASSERT_NE(ignore_file, nullptr);
+    EXPECT_EQ(ignore_file->size, rules.size());
+    EXPECT_EQ(kasumi::test::read_text(root / ".kasumiignore"), rules);
+    EXPECT_EQ(kasumi::find_row(result->snapshot, "ignored.tmp"), nullptr);
+
+    kasumi::test::write_text(root / ".kasumiignore", ".kasumiignore\n");
+    const auto explicitly_ignored =
+        kasumi::application::observation::scanner::scan_result(
+            root,
+            {},
+            kasumi::application::observation::scanner::ScanPolicy::FullHash);
+    ASSERT_TRUE(explicitly_ignored.has_value());
+    EXPECT_EQ(kasumi::find_row(explicitly_ignored->snapshot, ".kasumiignore"),
+              nullptr);
+}
+
+TEST(ScannerTest, DisposableRulesDoNotHideKasumiIgnore) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("scanner-disposable-ignore-file");
+    const auto root = kasumi::test::workspace_path(workspace, "local");
+    kasumi::test::write_text(root / ".kasumiignore",
+                             "(?d)*.bak\n"
+                             "*.env\n");
+    kasumi::test::write_text(root / "cache.bak", "disposable");
+    kasumi::test::write_text(root / "secret.env", "protected");
+
+    const auto result = kasumi::application::observation::scanner::scan_result(
+        root,
+        {},
+        kasumi::application::observation::scanner::ScanPolicy::FullHash);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_NE(kasumi::find_row(result->snapshot, ".kasumiignore"), nullptr);
+    EXPECT_EQ(kasumi::find_row(result->snapshot, "cache.bak"), nullptr);
+    EXPECT_EQ(kasumi::find_row(result->snapshot, "secret.env"), nullptr);
+}
+
 TEST(ScannerTest, RegularFileMetadataNulloptFailsClosed) {
     auto workspace = kasumi::test::make_temp_workspace("scanner-metadata-nullopt");
     const auto root = kasumi::test::workspace_path(workspace, "local");

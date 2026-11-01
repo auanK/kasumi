@@ -138,6 +138,13 @@ TEST(IgnoreTest, NegationAndRuleOrderPrecedence) {
     EXPECT_FALSE(is_ignored("build/keep.txt", dir_neg, false));
 }
 
+TEST(IgnoreTest, DisposableModifierStillExcludesMatchingFileFromManagedTree) {
+    const auto list = parse_ignore_rules("(?d)*.bak\n");
+
+    EXPECT_TRUE(is_ignored("cache.bak", list, false));
+    EXPECT_FALSE(is_ignored("cache.tmp", list, false));
+}
+
 TEST(IgnoreTest, GlobPatternsQuestionMarkAndStar) {
     const auto list = parse_ignore_rules("doc?.txt\nfoo*bar\n");
 
