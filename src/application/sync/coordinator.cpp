@@ -2081,9 +2081,7 @@ execute(const runtime::RuntimeData& runtime_data,
             remaining_operations.push_back(index);
         }
     }
-    std::ranges::stable_sort(remaining_operations, {}, [&](std::size_t index) {
-        return detail::execution_priority(record->plan.operations[index].action);
-    });
+    detail::order_local_copies(record->plan.operations, remaining_operations);
     for (const auto index : remaining_operations) {
         apply_order.push_back(index);
     }

@@ -12,6 +12,7 @@
 #include "runtime/resolver.hpp"
 #include "transport/transport.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <expected>
@@ -19,6 +20,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace kasumi::application::sync::coordinator::detail {
 
@@ -28,26 +30,17 @@ inline constexpr std::uint64_t upload_batch_max_bytes =
     256 * 1024 * 1024; // 256 MiB
 inline constexpr auto transaction_resumption_ttl = std::chrono::hours(24);
 
-constexpr int execution_priority(Action action) noexcept {
-    switch (action) {
-        case Action::CreateLocalDirectory:
-            return 1;
-        case Action::CopyLocal:
-            return 2;
-        case Action::Download:
-            return 3;
-        case Action::RenameLocal:
-        case Action::MoveLocal:
-            return 4;
-        case Action::DeleteLocal:
-            return 5;
-        case Action::DeleteLocalDirectory:
-            return 6;
-        case Action::Upload:
-            return 7;
-        default:
-            return 8;
-    }
+inline void
+order_local_copies(std::span<const transaction::Operation> operations,
+                   std::vector<std::size_t>& order) {
+    // Keep setup in plan order; copy before source mutations.
+    const auto first = std::ranges::find_if(order, [&](std::size_t index) {
+        return action_index(operations[index].action) >=
+               action_index(Action::MoveLocal);
+    });
+    std::stable_partition(first, order.end(), [&](std::size_t index) {
+        return operations[index].action == Action::CopyLocal;
+    });
 }
 
 // Creates a coordinator failure with optional operation context.

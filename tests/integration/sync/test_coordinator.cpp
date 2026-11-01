@@ -9721,9 +9721,11 @@ void interrupt_after_conflict_reset_checkpoint(
     auto record = sync::journal::create_record(
         0, 0, plan, false, std::string(64, 'a'));
     ASSERT_TRUE(record.has_value());
-    const kasumi::platform::Workspace transaction{
-        profile / ".transactions" / record->operation_id};
-    ASSERT_TRUE(std::filesystem::create_directories(transaction.root));
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    const auto owned = sync::coordinator::detail::create_transaction_workspace(
+        profile, record->operation_id, key);
+    ASSERT_TRUE(owned.has_value()) << owned.error().detail;
+    const auto& transaction = *owned;
     for (std::size_t index = 0; index < plan.operations.size(); ++index) {
         const auto prepared = sync::mutation::prepare_operation(
             plan.operations[index], index, local, transaction,
@@ -9735,7 +9737,6 @@ void interrupt_after_conflict_reset_checkpoint(
     record->progress[0].state = kasumi::transaction::OperationState::Applied;
     const auto paths = sync::journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
     ASSERT_TRUE(sync::journal::save(*paths, *record, key));
 
     // The peer Download completed; the conflicting destination is user-owned.

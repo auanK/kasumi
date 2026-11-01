@@ -921,11 +921,26 @@ void plan_local_copies(std::vector<Operation>& operations,
         return;
     }
 
-    std::unordered_map<ContentIdentityKey, std::vector<std::string>, ContentIdentityKeyHash>
+    std::vector<std::string> renamed_sources;
+    for (const auto& operation : operations) {
+        if (operation.action == Action::RenameLocal)
+            renamed_sources.push_back(
+                platform::path::to_logical_utf8(operation.path));
+    }
+
+    std::unordered_map<ContentIdentityKey,
+                       std::vector<std::string>,
+                       ContentIdentityKeyHash>
         candidates;
     for (const auto& row : local_tree.rows) {
         if (row.is_directory || row.hash == Hash{} || row.path.empty() ||
             row.path.find(".kasumiconflict_") != std::string::npos) {
+            continue;
+        }
+        // Copies run after conflict renames, so their sources must survive.
+        if (std::ranges::any_of(renamed_sources, [&](std::string_view source) {
+                return row.path == source || is_descendant(row.path, source);
+            })) {
             continue;
         }
         Operation check_op{

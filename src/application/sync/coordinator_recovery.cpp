@@ -396,7 +396,7 @@ bool is_publication_transaction_resumable(
 std::expected<void, Error> resume_pending_local_mutations(
     const journal::Paths& paths,
     transaction::Record& record,
-    const platform::Workspace& workspace,
+    const std::optional<platform::Workspace>& workspace,
     const runtime::RuntimeData& runtime_data,
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
@@ -412,6 +412,12 @@ std::expected<void, Error> resume_pending_local_mutations(
                 transaction::OperationState::Applied) {
             continue;
         }
+        if (!workspace) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::RecoveryConflict,
+                "pending local mutation is missing recovery workspace",
+                index));
+        }
         if (record.progress[index].state ==
             transaction::OperationState::Pending) {
             if (operation.action == Action::Download ||
@@ -426,7 +432,7 @@ std::expected<void, Error> resume_pending_local_mutations(
             auto prepared = mutation::prepare_operation(operation,
                                                         index,
                                                         runtime_data.local_dir,
-                                                        workspace,
+                                                        *workspace,
                                                         record.progress[index],
                                                         record.plan.operations);
             if (!prepared) {
@@ -443,9 +449,7 @@ std::expected<void, Error> resume_pending_local_mutations(
         }
         replay_order.push_back(index);
     }
-    std::ranges::stable_sort(replay_order, {}, [&](std::size_t index) {
-        return detail::execution_priority(record.plan.operations[index].action);
-    });
+    detail::order_local_copies(record.plan.operations, replay_order);
     for (const auto index : replay_order) {
         const auto& operation = record.plan.operations[index];
         auto condition = mutation::detail::effective_destination(
@@ -461,7 +465,7 @@ std::expected<void, Error> resume_pending_local_mutations(
                                       runtime_data.local_dir,
                                       storage,
                                       key,
-                                      workspace,
+                                      *workspace,
                                       record.progress[index],
                                       mutation::DownloadCacheMode::None,
                                       *condition ? &**condition : nullptr);
@@ -999,9 +1003,15 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
                         }
                         return std::unexpected(resumed.error());
                     }
+                }
+                const bool has_repairs = std::ranges::any_of(
+                    (*record)->plan.operations, [](const auto& operation) {
+                        return operation.action == Action::Upload;
+                    });
+                if (has_repairs) {
                     auto local = resume_pending_local_mutations(*paths,
                                                                 **record,
-                                                                **workspace,
+                                                                *workspace,
                                                                 runtime_data,
                                                                 storage,
                                                                 key);

@@ -113,6 +113,12 @@ Recovery checks these effects even while the journal still records `Prepared`,
 including crashes immediately before and after installation, without changing
 the journal format or fetching remote Content for a valid local copy.
 
+Execution and replay preserve the plan's rename, upload and directory-creation
+sequence, then promote copies before data mutations. A copy source must survive
+conflict renames; another surviving local source is preferred before falling
+back to Download. Interrupted repairs replay unfinished local mutations even
+when all repair uploads are already confirmed, skipping mutations marked Applied.
+
 On POSIX, private-file cleanup compares `fstat` and `lstat` regular-file identities
 (device/inode) with an open descriptor, or the recorded native identity without
 one, then calls `unlink` on that pathname. It uses no intermediate rename or

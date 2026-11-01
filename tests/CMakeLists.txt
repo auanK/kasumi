@@ -188,6 +188,8 @@ target_compile_definitions(kasumi_test_integration_sync PRIVATE
 if(KASUMI_BUILD_JOURNAL_FAULT_TESTS)
     target_compile_definitions(
         kasumi_test_integration_sync PRIVATE KASUMI_JOURNAL_FAULT_TESTS)
+    target_compile_definitions(
+        kasumi_application_fault_test_objects PRIVATE KASUMI_JOURNAL_FAULT_TESTS)
 endif()
 target_compile_definitions(kasumi_test_integration_sync PRIVATE KASUMI_WORKSPACE_FAULT_TESTS)
 
