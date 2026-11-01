@@ -1040,6 +1040,7 @@ apply_copy_local(const Operation& operation,
                                           source,
                                           operation_index));
     }
+    mutation_fault_test::hit("during_copy_local_staging_race", candidate);
     std::ofstream out(candidate, std::ios::binary | std::ios::trunc);
     if (!out) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,

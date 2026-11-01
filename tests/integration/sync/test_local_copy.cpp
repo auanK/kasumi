@@ -34,6 +34,23 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <cerrno>
+#include <spawn.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+extern char** environ;
+#endif
+
 namespace kasumi::application::detail {
 std::expected<Response, Error> run_sync(OperationContext& context);
 std::expected<Response, Error> run_plan(OperationContext& context);
@@ -341,6 +358,205 @@ struct SyncNode {
     kasumi::application::detail::OperationContext context{};
     bool valid = false;
 };
+
+
+#if defined(KASUMI_SYNC_CRASH_HELPER_PATH)
+std::filesystem::path crash_child_path() {
+    return std::filesystem::path{KASUMI_SYNC_CRASH_HELPER_PATH};
+}
+
+struct ChildRun {
+    bool reached_point = false;
+    bool was_killed = false;
+    std::string signal_contents;
+    std::string detail;
+};
+
+#if defined(_WIN32)
+
+class ScopedEnvironmentHelper {
+public:
+    bool set(const wchar_t* name, std::wstring value) {
+        const DWORD required = GetEnvironmentVariableW(name, nullptr, 0);
+        if (required > 0) {
+            std::wstring prev(required, L'\0');
+            GetEnvironmentVariableW(name, prev.data(), static_cast<DWORD>(prev.size()));
+            prev.resize(wcslen(prev.c_str()));
+            previous_.emplace_back(name, prev);
+        } else {
+            previous_.emplace_back(name, std::nullopt);
+        }
+        return SetEnvironmentVariableW(name, value.c_str()) != 0;
+    }
+
+    ~ScopedEnvironmentHelper() {
+        for (auto it = previous_.rbegin(); it != previous_.rend(); ++it) {
+            SetEnvironmentVariableW(it->first.c_str(),
+                                    it->second ? it->second->c_str() : nullptr);
+        }
+    }
+
+private:
+    std::vector<std::pair<std::wstring, std::optional<std::wstring>>> previous_;
+};
+
+ChildRun run_crash_child(const SyncNode& node,
+                         std::string_view mode,
+                         std::string_view point,
+                         std::string_view subject,
+                         const std::filesystem::path& signal_path) {
+    ChildRun result;
+    ScopedEnvironmentHelper environment;
+    const auto ascii = [](std::string_view value) {
+        return std::wstring(value.begin(), value.end());
+    };
+    const auto set = [&](const wchar_t* name, std::wstring value) {
+        return environment.set(name, std::move(value));
+    };
+    if (!set(L"KASUMI_CRASH_TEST_MODE", ascii(mode)) ||
+        !set(L"KASUMI_CRASH_TEST_PROFILE", node.profile.native()) ||
+        !set(L"KASUMI_CRASH_TEST_LOCAL", node.local.native()) ||
+        !set(L"KASUMI_CRASH_TEST_STORAGE", node.storage_root.native()) ||
+        !set(L"KASUMI_CRASH_TEST_POINT", ascii(point)) ||
+        !set(L"KASUMI_CRASH_TEST_SUBJECT", ascii(subject)) ||
+        !set(L"KASUMI_CRASH_TEST_SIGNAL", signal_path.native())) {
+        result.detail = "could not set child environment";
+        return result;
+    }
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    const auto executable = crash_child_path();
+    if (!CreateProcessW(executable.c_str(),
+                        nullptr,
+                        nullptr,
+                        nullptr,
+                        FALSE,
+                        CREATE_NO_WINDOW,
+                        nullptr,
+                        nullptr,
+                        &startup,
+                        &process)) {
+        result.detail = "CreateProcessW failed: " + std::to_string(GetLastError());
+        return result;
+    }
+    CloseHandle(process.hThread);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{30};
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (std::filesystem::exists(signal_path)) {
+            result.reached_point = true;
+            break;
+        }
+        const DWORD state = WaitForSingleObject(process.hProcess, 0);
+        if (state == WAIT_OBJECT_0) {
+            DWORD exit_code = 0;
+            GetExitCodeProcess(process.hProcess, &exit_code);
+            result.detail = "child exited before point with code " + std::to_string(exit_code);
+            CloseHandle(process.hProcess);
+            return result;
+        }
+        Sleep(5);
+    }
+
+    if (result.reached_point) {
+        std::ifstream signal{signal_path, std::ios::binary};
+        result.signal_contents.assign(
+            std::istreambuf_iterator<char>{signal},
+            std::istreambuf_iterator<char>{});
+    }
+    if (TerminateProcess(process.hProcess, 137) &&
+        WaitForSingleObject(process.hProcess, 5000) == WAIT_OBJECT_0) {
+        DWORD exit_code = 0;
+        result.was_killed = GetExitCodeProcess(process.hProcess, &exit_code) && exit_code == 137;
+    }
+    CloseHandle(process.hProcess);
+    return result;
+}
+
+#else
+
+ChildRun run_crash_child(const SyncNode& node,
+                         std::string_view mode,
+                         std::string_view point,
+                         std::string_view subject,
+                         const std::filesystem::path& signal_path) {
+    ChildRun result;
+    const std::map<std::string, std::string> overrides{
+        {"KASUMI_CRASH_TEST_MODE", std::string{mode}},
+        {"KASUMI_CRASH_TEST_PROFILE", kasumi::platform::path::to_utf8(node.profile)},
+        {"KASUMI_CRASH_TEST_LOCAL", kasumi::platform::path::to_utf8(node.local)},
+        {"KASUMI_CRASH_TEST_STORAGE", kasumi::platform::path::to_utf8(node.storage_root)},
+        {"KASUMI_CRASH_TEST_POINT", std::string{point}},
+        {"KASUMI_CRASH_TEST_SUBJECT", std::string{subject}},
+        {"KASUMI_CRASH_TEST_SIGNAL", kasumi::platform::path::to_utf8(signal_path)},
+    };
+    std::vector<std::string> environment;
+    for (char** entry = environ; entry != nullptr && *entry != nullptr; ++entry) {
+        const std::string_view value{*entry};
+        const auto separator = value.find('=');
+        if (separator != std::string_view::npos &&
+            overrides.contains(std::string{value.substr(0, separator)})) {
+            continue;
+        }
+        environment.emplace_back(value);
+    }
+    for (const auto& [name, value] : overrides) {
+        environment.push_back(name + "=" + value);
+    }
+    std::vector<char*> environment_pointers;
+    environment_pointers.reserve(environment.size() + 1);
+    for (auto& entry : environment) {
+        environment_pointers.push_back(entry.data());
+    }
+    environment_pointers.push_back(nullptr);
+
+    const auto executable = crash_child_path().string();
+    std::array<char*, 2> arguments{const_cast<char*>(executable.c_str()), nullptr};
+    pid_t child = -1;
+    const int spawned = posix_spawn(&child,
+                                    executable.c_str(),
+                                    nullptr,
+                                    nullptr,
+                                    arguments.data(),
+                                    environment_pointers.data());
+    if (spawned != 0) {
+        result.detail = "posix_spawn failed: " + std::to_string(spawned);
+        return result;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{30};
+    int child_status = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (std::filesystem::exists(signal_path)) {
+            result.reached_point = true;
+            break;
+        }
+        const auto waited = waitpid(child, &child_status, WNOHANG);
+        if (waited == child) {
+            const int exit_code = WIFEXITED(child_status) ? WEXITSTATUS(child_status) : -1;
+            result.detail = "child exited before point with code " + std::to_string(exit_code);
+            return result;
+        }
+        usleep(5000);
+    }
+
+    if (result.reached_point) {
+        std::ifstream signal{signal_path, std::ios::binary};
+        result.signal_contents.assign(
+            std::istreambuf_iterator<char>{signal},
+            std::istreambuf_iterator<char>{});
+    }
+    kill(child, SIGKILL);
+    int status = 0;
+    waitpid(child, &status, 0);
+    result.was_killed = true;
+    return result;
+}
+
+#endif
+#endif
 
 bool init_sync_node(SyncNode& node,
                     std::string_view name,
@@ -719,6 +935,158 @@ TEST(LocalCopyDependenciesTest, UnsafeDependencyFallsBackToDownload) {
     EXPECT_TRUE(has_operation(result->plan, Action::Download, "dest.txt"));
 }
 
+TEST(LocalCopyDependenciesTest, CopyRecoveryInterruptedBeforeInstall) {
+    SyncNode node_a, node_b;
+    ASSERT_TRUE(init_sync_node(node_a, "rec_before_inst_a"));
+    ASSERT_TRUE(init_sync_node(node_b, "rec_before_inst_b", node_a.storage_root));
+
+    write_local_file(node_a, "orig.txt", "RecoverBeforeInstallPayload");
+    ASSERT_TRUE(run_node_sync(node_a).has_value());
+    ASSERT_TRUE(run_node_sync(node_b).has_value());
+
+    write_local_file(node_a, "copy.txt", "RecoverBeforeInstallPayload");
+    ASSERT_TRUE(run_node_sync(node_a).has_value());
+
+    struct SimulatedCrash {};
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path&) {
+            if (point == "during_copy_local_write") {
+                throw SimulatedCrash{};
+            }
+        });
+
+    EXPECT_THROW((void)run_node_sync(node_b), SimulatedCrash);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_FALSE(local_entry_exists(node_b, "copy.txt"));
+    EXPECT_TRUE(local_entry_exists(node_b, "orig.txt"));
+
+    reset_content_counts(node_b);
+    auto rec_sync = run_node_sync(node_b);
+    ASSERT_TRUE(rec_sync.has_value()) << rec_sync.error().detail;
+    EXPECT_TRUE(local_entry_exists(node_b, "copy.txt"));
+    EXPECT_EQ(read_local_file(node_b, "copy.txt"), "RecoverBeforeInstallPayload");
+    EXPECT_EQ(node_b.counters.content_gets, 0U);
+}
+
+TEST(LocalCopyDependenciesTest, CopyRecoveryInterruptedAfterInstallBeforeCheckpoint) {
+    SyncNode node_a, node_b;
+    ASSERT_TRUE(init_sync_node(node_a, "rec_after_inst_a"));
+    ASSERT_TRUE(init_sync_node(node_b, "rec_after_inst_b", node_a.storage_root));
+
+    write_local_file(node_a, "doc.pdf", "CopyRecoveryAfterInstallBytes12345");
+    ASSERT_TRUE(run_node_sync(node_a).has_value());
+    ASSERT_TRUE(run_node_sync(node_b).has_value());
+
+    write_local_file(node_a, "doc_backup.pdf", "CopyRecoveryAfterInstallBytes12345");
+    ASSERT_TRUE(run_node_sync(node_a).has_value());
+
+    struct SimulatedCrashAfterInstall {};
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path&) {
+            if (point == "after_copy_local_install") {
+                throw SimulatedCrashAfterInstall{};
+            }
+        });
+
+    EXPECT_THROW((void)run_node_sync(node_b), SimulatedCrashAfterInstall);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_TRUE(local_entry_exists(node_b, "doc_backup.pdf"));
+    EXPECT_EQ(read_local_file(node_b, "doc_backup.pdf"), "CopyRecoveryAfterInstallBytes12345");
+
+    const auto paths = kasumi::application::sync::journal::make_paths(node_b.profile);
+    ASSERT_TRUE(paths.has_value());
+    auto loaded = kasumi::application::sync::journal::load(*paths, node_b.key, nullptr);
+    ASSERT_TRUE(loaded.has_value() && *loaded);
+    bool found_prepared_copy = false;
+    for (std::size_t i = 0; i < (*loaded)->plan.operations.size(); ++i) {
+        if ((*loaded)->plan.operations[i].action == Action::CopyLocal) {
+            EXPECT_EQ((*loaded)->progress[i].state, OperationState::Prepared);
+            found_prepared_copy = true;
+        }
+    }
+    EXPECT_TRUE(found_prepared_copy);
+
+    reset_content_counts(node_b);
+    auto rec_sync = run_node_sync(node_b);
+    ASSERT_TRUE(rec_sync.has_value()) << (rec_sync ? "" : rec_sync.error().detail);
+    EXPECT_TRUE(local_entry_exists(node_b, "doc_backup.pdf"));
+    EXPECT_EQ(read_local_file(node_b, "doc_backup.pdf"), "CopyRecoveryAfterInstallBytes12345");
+    EXPECT_EQ(node_b.counters.content_gets, 0U);
+}
+
+TEST(LocalCopyDependenciesTest, CopyRecoveryInterruptedMixedCopyAndMove) {
+    SyncNode node_a, node_b;
+    ASSERT_TRUE(init_sync_node(node_a, "rec_mixed_a"));
+    ASSERT_TRUE(init_sync_node(node_b, "rec_mixed_b", node_a.storage_root));
+
+    write_local_file(node_a, "source.txt", "SharedSourceContentBetweenCopyAndMove");
+    ASSERT_TRUE(run_node_sync(node_a).has_value());
+    ASSERT_TRUE(run_node_sync(node_b).has_value());
+
+    write_local_file(node_a, "copy.txt", "SharedSourceContentBetweenCopyAndMove");
+    rename_local_entry(node_a, "source.txt", "moved.txt");
+    ASSERT_TRUE(run_node_sync(node_a).has_value());
+
+    struct SimulatedCrashMixed {};
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path&) {
+            if (point == "after_copy_local_install") {
+                throw SimulatedCrashMixed{};
+            }
+        });
+
+    EXPECT_THROW((void)run_node_sync(node_b), SimulatedCrashMixed);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_TRUE(local_entry_exists(node_b, "moved.txt"));
+    EXPECT_TRUE(local_entry_exists(node_b, "source.txt"));
+    EXPECT_FALSE(local_entry_exists(node_b, "copy.txt"));
+
+    reset_content_counts(node_b);
+    auto rec_sync = run_node_sync(node_b);
+    ASSERT_TRUE(rec_sync.has_value()) << (rec_sync ? "" : rec_sync.error().detail);
+
+    EXPECT_TRUE(local_entry_exists(node_b, "copy.txt"));
+    EXPECT_EQ(read_local_file(node_b, "copy.txt"), "SharedSourceContentBetweenCopyAndMove");
+    EXPECT_TRUE(local_entry_exists(node_b, "moved.txt"));
+    EXPECT_EQ(read_local_file(node_b, "moved.txt"), "SharedSourceContentBetweenCopyAndMove");
+    EXPECT_FALSE(local_entry_exists(node_b, "source.txt"));
+    EXPECT_EQ(node_b.counters.content_gets, 0U);
+}
+
+#if defined(KASUMI_SYNC_CRASH_HELPER_PATH)
+TEST(LocalCopyDependenciesTest, RecoveryPreservesDependencyOrderRealCrash) {
+    SyncNode node_a, node_b;
+    ASSERT_TRUE(init_sync_node(node_a, "node_a_real_crash"));
+    ASSERT_TRUE(init_sync_node(node_b, "node_b_real_crash", node_a.storage_root));
+
+    write_local_file(node_a, "orig.txt", "CrashTestBytesRealProcess");
+    ASSERT_TRUE(run_node_sync(node_a).has_value());
+    ASSERT_TRUE(run_node_sync(node_b).has_value());
+
+    write_local_file(node_a, "copy.txt", "CrashTestBytesRealProcess");
+    rename_local_entry(node_a, "orig.txt", "moved.txt");
+    ASSERT_TRUE(run_node_sync(node_a).has_value());
+
+    const auto signal = node_b.profile / "copy_crash.signal";
+    const auto child = run_crash_child(
+        node_b, "sync", "after_copy_local_install",
+        "", signal);
+    ASSERT_TRUE(child.reached_point) << "Child detail: " << child.detail;
+    ASSERT_TRUE(child.was_killed);
+
+    reset_content_counts(node_b);
+    auto sync_res = run_node_sync(node_b);
+    ASSERT_TRUE(sync_res.has_value()) << (sync_res ? "" : sync_res.error().detail);
+    EXPECT_TRUE(local_entry_exists(node_b, "copy.txt"));
+    EXPECT_TRUE(local_entry_exists(node_b, "moved.txt"));
+    EXPECT_FALSE(local_entry_exists(node_b, "orig.txt"));
+    EXPECT_EQ(node_b.counters.content_gets, 0U);
+}
+#endif
+
 TEST(LocalCopyDependenciesTest, RecoveryPreservesDependencyOrder) {
     // Invariant: crash replay or resume never executes Move before Copy
     SyncNode node_a, node_b;
@@ -749,6 +1117,45 @@ TEST(LocalCopyDependenciesTest, RecoveryPreservesDependencyOrder) {
     ASSERT_TRUE(sync_res.has_value());
     EXPECT_TRUE(local_entry_exists(node_b, "copy.txt"));
     EXPECT_TRUE(local_entry_exists(node_b, "moved.txt"));
+}
+
+
+
+TEST(LocalCopyDependenciesTest, CopyRecoveryRejectsDivergentIdentity) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "rec_divergent"));
+    write_local_file(node, "src.txt", "DivergentIdentityData");
+
+    Operation op{
+        .action = Action::CopyLocal,
+        .path = "src.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("DivergentIdentityData")),
+        .alt_path = "dst.txt",
+        .size = 21,
+    };
+    OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+    auto ws = make_test_workspace(node.profile / "ws_divergent");
+
+    ASSERT_TRUE(kasumi::application::sync::mutation::apply_operation(
+        op, 0, node.local, node.context.storage, node.key, ws,
+        progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr).has_value());
+
+    const auto orig_id = kasumi::platform::private_storage::query_file_identity(node.local / "dst.txt");
+    ASSERT_TRUE(orig_id.valid);
+
+    std::filesystem::rename(node.local / "dst.txt", node.local / "dst_preserved.txt");
+    write_local_file(node, "dst.txt", "DivergentIdentityData");
+    const auto new_id = kasumi::platform::private_storage::query_file_identity(node.local / "dst.txt");
+    ASSERT_TRUE(new_id.valid);
+    ASSERT_FALSE(orig_id == new_id);
+
+    auto replayed = kasumi::application::sync::mutation::apply_operation(
+        op, 0, node.local, node.context.storage, node.key, ws,
+        progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr);
+
+    EXPECT_FALSE(replayed.has_value());
+    EXPECT_EQ(replayed.error().code, kasumi::application::sync::mutation::MutationErrorCode::DestinationConflict);
+    EXPECT_TRUE(local_entry_exists(node, "dst.txt"));
 }
 
 // ============================================================================
@@ -994,6 +1401,41 @@ TEST(LocalCopyApplicationTest, CopyHandlesFilesystemFailure) {
     EXPECT_FALSE(applied.has_value());
 }
 
+TEST(LocalCopyApplicationTest, CopyRejectsExternalReplacementImmediatelyAfterInstall) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "app_own_replace"));
+    write_local_file(node, "src.txt", "DataForOwnershipTest");
+
+    Operation op{
+        .action = Action::CopyLocal,
+        .path = "src.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("DataForOwnershipTest")),
+        .alt_path = "dst.txt",
+        .size = 20,
+    };
+    OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+    auto ws = make_test_workspace(node.profile / "ws_own");
+
+    // Hook fires right after install to replace destination with an external file
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "after_copy_local_install") {
+                std::filesystem::rename(path, node.local / "orig_installed.txt");
+                kasumi::test::write_text(path, "DataForOwnershipTest");
+            }
+        });
+
+    auto applied = kasumi::application::sync::mutation::apply_operation(
+        op, 0, node.local, node.context.storage, node.key, ws,
+        progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_FALSE(applied.has_value());
+    EXPECT_TRUE(local_entry_exists(node, "dst.txt"));
+    EXPECT_EQ(read_local_file(node, "dst.txt"), "DataForOwnershipTest");
+    EXPECT_TRUE(local_entry_exists(node, "orig_installed.txt"));
+}
+
 // ============================================================================
 // GRUPO D — STAGING E INSTALAÇÃO
 // ============================================================================
@@ -1030,6 +1472,42 @@ TEST(LocalCopyStagingTest, CopyStagingFailure) {
 
     EXPECT_FALSE(local_entry_exists(node, "dst.txt"));
     EXPECT_TRUE(local_entry_exists(node, "src.txt"));
+}
+
+TEST(LocalCopyStagingTest, CopyStagingRejectsConcurrentOccupationWithoutTruncationOrRemoval) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "stg_race"));
+    write_local_file(node, "src.txt", "SourceDataForStagingTest");
+
+    Operation op{
+        .action = Action::CopyLocal,
+        .path = "src.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("SourceDataForStagingTest")),
+        .alt_path = "dst.txt",
+        .size = 24,
+    };
+    OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+    auto ws = make_test_workspace(node.profile / "ws_stg_race");
+
+    const auto candidate = kasumi::application::sync::mutation::detail::copy_candidate_path(
+        node.local / "dst.txt", ws, 0);
+
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path&) {
+            if (point == "during_copy_local_staging_race") {
+                kasumi::test::write_text(candidate, "ExternalUntouchableData");
+            }
+        });
+
+    auto applied = kasumi::application::sync::mutation::apply_operation(
+        op, 0, node.local, node.context.storage, node.key,
+        ws, progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_FALSE(applied.has_value());
+    EXPECT_TRUE(std::filesystem::exists(candidate));
+    EXPECT_EQ(kasumi::test::read_text(candidate), "ExternalUntouchableData");
+    std::filesystem::remove(candidate);
 }
 
 TEST(LocalCopyStagingTest, CopyPartialStagingNotInstalled) {
@@ -1214,6 +1692,9 @@ TEST(LocalCopyStagingTest, CopyIndependentOfSourceAfterInstall) {
     EXPECT_EQ(read_local_file(node, "dst.txt"), "DataToBeDeleted");
 }
 
+
+
+
 // ============================================================================
 // GRUPO E — ROLLBACK
 // ============================================================================
@@ -1249,6 +1730,8 @@ TEST(LocalCopyRollbackTest, CopyRollbackRemovesOwnedDestination) {
     // Source must remain untouched
     EXPECT_TRUE(local_entry_exists(node, "src.txt"));
     EXPECT_EQ(read_local_file(node, "src.txt"), "RollbackPayload");
+    EXPECT_FALSE(std::filesystem::exists(
+        kasumi::platform::workspace_file(ws, 0, ".copy_identity")));
 }
 
 TEST(LocalCopyRollbackTest, CopyRollbackPreservesSource) {
@@ -1308,7 +1791,9 @@ TEST(LocalCopyRollbackTest, CopyRollbackRejectsExternalModification) {
         op, 0, node.local, ws, progress);
 
     // Rollback MUST fail closed to preserve external data!
-    EXPECT_FALSE(rolled.has_value());
+    ASSERT_FALSE(rolled.has_value());
+    EXPECT_EQ(rolled.error().code,
+              kasumi::application::sync::mutation::MutationErrorCode::DestinationConflict);
     EXPECT_TRUE(local_entry_exists(node, "dst.txt"));
     EXPECT_EQ(read_local_file(node, "dst.txt"), "UserAlteredThisFileExternally");
 }
@@ -1344,6 +1829,90 @@ TEST(LocalCopyRollbackTest, CopyRollbackRejectsExternalReplacement) {
     EXPECT_TRUE(std::filesystem::is_directory(node.local / "dst.txt"));
 }
 
+TEST(LocalCopyRollbackTest, CopyRollbackRejectsExternalReplacementWithIdenticalContent) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "rb_identical_replace"));
+    write_local_file(node, "src.txt", "IdenticalPayload12345");
+
+    Operation op{
+        .action = Action::CopyLocal,
+        .path = "src.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("IdenticalPayload12345")),
+        .alt_path = "dst.txt",
+        .size = 21,
+    };
+    OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+    auto ws = make_test_workspace(node.profile / "ws_rb_ident");
+
+    ASSERT_TRUE(kasumi::application::sync::mutation::apply_operation(
+        op, 0, node.local, node.context.storage, node.key, ws,
+        progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr).has_value());
+
+    const auto orig_id = kasumi::platform::private_storage::query_file_identity(node.local / "dst.txt");
+    ASSERT_TRUE(orig_id.valid);
+
+    // Preserve original file so its inode is not reused probabilistically on Linux
+    std::filesystem::rename(node.local / "dst.txt", node.local / "dst_preserved.txt");
+    write_local_file(node, "dst.txt", "IdenticalPayload12345");
+    const auto new_id = kasumi::platform::private_storage::query_file_identity(node.local / "dst.txt");
+    ASSERT_TRUE(new_id.valid);
+    ASSERT_FALSE(orig_id == new_id);
+
+    progress.state = OperationState::Applied;
+    auto rolled = kasumi::application::sync::mutation::rollback_operation(
+        op, 0, node.local, ws, progress);
+
+    ASSERT_FALSE(rolled.has_value());
+    EXPECT_EQ(rolled.error().code,
+              kasumi::application::sync::mutation::MutationErrorCode::DestinationConflict);
+    EXPECT_TRUE(local_entry_exists(node, "dst.txt"));
+    EXPECT_EQ(read_local_file(node, "dst.txt"), "IdenticalPayload12345");
+    EXPECT_TRUE(local_entry_exists(node, "dst_preserved.txt"));
+}
+
+TEST(LocalCopyRollbackTest, CopyRollbackRejectsExternalReplacementRaceBeforeRemoval) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "rb_race_replace"));
+    write_local_file(node, "src.txt", "PayloadForRaceTest123");
+
+    Operation op{
+        .action = Action::CopyLocal,
+        .path = "src.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("PayloadForRaceTest123")),
+        .alt_path = "dst.txt",
+        .size = 21,
+    };
+    OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+    auto ws = make_test_workspace(node.profile / "ws_rb_race");
+
+    ASSERT_TRUE(kasumi::application::sync::mutation::apply_operation(
+        op, 0, node.local, node.context.storage, node.key, ws,
+        progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr).has_value());
+
+    const auto orig_id = kasumi::platform::private_storage::query_file_identity(node.local / "dst.txt");
+    ASSERT_TRUE(orig_id.valid);
+
+    // Inject replacement right at the hook before removal in rollback
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "before_remove_file_if_hash") {
+                std::filesystem::rename(path, node.local / "dst_saved.txt");
+                kasumi::test::write_text(path, "PayloadForRaceTest123");
+            }
+        });
+
+    progress.state = OperationState::Applied;
+    auto rolled = kasumi::application::sync::mutation::rollback_operation(
+        op, 0, node.local, ws, progress);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_FALSE(rolled.has_value());
+    EXPECT_TRUE(local_entry_exists(node, "dst.txt"));
+    EXPECT_EQ(read_local_file(node, "dst.txt"), "PayloadForRaceTest123");
+    EXPECT_TRUE(local_entry_exists(node, "dst_saved.txt"));
+    EXPECT_EQ(read_local_file(node, "dst_saved.txt"), "PayloadForRaceTest123");
+}
+
 TEST(LocalCopyRollbackTest, CopyRollbackIsIdempotent) {
     SyncNode node;
     ASSERT_TRUE(init_sync_node(node, "rb_idempotent"));
@@ -1373,6 +1942,157 @@ TEST(LocalCopyRollbackTest, CopyRollbackIsIdempotent) {
         op, 0, node.local, ws, progress);
     EXPECT_TRUE(rolled2.has_value());
 }
+
+TEST(LocalCopyRollbackTest, CopyRollbackRemovesOwnedCandidate) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "rb_owned_candidate"));
+    write_local_file(node, "src.txt", "Payload");
+    Operation op{.action = Action::CopyLocal,
+                 .path = "src.txt",
+                 .hash = kasumi::hash_hex(kasumi::hasher::hash_string("Payload")),
+                 .alt_path = "dst.txt",
+                 .size = 7};
+    OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+    auto ws = make_test_workspace(node.profile / "ws_owned_candidate");
+    ASSERT_TRUE(kasumi::application::sync::mutation::apply_operation(
+        op, 0, node.local, node.context.storage, node.key, ws, progress,
+        kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr));
+    const auto candidate = kasumi::application::sync::mutation::detail::copy_candidate_path(
+        node.local / "dst.txt", ws, 0);
+    std::filesystem::rename(node.local / "dst.txt", candidate);
+
+    const auto rolled = kasumi::application::sync::mutation::rollback_operation(
+        op, 0, node.local, ws, progress);
+    ASSERT_TRUE(rolled) << rolled.error().detail;
+    EXPECT_FALSE(std::filesystem::exists(candidate));
+    EXPECT_FALSE(std::filesystem::exists(kasumi::platform::workspace_file(ws, 0, ".copy_identity")));
+    EXPECT_EQ(read_local_file(node, "src.txt"), "Payload");
+}
+
+TEST(LocalCopyRollbackTest, CopyRollbackRejectsForeignCandidate) {
+    for (const bool keep_marker : {true, false}) {
+        SCOPED_TRACE(keep_marker);
+        SyncNode node;
+        ASSERT_TRUE(init_sync_node(node, "rb_foreign_candidate"));
+        write_local_file(node, "src.txt", "Payload");
+        Operation op{.action = Action::CopyLocal,
+                     .path = "src.txt",
+                     .hash = kasumi::hash_hex(kasumi::hasher::hash_string("Payload")),
+                     .alt_path = "dst.txt",
+                     .size = 7};
+        OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+        auto ws = make_test_workspace(node.profile / "ws_foreign_candidate");
+        ASSERT_TRUE(kasumi::application::sync::mutation::apply_operation(
+            op, 0, node.local, node.context.storage, node.key, ws, progress,
+            kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr));
+        std::filesystem::rename(node.local / "dst.txt", node.local / "original.txt");
+        const auto candidate = kasumi::application::sync::mutation::detail::copy_candidate_path(
+            node.local / "dst.txt", ws, 0);
+        kasumi::test::write_text(candidate, "Payload");
+        const auto original_id = kasumi::platform::private_storage::query_file_identity(node.local / "original.txt");
+        const auto foreign_id = kasumi::platform::private_storage::query_file_identity(candidate);
+        ASSERT_TRUE(original_id.valid && foreign_id.valid);
+        ASSERT_FALSE(original_id == foreign_id);
+        const auto marker = kasumi::platform::workspace_file(ws, 0, ".copy_identity");
+        if (!keep_marker)
+            std::filesystem::remove(marker);
+
+        const auto rolled = kasumi::application::sync::mutation::rollback_operation(
+            op, 0, node.local, ws, progress);
+        ASSERT_FALSE(rolled);
+        EXPECT_EQ(rolled.error().code,
+                  kasumi::application::sync::mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_EQ(kasumi::test::read_text(candidate), "Payload");
+        EXPECT_EQ(std::filesystem::exists(marker), keep_marker);
+        EXPECT_EQ(read_local_file(node, "src.txt"), "Payload");
+    }
+}
+
+TEST(LocalCopyRollbackTest, CopyRollbackRejectsCorruptMarkerWithoutDestination) {
+    for (const bool keep_candidate : {false, true}) {
+        SCOPED_TRACE(keep_candidate);
+        SyncNode node;
+        ASSERT_TRUE(init_sync_node(node, "rb_corrupt_marker"));
+        write_local_file(node, "src.txt", "Payload");
+        Operation op{.action = Action::CopyLocal,
+                     .path = "src.txt",
+                     .hash = kasumi::hash_hex(kasumi::hasher::hash_string("Payload")),
+                     .alt_path = "dst.txt",
+                     .size = 7};
+        OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+        auto ws = make_test_workspace(node.profile / "ws_corrupt_marker");
+        ASSERT_TRUE(kasumi::application::sync::mutation::apply_operation(
+            op, 0, node.local, node.context.storage, node.key, ws, progress,
+            kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr));
+        const auto candidate = kasumi::application::sync::mutation::detail::copy_candidate_path(
+            node.local / "dst.txt", ws, 0);
+        if (keep_candidate)
+            std::filesystem::rename(node.local / "dst.txt", candidate);
+        else
+            std::filesystem::remove(node.local / "dst.txt");
+        const auto marker = kasumi::platform::workspace_file(ws, 0, ".copy_identity");
+        kasumi::test::write_text(marker, "corrupt");
+
+        const auto rolled = kasumi::application::sync::mutation::rollback_operation(
+            op, 0, node.local, ws, progress);
+        ASSERT_FALSE(rolled);
+        EXPECT_EQ(rolled.error().code,
+                  kasumi::application::sync::mutation::MutationErrorCode::IntegrityMismatch);
+        EXPECT_EQ(kasumi::test::read_text(marker), "corrupt");
+        EXPECT_EQ(std::filesystem::exists(candidate), keep_candidate);
+        EXPECT_EQ(read_local_file(node, "src.txt"), "Payload");
+    }
+}
+
+TEST(LocalCopyRollbackTest, CopyRollbackPropagatesRemovalFailure) {
+    for (const bool staging : {false, true}) {
+        SCOPED_TRACE(staging);
+        SyncNode node;
+        ASSERT_TRUE(init_sync_node(node, "rb_remove_error"));
+        write_local_file(node, "src.txt", "Payload");
+        Operation op{.action = Action::CopyLocal,
+                     .path = "src.txt",
+                     .hash = kasumi::hash_hex(kasumi::hasher::hash_string("Payload")),
+                     .alt_path = "dst.txt",
+                     .size = 7};
+        OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+        auto ws = make_test_workspace(node.profile / "ws_remove_error");
+        ASSERT_TRUE(kasumi::application::sync::mutation::apply_operation(
+            op, 0, node.local, node.context.storage, node.key, ws, progress,
+            kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr));
+        const auto target = staging
+            ? kasumi::application::sync::mutation::detail::copy_candidate_path(node.local / "dst.txt", ws, 0)
+            : node.local / "dst.txt";
+        if (staging)
+            std::filesystem::rename(node.local / "dst.txt", target);
+#if defined(_WIN32)
+        const auto attributes = GetFileAttributesW(target.c_str());
+        ASSERT_NE(attributes, INVALID_FILE_ATTRIBUTES);
+        ASSERT_TRUE(SetFileAttributesW(target.c_str(), attributes | FILE_ATTRIBUTE_READONLY));
+#else
+        const auto permissions = std::filesystem::status(node.local).permissions();
+        std::filesystem::permissions(node.local, std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
+#endif
+        const auto rolled = kasumi::application::sync::mutation::rollback_operation(
+            op, 0, node.local, ws, progress);
+#if defined(_WIN32)
+        EXPECT_TRUE(SetFileAttributesW(target.c_str(), attributes));
+#else
+        std::filesystem::permissions(node.local, permissions);
+#endif
+        ASSERT_FALSE(rolled);
+        EXPECT_EQ(rolled.error().code,
+                  kasumi::application::sync::mutation::MutationErrorCode::LocalIo);
+        EXPECT_EQ(kasumi::test::read_text(target), "Payload");
+        EXPECT_TRUE(std::filesystem::exists(kasumi::platform::workspace_file(ws, 0, ".copy_identity")));
+        const auto retried = kasumi::application::sync::mutation::rollback_operation(
+            op, 0, node.local, ws, progress);
+        ASSERT_TRUE(retried) << retried.error().detail;
+        EXPECT_FALSE(std::filesystem::exists(target));
+        EXPECT_FALSE(std::filesystem::exists(kasumi::platform::workspace_file(ws, 0, ".copy_identity")));
+    }
+}
+
 
 TEST(LocalCopyRollbackTest, CopyRollbackAfterLaterOperationFails) {
     SyncNode node;
@@ -1700,3 +2420,229 @@ TEST(LocalCopyIntegrationTest, DiagnosticCopyReproduction512) {
     EXPECT_EQ(m.copy_applied, 512U);
     EXPECT_EQ(m.content_gets, 0U);
 }
+
+// ============================================================================
+// OWNERSHIP CHECKS, DURABILITY RETURNS, PRE-INSTALL CRASH
+// ============================================================================
+
+TEST(LocalCopyRollbackTest, CopyCleanupRejectsReplacementBeforeCheckingOpenDescriptor) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "rb_posix_race_open_fd"));
+    write_local_file(node, "src.txt", "PayloadForOpenFdRace");
+
+    const auto target_path = node.local / "staged.tmp";
+    auto priv_file = kasumi::platform::private_storage::create_private_file(target_path);
+    ASSERT_TRUE(priv_file.has_value());
+    const auto orig_id = priv_file->identity;
+    ASSERT_TRUE(orig_id.valid);
+
+    // Replacement precedes the ownership check; the original inode stays alive.
+    std::filesystem::rename(target_path, node.local / "staged_preserved.tmp");
+    write_local_file(node, "staged.tmp", "ForeignFileReplacingStaged");
+    ASSERT_FALSE(orig_id == kasumi::platform::private_storage::query_file_identity(target_path));
+
+    const auto res = kasumi::platform::private_storage::remove_private_file_if_owned(*priv_file);
+    EXPECT_FALSE(priv_file->is_open());
+
+    // The foreign file MUST NOT be destroyed!
+    EXPECT_TRUE(local_entry_exists(node, "staged.tmp"));
+    EXPECT_EQ(read_local_file(node, "staged.tmp"), "ForeignFileReplacingStaged");
+    EXPECT_EQ(res, kasumi::platform::private_storage::CleanupResult::IdentityMismatch);
+}
+
+TEST(LocalCopyStagingTest, CopyStagingCleanupRejectsReplacementBeforeOwnershipCheck) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "stg_race_replace"));
+    write_local_file(node, "src.txt", "StagingCleanupRaceData");
+
+    Operation op{
+        .action = Action::CopyLocal,
+        .path = "src.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("StagingCleanupRaceData")),
+        .alt_path = "dst.txt",
+        .size = 22,
+    };
+    OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+    auto ws = make_test_workspace(node.profile / "ws_stg_race");
+
+    // During staging write, trigger failure to cause staging guard cleanup
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "during_copy_local_write") {
+                std::error_code ec;
+                std::filesystem::rename(path, path.string() + ".preserved", ec);
+                std::ofstream out(path);
+                out << "ForeignFileAtCandidatePath";
+                out.close();
+                throw std::runtime_error("simulated failure during write");
+            }
+        });
+
+    EXPECT_THROW({
+        (void)kasumi::application::sync::mutation::apply_operation(
+            op, 0, node.local, node.context.storage, node.key, ws,
+            progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr);
+    }, std::runtime_error);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    const auto cand_path = kasumi::application::sync::mutation::detail::copy_candidate_path(
+        node.local / "dst.txt", ws, 0);
+    // Foreign file must be preserved
+    ASSERT_TRUE(std::filesystem::exists(cand_path));
+    EXPECT_EQ(kasumi::test::read_text(cand_path), "ForeignFileAtCandidatePath");
+}
+
+TEST(LocalCopyStagingTest, CopyCleanupResultDistinguishesIdentityMismatchFromAlreadyAbsent) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "stg_cleanup_codes"));
+
+    const auto path = node.local / "test_file.bin";
+    write_local_file(node, "test_file.bin", "OriginalPayload");
+
+    const auto actual_id = kasumi::platform::private_storage::query_file_identity(path);
+    ASSERT_TRUE(actual_id.valid);
+
+    kasumi::platform::private_storage::FileIdentity foreign_id = actual_id;
+    foreign_id.file_id_low += 9999;
+
+    kasumi::platform::private_storage::PrivateOutputFile mismatch_file{
+        .handle = kasumi::platform::private_storage::invalid_private_handle,
+        .path = path,
+        .identity = foreign_id,
+        .published = false,
+    };
+    auto res_mismatch = kasumi::platform::private_storage::remove_private_file_if_owned(mismatch_file);
+    EXPECT_EQ(res_mismatch, kasumi::platform::private_storage::CleanupResult::IdentityMismatch);
+    EXPECT_TRUE(local_entry_exists(node, "test_file.bin"));
+
+    std::filesystem::remove(path);
+    kasumi::platform::private_storage::PrivateOutputFile absent_file{
+        .handle = kasumi::platform::private_storage::invalid_private_handle,
+        .path = path,
+        .identity = actual_id,
+        .published = false,
+    };
+    auto res_absent = kasumi::platform::private_storage::remove_private_file_if_owned(absent_file);
+    EXPECT_EQ(res_absent, kasumi::platform::private_storage::CleanupResult::AlreadyAbsent);
+}
+
+
+
+
+#if defined(KASUMI_SYNC_CRASH_HELPER_PATH)
+TEST(LocalCopyDependenciesTest, CopyRecoveryPreInstallCrashRecoversCandidateOrFailsClosed) {
+    SyncNode node_a, node_b;
+    ASSERT_TRUE(init_sync_node(node_a, "node_a_preinstall_crash"));
+    ASSERT_TRUE(init_sync_node(node_b, "node_b_preinstall_crash", node_a.storage_root));
+
+    write_local_file(node_a, "orig.txt", "PreinstallCrashDataBytes");
+    ASSERT_TRUE(run_node_sync(node_a).has_value());
+    ASSERT_TRUE(run_node_sync(node_b).has_value());
+
+    write_local_file(node_a, "copy.txt", "PreinstallCrashDataBytes");
+    ASSERT_TRUE(run_node_sync(node_a).has_value());
+
+    // Crash the child right at before_copy_local_install (after .copy_identity is durable, before destination installed)
+    const auto signal = node_b.profile / "copy_crash_preinstall.signal";
+    const auto child = run_crash_child(
+        node_b, "sync", "before_copy_local_install",
+        "", signal);
+    ASSERT_TRUE(child.reached_point) << "Child detail: " << child.detail;
+    ASSERT_TRUE(child.was_killed);
+
+    // Now restart sync in parent process
+    reset_content_counts(node_b);
+    auto sync_res = run_node_sync(node_b);
+    ASSERT_TRUE(sync_res.has_value()) << (sync_res ? "" : sync_res.error().detail);
+
+    // Verify recovery succeeded safely without remote Content GET
+    EXPECT_TRUE(local_entry_exists(node_b, "copy.txt"));
+    EXPECT_TRUE(local_entry_exists(node_b, "orig.txt"));
+    EXPECT_EQ(read_local_file(node_b, "copy.txt"), "PreinstallCrashDataBytes");
+    EXPECT_EQ(node_b.counters.content_gets, 0U);
+}
+
+TEST(LocalCopyDependenciesTest, CopyRecoveryPreInstallCrashRejectsForeignCandidate) {
+    SyncNode node_a, node_b;
+    ASSERT_TRUE(init_sync_node(node_a, "node_a_preinstall_foreign"));
+    ASSERT_TRUE(init_sync_node(node_b, "node_b_preinstall_foreign", node_a.storage_root));
+
+    write_local_file(node_a, "orig.txt", "ForeignCandidateTestBytes");
+    ASSERT_TRUE(run_node_sync(node_a).has_value());
+    ASSERT_TRUE(run_node_sync(node_b).has_value());
+
+    write_local_file(node_a, "copy.txt", "ForeignCandidateTestBytes");
+    ASSERT_TRUE(run_node_sync(node_a).has_value());
+
+    const auto signal = node_b.profile / "copy_crash_foreign.signal";
+    const auto child = run_crash_child(
+        node_b, "sync", "before_copy_local_install",
+        "", signal);
+    ASSERT_TRUE(child.reached_point) << "Child detail: " << child.detail;
+    ASSERT_TRUE(child.was_killed);
+
+    const auto paths = kasumi::application::sync::journal::make_paths(node_b.profile);
+    ASSERT_TRUE(paths.has_value());
+    const auto loaded = kasumi::application::sync::journal::load(*paths, node_b.key, nullptr);
+    ASSERT_TRUE(loaded.has_value() && *loaded);
+    const auto& record = **loaded;
+    const kasumi::platform::Workspace ws{
+        .root = node_b.profile / ".transactions" / record.operation_id};
+    const auto copy = std::ranges::find(record.plan.operations, Action::CopyLocal, &Operation::action);
+    ASSERT_NE(copy, record.plan.operations.end());
+    const auto index = static_cast<std::size_t>(copy - record.plan.operations.begin());
+    const auto candidate = kasumi::application::sync::mutation::detail::copy_candidate_path(
+        node_b.local / copy->alt_path, ws, index);
+    ASSERT_TRUE(std::filesystem::exists(candidate));
+    const auto owned_id = kasumi::platform::private_storage::query_file_identity(candidate);
+    ASSERT_TRUE(owned_id.valid);
+    std::filesystem::rename(candidate, candidate.string() + ".original");
+    kasumi::test::write_text(candidate, "ForeignCandidateData");
+    const auto foreign_id = kasumi::platform::private_storage::query_file_identity(candidate);
+    ASSERT_TRUE(foreign_id.valid);
+    ASSERT_FALSE(owned_id == foreign_id);
+
+    reset_content_counts(node_b);
+    const auto recovered = run_node_sync(node_b);
+    EXPECT_FALSE(recovered.has_value());
+    EXPECT_EQ(kasumi::test::read_text(candidate), "ForeignCandidateData");
+    EXPECT_FALSE(local_entry_exists(node_b, "copy.txt"));
+    EXPECT_EQ(node_b.counters.content_gets, 0U);
+    EXPECT_TRUE(std::filesystem::exists(kasumi::platform::workspace_file(ws, index, ".copy_identity")));
+
+}
+
+TEST(LocalCopyDependenciesTest, CopyRecoveryPostInstallCrashRejectsForeignDestination) {
+    SyncNode node_a, node_b;
+    ASSERT_TRUE(init_sync_node(node_a, "postinstall_foreign_a"));
+    ASSERT_TRUE(init_sync_node(node_b, "postinstall_foreign_b", node_a.storage_root));
+    write_local_file(node_a, "orig.txt", "Payload");
+    ASSERT_TRUE(run_node_sync(node_a));
+    ASSERT_TRUE(run_node_sync(node_b));
+    write_local_file(node_a, "copy.txt", "Payload");
+    ASSERT_TRUE(run_node_sync(node_a));
+
+    const auto child = run_crash_child(
+        node_b, "sync", "after_copy_local_install", "",
+        node_b.profile / "postinstall_foreign.signal");
+    ASSERT_TRUE(child.reached_point) << child.detail;
+    ASSERT_TRUE(child.was_killed);
+    const auto destination = node_b.local / "copy.txt";
+    ASSERT_TRUE(std::filesystem::exists(destination));
+    const auto owned_id = kasumi::platform::private_storage::query_file_identity(destination);
+    ASSERT_TRUE(owned_id.valid);
+    std::filesystem::rename(destination, node_b.local / "preserved.txt");
+    kasumi::test::write_text(destination, "Payload");
+    const auto foreign_id = kasumi::platform::private_storage::query_file_identity(destination);
+    ASSERT_TRUE(foreign_id.valid);
+    ASSERT_FALSE(owned_id == foreign_id);
+
+    reset_content_counts(node_b);
+    EXPECT_FALSE(run_node_sync(node_b));
+    EXPECT_EQ(kasumi::platform::private_storage::query_file_identity(destination), foreign_id);
+    EXPECT_EQ(read_local_file(node_b, "copy.txt"), "Payload");
+    EXPECT_EQ(read_local_file(node_b, "preserved.txt"), "Payload");
+    EXPECT_EQ(read_local_file(node_b, "orig.txt"), "Payload");
+    EXPECT_EQ(node_b.counters.content_gets, 0U);
+}
+#endif
