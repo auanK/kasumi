@@ -8,6 +8,7 @@
 #include "application/sync/coordinator.hpp"
 #include "application/sync/coordinator_detail.hpp"
 #include "application/sync/journal.hpp"
+#include "application/sync/reobservation.hpp"
 #include "crypto/content.hpp"
 #include "core/reconciliation/plan.hpp"
 #include "kasumi/test/filesystem.hpp"
@@ -1025,6 +1026,225 @@ TEST(DirectoryLocalMoveTest,
 }
 
 struct SimulatedInterruption {};
+
+TEST(DirectoryLocalMoveTest,
+     LatestIgnoredPhysicalEvidencePreservesDirectoryDuringStabilization) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "ignored-evidence-stabilize-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "ignored-evidence-stabilize-receiver", sender.storage_root));
+
+    write_local_file(sender, ".kasumiignore", "antigo/*.cache\n");
+    write_local_file(sender, "antigo/main.cpp", "managed");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    remove_local_subtree(sender, "antigo/main.cpp");
+    remove_local_subtree(sender, "antigo");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    auto input = kasumi::application::observation::collect_reconciliation_input(
+        receiver.runtime, receiver.context.storage, receiver.key, false);
+    ASSERT_TRUE(input.has_value()) << input.error().detail;
+    ASSERT_NE(kasumi::find_row(input->local_tree, "antigo/main.cpp"), nullptr);
+
+    bool hook_fired = false;
+    bool logical_snapshot_unchanged = false;
+    bool physical_evidence_changed = false;
+    bool same_observation_ignores_physical_evidence = false;
+    bool recalculated_plan_deletes_file = false;
+    bool recalculated_plan_keeps_directory = false;
+    std::string hook_error;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path&) {
+            if (point != "before_final_local_observation" || hook_fired) {
+                return;
+            }
+            hook_fired = true;
+            const auto before =
+                kasumi::application::observation::collect_local_observation(
+                    receiver.local, input->ignore_list);
+            if (!before) {
+                hook_error = before.error();
+                return;
+            }
+            write_local_file(receiver, "antigo/novo.cache", "ignored cache");
+            const auto after =
+                kasumi::application::observation::collect_local_observation(
+                    receiver.local, input->ignore_list);
+            if (!after) {
+                hook_error = after.error();
+                return;
+            }
+            physical_evidence_changed =
+                before->physical_evidence != after->physical_evidence;
+
+            auto before_observation = *input;
+            before_observation.local_tree = before->snapshot;
+            before_observation.local_physical_evidence =
+                before->physical_evidence;
+            auto latest = *input;
+            latest.local_tree = after->snapshot;
+            latest.local_physical_evidence = after->physical_evidence;
+            logical_snapshot_unchanged =
+                kasumi::application::sync::coordinator::reobservation::
+                    same_observation(before_observation, latest);
+            same_observation_ignores_physical_evidence =
+                kasumi::application::sync::coordinator::reobservation::
+                    same_observation(*input, latest);
+            const auto recalculated = kasumi::reconciliation::reconcile(latest);
+            if (!recalculated) {
+                hook_error = recalculated.error().detail;
+                return;
+            }
+            recalculated_plan_deletes_file = std::ranges::any_of(
+                recalculated->plan.operations, [](const auto& operation) {
+                    return operation.action == kasumi::Action::DeleteLocal &&
+                           operation.path == "antigo/main.cpp";
+                });
+            recalculated_plan_keeps_directory = std::ranges::none_of(
+                recalculated->plan.operations, [](const auto& operation) {
+                    return operation.action ==
+                               kasumi::Action::DeleteLocalDirectory &&
+                           operation.path == "antigo";
+                });
+        });
+    const auto synchronized = run_node_sync(receiver);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    ASSERT_TRUE(synchronized.has_value())
+        << (synchronized ? "" : synchronized.error().detail);
+    ASSERT_TRUE(hook_fired);
+    ASSERT_TRUE(hook_error.empty()) << hook_error;
+    EXPECT_TRUE(logical_snapshot_unchanged);
+    EXPECT_TRUE(physical_evidence_changed);
+    EXPECT_TRUE(same_observation_ignores_physical_evidence);
+    EXPECT_TRUE(recalculated_plan_deletes_file);
+    EXPECT_TRUE(recalculated_plan_keeps_directory);
+    EXPECT_FALSE(local_entry_exists(receiver, "antigo/main.cpp"));
+    EXPECT_TRUE(local_entry_exists(receiver, "antigo"));
+    EXPECT_EQ(read_local_file(receiver, "antigo/novo.cache"), "ignored cache");
+
+    const auto remote_state =
+        kasumi::application::observation::collect_storage_state(
+            receiver.context.storage,
+            receiver.key,
+            kasumi::test::workspace_root(receiver.workspace),
+            false);
+    ASSERT_TRUE(remote_state.has_value()) << remote_state.error();
+    EXPECT_EQ(kasumi::find_row(remote_state->tree, "antigo"), nullptr);
+
+    const auto accepted_before_noop =
+        kasumi::state_storage::load_state(receiver.database);
+    ASSERT_TRUE(accepted_before_noop.has_value())
+        << accepted_before_noop.error();
+    ASSERT_TRUE(accepted_before_noop->has_value());
+    const auto no_op = run_node_sync(receiver);
+    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
+    const auto accepted_after_noop =
+        kasumi::state_storage::load_state(receiver.database);
+    ASSERT_TRUE(accepted_after_noop.has_value())
+        << accepted_after_noop.error();
+    ASSERT_TRUE(accepted_after_noop->has_value());
+    EXPECT_EQ((*accepted_after_noop)->commit_id,
+              (*accepted_before_noop)->commit_id);
+    EXPECT_EQ(read_local_file(receiver, "antigo/novo.cache"), "ignored cache");
+}
+
+TEST(DirectoryLocalMoveTest,
+     NewUnignoredEntryAfterStabilizationConflictsAndRollsBack) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "directory-race-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "directory-race-receiver", sender.storage_root));
+
+    write_local_file(sender, ".kasumiignore", "antigo/*.cache\n");
+    write_local_file(sender, "antigo/main.cpp", "managed");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    remove_local_subtree(sender, "antigo/main.cpp");
+    remove_local_subtree(sender, "antigo");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    const auto remote_before =
+        kasumi::application::observation::collect_storage_state(
+            receiver.context.storage,
+            receiver.key,
+            kasumi::test::workspace_root(receiver.workspace),
+            false);
+    ASSERT_TRUE(remote_before.has_value()) << remote_before.error();
+    const auto accepted_before =
+        kasumi::state_storage::load_state(receiver.database);
+    ASSERT_TRUE(accepted_before.has_value()) << accepted_before.error();
+    ASSERT_TRUE(accepted_before->has_value());
+
+    const auto target = receiver.local / "antigo/main.cpp";
+    bool inserted = false;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "before_delete_local" && path == target && !inserted) {
+                inserted = true;
+                write_local_file(receiver,
+                                 "antigo/unexpected.txt",
+                                 "external data");
+            }
+        });
+    const auto rejected = run_node_sync(receiver);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    ASSERT_TRUE(inserted);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(rejected.error().code,
+              kasumi::application::ErrorCode::SynchronizationFailure);
+    EXPECT_NE(rejected.error().detail.find(
+                  "local destination changed before mutation"),
+              std::string::npos);
+    EXPECT_NE(rejected.error().detail.find("destination_conflict"),
+              std::string::npos);
+    // On a destination conflict, completed local effects are retained by the
+    // coordinator; the unexpected file itself remains untouched.
+    EXPECT_FALSE(local_entry_exists(receiver, "antigo/main.cpp"));
+    EXPECT_EQ(read_local_file(receiver, "antigo/unexpected.txt"),
+              "external data");
+
+    const auto remote_after_failure =
+        kasumi::application::observation::collect_storage_state(
+            receiver.context.storage,
+            receiver.key,
+            kasumi::test::workspace_root(receiver.workspace),
+            false);
+    ASSERT_TRUE(remote_after_failure.has_value())
+        << remote_after_failure.error();
+    EXPECT_EQ(remote_after_failure->logical_heads,
+              remote_before->logical_heads);
+    EXPECT_EQ(remote_after_failure->tree, remote_before->tree);
+    const auto accepted_after_failure =
+        kasumi::state_storage::load_state(receiver.database);
+    ASSERT_TRUE(accepted_after_failure.has_value())
+        << accepted_after_failure.error();
+    ASSERT_TRUE(accepted_after_failure->has_value());
+    EXPECT_EQ((*accepted_after_failure)->commit_id,
+              (*accepted_before)->commit_id);
+
+    std::error_code error;
+    ASSERT_TRUE(std::filesystem::remove(
+        receiver.local / "antigo/unexpected.txt", error));
+    ASSERT_FALSE(error) << error.message();
+    ASSERT_TRUE(std::filesystem::remove(receiver.local / "antigo", error));
+    ASSERT_FALSE(error) << error.message();
+    const auto converged = run_node_sync(receiver);
+    ASSERT_TRUE(converged.has_value()) << converged.error().detail;
+    EXPECT_FALSE(local_entry_exists(receiver, "antigo"));
+    const auto accepted_after_recovery =
+        kasumi::state_storage::load_state(receiver.database);
+    ASSERT_TRUE(accepted_after_recovery.has_value())
+        << accepted_after_recovery.error();
+    ASSERT_TRUE(accepted_after_recovery->has_value());
+    EXPECT_EQ((*accepted_after_recovery)->tree, remote_after_failure->tree);
+}
 
 TEST(DirectoryLocalMoveTest,
      LegacyPendingDirectoryRemovalRollsBackBeforeConverging) {

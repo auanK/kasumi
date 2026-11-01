@@ -381,6 +381,84 @@ void seed_remote_ignore_vault(Scenario& scenario, const Client& seed) {
     expect_remote_absent(*observed, "Screenshots");
 }
 
+void exercise_managed_to_ignored_residual(bool rename_remote_file) {
+    auto scenario = make_scenario();
+    const auto a = make_client(scenario, "a");
+    const auto b = make_client(scenario, "b");
+    constexpr std::string_view main_contents = "managed main file";
+    constexpr std::string_view backup_contents = "original backup bytes";
+
+    kasumi::test::write_text(client_local_dir(a) / "Projetos/main.cpp",
+                             main_contents);
+    kasumi::test::write_text(client_local_dir(a) / "Projetos/arquivo.bak",
+                             backup_contents);
+    ASSERT_TRUE(sync_succeeds(a));
+    ASSERT_TRUE(sync_succeeds(b));
+
+    auto initially_managed = remote(scenario);
+    ASSERT_TRUE(initially_managed.has_value()) << initially_managed.error();
+    expect_remote_present(*initially_managed, "Projetos/main.cpp");
+    expect_remote_present(*initially_managed, "Projetos/arquivo.bak");
+    expect_file(b, "Projetos/arquivo.bak", backup_contents);
+
+    kasumi::test::write_text(client_local_dir(a) / ".kasumiignore", "*.bak\n");
+    ASSERT_TRUE(sync_succeeds(a));
+    ASSERT_TRUE(sync_succeeds(b));
+    expect_file(a, "Projetos/arquivo.bak", backup_contents);
+    expect_file(b, "Projetos/arquivo.bak", backup_contents);
+
+    auto accepted_ignore = remote(scenario);
+    ASSERT_TRUE(accepted_ignore.has_value()) << accepted_ignore.error();
+    expect_remote_present(*accepted_ignore, "Projetos/main.cpp");
+    expect_remote_absent(*accepted_ignore, "Projetos/arquivo.bak");
+
+    // This is a filesystem-only cleanup on B; the ignore rule keeps it out of
+    // the synchronized logical tree.
+    remove_file(b, "Projetos/arquivo.bak");
+    if (rename_remote_file) {
+        std::error_code error;
+        std::filesystem::create_directories(client_local_dir(b) / "Projects",
+                                            error);
+        ASSERT_FALSE(error) << error.message();
+        std::filesystem::rename(client_local_dir(b) / "Projetos/main.cpp",
+                                client_local_dir(b) / "Projects/main.cpp",
+                                error);
+        ASSERT_FALSE(error) << error.message();
+        remove_directory(b, "Projetos");
+    } else {
+        remove_file(b, "Projetos/main.cpp");
+        remove_directory(b, "Projetos");
+    }
+    ASSERT_TRUE(sync_succeeds(b));
+    ASSERT_TRUE(sync_succeeds(a));
+
+    expect_file(a, "Projetos/arquivo.bak", backup_contents);
+    EXPECT_TRUE(std::filesystem::is_directory(client_local_dir(a) / "Projetos"));
+    expect_absent(a, "Projetos/main.cpp");
+    auto accepted = state(a);
+    ASSERT_TRUE(accepted.has_value()) << accepted.error();
+    ASSERT_TRUE(accepted->has_value());
+    EXPECT_EQ(kasumi::find_row((*accepted)->tree, "Projetos"), nullptr);
+    EXPECT_EQ(kasumi::find_row((*accepted)->tree, "Projetos/arquivo.bak"),
+              nullptr);
+
+    auto final_remote = remote(scenario);
+    ASSERT_TRUE(final_remote.has_value()) << final_remote.error();
+    expect_remote_absent(*final_remote, "Projetos");
+    expect_remote_absent(*final_remote, "Projetos/main.cpp");
+    expect_remote_absent(*final_remote, "Projetos/arquivo.bak");
+    if (rename_remote_file) {
+        expect_file(a, "Projects/main.cpp", main_contents);
+        expect_remote_present(*final_remote, "Projects/main.cpp");
+    } else {
+        expect_absent(a, "Projects/main.cpp");
+        expect_remote_absent(*final_remote, "Projects/main.cpp");
+    }
+    expect_converged(scenario, {&a, &b});
+    expect_fixed_point(scenario, a);
+    expect_fixed_point(scenario, b);
+}
+
 void expect_no_transaction_artifacts(
     const kasumi::runtime::RuntimeData& runtime) {
     const auto profile = runtime.database_path.parent_path();
@@ -801,6 +879,16 @@ TEST(H3LocalSyncTest, RemoteDirectoryRenamePreservesIgnoredDescendants) {
     expect_remote_absent(*observed, "Projetos");
     expect_converged(scenario, {&a, &b});
     expect_fixed_point(scenario, a);
+}
+
+TEST(H3LocalSyncTest,
+     ManagedFileBecomingIgnoredSurvivesRemoteDirectoryRename) {
+    exercise_managed_to_ignored_residual(true);
+}
+
+TEST(H3LocalSyncTest,
+     ManagedFileBecomingIgnoredSurvivesRemoteDirectoryDeletion) {
+    exercise_managed_to_ignored_residual(false);
 }
 
 TEST(H3LocalSyncTest, NewDirectoryWithOnlyIgnoredEntriesIsNotPublished) {
