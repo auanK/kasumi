@@ -1,17 +1,25 @@
-# Kasumi v0.9.2
+# Kasumi v0.9.3
 
-Release focused on reusing local files and accepted remote Content to reduce transfers during moves, renames, and copies.
+Patch release fixing directory synchronization when locally ignored content remains after remote deletions or renames.
 
 ## Highlights
 
-### Local Moves and Copies
+### Ignored Content and Directory Reconciliation
 
-Eligible remote moves and renames reuse verified local files instead of downloading them again. Copies use matching local bytes while preserving the source, and local moves reuse accepted remote Content to avoid redundant uploads. `CopyLocal` still checks required Content presence and repairs missing objects from verified local sources.
+Kasumi now preserves ignored files and the parent directories needed to contain them when managed content is deleted or moved remotely. These residual directories are excluded from the managed synchronization tree instead of blocking directory removal or being published back as new local directories.
 
-### Transaction Safety and Recovery
+The behavior also covers files that were previously synchronized and later became ignored. Ordinary empty directories remain synchronized, and ignored files are neither moved nor deleted automatically.
 
-Verified staging, no-overwrite installation, and identity checks protect local files during execution, rollback, and recovery. Interrupted work preserves operation dependencies and confirmed progress; detected external changes stop conflicting mutations, and ambiguous recovery retains evidence.
+### Observation and Transaction Safety
+
+Local scanning tracks transient physical evidence of ignored content without adding ignored entries to the synchronized Snapshot. Reconciliation and final validation use the managed projection consistently, while stabilization recalculates plans using updated observations.
+
+Invalid metadata for managed regular files and unsupported non-regular entries remain explicit observation failures. Unexpected filesystem changes that invalidate a directory removal cause a conflict rather than silent deletion or success.
+
+Interrupted transactions involving local moves and blocked directory removals retain the existing authenticated recovery behavior. Recovery and subsequent synchronization were validated against the affected v0.9.2 scenarios without requiring manual state cleanup.
 
 ## Compatibility
 
-Remote object formats and the SQLite schema are unchanged. Local transaction journals can contain the new move and copy operations. Kasumi provides no backward compatibility between 0.x releases or automatic migration. Use the same release on all clients and follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi) before replacing binaries. `kasumi update` replaces only the executable.
+Remote object formats, the SQLite schema, and the transaction journal codec are unchanged. No new `.kasumiignore` syntax or automatic deletion of ignored content is introduced.
+
+Kasumi provides no general backward compatibility guarantee between 0.x releases or automatic migration. Use the same release on all clients and follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi) before replacing binaries. `kasumi update` replaces only the executable.

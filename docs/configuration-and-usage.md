@@ -276,6 +276,10 @@ cache/
 Symlinks inside the synchronization root are not traversed.
 Reserved private files at the synchronization root and generated transaction artifacts are excluded from synchronization. Generated artifacts use their exact current naming pattern. The `.kasumiignore` file itself can be synchronized; changes to its local or authenticated remote version can change the effective projection used for a run. See [Local Observation](architecture/local-observation.md).
 
+Ignored entries remain local. When a remote deletion or rename removes the managed contents of a directory, Kasumi preserves any ignored entries left behind and the directories required to contain them. These residual directories are not republished merely because they still exist on disk. An otherwise empty, non-ignored directory remains eligible for normal synchronization.
+
+Kasumi does not automatically move or delete ignored content during remote directory changes. `.kasumiignore` has no disposable-file or delete-ignored modifier. Unexpected entries and filesystem changes that prevent a safe removal remain subject to normal conflict and error handling.
+
 ## Synchronized Path Rules
 
 Kasumi defines portable logical path rules for all entries admitted to the synchronized namespace. Entries excluded by `.kasumiignore` are not part of the synchronized namespace.

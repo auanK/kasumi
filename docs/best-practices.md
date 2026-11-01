@@ -130,6 +130,8 @@ Before replacing binaries:
 4. Preserve journals and diagnostics for partial or uncertain operations. Never
    delete SQLite, accepted state, or recovery evidence to force initialization.
 
+For a v0.9.2 synchronization that stopped because an old directory still contains ignored files, preserve the complete local profile, synchronized files, transaction evidence, and remote data before upgrading. Kasumi v0.9.3 corrects the directory reconciliation behavior and has been validated against the affected recovery scenarios. With all clients stopped and backups retained, start the updated Sync normally and allow its existing recovery mechanism to evaluate any pending transaction. If recovery reports a conflict or indeterminate state, stop and preserve the evidence rather than deleting journals, SQLite files, or ignored content.
+
 [`kasumi update`](configuration-and-usage.md#updating-kasumi) replaces only the
 executable; it does not migrate data or validate cross-version compatibility.
 

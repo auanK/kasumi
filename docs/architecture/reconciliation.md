@@ -4,6 +4,14 @@ Reconciliation receives three distinct validated views: the current local `Snaps
 
 The reconciler validates all input Snapshots and pending-materialization rows before computing changes. It builds a logical local view that includes accepted remote files still pending on disk, then compares local/base/remote by path. Independent edits combine; a modified file wins over deletion; incompatible file edits preserve both versions. For simultaneous local/remote file changes, the local `mtime` must be strictly newer to keep the canonical path, placing the remote variant at a conflict path. Otherwise, including equal timestamps, the remote variant keeps the canonical path and the local one is renamed and uploaded. Conflict destinations are reserved against exact and portable Unicode case-key collisions. Remote-branch conflict paths are described in [History and Concurrency](history-and-concurrency.md). Unsupported structures or unsafe paths stop planning.
 
+## Ignored Directory Residues
+
+Reconciliation distinguishes the managed local Snapshot from transient physical evidence of ignored entries. Before the three-way comparison, it projects the local tree against the effective remote tree. A directory absent from the desired remote tree can be excluded from the managed projection when it exists only to contain ignored content and has no managed descendants that must remain. Directories still required by managed paths, ordinary empty directories, and directories present in the desired remote tree remain managed.
+
+This logical projection never removes physical entries. After local move and copy selection, `DeleteLocalDirectory` operations are suppressed for directories whose ignored descendants require physical preservation. Managed file deletions, moves, and downloads continue normally. The candidate shared tree represents the logical synchronization result rather than every directory physically present on the client.
+
+Residual directories must not become remote creations or recurring deletion operations on subsequent runs. Unexpected entries do not qualify as protected ignored content and must not be silently projected away. Final publication-tree validation applies the same managed-directory semantics to the filesystem observed after execution.
+
 The output is a `SyncPlan` plus a **candidate shared tree** and flags for local mutation, physical storage repair, publication, and local state commit. A plan contains safe relative paths, expected file hashes/sizes, a target generation, and serialized action groups:
 
 1. `RenameLocal`

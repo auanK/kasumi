@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.3]
+
+### Fixed
+
+- Fixed synchronization failures when remote directory deletions or renames left locally ignored files behind. Managed files are synchronized while ignored content and its required parent directories remain intact.
+- Prevented directories containing only ignored content from being republished as local additions or repeatedly scheduled for removal, while preserving normal synchronization of empty directories.
+- Corrected reconciliation and final publication-tree validation to account for transient physical ignore evidence, including files that were synchronized before becoming ignored.
+- Preserved fail-closed local observation for invalid regular-file metadata and unsupported non-regular entries. Unexpected filesystem changes continue to produce explicit conflicts instead of being silently discarded.
+- Kept directory-removal planning consistent with updated physical evidence during stabilization, and verified convergence after interrupted v0.9.2 transactions without requiring manual removal of recovery state.
+
 ## [0.9.2]
 
 ### Added
