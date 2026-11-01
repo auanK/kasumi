@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.9.2]
+
+### Added
+
+- Added `MoveLocal` to reuse verified local files for eligible remote file moves and renames, including files relocated within directories, avoiding Content downloads.
+- Added `CopyLocal` to materialize new paths from local bytes matching the expected BLAKE3 hash and size, preserving the source and refusing occupied destinations.
+
+### Changed
+
+- Local file and directory moves reuse matching accepted remote Content, avoiding redundant uploads.
+
+### Fixed
+
+- Preserved operation dependencies during execution and recovery, including interrupted repairs; strengthened staging ownership and rollback checks to preserve detected external replacements and retain recovery evidence on failure.
+- Fixed missing remote Content detection during `CopyLocal`. Repair uses verified local bytes, preserves local materialization, and reports repair failures; physical-only repair publishes no new Commit or HEAD.
+
 ## [0.9.1]
 
 ### Fixed
