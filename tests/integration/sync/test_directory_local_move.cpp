@@ -4,7 +4,12 @@
 #include <iostream>
 #include <iomanip>
 #include "application/use_cases/context.hpp"
+#include "application/observation/state.hpp"
+#include "application/sync/coordinator.hpp"
+#include "application/sync/coordinator_detail.hpp"
+#include "application/sync/journal.hpp"
 #include "crypto/content.hpp"
+#include "core/reconciliation/plan.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
 #include "kasumi/test/temp_workspace.hpp"
@@ -15,7 +20,6 @@
 #include "application/sync/mutation_detail.hpp"
 #include "core/hasher.hpp"
 #include "platform/workspace.hpp"
-#include "application/sync/journal.hpp"
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -1021,6 +1025,161 @@ TEST(DirectoryLocalMoveTest,
 }
 
 struct SimulatedInterruption {};
+
+TEST(DirectoryLocalMoveTest,
+     LegacyPendingDirectoryRemovalRollsBackBeforeConverging) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "legacy-ignore-recovery-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "legacy-ignore-recovery-receiver", sender.storage_root));
+
+    write_local_file(sender, "A/main.cpp", "managed");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    write_local_file(receiver, ".kasumiignore", "A/*.cache\n");
+    write_local_file(receiver, "A/local.cache", "local-only cache");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    rename_local_entry(sender, "A/main.cpp", "B/main.cpp");
+    remove_local_subtree(sender, "A");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    auto input = kasumi::application::observation::collect_reconciliation_input(
+        receiver.runtime,
+        receiver.context.storage,
+        receiver.key,
+        false);
+    ASSERT_TRUE(input.has_value());
+    auto reconciled = kasumi::reconciliation::reconcile(*input);
+    ASSERT_TRUE(reconciled.has_value());
+    auto legacy_operations = reconciled->plan.operations;
+    const auto move = std::ranges::find_if(
+        legacy_operations, [](const auto& operation) {
+            return operation.action == kasumi::Action::MoveLocal &&
+                   kasumi::platform::path::to_logical_utf8(operation.path) ==
+                       "A/main.cpp";
+        });
+    ASSERT_NE(move, legacy_operations.end());
+    legacy_operations.push_back(kasumi::Operation{
+        .action = kasumi::Action::DeleteLocalDirectory,
+        .path = "A",
+    });
+    auto legacy_plan = kasumi::make_sync_plan(
+        std::move(legacy_operations), reconciled->plan.target_generation);
+
+    const auto pinned_head = input->storage.logical_heads.front();
+    auto record = kasumi::application::sync::journal::create_record(
+        input->local_generation,
+        input->storage.generation,
+        std::move(legacy_plan),
+        reconciled->requires_publication,
+        pinned_head);
+    ASSERT_TRUE(record.has_value());
+    record->observed_base_id = input->base_commit_id;
+    for (const auto& row : input->pending_materializations) {
+        record->observed_pending_paths.push_back(row.path);
+    }
+    for (const auto& row : reconciled->pending_materializations) {
+        record->pending_paths.push_back(row.path);
+    }
+
+    const auto paths = kasumi::application::sync::journal::make_paths(
+        receiver.profile);
+    ASSERT_TRUE(paths.has_value());
+    ASSERT_TRUE(kasumi::application::sync::journal::save(
+        *paths, *record, receiver.key));
+    auto workspace =
+        kasumi::application::sync::coordinator::detail::
+            create_transaction_workspace(
+                receiver.profile, record->operation_id, receiver.key);
+    ASSERT_TRUE(workspace.has_value());
+    const auto workspace_root = workspace->root;
+    const auto operation_id = record->operation_id;
+
+    std::size_t move_index = record->plan.operations.size();
+    for (std::size_t index = 0; index < record->plan.operations.size();
+         ++index) {
+        auto prepared = kasumi::application::sync::mutation::prepare_operation(
+            record->plan.operations[index],
+            index,
+            receiver.local,
+            *workspace,
+            record->progress[index],
+            record->plan.operations);
+        ASSERT_TRUE(prepared.has_value()) << prepared.error().detail;
+        record->progress[index] = *prepared;
+        if (record->plan.operations[index].action == kasumi::Action::MoveLocal) {
+            move_index = index;
+        }
+    }
+    ASSERT_LT(move_index, record->plan.operations.size());
+    record->phase = kasumi::transaction::Phase::FilesStaged;
+    ASSERT_TRUE(kasumi::application::sync::journal::save(
+        *paths, *record, receiver.key));
+
+    for (std::size_t index = 0; index <= move_index; ++index) {
+        const auto& operation = record->plan.operations[index];
+        if (!kasumi::is_local_mutation(operation.action)) {
+            continue;
+        }
+        const auto applied = kasumi::application::sync::mutation::apply_operation(
+            operation,
+            index,
+            receiver.local,
+            receiver.context.storage,
+            receiver.key,
+            *workspace,
+            record->progress[index]);
+        ASSERT_TRUE(applied.has_value()) << applied.error().detail;
+        if (index == move_index) {
+            break; // Model v0.9.2 stopping after the filesystem effect.
+        }
+        record->progress[index].state =
+            kasumi::transaction::OperationState::Applied;
+        ASSERT_TRUE(kasumi::application::sync::journal::save(
+            *paths, *record, receiver.key));
+    }
+
+    EXPECT_FALSE(local_entry_exists(receiver, "A/main.cpp"));
+    EXPECT_EQ(read_local_file(receiver, "B/main.cpp"), "managed");
+    EXPECT_EQ(read_local_file(receiver, "A/local.cache"), "local-only cache");
+    const auto pending =
+        kasumi::application::sync::journal::load(*paths, receiver.key);
+    ASSERT_TRUE(pending.has_value());
+    ASSERT_TRUE(pending->has_value());
+    EXPECT_TRUE(std::ranges::any_of(
+        (*pending)->plan.operations, [](const auto& operation) {
+            return operation.action == kasumi::Action::DeleteLocalDirectory &&
+                   kasumi::platform::path::to_logical_utf8(operation.path) ==
+                       "A";
+        }));
+    EXPECT_EQ((*pending)->progress[move_index].state,
+              kasumi::transaction::OperationState::BackupCreated);
+    EXPECT_TRUE(std::filesystem::exists(workspace_root));
+
+    const auto recovered =
+        kasumi::application::sync::coordinator::recover_if_needed(
+            receiver.runtime, receiver.context.storage, receiver.key);
+    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+    EXPECT_EQ(*recovered,
+              kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    const auto cleared =
+        kasumi::application::sync::journal::load(*paths, receiver.key);
+    ASSERT_TRUE(cleared.has_value());
+    EXPECT_FALSE(cleared->has_value());
+    EXPECT_FALSE(std::filesystem::exists(workspace_root));
+    EXPECT_EQ(read_local_file(receiver, "A/main.cpp"), "managed");
+    EXPECT_EQ(read_local_file(receiver, "A/local.cache"), "local-only cache");
+    EXPECT_FALSE(local_entry_exists(receiver, "B/main.cpp"));
+
+    const auto converged = run_node_sync(receiver);
+    ASSERT_TRUE(converged.has_value()) << converged.error().detail;
+    EXPECT_EQ(read_local_file(receiver, "B/main.cpp"), "managed");
+    EXPECT_EQ(read_local_file(receiver, "A/local.cache"), "local-only cache");
+    EXPECT_FALSE(local_entry_exists(receiver, "A/main.cpp"));
+}
 
 void corrupt_or_remove_transaction_backups(const SyncNode& node) {
     const auto tx_root = node.profile / ".transactions";
