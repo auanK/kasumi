@@ -1366,6 +1366,116 @@ apply_operation(const Operation& operation,
                                   condition);
         }
 
+        case Action::DeleteIgnoredLocalFile: {
+            auto path =
+                resolve_local_path(local_root, operation.path, operation_index);
+            if (!path) {
+                return std::unexpected(path.error());
+            }
+            auto prepared = detail::validate_prepared_operation(
+                operation, operation_index, *path, workspace, progress);
+            if (!prepared) {
+                return prepared;
+            }
+            if (!progress.had_original ||
+                progress.previous_hash != operation.hash ||
+                progress.state < transaction::OperationState::BackupCreated) {
+                return std::unexpected(make_error(
+                    MutationErrorCode::InvalidOperation,
+                    "disposable removal lacks a verified transaction backup",
+                    *path,
+                    operation_index));
+            }
+            mutation_fault_test::hit("before_delete_ignored_local_file", *path);
+            auto status = read_status(*path, operation_index);
+            if (!status) {
+                return std::unexpected(status.error());
+            }
+            if (missing(*status)) {
+                return {};
+            }
+            if (std::filesystem::is_symlink(*status) ||
+                !std::filesystem::is_regular_file(*status)) {
+                return std::unexpected(make_error(
+                    MutationErrorCode::DestinationConflict,
+                    "disposable source is no longer a regular file",
+                    *path,
+                    operation_index));
+            }
+            const auto identity =
+                platform::private_storage::query_file_identity(*path);
+            std::error_code size_error;
+            const auto size = std::filesystem::file_size(*path, size_error);
+            if (size_error || !identity.valid ||
+                identity.volume_or_dev !=
+                    operation.expected_source_identity.volume_or_dev ||
+                identity.file_id_low !=
+                    operation.expected_source_identity.file_id_low ||
+                identity.file_id_high !=
+                    operation.expected_source_identity.file_id_high ||
+                size != operation.size) {
+                return std::unexpected(make_error(
+                    size_error ? MutationErrorCode::LocalIo
+                               : MutationErrorCode::DestinationConflict,
+                    size_error ? size_error.message()
+                               : "disposable source identity or size changed",
+                    *path,
+                    operation_index));
+            }
+            auto actual = file_hash(*path, operation_index);
+            const auto after_identity =
+                platform::private_storage::query_file_identity(*path);
+            if (!actual) {
+                return std::unexpected(actual.error());
+            }
+            if (*actual != operation.hash || !after_identity.valid ||
+                after_identity.volume_or_dev !=
+                    operation.expected_source_identity.volume_or_dev ||
+                after_identity.file_id_low !=
+                    operation.expected_source_identity.file_id_low ||
+                after_identity.file_id_high !=
+                    operation.expected_source_identity.file_id_high) {
+                return std::unexpected(make_error(
+                    MutationErrorCode::DestinationConflict,
+                    "disposable source changed before removal",
+                    *path,
+                    operation_index));
+            }
+            platform::private_storage::PrivateOutputFile source{
+                .path = *path,
+                .identity = {
+                    .volume_or_dev = operation.expected_source_identity.volume_or_dev,
+                    .file_id_low = operation.expected_source_identity.file_id_low,
+                    .file_id_high = operation.expected_source_identity.file_id_high,
+                    .valid = true,
+                },
+            };
+            const auto removed =
+                platform::private_storage::remove_private_file_if_owned(source);
+            using platform::private_storage::CleanupResult;
+            if (removed != CleanupResult::Removed &&
+                removed != CleanupResult::AlreadyAbsent) {
+                return std::unexpected(make_error(
+                    removed == CleanupResult::IdentityMismatch
+                        ? MutationErrorCode::DestinationConflict
+                        : MutationErrorCode::LocalIo,
+                    removed == CleanupResult::IdentityMismatch
+                        ? "disposable source identity changed during removal"
+                        : "failed to remove disposable source",
+                    *path,
+                    operation_index));
+            }
+            mutation_fault_test::hit("after_delete_ignored_local_file", *path);
+            auto synced = platform::durability::sync_parent_directory(*path);
+            if (!synced) {
+                return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                                  synced.error(),
+                                                  *path,
+                                                  operation_index));
+            }
+            return {};
+        }
+
         case Action::DeleteLocal: {
             auto path =
                 resolve_local_path(local_root, operation.path, operation_index);

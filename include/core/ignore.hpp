@@ -46,6 +46,9 @@ struct IgnoreList {
 // Checks if a path matches internal metadata files reserved by Kasumi.
 bool is_reserved_internal(std::string_view path);
 
+// Identifies the synchronized ignore file, including portable case variants.
+bool is_kasumiignore_path(std::string_view path);
+
 // Parses ignore rules from raw text (e.g. .kasumiignore file content).
 IgnoreList parse_ignore_rules(std::string_view content);
 

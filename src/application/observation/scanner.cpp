@@ -7,6 +7,7 @@
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
+#include "platform/private_storage.hpp"
 
 #include <algorithm>
 #include <array>
@@ -31,6 +32,8 @@ namespace kasumi::application::observation::scanner {
 namespace {
 
 using kasumi::ignore::IgnoreList;
+using kasumi::ignore::IgnoreDisposition;
+using kasumi::ignore::classify_ignore;
 using kasumi::ignore::is_ignored;
 using kasumi::ignore::load_ignore_list;
 
@@ -283,6 +286,17 @@ scan_result(const std::filesystem::path& local_root,
             ScanPolicy policy,
             MetadataQuery metadata_query,
             const IgnoreList& ignore_list) {
+    if (ignore_list.parse_error) {
+        return std::unexpected(ScanError{
+            .code = ScanErrorCode::Io,
+            .path = local_root / ".kasumiignore",
+            .operation = ignore_list.parse_error->line == 0
+                             ? "read ignore file"
+                             : "parse ignore rule at line " +
+                                   std::to_string(ignore_list.parse_error->line),
+            .detail = ignore_list.parse_error->detail,
+        });
+    }
     const auto scan_trace = platform::perf_trace::begin();
     ScanContext context{.policy = policy,
                         .metadata_query = metadata_query,
@@ -311,7 +325,10 @@ scan_result(const std::filesystem::path& local_root,
                                          "classify entry",
                                          "root is not a regular file or directory"});
     }
-    if (is_ignored(".", ignore_list, root_type->directory))
+    if (root_type->regular_file &&
+        is_ignored(platform::path::to_logical_utf8(local_root.filename()),
+                   ignore_list,
+                   false))
         return ScanResult{};
 
     if (root_type->regular_file) {
@@ -371,6 +388,10 @@ scan_result(const std::filesystem::path& local_root,
                     completed.has_ignored_descendants;
                 parent.has_unexpected_descendants |=
                     completed.has_unexpected_descendants;
+                parent.has_protected_descendants |=
+                    completed.has_protected_descendants;
+                parent.has_disposable_descendants |=
+                    completed.has_disposable_descendants;
             }
             continue;
         }
@@ -398,18 +419,25 @@ scan_result(const std::filesystem::path& local_root,
             platform::path::to_logical_utf8(entry.path().filename());
         const auto relative =
             frame.path.empty() ? entry_name : frame.path + '/' + entry_name;
-        const bool ignored =
-            is_ignored(relative, ignore_list, entry_type->directory);
+        const auto disposition =
+            classify_ignore(relative, entry_type->directory, ignore_list);
+        const bool ignored = disposition != IgnoreDisposition::Managed;
         auto& parent_evidence =
             physical_evidence.directories[frame.evidence_index];
         parent_evidence.physically_empty = false;
         if (entry_type->linklike) {
             if (ignored) {
-                physical_evidence.ignored_entries.push_back(relative);
+                physical_evidence.ignored_entries.push_back(
+                    {.path = relative,
+                     .kind = reconciliation::PhysicalEntryKind::LinkLike,
+                     .disposition = IgnoreDisposition::IgnoredProtected});
                 parent_evidence.has_ignored_descendants = true;
+                parent_evidence.has_protected_descendants = true;
                 if (entry_type->directory) {
                     physical_evidence.directories.push_back(
-                        {.path = relative, .ignored_entry = true});
+                        {.path = relative,
+                         .ignored_entry = true,
+                         .has_protected_descendants = true});
                 }
             } else {
                 parent_evidence.has_unexpected_descendants = true;
@@ -417,11 +445,60 @@ scan_result(const std::filesystem::path& local_root,
             continue;
         }
         if (ignored) {
-            physical_evidence.ignored_entries.push_back(relative);
+            const auto kind = entry_type->directory
+                                  ? reconciliation::PhysicalEntryKind::Directory
+                                  : (entry_type->regular_file
+                                         ? reconciliation::PhysicalEntryKind::RegularFile
+                                         : reconciliation::PhysicalEntryKind::Unsupported);
+            auto effective_disposition = disposition;
+            std::uint64_t ignored_size = 0;
+            PhysicalFileIdentity identity{};
+            if (!entry_type->regular_file ||
+                !valid_logical_path_component(entry_name)) {
+                effective_disposition = IgnoreDisposition::IgnoredProtected;
+            } else if (disposition == IgnoreDisposition::IgnoredDisposable) {
+                const auto metadata = metadata_query(entry.path(), relative);
+                if (!metadata) {
+                    return std::unexpected(ScanError{
+                        .code = metadata.error().code ==
+                                        cache::FileMetadataErrorCode::PermissionDenied
+                                    ? ScanErrorCode::PermissionDenied
+                                    : ScanErrorCode::Metadata,
+                        .path = entry.path(),
+                        .operation = "read disposable file metadata",
+                        .detail = metadata.error().message,
+                    });
+                }
+                if (!metadata->has_value() ||
+                    !(**metadata).identity.has_value()) {
+                    effective_disposition = IgnoreDisposition::IgnoredProtected;
+                } else {
+                    const auto& file_metadata = **metadata;
+                    ignored_size = file_metadata.size;
+                    identity = {
+                        .volume_or_dev = file_metadata.identity->volume,
+                        .file_id_low = file_metadata.identity->file_low,
+                        .file_id_high = file_metadata.identity->file_high,
+                        .valid = true,
+                    };
+                }
+            }
+            physical_evidence.ignored_entries.push_back(
+                {.path = relative,
+                 .kind = kind,
+                 .disposition = effective_disposition,
+                 .size = ignored_size,
+                 .identity = identity});
             parent_evidence.has_ignored_descendants = true;
+            parent_evidence.has_protected_descendants |=
+                effective_disposition == IgnoreDisposition::IgnoredProtected;
+            parent_evidence.has_disposable_descendants |=
+                effective_disposition == IgnoreDisposition::IgnoredDisposable;
             if (entry_type->directory) {
                 physical_evidence.directories.push_back(
-                    {.path = relative, .ignored_entry = true});
+                    {.path = relative,
+                     .ignored_entry = true,
+                     .has_protected_descendants = true});
             }
             continue;
         }
@@ -514,11 +591,185 @@ scan_result(const std::filesystem::path& local_root,
     std::ranges::sort(physical_evidence.directories,
                       path_less,
                       &reconciliation::LocalDirectoryEvidence::path);
-    std::ranges::sort(physical_evidence.ignored_entries);
+    std::ranges::sort(physical_evidence.ignored_entries,
+                      path_less,
+                      &reconciliation::IgnoredEntryEvidence::path);
     platform::perf_trace::finish("local filesystem scan wall", scan_trace);
     return ScanResult{.snapshot = std::move(snapshot),
                       .cache = std::move(context.cache),
                       .physical_evidence = std::move(physical_evidence)};
+}
+
+std::expected<std::vector<reconciliation::DisposableIgnoredContent>, ScanError>
+hash_disposable_candidates(
+    const std::filesystem::path& local_root,
+    const reconciliation::LocalPhysicalEvidence& evidence,
+    std::span<const std::filesystem::path> candidate_paths,
+    const IgnoreList& ignore_list,
+    MetadataQuery metadata_query) {
+    if (ignore_list.parse_error) {
+        return std::unexpected(ScanError{
+            .code = ScanErrorCode::Io,
+            .path = local_root / ".kasumiignore",
+            .operation = ignore_list.parse_error->line == 0
+                             ? "read ignore file"
+                             : "parse ignore rule at line " +
+                                   std::to_string(ignore_list.parse_error->line),
+            .detail = ignore_list.parse_error->detail,
+        });
+    }
+    std::vector<std::string> paths;
+    paths.reserve(candidate_paths.size());
+    for (const auto& candidate : candidate_paths) {
+        if (candidate.empty() ||
+            !kasumi::has_safe_paths(Operation{.path = candidate})) {
+            return std::unexpected(ScanError{
+                .code = ScanErrorCode::Io,
+                .path = local_root / candidate,
+                .operation = "validate disposable candidate",
+                .detail = "candidate path is unsafe",
+            });
+        }
+        paths.push_back(platform::path::to_logical_utf8(candidate));
+    }
+    std::ranges::sort(paths, path_less);
+    if (std::ranges::adjacent_find(paths) != paths.end()) {
+        return std::unexpected(ScanError{
+            .code = ScanErrorCode::Io,
+            .path = local_root,
+            .operation = "validate disposable candidates",
+            .detail = "duplicate candidate path",
+        });
+    }
+
+    std::vector<reconciliation::DisposableIgnoredContent> result;
+    result.reserve(paths.size());
+    ScanContext context{.policy = ScanPolicy::FullHash,
+                        .metadata_query = metadata_query,
+                        .previous = {},
+                        .cache = {}};
+    for (const auto& relative : paths) {
+        const auto found = std::ranges::lower_bound(
+            evidence.ignored_entries,
+            relative,
+            path_less,
+            &reconciliation::IgnoredEntryEvidence::path);
+        if (found == evidence.ignored_entries.end() || found->path != relative ||
+            found->kind != reconciliation::PhysicalEntryKind::RegularFile ||
+            found->disposition != IgnoreDisposition::IgnoredDisposable ||
+            !found->identity.valid ||
+            classify_ignore(relative, false, ignore_list) !=
+                IgnoreDisposition::IgnoredDisposable) {
+            return std::unexpected(ScanError{
+                .code = ScanErrorCode::Metadata,
+                .path = local_root / platform::path::from_utf8(relative),
+                .operation = "revalidate disposable candidate",
+                .detail = "ignore rules or physical evidence changed",
+            });
+        }
+
+        std::size_t start = 0;
+        auto current = local_root;
+        while (start < relative.size()) {
+            const auto slash = relative.find('/', start);
+            const auto component = std::string_view{relative}.substr(
+                start,
+                slash == std::string::npos ? relative.size() - start
+                                           : slash - start);
+            if (!valid_logical_path_component(component)) {
+                return std::unexpected(ScanError{
+                    .code = ScanErrorCode::Io,
+                    .path = local_root / platform::path::from_utf8(relative),
+                    .operation = "validate disposable candidate",
+                    .detail = "candidate contains an unsafe path component",
+                });
+            }
+            current /= platform::path::from_utf8(component);
+            std::error_code error;
+            const auto status = std::filesystem::symlink_status(current, error);
+            const bool final = slash == std::string::npos;
+            if (error || std::filesystem::is_symlink(status) ||
+                (final ? !std::filesystem::is_regular_file(status)
+                       : !std::filesystem::is_directory(status))) {
+                return std::unexpected(ScanError{
+                    .code = ScanErrorCode::Metadata,
+                    .path = current,
+                    .operation = "validate disposable candidate",
+                    .detail = error ? error.message()
+                                    : (final ? "candidate is not a regular file"
+                                             : "candidate path contains a non-directory"),
+                });
+            }
+            if (final) {
+                break;
+            }
+            start = slash + 1;
+        }
+
+        auto metadata = metadata_query(current, relative);
+        if (!metadata || !metadata->has_value() ||
+            !(**metadata).identity.has_value()) {
+            return std::unexpected(ScanError{
+                .code = ScanErrorCode::Metadata,
+                .path = current,
+                .operation = "verify disposable candidate metadata",
+                .detail = !metadata ? metadata.error().message
+                                    : "file identity is unavailable",
+            });
+        }
+        const auto before_identity = PhysicalFileIdentity{
+            .volume_or_dev = (**metadata).identity->volume,
+            .file_id_low = (**metadata).identity->file_low,
+            .file_id_high = (**metadata).identity->file_high,
+            .valid = true,
+        };
+        if (before_identity != found->identity ||
+            (**metadata).size != found->size) {
+            return std::unexpected(ScanError{
+                .code = ScanErrorCode::Metadata,
+                .path = current,
+                .operation = "verify disposable candidate metadata",
+                .detail = "physical identity or size changed after observation",
+            });
+        }
+
+        auto row = process_file(current, relative, context);
+        if (!row) {
+            return std::unexpected(row.error());
+        }
+        auto after = metadata_query(current, relative);
+        if (!after || !after->has_value() || !(**after).identity.has_value()) {
+            return std::unexpected(ScanError{
+                .code = ScanErrorCode::Metadata,
+                .path = current,
+                .operation = "verify disposable candidate after hashing",
+                .detail = !after ? after.error().message
+                                 : "file identity is unavailable",
+            });
+        }
+        const PhysicalFileIdentity after_identity{
+            .volume_or_dev = (**after).identity->volume,
+            .file_id_low = (**after).identity->file_low,
+            .file_id_high = (**after).identity->file_high,
+            .valid = true,
+        };
+        if (after_identity != found->identity ||
+            (**after).size != found->size ||
+            classify_ignore(relative, false, ignore_list) !=
+                IgnoreDisposition::IgnoredDisposable) {
+            return std::unexpected(ScanError{
+                .code = ScanErrorCode::Metadata,
+                .path = current,
+                .operation = "verify disposable candidate after hashing",
+                .detail = "file or ignore rules changed while hashing",
+            });
+        }
+        result.push_back({.path = relative,
+                          .hash = hash_hex(row->hash),
+                          .size = row->size,
+                          .identity = found->identity});
+    }
+    return result;
 }
 
 } // namespace kasumi::application::observation::scanner

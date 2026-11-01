@@ -72,6 +72,14 @@ scan_result(const std::filesystem::path& local_root,
             MetadataQuery metadata_query,
             const kasumi::ignore::IgnoreList& ignore_list);
 
+std::expected<std::vector<reconciliation::DisposableIgnoredContent>, ScanError>
+hash_disposable_candidates(
+    const std::filesystem::path& local_root,
+    const reconciliation::LocalPhysicalEvidence& evidence,
+    std::span<const std::filesystem::path> candidate_paths,
+    const kasumi::ignore::IgnoreList& ignore_list,
+    MetadataQuery metadata_query = cache::read_file_metadata);
+
 } // namespace kasumi::application::observation::scanner
 
 #endif

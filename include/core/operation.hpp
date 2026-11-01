@@ -35,8 +35,10 @@ enum class Action : std::uint8_t {
     DeleteRemoteDirectory = 9,
     // Copies a verified local file from path to alt_path.
     CopyLocal = 10,
+    // Removes a verified disposable ignored local file.
+    DeleteIgnoredLocalFile = 11,
     // Sentinel used to dimension the phases.
-    Count = 11
+    Count = 12
 };
 
 // Number of executable values in Action.
@@ -47,6 +49,15 @@ inline constexpr std::size_t ActionCount =
 inline constexpr std::size_t action_index(Action action) noexcept {
     return static_cast<std::size_t>(action);
 }
+
+struct PhysicalFileIdentity {
+    std::uint64_t volume_or_dev = 0;
+    std::uint64_t file_id_low = 0;
+    std::uint64_t file_id_high = 0;
+    bool valid = false;
+
+    constexpr bool operator==(const PhysicalFileIdentity&) const = default;
+};
 
 // Indicates whether action represents an executable action.
 inline constexpr bool is_valid_action(Action action) noexcept {
@@ -66,6 +77,7 @@ inline constexpr bool is_local_mutation(Action action) noexcept {
         true,
         false,
         false,
+        true,
         true,
     };
 
@@ -93,6 +105,8 @@ struct Operation {
     std::uint64_t size = 0;
     // Requests an exclusive destination to preserve conflicts.
     bool exclusive_destination = false;
+    // Identity observed while verifying a disposable ignored source.
+    PhysicalFileIdentity expected_source_identity{};
 };
 
 // Operations grouped by Action; offsets demarcate each phase.

@@ -369,6 +369,26 @@ bool is_reserved_internal(std::string_view path) {
     return generated_internal_name(name);
 }
 
+bool is_kasumiignore_path(std::string_view path) {
+    const auto slash = path.find_last_of("/\\");
+    const auto name =
+        slash == std::string_view::npos ? path : path.substr(slash + 1);
+    constexpr std::string_view expected = ".kasumiignore";
+    if (name.size() != expected.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < name.size(); ++index) {
+        auto character = name[index];
+        if (character >= 'A' && character <= 'Z') {
+            character = static_cast<char>(character - 'A' + 'a');
+        }
+        if (character != expected[index]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 IgnoreList parse_ignore_rules(std::string_view content) {
     IgnoreList result;
     std::string_view remaining = content;
@@ -439,6 +459,11 @@ IgnoreDisposition classify_ignore(std::string_view logical_path,
     const auto* rule = last_matching_rule(rules, logical_path, is_directory);
     if (rule == nullptr || rule->negated) {
         return IgnoreDisposition::Managed;
+    }
+    if (rule->disposable && is_kasumiignore_path(logical_path)) {
+        return logical_path.find_first_of("/\\") == std::string_view::npos
+                   ? IgnoreDisposition::Managed
+                   : IgnoreDisposition::IgnoredProtected;
     }
     if (rule->disposable && !is_directory) {
         return IgnoreDisposition::IgnoredDisposable;

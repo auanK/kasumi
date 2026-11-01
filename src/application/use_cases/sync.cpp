@@ -46,6 +46,7 @@ SyncCompleted compute_sync_summary(const reconciliation::Result& result) {
                 summary.download_bytes += op.size;
                 break;
             case Action::DeleteLocal:
+            case Action::DeleteIgnoredLocalFile:
             case Action::DeleteRemote:
                 ++summary.removed;
                 break;

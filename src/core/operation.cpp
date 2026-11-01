@@ -5,6 +5,10 @@
 #include <stdexcept>
 #include <utility>
 
+#include "core/hasher.hpp"
+#include "core/ignore.hpp"
+#include "platform/path.hpp"
+
 namespace kasumi {
 
 bool has_safe_paths(const Operation& operation) {
@@ -15,7 +19,20 @@ bool has_safe_paths(const Operation& operation) {
                    path.end();
     };
 
-    return !unsafe(operation.path) && !unsafe(operation.alt_path);
+    if (unsafe(operation.path) || unsafe(operation.alt_path)) {
+        return false;
+    }
+    if (operation.action == Action::DeleteIgnoredLocalFile) {
+        const auto logical_path =
+            platform::path::to_logical_utf8(operation.path);
+        return !logical_path.empty() && operation.alt_path.empty() &&
+               !operation.exclusive_destination &&
+               hash_from_hex(operation.hash).has_value() &&
+               operation.expected_source_identity.valid &&
+               !ignore::is_kasumiignore_path(logical_path) &&
+               !ignore::is_reserved_internal(logical_path);
+    }
+    return !operation.expected_source_identity.valid;
 }
 
 SyncPlan make_sync_plan(std::vector<Operation> operations,
