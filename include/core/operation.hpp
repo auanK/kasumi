@@ -33,8 +33,10 @@ enum class Action : std::uint8_t {
     DeleteRemote = 8,
     // Removes a directory from the logical remote tree.
     DeleteRemoteDirectory = 9,
+    // Copies a verified local file from path to alt_path.
+    CopyLocal = 10,
     // Sentinel used to dimension the phases.
-    Count = 10
+    Count = 11
 };
 
 // Number of executable values in Action.
@@ -64,6 +66,7 @@ inline constexpr bool is_local_mutation(Action action) noexcept {
         true,
         false,
         false,
+        true,
     };
 
     return is_valid_action(action) && local[action_index(action)];

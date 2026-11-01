@@ -68,6 +68,7 @@ add_subdirectory(support)
 add_library(kasumi_application_fault_test_objects OBJECT
     ${PROJECT_SOURCE_DIR}/src/application/profile_fault_test.cpp
     ${PROJECT_SOURCE_DIR}/src/application/profile.cpp
+    ${PROJECT_SOURCE_DIR}/src/application/sync/mutation_detail.cpp
     ${PROJECT_SOURCE_DIR}/src/application/sync/mutation.cpp
     ${PROJECT_SOURCE_DIR}/src/application/sync/mutation_transaction.cpp
     ${PROJECT_SOURCE_DIR}/src/application/sync/coordinator.cpp
@@ -172,6 +173,7 @@ kasumi_add_test_suite(
         integration/sync/test_remote_availability.cpp
         integration/sync/test_reobservation_safeguards.cpp
         integration/sync/test_mutation_contracts.cpp
+        integration/sync/test_local_copy.cpp
     LIBRARIES
         kasumi_application
         kasumi_sqlite3
@@ -186,12 +188,37 @@ target_compile_definitions(kasumi_test_integration_sync PRIVATE
 if(KASUMI_BUILD_JOURNAL_FAULT_TESTS)
     target_compile_definitions(
         kasumi_test_integration_sync PRIVATE KASUMI_JOURNAL_FAULT_TESTS)
+    target_compile_definitions(
+        kasumi_application_fault_test_objects PRIVATE KASUMI_JOURNAL_FAULT_TESTS)
 endif()
 target_compile_definitions(kasumi_test_integration_sync PRIVATE KASUMI_WORKSPACE_FAULT_TESTS)
+
+kasumi_add_test_suite(
+    kasumi_test_integration_local_copy
+    "integration.local_copy"
+    SOURCES
+        integration/sync/test_local_copy.cpp
+    LIBRARIES
+        kasumi_application
+        kasumi_sqlite3
+        monocypher
+)
+target_sources(kasumi_test_integration_local_copy PRIVATE
+    $<TARGET_OBJECTS:kasumi_application_fault_test_objects>
+)
+target_compile_definitions(kasumi_test_integration_local_copy PRIVATE
+    KASUMI_MUTATION_FAULT_TESTS
+    "KASUMI_SYNC_CRASH_HELPER_PATH=\"$<TARGET_FILE:kasumi_sync_gc_crash_child>\""
+)
+add_dependencies(kasumi_test_integration_local_copy kasumi_sync_gc_crash_child)
+
 
 add_executable(
     kasumi_sync_gc_crash_child
     operational/sync_gc_crash_child.cpp
+)
+target_sources(kasumi_sync_gc_crash_child PRIVATE
+    $<TARGET_OBJECTS:kasumi_application_fault_test_objects>
 )
 target_link_libraries(
     kasumi_sync_gc_crash_child
@@ -202,7 +229,10 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
         -static-libgcc -static-libstdc++ -Wl,--allow-multiple-definition)
 endif()
 target_include_directories(kasumi_sync_gc_crash_child PRIVATE ${PROJECT_SOURCE_DIR}/src)
-target_compile_definitions(kasumi_sync_gc_crash_child PRIVATE KASUMI_PROCESS_CRASH_TESTS)
+target_compile_definitions(kasumi_sync_gc_crash_child PRIVATE
+    KASUMI_PROCESS_CRASH_TESTS
+    KASUMI_MUTATION_FAULT_TESTS
+)
 if(WIN32)
     target_sources(kasumi_sync_gc_crash_child PRIVATE
         "${PROJECT_BINARY_DIR}/long_path_aware.rc")

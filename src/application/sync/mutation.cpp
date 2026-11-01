@@ -6,7 +6,9 @@
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
+#include "platform/private_storage.hpp"
 
+#include <fstream>
 #include <limits>
 #include <optional>
 #include <system_error>
@@ -451,7 +453,7 @@ apply_download(const Operation& operation,
     if (!parent_status) {
         return std::unexpected(parent_status.error());
     }
-    if (std::filesystem::is_symlink(*parent_status) ||
+    if (missing(*parent_status) || std::filesystem::is_symlink(*parent_status) ||
         !std::filesystem::is_directory(*parent_status)) {
         return std::unexpected(
             make_error(MutationErrorCode::UnsafePath,
@@ -903,6 +905,281 @@ apply_move_local(const Operation& operation,
     return {};
 }
 
+MutationResult
+apply_copy_local(const Operation& operation,
+                 std::size_t operation_index,
+                 const std::filesystem::path& source,
+                 const std::filesystem::path& destination,
+                 const platform::Workspace& workspace,
+                 const transaction::OperationProgress& progress) {
+    (void)progress;
+    struct CopyApplyGuard {
+        platform::perf_trace::Token token;
+        ~CopyApplyGuard() {
+            platform::perf_trace::finish("copy apply wall", token);
+        }
+    } copy_apply_guard{platform::perf_trace::begin()};
+
+    if (destination.empty()) {
+        return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
+                                          "copy destination is empty",
+                                          destination,
+                                          operation_index));
+    }
+    const auto parent = destination.parent_path();
+    auto parent_status = read_status(parent, operation_index);
+    if (!parent_status) {
+        return std::unexpected(parent_status.error());
+    }
+    if (std::filesystem::is_symlink(*parent_status) ||
+        !std::filesystem::is_directory(*parent_status)) {
+        return std::unexpected(
+            make_error(MutationErrorCode::UnsafePath,
+                       "destination parent directory is invalid",
+                       parent,
+                       operation_index));
+    }
+
+    auto source_status = read_status(source, operation_index);
+    if (!source_status) {
+        return std::unexpected(source_status.error());
+    }
+    if (std::filesystem::is_symlink(*source_status)) {
+        return std::unexpected(make_error(
+            MutationErrorCode::UnsafePath,
+            "copy does not accept symlink",
+            source,
+            operation_index));
+    }
+    if (missing(*source_status)) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "copy source does not exist",
+                                          source,
+                                          operation_index));
+    }
+    if (!std::filesystem::is_regular_file(*source_status)) {
+        return std::unexpected(
+            make_error(MutationErrorCode::DestinationConflict,
+                       "copy source is not a regular file",
+                       source,
+                       operation_index));
+    }
+
+    std::error_code size_error;
+    const auto actual_source_size = std::filesystem::file_size(source, size_error);
+    if (size_error || actual_source_size != operation.size) {
+        return std::unexpected(make_error(
+            size_error ? MutationErrorCode::LocalIo : MutationErrorCode::IntegrityMismatch,
+            size_error ? size_error.message() : "copy source does not match expected size",
+            source,
+            operation_index));
+    }
+    const auto src_verif_trace = platform::perf_trace::begin();
+    auto verified_source = verify_local_file(source, operation, operation_index);
+    platform::perf_trace::finish("copy source verification wall", src_verif_trace);
+    if (!verified_source) {
+        return std::unexpected(verified_source.error());
+    }
+
+    auto destination_status = read_status(destination, operation_index);
+    if (!destination_status) {
+        return std::unexpected(destination_status.error());
+    }
+    if (std::filesystem::is_symlink(*destination_status)) {
+        return std::unexpected(make_error(
+            MutationErrorCode::UnsafePath,
+            "destination is a symlink",
+            destination,
+            operation_index));
+    }
+    if (!missing(*destination_status)) {
+        const auto recorded_identity_res =
+            detail::read_copy_installed_identity(workspace, operation_index);
+        if (!recorded_identity_res) {
+            return std::unexpected(recorded_identity_res.error());
+        }
+        const auto& recorded_identity = *recorded_identity_res;
+        if (recorded_identity.has_value()) {
+            const auto current_identity =
+                platform::private_storage::query_file_identity(destination);
+            if (current_identity.valid && current_identity == *recorded_identity) {
+                const auto dest_verif_trace = platform::perf_trace::begin();
+                auto verified_dest =
+                    verify_local_file(destination, operation, operation_index);
+                platform::perf_trace::finish(
+                    "copy destination verification wall", dest_verif_trace);
+                if (verified_dest) {
+                    return {};
+                }
+            }
+        }
+        return std::unexpected(
+            make_error(MutationErrorCode::DestinationConflict,
+                       "copy destination already exists",
+                       destination,
+                       operation_index));
+    }
+
+    mutation_fault_test::hit("before_copy_local_staging", source);
+
+    const auto candidate = detail::copy_candidate_path(
+        destination, workspace, operation_index);
+    auto candidate_status = read_status(candidate, operation_index);
+    if (!candidate_status) {
+        return std::unexpected(candidate_status.error());
+    }
+    if (!missing(*candidate_status)) {
+        return std::unexpected(
+            make_error(MutationErrorCode::DestinationConflict,
+                       "local copy candidate already exists",
+                       candidate,
+                       operation_index));
+    }
+
+    mutation_fault_test::hit("during_copy_local_staging_race", candidate);
+
+    auto staged_file = platform::private_storage::create_private_file(candidate);
+    if (!staged_file) {
+        return std::unexpected(
+            make_error(staged_file.error().is_collision
+                           ? MutationErrorCode::DestinationConflict
+                           : MutationErrorCode::LocalIo,
+                       staged_file.error().message,
+                       candidate,
+                       operation_index));
+    }
+
+    struct StagingGuard {
+        platform::private_storage::PrivateOutputFile* file = nullptr;
+        bool keep = false;
+        ~StagingGuard() {
+            if (!keep && file != nullptr) {
+                platform::private_storage::remove_private_file_if_owned(*file);
+            }
+        }
+    } staging_guard{&staged_file.value()};
+
+    const auto staging_trace = platform::perf_trace::begin();
+    std::ifstream in(source, std::ios::binary);
+    if (!in) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "failed to open copy source",
+                                          source,
+                                          operation_index));
+    }
+
+    std::array<char, 64 * 1024> buffer;
+    std::uint64_t total_copied = 0;
+    while (in) {
+        in.read(buffer.data(), buffer.size());
+        const auto bytes_read = in.gcount();
+        if (bytes_read > 0) {
+            mutation_fault_test::hit("during_copy_local_write", candidate);
+            auto written = platform::private_storage::write_private_file(
+                *staging_guard.file, buffer.data(), static_cast<std::size_t>(bytes_read));
+            if (!written) {
+                return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                                  "failed to write staging bytes: " + written.error(),
+                                                  candidate,
+                                                  operation_index));
+            }
+            total_copied += static_cast<std::uint64_t>(bytes_read);
+        }
+    }
+    if (in.bad()) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "failed reading copy source",
+                                          source,
+                                          operation_index));
+    }
+    in.close();
+
+    auto flushed = platform::private_storage::flush_and_close_private_file(*staging_guard.file);
+    if (!flushed) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "failed closing staging file: " + flushed.error(),
+                                          candidate,
+                                          operation_index));
+    }
+    platform::perf_trace::finish("copy staging wall", staging_trace);
+    platform::perf_trace::count("copy bytes copied", total_copied);
+
+    std::error_code candidate_size_error;
+    const auto candidate_size = std::filesystem::file_size(candidate, candidate_size_error);
+    if (candidate_size_error || candidate_size != operation.size) {
+        return std::unexpected(make_error(
+            candidate_size_error ? MutationErrorCode::LocalIo : MutationErrorCode::IntegrityMismatch,
+            candidate_size_error ? candidate_size_error.message() : "staging file size mismatch",
+            candidate,
+            operation_index));
+    }
+
+    const auto dest_verif_trace = platform::perf_trace::begin();
+    auto verified_staging = verify_local_file(candidate, operation, operation_index);
+    platform::perf_trace::finish("copy destination verification wall", dest_verif_trace);
+    if (!verified_staging) {
+        return std::unexpected(verified_staging.error());
+    }
+
+    mutation_fault_test::hit("before_copy_local_durability", candidate);
+    const auto durability_trace = platform::perf_trace::begin();
+    auto synced = platform::durability::sync_file(candidate);
+    platform::perf_trace::finish("copy durability wall", durability_trace);
+    if (!synced) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          synced.error(),
+                                          candidate,
+                                          operation_index));
+    }
+
+    auto recorded_id = detail::record_copy_installed_identity(
+        workspace, operation_index, staging_guard.file->identity);
+    if (!recorded_id) {
+        return std::unexpected(recorded_id.error());
+    }
+
+    mutation_fault_test::hit("before_copy_local_install", destination);
+    const auto install_trace = platform::perf_trace::begin();
+    auto installed = platform::durability::install_without_overwrite(
+        candidate, destination);
+    platform::perf_trace::finish("copy install wall", install_trace);
+    if (!installed) {
+        return std::unexpected(make_error(
+            installed.error() == std::errc::file_exists
+                ? MutationErrorCode::DestinationConflict
+            : installed.error() == std::errc::too_many_symbolic_link_levels
+                ? MutationErrorCode::UnsafePath
+                : MutationErrorCode::LocalIo,
+            "conditional install failed: " + installed.error().message(),
+            destination,
+            operation_index));
+    }
+    staging_guard.keep = true;
+    mutation_fault_test::hit("after_copy_local_install", destination);
+
+    const auto dest_id = platform::private_storage::query_file_identity(destination);
+    if (!dest_id.valid || !(dest_id == staging_guard.file->identity)) {
+        return std::unexpected(make_error(MutationErrorCode::DestinationConflict,
+                                          "installed destination identity mismatch / externally replaced",
+                                          destination,
+                                          operation_index));
+    }
+
+    synced = platform::durability::sync_parent_directory(destination);
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (mutation_fault_test::g_fail_copy_post_install_dir_sync_return) {
+        synced = std::unexpected("simulated destination directory sync return error");
+    }
+#endif
+    if (!synced) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          synced.error(),
+                                          destination,
+                                          operation_index));
+    }
+    return {};
+}
+
 std::string mutation_code_name(MutationErrorCode code) noexcept {
     switch (code) {
         case MutationErrorCode::InvalidOperation:
@@ -1046,6 +1323,25 @@ apply_operation(const Operation& operation,
                 return std::unexpected(destination.error());
             }
             return apply_move_local(operation,
+                                    operation_index,
+                                    *source,
+                                    *destination,
+                                    workspace,
+                                    progress);
+        }
+
+        case Action::CopyLocal: {
+            auto source =
+                resolve_local_path(local_root, operation.path, operation_index);
+            if (!source) {
+                return std::unexpected(source.error());
+            }
+            auto destination = resolve_local_path(
+                local_root, operation.alt_path, operation_index);
+            if (!destination) {
+                return std::unexpected(destination.error());
+            }
+            return apply_copy_local(operation,
                                     operation_index,
                                     *source,
                                     *destination,

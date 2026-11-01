@@ -1,6 +1,7 @@
 #ifndef KASUMI_APPLICATION_SYNC_MUTATION_FAULT_TEST_HPP
 #define KASUMI_APPLICATION_SYNC_MUTATION_FAULT_TEST_HPP
 
+#include <atomic>
 #include <filesystem>
 #include <string_view>
 
@@ -14,6 +15,10 @@ namespace kasumi::application::sync::mutation_fault_test {
 
 #ifdef KASUMI_MUTATION_FAULT_TESTS
 using Hook = std::function<void(std::string_view point, const std::filesystem::path& path)>;
+
+inline std::atomic<bool> g_fail_copy_identity_sync_return{false};
+inline std::atomic<bool> g_fail_copy_identity_dir_sync_return{false};
+inline std::atomic<bool> g_fail_copy_post_install_dir_sync_return{false};
 
 inline Hook& global_hook_instance() {
     static Hook hook;

@@ -6,6 +6,9 @@
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 #include "process_crash_test_hook.hpp"
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+#include "application/sync/mutation_fault_test.hpp"
+#endif
 
 #include <cstdlib>
 #include <iostream>
@@ -132,6 +135,13 @@ int main() {
     auto storage = crash_storage(*opened);
 
     if (mode == "sync") {
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+        kasumi::application::sync::mutation_fault_test::set_hook(
+            [](std::string_view point, const std::filesystem::path& subject) {
+                kasumi::platform::process_crash_test_hook::pause_at(
+                    point, kasumi::platform::path::to_utf8(subject));
+            });
+#endif
         kasumi::application::detail::OperationContext context{
             .operation = kasumi::application::Operation::Sync,
             .runtime = runtime,

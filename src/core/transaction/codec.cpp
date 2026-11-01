@@ -52,6 +52,8 @@ persisted_action_id(kasumi::Action action) noexcept {
             return 8;
         case kasumi::Action::MoveLocal:
             return 9;
+        case kasumi::Action::CopyLocal:
+            return 10;
         case kasumi::Action::Count:
             return std::nullopt;
     }
@@ -81,6 +83,8 @@ action_from_persisted_id(std::uint8_t id) noexcept {
             return kasumi::Action::DeleteRemoteDirectory;
         case 9:
             return kasumi::Action::MoveLocal;
+        case 10:
+            return kasumi::Action::CopyLocal;
         default:
             return std::nullopt;
     }

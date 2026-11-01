@@ -62,7 +62,8 @@ std::string action_name(Action action) {
             return "CreateRemoteDirectory";
         case Action::MoveLocal:
             return "MoveLocal";
-            return "CreateRemoteDirectory";
+        case Action::CopyLocal:
+            return "CopyLocal";
         case Action::Download:
             return "Download";
         case Action::DeleteLocal:
@@ -710,10 +711,10 @@ TEST(ReconciliationLocalMoveTest,
         kasumi::sync_plan_phase(copy_result->plan, Action::MoveLocal).empty());
     expect_operations(copy_result->plan.operations,
                       {signature(Action::CreateLocalDirectory, "B"),
-                       signature(Action::Download,
+                       signature(Action::CopyLocal,
+                                 "A/one.bin",
+                                 kasumi::hash_hex(dup1.hash),
                                  "B/one.bin",
-                                 kasumi::hash_hex(dest1.hash),
-                                 {},
-                                 dest1.size)});
+                                 dup1.size)});
 }
 } // namespace

@@ -12,6 +12,7 @@
 #include "runtime/resolver.hpp"
 #include "transport/transport.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <expected>
@@ -19,6 +20,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace kasumi::application::sync::coordinator::detail {
 
@@ -27,6 +29,19 @@ inline constexpr std::size_t upload_batch_max_items = 256;
 inline constexpr std::uint64_t upload_batch_max_bytes =
     256 * 1024 * 1024; // 256 MiB
 inline constexpr auto transaction_resumption_ttl = std::chrono::hours(24);
+
+inline void
+order_local_copies(std::span<const transaction::Operation> operations,
+                   std::vector<std::size_t>& order) {
+    // Keep setup in plan order; copy before source mutations.
+    const auto first = std::ranges::find_if(order, [&](std::size_t index) {
+        return action_index(operations[index].action) >=
+               action_index(Action::MoveLocal);
+    });
+    std::stable_partition(first, order.end(), [&](std::size_t index) {
+        return operations[index].action == Action::CopyLocal;
+    });
+}
 
 // Creates a coordinator failure with optional operation context.
 Error make_error(ErrorCode code,

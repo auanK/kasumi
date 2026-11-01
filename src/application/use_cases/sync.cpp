@@ -55,6 +55,8 @@ SyncCompleted compute_sync_summary(const reconciliation::Result& result) {
             case Action::MoveLocal:
                 ++summary.renamed;
                 break;
+            case Action::CopyLocal:
+                break;
             case Action::CreateLocalDirectory:
             case Action::CreateRemoteDirectory:
                 ++summary.created_dirs;

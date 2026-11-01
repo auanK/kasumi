@@ -60,6 +60,7 @@ inline constexpr std::array<std::string_view, ActionCount> action_metrics{
     "action/DeleteLocalDirectory",
     "action/DeleteRemote",
     "action/DeleteRemoteDirectory",
+    "action/CopyLocal",
 };
 
 Error make_error(ErrorCode code,
@@ -1114,8 +1115,11 @@ bool has_local_rollback_work(const transaction::Record& record) noexcept {
     for (std::size_t index = 0; index < record.plan.operations.size();
          ++index) {
         if (is_local_mutation(record.plan.operations[index].action) &&
-            record.progress[index].state >=
-                transaction::OperationState::BackupCreated) {
+            (record.progress[index].state >=
+                 transaction::OperationState::BackupCreated ||
+             (record.plan.operations[index].action == Action::CopyLocal &&
+              record.progress[index].state ==
+                  transaction::OperationState::Prepared))) {
             return true;
         }
     }
@@ -1141,7 +1145,10 @@ rollback_transaction(const journal::Paths& paths,
              --index) {
             const auto operation_index = index - 1;
             const auto& progress = record.progress[operation_index];
-            if (progress.state < transaction::OperationState::BackupCreated) {
+            if (progress.state < transaction::OperationState::BackupCreated &&
+                !(record.plan.operations[operation_index].action ==
+                      Action::CopyLocal &&
+                  progress.state == transaction::OperationState::Prepared)) {
                 continue;
             }
             auto condition = mutation::detail::effective_destination(
@@ -1209,8 +1216,12 @@ rollback_local_mutations(transaction::Record& record,
         const auto operation_index = index - 1;
         if (!is_local_mutation(
                 record.plan.operations[operation_index].action) ||
-            record.progress[operation_index].state <
-                transaction::OperationState::BackupCreated) {
+            (record.progress[operation_index].state <
+                 transaction::OperationState::BackupCreated &&
+             !(record.plan.operations[operation_index].action ==
+                   Action::CopyLocal &&
+               record.progress[operation_index].state ==
+                   transaction::OperationState::Prepared))) {
             continue;
         }
         auto condition = mutation::detail::effective_destination(
@@ -1885,6 +1896,9 @@ execute(const runtime::RuntimeData& runtime_data,
         if (operation.action == Action::MoveLocal) {
             platform::perf_trace::count("move planned count");
         }
+        if (operation.action == Action::CopyLocal) {
+            platform::perf_trace::count("copy planned count");
+        }
     }
     const auto preparation_saves_before =
         platform::perf_trace::get_count("journal durable saves");
@@ -2051,6 +2065,8 @@ execute(const runtime::RuntimeData& runtime_data,
             }
         }
     }
+    std::vector<std::size_t> remaining_operations;
+    remaining_operations.reserve(record->plan.operations.size());
     for (std::size_t index = 0; index < record->plan.operations.size();
          ++index) {
         if (!content_upload_required[index] ||
@@ -2062,8 +2078,12 @@ execute(const runtime::RuntimeData& runtime_data,
             continue;
         }
         if (std::ranges::find(apply_order, index) == apply_order.end()) {
-            apply_order.push_back(index);
+            remaining_operations.push_back(index);
         }
+    }
+    detail::order_local_copies(record->plan.operations, remaining_operations);
+    for (const auto index : remaining_operations) {
+        apply_order.push_back(index);
     }
 
     const auto mark_applied =
@@ -2071,6 +2091,10 @@ execute(const runtime::RuntimeData& runtime_data,
         record->progress[index].state = transaction::OperationState::Applied;
         if (record->plan.operations[index].action == Action::MoveLocal) {
             platform::perf_trace::count("move applied count");
+            return {};
+        }
+        if (record->plan.operations[index].action == Action::CopyLocal) {
+            platform::perf_trace::count("copy applied count");
             return {};
         }
         if (is_logical_mutation(record->plan.operations[index].action)) {
