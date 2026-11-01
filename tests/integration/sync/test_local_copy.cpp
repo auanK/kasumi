@@ -1119,7 +1119,79 @@ TEST(LocalCopyDependenciesTest, RecoveryPreservesDependencyOrder) {
     EXPECT_TRUE(local_entry_exists(node_b, "moved.txt"));
 }
 
+TEST(LocalCopyDependenciesTest, CopyRecoveryRejectsTruncatedMarkerWithExistingDestination) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "rec_trunc_marker"));
+    write_local_file(node, "src.txt", "TruncatedMarkerTestData");
 
+    Operation op{
+        .action = Action::CopyLocal,
+        .path = "src.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("TruncatedMarkerTestData")),
+        .alt_path = "dst.txt",
+        .size = 23,
+    };
+    OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+    auto ws = make_test_workspace(node.profile / "ws_trunc");
+
+    ASSERT_TRUE(kasumi::application::sync::mutation::apply_operation(
+        op, 0, node.local, node.context.storage, node.key, ws,
+        progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr).has_value());
+
+    const auto marker_path = kasumi::platform::workspace_file(ws, 0, ".copy_identity");
+    ASSERT_TRUE(std::filesystem::exists(marker_path));
+    {
+        std::ofstream out(marker_path, std::ios::binary | std::ios::trunc);
+        char partial[4] = {'C', 'P', 'D', 'I'};
+        out.write(partial, 4);
+    }
+
+    auto replayed = kasumi::application::sync::mutation::apply_operation(
+        op, 0, node.local, node.context.storage, node.key, ws,
+        progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr);
+
+    ASSERT_FALSE(replayed.has_value());
+    EXPECT_EQ(replayed.error().code, kasumi::application::sync::mutation::MutationErrorCode::IntegrityMismatch);
+    EXPECT_TRUE(local_entry_exists(node, "dst.txt"));
+    const auto rolled = kasumi::application::sync::mutation::rollback_operation(
+        op, 0, node.local, ws, progress);
+    ASSERT_FALSE(rolled);
+    EXPECT_EQ(rolled.error().code,
+              kasumi::application::sync::mutation::MutationErrorCode::IntegrityMismatch);
+    EXPECT_TRUE(std::filesystem::exists(marker_path));
+    EXPECT_TRUE(local_entry_exists(node, "dst.txt"));
+}
+
+TEST(LocalCopyDependenciesTest, CopyRecoveryRejectsMissingMarkerWithExistingDestination) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "rec_missing_marker"));
+    write_local_file(node, "src.txt", "MissingMarkerTestData");
+
+    Operation op{
+        .action = Action::CopyLocal,
+        .path = "src.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("MissingMarkerTestData")),
+        .alt_path = "dst.txt",
+        .size = 21,
+    };
+    OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+    auto ws = make_test_workspace(node.profile / "ws_missing_marker");
+
+    ASSERT_TRUE(kasumi::application::sync::mutation::apply_operation(
+        op, 0, node.local, node.context.storage, node.key, ws,
+        progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr).has_value());
+
+    const auto marker_path = kasumi::platform::workspace_file(ws, 0, ".copy_identity");
+    std::filesystem::remove(marker_path);
+
+    auto replayed = kasumi::application::sync::mutation::apply_operation(
+        op, 0, node.local, node.context.storage, node.key, ws,
+        progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr);
+
+    EXPECT_FALSE(replayed.has_value());
+    EXPECT_EQ(replayed.error().code, kasumi::application::sync::mutation::MutationErrorCode::DestinationConflict);
+    EXPECT_TRUE(local_entry_exists(node, "dst.txt"));
+}
 
 TEST(LocalCopyDependenciesTest, CopyRecoveryRejectsDivergentIdentity) {
     SyncNode node;
@@ -1692,8 +1764,80 @@ TEST(LocalCopyStagingTest, CopyIndependentOfSourceAfterInstall) {
     EXPECT_EQ(read_local_file(node, "dst.txt"), "DataToBeDeleted");
 }
 
+TEST(LocalCopyStagingTest, CopyMarkerDurabilitySyncFailureAbortsWithoutInstallingDestination) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "stg_dur_fail"));
+    write_local_file(node, "src.txt", "DurabilityTestData");
 
+    Operation op{
+        .action = Action::CopyLocal,
+        .path = "src.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("DurabilityTestData")),
+        .alt_path = "dst.txt",
+        .size = 18,
+    };
+    OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+    auto ws = make_test_workspace(node.profile / "ws_dur_fail");
 
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path&) {
+            if (point == "before_copy_identity_sync") {
+                throw std::runtime_error("simulated identity sync failure");
+            }
+        });
+
+    EXPECT_THROW({
+        (void)kasumi::application::sync::mutation::apply_operation(
+            op, 0, node.local, node.context.storage, node.key, ws,
+            progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr);
+    }, std::runtime_error);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_FALSE(local_entry_exists(node, "dst.txt"));
+    EXPECT_TRUE(local_entry_exists(node, "src.txt"));
+}
+
+TEST(LocalCopyStagingTest, CopyMarkerDirectoryDurabilitySyncFailureAborts) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "stg_dir_dur_fail"));
+    write_local_file(node, "src.txt", "DirectoryDurabilityData");
+
+    Operation op{
+        .action = Action::CopyLocal,
+        .path = "src.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("DirectoryDurabilityData")),
+        .alt_path = "dst.txt",
+        .size = 23,
+    };
+    OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+    auto ws = make_test_workspace(node.profile / "ws_dir_dur");
+
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path&) {
+            if (point == "before_copy_identity_dir_sync") {
+                throw std::runtime_error("simulated identity directory sync failure");
+            }
+        });
+
+    EXPECT_THROW({
+        (void)kasumi::application::sync::mutation::apply_operation(
+            op, 0, node.local, node.context.storage, node.key, ws,
+            progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr);
+    }, std::runtime_error);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_FALSE(local_entry_exists(node, "dst.txt"));
+    EXPECT_TRUE(local_entry_exists(node, "src.txt"));
+}
+
+TEST(LocalCopyStagingTest, CopyRecordIdentityRejectsInvalidIdentity) {
+    auto ws = make_test_workspace("test_ws_invalid_id");
+    kasumi::platform::private_storage::FileIdentity invalid_id{};
+    invalid_id.valid = false;
+    auto res = kasumi::application::sync::mutation::detail::record_copy_installed_identity(
+        ws, 0, invalid_id);
+    EXPECT_FALSE(res.has_value());
+}
 
 // ============================================================================
 // GRUPO E — ROLLBACK
@@ -2093,6 +2237,56 @@ TEST(LocalCopyRollbackTest, CopyRollbackPropagatesRemovalFailure) {
     }
 }
 
+TEST(LocalCopyRollbackTest, CopyRollbackPropagatesMarkerRemovalFailure) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "rb_marker_remove_error"));
+    write_local_file(node, "src.txt", "Payload");
+    Operation op{.action = Action::CopyLocal,
+                 .path = "src.txt",
+                 .hash = kasumi::hash_hex(kasumi::hasher::hash_string("Payload")),
+                 .alt_path = "dst.txt",
+                 .size = 7};
+    OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+    auto ws = make_test_workspace(node.profile / "ws_marker_remove_error");
+    ASSERT_TRUE(kasumi::application::sync::mutation::apply_operation(
+        op, 0, node.local, node.context.storage, node.key, ws, progress,
+        kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr));
+    const auto marker = kasumi::platform::workspace_file(ws, 0, ".copy_identity");
+#if defined(_WIN32)
+    const auto attributes = GetFileAttributesW(marker.c_str());
+    ASSERT_NE(attributes, INVALID_FILE_ATTRIBUTES);
+    ASSERT_TRUE(SetFileAttributesW(marker.c_str(), attributes | FILE_ATTRIBUTE_READONLY));
+#else
+    const auto permissions = std::filesystem::status(ws.root).permissions();
+    bool hook_hit = false;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path&) {
+            if (point == "before_remove_file_if_hash") {
+                hook_hit = true;
+                std::filesystem::permissions(ws.root,
+                    std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
+            }
+        });
+#endif
+    const auto rolled = kasumi::application::sync::mutation::rollback_operation(
+        op, 0, node.local, ws, progress);
+#if defined(_WIN32)
+    EXPECT_TRUE(SetFileAttributesW(marker.c_str(), attributes));
+#else
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+    std::filesystem::permissions(ws.root, permissions);
+    ASSERT_TRUE(hook_hit);
+#endif
+    ASSERT_FALSE(rolled);
+    EXPECT_EQ(rolled.error().code,
+              kasumi::application::sync::mutation::MutationErrorCode::LocalIo);
+    EXPECT_FALSE(local_entry_exists(node, "dst.txt"));
+    EXPECT_TRUE(std::filesystem::exists(marker));
+    EXPECT_EQ(read_local_file(node, "src.txt"), "Payload");
+    ASSERT_TRUE(kasumi::application::sync::mutation::rollback_operation(
+        op, 0, node.local, ws, progress));
+    EXPECT_FALSE(std::filesystem::exists(marker));
+}
 
 TEST(LocalCopyRollbackTest, CopyRollbackAfterLaterOperationFails) {
     SyncNode node;
@@ -2526,8 +2720,103 @@ TEST(LocalCopyStagingTest, CopyCleanupResultDistinguishesIdentityMismatchFromAlr
     EXPECT_EQ(res_absent, kasumi::platform::private_storage::CleanupResult::AlreadyAbsent);
 }
 
+TEST(LocalCopyStagingTest, CopyMarkerDurabilitySyncFileErrorReturnAborts) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "stg_dur_ret_01"));
+    write_local_file(node, "src.txt", "DurabilityTestDataSyncFile");
 
+    Operation op{
+        .action = Action::CopyLocal,
+        .path = "src.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("DurabilityTestDataSyncFile")),
+        .alt_path = "dst.txt",
+        .size = 26,
+    };
+    OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+    auto ws = make_test_workspace(node.profile / "ws_dur_ret_01");
 
+    kasumi::application::sync::mutation_fault_test::g_fail_copy_identity_sync_return = true;
+
+    auto res = kasumi::application::sync::mutation::apply_operation(
+        op, 0, node.local, node.context.storage, node.key, ws,
+        progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr);
+
+    kasumi::application::sync::mutation_fault_test::g_fail_copy_identity_sync_return = false;
+
+    EXPECT_FALSE(res.has_value());
+    EXPECT_EQ(res.error().code, kasumi::application::sync::mutation::MutationErrorCode::LocalIo);
+    EXPECT_FALSE(local_entry_exists(node, "dst.txt"));
+    EXPECT_TRUE(local_entry_exists(node, "src.txt"));
+    EXPECT_EQ(progress.state, OperationState::Prepared);
+}
+
+TEST(LocalCopyStagingTest, CopyMarkerDirectoryDurabilitySyncErrorReturnAborts) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "stg_dur_ret_02"));
+    write_local_file(node, "src.txt", "DurabilityTestDataSyncDir");
+
+    Operation op{
+        .action = Action::CopyLocal,
+        .path = "src.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("DurabilityTestDataSyncDir")),
+        .alt_path = "dst.txt",
+        .size = 25,
+    };
+    OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+    auto ws = make_test_workspace(node.profile / "ws_dur_ret_02");
+
+    kasumi::application::sync::mutation_fault_test::g_fail_copy_identity_dir_sync_return = true;
+
+    auto res = kasumi::application::sync::mutation::apply_operation(
+        op, 0, node.local, node.context.storage, node.key, ws,
+        progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr);
+
+    kasumi::application::sync::mutation_fault_test::g_fail_copy_identity_dir_sync_return = false;
+
+    EXPECT_FALSE(res.has_value());
+    EXPECT_EQ(res.error().code, kasumi::application::sync::mutation::MutationErrorCode::LocalIo);
+    EXPECT_FALSE(local_entry_exists(node, "dst.txt"));
+    EXPECT_TRUE(local_entry_exists(node, "src.txt"));
+    EXPECT_EQ(progress.state, OperationState::Prepared);
+}
+
+TEST(LocalCopyApplicationTest, CopyPostInstallDirectorySyncErrorPropagates) {
+    SyncNode node;
+    ASSERT_TRUE(init_sync_node(node, "dur_post_install_fail"));
+    write_local_file(node, "src.txt", "PostInstallDirSyncTestData");
+
+    Operation op{
+        .action = Action::CopyLocal,
+        .path = "src.txt",
+        .hash = kasumi::hash_hex(kasumi::hasher::hash_string("PostInstallDirSyncTestData")),
+        .alt_path = "dst.txt",
+        .size = 26,
+    };
+    OperationProgress progress{.backup_slot = 0, .state = OperationState::Prepared};
+    auto ws = make_test_workspace(node.profile / "ws_post_install_fail");
+
+    kasumi::application::sync::mutation_fault_test::g_fail_copy_post_install_dir_sync_return = true;
+
+    auto res = kasumi::application::sync::mutation::apply_operation(
+        op, 0, node.local, node.context.storage, node.key, ws,
+        progress, kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr);
+
+    kasumi::application::sync::mutation_fault_test::g_fail_copy_post_install_dir_sync_return = false;
+
+    EXPECT_FALSE(res.has_value());
+    EXPECT_EQ(res.error().code, kasumi::application::sync::mutation::MutationErrorCode::LocalIo);
+    // Destination was installed before directory sync failed
+    EXPECT_TRUE(local_entry_exists(node, "dst.txt"));
+    // Progress state must remain Prepared, NOT Applied
+    EXPECT_EQ(progress.state, OperationState::Prepared);
+
+    // Rollback must verify ownership and safely remove installed destination
+    auto rolled = kasumi::application::sync::mutation::rollback_operation(
+        op, 0, node.local, ws, progress);
+    EXPECT_TRUE(rolled.has_value());
+    EXPECT_FALSE(local_entry_exists(node, "dst.txt"));
+    EXPECT_TRUE(local_entry_exists(node, "src.txt"));
+}
 
 #if defined(KASUMI_SYNC_CRASH_HELPER_PATH)
 TEST(LocalCopyDependenciesTest, CopyRecoveryPreInstallCrashRecoversCandidateOrFailsClosed) {

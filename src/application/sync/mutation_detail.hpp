@@ -4,12 +4,14 @@
 #include "application/sync/mutation.hpp"
 #include "core/transaction/types.hpp"
 #include "crypto/file_crypto.hpp"
+#include "platform/private_storage.hpp"
 #include "platform/workspace.hpp"
 #include "transport/transport.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -122,6 +124,23 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
                           const std::filesystem::path& local_root,
                           const std::filesystem::path& destination,
                           std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+
+// Records the unique FileIdentity of an installed or staging local copy.
+std::expected<void, MutationError>
+record_copy_installed_identity(const platform::Workspace& workspace,
+                               std::size_t operation_index,
+                               const platform::private_storage::FileIdentity& identity);
+
+// Reads the recorded FileIdentity of an installed local copy.
+std::expected<std::optional<platform::private_storage::FileIdentity>,
+              MutationError>
+read_copy_installed_identity(const platform::Workspace& workspace,
+                             std::size_t operation_index);
+
+// Clears the recorded FileIdentity for an operation.
+std::expected<void, MutationError>
+clear_copy_installed_identity(const platform::Workspace& workspace,
+                              std::size_t operation_index);
 
 } // namespace kasumi::application::sync::mutation::detail
 

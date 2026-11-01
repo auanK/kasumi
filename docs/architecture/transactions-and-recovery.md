@@ -95,6 +95,31 @@ for confirmation, cache validation, retirement, and durability limits.
 
 ## Local mutation contract and external writers
 
+Kasumi coordinates cooperative instances through its existing exclusion mechanisms.
+External changes observable before destructive operations must be checked; detected
+identity, type, or content conflicts preserve the external object. This contract
+does not require exclusion against a non-cooperative process deliberately replacing
+a directory entry after every final identity check.
+
+`CopyLocal` preserves its source, creates staging exclusively, verifies exact size
+and BLAKE3, and installs without overwriting an existing destination. Its versioned
+`.copy_identity` marker records the staging object's native identity before
+installation; the installed identity must still match. Rollback requires that
+identity, a regular destination and the expected content. With no destination,
+absent staging is idempotent, owned staging can be removed, unknown staging is a
+conflict, and a corrupt marker is an integrity error. I/O and directory-sync errors
+remain errors; required ownership evidence is retained until rollback succeeds.
+Recovery checks these effects even while the journal still records `Prepared`,
+including crashes immediately before and after installation, without changing
+the journal format or fetching remote Content for a valid local copy.
+
+On POSIX, private-file cleanup compares `fstat` and `lstat` regular-file identities
+(device/inode) with an open descriptor, or the recorded native identity without
+one, then calls `unlink` on that pathname. It uses no intermediate rename or
+quarantine. The identity check and `unlink` are separate operations: this is a
+residual TOCTOU window, not atomic deletion conditional on identity. Windows
+retains deletion by handle using `SetFileInformationByHandle`.
+
 Kasumi is a home file synchronizer for a small set of user-owned devices, not a backup service, database, immutable store, or general filesystem transaction system. It verifies received content, detects local changes observed before final validation, reports filesystem errors, and recovers Kasumi's own journaled effects. It does not retain every historical version or isolate a mutation from arbitrary processes running as the same user. Keep an independent backup of important files; that backup remains necessary even when Sync and recovery work normally.
 
 Linux supports normal local Sync mutations. A Download verifies the staged plaintext and its expected hash, then installs it without overwrite when the destination was absent or atomically replaces the existing file after checking the prepared destination and backup. `DeleteLocal` checks the prepared state before removal; `RenameLocal` and `MoveLocal` check the source, preserve a verified backup in `.transactions/<id>/`, and use a no-overwrite rename (`MoveLocal` also verifies the expected file size and BLAKE3 hash). Rollback restores a verified backup by atomic replacement or no-overwrite installation, removes a verified `RenameLocal` / `MoveLocal` destination after restoring its source from backup, and removes only an exact transaction-produced Download where the saved progress and content identify that effect. Directory mutations retain their type and emptiness checks. Recovery uses the current authenticated Journal and verified backup; a staged `.kasumi-rollback-candidate-*` is reused only after its hash matches that backup. Files named `.kasumi-custody-*`, `.kasumi-custody-delete-*`, or `.kasumi-rollback-custody-*` from earlier builds are unsupported artifacts: the scanner keeps them out of Sync, but recovery does not adopt, restore from, or delete them. Preserve and inspect those files independently if encountered.

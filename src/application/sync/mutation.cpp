@@ -6,6 +6,7 @@
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
+#include "platform/private_storage.hpp"
 
 #include <fstream>
 #include <limits>
@@ -911,6 +912,7 @@ apply_copy_local(const Operation& operation,
                  const std::filesystem::path& destination,
                  const platform::Workspace& workspace,
                  const transaction::OperationProgress& progress) {
+    (void)progress;
     struct CopyApplyGuard {
         platform::perf_trace::Token token;
         ~CopyApplyGuard() {
@@ -991,12 +993,24 @@ apply_copy_local(const Operation& operation,
             operation_index));
     }
     if (!missing(*destination_status)) {
-        if (progress.state == transaction::OperationState::Applied) {
-            const auto dest_verif_trace = platform::perf_trace::begin();
-            auto verified_dest = verify_local_file(destination, operation, operation_index);
-            platform::perf_trace::finish("copy destination verification wall", dest_verif_trace);
-            if (verified_dest) {
-                return {};
+        const auto recorded_identity_res =
+            detail::read_copy_installed_identity(workspace, operation_index);
+        if (!recorded_identity_res) {
+            return std::unexpected(recorded_identity_res.error());
+        }
+        const auto& recorded_identity = *recorded_identity_res;
+        if (recorded_identity.has_value()) {
+            const auto current_identity =
+                platform::private_storage::query_file_identity(destination);
+            if (current_identity.valid && current_identity == *recorded_identity) {
+                const auto dest_verif_trace = platform::perf_trace::begin();
+                auto verified_dest =
+                    verify_local_file(destination, operation, operation_index);
+                platform::perf_trace::finish(
+                    "copy destination verification wall", dest_verif_trace);
+                if (verified_dest) {
+                    return {};
+                }
             }
         }
         return std::unexpected(
@@ -1022,15 +1036,28 @@ apply_copy_local(const Operation& operation,
                        operation_index));
     }
 
+    mutation_fault_test::hit("during_copy_local_staging_race", candidate);
+
+    auto staged_file = platform::private_storage::create_private_file(candidate);
+    if (!staged_file) {
+        return std::unexpected(
+            make_error(staged_file.error().is_collision
+                           ? MutationErrorCode::DestinationConflict
+                           : MutationErrorCode::LocalIo,
+                       staged_file.error().message,
+                       candidate,
+                       operation_index));
+    }
+
     struct StagingGuard {
-        const std::filesystem::path& path;
+        platform::private_storage::PrivateOutputFile* file = nullptr;
         bool keep = false;
         ~StagingGuard() {
-            if (!keep) {
-                remove_temporary_file(path);
+            if (!keep && file != nullptr) {
+                platform::private_storage::remove_private_file_if_owned(*file);
             }
         }
-    } staging_guard{candidate};
+    } staging_guard{&staged_file.value()};
 
     const auto staging_trace = platform::perf_trace::begin();
     std::ifstream in(source, std::ios::binary);
@@ -1038,14 +1065,6 @@ apply_copy_local(const Operation& operation,
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
                                           "failed to open copy source",
                                           source,
-                                          operation_index));
-    }
-    mutation_fault_test::hit("during_copy_local_staging_race", candidate);
-    std::ofstream out(candidate, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "failed to create staging file",
-                                          candidate,
                                           operation_index));
     }
 
@@ -1056,10 +1075,11 @@ apply_copy_local(const Operation& operation,
         const auto bytes_read = in.gcount();
         if (bytes_read > 0) {
             mutation_fault_test::hit("during_copy_local_write", candidate);
-            out.write(buffer.data(), bytes_read);
-            if (!out) {
+            auto written = platform::private_storage::write_private_file(
+                *staging_guard.file, buffer.data(), static_cast<std::size_t>(bytes_read));
+            if (!written) {
                 return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                                  "failed to write staging bytes",
+                                                  "failed to write staging bytes: " + written.error(),
                                                   candidate,
                                                   operation_index));
             }
@@ -1072,11 +1092,12 @@ apply_copy_local(const Operation& operation,
                                           source,
                                           operation_index));
     }
-    out.close();
     in.close();
-    if (out.fail()) {
+
+    auto flushed = platform::private_storage::flush_and_close_private_file(*staging_guard.file);
+    if (!flushed) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "failed closing staging file",
+                                          "failed closing staging file: " + flushed.error(),
                                           candidate,
                                           operation_index));
     }
@@ -1111,6 +1132,12 @@ apply_copy_local(const Operation& operation,
                                           operation_index));
     }
 
+    auto recorded_id = detail::record_copy_installed_identity(
+        workspace, operation_index, staging_guard.file->identity);
+    if (!recorded_id) {
+        return std::unexpected(recorded_id.error());
+    }
+
     mutation_fault_test::hit("before_copy_local_install", destination);
     const auto install_trace = platform::perf_trace::begin();
     auto installed = platform::durability::install_without_overwrite(
@@ -1128,10 +1155,22 @@ apply_copy_local(const Operation& operation,
             operation_index));
     }
     staging_guard.keep = true;
-
     mutation_fault_test::hit("after_copy_local_install", destination);
 
+    const auto dest_id = platform::private_storage::query_file_identity(destination);
+    if (!dest_id.valid || !(dest_id == staging_guard.file->identity)) {
+        return std::unexpected(make_error(MutationErrorCode::DestinationConflict,
+                                          "installed destination identity mismatch / externally replaced",
+                                          destination,
+                                          operation_index));
+    }
+
     synced = platform::durability::sync_parent_directory(destination);
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (mutation_fault_test::g_fail_copy_post_install_dir_sync_return) {
+        synced = std::unexpected("simulated destination directory sync return error");
+    }
+#endif
     if (!synced) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
                                           synced.error(),

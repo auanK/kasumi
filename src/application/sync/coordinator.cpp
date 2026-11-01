@@ -1115,8 +1115,11 @@ bool has_local_rollback_work(const transaction::Record& record) noexcept {
     for (std::size_t index = 0; index < record.plan.operations.size();
          ++index) {
         if (is_local_mutation(record.plan.operations[index].action) &&
-            record.progress[index].state >=
-                transaction::OperationState::BackupCreated) {
+            (record.progress[index].state >=
+                 transaction::OperationState::BackupCreated ||
+             (record.plan.operations[index].action == Action::CopyLocal &&
+              record.progress[index].state ==
+                  transaction::OperationState::Prepared))) {
             return true;
         }
     }
@@ -1142,7 +1145,10 @@ rollback_transaction(const journal::Paths& paths,
              --index) {
             const auto operation_index = index - 1;
             const auto& progress = record.progress[operation_index];
-            if (progress.state < transaction::OperationState::BackupCreated) {
+            if (progress.state < transaction::OperationState::BackupCreated &&
+                !(record.plan.operations[operation_index].action ==
+                      Action::CopyLocal &&
+                  progress.state == transaction::OperationState::Prepared)) {
                 continue;
             }
             auto condition = mutation::detail::effective_destination(
@@ -1210,8 +1216,12 @@ rollback_local_mutations(transaction::Record& record,
         const auto operation_index = index - 1;
         if (!is_local_mutation(
                 record.plan.operations[operation_index].action) ||
-            record.progress[operation_index].state <
-                transaction::OperationState::BackupCreated) {
+            (record.progress[operation_index].state <
+                 transaction::OperationState::BackupCreated &&
+             !(record.plan.operations[operation_index].action ==
+                   Action::CopyLocal &&
+               record.progress[operation_index].state ==
+                   transaction::OperationState::Prepared))) {
             continue;
         }
         auto condition = mutation::detail::effective_destination(

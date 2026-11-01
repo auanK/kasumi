@@ -1059,14 +1059,18 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
             if (err == ENOENT) {
                 return CleanupResult::AlreadyAbsent;
             }
+            if (err == EACCES || err == EPERM || err == EROFS) {
+                return CleanupResult::AccessDenied;
+            }
             return CleanupResult::FilesystemError;
         }
-        if (st_fd.st_dev != st_path.st_dev || st_fd.st_ino != st_path.st_ino ||
-            !S_ISREG(st_path.st_mode)) {
+        if (!S_ISREG(st_fd.st_mode) || !S_ISREG(st_path.st_mode) ||
+            st_fd.st_dev != st_path.st_dev || st_fd.st_ino != st_path.st_ino) {
             close_private_file(file);
             return CleanupResult::IdentityMismatch;
         }
 
+        // shortcut: unlink can race; revisit for adversarial writers.
         if (::unlink(file.path.c_str()) != 0) {
             const auto err = errno;
             close_private_file(file);
@@ -1157,19 +1161,17 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
     if (!current_id.valid || !(current_id == file.identity)) {
         return CleanupResult::IdentityMismatch;
     }
-
-    std::error_code remove_err;
-    const bool removed = std::filesystem::remove(file.path, remove_err);
-    if (removed && !remove_err) {
-        return CleanupResult::Removed;
+    if (::unlink(file.path.c_str()) != 0) {
+        const auto err = errno;
+        if (err == ENOENT) {
+            return CleanupResult::AlreadyAbsent;
+        }
+        if (err == EACCES || err == EPERM || err == EROFS) {
+            return CleanupResult::AccessDenied;
+        }
+        return CleanupResult::FilesystemError;
     }
-    if (remove_err == std::errc::no_such_file_or_directory) {
-        return CleanupResult::AlreadyAbsent;
-    }
-    if (remove_err == std::errc::permission_denied) {
-        return CleanupResult::AccessDenied;
-    }
-    return CleanupResult::FilesystemError;
+    return CleanupResult::Removed;
 #endif
 }
 

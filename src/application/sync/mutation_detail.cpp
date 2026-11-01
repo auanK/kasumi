@@ -2,10 +2,13 @@
 
 #include "core/hasher.hpp"
 #include "crypto/content.hpp"
+#include "platform/durability.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
+#include "mutation_fault_test.hpp"
 
 #include <algorithm>
+#include <fstream>
 #include <iterator>
 #include <system_error>
 #include <utility>
@@ -304,6 +307,198 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
     return PreparedUploadCiphertext{.plaintext_size = operation.size,
                                     .ciphertext_sha256 =
                                         encrypted_file->ciphertext_sha256};
+}
+
+namespace {
+
+#pragma pack(push, 1)
+struct DiskCopyIdentity {
+    std::uint32_t magic{0x49445043}; // 'CPDI'
+    std::uint16_t version{1};
+    std::uint16_t reserved{0};
+    std::uint64_t volume_or_dev{0};
+    std::uint64_t file_id_low{0};
+    std::uint64_t file_id_high{0};
+    std::uint32_t valid{1};
+};
+#pragma pack(pop)
+
+} // namespace
+
+std::expected<void, MutationError>
+record_copy_installed_identity(const platform::Workspace& workspace,
+                               std::size_t operation_index,
+                               const platform::private_storage::FileIdentity& identity) {
+    if (!identity.valid) {
+        return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
+                                          "cannot record invalid copy identity",
+                                          workspace.root,
+                                          operation_index));
+    }
+    if (workspace.root.empty()) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "workspace root is empty",
+                                          workspace.root,
+                                          operation_index));
+    }
+    const auto marker_path =
+        platform::workspace_file(workspace, operation_index, ".copy_identity");
+    if (marker_path.empty()) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "marker path is empty",
+                                          workspace.root,
+                                          operation_index));
+    }
+
+    std::ofstream out(marker_path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "failed to create copy identity marker",
+                                          marker_path,
+                                          operation_index));
+    }
+    const DiskCopyIdentity disk{
+        .magic = 0x49445043,
+        .version = 1,
+        .reserved = 0,
+        .volume_or_dev = identity.volume_or_dev,
+        .file_id_low = identity.file_id_low,
+        .file_id_high = identity.file_id_high,
+        .valid = 1,
+    };
+    out.write(reinterpret_cast<const char*>(&disk), sizeof(disk));
+    out.flush();
+    if (out.fail()) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "failed writing copy identity marker",
+                                          marker_path,
+                                          operation_index));
+    }
+    out.close();
+    if (out.fail()) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "failed closing copy identity marker",
+                                          marker_path,
+                                          operation_index));
+    }
+
+    mutation_fault_test::hit("before_copy_identity_sync", marker_path);
+    auto synced = platform::durability::sync_file(marker_path);
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (mutation_fault_test::g_fail_copy_identity_sync_return) {
+        synced = std::unexpected("simulated sync_file return error");
+    }
+#endif
+    if (!synced) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          synced.error(),
+                                          marker_path,
+                                          operation_index));
+    }
+
+    mutation_fault_test::hit("before_copy_identity_dir_sync", marker_path);
+    auto dir_synced = platform::durability::sync_parent_directory(marker_path);
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (mutation_fault_test::g_fail_copy_identity_dir_sync_return) {
+        dir_synced = std::unexpected("simulated sync_parent_directory return error");
+    }
+#endif
+    if (!dir_synced) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          dir_synced.error(),
+                                          marker_path,
+                                          operation_index));
+    }
+    return {};
+}
+
+std::expected<std::optional<platform::private_storage::FileIdentity>, MutationError>
+read_copy_installed_identity(const platform::Workspace& workspace,
+                             std::size_t operation_index) {
+    if (workspace.root.empty()) {
+        return std::optional<platform::private_storage::FileIdentity>{std::nullopt};
+    }
+    const auto marker_path =
+        platform::workspace_file(workspace, operation_index, ".copy_identity");
+    if (marker_path.empty()) {
+        return std::optional<platform::private_storage::FileIdentity>{std::nullopt};
+    }
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(marker_path, ec);
+    if (ec) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "failed checking copy marker existence: " + ec.message(),
+                                          marker_path,
+                                          operation_index));
+    }
+    if (!exists) {
+        return std::optional<platform::private_storage::FileIdentity>{std::nullopt};
+    }
+
+    const auto sz = std::filesystem::file_size(marker_path, ec);
+    if (ec) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "failed reading marker file size: " + ec.message(),
+                                          marker_path,
+                                          operation_index));
+    }
+    if (sz != sizeof(DiskCopyIdentity)) {
+        return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
+                                          "corrupted copy identity marker size",
+                                          marker_path,
+                                          operation_index));
+    }
+
+    std::ifstream in(marker_path, std::ios::binary);
+    if (!in) {
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          "failed opening copy identity marker",
+                                          marker_path,
+                                          operation_index));
+    }
+    DiskCopyIdentity disk{};
+    in.read(reinterpret_cast<char*>(&disk), sizeof(disk));
+    if (in.gcount() != sizeof(disk)) {
+        return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
+                                          "incomplete read of copy identity marker",
+                                          marker_path,
+                                          operation_index));
+    }
+    if (disk.magic != 0x49445043 || disk.version != 1 || disk.valid != 1) {
+        return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
+                                          "invalid copy identity marker header or content",
+                                          marker_path,
+                                          operation_index));
+    }
+
+    return std::optional<platform::private_storage::FileIdentity>{
+        platform::private_storage::FileIdentity{
+            .volume_or_dev = disk.volume_or_dev,
+            .file_id_low = disk.file_id_low,
+            .file_id_high = disk.file_id_high,
+            .valid = true,
+        }};
+}
+
+std::expected<void, MutationError>
+clear_copy_installed_identity(const platform::Workspace& workspace,
+                              std::size_t operation_index) {
+    const auto marker =
+        platform::workspace_file(workspace, operation_index, ".copy_identity");
+    std::error_code error;
+    std::filesystem::remove(marker, error);
+    if (error)
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          error.message(),
+                                          marker,
+                                          operation_index));
+    auto synced = platform::durability::sync_parent_directory(marker);
+    if (!synced)
+        return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                          synced.error(),
+                                          marker,
+                                          operation_index));
+    return {};
 }
 
 } // namespace kasumi::application::sync::mutation::detail

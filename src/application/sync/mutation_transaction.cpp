@@ -442,9 +442,57 @@ current_file_hash(const std::filesystem::path& path,
 }
 
 std::expected<void, MutationError>
-remove_file_if_hash(const std::filesystem::path& path,
-                    std::string_view expected_hash,
-                    std::size_t operation_index) {
+remove_owned_file(const std::filesystem::path& path,
+                  const platform::private_storage::FileIdentity& identity,
+                  std::size_t operation_index) {
+    platform::private_storage::PrivateOutputFile file{.path = path,
+                                                      .identity = identity};
+    const auto cleanup =
+        platform::private_storage::remove_private_file_if_owned(file);
+    using platform::private_storage::CleanupResult;
+    switch (cleanup) {
+        case CleanupResult::Removed:
+            break;
+        case CleanupResult::AlreadyAbsent: {
+            auto status = read_status(path, operation_index);
+            if (!status)
+                return std::unexpected(status.error());
+            if (missing(*status))
+                break;
+            return std::unexpected(
+                make_error(MutationErrorCode::DestinationConflict,
+                           "file reappeared during rollback removal",
+                           path,
+                           operation_index));
+        }
+        case CleanupResult::IdentityMismatch:
+            return std::unexpected(make_error(
+                MutationErrorCode::DestinationConflict,
+                "local file identity mismatch during rollback removal",
+                path,
+                operation_index));
+        case CleanupResult::AccessDenied:
+        case CleanupResult::FilesystemError:
+        default:
+            return std::unexpected(
+                make_error(MutationErrorCode::LocalIo,
+                           "failed removing owned file during rollback",
+                           path,
+                           operation_index));
+    }
+    auto synced = platform::durability::sync_parent_directory(path);
+    if (!synced)
+        return std::unexpected(make_error(
+            MutationErrorCode::LocalIo, synced.error(), path, operation_index));
+    return {};
+}
+
+std::expected<void, MutationError> remove_file_if_hash(
+    const std::filesystem::path& path,
+    std::string_view expected_hash,
+    std::size_t operation_index,
+    const platform::private_storage::FileIdentity* expected_identity =
+        nullptr) {
     auto status = read_status(path, operation_index);
     if (!status) {
         return std::unexpected(status.error());
@@ -472,13 +520,17 @@ remove_file_if_hash(const std::filesystem::path& path,
                        operation_index));
     }
     mutation_fault_test::hit("before_remove_file_if_hash", path);
-    std::error_code error;
-    if (!std::filesystem::remove(path, error) || error) {
-        return std::unexpected(make_error(
-            MutationErrorCode::LocalIo,
-            error ? error.message() : "file disappeared during rollback",
-            path,
-            operation_index));
+    if (expected_identity != nullptr) {
+        return remove_owned_file(path, *expected_identity, operation_index);
+    } else {
+        std::error_code error;
+        if (!std::filesystem::remove(path, error) || error) {
+            return std::unexpected(make_error(
+                MutationErrorCode::LocalIo,
+                error ? error.message() : "file disappeared during rollback",
+                path,
+                operation_index));
+        }
     }
     auto synced = platform::durability::sync_parent_directory(path);
     if (!synced) {
@@ -668,42 +720,66 @@ rollback_file_operation(const Operation& operation,
         if (!destination) {
             return std::unexpected(destination.error());
         }
-        auto candidate = detail::copy_candidate_path(
-            *destination, workspace, operation_index);
-        std::error_code candidate_error;
-        std::filesystem::remove(candidate, candidate_error);
+        const auto recorded_identity =
+            detail::read_copy_installed_identity(workspace, operation_index);
+        if (!recorded_identity)
+            return std::unexpected(recorded_identity.error());
 
-        auto dest_status = read_status(*destination, operation_index);
-        if (!dest_status) {
+        const auto candidate = detail::copy_candidate_path(
+            *destination, workspace, operation_index);
+        const auto candidate_status = read_status(candidate, operation_index);
+        if (!candidate_status)
+            return std::unexpected(candidate_status.error());
+        if (!missing(*candidate_status)) {
+            if (!recorded_identity->has_value() ||
+                !std::filesystem::is_regular_file(*candidate_status) ||
+                std::filesystem::is_symlink(*candidate_status)) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::DestinationConflict,
+                               "copy candidate ownership cannot be verified "
+                               "during rollback",
+                               candidate,
+                               operation_index));
+            }
+            auto removed = remove_owned_file(
+                candidate, **recorded_identity, operation_index);
+            if (!removed)
+                return removed;
+        }
+
+        const auto dest_status = read_status(*destination, operation_index);
+        if (!dest_status)
             return std::unexpected(dest_status.error());
+        if (!missing(*dest_status)) {
+            if (!recorded_identity->has_value() ||
+                !std::filesystem::is_regular_file(*dest_status) ||
+                std::filesystem::is_symlink(*dest_status)) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::DestinationConflict,
+                               "copy destination ownership or type cannot be "
+                               "verified during rollback",
+                               *destination,
+                               operation_index));
+            }
+            const auto current_identity =
+                platform::private_storage::query_file_identity(*destination);
+            if (!current_identity.valid ||
+                !(current_identity == **recorded_identity)) {
+                return std::unexpected(make_error(
+                    MutationErrorCode::DestinationConflict,
+                    "copy destination was externally replaced during rollback",
+                    *destination,
+                    operation_index));
+            }
+            auto removed = remove_file_if_hash(*destination,
+                                               operation.hash,
+                                               operation_index,
+                                               &**recorded_identity);
+            if (!removed)
+                return removed;
         }
-        if (missing(*dest_status)) {
-            return {};
-        }
-        if (std::filesystem::is_symlink(*dest_status) ||
-            !std::filesystem::is_regular_file(*dest_status)) {
-            return std::unexpected(
-                make_error(MutationErrorCode::DestinationConflict,
-                           "copy destination is not a regular file during rollback",
-                           *destination,
-                           operation_index));
-        }
-        auto actual = current_file_hash(*destination, *dest_status, operation_index);
-        if (!actual) {
-            return std::unexpected(actual.error());
-        }
-        if (actual->empty()) {
-            return {};
-        }
-        if (*actual == operation.hash) {
-            return remove_file_if_hash(
-                *destination, operation.hash, operation_index);
-        }
-        return std::unexpected(
-            make_error(MutationErrorCode::DestinationConflict,
-                       "copy destination was externally modified",
-                       *destination,
-                       operation_index));
+        return detail::clear_copy_installed_identity(workspace,
+                                                     operation_index);
     }
 
     if (operation.action == Action::RenameLocal ||
@@ -1213,8 +1289,11 @@ rollback_operation_impl(const Operation& operation,
     if (!valid_progress)
         return std::unexpected(valid_progress.error());
     if (!is_local_mutation(operation.action) ||
-        progress.state == transaction::OperationState::Pending ||
-        progress.state == transaction::OperationState::Prepared) {
+        progress.state == transaction::OperationState::Pending) {
+        return {};
+    }
+    if (progress.state == transaction::OperationState::Prepared &&
+        operation.action != Action::CopyLocal) {
         return {};
     }
     auto workspace_valid = validate_workspace(workspace, operation_index);

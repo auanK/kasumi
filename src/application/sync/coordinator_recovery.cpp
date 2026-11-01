@@ -305,8 +305,11 @@ bool has_applied_local_mutation(const transaction::Record& record) noexcept {
     for (std::size_t index = 0; index < record.plan.operations.size();
          ++index) {
         if (is_local_mutation(record.plan.operations[index].action) &&
-            record.progress[index].state >=
-                transaction::OperationState::BackupCreated) {
+            (record.progress[index].state >=
+                 transaction::OperationState::BackupCreated ||
+             (record.plan.operations[index].action == Action::CopyLocal &&
+              record.progress[index].state ==
+                  transaction::OperationState::Prepared))) {
             return true;
         }
     }
