@@ -10124,9 +10124,127 @@ TEST(MutationPlanSequenceTest, RetryUsesConfirmedRenameAndOriginalPreparedProgre
     check_mutation_plan_sequence(false, false, true, true);
 }
 
+TEST(MutationPlanSequenceTest,
+     RepairReplayResumesAfterConfirmedRenameAndInterruptedDownload) {
+    namespace sync = kasumi::application::sync;
+    auto workspace =
+        kasumi::test::make_temp_workspace("repair-replay-sequence");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto profile = root / "profile";
+    const auto local = root / "local";
+    ASSERT_TRUE(std::filesystem::create_directory(profile));
+    ASSERT_TRUE(std::filesystem::create_directory(local));
+    kasumi::test::write_text(local / "file.txt", "B-V2");
+    kasumi::test::write_text(local / "repair.txt", "REPAIR");
+    kasumi::test::write_text(root / "remote-source", "REMOTE");
+    const auto remote_hash = kasumi::hasher::hash_string("REMOTE");
+    const auto repair_hash = kasumi::hasher::hash_string("REPAIR");
+    const auto runtime = make_runtime(profile, local, root / "storage");
+    const auto head = std::string(64, 'a');
+    kasumi::Snapshot tree{
+        {{.path = "", .is_directory = true},
+         {.path = "conflict.txt",
+          .hash = kasumi::hasher::hash_string("B-V2"),
+          .size = 4},
+         {.path = "file.txt", .hash = remote_hash, .size = 6},
+         {.path = "repair.txt", .hash = repair_hash, .size = 6}}};
+    kasumi::finalize_snapshot(tree);
+    ASSERT_TRUE(kasumi::state_storage::initialize(runtime.database_path));
+    ASSERT_TRUE(kasumi::state_storage::save_state(
+        runtime.database_path,
+        {.tree = tree,
+         .height = 0,
+         .commit_id = head,
+         .ciphertext_id = std::string(64, 'c')}));
+    auto record = sync::journal::create_record(
+        0,
+        0,
+        kasumi::make_sync_plan({{.action = kasumi::Action::RenameLocal,
+                                 .path = "file.txt",
+                                 .alt_path = "conflict.txt"},
+                                {.action = kasumi::Action::Upload,
+                                 .path = "repair.txt",
+                                 .hash = kasumi::hash_hex(repair_hash),
+                                 .size = 6},
+                                {.action = kasumi::Action::Download,
+                                 .path = "file.txt",
+                                 .hash = kasumi::hash_hex(remote_hash),
+                                 .size = 6}},
+                               0),
+        false,
+        head);
+    ASSERT_TRUE(record) << record.error();
+    record->observed_base_id = head;
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    auto transaction = sync::coordinator::detail::create_transaction_workspace(
+        profile, record->operation_id, key);
+    ASSERT_TRUE(transaction) << transaction.error().detail;
+    for (std::size_t i = 0; i < record->plan.operations.size(); ++i) {
+        auto prepared =
+            sync::mutation::prepare_operation(record->plan.operations[i],
+                                              i,
+                                              local,
+                                              *transaction,
+                                              record->progress[i],
+                                              record->plan.operations);
+        ASSERT_TRUE(prepared) << prepared.error().detail;
+        record->progress[i] = *prepared;
+    }
+    record->phase = kasumi::transaction::Phase::FilesStaged;
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths);
+    ASSERT_TRUE(sync::journal::save(*paths, *record, key));
+    AmbiguousPublicationState* state = nullptr;
+    auto storage = make_ambiguous_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    add_storage_object(storage, root / "remote-source", remote_hash);
+    bool interrupted = false;
+    state->on_content_get = [&]() -> kasumi::transport::Result {
+        const auto pending = sync::journal::load(*paths, key);
+        EXPECT_TRUE(pending && *pending);
+        if (pending && *pending &&
+            (*pending)->progress[1].state ==
+                kasumi::transaction::OperationState::Applied) {
+            interrupted = true;
+            EXPECT_EQ((*pending)->progress[0].state,
+                      kasumi::transaction::OperationState::Applied);
+            return std::unexpected(kasumi::transport::Error{
+                .code = kasumi::transport::ErrorCode::Io,
+                .message = "download interrupted after confirmed rename"});
+        }
+        return {};
+    };
+    const auto first =
+        sync::coordinator::recover_if_needed(runtime, storage, key);
+    ASSERT_FALSE(first);
+    ASSERT_TRUE(interrupted) << first.error().detail;
+    EXPECT_EQ(kasumi::test::read_text(local / "conflict.txt"), "B-V2");
+    EXPECT_FALSE(std::filesystem::exists(local / "file.txt"));
+    const auto pending = sync::journal::load(*paths, key);
+    ASSERT_TRUE(pending && *pending);
+    EXPECT_EQ((*pending)->progress[0].state,
+              kasumi::transaction::OperationState::Applied);
+    EXPECT_EQ((*pending)->progress[1].state,
+              kasumi::transaction::OperationState::Applied);
+    EXPECT_NE((*pending)->progress[2].state,
+              kasumi::transaction::OperationState::Applied);
+    state->on_content_get = {};
+    const auto recovered =
+        sync::coordinator::recover_if_needed(runtime, storage, key);
+    ASSERT_TRUE(recovered) << recovered.error().detail;
+    EXPECT_EQ(kasumi::test::read_text(local / "file.txt"), "REMOTE");
+    EXPECT_EQ(kasumi::test::read_text(local / "conflict.txt"), "B-V2");
+    EXPECT_EQ(kasumi::test::read_text(local / "repair.txt"), "REPAIR");
+    EXPECT_FALSE(std::filesystem::exists(paths->final_path));
+    const auto repeated =
+        sync::coordinator::recover_if_needed(runtime, storage, key);
+    ASSERT_TRUE(repeated) << repeated.error().detail;
+    EXPECT_EQ(*repeated, sync::coordinator::RecoveryResult::NoJournal);
+}
+
 void check_mutation_sequence_recovery(bool rename_confirmed,
-                                bool download_installed,
-                                bool download_confirmed) {
+                                      bool download_installed,
+                                      bool download_confirmed) {
     namespace sync = kasumi::application::sync;
     auto workspace = kasumi::test::make_temp_workspace("mutation-sequence-recovery");
     const auto root = kasumi::test::workspace_root(workspace);

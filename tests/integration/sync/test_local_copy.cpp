@@ -819,6 +819,92 @@ TEST(LocalCopyReconciliationTest, CopySelectionIsDeterministic) {
     EXPECT_TRUE(has_operation(result->plan, Action::CopyLocal, "a_source.txt", "dest.txt"));
 }
 
+TEST(LocalCopyReconciliationTest, CopySourcesSurviveConflictRenames) {
+    for (const bool stable_source : {false, true}) {
+        SCOPED_TRACE(stable_source);
+        auto base = make_tree({make_file_row("A.txt", "BASE")});
+        auto local =
+            make_tree({make_file_row("A.txt", "LOCAL", test_mtime + 100)});
+        auto remote =
+            make_tree({make_file_row("A.txt", "REMOTE", test_mtime + 200),
+                       make_file_row("copy.txt", "LOCAL")});
+        if (stable_source) {
+            for (auto* tree : {&base, &local, &remote}) {
+                tree->rows.push_back(make_file_row("safe.txt", "LOCAL"));
+                kasumi::finalize_snapshot(*tree);
+            }
+        }
+        const auto result = kasumi::reconciliation::reconcile(
+            make_reconcile_input(local, base, remote));
+        ASSERT_TRUE(result) << result.error().detail;
+        ASSERT_TRUE(has_operation(result->plan, Action::RenameLocal, "A.txt"));
+        EXPECT_FALSE(has_operation(
+            result->plan, Action::CopyLocal, "A.txt", "copy.txt"));
+        if (stable_source)
+            EXPECT_TRUE(has_operation(
+                result->plan, Action::CopyLocal, "safe.txt", "copy.txt"));
+        else
+            EXPECT_TRUE(
+                has_operation(result->plan, Action::Download, "copy.txt"));
+    }
+}
+
+TEST(LocalCopyDependenciesTest, CopyWithConflictRenameUsesSurvivingSource) {
+    SyncNode publisher, receiver;
+    ASSERT_TRUE(init_sync_node(publisher, "copy-conflict-publisher"));
+    ASSERT_TRUE(init_sync_node(
+        receiver, "copy-conflict-receiver", publisher.storage_root));
+    write_local_file(publisher, "A.txt", "BASE");
+    write_local_file(publisher, "safe.txt", "LOCAL");
+    ASSERT_TRUE(run_node_sync(publisher));
+    ASSERT_TRUE(run_node_sync(receiver));
+
+    const auto now = std::filesystem::file_time_type::clock::now();
+    write_local_file(receiver, "A.txt", "LOCAL");
+    std::filesystem::last_write_time(receiver.local / "A.txt",
+                                     now + std::chrono::hours{1});
+    write_local_file(publisher, "A.txt", "REMOTE");
+    std::filesystem::last_write_time(publisher.local / "A.txt",
+                                     now + std::chrono::hours{2});
+    write_local_file(publisher, "nested/copy.txt", "LOCAL");
+    ASSERT_TRUE(run_node_sync(publisher));
+
+    reset_content_counts(receiver);
+    const auto synced = run_node_sync(receiver);
+    ASSERT_TRUE(synced) << synced.error().detail;
+    EXPECT_EQ(read_local_file(receiver, "A.txt"), "REMOTE");
+    EXPECT_EQ(read_local_file(receiver, "A.txt.kasumiconflict_local"), "LOCAL");
+    EXPECT_EQ(read_local_file(receiver, "safe.txt"), "LOCAL");
+    EXPECT_EQ(read_local_file(receiver, "nested/copy.txt"), "LOCAL");
+    EXPECT_EQ(receiver.counters.content_gets, 1U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+    const auto repeated = run_node_sync(receiver);
+    ASSERT_TRUE(repeated) << repeated.error().detail;
+    EXPECT_EQ(receiver.counters.content_gets, 1U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+}
+
+TEST(LocalCopyDependenciesTest, CopyConsumesSourceBeforeDownloadReplacement) {
+    SyncNode publisher, receiver;
+    ASSERT_TRUE(init_sync_node(publisher, "copy-replace-publisher"));
+    ASSERT_TRUE(init_sync_node(
+        receiver, "copy-replace-receiver", publisher.storage_root));
+    write_local_file(publisher, "A.txt", "OLD");
+    ASSERT_TRUE(run_node_sync(publisher));
+    ASSERT_TRUE(run_node_sync(receiver));
+    write_local_file(publisher, "A.txt", "NEW");
+    write_local_file(publisher, "copy.txt", "OLD");
+    ASSERT_TRUE(run_node_sync(publisher));
+
+    reset_content_counts(receiver);
+    const auto synced = run_node_sync(receiver);
+    ASSERT_TRUE(synced) << synced.error().detail;
+    EXPECT_EQ(read_local_file(receiver, "A.txt"), "NEW");
+    EXPECT_EQ(read_local_file(receiver, "copy.txt"), "OLD");
+    EXPECT_EQ(receiver.counters.content_gets, 1U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+}
+
 // ============================================================================
 // GRUPO B — DEPENDÊNCIAS (MOVE + COPY)
 // ============================================================================
