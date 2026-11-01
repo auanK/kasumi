@@ -145,6 +145,46 @@ TEST(IgnoreTest, DisposableModifierStillExcludesMatchingFileFromManagedTree) {
     EXPECT_FALSE(is_ignored("cache.tmp", list, false));
 }
 
+TEST(IgnoreTest, DispositionUsesLastMatchingRuleAndKeepsIgnoreFileManaged) {
+    const auto disposable = parse_ignore_rules("(?d)*.bak\n");
+    EXPECT_EQ(classify_ignore("file.bak", false, disposable),
+              IgnoreDisposition::IgnoredDisposable);
+    EXPECT_EQ(classify_ignore(".kasumiignore", false, disposable),
+              IgnoreDisposition::Managed);
+    EXPECT_FALSE(disposable.parse_error.has_value());
+
+    const auto broad_disposable = parse_ignore_rules("(?d)*\n");
+    EXPECT_EQ(classify_ignore(".kasumiignore", false, broad_disposable),
+              IgnoreDisposition::IgnoredDisposable);
+
+    const auto protected_later =
+        parse_ignore_rules("(?d)*.bak\n*.bak\n");
+    EXPECT_EQ(classify_ignore("file.bak", false, protected_later),
+              IgnoreDisposition::IgnoredProtected);
+
+    const auto disposable_later =
+        parse_ignore_rules("*.bak\n(?d)*.bak\n");
+    EXPECT_EQ(classify_ignore("file.bak", false, disposable_later),
+              IgnoreDisposition::IgnoredDisposable);
+
+    const auto negated =
+        parse_ignore_rules("(?d)*.bak\n!important.bak\n");
+    EXPECT_EQ(classify_ignore("important.bak", false, negated),
+              IgnoreDisposition::Managed);
+}
+
+TEST(IgnoreTest, MalformedDisposableRulesRejectTheWholeListWithLineNumber) {
+    for (const auto* invalid : {"(?d)", "(?d)!file", "!(?d)file",
+                                "(?d)cache/", "(?x)file",
+                                "(?d)(?x)file"}) {
+        const auto list = parse_ignore_rules(
+            std::string("valid.txt\n") + invalid + "\nother.txt\n");
+        ASSERT_TRUE(list.parse_error.has_value()) << invalid;
+        EXPECT_EQ(list.parse_error->line, 2U) << invalid;
+        EXPECT_TRUE(list.rules.empty()) << invalid;
+    }
+}
+
 TEST(IgnoreTest, GlobPatternsQuestionMarkAndStar) {
     const auto list = parse_ignore_rules("doc?.txt\nfoo*bar\n");
 
