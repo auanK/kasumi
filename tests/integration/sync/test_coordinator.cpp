@@ -1542,7 +1542,6 @@ TEST(SyncCoordinatorTest,
         kasumi::test::workspace_path(workspace, "transaction");
     ASSERT_TRUE(std::filesystem::create_directories(local / "dir"));
     ASSERT_TRUE(std::filesystem::create_directories(transaction));
-    kasumi::test::write_text(local / "dir/unexpected.txt", "important");
     const kasumi::Operation operation{
         .action = kasumi::Action::DeleteLocalDirectory, .path = "dir"};
     kasumi::transaction::OperationProgress progress{.backup_slot = 0};
@@ -1550,6 +1549,7 @@ TEST(SyncCoordinatorTest,
     auto prepared = kasumi::application::sync::mutation::prepare_operation(
         operation, 0, local, tx, progress);
     ASSERT_TRUE(prepared.has_value()) << prepared.error().detail;
+    kasumi::test::write_text(local / "dir/unexpected.txt", "important");
     kasumi::transport::Transport unavailable{};
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
 
@@ -1558,11 +1558,68 @@ TEST(SyncCoordinatorTest,
 
     ASSERT_FALSE(applied.has_value());
     EXPECT_EQ(applied.error().code,
-              kasumi::application::sync::mutation::MutationErrorCode::LocalIo);
+              kasumi::application::sync::mutation::MutationErrorCode::
+                  DestinationConflict);
     EXPECT_TRUE(kasumi::application::sync::mutation::rollback_operation(
         operation, 0, local, tx, *prepared));
     EXPECT_EQ(kasumi::test::read_text(local / "dir/unexpected.txt"),
               "important");
+}
+
+TEST(ScanEvidenceTest,
+     IgnoredSymlinksAreOpaqueAndUnignoredSymlinksAreUnexpected) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("ignored-symlink-evidence");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto target = kasumi::test::workspace_path(workspace, "target");
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    ASSERT_TRUE(std::filesystem::create_directories(target));
+    kasumi::test::write_text(target / "secret.txt", "outside");
+    kasumi::test::write_text(local / ".kasumiignore", "ignored-link\n");
+
+    const auto create_link = [&](const std::filesystem::path& link) {
+        std::error_code error;
+        std::filesystem::create_directory_symlink(target, link, error);
+#ifdef _WIN32
+        if (error) {
+            error.clear();
+            if (!create_test_junction(link, target, error)) {
+                ADD_FAILURE() << "could not create directory link: "
+                              << error.message();
+                return false;
+            }
+        }
+#endif
+        if (error) {
+            ADD_FAILURE() << "could not create directory link: "
+                          << error.message();
+            return false;
+        }
+        return true;
+    };
+    ASSERT_TRUE(create_link(local / "ignored-link"));
+    ASSERT_TRUE(create_link(local / "unexpected-link"));
+
+    const auto scanned =
+        kasumi::application::observation::scanner::scan_result(local);
+    ASSERT_TRUE(scanned.has_value())
+        << kasumi::application::observation::scanner::describe(
+               scanned.error());
+    EXPECT_EQ(kasumi::find_row(scanned->snapshot, "ignored-link"), nullptr);
+    EXPECT_EQ(kasumi::find_row(scanned->snapshot, "unexpected-link"), nullptr);
+    EXPECT_EQ(kasumi::find_row(scanned->snapshot, "ignored-link/secret.txt"),
+              nullptr);
+    EXPECT_NE(std::ranges::find(scanned->physical_evidence.ignored_entries,
+                                "ignored-link"),
+              scanned->physical_evidence.ignored_entries.end());
+
+    const auto root_evidence = std::ranges::find(
+        scanned->physical_evidence.directories,
+        std::string_view{},
+        &kasumi::reconciliation::LocalDirectoryEvidence::path);
+    ASSERT_NE(root_evidence, scanned->physical_evidence.directories.end());
+    EXPECT_TRUE(root_evidence->has_ignored_descendants);
+    EXPECT_TRUE(root_evidence->has_unexpected_descendants);
 }
 
 TEST(SyncCoordinatorTest, RenameMutationIsExclusiveAndIdempotent) {
@@ -6340,6 +6397,51 @@ TEST(ReconciliationTest, LocalUploadChangesSharedTree) {
     EXPECT_FALSE(result->requires_storage_repair);
     EXPECT_TRUE(result->requires_publication);
     EXPECT_EQ(result->target_generation, input.storage.generation + 1);
+}
+
+TEST(ReconciliationTest, UnexpectedSymlinkEvidenceDoesNotSuppressDirectoryRemoval) {
+    auto input = empty_publication_input();
+    const auto managed_hash = kasumi::hasher::hash_string("managed");
+    input.local_tree.rows.push_back(
+        kasumi::NodeRow{.path = "Projects", .is_directory = true});
+    input.local_tree.rows.push_back(
+        kasumi::NodeRow{.path = "Projects/main.cpp",
+                        .hash = managed_hash,
+                        .size = 7});
+    kasumi::finalize_snapshot(input.local_tree);
+    input.base_tree = input.local_tree;
+    input.storage.tree =
+        kasumi::Snapshot{.rows = {{.path = "", .is_directory = true}}};
+    kasumi::finalize_snapshot(input.storage.tree);
+    input.storage.history_present = true;
+    input.storage.logical_heads = {std::string(64, 'a')};
+    input.local_physical_evidence.directories = {
+        {.path = "",
+         .has_ignored_descendants = true,
+         .has_managed_descendants = true,
+         .has_unexpected_descendants = true},
+        {.path = "Projects",
+         .has_ignored_descendants = true,
+         .has_managed_descendants = true,
+         .has_unexpected_descendants = true},
+    };
+    input.local_physical_evidence.ignored_entries = {"Projects/local.cache"};
+
+    const auto result = kasumi::reconciliation::reconcile(input);
+
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(kasumi::find_row(result->candidate_shared_tree, "Projects"),
+              nullptr);
+    EXPECT_TRUE(std::ranges::any_of(
+        result->plan.operations, [](const kasumi::Operation& operation) {
+            return operation.action == kasumi::Action::DeleteLocalDirectory &&
+                   operation.path == "Projects";
+        }));
+    EXPECT_FALSE(std::ranges::any_of(
+        result->plan.operations, [](const kasumi::Operation& operation) {
+            return operation.action == kasumi::Action::CreateRemoteDirectory &&
+                   operation.path == "Projects";
+        }));
 }
 
 TEST(ReconciliationTest,

@@ -28,6 +28,29 @@ struct LocalObservationSession {
     bool cache_dirty = false;
 };
 
+// Managed snapshot and transient physical facts from the same local scan.
+struct LocalTreeObservation {
+    Snapshot snapshot;
+    reconciliation::LocalPhysicalEvidence physical_evidence;
+};
+
+std::expected<LocalTreeObservation, std::string>
+collect_local_observation(const std::filesystem::path& local_root);
+
+std::expected<LocalTreeObservation, std::string>
+collect_local_observation(
+    const std::filesystem::path& local_root,
+    const kasumi::ignore::IgnoreList& ignore_list);
+
+std::expected<LocalTreeObservation, std::string>
+collect_local_observation(const std::filesystem::path& local_root,
+                          LocalObservationSession* session);
+
+std::expected<LocalTreeObservation, std::string>
+collect_local_observation(const std::filesystem::path& local_root,
+                          LocalObservationSession* session,
+                          const kasumi::ignore::IgnoreList& ignore_list);
+
 // Collects the local tree with full hashing.
 std::expected<Snapshot, std::string>
 collect_local_tree(const std::filesystem::path& local_root);

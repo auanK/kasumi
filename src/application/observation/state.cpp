@@ -20,7 +20,7 @@
 namespace kasumi::application::observation {
 namespace {
 
-std::expected<Snapshot, std::string>
+std::expected<LocalTreeObservation, std::string>
 scan_local_tree(const std::filesystem::path& local_root) {
     std::error_code error;
     const auto status = std::filesystem::symlink_status(local_root, error);
@@ -36,7 +36,10 @@ scan_local_tree(const std::filesystem::path& local_root) {
     if (!valid_snapshot(current->snapshot, false)) {
         return std::unexpected("local snapshot has no valid root");
     }
-    return std::move(current->snapshot);
+    return LocalTreeObservation{
+        .snapshot = std::move(current->snapshot),
+        .physical_evidence = std::move(current->physical_evidence),
+    };
 }
 
 struct IgnoreIdentity {
@@ -230,14 +233,15 @@ void ensure_file_cache_loaded(LocalObservationSession& session) {
 
 } // namespace
 
-std::expected<Snapshot, std::string>
-collect_local_tree(const std::filesystem::path& local_root) {
-    return collect_local_tree(local_root, nullptr);
+std::expected<LocalTreeObservation, std::string>
+collect_local_observation(const std::filesystem::path& local_root) {
+    return collect_local_observation(local_root, nullptr);
 }
 
-std::expected<Snapshot, std::string>
-collect_local_tree(const std::filesystem::path& local_root,
-                   const kasumi::ignore::IgnoreList& ignore_list) {
+std::expected<LocalTreeObservation, std::string>
+collect_local_observation(
+    const std::filesystem::path& local_root,
+    const kasumi::ignore::IgnoreList& ignore_list) {
     std::error_code error;
     const auto status = std::filesystem::symlink_status(local_root, error);
     if (error || std::filesystem::is_symlink(status) ||
@@ -255,23 +259,26 @@ collect_local_tree(const std::filesystem::path& local_root,
     if (!valid_snapshot(current->snapshot, false)) {
         return std::unexpected("local snapshot has no valid root");
     }
-    return std::move(current->snapshot);
+    return LocalTreeObservation{
+        .snapshot = std::move(current->snapshot),
+        .physical_evidence = std::move(current->physical_evidence),
+    };
 }
 
-std::expected<Snapshot, std::string>
-collect_local_tree(const std::filesystem::path& local_root,
-                   LocalObservationSession* session,
-                   const kasumi::ignore::IgnoreList& ignore_list) {
+std::expected<LocalTreeObservation, std::string>
+collect_local_observation(const std::filesystem::path& local_root,
+                          LocalObservationSession* session,
+                          const kasumi::ignore::IgnoreList& ignore_list) {
     if (ignore_list ==
         kasumi::ignore::load_ignore_list(local_root / ".kasumiignore")) {
-        return collect_local_tree(local_root, session);
+        return collect_local_observation(local_root, session);
     }
-    return collect_local_tree(local_root, ignore_list);
+    return collect_local_observation(local_root, ignore_list);
 }
 
-std::expected<Snapshot, std::string>
-collect_local_tree(const std::filesystem::path& local_root,
-                   LocalObservationSession* session) {
+std::expected<LocalTreeObservation, std::string>
+collect_local_observation(const std::filesystem::path& local_root,
+                          LocalObservationSession* session) {
     try {
         if (session == nullptr)
             return scan_local_tree(local_root);
@@ -289,10 +296,50 @@ collect_local_tree(const std::filesystem::path& local_root,
         session->cache_dirty =
             cache_was_dirty || !same_cache(previous, scanned->cache);
         session->cache = std::move(scanned->cache);
-        return std::move(scanned->snapshot);
+        return LocalTreeObservation{
+            .snapshot = std::move(scanned->snapshot),
+            .physical_evidence = std::move(scanned->physical_evidence),
+        };
     } catch (const std::exception& exception) {
         return std::unexpected(exception.what());
     }
+}
+
+std::expected<Snapshot, std::string>
+collect_local_tree(const std::filesystem::path& local_root) {
+    return collect_local_tree(local_root, nullptr);
+}
+
+std::expected<Snapshot, std::string>
+collect_local_tree(const std::filesystem::path& local_root,
+                   const kasumi::ignore::IgnoreList& ignore_list) {
+    auto observed = collect_local_observation(local_root, ignore_list);
+    if (!observed) {
+        return std::unexpected(observed.error());
+    }
+    return std::move(observed->snapshot);
+}
+
+std::expected<Snapshot, std::string>
+collect_local_tree(const std::filesystem::path& local_root,
+                   LocalObservationSession* session,
+                   const kasumi::ignore::IgnoreList& ignore_list) {
+    auto observed =
+        collect_local_observation(local_root, session, ignore_list);
+    if (!observed) {
+        return std::unexpected(observed.error());
+    }
+    return std::move(observed->snapshot);
+}
+
+std::expected<Snapshot, std::string>
+collect_local_tree(const std::filesystem::path& local_root,
+                   LocalObservationSession* session) {
+    auto observed = collect_local_observation(local_root, session);
+    if (!observed) {
+        return std::unexpected(observed.error());
+    }
+    return std::move(observed->snapshot);
 }
 
 std::expected<StorageObservation, std::string>
@@ -355,7 +402,7 @@ collect_reconciliation_input(
     std::span<const std::string> trusted_marker_identifiers,
     LocalObservationSession* session,
     const std::function<void()>& on_proven_local_change) {
-    std::expected<Snapshot, std::string> local_tree;
+    std::expected<LocalTreeObservation, std::string> local_observation;
     auto persisted = state_storage::load_state(runtime_data.database_path);
 
     reconciliation::Input input;
@@ -375,15 +422,13 @@ collect_reconciliation_input(
 
     std::jthread local_scan([&] {
         const auto scan_trace = platform::perf_trace::begin();
-        if (session == nullptr) {
-            local_tree = collect_local_tree(runtime_data.local_dir);
-        } else {
-            local_tree = collect_local_tree(runtime_data.local_dir, session);
-        }
+        local_observation =
+            collect_local_observation(runtime_data.local_dir, session);
         platform::perf_trace::finish("local filesystem scan", scan_trace);
-        if (local_tree && input.base_state_present &&
-            !local_tree->rows.empty() && !input.base_tree.rows.empty() &&
-            local_tree->rows.front().hash !=
+        if (local_observation && input.base_state_present &&
+            !local_observation->snapshot.rows.empty() &&
+            !input.base_tree.rows.empty() &&
+            local_observation->snapshot.rows.front().hash !=
                 input.base_tree.rows.front().hash &&
             on_proven_local_change) {
             on_proven_local_change();
@@ -392,10 +437,10 @@ collect_reconciliation_input(
 
     if (!persisted) {
         local_scan.join();
-        if (!local_tree) {
+        if (!local_observation) {
             return std::unexpected(
                 state_error(reconciliation::ErrorCode::InvalidLocalTree,
-                            local_tree.error()));
+                            local_observation.error()));
         }
         return std::unexpected(
             state_error(reconciliation::ErrorCode::InvalidLocalBaseState,
@@ -456,11 +501,14 @@ collect_reconciliation_input(
     platform::perf_trace::finish("remote history observation",
                                  remote_history_trace);
     local_scan.join();
-    if (!local_tree) {
+    if (!local_observation) {
         return std::unexpected(state_error(
-            reconciliation::ErrorCode::InvalidLocalTree, local_tree.error()));
+            reconciliation::ErrorCode::InvalidLocalTree,
+            local_observation.error()));
     }
-    input.local_tree = std::move(*local_tree);
+    input.local_tree = std::move(local_observation->snapshot);
+    input.local_physical_evidence =
+        std::move(local_observation->physical_evidence);
     if (!observed) {
         return std::unexpected(
             state_error(reconciliation::ErrorCode::InvalidStorageTree,
@@ -532,14 +580,16 @@ collect_reconciliation_input(
     }
     input.ignore_list = std::move(*effective_rules);
     if (input.ignore_list != local_ignore_list) {
-        auto projected = collect_local_tree(
+        auto projected = collect_local_observation(
             runtime_data.local_dir, session, input.ignore_list);
         if (!projected) {
             return std::unexpected(
                 state_error(reconciliation::ErrorCode::InvalidLocalTree,
                             projected.error()));
         }
-        input.local_tree = std::move(*projected);
+        input.local_tree = std::move(projected->snapshot);
+        input.local_physical_evidence =
+            std::move(projected->physical_evidence);
     }
     input.audit_storage_objects = audit_storage_objects;
     return input;

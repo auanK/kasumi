@@ -3,6 +3,7 @@
 
 #include "core/ignore.hpp"
 #include "core/node.hpp"
+#include "core/reconciliation/types.hpp"
 #include "state_storage/database.hpp"
 
 #include <cstdint>
@@ -37,6 +38,7 @@ enum class ScanPolicy {
 struct ScanResult {
     Snapshot snapshot;
     std::vector<state_storage::FileCacheRow> cache;
+    reconciliation::LocalPhysicalEvidence physical_evidence;
 };
 
 // Contextualized local scan failure.

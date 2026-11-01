@@ -419,7 +419,7 @@ TEST(ScannerTest, UnignoredFifoFailsClosedAsNonRegularInput) {
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code,
               kasumi::application::observation::scanner::ScanErrorCode::Metadata);
-    EXPECT_EQ(result.error().operation, "read metadata");
+    EXPECT_EQ(result.error().operation, "classify entry");
     EXPECT_EQ(result.error().path, fifo);
 }
 #endif

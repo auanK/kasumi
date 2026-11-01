@@ -685,6 +685,108 @@ void order_directory_operations(SyncPlan& plan) {
     std::ranges::sort(deletions, std::greater{}, depth);
 }
 
+const LocalDirectoryEvidence* find_directory_evidence(
+    const LocalPhysicalEvidence& evidence,
+    std::string_view path) {
+    const auto found = std::ranges::lower_bound(
+        evidence.directories, path, path_less, &LocalDirectoryEvidence::path);
+    return found != evidence.directories.end() && found->path == path
+               ? &*found
+               : nullptr;
+}
+
+std::expected<Snapshot, Error> project_local_tree(
+    Snapshot local_tree,
+    const LocalPhysicalEvidence& physical_evidence,
+    const Snapshot& desired_tree,
+    ErrorCode error_code) {
+    if (!kasumi::valid_snapshot(local_tree, false)) {
+        return std::unexpected(Error{
+            .code = error_code,
+            .detail = "invalid local tree for managed projection",
+            .paths = {},
+        });
+    }
+    if (!kasumi::valid_snapshot(desired_tree, true)) {
+        return std::unexpected(Error{
+            .code = ErrorCode::InvalidStorageTree,
+            .detail = "invalid desired tree for managed projection",
+            .paths = {},
+        });
+    }
+
+    std::unordered_set<std::string> retained_directories;
+    std::vector<std::uint8_t> retained(local_tree.rows.size(), 0);
+    for (std::size_t index = local_tree.rows.size(); index > 0; --index) {
+        const auto row_index = index - 1;
+        const auto& row = local_tree.rows[row_index];
+        bool keep = !row.is_directory;
+        if (row.is_directory) {
+            const auto* evidence =
+                find_directory_evidence(physical_evidence, row.path);
+            const auto* desired = find_row(desired_tree, row.path);
+            if (!row.path.empty() && evidence != nullptr &&
+                evidence->has_unexpected_descendants &&
+                (desired == nullptr || !desired->is_directory) &&
+                !evidence->has_managed_descendants) {
+                return std::unexpected(Error{
+                    .code = error_code,
+                    .detail =
+                        "unexpected local entries prevent directory projection",
+                    .paths = {platform::path::from_utf8(row.path)},
+                });
+            }
+            keep = row.path.empty() || retained_directories.contains(row.path) ||
+                   (desired != nullptr && desired->is_directory) ||
+                   evidence == nullptr || !evidence->has_ignored_descendants ||
+                   evidence->has_managed_descendants ||
+                   evidence->physically_empty;
+        }
+        if (!keep) {
+            continue;
+        }
+        retained[row_index] = 1;
+        if (row.is_directory) {
+            retained_directories.emplace(row.path);
+        }
+        if (!row.path.empty()) {
+            retained_directories.emplace(row_parent(row.path));
+        }
+    }
+
+    Snapshot projected;
+    projected.rows.reserve(local_tree.rows.size());
+    for (std::size_t index = 0; index < local_tree.rows.size(); ++index) {
+        if (retained[index] != 0) {
+            projected.rows.push_back(std::move(local_tree.rows[index]));
+        }
+    }
+    finalize_snapshot(projected);
+    if (!kasumi::valid_snapshot(projected, false)) {
+        return std::unexpected(Error{
+            .code = error_code,
+            .detail = "managed local projection is invalid",
+            .paths = {},
+        });
+    }
+    return projected;
+}
+
+void suppress_protected_directory_deletions(
+    std::vector<Operation>& operations,
+    const LocalPhysicalEvidence& physical_evidence) {
+    std::erase_if(operations, [&](const Operation& operation) {
+        if (operation.action != Action::DeleteLocalDirectory) {
+            return false;
+        }
+        const auto path =
+            platform::path::to_logical_utf8(operation.path);
+        const auto* evidence = find_directory_evidence(physical_evidence, path);
+        return evidence != nullptr && evidence->has_ignored_descendants &&
+               !evidence->has_unexpected_descendants;
+    });
+}
+
 std::expected<void, Error>
 merge_pending_references(Snapshot& publication_tree,
                          std::span<const NodeRow> pending_rows,
@@ -1049,7 +1151,8 @@ bool has_safe_paths(const SyncPlan& plan) {
 std::expected<Snapshot, Error>
 build_publication_tree(Snapshot publication_tree,
                        std::span<const NodeRow> pending_storage_rows,
-                       const Snapshot& candidate_shared_tree) {
+                       const Snapshot& candidate_shared_tree,
+                       const LocalPhysicalEvidence& local_physical_evidence) {
     if (!kasumi::valid_snapshot(publication_tree, false)) {
         return std::unexpected(Error{
             .code = ErrorCode::InvalidExecutedTree,
@@ -1066,6 +1169,15 @@ build_publication_tree(Snapshot publication_tree,
             .paths = {},
         });
     }
+
+    auto projected = project_local_tree(std::move(publication_tree),
+                                        local_physical_evidence,
+                                        candidate_shared_tree,
+                                        ErrorCode::InvalidExecutedTree);
+    if (!projected) {
+        return std::unexpected(std::move(projected.error()));
+    }
+    publication_tree = std::move(*projected);
 
     auto merged = merge_pending_references(
         publication_tree, pending_storage_rows, candidate_shared_tree);
@@ -1192,6 +1304,16 @@ ReconcileResult reconcile(const Input& input) {
 
     auto logical_local =
         logical_local_view(input, missing_objects, local_sources);
+    auto projected_local = project_local_tree(
+        std::move(logical_local),
+        input.local_physical_evidence,
+        effective_storage_tree,
+        ErrorCode::InvalidLocalTree);
+    if (!projected_local) {
+        return std::unexpected(std::move(projected_local.error()));
+    }
+    Input projected_input = input;
+    projected_input.local_tree = *projected_local;
     const std::unordered_set<std::string>* authorized_deletions_ptr = nullptr;
     std::unordered_set<std::string> authorized_deletion_paths;
     if (!input.pending_deletion_authority.empty()) {
@@ -1203,7 +1325,7 @@ ReconcileResult reconcile(const Input& input) {
         }
         authorized_deletions_ptr = &authorized_deletion_paths;
     }
-    auto operations = diff::compare_trees(logical_local,
+    auto operations = diff::compare_trees(*projected_local,
                                           input.base_tree,
                                           effective_storage_tree,
                                           missing_objects,
@@ -1263,6 +1385,8 @@ ReconcileResult reconcile(const Input& input) {
 
     plan_local_moves(operations, input.local_tree);
     plan_local_copies(operations, input.local_tree);
+    suppress_protected_directory_deletions(
+        operations, input.local_physical_evidence);
 
     const bool requires_local_mutation =
         std::ranges::any_of(operations, [](const Operation& operation) {
@@ -1282,7 +1406,7 @@ ReconcileResult reconcile(const Input& input) {
     }
 
     auto candidate = candidate_shared_tree(
-        input, plan, std::span<const std::string>{repair_upload_paths});
+        projected_input, plan, std::span<const std::string>{repair_upload_paths});
     if (!candidate) {
         return std::unexpected(std::move(candidate.error()));
     }

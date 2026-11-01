@@ -2445,7 +2445,7 @@ execute(const runtime::RuntimeData& runtime_data,
     }
 
     const auto final_scan_trace = platform::perf_trace::begin();
-    auto scanned = observation::collect_local_tree(
+    auto scanned = observation::collect_local_observation(
         runtime_data.local_dir, session, observed_input.ignore_list);
     platform::perf_trace::finish("final local validation", final_scan_trace);
     platform::perf_trace::finish("final local validation wall", final_scan_trace);
@@ -2460,7 +2460,7 @@ execute(const runtime::RuntimeData& runtime_data,
     // during sync.
     std::unordered_set<std::string> concurrent_new_paths;
     std::unordered_set<std::string> affected_ancestor_dirs;
-    for (const auto& row : scanned->rows) {
+    for (const auto& row : scanned->snapshot.rows) {
         if (!row.path.empty() &&
             find_row(observed_input.local_tree, row.path) == nullptr &&
             find_row(reconciliation_result.candidate_shared_tree, row.path) ==
@@ -2476,10 +2476,10 @@ execute(const runtime::RuntimeData& runtime_data,
 
     Snapshot validation_local_tree;
     if (concurrent_new_paths.empty()) {
-        validation_local_tree = std::move(*scanned);
+        validation_local_tree = std::move(scanned->snapshot);
     } else {
-        validation_local_tree.rows.reserve(scanned->rows.size());
-        for (auto& row : scanned->rows) {
+        validation_local_tree.rows.reserve(scanned->snapshot.rows.size());
+        for (auto& row : scanned->snapshot.rows) {
             if (concurrent_new_paths.contains(row.path)) {
                 continue;
             }
@@ -2498,7 +2498,8 @@ execute(const runtime::RuntimeData& runtime_data,
     auto publication_tree = reconciliation::build_publication_tree(
         std::move(validation_local_tree),
         reconciliation_result.pending_storage_rows,
-        reconciliation_result.candidate_shared_tree);
+        reconciliation_result.candidate_shared_tree,
+        scanned->physical_evidence);
     if (!publication_tree) {
         auto rolled = rollback_terminal();
         if (!rolled)

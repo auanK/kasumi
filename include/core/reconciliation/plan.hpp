@@ -15,7 +15,8 @@ ReconcileResult reconcile(const Input& input);
 std::expected<Snapshot, Error>
 build_publication_tree(Snapshot executed_local_tree,
                        std::span<const NodeRow> pending_storage_rows,
-                       const Snapshot& candidate_shared_tree);
+                       const Snapshot& candidate_shared_tree,
+                       const LocalPhysicalEvidence& local_physical_evidence = {});
 
 // Validates that no plan paths escape the synchronized root.
 bool has_safe_paths(const SyncPlan& plan);
