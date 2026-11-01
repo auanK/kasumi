@@ -14,6 +14,11 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <thread>
+#if !defined(_WIN32)
+#include <cerrno>
+#include <cstring>
+#include <sys/stat.h>
+#endif
 
 namespace {
 
@@ -77,6 +82,13 @@ fake_metadata(const std::filesystem::path& path, std::string_view relative_path)
     meta.identity = kasumi::application::observation::cache::FileIdentity{
         .volume = 1, .file_low = 2, .file_high = 3};
     return meta;
+}
+
+std::expected<std::optional<kasumi::application::observation::cache::FileMetadata>,
+              kasumi::application::observation::cache::FileMetadataError>
+missing_metadata(const std::filesystem::path&, std::string_view) {
+    return std::optional<
+        kasumi::application::observation::cache::FileMetadata>{};
 }
 
 void set_metadata_fake(MetadataFakeMode mode) {
@@ -370,6 +382,47 @@ TEST(ScannerTest, IgnoreRulesHandleGlobsAnchorsDirectoriesAndNegation) {
               nullptr);
 
 }
+
+TEST(ScannerTest, RegularFileMetadataNulloptFailsClosed) {
+    auto workspace = kasumi::test::make_temp_workspace("scanner-metadata-nullopt");
+    const auto root = kasumi::test::workspace_path(workspace, "local");
+    const auto file = root / "managed.txt";
+    kasumi::test::write_text(file, "managed content");
+
+    const auto result = kasumi::application::observation::scanner::scan_result(
+        root,
+        {},
+        kasumi::application::observation::scanner::ScanPolicy::FullHash,
+        missing_metadata);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code,
+              kasumi::application::observation::scanner::ScanErrorCode::Metadata);
+    EXPECT_EQ(result.error().operation, "read metadata");
+    EXPECT_EQ(result.error().path, file);
+    EXPECT_TRUE(std::filesystem::is_regular_file(file));
+}
+
+#if !defined(_WIN32)
+TEST(ScannerTest, UnignoredFifoFailsClosedAsNonRegularInput) {
+    auto workspace = kasumi::test::make_temp_workspace("scanner-unignored-fifo");
+    const auto root = kasumi::test::workspace_path(workspace, "local");
+    std::error_code error;
+    ASSERT_TRUE(std::filesystem::create_directories(root, error));
+    ASSERT_FALSE(error) << error.message();
+    const auto fifo = root / "unexpected.pipe";
+    ASSERT_EQ(::mkfifo(fifo.c_str(), 0600), 0) << std::strerror(errno);
+
+    const auto result =
+        kasumi::application::observation::scanner::scan_result(root);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code,
+              kasumi::application::observation::scanner::ScanErrorCode::Metadata);
+    EXPECT_EQ(result.error().operation, "classify entry");
+    EXPECT_EQ(result.error().path, fifo);
+}
+#endif
 
 TEST(ScannerTest, SameSizeMutationInvalidatesCachedHash) {
     auto workspace = kasumi::test::make_temp_workspace("scanner-mutation");

@@ -1,4 +1,5 @@
 #include "application/sync/reobservation.hpp"
+#include "application/sync/mutation_fault_test.hpp"
 
 #include "application/observation/file_metadata.hpp"
 #include "application/observation/state.hpp"
@@ -761,7 +762,9 @@ stabilize(const runtime::RuntimeData& runtime_data,
                                    "content reuse"));
         }
         observed->pending_deletion_authority = input.pending_deletion_authority;
-        auto local_after_storage = observation::collect_local_tree(
+        mutation_fault_test::hit("before_final_local_observation",
+                                 runtime_data.local_dir);
+        auto local_after_storage = observation::collect_local_observation(
             runtime_data.local_dir, session, observed->ignore_list);
         if (!local_after_storage) {
             auto removed = detail::remove_transaction_workspace(workspace, key);
@@ -771,8 +774,13 @@ stabilize(const runtime::RuntimeData& runtime_data,
             return std::unexpected(detail::make_error(
                 ErrorCode::ObservationFailure, local_after_storage.error()));
         }
-        if (!same_snapshot(observed->local_tree, *local_after_storage)) {
-            observed->local_tree = std::move(*local_after_storage);
+        if (!same_snapshot(observed->local_tree,
+                           local_after_storage->snapshot) ||
+            observed->local_physical_evidence !=
+                local_after_storage->physical_evidence) {
+            observed->local_tree = std::move(local_after_storage->snapshot);
+            observed->local_physical_evidence =
+                std::move(local_after_storage->physical_evidence);
         }
         auto recalculated = reconciliation::reconcile(*observed);
         if (!recalculated) {

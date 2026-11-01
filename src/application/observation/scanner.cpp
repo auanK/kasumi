@@ -20,6 +20,13 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace kasumi::application::observation::scanner {
 namespace {
 
@@ -31,6 +38,7 @@ struct ScanFrame {
     std::filesystem::directory_iterator iterator;
     std::filesystem::directory_iterator end;
     std::string path;
+    std::size_t evidence_index = 0;
 };
 
 struct ScanContext {
@@ -51,6 +59,47 @@ ScanError scan_error(const std::filesystem::path& path,
             path,
             std::move(operation),
             error.message()};
+}
+
+struct PhysicalEntryType {
+    bool directory = false;
+    bool regular_file = false;
+    bool linklike = false;
+};
+
+std::expected<PhysicalEntryType, std::error_code> classify_entry(
+    const std::filesystem::path& path,
+    const std::filesystem::file_status& status) {
+#if defined(_WIN32)
+    const auto attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        return std::unexpected(std::error_code(
+            static_cast<int>(GetLastError()), std::system_category()));
+    }
+    const bool directory = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    if (std::filesystem::is_symlink(status) ||
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return PhysicalEntryType{.directory = directory,
+                                 .regular_file = false,
+                                 .linklike = true};
+    }
+#else
+    static_cast<void>(path);
+    if (std::filesystem::is_symlink(status)) {
+        return PhysicalEntryType{.directory = false,
+                                 .regular_file = false,
+                                 .linklike = true};
+    }
+#endif
+    if (status.type() == std::filesystem::file_type::none ||
+        status.type() == std::filesystem::file_type::not_found ||
+        status.type() == std::filesystem::file_type::unknown) {
+        return std::unexpected(std::make_error_code(std::errc::io_error));
+    }
+    return PhysicalEntryType{
+        .directory = std::filesystem::is_directory(status),
+        .regular_file = std::filesystem::is_regular_file(status),
+        .linklike = false};
 }
 
 std::expected<NodeRow, ScanError>
@@ -81,7 +130,8 @@ process_file(const std::filesystem::path& file_path,
             .code = ScanErrorCode::Metadata,
             .path = file_path,
             .operation = "read metadata",
-            .detail = "entry is not an eligible regular file"});
+            .detail =
+                "metadata query returned no metadata for a regular file"});
     }
 
     auto current_meta = **meta_result;
@@ -247,12 +297,24 @@ scan_result(const std::filesystem::path& local_root,
     if (error)
         return std::unexpected(scan_error(
             local_root, "query entry type", error, ScanErrorCode::Metadata));
-    const bool directory = std::filesystem::is_directory(status);
-    if (std::filesystem::is_symlink(status) ||
-        is_ignored(".", ignore_list, directory))
+    const auto root_type = classify_entry(local_root, status);
+    if (!root_type) {
+        return std::unexpected(scan_error(local_root,
+                                          "classify entry",
+                                          root_type.error(),
+                                          ScanErrorCode::Metadata));
+    }
+    if (root_type->linklike ||
+        (!root_type->directory && !root_type->regular_file)) {
+        return std::unexpected(ScanError{ScanErrorCode::Metadata,
+                                         local_root,
+                                         "classify entry",
+                                         "root is not a regular file or directory"});
+    }
+    if (is_ignored(".", ignore_list, root_type->directory))
         return ScanResult{};
 
-    if (!directory) {
+    if (root_type->regular_file) {
         auto row =
             process_file(local_root,
                          platform::path::to_logical_utf8(local_root.filename()),
@@ -283,17 +345,33 @@ scan_result(const std::filesystem::path& local_root,
     // The parent must precede its descendants.
     snapshot.rows.push_back(
         {.path = "", .mtime = *root_mtime, .is_directory = true});
+    reconciliation::LocalPhysicalEvidence physical_evidence;
+    physical_evidence.directories.push_back(
+        {.path = "", .physically_empty = true});
+    std::unordered_map<std::string, std::size_t> evidence_indices;
+    evidence_indices.emplace("", 0);
 
     std::filesystem::directory_iterator iterator(local_root, error);
     if (error)
         return std::unexpected(
             scan_error(local_root, "list directory", error, ScanErrorCode::Io));
     std::vector<ScanFrame> stack;
-    stack.push_back({iterator, {}, ""});
+    stack.push_back({iterator, {}, "", 0});
     while (!stack.empty()) {
         auto& frame = stack.back();
         if (frame.iterator == frame.end) {
+            const auto completed_index = frame.evidence_index;
             stack.pop_back();
+            if (!stack.empty()) {
+                auto& parent = physical_evidence.directories[
+                    stack.back().evidence_index];
+                const auto& completed =
+                    physical_evidence.directories[completed_index];
+                parent.has_ignored_descendants |=
+                    completed.has_ignored_descendants;
+                parent.has_unexpected_descendants |=
+                    completed.has_unexpected_descendants;
+            }
             continue;
         }
         const auto entry = *frame.iterator;
@@ -309,16 +387,44 @@ scan_result(const std::filesystem::path& local_root,
                                               "query entry type",
                                               error,
                                               ScanErrorCode::Metadata));
-        const bool entry_directory =
-            std::filesystem::is_directory(entry_status);
-        if (std::filesystem::is_symlink(entry_status))
-            continue;
+        const auto entry_type = classify_entry(entry.path(), entry_status);
+        if (!entry_type) {
+            return std::unexpected(scan_error(entry.path(),
+                                              "classify entry",
+                                              entry_type.error(),
+                                              ScanErrorCode::Metadata));
+        }
         const auto entry_name =
             platform::path::to_logical_utf8(entry.path().filename());
         const auto relative =
             frame.path.empty() ? entry_name : frame.path + '/' + entry_name;
-        if (is_ignored(relative, ignore_list, entry_directory))
+        const bool ignored =
+            is_ignored(relative, ignore_list, entry_type->directory);
+        auto& parent_evidence =
+            physical_evidence.directories[frame.evidence_index];
+        parent_evidence.physically_empty = false;
+        if (entry_type->linklike) {
+            if (ignored) {
+                physical_evidence.ignored_entries.push_back(relative);
+                parent_evidence.has_ignored_descendants = true;
+                if (entry_type->directory) {
+                    physical_evidence.directories.push_back(
+                        {.path = relative, .ignored_entry = true});
+                }
+            } else {
+                parent_evidence.has_unexpected_descendants = true;
+            }
             continue;
+        }
+        if (ignored) {
+            physical_evidence.ignored_entries.push_back(relative);
+            parent_evidence.has_ignored_descendants = true;
+            if (entry_type->directory) {
+                physical_evidence.directories.push_back(
+                    {.path = relative, .ignored_entry = true});
+            }
+            continue;
+        }
         if (!valid_logical_path_component(entry_name)) {
             return std::unexpected(ScanError{
                 .code = ScanErrorCode::Io,
@@ -328,7 +434,16 @@ scan_result(const std::filesystem::path& local_root,
                           entry_name + "'",
             });
         }
-        if (!entry_directory) {
+        if (!entry_type->regular_file && !entry_type->directory) {
+            parent_evidence.has_unexpected_descendants = true;
+            return std::unexpected(ScanError{
+                .code = ScanErrorCode::Metadata,
+                .path = entry.path(),
+                .operation = "classify entry",
+                .detail = "entry is not a regular file or directory",
+            });
+        }
+        if (entry_type->regular_file) {
             auto row = process_file(entry.path(), relative, context);
             if (!row)
                 return std::unexpected(row.error());
@@ -350,11 +465,39 @@ scan_result(const std::filesystem::path& local_root,
         }
         snapshot.rows.push_back(
             {.path = relative, .mtime = *mtime_ns, .is_directory = true});
+        const auto evidence_index = physical_evidence.directories.size();
+        physical_evidence.directories.push_back(
+            {.path = relative, .physically_empty = true});
+        evidence_indices.emplace(relative, evidence_index);
         std::filesystem::directory_iterator nested(entry.path(), error);
         if (error)
             return std::unexpected(scan_error(
                 entry.path(), "list directory", error, ScanErrorCode::Io));
-        stack.push_back({nested, {}, relative});
+        stack.push_back({nested, {}, relative, evidence_index});
+    }
+    for (const auto& row : snapshot.rows) {
+        if (row.is_directory) {
+            if (row.path.empty()) {
+                continue;
+            }
+            const auto found = evidence_indices.find(row.path);
+            if (found == evidence_indices.end() ||
+                !physical_evidence.directories[found->second].physically_empty) {
+                continue;
+            }
+        }
+        auto parent_path = row_parent(row.path);
+        while (true) {
+            const auto found = evidence_indices.find(std::string{parent_path});
+            if (found != evidence_indices.end()) {
+                physical_evidence.directories[found->second]
+                    .has_managed_descendants = true;
+            }
+            if (parent_path.empty()) {
+                break;
+            }
+            parent_path = row_parent(parent_path);
+        }
     }
     finalize_snapshot(snapshot);
     if (!valid_snapshot(snapshot, false)) {
@@ -368,9 +511,14 @@ scan_result(const std::filesystem::path& local_root,
     }
     std::ranges::sort(
         context.cache, path_less, &state_storage::FileCacheRow::path);
+    std::ranges::sort(physical_evidence.directories,
+                      path_less,
+                      &reconciliation::LocalDirectoryEvidence::path);
+    std::ranges::sort(physical_evidence.ignored_entries);
     platform::perf_trace::finish("local filesystem scan wall", scan_trace);
     return ScanResult{.snapshot = std::move(snapshot),
-                      .cache = std::move(context.cache)};
+                      .cache = std::move(context.cache),
+                      .physical_evidence = std::move(physical_evidence)};
 }
 
 } // namespace kasumi::application::observation::scanner

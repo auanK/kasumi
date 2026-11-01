@@ -1453,9 +1453,24 @@ apply_operation(const Operation& operation,
             std::error_code error;
             std::filesystem::remove(*path, error);
             if (error) {
+                bool directory_not_empty =
+                    error == std::errc::directory_not_empty;
+                if (!directory_not_empty) {
+                    std::error_code inspection_error;
+                    const bool empty =
+                        std::filesystem::is_empty(*path, inspection_error);
+                    directory_not_empty =
+                        !inspection_error && !empty;
+                }
                 return std::unexpected(
-                    make_error(MutationErrorCode::LocalIo,
-                               "failed to remove directory: " + error.message(),
+                    make_error(directory_not_empty
+                                   ? MutationErrorCode::DestinationConflict
+                                   : MutationErrorCode::LocalIo,
+                               directory_not_empty
+                                   ? "directory contains entries not observed "
+                                     "as ignored or managed"
+                                   : "failed to remove directory: " +
+                                         error.message(),
                                *path,
                                operation_index));
             }

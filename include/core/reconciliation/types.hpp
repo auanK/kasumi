@@ -99,10 +99,33 @@ struct StorageState {
     bool history_has_conflicts = false;
 };
 
+// Transient physical facts used to project ignored-only directories without
+// adding ignored entries to the managed snapshot.
+struct LocalDirectoryEvidence {
+    std::string path;
+    bool ignored_entry = false;
+    bool has_ignored_descendants = false;
+    bool has_managed_descendants = false;
+    bool has_unexpected_descendants = false;
+    bool physically_empty = false;
+
+    bool operator==(const LocalDirectoryEvidence&) const = default;
+};
+
+struct LocalPhysicalEvidence {
+    std::vector<LocalDirectoryEvidence> directories;
+    std::vector<std::string> ignored_entries;
+
+    bool operator==(const LocalPhysicalEvidence&) const = default;
+};
+
 // Immutable inputs used to compute a reconciliation.
 struct Input {
     // Current snapshot of the local directory.
     Snapshot local_tree;
+
+    // Physical ignore evidence from the same observation and effective rules.
+    LocalPhysicalEvidence local_physical_evidence;
 
     // Accepted logical files that are not physically present locally.
     std::vector<NodeRow> pending_materializations;
