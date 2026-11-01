@@ -673,18 +673,30 @@ candidate_shared_tree(const Input& input,
 }
 
 void order_directory_operations(SyncPlan& plan) {
-    const auto depth = [](const Operation& operation) {
-        return static_cast<std::size_t>(
-            std::distance(operation.path.begin(), operation.path.end()));
-    };
-
     auto creations = sync_plan_phase(plan, Action::CreateLocalDirectory);
-
     auto deletions = sync_plan_phase(plan, Action::DeleteLocalDirectory);
 
-    std::ranges::sort(creations, {}, depth);
+    std::ranges::sort(creations, [](const Operation& a, const Operation& b) {
+        const auto da = static_cast<std::size_t>(
+            std::distance(a.path.begin(), a.path.end()));
+        const auto db = static_cast<std::size_t>(
+            std::distance(b.path.begin(), b.path.end()));
+        if (da != db) {
+            return da < db;
+        }
+        return a.path < b.path;
+    });
 
-    std::ranges::sort(deletions, std::greater{}, depth);
+    std::ranges::sort(deletions, [](const Operation& a, const Operation& b) {
+        const auto da = static_cast<std::size_t>(
+            std::distance(a.path.begin(), a.path.end()));
+        const auto db = static_cast<std::size_t>(
+            std::distance(b.path.begin(), b.path.end()));
+        if (da != db) {
+            return da > db;
+        }
+        return a.path < b.path;
+    });
 }
 
 const LocalDirectoryEvidence* find_directory_evidence(
@@ -843,14 +855,13 @@ std::expected<DisposableSelection, Error> select_disposable_operations(
 
     std::unordered_set<std::string> selected_files;
     std::unordered_set<std::string> selected_directories;
-    std::vector<std::string> considered_roots;
+    std::vector<std::string> authorized_roots;
     for (const auto& root : removal_roots) {
-        if (std::ranges::any_of(considered_roots, [&](std::string_view parent) {
+        if (std::ranges::any_of(authorized_roots, [&](std::string_view parent) {
                 return is_descendant(root, parent);
             })) {
             continue;
         }
-        considered_roots.push_back(root);
         const auto* root_evidence =
             find_directory_evidence(input.local_physical_evidence, root);
         if (root_evidence == nullptr ||
@@ -921,6 +932,7 @@ std::expected<DisposableSelection, Error> select_disposable_operations(
         if (!viable || !has_disposable) {
             continue;
         }
+        authorized_roots.push_back(root);
         selected_files.insert(root_files.begin(), root_files.end());
         selected_directories.insert(root_directories.begin(),
                                     root_directories.end());
@@ -970,6 +982,14 @@ std::expected<DisposableSelection, Error> select_disposable_operations(
         });
     }
 
+    std::unordered_set<std::string> already_planned_directories;
+    for (const auto& op : sync_plan_operations(current_plan)) {
+        if (op.action == Action::DeleteLocalDirectory) {
+            already_planned_directories.insert(
+                platform::path::to_logical_utf8(op.path));
+        }
+    }
+
     for (const auto& path : candidate_paths) {
         const auto& item = *content.at(path);
         selection.operations.push_back(Operation{
@@ -980,11 +1000,16 @@ std::expected<DisposableSelection, Error> select_disposable_operations(
             .expected_source_identity = item.identity,
         });
     }
-    for (const auto& path : selected_directories) {
-        selection.operations.push_back(Operation{
-            .action = Action::DeleteLocalDirectory,
-            .path = platform::path::from_utf8(path),
-        });
+    std::vector<std::string> dir_paths(selected_directories.begin(),
+                                       selected_directories.end());
+    std::ranges::sort(dir_paths, path_less);
+    for (const auto& path : dir_paths) {
+        if (!already_planned_directories.contains(path)) {
+            selection.operations.push_back(Operation{
+                .action = Action::DeleteLocalDirectory,
+                .path = platform::path::from_utf8(path),
+            });
+        }
     }
     return selection;
 }
@@ -1628,11 +1653,23 @@ ReconcileResult reconcile(const Input& input) {
     auto disposable_paths_to_hash = std::move(disposable->paths_to_hash);
     if (!disposable->operations.empty()) {
         auto final_operations = plan.operations;
-        final_operations.insert(final_operations.end(),
-                                std::make_move_iterator(
-                                    disposable->operations.begin()),
-                                std::make_move_iterator(
-                                    disposable->operations.end()));
+        std::unordered_set<std::string> existing_dir_deletions;
+        for (const auto& op : final_operations) {
+            if (op.action == Action::DeleteLocalDirectory) {
+                existing_dir_deletions.insert(
+                    platform::path::to_logical_utf8(op.path));
+            }
+        }
+        for (auto& op : disposable->operations) {
+            if (op.action == Action::DeleteLocalDirectory) {
+                const auto path_str = platform::path::to_logical_utf8(op.path);
+                if (existing_dir_deletions.contains(path_str)) {
+                    continue;
+                }
+                existing_dir_deletions.insert(path_str);
+            }
+            final_operations.push_back(std::move(op));
+        }
         plan = make_sync_plan(std::move(final_operations), 0);
         order_directory_operations(plan);
         if (!valid_sync_plan(plan) || !has_safe_paths(plan)) {
