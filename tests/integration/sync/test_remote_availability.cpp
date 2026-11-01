@@ -1142,6 +1142,64 @@ TEST(SyncRemoteAvailabilityTest, CancelledRepairIsNotAcceptedAndRecovers) {
     EXPECT_EQ(harness.read("duplicate.txt"), "alpha contents");
 }
 
+TEST(SyncRemoteAvailabilityTest, LocalCopyRepairsMissingContentWithoutPublication) {
+    for (const bool cancel_repair : {false, true}) {
+        SCOPED_TRACE(cancel_repair);
+        SyncHarness publisher("copy-repair-publisher");
+        ASSERT_TRUE(publisher.valid());
+        publisher.write("source.txt", "shared bytes");
+        publisher.write("copy.txt", "shared bytes");
+        ASSERT_TRUE(publisher.sync().has_value());
+        const auto before =
+            kasumi::state_storage::load_state(publisher.database());
+        ASSERT_TRUE(before.has_value() && *before);
+        const auto layout =
+            kasumi::application::history_storage::derive_remote_layout(publisher.key());
+        const auto heads_before =
+            kasumi::test::snapshot_tree(publisher.remote_path(layout.heads_prefix));
+        const auto commits_before =
+            kasumi::test::snapshot_tree(publisher.remote_path(layout.commits_prefix));
+
+        SyncHarness receiver("copy-repair-receiver", publisher.storage_root());
+        ASSERT_TRUE(receiver.valid());
+        receiver.write("source.txt", "shared bytes");
+        const auto content =
+            receiver.content_path(kasumi::hasher::hash_string("shared bytes"));
+        ASSERT_TRUE(std::filesystem::remove(content));
+        if (cancel_repair) {
+            receiver.cancel_next_content_put();
+            const auto cancelled = receiver.sync();
+            ASSERT_FALSE(cancelled.has_value());
+            EXPECT_FALSE(std::filesystem::exists(content));
+            EXPECT_EQ(receiver.read("source.txt"), "shared bytes");
+        }
+
+        receiver.reset_transfer_counts();
+        const auto repaired = receiver.sync();
+        ASSERT_TRUE(repaired.has_value()) << repaired.error().detail;
+        const auto* summary =
+            std::get_if<kasumi::application::SyncCompleted>(&repaired->data);
+        ASSERT_NE(summary, nullptr);
+        EXPECT_FALSE(summary->partial);
+        EXPECT_FALSE(summary->published);
+        EXPECT_EQ(receiver.content_puts(), 1U);
+        EXPECT_TRUE(std::filesystem::is_regular_file(content));
+        EXPECT_EQ(receiver.read("source.txt"), "shared bytes");
+        EXPECT_EQ(receiver.read("copy.txt"), "shared bytes");
+        const auto after =
+            kasumi::state_storage::load_state(receiver.database());
+        ASSERT_TRUE(after.has_value() && *after);
+        EXPECT_EQ((*after)->commit_id, (*before)->commit_id);
+        EXPECT_EQ((*after)->ciphertext_id, (*before)->ciphertext_id);
+        EXPECT_EQ(kasumi::test::snapshot_tree(receiver.remote_path(layout.heads_prefix)),
+                  heads_before);
+        EXPECT_EQ(kasumi::test::snapshot_tree(receiver.remote_path(layout.commits_prefix)),
+                  commits_before);
+        const auto healthy = receiver.fsck();
+        ASSERT_TRUE(healthy.has_value()) << healthy.error().detail;
+    }
+}
+
 TEST(SyncRemoteAvailabilityTest,
      ActiveSyncIgnoresUnrelatedMissingContents) {
     SyncHarness harness("gc-r3-multiple-missing");
@@ -1792,6 +1850,42 @@ kasumi::reconciliation::Result uploads_for(const kasumi::Snapshot& local) {
 }
 
 } // namespace
+
+TEST(SyncRemoteAvailabilityTest, LocalCopyStillProbesRequiredContent) {
+    const auto key = test_key();
+    const auto hash = kasumi::hasher::hash_string("shared bytes");
+    const auto local = remote_tree_with(hash, 12);
+    auto remote = local;
+    auto copy = remote.rows.back();
+    copy.path = "copy.txt";
+    remote.rows.push_back(copy);
+    kasumi::finalize_snapshot(remote);
+    auto input = availability_input(remote, false);
+    input.local_tree = local;
+    const auto planned = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(planned.has_value()) << planned.error().detail;
+    ASSERT_EQ(kasumi::sync_plan_phase(planned->plan, kasumi::Action::CopyLocal).size(),
+              1U);
+    ASSERT_TRUE(
+        kasumi::sync_plan_phase(planned->plan, kasumi::Action::Download).empty());
+    ASSERT_TRUE(
+        kasumi::sync_plan_phase(planned->plan, kasumi::Action::Upload).empty());
+
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    const auto refreshed = kasumi::application::sync::coordinator::
+        reobservation::refresh_content_availability(input, *planned, storage, key);
+    ASSERT_TRUE(refreshed.has_value()) << refreshed.error().detail;
+    EXPECT_TRUE(input.known_missing_content_objects.contains(hash));
+    EXPECT_TRUE(refreshed->requires_storage_repair);
+    const auto uploads =
+        kasumi::sync_plan_phase(refreshed->plan, kasumi::Action::Upload);
+    ASSERT_EQ(uploads.size(), 1U);
+    EXPECT_EQ(uploads.front().hash, kasumi::hash_hex(hash));
+    EXPECT_EQ(uploads.front().size, 12U);
+    EXPECT_EQ(kasumi::sync_plan_phase(refreshed->plan, kasumi::Action::CopyLocal).size(),
+              1U);
+}
 
 TEST(SyncRemoteAvailabilityTest, ListPresentPresenceAbsentFailsClosed) {
     const auto key = test_key();

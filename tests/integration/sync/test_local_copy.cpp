@@ -6,6 +6,7 @@
 #include "kasumi/test/history_storage.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/path.hpp"
+#include "platform/private_storage.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 #include "application/sync/mutation.hpp"
@@ -2339,9 +2340,16 @@ TEST(LocalCopyRollbackTest, CopyRollbackPropagatesMarkerRemovalFailure) {
         kasumi::application::sync::mutation::DownloadCacheMode::None, nullptr));
     const auto marker = kasumi::platform::workspace_file(ws, 0, ".copy_identity");
 #if defined(_WIN32)
-    const auto attributes = GetFileAttributesW(marker.c_str());
-    ASSERT_NE(attributes, INVALID_FILE_ATTRIBUTES);
-    ASSERT_TRUE(SetFileAttributesW(marker.c_str(), attributes | FILE_ATTRIBUTE_READONLY));
+    const auto handle = CreateFileW(marker.c_str(), GENERIC_READ,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    ASSERT_NE(handle, INVALID_HANDLE_VALUE) << GetLastError();
+    kasumi::platform::private_storage::PrivateHandle marker_lock{
+        reinterpret_cast<std::intptr_t>(handle)};
+    const auto removed = DeleteFileW(marker.c_str());
+    const auto removal_error = GetLastError();
+    EXPECT_FALSE(removed);
+    EXPECT_EQ(removal_error, static_cast<DWORD>(ERROR_SHARING_VIOLATION));
 #else
     const auto permissions = std::filesystem::status(ws.root).permissions();
     bool hook_hit = false;
@@ -2356,9 +2364,7 @@ TEST(LocalCopyRollbackTest, CopyRollbackPropagatesMarkerRemovalFailure) {
 #endif
     const auto rolled = kasumi::application::sync::mutation::rollback_operation(
         op, 0, node.local, ws, progress);
-#if defined(_WIN32)
-    EXPECT_TRUE(SetFileAttributesW(marker.c_str(), attributes));
-#else
+#if !defined(_WIN32)
     kasumi::application::sync::mutation_fault_test::clear_hook();
     std::filesystem::permissions(ws.root, permissions);
     ASSERT_TRUE(hook_hit);
@@ -2369,9 +2375,14 @@ TEST(LocalCopyRollbackTest, CopyRollbackPropagatesMarkerRemovalFailure) {
     EXPECT_FALSE(local_entry_exists(node, "dst.txt"));
     EXPECT_TRUE(std::filesystem::exists(marker));
     EXPECT_EQ(read_local_file(node, "src.txt"), "Payload");
+#if defined(_WIN32)
+    marker_lock.close();
+#endif
     ASSERT_TRUE(kasumi::application::sync::mutation::rollback_operation(
         op, 0, node.local, ws, progress));
     EXPECT_FALSE(std::filesystem::exists(marker));
+    EXPECT_FALSE(local_entry_exists(node, "dst.txt"));
+    EXPECT_EQ(read_local_file(node, "src.txt"), "Payload");
 }
 
 TEST(LocalCopyRollbackTest, CopyRollbackAfterLaterOperationFails) {
@@ -2433,7 +2444,7 @@ TEST(LocalCopyIntegrationTest, PureCopyBetweenTwoClients) {
     write_local_file(node_a, "docs/manual_backup.pdf", "ContentOfKasumiUserManualV092");
     ASSERT_TRUE(run_node_sync(node_a).has_value());
 
-    // Client B syncs: must plan and apply CopyLocal with ZERO remote Content I/O
+    // Client B copies locally while checking remote Content availability.
     reset_content_counts(node_b);
     auto sync_b = run_node_sync(node_b);
     ASSERT_TRUE(sync_b.has_value()) << sync_b.error().detail;
@@ -2442,10 +2453,10 @@ TEST(LocalCopyIntegrationTest, PureCopyBetweenTwoClients) {
     EXPECT_EQ(read_local_file(node_b, "docs/manual_backup.pdf"), "ContentOfKasumiUserManualV092");
     EXPECT_TRUE(local_entry_exists(node_b, "manual.pdf"));
 
-    // INVARIANT: Content I/O must be zero during pure local copy
+    // Availability probes transfer no Content bytes.
     EXPECT_EQ(node_b.counters.content_gets, 0U);
     EXPECT_EQ(node_b.counters.content_puts, 0U);
-    EXPECT_EQ(node_b.counters.content_presences, 0U);
+    EXPECT_EQ(node_b.counters.content_presences, 2U);
     EXPECT_EQ(node_b.counters.content_copies, 0U);
 }
 
@@ -2616,7 +2627,7 @@ ControlledCopyMetrics run_controlled_copy_reproduction(std::size_t count, std::s
               kasumi::test::snapshot_tree(receiver.local));
     EXPECT_EQ(receiver.counters.content_gets, 0U);
     EXPECT_EQ(receiver.counters.content_puts, 0U);
-    EXPECT_EQ(receiver.counters.content_presences, 0U);
+    EXPECT_EQ(receiver.counters.content_presences, 2U * count);
     EXPECT_EQ(receiver.counters.content_copies, 0U);
 
     m.total_sync_s = std::chrono::duration<double>(elapsed).count();

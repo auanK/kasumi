@@ -1235,6 +1235,19 @@ ReconcileResult reconcile(const Input& input) {
     if (input.pending_deletion_authority.empty()) {
         append_recovery_uploads(
             missing_objects, local_sources, operations, repair_upload_paths);
+        // A repairable remote gap must not discard local materializations.
+        for (const auto& row : pending_storage_rows) {
+            const auto source = local_sources.find(row.hash);
+            if (find_row(input.local_tree, row.path) == nullptr &&
+                source != local_sources.end() && source->second.size == row.size) {
+                operations.push_back(Operation{
+                    .action = Action::Download,
+                    .path = platform::path::from_utf8(row.path),
+                    .hash = hash_hex(row.hash),
+                    .size = row.size,
+                });
+            }
+        }
     }
 
     for (const auto& operation : operations) {

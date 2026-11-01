@@ -185,7 +185,8 @@ std::expected<void, Error> observe_content_availability(
                                              std::to_string(candidate.size));
                 }
             }
-        } else if (candidate.action == Action::Download) {
+        } else if (candidate.action == Action::Download ||
+                   candidate.action == Action::CopyLocal) {
             if (const auto hash = hash_from_hex(candidate.hash)) {
                 add_hash(*hash);
             }
