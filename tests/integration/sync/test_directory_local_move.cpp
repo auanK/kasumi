@@ -2584,4 +2584,142 @@ TEST(DirectoryLocalMoveTest, ContentCounterConcurrentCallbacksAreThreadSafe) {
     EXPECT_EQ(state.presence_identifiers.size(), expected_ops);
 }
 
+
+TEST(DirectoryLocalMoveTest,
+     DisposableRemovalDeduplicatesDirectoryDeletionsInPlan) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-dedup-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-dedup-receiver", sender.storage_root));
+
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "managed");
+    std::error_code ec;
+    ASSERT_TRUE(std::filesystem::create_directories(
+        sender.local / "Projects/empty", ec));
+    ASSERT_FALSE(ec);
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(local_entry_exists(receiver, "Projects/empty"));
+
+    write_local_file(receiver, "Projects/cache.bak", "disposable cache");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    auto preview = run_plan(receiver.context);
+    ASSERT_TRUE(preview.has_value()) << preview.error().detail;
+    const auto* preview_report =
+        std::get_if<kasumi::application::PlanReport>(&preview->data);
+    ASSERT_NE(preview_report, nullptr);
+
+    std::size_t delete_empty_count = 0;
+    std::size_t delete_projects_count = 0;
+    std::size_t delete_cache_bak_count = 0;
+    std::set<std::pair<kasumi::application::PlanAction, std::string>> unique_ops;
+    for (const auto& item : preview_report->items) {
+        const auto p = kasumi::platform::path::to_logical_utf8(item.path);
+        EXPECT_TRUE(unique_ops.emplace(item.action, p).second)
+            << "Duplicate operation found: action " << static_cast<int>(item.action)
+            << " for path " << p;
+        if (item.action == kasumi::application::PlanAction::DeleteLocalDirectory) {
+            if (p == "Projects/empty") ++delete_empty_count;
+            if (p == "Projects") ++delete_projects_count;
+        }
+        if (item.action == kasumi::application::PlanAction::DeleteIgnoredLocalFile) {
+            if (p == "Projects/cache.bak") ++delete_cache_bak_count;
+        }
+    }
+    EXPECT_EQ(delete_cache_bak_count, 1U);
+    EXPECT_EQ(delete_empty_count, 1U);
+    EXPECT_EQ(delete_projects_count, 1U);
+
+    const auto synchronized = run_node_sync(receiver);
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/main.cpp"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache.bak"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/empty"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects"));
+
+    const auto no_op = run_node_sync(receiver);
+    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
+    const auto* no_op_completed =
+        std::get_if<kasumi::application::SyncCompleted>(&no_op->data);
+    ASSERT_NE(no_op_completed, nullptr);
+    EXPECT_EQ(no_op_completed->total, 0U);
+    EXPECT_FALSE(no_op_completed->published);
+}
+
+TEST(DirectoryLocalMoveTest,
+     ProtectedAncestorDoesNotBlockIndependentDisposableSubtree) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-ancestor-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-ancestor-receiver", sender.storage_root));
+
+    write_local_file(sender, ".kasumiignore", "*.env\n(?d)*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "managed main");
+    write_local_file(sender, "Projects/cache/marker.txt", "managed marker");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    write_local_file(receiver, "Projects/segredo.env", "secret protected");
+    write_local_file(receiver, "Projects/cache/cache.bak", "disposable cache");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    reset_content_counts(receiver);
+    const auto synchronized = run_node_sync(receiver);
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+
+    EXPECT_EQ(read_local_file(receiver, "Projects/segredo.env"), "secret protected");
+    EXPECT_TRUE(local_entry_exists(receiver, "Projects"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache/cache.bak"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/main.cpp"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache/marker.txt"));
+
+    const auto no_op = run_node_sync(receiver);
+    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
+    const auto* completed =
+        std::get_if<kasumi::application::SyncCompleted>(&no_op->data);
+    ASSERT_NE(completed, nullptr);
+    EXPECT_EQ(completed->total, 0U);
+    EXPECT_FALSE(completed->published);
+}
+
+TEST(DirectoryLocalMoveTest,
+     ProtectedDescendantBlocksDisposalWithinSameProtectedSubtree) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-inv-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-inv-receiver", sender.storage_root));
+
+    write_local_file(sender, ".kasumiignore", "*.env\n(?d)*.bak\n");
+    write_local_file(sender, "Projects/cache/marker.txt", "managed marker");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    write_local_file(receiver, "Projects/cache/cache.bak", "disposable cache");
+    write_local_file(receiver, "Projects/cache/segredo.env", "secret protected");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    const auto synchronized = run_node_sync(receiver);
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache/segredo.env"), "secret protected");
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache/cache.bak"), "disposable cache");
+    EXPECT_TRUE(local_entry_exists(receiver, "Projects/cache"));
+}
+
 } // namespace
