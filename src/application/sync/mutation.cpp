@@ -1392,7 +1392,11 @@ apply_operation(const Operation& operation,
                 return std::unexpected(status.error());
             }
             if (missing(*status)) {
-                return {};
+                return std::unexpected(make_error(
+                    MutationErrorCode::DestinationConflict,
+                    "disposable source is missing or not a regular file",
+                    *path,
+                    operation_index));
             }
             if (std::filesystem::is_symlink(*status) ||
                 !std::filesystem::is_regular_file(*status)) {
@@ -1454,15 +1458,17 @@ apply_operation(const Operation& operation,
             const auto removed =
                 platform::private_storage::remove_private_file_if_owned(source);
             using platform::private_storage::CleanupResult;
-            if (removed != CleanupResult::Removed &&
-                removed != CleanupResult::AlreadyAbsent) {
+            if (removed != CleanupResult::Removed) {
                 return std::unexpected(make_error(
-                    removed == CleanupResult::IdentityMismatch
+                    removed == CleanupResult::AlreadyAbsent ||
+                            removed == CleanupResult::IdentityMismatch
                         ? MutationErrorCode::DestinationConflict
                         : MutationErrorCode::LocalIo,
-                    removed == CleanupResult::IdentityMismatch
-                        ? "disposable source identity changed during removal"
-                        : "failed to remove disposable source",
+                    removed == CleanupResult::AlreadyAbsent
+                        ? "disposable source disappeared before verified removal"
+                        : removed == CleanupResult::IdentityMismatch
+                            ? "disposable source identity changed during removal"
+                            : "failed to remove disposable source",
                     *path,
                     operation_index));
             }
