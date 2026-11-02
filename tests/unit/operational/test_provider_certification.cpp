@@ -55,6 +55,21 @@ struct TempCertificationFiles {
     }
 };
 
+TempCertificationFiles
+allocate_temp_certification_files(std::string_view suffix = "") {
+    const auto effective_suffix =
+        suffix.empty()
+            ? std::to_string(
+                  std::chrono::steady_clock::now().time_since_epoch().count())
+            : std::string{suffix};
+    return TempCertificationFiles{
+        .source = std::filesystem::temp_directory_path() /
+                  ("kasumi-cert-source-" + effective_suffix),
+        .readback = std::filesystem::temp_directory_path() /
+                    ("kasumi-cert-readback-" + effective_suffix),
+    };
+}
+
 TEST(ProviderCertificationEvidenceTest,
      MissingLikeAuditCannotCertifyFsckCorruption) {
     EXPECT_FALSE(fsck_corrupt_evidence_passes(FsckCorruptEvidence{
@@ -161,6 +176,57 @@ TEST(ProviderCertificationMutationTest,
     EXPECT_EQ(state->remove_count, 1U);
     EXPECT_EQ(state->put_count, 1U);
     EXPECT_EQ(state->get_count, 1U);
+}
+
+TEST(ProviderCertificationMutationTest,
+     TemporaryFilesRemainIsolatedAcrossConcurrentExecutions) {
+    auto first = allocate_temp_certification_files("collision");
+    auto second = allocate_temp_certification_files("collision");
+
+    EXPECT_NE(first.source, second.source);
+    EXPECT_NE(first.readback, second.readback);
+    EXPECT_NE(first.source, first.readback);
+    EXPECT_NE(second.source, second.readback);
+
+    const std::vector<std::uint8_t> first_bytes{'F', 'I', 'R', 'S', 'T'};
+    const std::vector<std::uint8_t> second_bytes{'S', 'E', 'C', 'O', 'N', 'D'};
+    {
+        std::ofstream output(first.source, std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(first_bytes.data()),
+                     static_cast<std::streamsize>(first_bytes.size()));
+        ASSERT_TRUE(output.good());
+    }
+    {
+        std::ofstream output(second.source, std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(second_bytes.data()),
+                     static_cast<std::streamsize>(second_bytes.size()));
+        ASSERT_TRUE(output.good());
+    }
+
+    {
+        auto to_cleanup = std::move(second);
+    }
+    ASSERT_TRUE(std::filesystem::exists(first.source));
+
+    std::ifstream check_input(first.source, std::ios::binary);
+    ASSERT_TRUE(check_input.good());
+    const std::vector<std::uint8_t> preserved{
+        std::istreambuf_iterator<char>{check_input},
+        std::istreambuf_iterator<char>{}};
+    EXPECT_EQ(preserved, first_bytes);
+
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    state->objects["isolated-object"] =
+        std::vector<std::uint8_t>{'O', 'L', 'D'};
+    storage.storage.put = ignore_existing_put;
+
+    Report report;
+    const auto installed = install_verified_object(
+        report, storage, first.source, "isolated-object", first.readback);
+
+    ASSERT_TRUE(installed.has_value()) << (installed ? "" : installed.error());
+    EXPECT_EQ(state->objects.at("isolated-object"), first_bytes);
 }
 
 TEST(ProviderCertificationTargetTest, OwnsUniqueChildAndRejectsEscape) {
