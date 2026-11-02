@@ -44,6 +44,7 @@ The output is a `SyncPlan` plus a **candidate shared tree** and flags for local 
 9. `DeleteRemote`
 10. `DeleteRemoteDirectory`
 11. `CopyLocal`
+12. `DeleteIgnoredLocalFile`
 
 These are serialized action groups; execution and replay may order effects by
 their dependencies. Directory creation is parent-first and removal child-first.

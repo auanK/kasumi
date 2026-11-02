@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.9.4]
+
+### Added
+
+- Added opt-in disposable ignore rules with the `(?d)` modifier in `.kasumiignore` (such as `(?d)*.bak`). Disposable classification applies exclusively to regular ignored files; unsupported modifier combinations and negated disposable rules fail closed during parsing.
+- Added transactional `DeleteIgnoredLocalFile` (action ID 11) to safely remove eligible disposable ignored files when reconciliation authorizes the removal of their containing previously managed directory tree.
+- Upgraded transaction journal writer to format 10 with backward-compatible reading of formats 9 and 10; wire action IDs 0–10 are preserved.
+
+### Changed
+
+- Reconciled directory tree removals allow pruned managed subtrees to be deleted when all descendants are either managed removals or eligible disposable files, while preserving subtrees containing protected ignored files. Independently eligible nested subdirectories remain candidate for removal.
+- `kasumi status <profile>` and `kasumi sync <profile> --dry-run` display planned `DeleteIgnoredLocalFile` operations and directory removals without performing physical deletions.
+
+### Fixed
+
+- Hardened disposable file disposal with pre-removal verification of native filesystem identity, size, and BLAKE3 hash against durable staged transaction backups, with authenticated rollback and recovery support.
+- Enforced fail-closed conflict handling if a disposable source disappears without verified removal by Kasumi or if external file replacement is detected during execution.
+- Isolated provider certification test temporary files using unique dedicated workspaces (`kasumi::test::make_temp_workspace`), preventing race conditions and readback corruption under parallel CTest execution while maintaining strict byte validation.
+
 ## [0.9.3]
 
 ### Fixed
