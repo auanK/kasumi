@@ -1,3 +1,4 @@
+#include "platform/cancellation.hpp"
 #include "application/profile.hpp"
 #include "cli/app.hpp"
 #include "kasumi/test/filesystem.hpp"
@@ -47,6 +48,10 @@ protected:
             kasumi::test::workspace_root(workspace).string());
     kasumi::test::ScopedEnvironmentVariable language =
         kasumi::test::scoped_environment_variable("KASUMI_LANG", "en");
+
+    void TearDown() override {
+        kasumi::platform::cancellation::reset();
+    }
 };
 class ContextualHelpTest
     : public CliInterfaceTest,
@@ -461,6 +466,7 @@ TEST_F(CliInterfaceTest, SignalCancelsBlockedWizardInput) {
                   static_cast<ssize_t>(sizeof(quit) - 1));
     }
     cli.join();
+    kasumi::platform::cancellation::reset();
     std::cin.rdbuf(previous);
     std::cin.clear();
     ::close(descriptors[0]);

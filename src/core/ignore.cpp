@@ -197,7 +197,9 @@ bool rule_matches(const IgnoreRule& rule,
     return fallback_rule_matches(rule, path, is_directory);
 }
 
-void parse_rule_line(std::string line, IgnoreList& result) {
+void parse_rule_line(std::string line,
+                     IgnoreList& result,
+                     std::size_t line_number) {
     if (line.starts_with("\xEF\xBB\xBF"))
         line.erase(0, 3);
     if (!line.empty() && line.back() == '\r')
@@ -227,19 +229,70 @@ void parse_rule_line(std::string line, IgnoreList& result) {
     }
     if (line.empty())
         return;
+
+    if (line.starts_with("(?d)")) {
+        if (rule.negated) {
+            result.parse_error = IgnoreParseError{
+                line_number, "disposable rules cannot be negated"};
+            return;
+        }
+        rule.disposable = true;
+        line.erase(0, 4);
+        if (line.empty()) {
+            result.parse_error =
+                IgnoreParseError{line_number, "(?d) requires a pattern"};
+            return;
+        }
+        if (line.starts_with('!')) {
+            result.parse_error = IgnoreParseError{
+                line_number, "(?d)!pattern is not supported"};
+            return;
+        }
+        if (line.starts_with("(?")) {
+            result.parse_error = IgnoreParseError{
+                line_number, "combined ignore modifiers are not supported"};
+            return;
+        }
+        if (line.back() == '/') {
+            result.parse_error = IgnoreParseError{
+                line_number, "disposable directory rules are not supported"};
+            return;
+        }
+    } else if (line.starts_with("(?")) {
+        result.parse_error =
+            IgnoreParseError{line_number, "unsupported ignore modifier"};
+        return;
+    }
+
     rule.directory_only = line.back() == '/';
     if (rule.directory_only)
         line.pop_back();
     rule.anchored = !line.empty() && line.front() == '/';
     if (rule.anchored)
         line.erase(0, 1);
-    if (line.empty() || line.size() > max_ignore_pattern_size)
+    if (line.empty()) {
+        if (rule.disposable) {
+            result.parse_error =
+                IgnoreParseError{line_number, "(?d) requires a pattern"};
+        }
         return;
+    }
+    if (line.size() > max_ignore_pattern_size) {
+        if (rule.disposable) {
+            result.parse_error = IgnoreParseError{
+                line_number,
+                "disposable pattern exceeds the maximum size of " +
+                    std::to_string(max_ignore_pattern_size)};
+        }
+        return;
+    }
     rule.pattern = std::move(line);
     result.rules.push_back(std::move(rule));
 }
 
-bool ignores(const IgnoreList& list, std::string_view path, bool is_directory) {
+const IgnoreRule* last_matching_rule(const IgnoreList& list,
+                                     std::string_view path,
+                                     bool is_directory) {
     // Stack-allocated buffers for zero heap allocation for paths with depth <=
     // 32
     std::array<PathSlice, 32> stack_prefixes{};
@@ -296,10 +349,10 @@ bool ignores(const IgnoreList& list, std::string_view path, bool is_directory) {
     // last applicable rule in forward order and dictates the final result.
     for (auto it = list.rules.rbegin(); it != list.rules.rend(); ++it) {
         if (rule_matches(*it, path, is_directory, prefixes, components)) {
-            return !it->negated;
+            return &*it;
         }
     }
-    return false;
+    return nullptr;
 }
 
 } // namespace
@@ -316,18 +369,44 @@ bool is_reserved_internal(std::string_view path) {
     return generated_internal_name(name);
 }
 
+bool is_kasumiignore_path(std::string_view path) {
+    const auto slash = path.find_last_of("/\\");
+    const auto name =
+        slash == std::string_view::npos ? path : path.substr(slash + 1);
+    constexpr std::string_view expected = ".kasumiignore";
+    if (name.size() != expected.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < name.size(); ++index) {
+        auto character = name[index];
+        if (character >= 'A' && character <= 'Z') {
+            character = static_cast<char>(character - 'A' + 'a');
+        }
+        if (character != expected[index]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 IgnoreList parse_ignore_rules(std::string_view content) {
     IgnoreList result;
     std::string_view remaining = content;
+    std::size_t line_number = 1;
     while (!remaining.empty()) {
         const auto newline = remaining.find('\n');
         const auto line = newline == std::string_view::npos
                               ? remaining
                               : remaining.substr(0, newline);
-        parse_rule_line(std::string(line), result);
+        parse_rule_line(std::string(line), result, line_number);
+        if (result.parse_error) {
+            result.rules.clear();
+            return result;
+        }
         if (newline == std::string_view::npos)
             break;
         remaining = remaining.substr(newline + 1);
+        ++line_number;
     }
     return result;
 }
@@ -335,12 +414,31 @@ IgnoreList parse_ignore_rules(std::string_view content) {
 IgnoreList load_ignore_list(const std::filesystem::path& file_path) {
     IgnoreList result;
     std::error_code error;
-    if (!std::filesystem::exists(file_path, error) || error)
+    if (!std::filesystem::exists(file_path, error)) {
+        if (error) {
+            result.parse_error = IgnoreParseError{
+                0, "could not inspect ignore file: " + error.message()};
+        }
         return result;
+    }
     std::ifstream input(file_path);
+    if (!input) {
+        result.parse_error = IgnoreParseError{0, "could not open ignore file"};
+        return result;
+    }
     std::string line;
+    std::size_t line_number = 0;
     while (std::getline(input, line)) {
-        parse_rule_line(std::move(line), result);
+        parse_rule_line(std::move(line), result, ++line_number);
+        if (result.parse_error) {
+            result.rules.clear();
+            return result;
+        }
+    }
+    if (input.bad()) {
+        result.rules.clear();
+        result.parse_error = IgnoreParseError{
+            line_number + 1, "could not read ignore file"};
     }
     return result;
 }
@@ -348,13 +446,29 @@ IgnoreList load_ignore_list(const std::filesystem::path& file_path) {
 bool is_ignored(std::string_view path,
                 const IgnoreList& ignore_list,
                 bool is_directory) {
-    if (is_reserved_internal(path)) {
-        return true;
+    return classify_ignore(path, is_directory, ignore_list) !=
+           IgnoreDisposition::Managed;
+}
+
+IgnoreDisposition classify_ignore(std::string_view logical_path,
+                                  bool is_directory,
+                                  const IgnoreList& rules) {
+    if (rules.parse_error || is_reserved_internal(logical_path)) {
+        return IgnoreDisposition::IgnoredProtected;
     }
-    if (ignore_list.rules.empty()) {
-        return false;
+    const auto* rule = last_matching_rule(rules, logical_path, is_directory);
+    if (rule == nullptr || rule->negated) {
+        return IgnoreDisposition::Managed;
     }
-    return ignores(ignore_list, path, is_directory);
+    if (rule->disposable && is_kasumiignore_path(logical_path)) {
+        return logical_path.find_first_of("/\\") == std::string_view::npos
+                   ? IgnoreDisposition::Managed
+                   : IgnoreDisposition::IgnoredProtected;
+    }
+    if (rule->disposable && !is_directory) {
+        return IgnoreDisposition::IgnoredDisposable;
+    }
+    return IgnoreDisposition::IgnoredProtected;
 }
 
 } // namespace kasumi::ignore

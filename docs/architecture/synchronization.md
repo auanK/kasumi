@@ -26,6 +26,14 @@ Normal Sync checks only the deduplicated Content IDs needed by the current work:
 
 `CopyLocal` materializes files from verified local bytes while still checking the required remote Content with `PRESENCE`. When that Content is present, the copy performs no Content GET, PUT, or remote COPY. If it is missing, reconciliation schedules a repair Upload from a local source matching the expected hash and size and preserves the local materialization. A physical-only repair publishes no new Commit or HEAD, and a failed required repair remains an error.
 
+`DeleteIgnoredLocalFile` does not transfer or publish Content. It is planned only
+for a regular file matched by a `(?d)` rule when an accepted managed directory
+removal authorizes the containing subtree's removal. The scanner hashes only
+selected candidates. Sync verifies the recorded file identity, size, hash, and a
+durable transaction backup before removal. Recovery can restore the file if the
+transaction rolls back; conflicts preserve external replacements. `PRESENCE`
+checks for other required Content remain independent of this local removal.
+
 The probe uses `control_read_batch` when the transport exposes it and falls back to individual `presence` checks. A transport or cancellation failure is an error, never evidence of absence. When a complete physical content inventory is already available, Sync cross-checks LIST and PRESENCE in both directions and fails closed on disagreement; LIST omission alone never proves that a required object is missing. Missing required IDs are returned to reconciliation, which deduplicates repair uploads by plaintext hash. The upload path requires a regular non-symlink local source and verifies its bytes against the expected logical hash and size, independently of cached fingerprints. A mismatch fails before PUT and preserves accepted logical state and recovery evidence. If no compatible source exists, Sync preserves the logical rows, accepted Commit/HEAD, expected Content IDs, local state, and pending evidence, records pending paths, and returns a partial result (exit status `2`). Missing objects unrelated to current work are not discovered or repaired by ordinary Sync; use Fsck or remote-content inspection to check broader availability. Sync never infers a logical deletion or invokes `resolve-missing` automatically.
 
 ## Optional Remote Inventory Audit

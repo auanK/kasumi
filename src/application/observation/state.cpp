@@ -6,6 +6,7 @@
 #include "application/observation/history.hpp"
 #include "application/observation/scanner.hpp"
 #include "core/ignore.hpp"
+#include "core/reconciliation/plan.hpp"
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
 #include "platform/path.hpp"
@@ -592,6 +593,42 @@ collect_reconciliation_input(
             std::move(projected->physical_evidence);
     }
     input.audit_storage_objects = audit_storage_objects;
+    const bool maybe_disposable_removal =
+        input.base_state_present && input.storage.history_present &&
+        !input.storage.history_has_conflicts &&
+        std::ranges::any_of(
+            input.local_physical_evidence.directories,
+            [&](const reconciliation::LocalDirectoryEvidence& directory) {
+                const auto* base = find_row(input.base_tree, directory.path);
+                return !directory.path.empty() && !directory.ignored_entry &&
+                       base != nullptr && base->is_directory &&
+                       find_row(input.storage.tree, directory.path) == nullptr &&
+                       std::ranges::any_of(
+                           input.local_physical_evidence.ignored_entries,
+                           [&](const reconciliation::IgnoredEntryEvidence& item) {
+                               return item.disposition ==
+                                          ignore::IgnoreDisposition::
+                                              IgnoredDisposable &&
+                                      is_descendant(item.path, directory.path);
+                           });
+            });
+    if (maybe_disposable_removal) {
+        auto initial_plan = reconciliation::reconcile(input);
+        if (initial_plan &&
+            !initial_plan->disposable_paths_to_hash.empty()) {
+            auto content = scanner::hash_disposable_candidates(
+                runtime_data.local_dir,
+                input.local_physical_evidence,
+                initial_plan->disposable_paths_to_hash,
+                input.ignore_list);
+            if (!content) {
+                return std::unexpected(state_error(
+                    reconciliation::ErrorCode::InvalidLocalTree,
+                    scanner::describe(content.error())));
+            }
+            input.disposable_ignored_content = std::move(*content);
+        }
+    }
     return input;
 }
 

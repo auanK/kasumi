@@ -1,14 +1,18 @@
 # Incremental transaction journal
 
-The current journal format is incompatible with other journal formats. There is
-one supported format, with no legacy reader, migration, fallback, or downgrade.
-An incompatible journal stops recovery and retains its artifacts.
+The writer emits journal codec format 10 and the reader accepts formats 9 and
+10. Format 10 adds the source file identity needed by
+`DeleteIgnoredLocalFile`; it preserves persisted action IDs 0 through 10 and uses
+ID 11 for the new action. Format 9 remains readable and does not contain that
+action. Other incompatible journal formats (including format 8 and earlier) stop recovery and retain their
+artifacts. This journal compatibility does not promise compatibility of other
+0.x state or remote formats.
 
 The profile's private `transaction.bin.enc` directory contains:
 
 | Artifact | Authority |
 | --- | --- |
-| `snapshot.enc` | Immutable KTX3 AEAD snapshot, containing the current transaction codec v9 record |
+| `snapshot.enc` | Immutable KTX3 AEAD snapshot, containing a transaction codec v9 or v10 record |
 | `transaction.log.enc` | KTD3 AEAD deltas, numbered from zero and chained from the snapshot ciphertext hash |
 | `confirmed.enc` | KTC3 authenticated confirmation: snapshot hash, committed log length, delta count and terminal chain hash |
 | `retired.enc` | KTQ3 authenticated authorization to clear the same confirmed generation |

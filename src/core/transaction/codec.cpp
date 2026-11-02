@@ -13,7 +13,8 @@ namespace kasumi::transaction::codec {
 
 namespace {
 
-inline constexpr std::uint8_t format_version = 9;
+inline constexpr std::uint8_t format_version = 10;
+inline constexpr std::uint8_t oldest_supported_format_version = 9;
 inline constexpr std::size_t maximum_string_size = 4096;
 inline constexpr std::uint32_t maximum_operation_count = 1'000'000;
 inline constexpr std::uint32_t maximum_pending_path_count = 1'000'000;
@@ -54,6 +55,8 @@ persisted_action_id(kasumi::Action action) noexcept {
             return 9;
         case kasumi::Action::CopyLocal:
             return 10;
+        case kasumi::Action::DeleteIgnoredLocalFile:
+            return 11;
         case kasumi::Action::Count:
             return std::nullopt;
     }
@@ -85,6 +88,8 @@ action_from_persisted_id(std::uint8_t id) noexcept {
             return kasumi::Action::MoveLocal;
         case 10:
             return kasumi::Action::CopyLocal;
+        case 11:
+            return kasumi::Action::DeleteIgnoredLocalFile;
         default:
             return std::nullopt;
     }
@@ -195,6 +200,20 @@ EncodeResult encode(const Record& record) {
             wire::write<std::uint64_t>(writer, operation.size);
             wire::write<std::uint8_t>(writer,
                                       operation.exclusive_destination ? 1 : 0);
+            if (operation.action == kasumi::Action::DeleteIgnoredLocalFile) {
+                wire::write<std::uint64_t>(
+                    writer,
+                    operation.expected_source_identity.volume_or_dev);
+                wire::write<std::uint64_t>(
+                    writer,
+                    operation.expected_source_identity.file_id_low);
+                wire::write<std::uint64_t>(
+                    writer,
+                    operation.expected_source_identity.file_id_high);
+                wire::write<std::uint8_t>(
+                    writer,
+                    operation.expected_source_identity.valid ? 1 : 0);
+            }
 
             wire::write_string(writer, progress.previous_hash);
             wire::write<std::uint32_t>(writer, progress.backup_slot);
@@ -215,7 +234,8 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
         wire::Reader reader{data};
 
         auto version = wire::read<std::uint8_t>(reader);
-        if (!version || *version != format_version) {
+        if (!version || *version < oldest_supported_format_version ||
+            *version > format_version) {
             return std::unexpected("unsupported journal format version");
         }
 
@@ -324,6 +344,25 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
             auto hash = wire::read_string(reader, maximum_string_size);
             auto size = wire::read<std::uint64_t>(reader);
             auto exclusive = wire::read<std::uint8_t>(reader);
+            std::optional<std::uint64_t> identity_volume;
+            std::optional<std::uint64_t> identity_low;
+            std::optional<std::uint64_t> identity_high;
+            std::optional<std::uint8_t> identity_valid;
+            if (*version >= 10 && action_raw &&
+                *action_raw == 11) {
+                if (auto field = wire::read<std::uint64_t>(reader)) {
+                    identity_volume = *field;
+                }
+                if (auto field = wire::read<std::uint64_t>(reader)) {
+                    identity_low = *field;
+                }
+                if (auto field = wire::read<std::uint64_t>(reader)) {
+                    identity_high = *field;
+                }
+                if (auto field = wire::read<std::uint8_t>(reader)) {
+                    identity_valid = *field;
+                }
+            }
             auto previous_hash = wire::read_string(reader, maximum_string_size);
             auto backup = wire::read<std::uint32_t>(reader);
             auto state_raw = wire::read<std::uint8_t>(reader);
@@ -334,8 +373,13 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
                 !had_original) {
                 return std::unexpected("truncated operation");
             }
+            if (*version >= 10 && action_raw && *action_raw == 11 &&
+                (!identity_volume || !identity_low || !identity_high ||
+                 !identity_valid || *identity_valid != 1)) {
+                return std::unexpected("invalid disposable source identity");
+            }
             const auto action = action_from_persisted_id(*action_raw);
-            if (!action) {
+            if (!action || (*version == 9 && *action_raw == 11)) {
                 return std::unexpected("invalid action");
             }
             if (*exclusive > 1 || *had_original > 1) {
@@ -354,6 +398,14 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
                 .alt_path = platform::path::from_utf8(*alt_path),
                 .size = *size,
                 .exclusive_destination = *exclusive == 1,
+                .expected_source_identity =
+                    *action == kasumi::Action::DeleteIgnoredLocalFile
+                        ? kasumi::PhysicalFileIdentity{
+                              .volume_or_dev = *identity_volume,
+                              .file_id_low = *identity_low,
+                              .file_id_high = *identity_high,
+                              .valid = *identity_valid == 1}
+                        : kasumi::PhysicalFileIdentity{},
             });
             record.progress.push_back(OperationProgress{
                 .previous_hash = std::move(*previous_hash),

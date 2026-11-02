@@ -41,6 +41,7 @@
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -395,6 +396,85 @@ void reset_content_counts(SyncNode& node) noexcept {
     node.counters.get_identifiers.clear();
     node.counters.put_identifiers.clear();
     node.counters.presence_identifiers.clear();
+}
+
+struct StagedDisposableJournal {
+    kasumi::transaction::Record record;
+    kasumi::application::sync::journal::Paths paths;
+    kasumi::platform::Workspace workspace;
+};
+
+std::expected<StagedDisposableJournal, std::string>
+stage_disposable_journal(SyncNode& node) {
+    auto input = kasumi::application::observation::collect_reconciliation_input(
+        node.runtime, node.context.storage, node.key, false);
+    if (!input) {
+        return std::unexpected(input.error().detail);
+    }
+    auto reconciled = kasumi::reconciliation::reconcile(*input);
+    if (!reconciled) {
+        return std::unexpected(reconciled.error().detail);
+    }
+    std::vector<kasumi::Operation> disposable_operations;
+    for (const auto& operation : reconciled->plan.operations) {
+        if (operation.action == kasumi::Action::DeleteIgnoredLocalFile) {
+            disposable_operations.push_back(operation);
+        }
+    }
+    if (disposable_operations.empty() || input->storage.logical_heads.size() != 1) {
+        return std::unexpected("reconciliation did not select disposable files");
+    }
+    auto plan = kasumi::make_sync_plan(std::move(disposable_operations),
+                                       input->storage.generation);
+    auto record = kasumi::application::sync::journal::create_record(
+        input->local_generation,
+        input->storage.generation,
+        std::move(plan),
+        false,
+        input->storage.logical_heads.front());
+    if (!record) {
+        return std::unexpected(record.error());
+    }
+    record->observed_base_id = input->base_commit_id;
+    auto paths = kasumi::application::sync::journal::make_paths(node.profile);
+    if (!paths) {
+        return std::unexpected(paths.error());
+    }
+    auto saved = kasumi::application::sync::journal::save(
+        *paths, *record, node.key);
+    if (!saved) {
+        return std::unexpected(saved.error());
+    }
+    auto workspace =
+        kasumi::application::sync::coordinator::detail::
+            create_transaction_workspace(node.profile, record->operation_id, node.key);
+    if (!workspace) {
+        return std::unexpected(workspace.error().detail);
+    }
+    for (std::size_t index = 0; index < record->plan.operations.size(); ++index) {
+        auto prepared = kasumi::application::sync::mutation::prepare_operation(
+            record->plan.operations[index],
+            index,
+            node.local,
+            *workspace,
+            record->progress[index],
+            record->plan.operations);
+        if (!prepared) {
+            return std::unexpected(
+                kasumi::application::sync::mutation::describe(prepared.error()));
+        }
+        record->progress[index] = *prepared;
+    }
+    record->phase = kasumi::transaction::Phase::FilesStaged;
+    saved = kasumi::application::sync::journal::save(*paths, *record, node.key);
+    if (!saved) {
+        return std::unexpected(saved.error());
+    }
+    return StagedDisposableJournal{
+        .record = std::move(*record),
+        .paths = std::move(*paths),
+        .workspace = std::move(*workspace),
+    };
 }
 
 std::string content_identifier_for_payload(const SyncNode& node,
@@ -1150,6 +1230,733 @@ TEST(DirectoryLocalMoveTest,
     EXPECT_EQ((*accepted_after_noop)->commit_id,
               (*accepted_before_noop)->commit_id);
     EXPECT_EQ(read_local_file(receiver, "antigo/novo.cache"), "ignored cache");
+}
+
+TEST(DirectoryLocalMoveTest,
+     DisposableIgnoredFileFollowsRemoteManagedDirectoryRemoval) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-delete-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-delete-receiver", sender.storage_root));
+
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projetos/main.cpp", "managed source");
+    write_local_file(sender, "Projetos/cache.bak", "never publish");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    EXPECT_FALSE(local_entry_exists(receiver, "Projetos/cache.bak"));
+
+    write_local_file(receiver, "Projetos/cache.bak", "local disposable");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    remove_local_subtree(sender, "Projetos");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    reset_content_counts(receiver);
+    const auto synchronized = run_node_sync(receiver);
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    EXPECT_FALSE(local_entry_exists(receiver, "Projetos/main.cpp"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projetos/cache.bak"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projetos"));
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+
+    const auto no_op = run_node_sync(receiver);
+    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
+    const auto* completed =
+        std::get_if<kasumi::application::SyncCompleted>(&no_op->data);
+    ASSERT_NE(completed, nullptr);
+    EXPECT_EQ(completed->total, 0U);
+}
+
+TEST(DirectoryLocalMoveTest,
+     DisposableIgnoredFileIsRemovedAlongsideRemoteRename) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-rename-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-rename-receiver", sender.storage_root));
+
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "managed source");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    write_local_file(receiver, "Projects/cache.bak", "local disposable");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    rename_local_entry(sender, "Projects/main.cpp", "Projects2/main.cpp");
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    auto preview = run_plan(receiver.context);
+    ASSERT_TRUE(preview.has_value()) << preview.error().detail;
+    const auto* preview_report =
+        std::get_if<kasumi::application::PlanReport>(&preview->data);
+    ASSERT_NE(preview_report, nullptr);
+    EXPECT_TRUE(std::ranges::any_of(preview_report->items, [](const auto& item) {
+        return item.action ==
+                   kasumi::application::PlanAction::DeleteIgnoredLocalFile &&
+               kasumi::platform::path::to_logical_utf8(item.path) ==
+                   "Projects/cache.bak";
+    }));
+    EXPECT_TRUE(local_entry_exists(receiver, "Projects/cache.bak"));
+    reset_content_counts(receiver);
+    const auto synchronized = run_node_sync(receiver);
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/main.cpp"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache.bak"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects"));
+    EXPECT_EQ(read_local_file(receiver, "Projects2/main.cpp"), "managed source");
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+}
+
+TEST(DirectoryLocalMoveTest,
+     ProtectedIgnorePreventsPartialDisposableRemoval) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-mixed-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-mixed-receiver", sender.storage_root));
+
+    write_local_file(sender,
+                     ".kasumiignore",
+                     "(?d)*.bak\n*.env\n");
+    write_local_file(sender, "Projects/main.cpp", "managed source");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    write_local_file(receiver, "Projects/cache.bak", "disposable");
+    write_local_file(receiver, "Projects/segredo.env", "protected");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    reset_content_counts(receiver);
+    const auto synchronized = run_node_sync(receiver);
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/main.cpp"));
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"), "disposable");
+    EXPECT_EQ(read_local_file(receiver, "Projects/segredo.env"), "protected");
+    EXPECT_TRUE(local_entry_exists(receiver, "Projects"));
+    const auto* completed =
+        std::get_if<kasumi::application::SyncCompleted>(&synchronized->data);
+    ASSERT_NE(completed, nullptr);
+    EXPECT_FALSE(completed->published);
+}
+
+TEST(DirectoryLocalMoveTest,
+     DisposableRemovalDeduplicatesDirectoryDeletionsInPlan) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-dedup-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-dedup-receiver", sender.storage_root));
+
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "managed");
+    std::error_code ec;
+    ASSERT_TRUE(std::filesystem::create_directories(
+        sender.local / "Projects/empty", ec));
+    ASSERT_FALSE(ec);
+
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(local_entry_exists(receiver, "Projects/empty"));
+
+    write_local_file(receiver, "Projects/cache.bak", "disposable cache");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    auto preview = run_plan(receiver.context);
+    ASSERT_TRUE(preview.has_value()) << preview.error().detail;
+    const auto* preview_report =
+        std::get_if<kasumi::application::PlanReport>(&preview->data);
+    ASSERT_NE(preview_report, nullptr);
+
+    std::size_t delete_empty_count = 0;
+    std::size_t delete_projects_count = 0;
+    std::size_t delete_cache_bak_count = 0;
+    std::set<std::pair<kasumi::application::PlanAction, std::string>> unique_ops;
+    for (const auto& item : preview_report->items) {
+        const auto p = kasumi::platform::path::to_logical_utf8(item.path);
+        EXPECT_TRUE(unique_ops.emplace(item.action, p).second)
+            << "Duplicate operation found: action " << static_cast<int>(item.action)
+            << " for path " << p;
+        if (item.action == kasumi::application::PlanAction::DeleteLocalDirectory) {
+            if (p == "Projects/empty") ++delete_empty_count;
+            if (p == "Projects") ++delete_projects_count;
+        }
+        if (item.action == kasumi::application::PlanAction::DeleteIgnoredLocalFile) {
+            if (p == "Projects/cache.bak") ++delete_cache_bak_count;
+        }
+    }
+    EXPECT_EQ(delete_cache_bak_count, 1U);
+    EXPECT_EQ(delete_empty_count, 1U);
+    EXPECT_EQ(delete_projects_count, 1U);
+
+    const auto synchronized = run_node_sync(receiver);
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/main.cpp"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache.bak"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/empty"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects"));
+
+    const auto no_op = run_node_sync(receiver);
+    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
+    const auto* no_op_completed =
+        std::get_if<kasumi::application::SyncCompleted>(&no_op->data);
+    ASSERT_NE(no_op_completed, nullptr);
+    EXPECT_EQ(no_op_completed->total, 0U);
+    EXPECT_FALSE(no_op_completed->published);
+}
+
+TEST(DirectoryLocalMoveTest,
+     ProtectedAncestorDoesNotBlockIndependentDisposableSubtree) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-ancestor-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-ancestor-receiver", sender.storage_root));
+
+    write_local_file(sender, ".kasumiignore", "*.env\n(?d)*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "managed main");
+    write_local_file(sender, "Projects/cache/marker.txt", "managed marker");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    write_local_file(receiver, "Projects/segredo.env", "secret protected");
+    write_local_file(receiver, "Projects/cache/cache.bak", "disposable cache");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    reset_content_counts(receiver);
+    const auto synchronized = run_node_sync(receiver);
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+
+    EXPECT_EQ(read_local_file(receiver, "Projects/segredo.env"), "secret protected");
+    EXPECT_TRUE(local_entry_exists(receiver, "Projects"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache/cache.bak"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/main.cpp"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache/marker.txt"));
+
+    const auto no_op = run_node_sync(receiver);
+    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
+    const auto* completed =
+        std::get_if<kasumi::application::SyncCompleted>(&no_op->data);
+    ASSERT_NE(completed, nullptr);
+    EXPECT_EQ(completed->total, 0U);
+    EXPECT_FALSE(completed->published);
+}
+
+TEST(DirectoryLocalMoveTest,
+     ProtectedDescendantBlocksDisposalWithinSameProtectedSubtree) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-inv-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-inv-receiver", sender.storage_root));
+
+    write_local_file(sender, ".kasumiignore", "*.env\n(?d)*.bak\n");
+    write_local_file(sender, "Projects/cache/marker.txt", "managed marker");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    write_local_file(receiver, "Projects/cache/cache.bak", "disposable cache");
+    write_local_file(receiver, "Projects/cache/segredo.env", "secret protected");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    const auto synchronized = run_node_sync(receiver);
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache/segredo.env"), "secret protected");
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache/cache.bak"), "disposable cache");
+    EXPECT_TRUE(local_entry_exists(receiver, "Projects/cache"));
+}
+
+TEST(DirectoryLocalMoveTest, NewLocalDisposableDirectoryIsNeverDiscarded) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-new-dir-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-new-dir-receiver", sender.storage_root));
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "tracked.txt", "managed");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    write_local_file(receiver, "novo/cache.bak", "local only");
+    const auto synchronized = run_node_sync(receiver);
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    EXPECT_EQ(read_local_file(receiver, "novo/cache.bak"), "local only");
+    const auto* completed =
+        std::get_if<kasumi::application::SyncCompleted>(&synchronized->data);
+    ASSERT_NE(completed, nullptr);
+    EXPECT_FALSE(completed->published);
+    const auto remote =
+        kasumi::application::observation::collect_storage_state(
+            receiver.context.storage,
+            receiver.key,
+            kasumi::test::workspace_root(receiver.workspace),
+            false);
+    ASSERT_TRUE(remote.has_value()) << remote.error();
+    EXPECT_EQ(kasumi::find_row(remote->tree, "novo"), nullptr);
+}
+
+TEST(DirectoryLocalMoveTest, NewRuleDoesNotRetroactivelyCleanOldResidue) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-residue-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-residue-receiver", sender.storage_root));
+    write_local_file(sender, ".kasumiignore", "*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "managed source");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    write_local_file(receiver, "Projects/cache.bak", "legacy residue");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"), "legacy residue");
+
+    write_local_file(receiver, ".kasumiignore", "(?d)*.bak\n");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"), "legacy residue");
+    EXPECT_TRUE(local_entry_exists(receiver, "Projects"));
+}
+
+TEST(DirectoryLocalMoveTest, ManagedFileCanBecomeDisposableAfterPolicySync) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-managed-transition-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-managed-transition-receiver", sender.storage_root));
+
+    write_local_file(sender, "Projects/main.cpp", "managed source");
+    write_local_file(sender, "Projects/cache.bak", "was managed");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"), "was managed");
+
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"), "was managed");
+
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    reset_content_counts(receiver);
+    const auto synchronized = run_node_sync(receiver);
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache.bak"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects"));
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+}
+
+TEST(DirectoryLocalMoveTest, NestedDisposableSubtreeIsRemovedBottomUp) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-nested-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-nested-receiver", sender.storage_root));
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projects/inner/deep/main.cpp", "managed source");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    write_local_file(receiver, "Projects/outer.bak", "outer cache");
+    write_local_file(receiver, "Projects/inner/middle.bak", "middle cache");
+    write_local_file(receiver, "Projects/inner/deep/inner.bak", "deep cache");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    const auto synchronized = run_node_sync(receiver);
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/outer.bak"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/inner/middle.bak"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/inner/deep/inner.bak"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects"));
+}
+
+TEST(DirectoryLocalMoveTest, RuleBecomingProtectedDuringStabilizationPreventsDisposal) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-rule-race-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-rule-race-receiver", sender.storage_root));
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "managed source");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    write_local_file(receiver, "Projects/cache.bak", "keep after rule change");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    bool changed_rules = false;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path&) {
+            if (point == "before_final_local_observation" && !changed_rules) {
+                changed_rules = true;
+                write_local_file(receiver, ".kasumiignore", "*.bak\n");
+            }
+        });
+    const auto synchronized = run_node_sync(receiver);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    ASSERT_TRUE(changed_rules);
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"),
+              "keep after rule change");
+    EXPECT_TRUE(local_entry_exists(receiver, "Projects"));
+}
+
+TEST(DirectoryLocalMoveTest, ExternalSameContentReplacementIsPreserved) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-replacement-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-replacement-receiver", sender.storage_root));
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "managed source");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    constexpr std::string_view payload = "same bytes, new identity";
+    write_local_file(receiver, "Projects/cache.bak", payload);
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    const auto target = receiver.local / "Projects/cache.bak";
+    const auto original_identity =
+        kasumi::platform::private_storage::query_file_identity(target);
+    ASSERT_TRUE(original_identity.valid);
+
+    const auto replacement = receiver.local / "Projects/replacement.bak";
+    write_local_file(receiver, "Projects/replacement.bak", payload);
+    const auto replacement_identity =
+        kasumi::platform::private_storage::query_file_identity(replacement);
+    ASSERT_TRUE(replacement_identity.valid);
+    ASSERT_NE(original_identity, replacement_identity);
+    bool replaced = false;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "before_delete_ignored_local_file" && path == target &&
+                !replaced) {
+                replaced = true;
+                std::error_code error;
+                ASSERT_TRUE(std::filesystem::remove(target, error));
+                ASSERT_FALSE(error) << error.message();
+                std::filesystem::rename(replacement, target, error);
+                ASSERT_FALSE(error) << error.message();
+            }
+        });
+    const auto rejected = run_node_sync(receiver);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    ASSERT_TRUE(replaced);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(rejected.error().code,
+              kasumi::application::ErrorCode::SynchronizationFailure);
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"), payload);
+    const auto current_identity =
+        kasumi::platform::private_storage::query_file_identity(target);
+    EXPECT_TRUE(current_identity.valid);
+    EXPECT_EQ(current_identity, replacement_identity);
+}
+
+TEST(DirectoryLocalMoveTest, RecoveryRestoresFileRemovedBeforeAppliedCheckpoint) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-recovery-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-recovery-receiver", sender.storage_root));
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "managed source");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    write_local_file(receiver, "Projects/cache.bak", "recover this cache");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    auto staged = stage_disposable_journal(receiver);
+    ASSERT_TRUE(staged.has_value()) << staged.error();
+    ASSERT_EQ(staged->record.plan.operations.size(), 1U);
+    bool interrupted = false;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path&) {
+            if (point == "after_delete_ignored_local_file" && !interrupted) {
+                interrupted = true;
+                throw std::runtime_error("simulated process interruption");
+            }
+        });
+    EXPECT_THROW(
+        (void)kasumi::application::sync::mutation::apply_operation(
+            staged->record.plan.operations.front(),
+            0,
+            receiver.local,
+            receiver.context.storage,
+            receiver.key,
+            staged->workspace,
+            staged->record.progress.front()),
+        std::runtime_error);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+    ASSERT_TRUE(interrupted);
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache.bak"));
+
+    const auto pending =
+        kasumi::application::sync::journal::load(staged->paths, receiver.key);
+    ASSERT_TRUE(pending.has_value()) << pending.error();
+    ASSERT_TRUE(pending->has_value());
+    EXPECT_EQ((*pending)->progress.front().state,
+              kasumi::transaction::OperationState::BackupCreated);
+
+    const auto recovery =
+        kasumi::application::sync::coordinator::recover_if_needed(
+            receiver.runtime, receiver.context.storage, receiver.key);
+    ASSERT_TRUE(recovery.has_value()) << recovery.error().detail;
+    EXPECT_EQ(*recovery,
+              kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    EXPECT_EQ(read_local_file(receiver, "Projects/main.cpp"), "managed source");
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"),
+              "recover this cache");
+
+    const auto converged = run_node_sync(receiver);
+    ASSERT_TRUE(converged.has_value()) << converged.error().detail;
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects"));
+}
+
+
+TEST(DirectoryLocalMoveTest,
+     DisposableRecoveryFailsClosedOnCorruptedBackup) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-corrupt-backup-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-corrupt-backup-receiver", sender.storage_root));
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "managed source");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    write_local_file(receiver, "Projects/cache.bak", "important cache");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    auto staged = stage_disposable_journal(receiver);
+    ASSERT_TRUE(staged.has_value()) << staged.error();
+    ASSERT_EQ(staged->record.plan.operations.size(), 1U);
+    bool interrupted = false;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path&) {
+            if (point == "after_delete_ignored_local_file" && !interrupted) {
+                interrupted = true;
+                throw std::runtime_error("simulated interruption before applied");
+            }
+        });
+    EXPECT_THROW(
+        (void)kasumi::application::sync::mutation::apply_operation(
+            staged->record.plan.operations.front(),
+            0,
+            receiver.local,
+            receiver.context.storage,
+            receiver.key,
+            staged->workspace,
+            staged->record.progress.front()),
+        std::runtime_error);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+    ASSERT_TRUE(interrupted);
+
+    const auto backup_file = staged->workspace.root / "0.backup";
+    ASSERT_TRUE(std::filesystem::exists(backup_file));
+    kasumi::test::write_text(backup_file, "corrupted-backup-data");
+
+    const auto recovery =
+        kasumi::application::sync::coordinator::recover_if_needed(
+            receiver.runtime, receiver.context.storage, receiver.key);
+    EXPECT_FALSE(recovery.has_value());
+}
+
+TEST(DirectoryLocalMoveTest,
+     DisposableRecoveryFailsClosedOnExternalDestinationConflict) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-ext-conflict-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-ext-conflict-receiver", sender.storage_root));
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "managed source");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    write_local_file(receiver, "Projects/cache.bak", "original cache");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    auto staged = stage_disposable_journal(receiver);
+    ASSERT_TRUE(staged.has_value()) << staged.error();
+    ASSERT_EQ(staged->record.plan.operations.size(), 1U);
+    bool interrupted = false;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path&) {
+            if (point == "after_delete_ignored_local_file" && !interrupted) {
+                interrupted = true;
+                throw std::runtime_error("simulated interruption before applied");
+            }
+        });
+    EXPECT_THROW(
+        (void)kasumi::application::sync::mutation::apply_operation(
+            staged->record.plan.operations.front(),
+            0,
+            receiver.local,
+            receiver.context.storage,
+            receiver.key,
+            staged->workspace,
+            staged->record.progress.front()),
+        std::runtime_error);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+    ASSERT_TRUE(interrupted);
+
+    write_local_file(receiver, "Projects/cache.bak", "intruder content created externally");
+
+    const auto recovery =
+        kasumi::application::sync::coordinator::recover_if_needed(
+            receiver.runtime, receiver.context.storage, receiver.key);
+    EXPECT_FALSE(recovery.has_value());
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"),
+              "intruder content created externally");
+}
+
+TEST(DirectoryLocalMoveTest, PartialDisposableRemovalRollsBackWholeSubtree) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-partial-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-partial-receiver", sender.storage_root));
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "managed source");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    write_local_file(receiver, "Projects/a.bak", "first cache");
+    write_local_file(receiver, "Projects/b.bak", "second cache");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    auto staged = stage_disposable_journal(receiver);
+    ASSERT_TRUE(staged.has_value()) << staged.error();
+    ASSERT_EQ(staged->record.plan.operations.size(), 2U);
+    std::size_t removed = 0;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path&) {
+            if (point == "after_delete_ignored_local_file" && ++removed == 1) {
+                throw std::runtime_error("simulated partial subtree failure");
+            }
+        });
+    EXPECT_THROW(
+        (void)kasumi::application::sync::mutation::apply_operation(
+            staged->record.plan.operations.front(),
+            0,
+            receiver.local,
+            receiver.context.storage,
+            receiver.key,
+            staged->workspace,
+            staged->record.progress.front()),
+        std::runtime_error);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+    ASSERT_EQ(removed, 1U);
+
+    const auto recovery =
+        kasumi::application::sync::coordinator::recover_if_needed(
+            receiver.runtime, receiver.context.storage, receiver.key);
+    ASSERT_TRUE(recovery.has_value()) << recovery.error().detail;
+    EXPECT_EQ(*recovery,
+              kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    EXPECT_EQ(read_local_file(receiver, "Projects/main.cpp"), "managed source");
+    EXPECT_EQ(read_local_file(receiver, "Projects/a.bak"), "first cache");
+    EXPECT_EQ(read_local_file(receiver, "Projects/b.bak"), "second cache");
+
+    const auto converged = run_node_sync(receiver);
+    ASSERT_TRUE(converged.has_value()) << converged.error().detail;
+    EXPECT_FALSE(local_entry_exists(receiver, "Projects"));
+}
+
+TEST(DirectoryLocalMoveTest, DisposablePreviewReportsDeletionWithoutApplyingIt) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-preview-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-preview-receiver", sender.storage_root));
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "managed source");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    write_local_file(receiver, "Projects/cache.bak", "preview cache");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    const auto preview = run_plan(receiver.context);
+    ASSERT_TRUE(preview.has_value()) << preview.error().detail;
+    const auto* report =
+        std::get_if<kasumi::application::PlanReport>(&preview->data);
+    ASSERT_NE(report, nullptr);
+    EXPECT_EQ(report->action_counts[static_cast<std::size_t>(
+                  kasumi::application::PlanAction::DeleteIgnoredLocalFile)],
+              1U);
+    EXPECT_TRUE(std::ranges::any_of(report->items, [](const auto& item) {
+        return item.action ==
+                   kasumi::application::PlanAction::DeleteIgnoredLocalFile &&
+               kasumi::platform::path::to_logical_utf8(item.path) ==
+                   "Projects/cache.bak";
+    }));
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"), "preview cache");
+    EXPECT_TRUE(local_entry_exists(receiver, "Projects"));
+
+    receiver.context.operation = kasumi::application::Operation::Status;
+    const auto status = run_plan(receiver.context);
+    ASSERT_TRUE(status.has_value()) << status.error().detail;
+    const auto* status_report =
+        std::get_if<kasumi::application::PlanReport>(&status->data);
+    ASSERT_NE(status_report, nullptr);
+    EXPECT_EQ(status_report->action_counts[static_cast<std::size_t>(
+                  kasumi::application::PlanAction::DeleteIgnoredLocalFile)],
+              1U);
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"), "preview cache");
+}
+
+TEST(DirectoryLocalMoveTest, BroadDisposableRuleNeverHidesKasumiIgnore) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-ignore-rules-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-ignore-rules-receiver", sender.storage_root));
+    write_local_file(sender, ".kasumiignore", "(?d)*\n!tracked.txt\n");
+    write_local_file(sender, "tracked.txt", "managed source");
+    const auto initial = run_node_sync(sender);
+    ASSERT_TRUE(initial.has_value()) << initial.error().detail;
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    EXPECT_EQ(read_local_file(receiver, ".kasumiignore"), "(?d)*\n!tracked.txt\n");
+    EXPECT_EQ(read_local_file(receiver, "tracked.txt"), "managed source");
+    const auto remote =
+        kasumi::application::observation::collect_storage_state(
+            receiver.context.storage,
+            receiver.key,
+            kasumi::test::workspace_root(receiver.workspace),
+            false);
+    ASSERT_TRUE(remote.has_value()) << remote.error();
+    EXPECT_NE(kasumi::find_row(remote->tree, ".kasumiignore"), nullptr);
 }
 
 TEST(DirectoryLocalMoveTest,
@@ -2545,6 +3352,236 @@ TEST(DirectoryLocalMoveTest, ContentCounterConcurrentCallbacksAreThreadSafe) {
     EXPECT_EQ(state.get_identifiers.size(), expected_ops);
     EXPECT_EQ(state.put_identifiers.size(), expected_ops);
     EXPECT_EQ(state.presence_identifiers.size(), expected_ops);
+}
+
+
+
+
+
+
+TEST(DirectoryLocalMoveTest, DisposableCoordinatorInterruptionRecovery) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "coord-interrupt-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "coord-interrupt-receiver", sender.storage_root));
+
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "int main() { return 0; }\n");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    write_local_file(receiver, "Projects/a.bak", "content-a");
+    write_local_file(receiver, "Projects/b.bak", "content-b");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    EXPECT_TRUE(local_entry_exists(receiver, "Projects/a.bak"));
+    EXPECT_TRUE(local_entry_exists(receiver, "Projects/b.bak"));
+
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    const auto preview = run_plan(receiver.context);
+    ASSERT_TRUE(preview.has_value()) << preview.error().detail;
+    const auto* report =
+        std::get_if<kasumi::application::PlanReport>(&preview->data);
+    ASSERT_NE(report, nullptr);
+    EXPECT_EQ(report->action_counts[static_cast<std::size_t>(
+                  kasumi::Action::DeleteLocal)],
+              1U);
+    EXPECT_EQ(report->action_counts[static_cast<std::size_t>(
+                  kasumi::Action::DeleteIgnoredLocalFile)],
+              2U);
+    EXPECT_EQ(report->action_counts[static_cast<std::size_t>(
+                  kasumi::Action::DeleteLocalDirectory)],
+              1U);
+
+    std::size_t hook_hits = 0;
+    std::filesystem::path interrupted_path;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "after_delete_ignored_local_file" && ++hook_hits == 1) {
+                interrupted_path = path;
+                throw std::runtime_error("simulated crash after physical disposal");
+            }
+        });
+
+    const auto interrupted_sync = run_node_sync(receiver);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    ASSERT_FALSE(interrupted_sync.has_value());
+    EXPECT_NE(interrupted_sync.error().detail.find("simulated crash after physical disposal"),
+              std::string::npos);
+
+    ASSERT_EQ(hook_hits, 1U);
+    ASSERT_FALSE(interrupted_path.empty());
+
+    EXPECT_FALSE(std::filesystem::exists(interrupted_path));
+
+    const auto paths = kasumi::application::sync::journal::make_paths(receiver.profile);
+    ASSERT_TRUE(paths.has_value());
+    ASSERT_TRUE(std::filesystem::exists(paths->final_path));
+
+    auto loaded = kasumi::application::sync::journal::load(*paths, receiver.key);
+    ASSERT_TRUE(loaded.has_value());
+    ASSERT_TRUE(loaded->has_value());
+    const auto& record = **loaded;
+    EXPECT_EQ(record.phase, kasumi::transaction::Phase::FilesStaged);
+
+    auto opened_ws =
+        kasumi::application::sync::coordinator::detail::open_transaction_workspace(
+            receiver.profile, record.operation_id, receiver.key);
+    ASSERT_TRUE(opened_ws.has_value());
+    ASSERT_TRUE(opened_ws->has_value());
+
+    const auto rel_interrupted = kasumi::platform::path::to_utf8(
+        std::filesystem::relative(interrupted_path, receiver.local));
+    bool found_interrupted_op = false;
+    for (std::size_t i = 0; i < record.plan.operations.size(); ++i) {
+        if (record.plan.operations[i].path == rel_interrupted) {
+            found_interrupted_op = true;
+            EXPECT_TRUE(record.progress[i].had_original);
+            EXPECT_NE(record.progress[i].state,
+                      kasumi::transaction::OperationState::Applied);
+            const auto backup_file = kasumi::platform::workspace_file(
+                **opened_ws, record.progress[i].backup_slot, ".backup");
+            ASSERT_TRUE(std::filesystem::exists(backup_file));
+            EXPECT_EQ(kasumi::test::read_text(backup_file),
+                      rel_interrupted.ends_with("a.bak") ? "content-a"
+                                                         : "content-b");
+            break;
+        }
+    }
+    EXPECT_TRUE(found_interrupted_op);
+
+    SyncNode restarted;
+    restarted.profile = receiver.profile;
+    restarted.local = receiver.local;
+    restarted.storage_root = receiver.storage_root;
+    restarted.database = receiver.database;
+    restarted.key = receiver.key;
+    auto opened = kasumi::transport::open_transport(restarted.storage_root.string());
+    ASSERT_TRUE(opened.has_value());
+    restarted.base_storage = std::move(*opened);
+    restarted.counters.base = &restarted.base_storage;
+    restarted.runtime = kasumi::runtime::RuntimeData{
+        .local_dir = restarted.local,
+        .database_path = restarted.database,
+        .key_path = restarted.profile / "key.bin",
+        .storage_location = restarted.storage_root.string(),
+    };
+    restarted.context.operation = kasumi::application::Operation::Sync;
+    restarted.context.runtime = restarted.runtime;
+    restarted.context.summary = {
+        .local_dir = restarted.local,
+        .remote_dir = kasumi::platform::path::to_utf8(restarted.storage_root),
+    };
+    restarted.context.key = restarted.key;
+    restarted.context.storage = make_counting_transport(restarted.counters);
+    restarted.valid = true;
+
+    const auto recovery =
+        kasumi::application::sync::coordinator::recover_if_needed(
+            restarted.runtime, restarted.context.storage, restarted.key);
+    ASSERT_TRUE(recovery.has_value()) << recovery.error().detail;
+    EXPECT_EQ(*recovery,
+              kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+
+    EXPECT_EQ(read_local_file(restarted, "Projects/a.bak"), "content-a");
+    EXPECT_EQ(read_local_file(restarted, "Projects/b.bak"), "content-b");
+    EXPECT_EQ(read_local_file(restarted, "Projects/main.cpp"), "int main() { return 0; }\n");
+
+    const auto synced = run_node_sync(restarted);
+    ASSERT_TRUE(synced.has_value()) << synced.error().detail;
+    EXPECT_FALSE(local_entry_exists(restarted, "Projects"));
+
+    const auto noop = run_node_sync(restarted);
+    ASSERT_TRUE(noop.has_value()) << noop.error().detail;
+    const auto* summary =
+        std::get_if<kasumi::application::SyncCompleted>(&noop->data);
+    ASSERT_NE(summary, nullptr);
+    EXPECT_EQ(summary->total, 0U);
+}
+
+
+TEST(DirectoryLocalMoveTest, DisposableRemovalFailsClosedWhenSourceDisappearsBeforeApply) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-missing-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-missing-receiver", sender.storage_root));
+
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "int main() { return 0; }\n");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    write_local_file(receiver, "Projects/a.bak", "content-a");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    EXPECT_TRUE(local_entry_exists(receiver, "Projects/a.bak"));
+
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    std::size_t hook_hits = 0;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "before_delete_ignored_local_file" && path.filename() == "a.bak") {
+                ++hook_hits;
+                std::error_code ec;
+                std::filesystem::remove(path, ec);
+            }
+        });
+
+    const auto sync_result = run_node_sync(receiver);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_EQ(hook_hits, 1U);
+    ASSERT_FALSE(sync_result.has_value());
+    EXPECT_NE(sync_result.error().detail.find("disposable source is missing"),
+              std::string::npos);
+}
+
+
+TEST(DirectoryLocalMoveTest,
+     DisposableRemovalRejectsAlreadyAbsentAfterFinalVerification) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-absent-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-absent-receiver", sender.storage_root));
+
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projects/main.cpp", "int main() { return 0; }\n");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+
+    write_local_file(receiver, "Projects/cache.bak", "disposable cache");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    EXPECT_TRUE(local_entry_exists(receiver, "Projects/cache.bak"));
+
+    remove_local_subtree(sender, "Projects");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    std::size_t hook_hits = 0;
+    kasumi::application::sync::mutation_fault_test::set_hook(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "before_disposable_owned_remove" &&
+                path.filename() == "cache.bak") {
+                ++hook_hits;
+                std::error_code ec;
+                std::filesystem::remove(path, ec);
+            }
+        });
+
+    const auto sync_result = run_node_sync(receiver);
+    kasumi::application::sync::mutation_fault_test::clear_hook();
+
+    EXPECT_EQ(hook_hits, 1U);
+    ASSERT_FALSE(sync_result.has_value());
+    EXPECT_NE(sync_result.error().detail.find(
+                  "disposable source disappeared before verified removal"),
+              std::string::npos);
 }
 
 } // namespace

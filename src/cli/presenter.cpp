@@ -203,7 +203,8 @@ void render_plan_report(const application::PlanReport& report,
                                             "DeleteLocalDirectory",
                                             "DeleteRemote",
                                             "DeleteRemoteDirectory",
-                                            "CopyLocal"};
+                                            "CopyLocal",
+                                            "DeleteIgnoredLocalFile"};
 
     auto print_item = [&](const application::PlanItem& item) {
         auto idx = static_cast<std::size_t>(item.action);

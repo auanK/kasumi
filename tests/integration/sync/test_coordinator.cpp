@@ -1610,7 +1610,8 @@ TEST(ScanEvidenceTest,
     EXPECT_EQ(kasumi::find_row(scanned->snapshot, "ignored-link/secret.txt"),
               nullptr);
     EXPECT_NE(std::ranges::find(scanned->physical_evidence.ignored_entries,
-                                "ignored-link"),
+                                "ignored-link",
+                                &kasumi::reconciliation::IgnoredEntryEvidence::path),
               scanned->physical_evidence.ignored_entries.end());
 
     const auto root_evidence = std::ranges::find(
@@ -6425,7 +6426,10 @@ TEST(ReconciliationTest, UnexpectedSymlinkEvidenceDoesNotSuppressDirectoryRemova
          .has_managed_descendants = true,
          .has_unexpected_descendants = true},
     };
-    input.local_physical_evidence.ignored_entries = {"Projects/local.cache"};
+    input.local_physical_evidence.ignored_entries = {
+        {.path = "Projects/local.cache",
+         .kind = kasumi::reconciliation::PhysicalEntryKind::RegularFile,
+         .disposition = kasumi::ignore::IgnoreDisposition::IgnoredProtected}};
 
     const auto result = kasumi::reconciliation::reconcile(input);
 

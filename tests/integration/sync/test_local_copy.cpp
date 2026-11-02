@@ -1,6 +1,7 @@
 #include "application/sync/mutation_fault_test.hpp"
 #include "platform/perf_trace.hpp"
 #include "application/use_cases/context.hpp"
+#include "application/observation/state.hpp"
 #include "crypto/content.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
@@ -2458,6 +2459,47 @@ TEST(LocalCopyIntegrationTest, PureCopyBetweenTwoClients) {
     EXPECT_EQ(node_b.counters.content_puts, 0U);
     EXPECT_EQ(node_b.counters.content_presences, 2U);
     EXPECT_EQ(node_b.counters.content_copies, 0U);
+}
+
+TEST(LocalCopyIntegrationTest,
+     KasumiIgnoreWithDisposableRulePropagatesBetweenClients) {
+    SyncNode node_a, node_b;
+    ASSERT_TRUE(init_sync_node(node_a, "ignore-rules-a"));
+    ASSERT_TRUE(init_sync_node(node_b, "ignore-rules-b", node_a.storage_root));
+
+    constexpr std::string_view initial_rules = "*.env\n";
+    constexpr std::string_view updated_rules = "*.env\n(?d)*.bak\n";
+    write_local_file(node_a, ".kasumiignore", initial_rules);
+    write_local_file(node_a, "readme.txt", "managed");
+    ASSERT_TRUE(run_node_sync(node_a).has_value());
+    ASSERT_TRUE(run_node_sync(node_b).has_value());
+    ASSERT_TRUE(local_entry_exists(node_b, ".kasumiignore"));
+    EXPECT_EQ(read_local_file(node_b, ".kasumiignore"), initial_rules);
+
+    write_local_file(node_a, ".kasumiignore", updated_rules);
+    ASSERT_TRUE(run_node_sync(node_a).has_value());
+    ASSERT_TRUE(run_node_sync(node_b).has_value());
+    EXPECT_EQ(read_local_file(node_b, ".kasumiignore"), updated_rules);
+
+    write_local_file(node_b, "local.env", "protected ignore");
+    write_local_file(node_b, "cache.bak", "disposable ignore");
+    write_local_file(node_b, "visible.txt", "managed after rule update");
+    const auto synced = run_node_sync(node_b);
+    ASSERT_TRUE(synced.has_value()) << synced.error().detail;
+    EXPECT_TRUE(local_entry_exists(node_b, "local.env"));
+    EXPECT_TRUE(local_entry_exists(node_b, "cache.bak"));
+
+    const auto remote =
+        kasumi::application::observation::collect_storage_state(
+            node_b.context.storage,
+            node_b.key,
+            kasumi::test::workspace_root(node_b.workspace),
+            false);
+    ASSERT_TRUE(remote.has_value()) << remote.error();
+    EXPECT_NE(kasumi::find_row(remote->tree, ".kasumiignore"), nullptr);
+    EXPECT_NE(kasumi::find_row(remote->tree, "visible.txt"), nullptr);
+    EXPECT_EQ(kasumi::find_row(remote->tree, "local.env"), nullptr);
+    EXPECT_EQ(kasumi::find_row(remote->tree, "cache.bak"), nullptr);
 }
 
 TEST(LocalCopyIntegrationTest, MultipleLocalCopiesBetweenClients) {

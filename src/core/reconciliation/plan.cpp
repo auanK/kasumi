@@ -1,6 +1,8 @@
 #include "core/reconciliation/plan.hpp"
 
 #include "core/diff.hpp"
+#include "core/hasher.hpp"
+#include "core/ignore.hpp"
 #include "platform/path.hpp"
 
 #include <algorithm>
@@ -671,18 +673,30 @@ candidate_shared_tree(const Input& input,
 }
 
 void order_directory_operations(SyncPlan& plan) {
-    const auto depth = [](const Operation& operation) {
-        return static_cast<std::size_t>(
-            std::distance(operation.path.begin(), operation.path.end()));
-    };
-
     auto creations = sync_plan_phase(plan, Action::CreateLocalDirectory);
-
     auto deletions = sync_plan_phase(plan, Action::DeleteLocalDirectory);
 
-    std::ranges::sort(creations, {}, depth);
+    std::ranges::sort(creations, [](const Operation& a, const Operation& b) {
+        const auto da = static_cast<std::size_t>(
+            std::distance(a.path.begin(), a.path.end()));
+        const auto db = static_cast<std::size_t>(
+            std::distance(b.path.begin(), b.path.end()));
+        if (da != db) {
+            return da < db;
+        }
+        return a.path < b.path;
+    });
 
-    std::ranges::sort(deletions, std::greater{}, depth);
+    std::ranges::sort(deletions, [](const Operation& a, const Operation& b) {
+        const auto da = static_cast<std::size_t>(
+            std::distance(a.path.begin(), a.path.end()));
+        const auto db = static_cast<std::size_t>(
+            std::distance(b.path.begin(), b.path.end()));
+        if (da != db) {
+            return da > db;
+        }
+        return a.path < b.path;
+    });
 }
 
 const LocalDirectoryEvidence* find_directory_evidence(
@@ -785,6 +799,219 @@ void suppress_protected_directory_deletions(
         return evidence != nullptr && evidence->has_ignored_descendants &&
                !evidence->has_unexpected_descendants;
     });
+}
+
+bool snapshot_contains_subtree(const Snapshot& tree, std::string_view path) {
+    return std::ranges::any_of(tree.rows, [&](const NodeRow& row) {
+        return row.path == path || is_descendant(row.path, path);
+    });
+}
+
+struct DisposableSelection {
+    std::vector<Operation> operations;
+    std::vector<std::filesystem::path> paths_to_hash;
+};
+
+std::expected<DisposableSelection, Error> select_disposable_operations(
+    const Input& input,
+    const Snapshot& candidate_tree,
+    const SyncPlan& current_plan) {
+    DisposableSelection selection;
+    if (!input.base_state_present || !input.storage.history_present ||
+        input.storage.history_has_conflicts || has_conflicts(current_plan)) {
+        if (!input.disposable_ignored_content.empty()) {
+            return std::unexpected(Error{
+                .code = ErrorCode::UnsafePlan,
+                .detail = "disposable evidence has no authorized removal",
+                .paths = {},
+            });
+        }
+        return selection;
+    }
+
+    std::unordered_map<std::string, const DisposableIgnoredContent*> content;
+    for (const auto& item : input.disposable_ignored_content) {
+        if (item.path.empty() || !content.emplace(item.path, &item).second) {
+            return std::unexpected(Error{
+                .code = ErrorCode::UnsafePlan,
+                .detail = "duplicate or empty disposable content evidence",
+                .paths = {platform::path::from_utf8(item.path)},
+            });
+        }
+    }
+
+    std::vector<std::string> removal_roots;
+    for (const auto& directory : input.local_physical_evidence.directories) {
+        const auto* base = find_row(input.base_tree, directory.path);
+        if (directory.path.empty() || directory.ignored_entry || base == nullptr ||
+            !base->is_directory ||
+            snapshot_contains_subtree(input.storage.tree, directory.path) ||
+            snapshot_contains_subtree(candidate_tree, directory.path)) {
+            continue;
+        }
+        removal_roots.push_back(directory.path);
+    }
+    std::ranges::sort(removal_roots, path_less);
+
+    std::unordered_set<std::string> selected_files;
+    std::unordered_set<std::string> selected_directories;
+    std::vector<std::string> authorized_roots;
+    for (const auto& root : removal_roots) {
+        if (std::ranges::any_of(authorized_roots, [&](std::string_view parent) {
+                return is_descendant(root, parent);
+            })) {
+            continue;
+        }
+        const auto* root_evidence =
+            find_directory_evidence(input.local_physical_evidence, root);
+        if (root_evidence == nullptr ||
+            root_evidence->has_protected_descendants ||
+            root_evidence->has_unexpected_descendants) {
+            continue;
+        }
+
+        bool viable = true;
+        bool has_disposable = false;
+        std::unordered_set<std::string> root_files;
+        std::unordered_set<std::string> root_directories;
+        for (const auto& directory : input.local_physical_evidence.directories) {
+            if (directory.path != root && !is_descendant(directory.path, root)) {
+                continue;
+            }
+            const auto* base = find_row(input.base_tree, directory.path);
+            if (directory.ignored_entry ||
+                directory.has_protected_descendants ||
+                directory.has_unexpected_descendants || base == nullptr ||
+                !base->is_directory) {
+                viable = false;
+                break;
+            }
+            root_directories.insert(directory.path);
+        }
+        if (!viable) {
+            continue;
+        }
+
+        for (const auto& ignored : input.local_physical_evidence.ignored_entries) {
+            if (!is_descendant(ignored.path, root)) {
+                continue;
+            }
+            if (ignored.kind != PhysicalEntryKind::RegularFile ||
+                ignored.disposition !=
+                    ignore::IgnoreDisposition::IgnoredDisposable ||
+                ignore::classify_ignore(ignored.path, false, input.ignore_list) !=
+                    ignore::IgnoreDisposition::IgnoredDisposable ||
+                ignore::is_kasumiignore_path(ignored.path) ||
+                ignore::is_reserved_internal(ignored.path)) {
+                viable = false;
+                break;
+            }
+            has_disposable = true;
+            root_files.insert(ignored.path);
+        }
+
+        if (viable) {
+            for (const auto& row : input.local_tree.rows) {
+                if (row.is_directory || !is_descendant(row.path, root)) {
+                    continue;
+                }
+                const bool removed_or_moved = std::ranges::any_of(
+                    sync_plan_operations(current_plan), [&](const Operation& op) {
+                        return (op.action == Action::DeleteLocal ||
+                                op.action == Action::MoveLocal ||
+                                op.action == Action::RenameLocal) &&
+                               platform::path::to_logical_utf8(op.path) ==
+                                   row.path;
+                    });
+                if (!removed_or_moved) {
+                    viable = false;
+                    break;
+                }
+            }
+        }
+        if (!viable || !has_disposable) {
+            continue;
+        }
+        authorized_roots.push_back(root);
+        selected_files.insert(root_files.begin(), root_files.end());
+        selected_directories.insert(root_directories.begin(),
+                                    root_directories.end());
+    }
+
+    std::vector<std::string> candidate_paths(selected_files.begin(),
+                                             selected_files.end());
+    std::ranges::sort(candidate_paths, path_less);
+    for (const auto& path : candidate_paths) {
+        const auto found = content.find(path);
+        if (found == content.end()) {
+            selection.paths_to_hash.push_back(platform::path::from_utf8(path));
+            continue;
+        }
+        const auto evidence = std::ranges::find(
+            input.local_physical_evidence.ignored_entries,
+            path,
+            &IgnoredEntryEvidence::path);
+        const auto hash = hash_from_hex(found->second->hash);
+        if (evidence == input.local_physical_evidence.ignored_entries.end() ||
+            !hash || hash_hex(*hash) != found->second->hash ||
+            found->second->size != evidence->size ||
+            found->second->identity != evidence->identity ||
+            !found->second->identity.valid) {
+            return std::unexpected(Error{
+                .code = ErrorCode::UnsafePlan,
+                .detail = "disposable content no longer matches physical evidence",
+                .paths = {platform::path::from_utf8(path)},
+            });
+        }
+    }
+    if (!selection.paths_to_hash.empty()) {
+        if (content.size() > candidate_paths.size()) {
+            return std::unexpected(Error{
+                .code = ErrorCode::UnsafePlan,
+                .detail = "disposable evidence contains an unselected file",
+                .paths = {},
+            });
+        }
+        return selection;
+    }
+    if (content.size() != candidate_paths.size()) {
+        return std::unexpected(Error{
+            .code = ErrorCode::UnsafePlan,
+            .detail = "disposable content evidence no longer matches candidates",
+            .paths = {},
+        });
+    }
+
+    std::unordered_set<std::string> already_planned_directories;
+    for (const auto& op : sync_plan_operations(current_plan)) {
+        if (op.action == Action::DeleteLocalDirectory) {
+            already_planned_directories.insert(
+                platform::path::to_logical_utf8(op.path));
+        }
+    }
+
+    for (const auto& path : candidate_paths) {
+        const auto& item = *content.at(path);
+        selection.operations.push_back(Operation{
+            .action = Action::DeleteIgnoredLocalFile,
+            .path = platform::path::from_utf8(path),
+            .hash = item.hash,
+            .size = item.size,
+            .expected_source_identity = item.identity,
+        });
+    }
+    std::vector<std::string> dir_paths(selected_directories.begin(),
+                                       selected_directories.end());
+    std::ranges::sort(dir_paths, path_less);
+    for (const auto& path : dir_paths) {
+        if (!already_planned_directories.contains(path)) {
+            selection.operations.push_back(Operation{
+                .action = Action::DeleteLocalDirectory,
+                .path = platform::path::from_utf8(path),
+            });
+        }
+    }
+    return selection;
 }
 
 std::expected<void, Error>
@@ -1190,6 +1417,18 @@ build_publication_tree(Snapshot publication_tree,
 }
 
 ReconcileResult reconcile(const Input& input) {
+    if (input.ignore_list.parse_error) {
+        const auto& parse_error = *input.ignore_list.parse_error;
+        return std::unexpected(Error{
+            .code = ErrorCode::InvalidLocalTree,
+            .detail = parse_error.line == 0
+                          ? ".kasumiignore: " + parse_error.detail
+                          : ".kasumiignore line " +
+                                std::to_string(parse_error.line) + ": " +
+                                parse_error.detail,
+            .paths = {platform::path::from_utf8(".kasumiignore")},
+        });
+    }
     if (!kasumi::valid_snapshot(input.local_tree, false)) {
         return std::unexpected(invalid_tree_error(ErrorCode::InvalidLocalTree,
                                                   "invalid local tree"));
@@ -1388,10 +1627,6 @@ ReconcileResult reconcile(const Input& input) {
     suppress_protected_directory_deletions(
         operations, input.local_physical_evidence);
 
-    const bool requires_local_mutation =
-        std::ranges::any_of(operations, [](const Operation& operation) {
-            return is_local_mutation(operation.action);
-        });
     auto plan = make_sync_plan(std::move(operations), 0);
 
     order_directory_operations(plan);
@@ -1409,6 +1644,48 @@ ReconcileResult reconcile(const Input& input) {
         projected_input, plan, std::span<const std::string>{repair_upload_paths});
     if (!candidate) {
         return std::unexpected(std::move(candidate.error()));
+    }
+    auto disposable = select_disposable_operations(
+        input, candidate->tree, plan);
+    if (!disposable) {
+        return std::unexpected(std::move(disposable.error()));
+    }
+    auto disposable_paths_to_hash = std::move(disposable->paths_to_hash);
+    if (!disposable->operations.empty()) {
+        auto final_operations = plan.operations;
+        std::unordered_set<std::string> existing_dir_deletions;
+        for (const auto& op : final_operations) {
+            if (op.action == Action::DeleteLocalDirectory) {
+                existing_dir_deletions.insert(
+                    platform::path::to_logical_utf8(op.path));
+            }
+        }
+        for (auto& op : disposable->operations) {
+            if (op.action == Action::DeleteLocalDirectory) {
+                const auto path_str = platform::path::to_logical_utf8(op.path);
+                if (existing_dir_deletions.contains(path_str)) {
+                    continue;
+                }
+                existing_dir_deletions.insert(path_str);
+            }
+            final_operations.push_back(std::move(op));
+        }
+        plan = make_sync_plan(std::move(final_operations), 0);
+        order_directory_operations(plan);
+        if (!valid_sync_plan(plan) || !has_safe_paths(plan)) {
+            return std::unexpected(Error{
+                .code = ErrorCode::UnsafePlan,
+                .detail = "disposable plan contains invalid paths or phases",
+                .paths = {},
+            });
+        }
+        candidate = candidate_shared_tree(
+            projected_input,
+            plan,
+            std::span<const std::string>{repair_upload_paths});
+        if (!candidate) {
+            return std::unexpected(std::move(candidate.error()));
+        }
     }
     std::erase_if(pending_storage_rows, [&](NodeRow& pending) {
         const auto* candidate_row = find_row(candidate->tree, pending.path);
@@ -1446,6 +1723,10 @@ ReconcileResult reconcile(const Input& input) {
     plan.target_generation = target_generation;
 
     const bool conflict = has_conflicts(plan);
+    const bool requires_local_mutation = std::ranges::any_of(
+        sync_plan_operations(plan), [](const Operation& operation) {
+            return is_local_mutation(operation.action);
+        });
 
     const bool requires_state_commit =
         input.storage.history_present &&
@@ -1456,6 +1737,7 @@ ReconcileResult reconcile(const Input& input) {
     return Result{
         .plan = std::move(plan),
         .missing_objects = std::move(missing_objects),
+        .disposable_paths_to_hash = std::move(disposable_paths_to_hash),
         .pending_storage_rows = std::move(pending_storage_rows),
         .pending_materializations = std::move(pending_materializations),
         .missing_content_paths_without_local_source =

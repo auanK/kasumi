@@ -61,6 +61,7 @@ inline constexpr std::array<std::string_view, ActionCount> action_metrics{
     "action/DeleteRemote",
     "action/DeleteRemoteDirectory",
     "action/CopyLocal",
+    "action/DeleteIgnoredLocalFile",
 };
 
 Error make_error(ErrorCode code,
@@ -2082,6 +2083,12 @@ execute(const runtime::RuntimeData& runtime_data,
         }
     }
     detail::order_local_copies(record->plan.operations, remaining_operations);
+    std::stable_partition(remaining_operations.begin(),
+                          remaining_operations.end(),
+                          [&](std::size_t index) {
+                              return record->plan.operations[index].action !=
+                                     Action::DeleteLocalDirectory;
+                          });
     for (const auto index : remaining_operations) {
         apply_order.push_back(index);
     }

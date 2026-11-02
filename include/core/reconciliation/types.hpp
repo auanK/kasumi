@@ -101,12 +101,32 @@ struct StorageState {
 
 // Transient physical facts used to project ignored-only directories without
 // adding ignored entries to the managed snapshot.
+enum class PhysicalEntryKind : std::uint8_t {
+    RegularFile,
+    Directory,
+    LinkLike,
+    Unsupported
+};
+
+struct IgnoredEntryEvidence {
+    std::string path;
+    PhysicalEntryKind kind = PhysicalEntryKind::Unsupported;
+    ignore::IgnoreDisposition disposition =
+        ignore::IgnoreDisposition::IgnoredProtected;
+    std::uint64_t size = 0;
+    PhysicalFileIdentity identity{};
+
+    bool operator==(const IgnoredEntryEvidence&) const = default;
+};
+
 struct LocalDirectoryEvidence {
     std::string path;
     bool ignored_entry = false;
     bool has_ignored_descendants = false;
     bool has_managed_descendants = false;
     bool has_unexpected_descendants = false;
+    bool has_protected_descendants = false;
+    bool has_disposable_descendants = false;
     bool physically_empty = false;
 
     bool operator==(const LocalDirectoryEvidence&) const = default;
@@ -114,9 +134,18 @@ struct LocalDirectoryEvidence {
 
 struct LocalPhysicalEvidence {
     std::vector<LocalDirectoryEvidence> directories;
-    std::vector<std::string> ignored_entries;
+    std::vector<IgnoredEntryEvidence> ignored_entries;
 
     bool operator==(const LocalPhysicalEvidence&) const = default;
+};
+
+struct DisposableIgnoredContent {
+    std::string path;
+    std::string hash;
+    std::uint64_t size = 0;
+    PhysicalFileIdentity identity{};
+
+    bool operator==(const DisposableIgnoredContent&) const = default;
 };
 
 // Immutable inputs used to compute a reconciliation.
@@ -126,6 +155,10 @@ struct Input {
 
     // Physical ignore evidence from the same observation and effective rules.
     LocalPhysicalEvidence local_physical_evidence;
+
+    // Candidate ignored file hashes computed only after reconciliation selects
+    // a remotely authorized removal subtree.
+    std::vector<DisposableIgnoredContent> disposable_ignored_content;
 
     // Accepted logical files that are not physically present locally.
     std::vector<NodeRow> pending_materializations;
@@ -171,6 +204,9 @@ struct Result {
 
     // Objects referenced by remote but physically missing.
     HashSet missing_objects{0, hash_key};
+
+    // Disposable files selected by reconciliation, awaiting targeted hashing.
+    std::vector<std::filesystem::path> disposable_paths_to_hash;
 
     // Remote rows whose physical objects are missing.
     std::vector<NodeRow> pending_storage_rows;

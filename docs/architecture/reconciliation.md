@@ -4,11 +4,30 @@ Reconciliation receives three distinct validated views: the current local `Snaps
 
 The reconciler validates all input Snapshots and pending-materialization rows before computing changes. It builds a logical local view that includes accepted remote files still pending on disk, then compares local/base/remote by path. Independent edits combine; a modified file wins over deletion; incompatible file edits preserve both versions. For simultaneous local/remote file changes, the local `mtime` must be strictly newer to keep the canonical path, placing the remote variant at a conflict path. Otherwise, including equal timestamps, the remote variant keeps the canonical path and the local one is renamed and uploaded. Conflict destinations are reserved against exact and portable Unicode case-key collisions. Remote-branch conflict paths are described in [History and Concurrency](history-and-concurrency.md). Unsupported structures or unsafe paths stop planning.
 
-## Ignored Directory Residues
+## Ignored Directory Residues and Disposable Files
 
 Reconciliation distinguishes the managed local Snapshot from transient physical evidence of ignored entries. Before the three-way comparison, it projects the local tree against the effective remote tree. A directory absent from the desired remote tree can be excluded from the managed projection when it exists only to contain ignored content and has no managed descendants that must remain. Directories still required by managed paths, ordinary empty directories, and directories present in the desired remote tree remain managed.
 
-This logical projection never removes physical entries. After local move and copy selection, `DeleteLocalDirectory` operations are suppressed for directories whose ignored descendants require physical preservation. Managed file deletions, moves, and downloads continue normally. The candidate shared tree represents the logical synchronization result rather than every directory physically present on the client.
+Ignored content is protected by default. `(?d)` rules classify matching regular
+files as disposable without adding them to the managed Snapshot. A file is
+selected for `DeleteIgnoredLocalFile` only when its removal is part of a
+previously accepted managed directory removal: reconciliation checks the base,
+effective remote and candidate shared trees, current ignore rules, physical
+evidence, and planned managed file removals or moves. New local-only directories,
+old residue, protected or unclassifiable entries, and links cannot authorize
+disposal. If a subtree mixes protected and disposable ignored entries, that specific subtree
+is preserved in full; independent eligible descendant subtrees that contain no protected
+entries remain eligible for disposal and directory removal. Each physical directory path
+receives at most one `DeleteLocalDirectory` operation in the plan, ordered bottom-up.
+
+Only selected candidates are hashed. Reconciliation first selects paths from
+metadata and physical evidence, then the scanner hashes those candidates and
+reconciles again, requiring the candidate set and file identities to match.
+After local move and copy selection, `DeleteLocalDirectory` operations are
+suppressed for directories whose ignored descendants require preservation.
+Authorized `DeleteIgnoredLocalFile` operations precede the corresponding
+child-first directory deletions. The candidate shared tree remains a logical
+view; residual ignored directories do not become remote creations.
 
 Residual directories must not become remote creations or recurring deletion operations on subsequent runs. Unexpected entries do not qualify as protected ignored content and must not be silently projected away. Final publication-tree validation applies the same managed-directory semantics to the filesystem observed after execution.
 
@@ -26,9 +45,15 @@ The output is a `SyncPlan` plus a **candidate shared tree** and flags for local 
 10. `DeleteRemoteDirectory`
 11. `CopyLocal`
 
-Directory creation is parent-first and removal child-first. When a remote file or directory is renamed or moved, reconciliation deterministically pairs eligible `DeleteLocal` sources (whose `(hash, size)` matches a `Download` destination and whose source path is not retained in the candidate shared tree) 1-to-1 into `MoveLocal` (`path = source`, `alt_path = destination`, `hash`, `size`) after `CreateLocalDirectory` and before `Download` / `DeleteLocalDirectory`.
+These are serialized action groups; execution and replay may order effects by
+their dependencies. Directory creation is parent-first and removal child-first.
+When a remote file is moved or renamed, including relocation within directories,
+reconciliation deterministically pairs eligible `DeleteLocal` sources (whose
+`(hash, size)` matches a `Download` destination and whose source path is not
+retained in the candidate shared tree) 1-to-1 into `MoveLocal` (`path = source`,
+`alt_path = destination`, `hash`, `size`).
 
-After move selection, remaining eligible Downloads to absent, non-conflict destinations become `CopyLocal` when an observed local file has the same `(hash, size)`. Sources are chosen deterministically, can serve multiple copies, and must survive conflict renames. `MoveLocal` consumes its paired source; `CopyLocal` preserves it. Without an eligible copy source, the operation remains a Download. Although copies are grouped last in the plan, execution and replay keep rename, upload, and directory creation first, then run copies before moves, downloads, and deletions that could consume their sources.
+After move selection, remaining eligible Downloads to absent, non-conflict destinations become `CopyLocal` when an observed local file has the same `(hash, size)`. Sources are chosen deterministically, can serve multiple copies, and must survive conflict renames. `MoveLocal` consumes its paired source; `CopyLocal` preserves it. Without an eligible copy source, the operation remains a Download. Although copies are grouped last in the plan, execution and replay keep rename, upload, and directory creation first, then run copies before moves, downloads, and deletions that could consume their sources. Disposable removals run only after the managed operations authorizing their containing-directory removal.
 
 When a local file or directory is renamed or moved, uploads whose `(hash, size)` is already accounted for in the accepted `StoredState` tree reuse the accepted remote content without re-uploading. The remote-directory and remote-delete actions change the logical publication tree; storage contains content-addressed payloads and history objects, not a mirrored plaintext directory. Plan validation checks phase boundaries, action grouping, and path safety before execution.
 

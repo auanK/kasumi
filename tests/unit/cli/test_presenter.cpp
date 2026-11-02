@@ -43,13 +43,18 @@ TEST(CliPresenterTest, PresentsEmptyAndPopulatedPlansWithTrafficAndRename) {
     report.download_bytes = 20;
     report.items = {{PlanAction::RenameLocal, "old", "new", 0},
                     {PlanAction::Upload, "file", {}, 10},
-                    {PlanAction::Download, "other", {}, 20}};
+                    {PlanAction::Download, "other", {}, 20},
+                    {PlanAction::DeleteIgnoredLocalFile,
+                     "cache.bak",
+                     {},
+                     10}};
     testing::internal::CaptureStdout();
     EXPECT_EQ(kasumi::cli::present(response(report)), 0);
     const auto output = testing::internal::GetCapturedStdout();
     EXPECT_NE(output.find("modificações independentes"), std::string::npos);
     EXPECT_NE(output.find("old -> new"), std::string::npos);
     EXPECT_NE(output.find("Upload"), std::string::npos);
+    EXPECT_NE(output.find("DeleteIgnoredLocalFile"), std::string::npos);
     EXPECT_NE(output.find("20 bytes"), std::string::npos);
 }
 

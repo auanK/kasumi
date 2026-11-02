@@ -383,6 +383,98 @@ TEST(ScannerTest, IgnoreRulesHandleGlobsAnchorsDirectoriesAndNegation) {
 
 }
 
+TEST(ScannerTest, KasumiIgnoreRemainsManagedUnlessRulesIgnoreIt) {
+    auto workspace = kasumi::test::make_temp_workspace(
+        "scanner-kasumiignore-compatibility");
+    const auto root = kasumi::test::workspace_path(workspace, "local");
+    const std::string rules = "ignored.tmp\n";
+    kasumi::test::write_text(root / ".kasumiignore", rules);
+    kasumi::test::write_text(root / "ignored.tmp", "ignored");
+
+    const auto result = kasumi::application::observation::scanner::scan_result(
+        root,
+        {},
+        kasumi::application::observation::scanner::ScanPolicy::FullHash);
+    ASSERT_TRUE(result.has_value());
+    const auto* ignore_file = kasumi::find_row(result->snapshot, ".kasumiignore");
+    ASSERT_NE(ignore_file, nullptr);
+    EXPECT_EQ(ignore_file->size, rules.size());
+    EXPECT_EQ(kasumi::test::read_text(root / ".kasumiignore"), rules);
+    EXPECT_EQ(kasumi::find_row(result->snapshot, "ignored.tmp"), nullptr);
+
+    kasumi::test::write_text(root / ".kasumiignore", ".kasumiignore\n");
+    const auto explicitly_ignored =
+        kasumi::application::observation::scanner::scan_result(
+            root,
+            {},
+            kasumi::application::observation::scanner::ScanPolicy::FullHash);
+    ASSERT_TRUE(explicitly_ignored.has_value());
+    EXPECT_EQ(kasumi::find_row(explicitly_ignored->snapshot, ".kasumiignore"),
+              nullptr);
+}
+
+TEST(ScannerTest, DisposableRulesDoNotHideKasumiIgnore) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("scanner-disposable-ignore-file");
+    const auto root = kasumi::test::workspace_path(workspace, "local");
+    kasumi::test::write_text(root / ".kasumiignore",
+                             "(?d)*.bak\n"
+                             "*.env\n");
+    kasumi::test::write_text(root / "cache.bak", "disposable");
+    kasumi::test::write_text(root / "secret.env", "protected");
+
+    const auto result = kasumi::application::observation::scanner::scan_result(
+        root,
+        {},
+        kasumi::application::observation::scanner::ScanPolicy::FullHash);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_NE(kasumi::find_row(result->snapshot, ".kasumiignore"), nullptr);
+    EXPECT_EQ(kasumi::find_row(result->snapshot, "cache.bak"), nullptr);
+    EXPECT_EQ(kasumi::find_row(result->snapshot, "secret.env"), nullptr);
+}
+
+TEST(ScannerTest, DisposableFilesAreHashedOnlyWhenSelected) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("scanner-disposable-on-demand");
+    const auto root = kasumi::test::workspace_path(workspace, "local");
+    kasumi::test::write_text(root / ".kasumiignore", "(?d)*.bak\n");
+    kasumi::test::write_text(root / "Project" / "cache.bak", "cache bytes");
+
+    kasumi::platform::perf_trace::force_enable(true);
+    kasumi::platform::perf_trace::reset();
+    const auto scanned =
+        kasumi::application::observation::scanner::scan_result(root);
+    ASSERT_TRUE(scanned.has_value());
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash file calls"),
+              1U);
+    ASSERT_EQ(scanned->physical_evidence.ignored_entries.size(), 1U);
+    const auto& evidence = scanned->physical_evidence.ignored_entries.front();
+    EXPECT_EQ(evidence.path, "Project/cache.bak");
+    EXPECT_EQ(evidence.kind,
+              kasumi::reconciliation::PhysicalEntryKind::RegularFile);
+    EXPECT_EQ(evidence.disposition,
+              kasumi::ignore::IgnoreDisposition::IgnoredDisposable);
+    EXPECT_TRUE(evidence.identity.valid);
+
+    const std::array<std::filesystem::path, 1> candidates{"Project/cache.bak"};
+    const auto hashed =
+        kasumi::application::observation::scanner::hash_disposable_candidates(
+            root,
+            scanned->physical_evidence,
+            candidates,
+            kasumi::ignore::load_ignore_list(root / ".kasumiignore"));
+    ASSERT_TRUE(hashed.has_value())
+        << kasumi::application::observation::scanner::describe(hashed.error());
+    ASSERT_EQ(hashed->size(), 1U);
+    EXPECT_EQ(hashed->front().hash,
+              kasumi::hash_hex(kasumi::hasher::hash_string("cache bytes")));
+    EXPECT_EQ(hashed->front().size, 11U);
+    EXPECT_EQ(hashed->front().identity, evidence.identity);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash file calls"),
+              2U);
+    kasumi::platform::perf_trace::force_enable(false);
+}
+
 TEST(ScannerTest, RegularFileMetadataNulloptFailsClosed) {
     auto workspace = kasumi::test::make_temp_workspace("scanner-metadata-nullopt");
     const auto root = kasumi::test::workspace_path(workspace, "local");

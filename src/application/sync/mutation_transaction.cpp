@@ -305,6 +305,18 @@ validate_progress(const Operation& operation,
                                operation_index));
             }
             break;
+        case Action::DeleteIgnoredLocalFile:
+            if (!require_slot() || !require_file_hash() ||
+                (progress.state != transaction::OperationState::Pending &&
+                 (!progress.had_original ||
+                  progress.previous_hash != operation.hash))) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::InvalidOperation,
+                               "invalid disposable file progress",
+                               operation.path,
+                               operation_index));
+            }
+            break;
         case Action::MoveLocal:
             if (!require_slot() || !valid_hash(operation.hash) ||
                 operation.path.empty() || operation.alt_path.empty() ||
@@ -989,7 +1001,7 @@ prepare_operation_impl(const Operation& operation,
             current_progress.had_original &&
             (operation.action == Action::Download ||
              operation.action == Action::DeleteLocal ||
-             operation.action == Action::DeleteLocal ||
+             operation.action == Action::DeleteIgnoredLocalFile ||
              operation.action == Action::RenameLocal ||
              operation.action == Action::MoveLocal);
         if (requires_file_backup) {
@@ -1266,6 +1278,87 @@ prepare_operation_impl(const Operation& operation,
         result.state = transaction::OperationState::BackupCreated;
         return result;
     }
+    if (operation.action == Action::DeleteIgnoredLocalFile) {
+        auto status = read_status(*path, operation_index);
+        if (!status) {
+            return std::unexpected(status.error());
+        }
+        if (missing(*status) || std::filesystem::is_symlink(*status) ||
+            !std::filesystem::is_regular_file(*status)) {
+            return std::unexpected(make_error(
+                MutationErrorCode::DestinationConflict,
+                "disposable source is missing or not a regular file",
+                *path,
+                operation_index));
+        }
+        const auto identity_matches = [&](const auto& identity) {
+            return identity.valid &&
+                   identity.volume_or_dev ==
+                       operation.expected_source_identity.volume_or_dev &&
+                   identity.file_id_low ==
+                       operation.expected_source_identity.file_id_low &&
+                   identity.file_id_high ==
+                       operation.expected_source_identity.file_id_high;
+        };
+        const auto identity =
+            platform::private_storage::query_file_identity(*path);
+        std::error_code size_error;
+        const auto size = std::filesystem::file_size(*path, size_error);
+        if (size_error || !identity_matches(identity) ||
+            size != operation.size) {
+            return std::unexpected(make_error(
+                size_error ? MutationErrorCode::LocalIo
+                           : MutationErrorCode::DestinationConflict,
+                size_error ? size_error.message()
+                           : "disposable source identity or size changed",
+                *path,
+                operation_index));
+        }
+        auto actual = file_hash(*path, operation_index);
+        if (!actual) {
+            return std::unexpected(actual.error());
+        }
+        if (*actual != operation.hash ||
+            !identity_matches(
+                platform::private_storage::query_file_identity(*path))) {
+            return std::unexpected(make_error(
+                MutationErrorCode::DestinationConflict,
+                "disposable source changed while preparing its backup",
+                *path,
+                operation_index));
+        }
+        auto progress = current_progress;
+        auto backup = backup_path(workspace, progress, *path, operation_index);
+        if (!backup) {
+            return std::unexpected(backup.error());
+        }
+        auto created = create_backup(*path, *backup, operation.hash,
+                                     operation_index);
+        if (!created) {
+            return std::unexpected(created.error());
+        }
+        auto valid_backup =
+            validate_backup(*backup, operation.hash, operation_index);
+        if (!valid_backup) {
+            return std::unexpected(valid_backup.error());
+        }
+        auto durable = make_backup_durable(*backup, operation_index);
+        if (!durable) {
+            return std::unexpected(durable.error());
+        }
+        if (!identity_matches(
+                platform::private_storage::query_file_identity(*path))) {
+            return std::unexpected(make_error(
+                MutationErrorCode::DestinationConflict,
+                "disposable source identity changed during backup",
+                *path,
+                operation_index));
+        }
+        progress.had_original = true;
+        progress.previous_hash = operation.hash;
+        progress.state = transaction::OperationState::BackupCreated;
+        return progress;
+    }
     return prepare_file_progress(
         operation_index, *path, workspace, current_progress, true);
 }
@@ -1299,6 +1392,77 @@ rollback_operation_impl(const Operation& operation,
     auto workspace_valid = validate_workspace(workspace, operation_index);
     if (!workspace_valid)
         return std::unexpected(workspace_valid.error());
+
+    if (operation.action == Action::DeleteIgnoredLocalFile) {
+        auto path = resolve_local_path(local_root, operation.path, operation_index);
+        if (!path) {
+            return std::unexpected(path.error());
+        }
+        if (!progress.had_original ||
+            progress.previous_hash != operation.hash) {
+            return std::unexpected(make_error(
+                MutationErrorCode::InvalidOperation,
+                "disposable rollback lacks its verified backup",
+                *path,
+                operation_index));
+        }
+        auto backup = backup_path(workspace, progress, *path, operation_index);
+        if (!backup) {
+            return std::unexpected(backup.error());
+        }
+        auto valid_backup =
+            validate_backup(*backup, operation.hash, operation_index);
+        if (!valid_backup) {
+            return std::unexpected(valid_backup.error());
+        }
+        auto status = read_status(*path, operation_index);
+        if (!status) {
+            return std::unexpected(status.error());
+        }
+        if (missing(*status)) {
+            return restore_backup(*backup,
+                                  *path,
+                                  operation.hash,
+                                  operation_index,
+                                  {},
+                                  workspace.root.filename().string());
+        }
+        if (std::filesystem::is_symlink(*status) ||
+            !std::filesystem::is_regular_file(*status)) {
+            return std::unexpected(make_error(
+                MutationErrorCode::DestinationConflict,
+                "unexpected object blocks disposable rollback",
+                *path,
+                operation_index));
+        }
+        const auto identity =
+            platform::private_storage::query_file_identity(*path);
+        if (!identity.valid ||
+            identity.volume_or_dev !=
+                operation.expected_source_identity.volume_or_dev ||
+            identity.file_id_low !=
+                operation.expected_source_identity.file_id_low ||
+            identity.file_id_high !=
+                operation.expected_source_identity.file_id_high) {
+            return std::unexpected(make_error(
+                MutationErrorCode::DestinationConflict,
+                "external file blocks disposable rollback",
+                *path,
+                operation_index));
+        }
+        auto actual = file_hash(*path, operation_index);
+        if (!actual) {
+            return std::unexpected(actual.error());
+        }
+        if (*actual != operation.hash) {
+            return std::unexpected(make_error(
+                MutationErrorCode::DestinationConflict,
+                "changed file blocks disposable rollback",
+                *path,
+                operation_index));
+        }
+        return {};
+    }
 
     if (operation.action == Action::Download) {
         auto destination =
@@ -1424,7 +1588,8 @@ MutationResult detail::validate_prepared_operation(
         return valid;
     if (operation_index == std::numeric_limits<std::size_t>::max() ||
         (operation.action != Action::Download &&
-         operation.action != Action::DeleteLocal) ||
+         operation.action != Action::DeleteLocal &&
+         operation.action != Action::DeleteIgnoredLocalFile) ||
         progress.state < transaction::OperationState::Prepared) {
         return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
                                           "destination lacks prepared progress",
