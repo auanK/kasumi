@@ -74,6 +74,8 @@ std::string action_name(Action action) {
             return "DeleteRemote";
         case Action::DeleteRemoteDirectory:
             return "DeleteRemoteDirectory";
+        case Action::DeleteIgnoredLocalFile:
+            return "DeleteIgnoredLocalFile";
         case Action::Count:
             break;
     }

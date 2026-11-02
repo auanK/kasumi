@@ -1006,14 +1006,30 @@ TEST(TransactionCodecTest,
 
 // Teste F — Compatibilidade de bytes antigos (decode v0.9.1 -> encode novo)
 TEST(TransactionCodecTest,
-     DecodingAndReencodingHistoricalV091BytesPreservesBinaryRepresentation) {
+     DecodesV9BytesAndWritesCurrentV10Format) {
     const auto v091_bytes = make_v091_all_legacy_actions_fixture();
+    ASSERT_FALSE(v091_bytes.empty());
+    EXPECT_EQ(std::to_integer<std::uint8_t>(v091_bytes.front()), 9U);
     const auto decoded = kasumi::transaction::codec::decode(v091_bytes);
     ASSERT_TRUE(decoded.has_value()) << decoded.error();
 
     const auto reencoded = kasumi::transaction::codec::encode(*decoded);
     ASSERT_TRUE(reencoded.has_value()) << reencoded.error();
-    EXPECT_EQ(*reencoded, v091_bytes);
+    EXPECT_EQ(std::to_integer<std::uint8_t>(reencoded->front()), 10U);
+    const auto migrated = kasumi::transaction::codec::decode(*reencoded);
+    ASSERT_TRUE(migrated.has_value()) << migrated.error();
+    ASSERT_EQ(migrated->plan.operations.size(),
+              decoded->plan.operations.size());
+    for (std::size_t index = 0; index < decoded->plan.operations.size();
+         ++index) {
+        EXPECT_EQ(migrated->plan.operations[index].action,
+                  decoded->plan.operations[index].action);
+        EXPECT_EQ(migrated->plan.operations[index].path,
+                  decoded->plan.operations[index].path);
+        EXPECT_EQ(migrated->plan.operations[index].hash,
+                  decoded->plan.operations[index].hash);
+    }
+    EXPECT_EQ(migrated->progress.size(), decoded->progress.size());
 }
 
 
@@ -1083,6 +1099,81 @@ TEST(TransactionCodecTest, CopyCodecRoundTrip) {
     EXPECT_EQ(prog.state, OperationState::Applied);
     EXPECT_TRUE(prog.had_original);
     EXPECT_EQ(prog.previous_hash, hash_hex);
+}
+
+
+TEST(TransactionCodecTest, V9RecordRejectsDisposableAction11) {
+    const std::array<WireOperationSpec, 1> disposable_spec{{
+        {.wire_action = 11,
+         .path = "legacy/cache.bak",
+         .alt_path = "",
+         .hash = std::string(64, 'c'),
+         .size = 16,
+         .exclusive_destination = false,
+         .previous_hash = "",
+         .backup_slot = 0,
+         .state = static_cast<std::uint8_t>(OperationState::Prepared),
+         .had_original = true},
+    }};
+    const auto v9_bytes = build_wire_record_with_operations(disposable_spec);
+    EXPECT_EQ(std::to_integer<std::uint8_t>(v9_bytes.front()), 9U);
+    EXPECT_FALSE(kasumi::transaction::codec::decode(v9_bytes).has_value());
+}
+
+TEST(TransactionCodecTest, DisposableFileUsesWireId11AndPersistsIdentity) {
+    const auto hash = std::string(64, 'd');
+    const kasumi::PhysicalFileIdentity identity{
+        .volume_or_dev = 11,
+        .file_id_low = 22,
+        .file_id_high = 33,
+        .valid = true,
+    };
+    auto record = kasumi::transaction::make_record(
+        std::string(32, '7'),
+        1,
+        3,
+        kasumi::make_sync_plan(
+            {Operation{.action = Action::DeleteIgnoredLocalFile,
+                       .path = "Project/cache.bak",
+                       .hash = hash,
+                       .size = 12,
+                       .expected_source_identity = identity}},
+            4));
+    ASSERT_TRUE(record.has_value());
+    const auto encoded = kasumi::transaction::codec::encode(*record);
+    ASSERT_TRUE(encoded.has_value()) << encoded.error();
+    EXPECT_EQ(std::to_integer<std::uint8_t>(encoded->front()), 10U);
+    EXPECT_EQ(extract_persisted_action_bytes(*encoded),
+              (std::vector<std::uint8_t>{11}));
+
+    const auto decoded = kasumi::transaction::codec::decode(*encoded);
+    ASSERT_TRUE(decoded.has_value()) << decoded.error();
+    ASSERT_EQ(decoded->plan.operations.size(), 1U);
+    EXPECT_EQ(decoded->plan.operations.front().action,
+              Action::DeleteIgnoredLocalFile);
+    EXPECT_EQ(decoded->plan.operations.front().expected_source_identity,
+              identity);
+
+    auto corrupted = *encoded;
+    std::array<std::byte, 24> identity_bytes{};
+    const auto write_u64 = [&](std::size_t offset, std::uint64_t value) {
+        for (std::size_t index = 0; index < sizeof(value); ++index) {
+            identity_bytes[offset + index] = static_cast<std::byte>(
+                (value >> (index * 8)) & 0xffU);
+        }
+    };
+    write_u64(0, identity.volume_or_dev);
+    write_u64(8, identity.file_id_low);
+    write_u64(16, identity.file_id_high);
+    const auto found = std::search(corrupted.begin(),
+                                   corrupted.end(),
+                                   identity_bytes.begin(),
+                                   identity_bytes.end());
+    ASSERT_NE(found, corrupted.end());
+    const auto valid_flag = found + identity_bytes.size();
+    ASSERT_LT(valid_flag, corrupted.end());
+    *valid_flag = std::byte{0};
+    EXPECT_FALSE(kasumi::transaction::codec::decode(corrupted).has_value());
 }
 
 TEST(TransactionCodecTest, LegacyActionIdsUnchanged) {

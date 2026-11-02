@@ -31,6 +31,7 @@ constexpr std::array<Action, kasumi::ActionCount> all_actions{
     Action::DeleteRemote,
     Action::DeleteRemoteDirectory,
     Action::CopyLocal,
+    Action::DeleteIgnoredLocalFile,
 };
 
 Operation make_operation(Action action, std::string_view relative_path) {
@@ -64,9 +65,11 @@ SyncPlan make_populated_plan() {
 
 TEST(ActionTest, ClassifiesEveryDefinedAction) {
     constexpr std::array<bool, kasumi::ActionCount> expected_local_mutation{
-        true, false, true, false, true, true, true, true, false, false, true};
+        true, false, true, false, true, true, true, true, false, false, true,
+        true};
     constexpr std::array<bool, kasumi::ActionCount> expected_logical_mutation{
-        false, false, false, true, false, false, false, false, true, true, false};
+        false, false, false, true, false, false, false, false, true, true,
+        false, false};
 
     EXPECT_EQ(kasumi::ActionCount, all_actions.size());
     for (std::size_t index = 0; index < all_actions.size(); ++index) {
@@ -138,7 +141,7 @@ TEST(SyncPlanTest, UsesCanonicalOffsetsAndExposesConstRanges) {
     EXPECT_TRUE(kasumi::valid_sync_plan(plan));
     EXPECT_EQ(plan.offsets,
               (std::array<std::uint32_t, kasumi::ActionCount + 1>{
-                  0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2}));
+                  0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2}));
 
     auto rebuilt = plan;
     rebuilt.offsets.fill(0);
@@ -228,6 +231,25 @@ TEST(SyncPlanTest, DetectsCorruptedOffsetsActionsAndFinalSize) {
     EXPECT_FALSE(kasumi::valid_sync_plan(invalid_action));
 }
 
+
+TEST(SyncPlanTest, DetectsDuplicateOperationsByActionAndPath) {
+    const SyncPlan plan = kasumi::make_sync_plan(
+        {make_operation(Action::DeleteLocalDirectory, "Projects/empty"),
+         make_operation(Action::DeleteLocalDirectory, "Projects/empty")},
+        1);
+    EXPECT_EQ(kasumi::sync_plan_size(plan), 2U);
+
+    std::set<std::pair<Action, std::string>> seen;
+    bool duplicate_found = false;
+    for (const auto& op : kasumi::sync_plan_operations(plan)) {
+        if (!seen.emplace(op.action, kasumi::platform::path::to_logical_utf8(op.path)).second) {
+            duplicate_found = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(duplicate_found);
+}
+
 TEST(OperationPathTest, AcceptsNormalRelativePathsAndLiteralDotsAndColons) {
     Operation operation =
         make_operation(Action::RenameLocal, "archive/report..draft.txt");
@@ -255,6 +277,27 @@ TEST(OperationPathTest, RejectsAbsolutePathsAndTraversal) {
     EXPECT_FALSE(kasumi::has_safe_paths(operation));
 
     operation.path = std::filesystem::path{"inside"} / ".." / "outside.txt";
+    EXPECT_FALSE(kasumi::has_safe_paths(operation));
+}
+
+TEST(OperationPathTest, DisposableRemovalRequiresIdentityAndRejectsIgnoreFile) {
+    Operation operation =
+        make_operation(Action::DeleteIgnoredLocalFile, "Project/cache.bak");
+    operation.hash = std::string(64, 'a');
+    operation.size = 12;
+    operation.expected_source_identity = {
+        .volume_or_dev = 1,
+        .file_id_low = 2,
+        .file_id_high = 3,
+        .valid = true,
+    };
+    EXPECT_TRUE(kasumi::has_safe_paths(operation));
+
+    operation.expected_source_identity.valid = false;
+    EXPECT_FALSE(kasumi::has_safe_paths(operation));
+    operation.expected_source_identity.valid = true;
+    operation.path = kasumi::platform::path::from_utf8(
+        "Project/.kasumiignore");
     EXPECT_FALSE(kasumi::has_safe_paths(operation));
 }
 

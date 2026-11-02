@@ -155,7 +155,11 @@ TEST(IgnoreTest, DispositionUsesLastMatchingRuleAndKeepsIgnoreFileManaged) {
 
     const auto broad_disposable = parse_ignore_rules("(?d)*\n");
     EXPECT_EQ(classify_ignore(".kasumiignore", false, broad_disposable),
-              IgnoreDisposition::IgnoredDisposable);
+              IgnoreDisposition::Managed);
+    EXPECT_EQ(classify_ignore(".KASUMIIGNORE", false, broad_disposable),
+              IgnoreDisposition::Managed);
+    EXPECT_EQ(classify_ignore("nested/.kasumiignore", false, broad_disposable),
+              IgnoreDisposition::IgnoredProtected);
 
     const auto protected_later =
         parse_ignore_rules("(?d)*.bak\n*.bak\n");

@@ -1450,6 +1450,7 @@ apply_operation(const Operation& operation,
                     .valid = true,
                 },
             };
+            mutation_fault_test::hit("before_disposable_owned_remove", *path);
             const auto removed =
                 platform::private_storage::remove_private_file_if_owned(source);
             using platform::private_storage::CleanupResult;

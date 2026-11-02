@@ -1452,6 +1452,60 @@ TEST(JournalSessionOptimizationTest, RollbackUpdatesSession) {
     EXPECT_EQ(session.confirmed()->phase, kasumi::transaction::Phase::Started);
 }
 
+TEST(JournalSessionOptimizationTest,
+     DisposableSourceIdentitySurvivesIncrementalProgressDelta) {
+    auto owner = kasumi::test::make_temp_workspace(
+        "journal-disposable-identity-delta");
+    const auto profile = kasumi::test::workspace_path(owner, "profile");
+    ASSERT_TRUE(std::filesystem::create_directories(profile));
+    const auto paths = sync::journal::make_paths(profile);
+    ASSERT_TRUE(paths.has_value());
+    const kasumi::PhysicalFileIdentity identity{
+        .volume_or_dev = 41,
+        .file_id_low = 42,
+        .file_id_high = 43,
+        .valid = true,
+    };
+    const auto hash = std::string(64, 'a');
+    auto record = sync::journal::create_record(
+        0,
+        0,
+        kasumi::make_sync_plan(
+            {kasumi::Operation{
+                 .action = kasumi::Action::DeleteIgnoredLocalFile,
+                 .path = "Project/cache.bak",
+                 .hash = hash,
+                 .size = 12,
+                 .expected_source_identity = identity}},
+            0));
+    ASSERT_TRUE(record.has_value()) << record.error();
+
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    sync::journal::Session session;
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    record->phase = kasumi::transaction::Phase::FilesStaged;
+    record->progress.front().state =
+        kasumi::transaction::OperationState::BackupCreated;
+    record->progress.front().had_original = true;
+    record->progress.front().previous_hash = hash;
+    ASSERT_TRUE(sync::journal::save(
+        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    EXPECT_GT(std::filesystem::file_size(paths->log_path), 0U);
+
+    const auto loaded = sync::journal::load(*paths, key);
+    ASSERT_TRUE(loaded.has_value()) << loaded.error();
+    ASSERT_TRUE(loaded->has_value());
+    ASSERT_EQ((*loaded)->plan.operations.size(), 1U);
+    EXPECT_EQ((*loaded)->plan.operations.front().action,
+              kasumi::Action::DeleteIgnoredLocalFile);
+    EXPECT_EQ((*loaded)->plan.operations.front().expected_source_identity,
+              identity);
+    EXPECT_EQ((*loaded)->progress.front().previous_hash, hash);
+    EXPECT_EQ((*loaded)->progress.front().state,
+              kasumi::transaction::OperationState::BackupCreated);
+}
+
 TEST(JournalSessionOptimizationTest, IndependentSessionsIsolation) {
     auto owner1 = kasumi::test::make_temp_workspace("opt-33b-iso-1");
     auto owner2 = kasumi::test::make_temp_workspace("opt-33b-iso-2");
