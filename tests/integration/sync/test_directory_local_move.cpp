@@ -1153,6 +1153,43 @@ TEST(DirectoryLocalMoveTest,
 }
 
 TEST(DirectoryLocalMoveTest,
+     DisposableIgnoredFileFollowsRemoteManagedDirectoryRemoval) {
+    SyncNode sender;
+    ASSERT_TRUE(init_sync_node(sender, "disposable-delete-sender"));
+    SyncNode receiver;
+    ASSERT_TRUE(init_sync_node(
+        receiver, "disposable-delete-receiver", sender.storage_root));
+
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
+    write_local_file(sender, "Projetos/main.cpp", "managed source");
+    write_local_file(sender, "Projetos/cache.bak", "never publish");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    EXPECT_FALSE(local_entry_exists(receiver, "Projetos/cache.bak"));
+
+    write_local_file(receiver, "Projetos/cache.bak", "local disposable");
+    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    remove_local_subtree(sender, "Projetos");
+    ASSERT_TRUE(run_node_sync(sender).has_value());
+
+    reset_content_counts(receiver);
+    const auto synchronized = run_node_sync(receiver);
+    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    EXPECT_FALSE(local_entry_exists(receiver, "Projetos/main.cpp"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projetos/cache.bak"));
+    EXPECT_FALSE(local_entry_exists(receiver, "Projetos"));
+    EXPECT_EQ(receiver.counters.content_gets, 0U);
+    EXPECT_EQ(receiver.counters.content_puts, 0U);
+
+    const auto no_op = run_node_sync(receiver);
+    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
+    const auto* completed =
+        std::get_if<kasumi::application::SyncCompleted>(&no_op->data);
+    ASSERT_NE(completed, nullptr);
+    EXPECT_EQ(completed->total, 0U);
+}
+
+TEST(DirectoryLocalMoveTest,
      NewUnignoredEntryAfterStabilizationConflictsAndRollsBack) {
     SyncNode sender;
     ASSERT_TRUE(init_sync_node(sender, "directory-race-sender"));
