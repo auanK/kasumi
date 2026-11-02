@@ -119,12 +119,22 @@ conflict renames; another surviving local source is preferred before falling
 back to Download. Interrupted repairs replay unfinished local mutations even
 when all repair uploads are already confirmed, skipping mutations marked Applied.
 
+`DeleteIgnoredLocalFile` records the verified source identity, size, and BLAKE3
+hash in the authenticated plan. Preparation creates and durably verifies a
+transaction backup before plan effects are applied. Apply rechecks the
+regular-file type, identity, size, hash, and backup; rollback restores a missing
+source from that backup and preserves any external replacement as a conflict.
+The operation is local-only and cannot publish ignored Content. Directory
+removal remains child-first and occurs after the authorized file removals.
+
 On POSIX, private-file cleanup compares `fstat` and `lstat` regular-file identities
 (device/inode) with an open descriptor, or the recorded native identity without
 one, then calls `unlink` on that pathname. It uses no intermediate rename or
 quarantine. The identity check and `unlink` are separate operations: this is a
 residual TOCTOU window, not atomic deletion conditional on identity. Windows
-retains deletion by handle using `SetFileInformationByHandle`.
+retains deletion by handle using `SetFileInformationByHandle`. The POSIX check
+and `unlink` remain separate syscalls, so same-user replacement in the interval
+is a documented residual TOCTOU risk, not an atomic identity-bound delete.
 
 Kasumi is a home file synchronizer for a small set of user-owned devices, not a backup service, database, immutable store, or general filesystem transaction system. It verifies received content, detects local changes observed before final validation, reports filesystem errors, and recovers Kasumi's own journaled effects. It does not retain every historical version or isolate a mutation from arbitrary processes running as the same user. Keep an independent backup of important files; that backup remains necessary even when Sync and recovery work normally.
 

@@ -271,14 +271,27 @@ cache/
 * Leading `/` anchors the pattern to the synchronization root.
 * Trailing `/` restricts matching to directories.
 * `!` negates the pattern (re-includes a path).
+* `(?d)` before a pattern marks matching regular files as disposable ignored
+  content, for example `(?d)*.bak`. It does not make directories disposable;
+  modifier combinations and negated disposable rules are rejected.
 * Lines starting with `#` are comments.
 
 Symlinks inside the synchronization root are not traversed.
 Reserved private files at the synchronization root and generated transaction artifacts are excluded from synchronization. Generated artifacts use their exact current naming pattern. The `.kasumiignore` file itself can be synchronized; changes to its local or authenticated remote version can change the effective projection used for a run. See [Local Observation](architecture/local-observation.md).
 
-Ignored entries remain local. When a remote deletion or rename removes the managed contents of a directory, Kasumi preserves any ignored entries left behind and the directories required to contain them. These residual directories are not republished merely because they still exist on disk. An otherwise empty, non-ignored directory remains eligible for normal synchronization.
+Ignored entries remain local by default. A `(?d)` file is discarded only when
+reconciliation authorizes removal of its previously managed containing
+directory. New local-only directories, old ignored residue, protected entries,
+links, and unexpected entries are preserved. A subtree containing protected and
+disposable ignored files is preserved as a whole; Kasumi does not partially
+discard it. Changing a rule to `(?d)` does not trigger cleanup by itself.
 
-Kasumi does not automatically move or delete ignored content during remote directory changes. `.kasumiignore` has no disposable-file or delete-ignored modifier. Unexpected entries and filesystem changes that prevent a safe removal remain subject to normal conflict and error handling.
+The root `.kasumiignore` remains synchronized even when a broad disposable rule
+matches it. Status and Preview show planned disposable-file removals without
+applying them. Sync backs up each file before removal and uses its transaction
+recovery path if an operation is interrupted. These safeguards detect changes
+observed before final validation; they do not isolate a mutation from arbitrary
+same-user filesystem writers. See [Transactions and Recovery](architecture/transactions-and-recovery.md).
 
 ## Synchronized Path Rules
 
