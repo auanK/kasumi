@@ -29,6 +29,27 @@ namespace kasumi::platform::durability {
 
 namespace {
 
+#if !defined(_WIN32)
+std::expected<void, std::string>
+sync_posix_descriptor(int fd, std::string_view operation) {
+    int sync_result = 0;
+    do {
+        sync_result = ::fsync(fd);
+    } while (sync_result != 0 && errno == EINTR);
+    const auto sync_error = sync_result == 0 ? 0 : errno;
+    const auto close_error = ::close(fd) == 0 ? 0 : errno;
+    if (sync_error != 0) {
+        return std::unexpected(std::string{operation} +
+                               ": fsync failed: " + std::strerror(sync_error));
+    }
+    if (close_error != 0) {
+        return std::unexpected(std::string{operation} +
+                               ": close failed: " + std::strerror(close_error));
+    }
+    return {};
+}
+#endif
+
 [[maybe_unused]] std::string native_error(std::string_view operation,
                                           unsigned long code) {
     return std::string{operation} + " (native_code=" + std::to_string(code) +
@@ -160,14 +181,17 @@ replace_atomically(const std::filesystem::path& source,
             const auto target_name =
                 std::filesystem::absolute(target, path_error).wstring();
             if (path_error) {
-                return std::unexpected("replace_atomically: " + path_error.message());
+                return std::unexpected("replace_atomically: " +
+                                       path_error.message());
             }
             const auto name_bytes = target_name.size() * sizeof(wchar_t);
-            if (name_bytes > std::numeric_limits<DWORD>::max() -
-                                 sizeof(FILE_RENAME_INFO)) {
-                return std::unexpected("replace_atomically: target path is too long");
+            if (name_bytes >
+                std::numeric_limits<DWORD>::max() - sizeof(FILE_RENAME_INFO)) {
+                return std::unexpected(
+                    "replace_atomically: target path is too long");
             }
-            std::vector<std::byte> buffer(sizeof(FILE_RENAME_INFO) + name_bytes);
+            std::vector<std::byte> buffer(sizeof(FILE_RENAME_INFO) +
+                                          name_bytes);
             auto* rename = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
             rename->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS |
                             FILE_RENAME_FLAG_POSIX_SEMANTICS;
@@ -175,26 +199,36 @@ replace_atomically(const std::filesystem::path& source,
             rename->FileNameLength = static_cast<DWORD>(name_bytes);
             std::memcpy(rename->FileName, target_name.data(), name_bytes);
             const auto file = CreateFileW(
-                source.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE,
+                source.c_str(),
+                GENERIC_READ | GENERIC_WRITE | DELETE,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                nullptr, OPEN_EXISTING,
-                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH, nullptr);
+                nullptr,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
+                nullptr);
             if (file == INVALID_HANDLE_VALUE) {
                 return std::unexpected(native_error(
                     "replace_atomically: open source failed", GetLastError()));
             }
             FILE_ATTRIBUTE_TAG_INFO attributes{};
-            if (!GetFileInformationByHandleEx(file, FileAttributeTagInfo,
-                                              &attributes, sizeof(attributes)) ||
+            if (!GetFileInformationByHandleEx(file,
+                                              FileAttributeTagInfo,
+                                              &attributes,
+                                              sizeof(attributes)) ||
                 (attributes.FileAttributes &
                  (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY |
                   FILE_ATTRIBUTE_DEVICE)) != 0) {
                 CloseHandle(file);
-                return std::unexpected("replace_atomically: source is not a regular file");
+                return std::unexpected(
+                    "replace_atomically: source is not a regular file");
             }
             const bool flushed = FlushFileBuffers(file) != 0;
-            const bool renamed = flushed && SetFileInformationByHandle(
-                file, FileRenameInfoEx, rename, static_cast<DWORD>(buffer.size()));
+            const bool renamed =
+                flushed &&
+                SetFileInformationByHandle(file,
+                                           FileRenameInfoEx,
+                                           rename,
+                                           static_cast<DWORD>(buffer.size()));
             const auto rename_error = renamed ? ERROR_SUCCESS : GetLastError();
             CloseHandle(file);
             if (!renamed) {
@@ -358,21 +392,8 @@ std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
                                std::string{std::strerror(errno)});
     }
 
-    int sync_result = 0;
-    do {
-        sync_result = ::fsync(file);
-    } while (sync_result != 0 && errno == EINTR);
-    const bool synced = sync_result == 0;
-    const auto sync_error = synced ? 0 : errno;
-    const bool closed = ::close(file) == 0;
-    const auto close_error = closed ? 0 : errno;
-    if (!synced) {
-        return std::unexpected("sync_file: fsync failed: " +
-                               std::string{std::strerror(sync_error)});
-    }
-    if (!closed) {
-        return std::unexpected("sync_file: close failed: " +
-                               std::string{std::strerror(close_error)});
+    if (const auto synced = sync_posix_descriptor(file, "sync_file"); !synced) {
+        return synced;
     }
 #endif
     platform::perf_trace::count("platform durable file sync completions");
@@ -409,21 +430,10 @@ sync_parent_directory(const std::filesystem::path& path) {
                                std::string{std::strerror(errno)});
     }
 
-    int sync_result = 0;
-    do {
-        sync_result = ::fsync(directory);
-    } while (sync_result != 0 && errno == EINTR);
-    const bool synced = sync_result == 0;
-    const auto sync_error = synced ? 0 : errno;
-    const bool closed = ::close(directory) == 0;
-    const auto close_error = closed ? 0 : errno;
-    if (!synced) {
-        return std::unexpected("sync_parent_directory: fsync failed: " +
-                               std::string{std::strerror(sync_error)});
-    }
-    if (!closed) {
-        return std::unexpected("sync_parent_directory: close failed: " +
-                               std::string{std::strerror(close_error)});
+    if (const auto synced =
+            sync_posix_descriptor(directory, "sync_parent_directory");
+        !synced) {
+        return synced;
     }
     platform::perf_trace::count("platform durable directory sync completions");
     return {};

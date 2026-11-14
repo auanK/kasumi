@@ -1,16 +1,17 @@
-#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
+#include "platform/perf_trace.hpp"
 #include "platform/random.hpp"
 
+#include <array>
 #include <cerrno>
 #include <cstddef>
+#include <cstring>
 #include <fstream>
 #include <system_error>
 #include <utility>
-#include <array>
 #include <vector>
 
 #if defined(_WIN32)
@@ -40,6 +41,17 @@ std::string windows_error(std::string_view operation, DWORD code) {
     return system_error(
         operation,
         std::error_code{static_cast<int>(code), std::system_category()});
+}
+
+FileIdentity to_file_identity(const FILE_ID_INFO& info) noexcept {
+    FileIdentity identity{.volume_or_dev = info.VolumeSerialNumber,
+                          .valid = true};
+    std::memcpy(
+        &identity.file_id_low, info.FileId.Identifier, sizeof(std::uint64_t));
+    std::memcpy(&identity.file_id_high,
+                info.FileId.Identifier + sizeof(std::uint64_t),
+                sizeof(std::uint64_t));
+    return identity;
 }
 
 std::expected<PSECURITY_DESCRIPTOR, std::string>
@@ -105,19 +117,17 @@ ProcessSecurityContext get_process_security_context() noexcept {
     }
     std::array<std::byte, sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE> buffer{};
     DWORD returned_size = 0;
-    const BOOL token_ok = GetTokenInformation(
-        token,
-        TokenUser,
-        buffer.data(),
-        static_cast<DWORD>(buffer.size()),
-        &returned_size);
+    const BOOL token_ok = GetTokenInformation(token,
+                                              TokenUser,
+                                              buffer.data(),
+                                              static_cast<DWORD>(buffer.size()),
+                                              &returned_size);
     CloseHandle(token);
     if (!token_ok) {
         return context;
     }
 
-    const auto* token_user =
-        reinterpret_cast<const TOKEN_USER*>(buffer.data());
+    const auto* token_user = reinterpret_cast<const TOKEN_USER*>(buffer.data());
     if (!token_user->User.Sid || !IsValidSid(token_user->User.Sid)) {
         return context;
     }
@@ -149,15 +159,15 @@ bool is_dacl_compliant(const std::filesystem::path& path,
 
     PACL current_dacl = nullptr;
     PSECURITY_DESCRIPTOR current_sd = nullptr;
-    const auto get_res = GetNamedSecurityInfoW(
-        const_cast<wchar_t*>(path.c_str()),
-        SE_FILE_OBJECT,
-        DACL_SECURITY_INFORMATION,
-        nullptr,
-        nullptr,
-        &current_dacl,
-        nullptr,
-        &current_sd);
+    const auto get_res =
+        GetNamedSecurityInfoW(const_cast<wchar_t*>(path.c_str()),
+                              SE_FILE_OBJECT,
+                              DACL_SECURITY_INFORMATION,
+                              nullptr,
+                              nullptr,
+                              &current_dacl,
+                              nullptr,
+                              &current_sd);
     if (get_res != ERROR_SUCCESS || !current_sd || !current_dacl) {
         if (current_sd) {
             LocalFree(current_sd);
@@ -207,8 +217,9 @@ bool is_dacl_compliant(const std::filesystem::path& path,
         auto* sid = const_cast<DWORD*>(&ace->SidStart);
         if (EqualSid(sid, const_cast<std::byte*>(context.user_sid.data()))) {
             user_seen = true;
-        } else if (EqualSid(sid,
-                            const_cast<std::byte*>(context.system_sid.data()))) {
+        } else if (EqualSid(
+                       sid,
+                       const_cast<std::byte*>(context.system_sid.data()))) {
             system_seen = true;
         } else {
             LocalFree(current_sd);
@@ -279,6 +290,36 @@ checked_attributes(const std::filesystem::path& path) {
 
 #else
 
+CleanupResult map_unlink_errno(int err) noexcept {
+    if (err == ENOENT) {
+        return CleanupResult::AlreadyAbsent;
+    }
+    if (err == EACCES || err == EPERM || err == EROFS) {
+        return CleanupResult::AccessDenied;
+    }
+    return CleanupResult::FilesystemError;
+}
+
+std::string cleanup_created_file_on_error(const std::filesystem::path& path,
+                                          int verify_fd) noexcept {
+    struct stat st_path{};
+    if (::lstat(path.c_str(), &st_path) != 0 || !S_ISREG(st_path.st_mode)) {
+        return {};
+    }
+    if (verify_fd >= 0) {
+        struct stat st_f{};
+        if (::fstat(verify_fd, &st_f) != 0 || st_f.st_dev != st_path.st_dev ||
+            st_f.st_ino != st_path.st_ino) {
+            return {};
+        }
+    }
+    if (::unlink(path.c_str()) != 0) {
+        return " (cleanup unlink failed: " +
+               std::error_code{errno, std::generic_category()}.message() + ")";
+    }
+    return {};
+}
+
 std::expected<struct stat, std::string>
 checked_status(const std::filesystem::path& path) {
     struct stat status{};
@@ -294,6 +335,51 @@ checked_status(const std::filesystem::path& path) {
 }
 
 #endif
+
+std::expected<void, std::string>
+protect_entry(const std::filesystem::path& path,
+              bool directory,
+              const char* empty_msg,
+              const char* mismatch_msg) {
+    if (path.empty()) {
+        return std::unexpected(empty_msg);
+    }
+#if defined(_WIN32)
+    auto attributes = checked_attributes(path);
+    if (!attributes) {
+        return std::unexpected(attributes.error());
+    }
+    const bool is_dir = (*attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    if (is_dir != directory) {
+        return std::unexpected(std::string{mismatch_msg} + "'" +
+                               platform::path::to_utf8(path) + "'");
+    }
+    return apply_acl(path, directory);
+#else
+    auto status = checked_status(path);
+    if (!status) {
+        return std::unexpected(status.error());
+    }
+    if (directory ? !S_ISDIR(status->st_mode) : !S_ISREG(status->st_mode)) {
+        return std::unexpected(std::string{mismatch_msg} + "'" +
+                               platform::path::to_utf8(path) + "'");
+    }
+    platform::perf_trace::count("apply_acl calls");
+    const mode_t mode = directory ? 0700 : 0600;
+    if ((status->st_mode & 0777) == mode) {
+        platform::perf_trace::count("acl.already_compliant");
+        return {};
+    }
+    platform::perf_trace::count("acl.repair_required");
+    if (::chmod(path.c_str(), mode) != 0) {
+        return std::unexpected(
+            system_error(directory ? "chmod 0700 failed" : "chmod 0600 failed",
+                         std::error_code{errno, std::generic_category()}));
+    }
+    platform::perf_trace::count("acl.writes_applied");
+    return {};
+#endif
+}
 
 void remove_temporary(const std::filesystem::path& path) noexcept {
     std::error_code ignored;
@@ -415,42 +501,8 @@ create_directory(const std::filesystem::path& path) {
 
 std::expected<void, std::string>
 protect_directory(const std::filesystem::path& path) {
-    if (path.empty()) {
-        return std::unexpected("empty private directory path");
-    }
-#if defined(_WIN32)
-    auto attributes = checked_attributes(path);
-    if (!attributes) {
-        return std::unexpected(attributes.error());
-    }
-    if ((*attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-        return std::unexpected("directory expected at '" +
-                               platform::path::to_utf8(path) + "'");
-    }
-    return apply_acl(path, true);
-#else
-    auto status = checked_status(path);
-    if (!status) {
-        return std::unexpected(status.error());
-    }
-    if (!S_ISDIR(status->st_mode)) {
-        return std::unexpected("directory expected at '" +
-                               platform::path::to_utf8(path) + "'");
-    }
-    platform::perf_trace::count("apply_acl calls");
-    if ((status->st_mode & 0777) == 0700) {
-        platform::perf_trace::count("acl.already_compliant");
-        return {};
-    }
-    platform::perf_trace::count("acl.repair_required");
-    if (::chmod(path.c_str(), 0700) != 0) {
-        return std::unexpected(
-            system_error("chmod 0700 failed",
-                         std::error_code{errno, std::generic_category()}));
-    }
-    platform::perf_trace::count("acl.writes_applied");
-    return {};
-#endif
+    return protect_entry(
+        path, true, "empty private directory path", "directory expected at ");
 }
 
 std::expected<void, std::string>
@@ -589,13 +641,7 @@ create_private_file(const std::filesystem::path& path) {
         return std::unexpected(CreateFileError{
             windows_error("Failed to query file identity", code), false});
     }
-    identity.volume_or_dev = id.VolumeSerialNumber;
-    std::memcpy(
-        &identity.file_id_low, id.FileId.Identifier, sizeof(std::uint64_t));
-    std::memcpy(&identity.file_id_high,
-                id.FileId.Identifier + sizeof(std::uint64_t),
-                sizeof(std::uint64_t));
-    identity.valid = true;
+    const auto identity = to_file_identity(id);
     platform::perf_trace::count("acl.writes_applied");
     return PrivateOutputFile{
         .handle = reinterpret_cast<std::intptr_t>(file),
@@ -620,18 +666,7 @@ create_private_file(const std::filesystem::path& path) {
     }
     if (::fchmod(file, 0600) != 0) {
         const auto error = errno;
-        std::string cleanup_detail;
-        struct stat st_f{};
-        struct stat st_path{};
-        if (::fstat(file, &st_f) == 0 && ::lstat(path.c_str(), &st_path) == 0 &&
-            st_f.st_dev == st_path.st_dev && st_f.st_ino == st_path.st_ino &&
-            S_ISREG(st_path.st_mode)) {
-            if (::unlink(path.c_str()) != 0) {
-                const auto unlink_err = errno;
-                cleanup_detail = " (cleanup unlink failed: " +
-                    std::error_code{unlink_err, std::generic_category()}.message() + ")";
-            }
-        }
+        const auto cleanup_detail = cleanup_created_file_on_error(path, file);
         ::close(file);
         return std::unexpected(CreateFileError{
             system_error("fchmod 0600 failed" + cleanup_detail,
@@ -640,18 +675,9 @@ create_private_file(const std::filesystem::path& path) {
     }
     struct stat st{};
     FileIdentity identity{};
-    const int fstat_res = ::fstat(file, &st);
-    if (fstat_res != 0) {
+    if (::fstat(file, &st) != 0) {
         const auto error = errno;
-        std::string cleanup_detail;
-        struct stat st_path{};
-        if (::lstat(path.c_str(), &st_path) == 0 && S_ISREG(st_path.st_mode)) {
-            if (::unlink(path.c_str()) != 0) {
-                const auto unlink_err = errno;
-                cleanup_detail = " (cleanup unlink failed: " +
-                    std::error_code{unlink_err, std::generic_category()}.message() + ")";
-            }
-        }
+        const auto cleanup_detail = cleanup_created_file_on_error(path, -1);
         ::close(file);
         return std::unexpected(CreateFileError{
             system_error("fstat failed" + cleanup_detail,
@@ -759,11 +785,8 @@ flush_and_close_private_file(PrivateOutputFile& file) {
         close_private_file(file);
         return std::unexpected(windows_error("FlushFileBuffers failed", error));
     }
-    const HANDLE handle_to_close =
-        reinterpret_cast<HANDLE>(
-            std::exchange(
-                file.handle.value,
-                invalid_private_handle));
+    const HANDLE handle_to_close = reinterpret_cast<HANDLE>(
+        std::exchange(file.handle.value, invalid_private_handle));
     if (!CloseHandle(handle_to_close)) {
         const auto error = GetLastError();
         return std::unexpected(windows_error("CloseHandle failed", error));
@@ -813,13 +836,7 @@ FileIdentity query_file_identity(const std::filesystem::path& path) noexcept {
     FILE_ID_INFO id{};
     FileIdentity result{};
     if (GetFileInformationByHandleEx(handle, FileIdInfo, &id, sizeof(id))) {
-        result.volume_or_dev = id.VolumeSerialNumber;
-        std::memcpy(
-            &result.file_id_low, id.FileId.Identifier, sizeof(std::uint64_t));
-        std::memcpy(&result.file_id_high,
-                    id.FileId.Identifier + sizeof(std::uint64_t),
-                    sizeof(std::uint64_t));
-        result.valid = true;
+        result = to_file_identity(id);
     }
     CloseHandle(handle);
     return result;
@@ -861,20 +878,19 @@ query_directory_identity(const std::filesystem::path& path) noexcept {
         (attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
         (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
         GetFileInformationByHandleEx(handle, FileIdInfo, &id, sizeof(id))) {
-        result.volume_or_dev = id.VolumeSerialNumber;
-        std::memcpy(
-            &result.file_id_low, id.FileId.Identifier, sizeof(std::uint64_t));
-        std::memcpy(&result.file_id_high,
-                    id.FileId.Identifier + sizeof(std::uint64_t),
-                    sizeof(std::uint64_t));
+        const auto file_id = to_file_identity(id);
+        result.volume_or_dev = file_id.volume_or_dev;
+        result.file_id_low = file_id.file_id_low;
+        result.file_id_high = file_id.file_id_high;
         result.valid = true;
     }
     CloseHandle(handle);
     return result;
 #else
-    const int descriptor = ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW
+    const int descriptor = ::open(path.c_str(),
+                                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW
 #ifdef O_CLOEXEC
-                                  | O_CLOEXEC
+                                      | O_CLOEXEC
 #endif
     );
     if (descriptor < 0) {
@@ -913,19 +929,7 @@ publish_private_file(PrivateOutputFile& file,
             windows_error("GetFileInformationByHandleEx failed during publish",
                           GetLastError()));
     }
-    FileIdentity handle_id{
-        .volume_or_dev = current_id.VolumeSerialNumber,
-        .file_id_low = 0,
-        .file_id_high = 0,
-        .valid = true,
-    };
-    std::memcpy(&handle_id.file_id_low,
-                current_id.FileId.Identifier,
-                sizeof(std::uint64_t));
-    std::memcpy(&handle_id.file_id_high,
-                current_id.FileId.Identifier + sizeof(std::uint64_t),
-                sizeof(std::uint64_t));
-    if (!(handle_id == file.identity)) {
+    if (!(to_file_identity(current_id) == file.identity)) {
         return std::unexpected("file handle identity mismatch during publish");
     }
 
@@ -1056,13 +1060,7 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
         if (::lstat(file.path.c_str(), &st_path) != 0) {
             const auto err = errno;
             close_private_file(file);
-            if (err == ENOENT) {
-                return CleanupResult::AlreadyAbsent;
-            }
-            if (err == EACCES || err == EPERM || err == EROFS) {
-                return CleanupResult::AccessDenied;
-            }
-            return CleanupResult::FilesystemError;
+            return map_unlink_errno(err);
         }
         if (!S_ISREG(st_fd.st_mode) || !S_ISREG(st_path.st_mode) ||
             st_fd.st_dev != st_path.st_dev || st_fd.st_ino != st_path.st_ino) {
@@ -1071,19 +1069,11 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
         }
 
         // shortcut: unlink can race; revisit for adversarial writers.
-        if (::unlink(file.path.c_str()) != 0) {
-            const auto err = errno;
-            close_private_file(file);
-            if (err == ENOENT) {
-                return CleanupResult::AlreadyAbsent;
-            }
-            if (err == EACCES || err == EPERM || err == EROFS) {
-                return CleanupResult::AccessDenied;
-            }
-            return CleanupResult::FilesystemError;
-        }
+        const int unlink_res = ::unlink(file.path.c_str());
+        const int unlink_err = errno;
         close_private_file(file);
-        return CleanupResult::Removed;
+        return unlink_res == 0 ? CleanupResult::Removed
+                               : map_unlink_errno(unlink_err);
 #endif
     }
 
@@ -1124,22 +1114,8 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
 
     FILE_ID_INFO current_id{};
     if (!GetFileInformationByHandleEx(
-            h, FileIdInfo, &current_id, sizeof(current_id))) {
-        CloseHandle(h);
-        return CleanupResult::IdentityMismatch;
-    }
-    FileIdentity id{
-        .volume_or_dev = current_id.VolumeSerialNumber,
-        .file_id_low = 0,
-        .file_id_high = 0,
-        .valid = true,
-    };
-    std::memcpy(
-        &id.file_id_low, current_id.FileId.Identifier, sizeof(std::uint64_t));
-    std::memcpy(&id.file_id_high,
-                current_id.FileId.Identifier + sizeof(std::uint64_t),
-                sizeof(std::uint64_t));
-    if (!(id == file.identity)) {
+            h, FileIdInfo, &current_id, sizeof(current_id)) ||
+        !(to_file_identity(current_id) == file.identity)) {
         CloseHandle(h);
         return CleanupResult::IdentityMismatch;
     }
@@ -1162,14 +1138,7 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
         return CleanupResult::IdentityMismatch;
     }
     if (::unlink(file.path.c_str()) != 0) {
-        const auto err = errno;
-        if (err == ENOENT) {
-            return CleanupResult::AlreadyAbsent;
-        }
-        if (err == EACCES || err == EPERM || err == EROFS) {
-            return CleanupResult::AccessDenied;
-        }
-        return CleanupResult::FilesystemError;
+        return map_unlink_errno(errno);
     }
     return CleanupResult::Removed;
 #endif
@@ -1177,42 +1146,8 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
 
 std::expected<void, std::string>
 protect_file(const std::filesystem::path& path) {
-    if (path.empty()) {
-        return std::unexpected("empty private file path");
-    }
-#if defined(_WIN32)
-    auto attributes = checked_attributes(path);
-    if (!attributes) {
-        return std::unexpected(attributes.error());
-    }
-    if ((*attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-        return std::unexpected("regular file expected at '" +
-                               platform::path::to_utf8(path) + "'");
-    }
-    return apply_acl(path, false);
-#else
-    auto status = checked_status(path);
-    if (!status) {
-        return std::unexpected(status.error());
-    }
-    if (!S_ISREG(status->st_mode)) {
-        return std::unexpected("regular file expected at '" +
-                               platform::path::to_utf8(path) + "'");
-    }
-    platform::perf_trace::count("apply_acl calls");
-    if ((status->st_mode & 0777) == 0600) {
-        platform::perf_trace::count("acl.already_compliant");
-        return {};
-    }
-    platform::perf_trace::count("acl.repair_required");
-    if (::chmod(path.c_str(), 0600) != 0) {
-        return std::unexpected(
-            system_error("chmod 0600 failed",
-                         std::error_code{errno, std::generic_category()}));
-    }
-    platform::perf_trace::count("acl.writes_applied");
-    return {};
-#endif
+    return protect_entry(
+        path, false, "empty private file path", "regular file expected at ");
 }
 
 std::expected<void, std::string>

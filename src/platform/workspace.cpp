@@ -420,8 +420,9 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
                                platform::path::to_utf8(workspace.root) + "'");
     }
     if (!workspace.identity.valid) {
-        return std::unexpected("workspace ownership identity is unavailable for '" +
-                               platform::path::to_utf8(workspace.root) + "'");
+        return std::unexpected(
+            "workspace ownership identity is unavailable for '" +
+            platform::path::to_utf8(workspace.root) + "'");
     }
     if (private_storage::query_directory_identity(native_root) !=
         workspace.identity) {
@@ -437,9 +438,9 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
         if (!id) {
             return std::unexpected(id.error());
         }
-        quarantine = workspace.root.parent_path() /
-                     (".kasumi-cleanup-" + quarantine_label(workspace.root) +
-                      "-" + *id);
+        quarantine =
+            workspace.root.parent_path() /
+            (".kasumi-cleanup-" + quarantine_label(workspace.root) + "-" + *id);
         quarantine_error = rename_no_replace(native_root, quarantine);
         if (!quarantine_error) {
             break;
@@ -457,17 +458,26 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
 #endif
         if (quarantine_error != std::errc::file_exists &&
             quarantine_error != std::errc::directory_not_empty) {
-            return std::unexpected("could not isolate workspace before cleanup '" +
-                                   platform::path::to_utf8(workspace.root) +
-                                   "': " + quarantine_error.message());
+            return std::unexpected(
+                "could not isolate workspace before cleanup '" +
+                platform::path::to_utf8(workspace.root) +
+                "': " + quarantine_error.message());
         }
     }
     if (quarantine_error) {
-        return std::unexpected("could not reserve a cleanup path for workspace '" +
-                               platform::path::to_utf8(workspace.root) + "'");
+        return std::unexpected(
+            "could not reserve a cleanup path for workspace '" +
+            platform::path::to_utf8(workspace.root) + "'");
     }
     const auto restore = [&]() {
         return rename_no_replace(quarantine, native_root);
+    };
+    const auto fail_restoring = [&](std::string msg) {
+        const auto restored = restore();
+        if (restored) {
+            msg += "; could not restore workspace path";
+        }
+        return std::unexpected(std::move(msg));
     };
     if (private_storage::query_directory_identity(quarantine) !=
         workspace.identity) {
@@ -479,13 +489,11 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
                       : std::string{}));
     }
 
-    // shortcut: same-user writers can race inside quarantine; use handle-relative recursive deletion if that threat is in scope.
+    // shortcut: same-user writers can race inside quarantine; use
+    // handle-relative recursive deletion if that threat is in scope.
     auto secured = private_storage::protect_tree(quarantine);
     if (!secured) {
-        const auto restored = restore();
-        return std::unexpected(secured.error() +
-                               (restored ? "; could not restore workspace path"
-                                         : std::string{}));
+        return fail_restoring(secured.error());
     }
 
 #ifdef KASUMI_WORKSPACE_FAULT_TESTS
@@ -497,34 +505,22 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
 #ifdef _WIN32
     const auto native_quarantine = extended_path(quarantine, error);
     if (error) {
-        const auto restored = restore();
-        return std::unexpected("could not resolve quarantined workspace: " +
-                               error.message() +
-                               (restored ? "; could not restore workspace path"
-                                         : std::string{}));
+        return fail_restoring("could not resolve quarantined workspace: " +
+                              error.message());
     }
     const auto attributes = GetFileAttributesW(native_quarantine.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
-        const auto restored = restore();
-        return std::unexpected("could not inspect workspace '" +
-                               platform::path::to_utf8(workspace.root) +
-                               "': " + windows_error(GetLastError()) +
-                               (restored ? "; could not restore workspace path"
-                                         : std::string{}));
+        return fail_restoring("could not inspect workspace '" +
+                              platform::path::to_utf8(workspace.root) +
+                              "': " + windows_error(GetLastError()));
     }
     if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        const auto restored = restore();
-        return std::unexpected("invalid workspace '" +
-                               platform::path::to_utf8(workspace.root) + "'" +
-                               (restored ? "; could not restore workspace path"
-                                         : std::string{}));
+        return fail_restoring("invalid workspace '" +
+                              platform::path::to_utf8(workspace.root) + "'");
     }
     auto writable = clear_read_only(native_quarantine);
     if (!writable) {
-        const auto restored = restore();
-        return std::unexpected(writable.error() +
-                               (restored ? "; could not restore workspace path"
-                                         : std::string{}));
+        return fail_restoring(writable.error());
     }
 
     for (std::size_t attempt = 0; attempt < maximum_attempts; ++attempt) {
@@ -547,12 +543,12 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
     if (error) {
         const auto restored = restore();
         auto detail = "could not remove workspace '" +
-                      platform::path::to_utf8(workspace.root) + "': " +
-                      error.message();
+                      platform::path::to_utf8(workspace.root) +
+                      "': " + error.message();
         if (restored) {
             detail += "; could not restore partial workspace from '" +
-                      platform::path::to_utf8(quarantine) + "': " +
-                      restored.message();
+                      platform::path::to_utf8(quarantine) +
+                      "': " + restored.message();
         } else {
             detail += "; partial workspace restored at original path";
         }
