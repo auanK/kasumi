@@ -50,6 +50,9 @@ inline constexpr std::size_t maximum_logical_component_length = 255;
 // Validates that a single path component is safe, portable, and valid UTF-8.
 bool valid_logical_path_component(std::string_view name) noexcept;
 
+// Validates a non-empty slash-separated relative logical path.
+bool valid_logical_path(std::string_view path) noexcept;
+
 // Generates a deterministic, platform-independent Unicode case key for
 // collision detection.
 std::string portable_case_key(std::string_view logical_path);

@@ -1,5 +1,6 @@
 #include "core/transaction/types.hpp"
 
+#include "core/hasher.hpp"
 #include "core/history.hpp"
 #include "core/node.hpp"
 
@@ -20,22 +21,8 @@ bool valid_pending_paths(const std::vector<std::string>& paths) noexcept {
     }
     std::string_view previous;
     for (const auto& path : paths) {
-        if (path.empty() || path.size() > maximum_path_size ||
-            path.front() == '/' || path.back() == '/') {
-            return false;
-        }
-        std::size_t start = 0;
-        while (start < path.size()) {
-            const auto end = path.find('/', start);
-            const auto component = std::string_view{path}.substr(
-                start,
-                end == std::string::npos ? path.size() - start : end - start);
-            if (!valid_logical_path_component(component)) {
-                return false;
-            }
-            start = end == std::string::npos ? path.size() : end + 1;
-        }
-        if (!previous.empty() && !path_less(previous, path)) {
+        if (path.size() > maximum_path_size || !valid_logical_path(path) ||
+            (!previous.empty() && !path_less(previous, path))) {
             return false;
         }
         previous = path;
@@ -51,21 +38,9 @@ bool valid_local_only_phase(Phase phase) noexcept {
         case Phase::DatabaseCommitted:
         case Phase::CleanupCompleted:
             return true;
-        case Phase::CommitPrepared:
-        case Phase::CommitUploaded:
-        case Phase::CommitVerified:
-        case Phase::HeadPublished:
-        case Phase::HeadVerified:
-        case Phase::EpochPrepared:
-        case Phase::EpochUploaded:
-        case Phase::EpochVerified:
+        default:
             return false;
     }
-    return false;
-}
-
-bool valid_publication_phase(Phase phase) noexcept {
-    return valid(phase);
 }
 
 } // namespace
@@ -79,17 +54,7 @@ bool valid(OperationState state) noexcept {
 }
 
 bool valid_transaction_id(std::string_view value) noexcept {
-    if (value.size() != transaction_id_hex_size) {
-        return false;
-    }
-    for (const char character : value) {
-        const bool digit = character >= '0' && character <= '9';
-        const bool letter = character >= 'a' && character <= 'f';
-        if (!digit && !letter) {
-            return false;
-        }
-    }
-    return true;
+    return value.size() == transaction_id_hex_size && is_lowercase_hex(value);
 }
 
 bool valid(const Record& record) noexcept {
@@ -105,8 +70,7 @@ bool valid(const Record& record) noexcept {
                              record.phase <= Phase::EpochVerified;
     const bool epoch_required =
         (genesis || pruning_epoch) && record.phase >= Phase::EpochPrepared;
-    if (!valid_transaction_id(record.operation_id) ||
-        !valid_publication_phase(record.phase) ||
+    if (!valid_transaction_id(record.operation_id) || !valid(record.phase) ||
         !valid_sync_plan(record.plan) ||
         record.local_generation > record.storage_generation ||
         record.storage_generation ==
@@ -226,20 +190,9 @@ std::expected<Record, std::string> make_record(std::string transaction_id,
         .phase = Phase::Started,
         .publication_required = publication_required,
         .observed_head_id = std::move(observed_head_id),
-        .observed_base_id = {},
         .local_generation = local_generation,
         .storage_generation = storage_generation,
-        .commit_id = {},
-        .ciphertext_id = {},
-        .parent_ids = {},
-        .marker_id = {},
-        .epoch_vault_id = {},
-        .epoch_id = {},
-        .epoch_issued_at = 0,
-        .epoch_min_history_depth = 0,
-        .epoch_min_history_age_hours = 0,
         .plan = std::move(plan),
-        .progress = {},
     };
     record.progress.resize(sync_plan_size(record.plan));
 

@@ -16,51 +16,33 @@ static_assert(BLAKE3_OUT_LEN == HASH_SIZE);
 namespace {
 
 bool is_windows_reserved_device_name(std::string_view base) noexcept {
-    auto ascii_lower = [](char c) noexcept -> char {
+    if (base.size() < 3 || base.size() > 5) {
+        return false;
+    }
+    const auto ascii_lower = [](char c) noexcept -> char {
         return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c;
     };
+    const char c0 = ascii_lower(base[0]);
+    const char c1 = ascii_lower(base[1]);
+    const char c2 = ascii_lower(base[2]);
+    const bool com_or_lpt = (c0 == 'c' && c1 == 'o' && c2 == 'm') ||
+                            (c0 == 'l' && c1 == 'p' && c2 == 't');
 
     if (base.size() == 3) {
-        char c0 = ascii_lower(base[0]);
-        char c1 = ascii_lower(base[1]);
-        char c2 = ascii_lower(base[2]);
-        if (c0 == 'c' && c1 == 'o' && c2 == 'n')
-            return true;
-        if (c0 == 'p' && c1 == 'r' && c2 == 'n')
-            return true;
-        if (c0 == 'a' && c1 == 'u' && c2 == 'x')
-            return true;
-        if (c0 == 'n' && c1 == 'u' && c2 == 'l')
-            return true;
+        return (c0 == 'c' && c1 == 'o' && c2 == 'n') ||
+               (c0 == 'p' && c1 == 'r' && c2 == 'n') ||
+               (c0 == 'a' && c1 == 'u' && c2 == 'x') ||
+               (c0 == 'n' && c1 == 'u' && c2 == 'l');
+    }
+    if (!com_or_lpt) {
         return false;
     }
-
     if (base.size() == 4) {
-        char c0 = ascii_lower(base[0]);
-        char c1 = ascii_lower(base[1]);
-        char c2 = ascii_lower(base[2]);
-        char c3 = base[3];
-        if ((c0 == 'c' && c1 == 'o' && c2 == 'm') ||
-            (c0 == 'l' && c1 == 'p' && c2 == 't')) {
-            return c3 >= '1' && c3 <= '9';
-        }
-        return false;
+        return base[3] >= '1' && base[3] <= '9';
     }
-
-    if (base.size() == 5) {
-        char c0 = ascii_lower(base[0]);
-        char c1 = ascii_lower(base[1]);
-        char c2 = ascii_lower(base[2]);
-        auto b3 = static_cast<unsigned char>(base[3]);
-        auto b4 = static_cast<unsigned char>(base[4]);
-        if ((c0 == 'c' && c1 == 'o' && c2 == 'm') ||
-            (c0 == 'l' && c1 == 'p' && c2 == 't')) {
-            return b3 == 0xC2 && (b4 == 0xB9 || b4 == 0xB2 || b4 == 0xB3);
-        }
-        return false;
-    }
-
-    return false;
+    const auto b3 = static_cast<unsigned char>(base[3]);
+    const auto b4 = static_cast<unsigned char>(base[4]);
+    return b3 == 0xC2 && (b4 == 0xB9 || b4 == 0xB2 || b4 == 0xB3);
 }
 
 } // namespace
@@ -108,21 +90,10 @@ bool valid_logical_path_component(std::string_view name) noexcept {
                 return false;
             }
             const auto b1 = static_cast<unsigned char>(name[++i]);
-            if (b0 == 0xE0) {
-                if (b1 < 0xA0 || b1 > 0xBF) {
-                    return false;
-                }
-            } else if (b0 == 0xED) {
-                if (b1 < 0x80 || b1 > 0x9F) {
-                    return false;
-                }
-            } else {
-                if (b1 < 0x80 || b1 > 0xBF) {
-                    return false;
-                }
-            }
+            const unsigned char b1_min = b0 == 0xE0 ? 0xA0 : 0x80;
+            const unsigned char b1_max = b0 == 0xED ? 0x9F : 0xBF;
             const auto b2 = static_cast<unsigned char>(name[++i]);
-            if (b2 < 0x80 || b2 > 0xBF) {
+            if (b1 < b1_min || b1 > b1_max || b2 < 0x80 || b2 > 0xBF) {
                 return false;
             }
         } else if (b0 >= 0xF0 && b0 <= 0xF4) {
@@ -130,25 +101,12 @@ bool valid_logical_path_component(std::string_view name) noexcept {
                 return false;
             }
             const auto b1 = static_cast<unsigned char>(name[++i]);
-            if (b0 == 0xF0) {
-                if (b1 < 0x90 || b1 > 0xBF) {
-                    return false;
-                }
-            } else if (b0 == 0xF4) {
-                if (b1 < 0x80 || b1 > 0x8F) {
-                    return false;
-                }
-            } else {
-                if (b1 < 0x80 || b1 > 0xBF) {
-                    return false;
-                }
-            }
+            const unsigned char b1_min = b0 == 0xF0 ? 0x90 : 0x80;
+            const unsigned char b1_max = b0 == 0xF4 ? 0x8F : 0xBF;
             const auto b2 = static_cast<unsigned char>(name[++i]);
-            if (b2 < 0x80 || b2 > 0xBF) {
-                return false;
-            }
             const auto b3 = static_cast<unsigned char>(name[++i]);
-            if (b3 < 0x80 || b3 > 0xBF) {
+            if (b1 < b1_min || b1 > b1_max || b2 < 0x80 || b2 > 0xBF ||
+                b3 < 0x80 || b3 > 0xBF) {
                 return false;
             }
         } else {
@@ -159,10 +117,28 @@ bool valid_logical_path_component(std::string_view name) noexcept {
     const auto dot = name.find('.');
     const auto base =
         dot == std::string_view::npos ? name : name.substr(0, dot);
-    if (is_windows_reserved_device_name(base)) {
+    return !is_windows_reserved_device_name(base);
+}
+
+bool valid_logical_path(std::string_view path) noexcept {
+    if (path.empty() || path.front() == '/' || path.back() == '/') {
         return false;
     }
-
+    std::size_t start = 0;
+    while (start < path.size()) {
+        const auto slash = path.find('/', start);
+        const auto component =
+            path.substr(start,
+                        slash == std::string_view::npos ? path.size() - start
+                                                        : slash - start);
+        if (!valid_logical_path_component(component)) {
+            return false;
+        }
+        if (slash == std::string_view::npos) {
+            break;
+        }
+        start = slash + 1;
+    }
     return true;
 }
 
@@ -292,30 +268,10 @@ bool valid_snapshot(const Snapshot& snapshot, bool allow_empty) {
         }
 
         if (index != 0) {
-            const auto parent = row_parent(row.path);
-            const auto* parent_row = find_row(snapshot, parent);
-            if (parent_row == nullptr || !parent_row->is_directory) {
+            const auto* parent_row = find_row(snapshot, row_parent(row.path));
+            if (parent_row == nullptr || !parent_row->is_directory ||
+                !valid_logical_path(row.path)) {
                 return false;
-            }
-
-            if (row.path.front() == '/' || row.path.back() == '/') {
-                return false;
-            }
-            std::size_t start = 0;
-            while (start < row.path.size()) {
-                const auto slash = row.path.find('/', start);
-                const auto component =
-                    slash == std::string_view::npos
-                        ? std::string_view(row.path).substr(start)
-                        : std::string_view(row.path).substr(start,
-                                                            slash - start);
-                if (!valid_logical_path_component(component)) {
-                    return false;
-                }
-                if (slash == std::string_view::npos) {
-                    break;
-                }
-                start = slash + 1;
             }
         }
 

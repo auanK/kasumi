@@ -1,5 +1,7 @@
 #include "core/ignore.hpp"
 
+#include "core/hasher.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -89,14 +91,9 @@ bool generated_internal_name(std::string_view name) noexcept {
 
     constexpr std::size_t transaction_id_size = 32;
     if (suffix.size() <= transaction_id_size + 1 ||
-        suffix[transaction_id_size] != '-') {
+        suffix[transaction_id_size] != '-' ||
+        !is_lowercase_hex(suffix.substr(0, transaction_id_size))) {
         return false;
-    }
-    for (const char character : suffix.substr(0, transaction_id_size)) {
-        if (!((character >= '0' && character <= '9') ||
-              (character >= 'a' && character <= 'f'))) {
-            return false;
-        }
     }
     const auto index = suffix.substr(transaction_id_size + 1);
     return std::ranges::all_of(index, [](char character) {
@@ -244,8 +241,8 @@ void parse_rule_line(std::string line,
             return;
         }
         if (line.starts_with('!')) {
-            result.parse_error = IgnoreParseError{
-                line_number, "(?d)!pattern is not supported"};
+            result.parse_error =
+                IgnoreParseError{line_number, "(?d)!pattern is not supported"};
             return;
         }
         if (line.starts_with("(?")) {
@@ -304,16 +301,27 @@ const IgnoreRule* last_matching_rule(const IgnoreList& list,
     std::span<const PathSlice> components;
 
     std::size_t count = 0;
-    std::size_t start = 0;
-    while (start <= path.size() && count < stack_prefixes.size()) {
+    for (std::size_t start = 0; start <= path.size();) {
         const auto slash = path.find('/', start);
         const auto end =
             (slash == std::string_view::npos) ? path.size() : slash;
         const bool comp_is_dir = (end < path.size()) || is_directory;
+        const PathSlice comp{path.substr(start, end - start), comp_is_dir};
+        const PathSlice pref{path.substr(0, end), comp_is_dir};
 
-        stack_components[count] = {path.substr(start, end - start),
-                                   comp_is_dir};
-        stack_prefixes[count] = {path.substr(0, end), comp_is_dir};
+        if (count < stack_prefixes.size()) {
+            stack_components[count] = comp;
+            stack_prefixes[count] = pref;
+        } else {
+            if (count == stack_prefixes.size()) {
+                heap_components.assign(stack_components.begin(),
+                                       stack_components.end());
+                heap_prefixes.assign(stack_prefixes.begin(),
+                                     stack_prefixes.end());
+            }
+            heap_components.push_back(comp);
+            heap_prefixes.push_back(pref);
+        }
         ++count;
 
         if (slash == std::string_view::npos)
@@ -321,23 +329,7 @@ const IgnoreRule* last_matching_rule(const IgnoreList& list,
         start = slash + 1;
     }
 
-    if (start <= path.size() && count == stack_prefixes.size()) {
-        // Fallback for paths deeper than 32 components
-        heap_components.assign(stack_components.begin(),
-                               stack_components.end());
-        heap_prefixes.assign(stack_prefixes.begin(), stack_prefixes.end());
-        while (start <= path.size()) {
-            const auto slash = path.find('/', start);
-            const auto end =
-                (slash == std::string_view::npos) ? path.size() : slash;
-            const bool comp_is_dir = (end < path.size()) || is_directory;
-            heap_components.push_back(
-                {path.substr(start, end - start), comp_is_dir});
-            heap_prefixes.push_back({path.substr(0, end), comp_is_dir});
-            if (slash == std::string_view::npos)
-                break;
-            start = slash + 1;
-        }
+    if (count > stack_prefixes.size()) {
         prefixes = heap_prefixes;
         components = heap_components;
     } else {
@@ -373,20 +365,13 @@ bool is_kasumiignore_path(std::string_view path) {
     const auto slash = path.find_last_of("/\\");
     const auto name =
         slash == std::string_view::npos ? path : path.substr(slash + 1);
-    constexpr std::string_view expected = ".kasumiignore";
-    if (name.size() != expected.size()) {
-        return false;
-    }
-    for (std::size_t index = 0; index < name.size(); ++index) {
-        auto character = name[index];
-        if (character >= 'A' && character <= 'Z') {
-            character = static_cast<char>(character - 'A' + 'a');
-        }
-        if (character != expected[index]) {
-            return false;
-        }
-    }
-    return true;
+    return std::ranges::equal(
+        name, std::string_view{".kasumiignore"}, [](char a, char b) {
+            if (a >= 'A' && a <= 'Z') {
+                a = static_cast<char>(a - 'A' + 'a');
+            }
+            return a == b;
+        });
 }
 
 IgnoreList parse_ignore_rules(std::string_view content) {
@@ -437,8 +422,8 @@ IgnoreList load_ignore_list(const std::filesystem::path& file_path) {
     }
     if (input.bad()) {
         result.rules.clear();
-        result.parse_error = IgnoreParseError{
-            line_number + 1, "could not read ignore file"};
+        result.parse_error =
+            IgnoreParseError{line_number + 1, "could not read ignore file"};
     }
     return result;
 }

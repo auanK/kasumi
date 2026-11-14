@@ -5,6 +5,7 @@
 #include "platform/path.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <exception>
 #include <utility>
@@ -30,69 +31,35 @@ bool valid_operation_strings(const kasumi::Operation& operation,
            valid_string(operation.hash) && valid_string(progress.previous_hash);
 }
 
+inline constexpr std::array persisted_actions{
+    kasumi::Action::RenameLocal,
+    kasumi::Action::Upload,
+    kasumi::Action::CreateLocalDirectory,
+    kasumi::Action::CreateRemoteDirectory,
+    kasumi::Action::Download,
+    kasumi::Action::DeleteLocal,
+    kasumi::Action::DeleteLocalDirectory,
+    kasumi::Action::DeleteRemote,
+    kasumi::Action::DeleteRemoteDirectory,
+    kasumi::Action::MoveLocal,
+    kasumi::Action::CopyLocal,
+    kasumi::Action::DeleteIgnoredLocalFile,
+};
+
 constexpr std::optional<std::uint8_t>
 persisted_action_id(kasumi::Action action) noexcept {
-    switch (action) {
-        case kasumi::Action::RenameLocal:
-            return 0;
-        case kasumi::Action::Upload:
-            return 1;
-        case kasumi::Action::CreateLocalDirectory:
-            return 2;
-        case kasumi::Action::CreateRemoteDirectory:
-            return 3;
-        case kasumi::Action::Download:
-            return 4;
-        case kasumi::Action::DeleteLocal:
-            return 5;
-        case kasumi::Action::DeleteLocalDirectory:
-            return 6;
-        case kasumi::Action::DeleteRemote:
-            return 7;
-        case kasumi::Action::DeleteRemoteDirectory:
-            return 8;
-        case kasumi::Action::MoveLocal:
-            return 9;
-        case kasumi::Action::CopyLocal:
-            return 10;
-        case kasumi::Action::DeleteIgnoredLocalFile:
-            return 11;
-        case kasumi::Action::Count:
-            return std::nullopt;
+    const auto it = std::ranges::find(persisted_actions, action);
+    if (it == persisted_actions.end()) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    return static_cast<std::uint8_t>(it - persisted_actions.begin());
 }
 
 constexpr std::optional<kasumi::Action>
 action_from_persisted_id(std::uint8_t id) noexcept {
-    switch (id) {
-        case 0:
-            return kasumi::Action::RenameLocal;
-        case 1:
-            return kasumi::Action::Upload;
-        case 2:
-            return kasumi::Action::CreateLocalDirectory;
-        case 3:
-            return kasumi::Action::CreateRemoteDirectory;
-        case 4:
-            return kasumi::Action::Download;
-        case 5:
-            return kasumi::Action::DeleteLocal;
-        case 6:
-            return kasumi::Action::DeleteLocalDirectory;
-        case 7:
-            return kasumi::Action::DeleteRemote;
-        case 8:
-            return kasumi::Action::DeleteRemoteDirectory;
-        case 9:
-            return kasumi::Action::MoveLocal;
-        case 10:
-            return kasumi::Action::CopyLocal;
-        case 11:
-            return kasumi::Action::DeleteIgnoredLocalFile;
-        default:
-            return std::nullopt;
-    }
+    return id < persisted_actions.size()
+               ? std::optional<kasumi::Action>{persisted_actions[id]}
+               : std::nullopt;
 }
 
 } // namespace
@@ -103,14 +70,7 @@ std::expected<void, std::string> validate(const Record& record) {
     }
     try {
         if (sync_plan_size(record.plan) > maximum_operation_count ||
-            !valid_string(record.operation_id) ||
-            !valid_string(record.observed_head_id) ||
-            !valid_string(record.observed_base_id) ||
-            !valid_string(record.commit_id) ||
-            !valid_string(record.ciphertext_id) ||
             !valid_string(record.marker_id) ||
-            !valid_string(record.epoch_vault_id) ||
-            !valid_string(record.epoch_id) ||
             record.parent_ids.size() > history::maximum_parent_count ||
             record.observed_pending_paths.size() > maximum_pending_path_count ||
             record.pending_paths.size() > maximum_pending_path_count) {
@@ -124,9 +84,8 @@ std::expected<void, std::string> validate(const Record& record) {
             }
         }
 
-        for (const auto* strings : {&record.parent_ids,
-                                    &record.observed_pending_paths,
-                                    &record.pending_paths}) {
+        for (const auto* strings :
+             {&record.observed_pending_paths, &record.pending_paths}) {
             for (const auto& value : *strings) {
                 if (!valid_string(value))
                     return std::unexpected(
@@ -202,17 +161,13 @@ EncodeResult encode(const Record& record) {
                                       operation.exclusive_destination ? 1 : 0);
             if (operation.action == kasumi::Action::DeleteIgnoredLocalFile) {
                 wire::write<std::uint64_t>(
-                    writer,
-                    operation.expected_source_identity.volume_or_dev);
+                    writer, operation.expected_source_identity.volume_or_dev);
                 wire::write<std::uint64_t>(
-                    writer,
-                    operation.expected_source_identity.file_id_low);
+                    writer, operation.expected_source_identity.file_id_low);
                 wire::write<std::uint64_t>(
-                    writer,
-                    operation.expected_source_identity.file_id_high);
+                    writer, operation.expected_source_identity.file_id_high);
                 wire::write<std::uint8_t>(
-                    writer,
-                    operation.expected_source_identity.valid ? 1 : 0);
+                    writer, operation.expected_source_identity.valid ? 1 : 0);
             }
 
             wire::write_string(writer, progress.previous_hash);
@@ -344,24 +299,22 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
             auto hash = wire::read_string(reader, maximum_string_size);
             auto size = wire::read<std::uint64_t>(reader);
             auto exclusive = wire::read<std::uint8_t>(reader);
-            std::optional<std::uint64_t> identity_volume;
-            std::optional<std::uint64_t> identity_low;
-            std::optional<std::uint64_t> identity_high;
-            std::optional<std::uint8_t> identity_valid;
-            if (*version >= 10 && action_raw &&
-                *action_raw == 11) {
-                if (auto field = wire::read<std::uint64_t>(reader)) {
-                    identity_volume = *field;
+            kasumi::PhysicalFileIdentity source_identity{};
+            if (*version >= 10 && action_raw && *action_raw == 11) {
+                auto volume = wire::read<std::uint64_t>(reader);
+                auto low = wire::read<std::uint64_t>(reader);
+                auto high = wire::read<std::uint64_t>(reader);
+                auto id_valid = wire::read<std::uint8_t>(reader);
+                if (!volume || !low || !high || !id_valid || *id_valid != 1) {
+                    return std::unexpected(
+                        "invalid disposable source identity");
                 }
-                if (auto field = wire::read<std::uint64_t>(reader)) {
-                    identity_low = *field;
-                }
-                if (auto field = wire::read<std::uint64_t>(reader)) {
-                    identity_high = *field;
-                }
-                if (auto field = wire::read<std::uint8_t>(reader)) {
-                    identity_valid = *field;
-                }
+                source_identity = {
+                    .volume_or_dev = *volume,
+                    .file_id_low = *low,
+                    .file_id_high = *high,
+                    .valid = true,
+                };
             }
             auto previous_hash = wire::read_string(reader, maximum_string_size);
             auto backup = wire::read<std::uint32_t>(reader);
@@ -372,11 +325,6 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
                 !exclusive || !previous_hash || !backup || !state_raw ||
                 !had_original) {
                 return std::unexpected("truncated operation");
-            }
-            if (*version >= 10 && action_raw && *action_raw == 11 &&
-                (!identity_volume || !identity_low || !identity_high ||
-                 !identity_valid || *identity_valid != 1)) {
-                return std::unexpected("invalid disposable source identity");
             }
             const auto action = action_from_persisted_id(*action_raw);
             if (!action || (*version == 9 && *action_raw == 11)) {
@@ -398,14 +346,7 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
                 .alt_path = platform::path::from_utf8(*alt_path),
                 .size = *size,
                 .exclusive_destination = *exclusive == 1,
-                .expected_source_identity =
-                    *action == kasumi::Action::DeleteIgnoredLocalFile
-                        ? kasumi::PhysicalFileIdentity{
-                              .volume_or_dev = *identity_volume,
-                              .file_id_low = *identity_low,
-                              .file_id_high = *identity_high,
-                              .valid = *identity_valid == 1}
-                        : kasumi::PhysicalFileIdentity{},
+                .expected_source_identity = source_identity,
             });
             record.progress.push_back(OperationProgress{
                 .previous_hash = std::move(*previous_hash),

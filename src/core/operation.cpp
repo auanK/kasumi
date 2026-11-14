@@ -1,13 +1,13 @@
 #include "core/operation.hpp"
 
+#include "core/hasher.hpp"
+#include "core/ignore.hpp"
+#include "platform/path.hpp"
+
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <utility>
-
-#include "core/hasher.hpp"
-#include "core/ignore.hpp"
-#include "platform/path.hpp"
 
 namespace kasumi {
 

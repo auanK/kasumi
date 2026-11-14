@@ -40,24 +40,18 @@ void write_bytes(Writer& writer, std::span<const std::byte> bytes);
 template <typename T>
     requires std::is_integral_v<T> || std::is_floating_point_v<T>
 inline void write(Writer& writer, T value) {
-    if constexpr (std::is_integral_v<T>) {
-        if constexpr (sizeof(T) > 1 &&
-                      std::endian::native != std::endian::little) {
-            value = std::byteswap(value);
-        }
-        std::array<std::byte, sizeof(T)> bytes;
-        std::memcpy(bytes.data(), &value, sizeof(T));
-        write_bytes(writer, bytes);
-    } else {
-        using UIntType = std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>;
-        auto int_val = std::bit_cast<UIntType>(value);
-        if constexpr (std::endian::native != std::endian::little) {
-            int_val = std::byteswap(int_val);
-        }
-        std::array<std::byte, sizeof(T)> bytes;
-        std::memcpy(bytes.data(), &int_val, sizeof(T));
-        write_bytes(writer, bytes);
+    using WireInt = std::conditional_t<
+        std::is_integral_v<T>,
+        T,
+        std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>>;
+    auto wire_val = std::bit_cast<WireInt>(value);
+    if constexpr (sizeof(WireInt) > 1 &&
+                  std::endian::native != std::endian::little) {
+        wire_val = std::byteswap(wire_val);
     }
+    std::array<std::byte, sizeof(T)> bytes;
+    std::memcpy(bytes.data(), &wire_val, sizeof(T));
+    write_bytes(writer, bytes);
 }
 
 // Encodes the underlying value of an enum.
@@ -88,24 +82,17 @@ inline std::expected<T, Error> read(Reader& reader) {
     if (!bytes) {
         return std::unexpected(bytes.error());
     }
-
-    if constexpr (std::is_integral_v<T>) {
-        T value;
-        std::memcpy(&value, bytes->data(), sizeof(T));
-        if constexpr (sizeof(T) > 1 &&
-                      std::endian::native != std::endian::little) {
-            value = std::byteswap(value);
-        }
-        return value;
-    } else {
-        using UIntType = std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>;
-        UIntType int_val;
-        std::memcpy(&int_val, bytes->data(), sizeof(T));
-        if constexpr (std::endian::native != std::endian::little) {
-            int_val = std::byteswap(int_val);
-        }
-        return std::bit_cast<T>(int_val);
+    using WireInt = std::conditional_t<
+        std::is_integral_v<T>,
+        T,
+        std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>>;
+    WireInt wire_val;
+    std::memcpy(&wire_val, bytes->data(), sizeof(T));
+    if constexpr (sizeof(WireInt) > 1 &&
+                  std::endian::native != std::endian::little) {
+        wire_val = std::byteswap(wire_val);
     }
+    return std::bit_cast<T>(wire_val);
 }
 
 // Decodes the underlying value of an enum.

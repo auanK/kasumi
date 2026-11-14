@@ -192,8 +192,10 @@ void compare_nodes_3way(
                         if (l && cloud_snapshot) {
                             for (const auto& row : cloud_snapshot->rows) {
                                 if (!row.is_directory && row.hash == l->hash &&
-                                    row.path.starts_with(std::string(path) +
-                                                         ".kasumiconflict_")) {
+                                    row.path.starts_with(path) &&
+                                    std::string_view(row.path)
+                                        .substr(path.size())
+                                        .starts_with(".kasumiconflict_")) {
                                     conflict_artifact = &row;
                                     break;
                                 }
