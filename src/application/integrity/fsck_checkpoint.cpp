@@ -433,8 +433,7 @@ decrypt_checkpoint(std::span<const std::uint8_t> envelope_bytes,
 
 std::filesystem::path
 checkpoint_path(const std::filesystem::path& profile_directory) {
-    return profile_directory /
-           platform::path::from_utf8(fsck_checkpoint_file_name);
+    return profile_directory / fsck_checkpoint_file_name;
 }
 
 std::expected<void, std::string>

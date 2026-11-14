@@ -284,17 +284,18 @@ audit_object(transport::Transport& storage,
             transport_error(downloaded.error(), reference.identifier));
     }
 
-    std::error_code enc_size_error;
-    const auto enc_size = std::filesystem::file_size(encrypted, enc_size_error);
-    if (!enc_size_error) {
-        platform::perf_trace::count("fsck.encrypted_bytes_downloaded",
-                                    enc_size);
-    }
-
     auto regular = require_regular_file(
         encrypted, ErrorCode::WorkspaceFailure, "invalid temporary download");
     if (!regular)
         return std::unexpected(regular.error());
+
+    std::error_code enc_size_error;
+    if (const auto enc_size =
+            std::filesystem::file_size(encrypted, enc_size_error);
+        !enc_size_error) {
+        platform::perf_trace::count("fsck.encrypted_bytes_downloaded",
+                                    enc_size);
+    }
 
     AuditState result = AuditState::Healthy;
     platform::perf_trace::count("fsck.audit_decrypt_calls");
@@ -305,13 +306,6 @@ audit_object(transport::Transport& storage,
     if (!decrypted) {
         result = AuditState::Corrupt;
     } else {
-        std::error_code plain_size_error;
-        const auto plain_size =
-            std::filesystem::file_size(plaintext, plain_size_error);
-        if (!plain_size_error) {
-            platform::perf_trace::count("fsck.plaintext_bytes_verified",
-                                        plain_size);
-        }
         platform::perf_trace::count("fsck.audit_verify_calls");
         const auto verify_token = platform::perf_trace::begin();
         auto verified = verify_content(plaintext,
@@ -320,7 +314,10 @@ audit_object(transport::Transport& storage,
                                        ErrorCode::WorkspaceFailure);
         platform::perf_trace::finish("fsck.audit_verify_duration_us",
                                      verify_token);
-        if (!verified) {
+        if (verified) {
+            platform::perf_trace::count("fsck.plaintext_bytes_verified",
+                                        reference.size);
+        } else {
             if (verified.error().code != ErrorCode::IntegrityFailure) {
                 return std::unexpected(verified.error());
             }
@@ -849,7 +846,7 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                                 .plaintext_size = reference.size,
                                 .physical_ciphertext_sha256 =
                                     std::move(work_result.physical_sha256),
-                            };
+                        };
                         platform::perf_trace::count(
                             "fsck.checkpoint_verified_entries_recorded");
                         ++unpersisted_verified;

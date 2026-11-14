@@ -33,47 +33,34 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     output.trust_existing_content = input.request.trust_existing_content;
     output.writer_identifier = input.request.writer_identifier;
     output.on_progress = input.on_progress;
-    if (input.request.initial && operation != Operation::Sync) {
+    const auto invalid_request = [&](std::string_view detail) {
         return std::unexpected(Error{
             .operation = operation,
             .code = ErrorCode::RuntimeFailure,
-            .detail = "--initial is only valid for sync",
+            .detail = std::string{detail},
         });
+    };
+    if (input.request.initial && operation != Operation::Sync) {
+        return invalid_request("--initial is only valid for sync");
     }
     if (input.request.trust_existing_content && !input.request.initial) {
-        return std::unexpected(Error{
-            .operation = operation,
-            .code = ErrorCode::RuntimeFailure,
-            .detail = "--trust-existing-content requires --initial",
-        });
+        return invalid_request("--trust-existing-content requires --initial");
     }
     if (input.request.trust_existing_content && operation != Operation::Sync) {
-        return std::unexpected(Error{
-            .operation = operation,
-            .code = ErrorCode::RuntimeFailure,
-            .detail = "--trust-existing-content is only valid for sync",
-        });
+        return invalid_request(
+            "--trust-existing-content is only valid for sync");
     }
     if (input.request.audit_inventory && operation != Operation::Sync) {
-        return std::unexpected(Error{
-            .operation = operation,
-            .code = ErrorCode::RuntimeFailure,
-            .detail = "--audit-inventory is only valid for sync",
-        });
+        return invalid_request("--audit-inventory is only valid for sync");
     }
     if (input.request.audit_inventory && input.request.initial) {
-        return std::unexpected(Error{
-            .operation = operation,
-            .code = ErrorCode::RuntimeFailure,
-            .detail = "--audit-inventory cannot be combined with --initial",
-        });
+        return invalid_request(
+            "--audit-inventory cannot be combined with --initial");
     }
-    if (operation == Operation::RemoveBarrier && !input.request.confirm_abandoned) {
-        return std::unexpected(Error{
-            .operation = operation,
-            .code = ErrorCode::RuntimeFailure,
-            .detail = "--confirm-abandoned is required to remove a maintenance barrier",
-        });
+    if (operation == Operation::RemoveBarrier &&
+        !input.request.confirm_abandoned) {
+        return invalid_request(
+            "--confirm-abandoned is required to remove a maintenance barrier");
     }
     const auto access_mode =
         (operation == Operation::Sync || operation == Operation::ResolveMissing)
@@ -125,8 +112,8 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     output.profile_lock = *profile_lock;
 
     if (input.request.initial) {
-        const auto reject_initial = [&](std::string detail)
-            -> std::expected<void, Error> {
+        const auto reject_initial =
+            [&](std::string detail) -> std::expected<void, Error> {
             platform::perf_trace::finish("operation preparation",
                                          preparation_trace);
             wipe_operation(output);
@@ -188,11 +175,12 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         };
 
         std::error_code db_err;
-        const auto db_status =
-            std::filesystem::symlink_status(runtime_data->database_path, db_err);
+        const auto db_status = std::filesystem::symlink_status(
+            runtime_data->database_path, db_err);
         if (db_err && db_err != std::errc::no_such_file_or_directory) {
-            return reject_initial("cannot inspect local initialization state: " +
-                                  db_err.message());
+            return reject_initial(
+                "cannot inspect local initialization state: " +
+                db_err.message());
         }
         if (db_status.type() != std::filesystem::file_type::not_found) {
             if (std::filesystem::is_symlink(db_status) ||
@@ -244,7 +232,8 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
                 check_empty_directory(profile_directory / ".transactions")) {
             return reject_initial(*error);
         }
-    } else if (operation != Operation::RemoveBarrier && !state_storage::validate(runtime_data->database_path)) {
+    } else if (operation != Operation::RemoveBarrier &&
+               !state_storage::validate(runtime_data->database_path)) {
         platform::perf_trace::finish("operation preparation",
                                      preparation_trace);
         wipe_operation(output);
@@ -340,16 +329,14 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         if (has_remote_history) {
             const auto profile_dir = runtime_data->database_path.parent_path();
             auto observed = observation::history::observe(
-                *opened_storage,
-                output.key,
-                profile_dir,
-                false);
+                *opened_storage, output.key, profile_dir, false);
             if (!observed) {
                 wipe_operation(output);
                 return std::unexpected(Error{
                     .operation = operation,
                     .code = ErrorCode::RuntimeFailure,
-                    .detail = "remote history is invalid, corrupt, or unauthenticated: " +
+                    .detail = "remote history is invalid, corrupt, or "
+                              "unauthenticated: " +
                               observed.error().detail,
                     .runtime = output.summary,
                 });
@@ -359,9 +346,10 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
                 return std::unexpected(Error{
                     .operation = operation,
                     .code = ErrorCode::RuntimeFailure,
-                    .detail = "remote history namespace contains partial or "
-                              "unrecognized objects without valid head markers; "
-                              "remote objects were left untouched",
+                    .detail =
+                        "remote history namespace contains partial or "
+                        "unrecognized objects without valid head markers; "
+                        "remote objects were left untouched",
                     .runtime = output.summary,
                 });
             }

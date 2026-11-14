@@ -440,50 +440,49 @@ resolve_key(const Credentials& credentials,
     if (!present) {
         return std::unexpected(present.error());
     }
-
-    if (std::holds_alternative<NoCredentials>(credentials)) {
-        if (!*present) {
-            return std::unexpected(
-                error(operation,
-                      InspectionErrorCode::CredentialsRequired,
-                      "credentials are required to inspect remote history"));
-        }
-        auto stored = runtime::vault::read_only(runtime_data.key_path);
-        if (!stored) {
-            return std::unexpected(
-                error(operation,
-                      InspectionErrorCode::CredentialFailure,
-                      "failed to read profile persisted key"));
-        }
-        output = *stored;
-        crypto::secure_memory::wipe(stored->data(), stored->size());
-        return {};
+    if (std::holds_alternative<NoCredentials>(credentials) && !*present) {
+        return std::unexpected(
+            error(operation,
+                  InspectionErrorCode::CredentialsRequired,
+                  "credentials are required to inspect remote history"));
     }
 
-    const auto& master_key = std::get<MasterKeyHex>(credentials);
-    auto resolved = runtime::vault::decode_hex(master_key.value);
-    if (!resolved) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::CredentialFailure,
-                                     resolved.error().detail));
+    std::optional<runtime::vault::KeyBytes> resolved;
+    if (const auto* master_key = std::get_if<MasterKeyHex>(&credentials)) {
+        auto decoded = runtime::vault::decode_hex(master_key->value);
+        if (!decoded) {
+            return std::unexpected(error(operation,
+                                         InspectionErrorCode::CredentialFailure,
+                                         decoded.error().detail));
+        }
+        resolved = *decoded;
+        crypto::secure_memory::wipe(decoded->data(), decoded->size());
     }
 
     if (*present) {
         auto stored = runtime::vault::read_only(runtime_data.key_path);
         if (!stored) {
-            crypto::secure_memory::wipe(resolved->data(), resolved->size());
+            if (resolved) {
+                crypto::secure_memory::wipe(resolved->data(), resolved->size());
+            }
             return std::unexpected(
                 error(operation,
                       InspectionErrorCode::CredentialFailure,
                       "failed to read profile persisted key"));
         }
-        const bool matches = *stored == *resolved;
-        crypto::secure_memory::wipe(stored->data(), stored->size());
-        if (!matches) {
-            crypto::secure_memory::wipe(resolved->data(), resolved->size());
-            return std::unexpected(error(operation,
-                                         InspectionErrorCode::CredentialFailure,
-                                         "credential does not match profile"));
+        if (resolved) {
+            const bool matches = *stored == *resolved;
+            crypto::secure_memory::wipe(stored->data(), stored->size());
+            if (!matches) {
+                crypto::secure_memory::wipe(resolved->data(), resolved->size());
+                return std::unexpected(
+                    error(operation,
+                          InspectionErrorCode::CredentialFailure,
+                          "credential does not match profile"));
+            }
+        } else {
+            resolved = *stored;
+            crypto::secure_memory::wipe(stored->data(), stored->size());
         }
     }
 
@@ -854,10 +853,6 @@ bool valid_logical_path(std::string_view path) {
     return true;
 }
 
-std::int64_t unix_nanoseconds(const NodeRow& row) {
-    return row.mtime;
-}
-
 std::expected<RemoteStatReport, InspectionError>
 make_stat_report(const InspectionRequest& request,
                  const observation::history::StorageView& observed,
@@ -886,7 +881,7 @@ make_stat_report(const InspectionRequest& request,
                                   : RemoteTreeEntryType::File,
         .logical_hash = hash_hex(row->hash),
         .size = row->size,
-        .modified_at_unix_nanoseconds = unix_nanoseconds(*row),
+        .modified_at_unix_nanoseconds = row->mtime,
     };
 }
 
@@ -1269,18 +1264,6 @@ physical_objects(InspectionContext& context, InspectionOperation operation) {
     return std::move(*listed);
 }
 
-bool valid_writer(const history_storage::RemoteLayout& layout,
-                  std::string_view identifier) {
-    if (!identifier.starts_with(layout.writers_prefix)) {
-        return false;
-    }
-    const auto token = identifier.substr(layout.writers_prefix.size());
-    return token.size() == 32 && std::ranges::all_of(token, [](char value) {
-               return (value >= '0' && value <= '9') ||
-                      (value >= 'a' && value <= 'f');
-           });
-}
-
 RemoteObjectInfo classify_object(const history_storage::RemoteLayout& layout,
                                  std::string identifier) {
     RemoteObjectInfo result{.identifier = std::move(identifier),
@@ -1307,7 +1290,8 @@ RemoteObjectInfo classify_object(const history_storage::RemoteLayout& layout,
         result.relation = "maintenance barrier";
     } else if (id.starts_with(layout.writers_prefix)) {
         result.category = RemoteObjectCategory::Writer;
-        result.structurally_valid = valid_writer(layout, id);
+        result.structurally_valid =
+            history_storage::valid_writer_identifier(layout, id);
         result.relation = "blocks maintenance while present";
     } else if (id.starts_with(layout.probes_prefix)) {
         result.category = RemoteObjectCategory::Protocol;
@@ -1567,7 +1551,7 @@ make_writers_report(const history_storage::RemoteLayout& layout,
     RemoteWritersReport report;
     report.barrier_present =
         std::ranges::find(identifiers, layout.barrier_identifier) !=
-            identifiers.end();
+        identifiers.end();
     if (report.barrier_present) {
         report.barrier_identifier = layout.barrier_identifier;
     }
@@ -1575,9 +1559,10 @@ make_writers_report(const history_storage::RemoteLayout& layout,
         if (!identifier.starts_with(layout.writers_prefix)) {
             continue;
         }
-        const auto state = valid_writer(layout, identifier)
-                               ? RemoteWriterState::Indeterminate
-                               : RemoteWriterState::Invalid;
+        const auto state =
+            history_storage::valid_writer_identifier(layout, identifier)
+                ? RemoteWriterState::Indeterminate
+                : RemoteWriterState::Invalid;
         report.protocol_consistent &= state != RemoteWriterState::Invalid;
         report.writers.push_back(
             RemoteWriterInfo{.identifier = identifier, .state = state});
@@ -1620,9 +1605,8 @@ make_health_report(InspectionContext& context,
     const auto markers = make_markers_report(*history_inventory);
     const auto objects = make_objects_report(context.layout, identifiers);
     const auto writers = make_writers_report(context.layout, identifiers);
-    const auto orphans =
-        make_orphans_report(
-            context.layout, *history_inventory, *content_inventory);
+    const auto orphans = make_orphans_report(
+        context.layout, *history_inventory, *content_inventory);
 
     RemoteHealthReport report{
         .marker_count = markers.markers.size(),

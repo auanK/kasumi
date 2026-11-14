@@ -1,11 +1,11 @@
 #include "application/sync/reobservation.hpp"
-#include "application/sync/mutation_fault_test.hpp"
 
 #include "application/observation/file_metadata.hpp"
 #include "application/observation/state.hpp"
 #include "application/sync/coordinator_detail.hpp"
 #include "application/sync/journal.hpp"
 #include "application/sync/mutation.hpp"
+#include "application/sync/mutation_fault_test.hpp"
 #include "core/reconciliation/plan.hpp"
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
@@ -175,15 +175,17 @@ std::expected<void, Error> observe_content_availability(
                 if (allow_unreferenced_content_reuse) {
                     upload_hashes.insert(*hash);
                     add_hash(*hash);
-                } else if (const auto relocated = relocated_delete_counts.find(
-                               hash_hex(*hash) + ':' +
-                               std::to_string(candidate.size));
-                           relocated != relocated_delete_counts.end() &&
-                           relocated->second > 0) {
-                    --relocated->second;
                 } else {
-                    upload_identities.insert(hash_hex(*hash) + ':' +
-                                             std::to_string(candidate.size));
+                    const auto identity =
+                        hash_hex(*hash) + ':' + std::to_string(candidate.size);
+                    if (const auto relocated =
+                            relocated_delete_counts.find(identity);
+                        relocated != relocated_delete_counts.end() &&
+                        relocated->second > 0) {
+                        --relocated->second;
+                    } else {
+                        upload_identities.insert(identity);
+                    }
                 }
             }
         } else if (candidate.action == Action::Download ||
@@ -460,8 +462,7 @@ std::expected<bool, coordinator::Error> verify_destructive_local_operations(
     for (const auto& op : sync_plan_operations(result.plan)) {
         if (op.action != Action::DeleteLocal && op.action != Action::Download &&
             op.action != Action::RenameLocal &&
-            op.action != Action::MoveLocal &&
-            op.action != Action::CopyLocal) {
+            op.action != Action::MoveLocal && op.action != Action::CopyLocal) {
             continue;
         }
 

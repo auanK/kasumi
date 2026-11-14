@@ -75,8 +75,12 @@ inline constexpr std::uint64_t maximum_log_size = 128ULL * 1024ULL * 1024ULL;
 thread_local bool passive_inspection = false;
 
 struct PassiveInspectionScope {
-    PassiveInspectionScope() : previous(std::exchange(passive_inspection, true)) {}
-    ~PassiveInspectionScope() { passive_inspection = previous; }
+    PassiveInspectionScope()
+        : previous(std::exchange(passive_inspection, true)) {
+    }
+    ~PassiveInspectionScope() {
+        passive_inspection = previous;
+    }
     PassiveInspectionScope(const PassiveInspectionScope&) = delete;
     PassiveInspectionScope& operator=(const PassiveInspectionScope&) = delete;
     bool previous;
@@ -87,32 +91,17 @@ bool path_not_found(const std::error_code& error) noexcept {
     return error == std::errc::no_such_file_or_directory;
 }
 
-void encode_u64_le(std::uint64_t value, std::uint8_t* output) noexcept {
+template <typename T> void encode_le(T value, std::uint8_t* output) noexcept {
     for (std::size_t index = 0; index < sizeof(value); ++index) {
         output[index] =
             static_cast<std::uint8_t>((value >> (index * 8)) & 0xffU);
     }
 }
 
-std::uint64_t decode_u64_le(const std::uint8_t* input) noexcept {
-    std::uint64_t value = 0;
+template <typename T> T decode_le(const std::uint8_t* input) noexcept {
+    T value = 0;
     for (std::size_t index = 0; index < sizeof(value); ++index) {
-        value |= static_cast<std::uint64_t>(input[index]) << (index * 8);
-    }
-    return value;
-}
-
-void encode_u32_le(std::uint32_t value, std::uint8_t* output) noexcept {
-    for (std::size_t index = 0; index < sizeof(value); ++index) {
-        output[index] =
-            static_cast<std::uint8_t>((value >> (index * 8)) & 0xffU);
-    }
-}
-
-std::uint32_t decode_u32_le(const std::uint8_t* input) noexcept {
-    std::uint32_t value = 0;
-    for (std::size_t index = 0; index < sizeof(value); ++index) {
-        value |= static_cast<std::uint32_t>(input[index]) << (index * 8);
+        value |= static_cast<T>(input[index]) << (index * 8);
     }
     return value;
 }
@@ -691,9 +680,9 @@ make_delta_aad(std::uint64_t seq,
                std::string_view operation_id) {
     std::vector<std::uint8_t> aad(48 + operation_id.size());
     std::copy(journal_log_magic.begin(), journal_log_magic.end(), aad.begin());
-    encode_u64_le(seq, aad.data() + 4);
+    encode_le<std::uint64_t>(seq, aad.data() + 4);
     std::memcpy(aad.data() + 12, prev_hash.data(), kasumi::HASH_SIZE);
-    encode_u32_le(payload_len, aad.data() + 44);
+    encode_le<std::uint32_t>(payload_len, aad.data() + 44);
     std::memcpy(aad.data() + 48, operation_id.data(), operation_id.size());
     return aad;
 }
@@ -917,8 +906,8 @@ std::expected<void, std::string> write_tip(const Paths& paths,
     const auto& magic = retirement ? retirement_magic : tip_magic;
     std::copy(magic.begin(), magic.end(), bytes.begin());
     std::memcpy(bytes.data() + 4, tip.snapshot.data(), 32);
-    encode_u64_le(tip.bytes, bytes.data() + 36);
-    encode_u64_le(tip.count, bytes.data() + 44);
+    encode_le<std::uint64_t>(tip.bytes, bytes.data() + 36);
+    encode_le<std::uint64_t>(tip.count, bytes.data() + 44);
     std::memcpy(bytes.data() + 52, tip.chain.data(), 32);
     auto random = platform::random::fill_bytes(
         std::span{bytes}.subspan(tip_aad_size, nonce_size));
@@ -989,8 +978,8 @@ read_tip(const Paths& paths, const crypto::Key& key, bool retirement = false) {
         return std::unexpected("journal confirmation authentication failed");
     Tip tip;
     std::memcpy(tip.snapshot.data(), bytes->data() + 4, 32);
-    tip.bytes = decode_u64_le(bytes->data() + 36);
-    tip.count = decode_u64_le(bytes->data() + 44);
+    tip.bytes = decode_le<std::uint64_t>(bytes->data() + 36);
+    tip.count = decode_le<std::uint64_t>(bytes->data() + 44);
     std::memcpy(tip.chain.data(), bytes->data() + 52, 32);
     if (tip.bytes > maximum_log_size || tip.count > maximum_delta_count ||
         tip.count > tip.bytes / log_header_size)
@@ -1064,7 +1053,7 @@ std::expected<Replay, std::string> replay(const Paths& paths,
     if (hasher::hash_bytes(snapshot->data(), snapshot->size()) != tip->snapshot)
         return std::unexpected(
             "journal snapshot/confirmation generation mismatch");
-    auto size = decode_u64_le(snapshot->data() + 4);
+    auto size = decode_le<std::uint64_t>(snapshot->data() + 4);
     if (size != snapshot->size() - header_size || size > maximum_payload_size)
         return std::unexpected("invalid journal snapshot payload size");
     SensitiveBytes plaintext(static_cast<std::size_t>(size));
@@ -1107,10 +1096,11 @@ std::expected<Replay, std::string> replay(const Paths& paths,
         if (!std::equal(
                 journal_log_magic.begin(), journal_log_magic.end(), ptr))
             return std::unexpected("incompatible journal delta format");
-        if (count >= maximum_delta_count || decode_u64_le(ptr + 4) != count ||
+        if (count >= maximum_delta_count ||
+            decode_le<std::uint64_t>(ptr + 4) != count ||
             std::memcmp(chain.data(), ptr + 12, 32) != 0)
             return std::unexpected("journal delta sequence or chain mismatch");
-        const auto payload_size = decode_u32_le(ptr + 44);
+        const auto payload_size = decode_le<std::uint32_t>(ptr + 44);
         if (payload_size > maximum_payload_size ||
             payload_size > tip->bytes - offset - log_header_size)
             return std::unexpected(
@@ -1164,7 +1154,7 @@ std::expected<Tip, std::string> save_snapshot(const Paths& paths,
         return std::unexpected("journal snapshot exceeds limit");
     std::vector<std::uint8_t> bytes(header_size + plaintext.size());
     std::copy(journal_magic.begin(), journal_magic.end(), bytes.begin());
-    encode_u64_le(plaintext.size(), bytes.data() + 4);
+    encode_le<std::uint64_t>(plaintext.size(), bytes.data() + 4);
     auto random = platform::random::fill_bytes(
         std::span{bytes}.subspan(aad_size, nonce_size));
     if (!random)
@@ -1398,7 +1388,8 @@ save_delta(const Paths& paths,
     ++tip.count;
     tip.chain = hasher::hash_bytes(bytes.data(), bytes.size());
     auto confirmed = write_tip(paths, tip, record, key);
-    platform::perf_trace::finish("journal durable write wall", durable_write_trace);
+    platform::perf_trace::finish("journal durable write wall",
+                                 durable_write_trace);
     if (!confirmed)
         return std::unexpected(confirmed.error());
     platform::perf_trace::count("journal durable saves");
@@ -1455,11 +1446,11 @@ std::expected<void, std::string> validate_retirement(const Paths& paths,
                 if (!std::equal(journal_log_magic.begin(),
                                 journal_log_magic.end(),
                                 ptr) ||
-                    decode_u64_le(ptr + 4) != count ||
+                    decode_le<std::uint64_t>(ptr + 4) != count ||
                     std::memcmp(chain.data(), ptr + 12, 32) != 0)
                     return std::unexpected(
                         "retired log generation or sequence mismatch");
-                const auto size = decode_u32_le(ptr + 44);
+                const auto size = decode_le<std::uint32_t>(ptr + 44);
                 if (size > maximum_payload_size ||
                     size > bytes->size() - offset - log_header_size ||
                     count >= maximum_delta_count)
@@ -1671,7 +1662,8 @@ save(const Paths& paths,
         }
         const auto semantic_trace = platform::perf_trace::begin();
         auto semantic = validate_record_semantics(record, true);
-        platform::perf_trace::finish("journal semantic validation wall", semantic_trace);
+        platform::perf_trace::finish("journal semantic validation wall",
+                                     semantic_trace);
         platform::perf_trace::finish("journal validation", validation_trace);
         if (!semantic) {
             invalidate();
@@ -2047,9 +2039,8 @@ clear(const Paths& paths,
     }
 }
 
-InspectionResult
-inspect(const Paths& paths,
-        std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+InspectionResult inspect(const Paths& paths,
+                         std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
     try {
         PassiveInspectionScope passive;
         std::lock_guard lock(journal_mutex);
@@ -2079,19 +2070,14 @@ inspect(const Paths& paths,
         }
 
 #if defined(_WIN32)
-        if (!missing(*active_status)) {
-            const DWORD attrs = GetFileAttributesW(active.c_str());
-            if (attrs != INVALID_FILE_ATTRIBUTES &&
-                (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                return InspectionResult::Corrupted;
-            }
-        }
-        if (!missing(*retired_status)) {
-            const DWORD attrs = GetFileAttributesW(retired.c_str());
-            if (attrs != INVALID_FILE_ATTRIBUTES &&
-                (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                return InspectionResult::Corrupted;
-            }
+        const auto has_reparse = [](const std::filesystem::path& path) {
+            const DWORD attrs = GetFileAttributesW(path.c_str());
+            return attrs != INVALID_FILE_ATTRIBUTES &&
+                   (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+        };
+        if ((!missing(*active_status) && has_reparse(active)) ||
+            (!missing(*retired_status) && has_reparse(retired))) {
+            return InspectionResult::Corrupted;
         }
 #endif
 
@@ -2103,71 +2089,60 @@ inspect(const Paths& paths,
             return InspectionResult::Absent;
         }
 
-        KeyGuard journal_key{crypto::derive_key(key, crypto::KeyPurpose::Journal)};
+        KeyGuard journal_key{
+            crypto::derive_key(key, crypto::KeyPurpose::Journal)};
 
-        if (!missing(*retired_status)) {
+        const auto inspect_entries = [](const std::filesystem::path& directory,
+                                        bool& has_retired_file) -> bool {
             std::error_code ec;
-            if (std::filesystem::is_empty(retired, ec)) {
-                return InspectionResult::Corrupted;
-            }
-            bool has_retired_file = false;
             for (const auto& entry :
-                 std::filesystem::directory_iterator(retired, ec)) {
+                 std::filesystem::directory_iterator(directory, ec)) {
                 if (ec) {
-                    return InspectionResult::Corrupted;
+                    return false;
                 }
                 const auto name = entry.path().filename().string();
                 if (name != "snapshot.enc" && name != "snapshot.enc.new" &&
                     name != "transaction.log.enc" && name != "confirmed.enc" &&
                     name != "confirmed.enc.new" && name != "retired.enc" &&
                     name != "retired.enc.new") {
-                    return InspectionResult::Corrupted;
+                    return false;
                 }
                 if (name == "retired.enc") {
                     has_retired_file = true;
                 }
-                auto validated =
-                    validate_file_or_absent(entry.path(), "journal artifact");
-                if (!validated) {
-                    return InspectionResult::Corrupted;
+                if (!validate_file_or_absent(entry.path(),
+                                             "journal artifact")) {
+                    return false;
                 }
             }
-            if (!has_retired_file) {
+            return !ec;
+        };
+
+        const auto validate_retired_tip = [&](const Paths& target_paths) {
+            auto proof = read_tip(target_paths, journal_key.value, true);
+            return proof &&
+                   validate_retirement(target_paths, *proof, journal_key.value);
+        };
+
+        if (!missing(*retired_status)) {
+            std::error_code ec;
+            bool has_retired_file = false;
+            if (std::filesystem::is_empty(retired, ec) ||
+                !inspect_entries(retired, has_retired_file) ||
+                !has_retired_file) {
                 return InspectionResult::Corrupted;
             }
             const Paths root_paths{retired / "snapshot.enc",
                                    retired / "snapshot.enc.new",
                                    retired / "transaction.log.enc"};
-            auto proof = read_tip(root_paths, journal_key.value, true);
-            if (!proof) {
-                return InspectionResult::Corrupted;
-            }
-            auto matching =
-                validate_retirement(root_paths, *proof, journal_key.value);
-            if (!matching) {
-                return InspectionResult::Corrupted;
-            }
-            return InspectionResult::Retired;
+            return validate_retired_tip(root_paths)
+                       ? InspectionResult::Retired
+                       : InspectionResult::Corrupted;
         }
 
-        std::error_code ec;
-        for (const auto& entry :
-             std::filesystem::directory_iterator(active, ec)) {
-            if (ec) {
-                return InspectionResult::Corrupted;
-            }
-            const auto name = entry.path().filename().string();
-            if (name != "snapshot.enc" && name != "snapshot.enc.new" &&
-                name != "transaction.log.enc" && name != "confirmed.enc" &&
-                name != "confirmed.enc.new" && name != "retired.enc" &&
-                name != "retired.enc.new") {
-                return InspectionResult::Corrupted;
-            }
-            auto validated =
-                validate_file_or_absent(entry.path(), "journal artifact");
-            if (!validated) {
-                return InspectionResult::Corrupted;
-            }
+        bool unused_retired_file = false;
+        if (!inspect_entries(active, unused_retired_file)) {
+            return InspectionResult::Corrupted;
         }
 
         auto retirement_file_status = read_status(retirement_path(paths));
@@ -2175,22 +2150,13 @@ inspect(const Paths& paths,
             return InspectionResult::Corrupted;
         }
         if (!missing(*retirement_file_status)) {
-            auto proof = read_tip(paths, journal_key.value, true);
-            if (!proof) {
-                return InspectionResult::Corrupted;
-            }
-            auto matching = validate_retirement(paths, *proof, journal_key.value);
-            if (!matching) {
-                return InspectionResult::Corrupted;
-            }
-            return InspectionResult::Retired;
+            return validate_retired_tip(paths) ? InspectionResult::Retired
+                                               : InspectionResult::Corrupted;
         }
 
         auto replayed = replay(paths, journal_key.value);
-        if (!replayed) {
-            return InspectionResult::Corrupted;
-        }
-        return InspectionResult::Active;
+        return replayed ? InspectionResult::Active
+                        : InspectionResult::Corrupted;
     } catch (...) {
         return InspectionResult::Corrupted;
     }

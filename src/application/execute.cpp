@@ -3,7 +3,6 @@
 #include "application/use_cases/context.hpp"
 #include "platform/perf_trace.hpp"
 
-#include <exception>
 #include <optional>
 #include <string>
 #include <utility>
@@ -53,16 +52,6 @@ std::expected<Response, Error> execute(ExecutionInput input) {
                 return std::unexpected(prepared.error());
             }
             return detail::dispatch(context);
-        } catch (const std::exception&) {
-            return std::unexpected(Error{
-                .operation = context.operation,
-                .code = ErrorCode::RuntimeFailure,
-                .detail = "application orchestration exception",
-                .runtime = context.summary.local_dir.empty() &&
-                                   context.summary.remote_dir.empty()
-                               ? std::nullopt
-                               : std::optional<RuntimeSummary>{context.summary},
-            });
         } catch (...) {
             return std::unexpected(Error{
                 .operation = context.operation,

@@ -9,6 +9,7 @@
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_batch.hpp"
 #include "application/sync/mutation_detail.hpp"
+#include "application/sync/mutation_fault_test.hpp"
 #include "application/sync/publication.hpp"
 #include "coordinator_detail.hpp"
 #include "core/hasher.hpp"
@@ -17,7 +18,6 @@
 #include "core/transaction/types.hpp"
 #include "crypto/key_derivation.hpp"
 #include "journal_fault_test.hpp"
-#include "application/sync/mutation_fault_test.hpp"
 #include "platform/clock.hpp"
 #include "platform/durability.hpp"
 #include "platform/metadata.hpp"
@@ -1527,11 +1527,6 @@ bool same_plan(const SyncPlan& left, const SyncPlan& right) noexcept {
         left.operations, right.operations, same_operation);
 }
 
-bool same_rows(std::span<const NodeRow> left,
-               std::span<const NodeRow> right) noexcept {
-    return std::ranges::equal(left, right);
-}
-
 bool is_storage_repair_operation(const reconciliation::Input& input,
                                  const reconciliation::Result& result,
                                  const Operation& operation) noexcept {
@@ -1675,9 +1670,10 @@ bool same_result(const reconciliation::Result& left,
                  const reconciliation::Result& right) noexcept {
     return same_plan(left.plan, right.plan) &&
            left.missing_objects == right.missing_objects &&
-           same_rows(left.pending_storage_rows, right.pending_storage_rows) &&
-           same_rows(left.pending_materializations,
-                     right.pending_materializations) &&
+           std::ranges::equal(left.pending_storage_rows,
+                              right.pending_storage_rows) &&
+           std::ranges::equal(left.pending_materializations,
+                              right.pending_materializations) &&
            left.missing_content_paths_without_local_source ==
                right.missing_content_paths_without_local_source &&
            left.observed_storage_generation ==
@@ -1688,8 +1684,7 @@ bool same_result(const reconciliation::Result& left,
            left.has_conflicts == right.has_conflicts &&
            left.requires_local_mutation == right.requires_local_mutation &&
            left.requires_storage_repair == right.requires_storage_repair &&
-           same_rows(left.candidate_shared_tree.rows,
-                     right.candidate_shared_tree.rows) &&
+           left.candidate_shared_tree == right.candidate_shared_tree &&
            left.shared_tree_changed == right.shared_tree_changed &&
            left.requires_publication == right.requires_publication &&
            left.requires_state_commit == right.requires_state_commit;
@@ -2455,7 +2450,8 @@ execute(const runtime::RuntimeData& runtime_data,
     auto scanned = observation::collect_local_observation(
         runtime_data.local_dir, session, observed_input.ignore_list);
     platform::perf_trace::finish("final local validation", final_scan_trace);
-    platform::perf_trace::finish("final local validation wall", final_scan_trace);
+    platform::perf_trace::finish("final local validation wall",
+                                 final_scan_trace);
     if (!scanned) {
         auto rolled = rollback_terminal();
         if (!rolled)
@@ -2639,8 +2635,7 @@ execute(const runtime::RuntimeData& runtime_data,
                               &history::LoadedCommit::id);
         if (found == observed_input.storage.reachable_commits.end() ||
             found->commit.height != observed_input.storage.generation ||
-            !same_rows(found->commit.tree.rows,
-                       observed_input.storage.tree.rows) ||
+            found->commit.tree != observed_input.storage.tree ||
             !detail::same_materialized_head_rows(found->commit.tree.rows,
                                                  publication_tree->rows,
                                                  observed_input.local_tree)) {
