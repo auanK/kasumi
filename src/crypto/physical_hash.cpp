@@ -5,8 +5,6 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
-#include <iomanip>
-#include <sstream>
 
 namespace kasumi::crypto::physical {
 namespace {
@@ -81,12 +79,15 @@ void compress(std::array<std::uint32_t, 8>& state,
 }
 
 std::string hex_digest(const std::array<std::uint32_t, 8>& state) {
-    std::ostringstream output;
-    output << std::hex << std::setfill('0');
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string output;
+    output.reserve(64);
     for (const auto word : state) {
-        output << std::setw(8) << word;
+        for (int shift = 28; shift >= 0; shift -= 4) {
+            output.push_back(digits[(word >> shift) & 0xFU]);
+        }
     }
-    return output.str();
+    return output;
 }
 
 } // namespace

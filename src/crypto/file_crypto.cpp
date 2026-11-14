@@ -69,83 +69,212 @@ make_chunk_ad(const std::array<std::uint8_t, header_ad_size>& header,
     return result;
 }
 
-void wipe_encrypt_buffers(std::array<std::uint8_t, NONCE_SIZE>& base_nonce,
-                          std::array<std::uint8_t, NONCE_SIZE>& chunk_nonce,
-                          std::array<std::uint8_t, MAC_SIZE>& header_mac,
-                          std::array<std::uint8_t, MAC_SIZE>& mac,
-                          std::vector<std::uint8_t>& plain_buffer,
-                          std::vector<std::uint8_t>& cipher_buffer) noexcept {
-    platform::perf_trace::count("file encryption wipe bytes",
-                                plain_buffer.size() + cipher_buffer.size());
-    crypto_wipe(base_nonce.data(), base_nonce.size());
-    crypto_wipe(chunk_nonce.data(), chunk_nonce.size());
-    crypto_wipe(header_mac.data(), header_mac.size());
-    crypto_wipe(mac.data(), mac.size());
-    if (!plain_buffer.empty()) {
-        crypto_wipe(plain_buffer.data(), plain_buffer.size());
-    }
-    if (!cipher_buffer.empty()) {
-        crypto_wipe(cipher_buffer.data(), cipher_buffer.size());
-    }
-}
-
-// Wipes every sensitive encryption value on all returns and exceptions.
-struct EncryptionCleanup {
+struct CryptoBufferCleanup {
+    const char* wipe_metric;
     std::array<std::uint8_t, NONCE_SIZE>& base_nonce;
     std::array<std::uint8_t, NONCE_SIZE>& chunk_nonce;
     std::array<std::uint8_t, MAC_SIZE>& header_mac;
     std::array<std::uint8_t, MAC_SIZE>& mac;
-    std::vector<std::uint8_t>& plain_buffer;
-    std::vector<std::uint8_t>& cipher_buffer;
+    std::vector<std::uint8_t>& buffer_a;
+    std::vector<std::uint8_t>& buffer_b;
 
-    ~EncryptionCleanup() noexcept {
-        wipe_encrypt_buffers(base_nonce,
-                             chunk_nonce,
-                             header_mac,
-                             mac,
-                             plain_buffer,
-                             cipher_buffer);
+    ~CryptoBufferCleanup() noexcept {
+        platform::perf_trace::count(wipe_metric,
+                                    buffer_a.size() + buffer_b.size());
+        crypto_wipe(base_nonce.data(), base_nonce.size());
+        crypto_wipe(chunk_nonce.data(), chunk_nonce.size());
+        crypto_wipe(header_mac.data(), header_mac.size());
+        crypto_wipe(mac.data(), mac.size());
+        if (!buffer_a.empty()) {
+            crypto_wipe(buffer_a.data(), buffer_a.size());
+        }
+        if (!buffer_b.empty()) {
+            crypto_wipe(buffer_b.data(), buffer_b.size());
+        }
     }
 };
 
-void wipe_decrypt_buffers(std::array<std::uint8_t, NONCE_SIZE>& base_nonce,
-                          std::array<std::uint8_t, NONCE_SIZE>& chunk_nonce,
-                          std::array<std::uint8_t, MAC_SIZE>& header_mac,
-                          std::array<std::uint8_t, MAC_SIZE>& mac,
-                          std::vector<std::uint8_t>& cipher_buffer,
-                          std::vector<std::uint8_t>& plain_buffer) noexcept {
-    platform::perf_trace::count("file decryption wipe bytes",
-                                cipher_buffer.size() + plain_buffer.size());
-    crypto_wipe(base_nonce.data(), base_nonce.size());
-    crypto_wipe(chunk_nonce.data(), chunk_nonce.size());
-    crypto_wipe(header_mac.data(), header_mac.size());
-    crypto_wipe(mac.data(), mac.size());
-    if (!cipher_buffer.empty()) {
-        crypto_wipe(cipher_buffer.data(), cipher_buffer.size());
+struct TemporaryOutputGuard {
+    const char* failure_metric;
+    platform::private_storage::PrivateOutputFile file;
+    bool published{false};
+
+    ~TemporaryOutputGuard() noexcept {
+        if (!published && !file.published && !file.path.empty()) {
+            const auto res =
+                platform::private_storage::remove_private_file_if_owned(file);
+            if (res == platform::private_storage::CleanupResult::AccessDenied ||
+                res ==
+                    platform::private_storage::CleanupResult::FilesystemError ||
+                res == platform::private_storage::CleanupResult::
+                           IdentityMismatch) {
+                platform::perf_trace::count(failure_metric);
+            }
+        } else {
+            platform::private_storage::close_private_file(file);
+        }
     }
-    if (!plain_buffer.empty()) {
-        crypto_wipe(plain_buffer.data(), plain_buffer.size());
+};
+
+std::nullopt_t fail_crypto(std::string* error_detail, std::string_view msg) {
+    if (error_detail) {
+        *error_detail = std::string(msg);
     }
+    return std::nullopt;
 }
 
-// Wipes every sensitive decryption value on all returns and exceptions.
-struct DecryptionCleanup {
-    std::array<std::uint8_t, NONCE_SIZE>& base_nonce;
-    std::array<std::uint8_t, NONCE_SIZE>& chunk_nonce;
-    std::array<std::uint8_t, MAC_SIZE>& header_mac;
-    std::array<std::uint8_t, MAC_SIZE>& mac;
-    std::vector<std::uint8_t>& cipher_buffer;
-    std::vector<std::uint8_t>& plain_buffer;
-
-    ~DecryptionCleanup() noexcept {
-        wipe_decrypt_buffers(base_nonce,
-                             chunk_nonce,
-                             header_mac,
-                             mac,
-                             cipher_buffer,
-                             plain_buffer);
+std::optional<std::filesystem::path>
+prepare_crypto_paths(const std::filesystem::path& input_path,
+                     const std::filesystem::path& output_path,
+                     bool check_dest_parent,
+                     std::string* error_detail) {
+    if (input_path.empty() || output_path.empty() ||
+        input_path == output_path) {
+        return fail_crypto(error_detail,
+                           "invalid empty or identical input/output paths");
     }
-};
+
+    const auto target_path = output_path.has_parent_path()
+                                 ? output_path
+                                 : (std::filesystem::path(".") / output_path);
+    if (input_path == target_path) {
+        return fail_crypto(error_detail,
+                           "input and target output paths are identical");
+    }
+
+    std::error_code ec;
+    const auto in_status = std::filesystem::status(input_path, ec);
+    if (ec || !std::filesystem::is_regular_file(in_status)) {
+        return fail_crypto(error_detail,
+                           "opening plaintext input failed: input path is not "
+                           "an accessible regular file");
+    }
+
+    const auto dest_status = std::filesystem::symlink_status(target_path, ec);
+    if (ec) {
+        if (ec != std::errc::no_such_file_or_directory) {
+            return fail_crypto(error_detail,
+                               "failed to query destination path status");
+        }
+    } else {
+        if (std::filesystem::is_directory(dest_status) ||
+            std::filesystem::is_symlink(dest_status)) {
+            return fail_crypto(
+                error_detail,
+                "destination cannot be an existing directory or symlink");
+        }
+        if (std::filesystem::exists(dest_status)) {
+            std::error_code eq_error;
+            if (std::filesystem::equivalent(
+                    input_path, target_path, eq_error) ||
+                eq_error) {
+                return fail_crypto(
+                    error_detail,
+                    "destination is an alias or hardlink to the input file");
+            }
+        }
+    }
+
+    if (check_dest_parent) {
+        const auto dest_parent = target_path.parent_path();
+        if (!dest_parent.empty()) {
+            const auto parent_status = std::filesystem::status(dest_parent, ec);
+            if (ec || !std::filesystem::is_directory(parent_status)) {
+                return fail_crypto(
+                    error_detail,
+                    "creating ciphertext output failed: destination parent "
+                    "directory does not exist or is not a directory");
+            }
+        }
+    }
+
+    return target_path;
+}
+
+bool reserve_temp_output(const std::filesystem::path& target_path,
+                         platform::private_storage::PrivateOutputFile& out_file,
+                         std::string* error_detail) {
+    for (std::size_t attempt = 0; attempt < 32; ++attempt) {
+        auto id = platform::random::hex_id();
+        if (!id) {
+            fail_crypto(error_detail, "generating temporary file id failed");
+            return false;
+        }
+        const auto candidate =
+            target_path.native().size() + 16 < 260
+                ? platform::path::temporary_sibling_path(
+                      target_path, ".k_", "." + id->substr(0, 8))
+                : target_path.parent_path() /
+                      platform::path::from_utf8(".k_" + id->substr(0, 16));
+        auto created =
+            platform::private_storage::create_private_file(candidate);
+        if (created) {
+            out_file = std::move(*created);
+            return true;
+        }
+        if (!created.error().is_collision) {
+            fail_crypto(error_detail,
+                        "creating ciphertext output failed: " +
+                            created.error().message);
+            return false;
+        }
+    }
+    fail_crypto(error_detail,
+                "creating ciphertext output failed: failed to reserve "
+                "exclusive temporary file");
+    return false;
+}
+
+bool close_verified_input(std::ifstream& input,
+                          const TemporaryOutputGuard& temp_guard,
+                          std::string* error_detail) {
+    char trailing = 0;
+    input.read(&trailing, 1);
+    if (input.gcount() != 0 || input.bad()) {
+        fail_crypto(error_detail, "checking plaintext end failed");
+        return false;
+    }
+    input.clear();
+    input.close();
+    if (input.fail()) {
+        fail_crypto(error_detail, "closing plaintext input failed");
+        return false;
+    }
+    if (!temp_guard.file.identity.valid) {
+        fail_crypto(error_detail, "temporary file identity is invalid");
+        return false;
+    }
+    return true;
+}
+
+bool publish_temp_output(TemporaryOutputGuard& temp_guard,
+                         const std::filesystem::path& target_path,
+                         std::string* error_detail) {
+    auto published = platform::private_storage::publish_private_file(
+        temp_guard.file, target_path);
+    if (temp_guard.file.published) {
+        temp_guard.published = true;
+    }
+    if (!published) {
+        fail_crypto(error_detail,
+                    "publishing ciphertext failed: " + published.error());
+        return false;
+    }
+    return true;
+}
+
+template <typename Fn>
+auto with_derived_key(std::span<const std::uint8_t, KEY_SIZE> master_key,
+                      FilePurpose purpose,
+                      Fn&& fn) {
+    auto key =
+        derive_key(master_key,
+                   purpose == FilePurpose::Content ? KeyPurpose::Content
+                                                   : KeyPurpose::History);
+    auto result = fn(key);
+    crypto_wipe(key.data(), key.size());
+    return result;
+}
 
 void derive_chunk_nonce(const std::uint8_t* base_nonce,
                         std::uint64_t chunk_index,
@@ -227,80 +356,12 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
                       const std::filesystem::path& output_path,
                       const Key& key,
                       std::string* error_detail) {
-    if (input_path.empty() || output_path.empty() ||
-        input_path == output_path) {
-        if (error_detail) {
-            *error_detail = "invalid empty or identical input/output paths";
-        }
+    const auto prepared_target =
+        prepare_crypto_paths(input_path, output_path, true, error_detail);
+    if (!prepared_target) {
         return std::nullopt;
     }
-
-    const auto target_path = output_path.has_parent_path()
-                                 ? output_path
-                                 : (std::filesystem::path(".") / output_path);
-
-    if (input_path == target_path) {
-        if (error_detail) {
-            *error_detail = "input and target output paths are identical";
-        }
-        return std::nullopt;
-    }
-
-    std::error_code in_error;
-    const auto in_status = std::filesystem::status(input_path, in_error);
-    if (in_error || !std::filesystem::is_regular_file(in_status)) {
-        if (error_detail) {
-            *error_detail =
-                "opening plaintext input failed: input path is not an accessible regular file";
-        }
-        return std::nullopt;
-    }
-
-    std::error_code dest_error;
-    const auto dest_status =
-        std::filesystem::symlink_status(target_path, dest_error);
-    if (dest_error) {
-        if (dest_error != std::errc::no_such_file_or_directory) {
-            if (error_detail) {
-                *error_detail = "failed to query destination path status";
-            }
-            return std::nullopt;
-        }
-    } else {
-        if (std::filesystem::is_directory(dest_status) ||
-            std::filesystem::is_symlink(dest_status)) {
-            if (error_detail) {
-                *error_detail =
-                    "destination cannot be an existing directory or symlink";
-            }
-            return std::nullopt;
-        }
-        if (std::filesystem::exists(dest_status)) {
-            std::error_code eq_error;
-            if (std::filesystem::equivalent(input_path, target_path, eq_error) ||
-                eq_error) {
-                if (error_detail) {
-                    *error_detail =
-                        "destination is an alias or hardlink to the input file";
-                }
-                return std::nullopt;
-            }
-        }
-    }
-
-    const auto dest_parent = target_path.parent_path();
-    if (!dest_parent.empty()) {
-        std::error_code parent_error;
-        const auto parent_status =
-            std::filesystem::status(dest_parent, parent_error);
-        if (parent_error || !std::filesystem::is_directory(parent_status)) {
-            if (error_detail) {
-                *error_detail =
-                    "creating ciphertext output failed: destination parent directory does not exist or is not a directory";
-            }
-            return std::nullopt;
-        }
-    }
+    const auto& target_path = *prepared_target;
 
     std::array<std::uint8_t, NONCE_SIZE> base_nonce{};
     std::array<std::uint8_t, NONCE_SIZE> chunk_nonce{};
@@ -308,81 +369,48 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
     std::array<std::uint8_t, MAC_SIZE> mac{};
     std::vector<std::uint8_t> plain_buffer;
     std::vector<std::uint8_t> cipher_buffer;
-    EncryptionCleanup cleanup{
-        base_nonce, chunk_nonce, header_mac, mac, plain_buffer, cipher_buffer};
+    CryptoBufferCleanup cleanup{"file encryption wipe bytes",
+                                base_nonce,
+                                chunk_nonce,
+                                header_mac,
+                                mac,
+                                plain_buffer,
+                                cipher_buffer};
 
-    struct TemporaryOutputGuard {
-        platform::private_storage::PrivateOutputFile file;
-        bool published{false};
-
-        ~TemporaryOutputGuard() noexcept {
-            if (!published && !file.published && !file.path.empty()) {
-                const auto res =
-                    platform::private_storage::remove_private_file_if_owned(
-                        file);
-                if (res == platform::private_storage::CleanupResult::
-                               AccessDenied ||
-                    res == platform::private_storage::CleanupResult::
-                               FilesystemError ||
-                    res == platform::private_storage::CleanupResult::
-                               IdentityMismatch) {
-                    platform::perf_trace::count("encryption.cleanup_failure");
-                }
-            } else {
-                platform::private_storage::close_private_file(file);
-            }
-        }
-    } temp_guard;
+    TemporaryOutputGuard temp_guard{"encryption.cleanup_failure"};
 
     try {
         std::ifstream input(input_path, std::ios::binary | std::ios::ate);
         if (!input) {
-            if (error_detail) {
-                *error_detail = "opening plaintext input failed";
-            }
-            return std::nullopt;
+            return fail_crypto(error_detail, "opening plaintext input failed");
         }
 
         const auto end_position = input.tellg();
         if (end_position < std::streampos{0}) {
-            if (error_detail) {
-                *error_detail = "reading plaintext size failed";
-            }
-            return std::nullopt;
+            return fail_crypto(error_detail, "reading plaintext size failed");
         }
 
         const auto stream_size = static_cast<std::streamoff>(end_position);
         if (stream_size < 0) {
-            if (error_detail) {
-                *error_detail = "reading plaintext size failed";
-            }
-            return std::nullopt;
+            return fail_crypto(error_detail, "reading plaintext size failed");
         }
         const auto input_size = static_cast<std::uintmax_t>(stream_size);
         if (input_size > static_cast<std::uintmax_t>(
                              std::numeric_limits<std::uint64_t>::max())) {
-            if (error_detail) {
-                *error_detail = "plaintext size is unsupported";
-            }
-            return std::nullopt;
+            return fail_crypto(error_detail, "plaintext size is unsupported");
         }
         const auto plaintext_size = static_cast<std::uint64_t>(input_size);
 
         input.seekg(0, std::ios::beg);
         if (!input) {
-            if (error_detail) {
-                *error_detail = "seeking plaintext input failed";
-            }
-            return std::nullopt;
+            return fail_crypto(error_detail, "seeking plaintext input failed");
         }
 
         auto random_result = platform::random::fill_bytes(base_nonce);
         if (!random_result) {
-            if (error_detail) {
-                *error_detail = "generating encryption nonce failed: " +
-                                random_result.error();
-            }
-            return std::nullopt;
+            return fail_crypto(error_detail,
+                               "generating encryption nonce failed: " +
+                                   random_result.error());
         }
 
         const auto header = make_header_ad(base_nonce.data(), plaintext_size);
@@ -396,45 +424,7 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
         platform::perf_trace::count("file encryption scratch bytes",
                                     plain_buffer.size() + cipher_buffer.size());
 
-        bool reserved = false;
-        for (std::size_t attempt = 0; attempt < 32; ++attempt) {
-            auto id = platform::random::hex_id();
-            if (!id) {
-                if (error_detail) {
-                    *error_detail = "generating temporary file id failed";
-                }
-                return std::nullopt;
-            }
-            std::filesystem::path candidate;
-            if (target_path.native().size() + 16 < 260) {
-                candidate = platform::path::temporary_sibling_path(
-                    target_path, ".k_", "." + id->substr(0, 8));
-            } else {
-                candidate =
-                    target_path.parent_path() /
-                    platform::path::from_utf8(".k_" + id->substr(0, 16));
-            }
-            auto created =
-                platform::private_storage::create_private_file(candidate);
-            if (created) {
-                temp_guard.file = std::move(*created);
-                reserved = true;
-                break;
-            }
-            if (!created.error().is_collision) {
-                if (error_detail) {
-                    *error_detail =
-                        "creating ciphertext output failed: " +
-                        created.error().message;
-                }
-                break;
-            }
-        }
-        if (!reserved) {
-            if (error_detail && error_detail->empty()) {
-                *error_detail =
-                    "creating ciphertext output failed: failed to reserve exclusive temporary file";
-            }
+        if (!reserve_temp_output(target_path, temp_guard.file, error_detail)) {
             return std::nullopt;
         }
 
@@ -515,28 +505,7 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
             return std::nullopt;
         }
 
-        char trailing = 0;
-        input.read(&trailing, 1);
-        if (input.gcount() != 0 || input.bad()) {
-            if (error_detail) {
-                *error_detail = "checking plaintext end failed";
-            }
-            return std::nullopt;
-        }
-
-        input.clear();
-        input.close();
-        if (input.fail()) {
-            if (error_detail) {
-                *error_detail = "closing plaintext input failed";
-            }
-            return std::nullopt;
-        }
-
-        if (!temp_guard.file.identity.valid) {
-            if (error_detail) {
-                *error_detail = "temporary file identity is invalid";
-            }
+        if (!close_verified_input(input, temp_guard, error_detail)) {
             return std::nullopt;
         }
 
@@ -548,31 +517,18 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
             reinterpret_cast<std::uint8_t*>(result.plaintext_hash.data()),
             result.plaintext_hash.size());
 
-        auto published = platform::private_storage::publish_private_file(
-            temp_guard.file, target_path);
-        if (temp_guard.file.published) {
-            temp_guard.published = true;
-        }
-        if (!published) {
-            if (error_detail) {
-                *error_detail =
-                    "publishing ciphertext failed: " + published.error();
-            }
+        if (!publish_temp_output(temp_guard, target_path, error_detail)) {
             return std::nullopt;
         }
 
         return result;
     } catch (const std::exception& exception) {
-        if (error_detail) {
-            *error_detail =
-                std::string{"encryption operation failed: "} + exception.what();
-        }
-        return std::nullopt;
+        return fail_crypto(error_detail,
+                           std::string{"encryption operation failed: "} +
+                               exception.what());
     } catch (...) {
-        if (error_detail) {
-            *error_detail = "encryption operation failed with an unknown error";
-        }
-        return std::nullopt;
+        return fail_crypto(error_detail,
+                           "encryption operation failed with an unknown error");
     }
 }
 
@@ -582,14 +538,10 @@ encrypt_file_with_hashes(const std::filesystem::path& input_path,
                          std::span<const std::uint8_t, KEY_SIZE> master_key,
                          FilePurpose purpose,
                          std::string* error_detail) {
-    auto key =
-        derive_key(master_key,
-                   purpose == FilePurpose::Content ? KeyPurpose::Content
-                                                   : KeyPurpose::History);
-    auto result =
-        encrypt_file_with_key(input_path, output_path, key, error_detail);
-    crypto_wipe(key.data(), key.size());
-    return result;
+    return with_derived_key(master_key, purpose, [&](const Key& key) {
+        return encrypt_file_with_key(
+            input_path, output_path, key, error_detail);
+    });
 }
 
 bool encrypt_file(const std::filesystem::path& input_path,
@@ -604,45 +556,12 @@ bool encrypt_file(const std::filesystem::path& input_path,
 bool decrypt_file_with_key(const std::filesystem::path& input_path,
                            const std::filesystem::path& output_path,
                            const Key& key) {
-    if (input_path.empty() || output_path.empty() ||
-        input_path == output_path) {
+    const auto prepared_target =
+        prepare_crypto_paths(input_path, output_path, false, nullptr);
+    if (!prepared_target) {
         return false;
     }
-
-    const auto target_path = output_path.has_parent_path()
-                                 ? output_path
-                                 : (std::filesystem::path(".") / output_path);
-
-    if (input_path == target_path) {
-        return false;
-    }
-
-    std::error_code in_error;
-    const auto in_status = std::filesystem::status(input_path, in_error);
-    if (in_error || !std::filesystem::is_regular_file(in_status)) {
-        return false;
-    }
-
-    std::error_code dest_error;
-    const auto dest_status =
-        std::filesystem::symlink_status(target_path, dest_error);
-    if (dest_error) {
-        if (dest_error != std::errc::no_such_file_or_directory) {
-            return false;
-        }
-    } else {
-        if (std::filesystem::is_directory(dest_status) ||
-            std::filesystem::is_symlink(dest_status)) {
-            return false;
-        }
-        if (std::filesystem::exists(dest_status)) {
-            std::error_code eq_error;
-            if (std::filesystem::equivalent(input_path, target_path, eq_error) ||
-                eq_error) {
-                return false;
-            }
-        }
-    }
+    const auto& target_path = *prepared_target;
 
     std::array<std::uint8_t, NONCE_SIZE> base_nonce{};
     std::array<std::uint8_t, NONCE_SIZE> chunk_nonce{};
@@ -650,31 +569,15 @@ bool decrypt_file_with_key(const std::filesystem::path& input_path,
     std::array<std::uint8_t, MAC_SIZE> mac{};
     std::vector<std::uint8_t> cipher_buffer;
     std::vector<std::uint8_t> plain_buffer;
-    DecryptionCleanup cleanup{
-        base_nonce, chunk_nonce, header_mac, mac, cipher_buffer, plain_buffer};
+    CryptoBufferCleanup cleanup{"file decryption wipe bytes",
+                                base_nonce,
+                                chunk_nonce,
+                                header_mac,
+                                mac,
+                                cipher_buffer,
+                                plain_buffer};
 
-    struct TemporaryOutputGuard {
-        platform::private_storage::PrivateOutputFile file;
-        bool published{false};
-
-        ~TemporaryOutputGuard() noexcept {
-            if (!published && !file.published && !file.path.empty()) {
-                const auto res =
-                    platform::private_storage::remove_private_file_if_owned(
-                        file);
-                if (res == platform::private_storage::CleanupResult::
-                               AccessDenied ||
-                    res == platform::private_storage::CleanupResult::
-                               FilesystemError ||
-                    res == platform::private_storage::CleanupResult::
-                               IdentityMismatch) {
-                    platform::perf_trace::count("decryption.cleanup_failure");
-                }
-            } else {
-                platform::private_storage::close_private_file(file);
-            }
-        }
-    } temp_guard;
+    TemporaryOutputGuard temp_guard{"decryption.cleanup_failure"};
 
     try {
         std::ifstream input(input_path, std::ios::binary | std::ios::ate);
@@ -725,33 +628,7 @@ bool decrypt_file_with_key(const std::filesystem::path& input_path,
         platform::perf_trace::count("file decryption scratch bytes",
                                     cipher_buffer.size() + plain_buffer.size());
 
-        bool reserved = false;
-        for (std::size_t attempt = 0; attempt < 32; ++attempt) {
-            auto id = platform::random::hex_id();
-            if (!id) {
-                return false;
-            }
-            std::filesystem::path candidate;
-            if (target_path.native().size() + 16 < 260) {
-                candidate = platform::path::temporary_sibling_path(
-                    target_path, ".k_", "." + id->substr(0, 8));
-            } else {
-                candidate =
-                    target_path.parent_path() /
-                    platform::path::from_utf8(".k_" + id->substr(0, 16));
-            }
-            auto created =
-                platform::private_storage::create_private_file(candidate);
-            if (created) {
-                temp_guard.file = std::move(*created);
-                reserved = true;
-                break;
-            }
-            if (!created.error().is_collision) {
-                break;
-            }
-        }
-        if (!reserved) {
+        if (!reserve_temp_output(target_path, temp_guard.file, nullptr)) {
             return false;
         }
 
@@ -801,32 +678,8 @@ bool decrypt_file_with_key(const std::filesystem::path& input_path,
             ++chunk_index;
         }
 
-        char trailing = 0;
-        input.read(&trailing, 1);
-        if (input.gcount() != 0 || input.bad()) {
-            return false;
-        }
-
-        input.clear();
-        input.close();
-        if (input.fail()) {
-            return false;
-        }
-
-        if (!temp_guard.file.identity.valid) {
-            return false;
-        }
-
-        auto published = platform::private_storage::publish_private_file(
-            temp_guard.file, target_path);
-        if (temp_guard.file.published) {
-            temp_guard.published = true;
-        }
-        if (!published) {
-            return false;
-        }
-
-        return true;
+        return close_verified_input(input, temp_guard, nullptr) &&
+               publish_temp_output(temp_guard, target_path, nullptr);
     } catch (...) {
         return false;
     }
@@ -836,13 +689,9 @@ bool decrypt_file(const std::filesystem::path& input_path,
                   const std::filesystem::path& output_path,
                   std::span<const std::uint8_t, KEY_SIZE> master_key,
                   FilePurpose purpose) {
-    auto key =
-        derive_key(master_key,
-                   purpose == FilePurpose::Content ? KeyPurpose::Content
-                                                   : KeyPurpose::History);
-    const auto result = decrypt_file_with_key(input_path, output_path, key);
-    crypto_wipe(key.data(), key.size());
-    return result;
+    return with_derived_key(master_key, purpose, [&](const Key& key) {
+        return decrypt_file_with_key(input_path, output_path, key);
+    });
 }
 
 } // namespace kasumi::crypto
