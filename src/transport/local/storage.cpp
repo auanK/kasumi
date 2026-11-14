@@ -1,3 +1,4 @@
+#include "../detail.hpp"
 #include "detail.hpp"
 #include "platform/path.hpp"
 
@@ -49,29 +50,8 @@ std::filesystem::path objects_directory(const State& state) {
 
 namespace {
 
-bool valid_identifier(std::string_view identifier) {
-    if (identifier.empty() || identifier.find('\\') != std::string_view::npos) {
-        return false;
-    }
-
-    const auto path = platform::path::from_utf8(identifier);
-
-    if (path.empty() || path.is_absolute() || path.has_root_name() ||
-        path.has_root_directory()) {
-        return false;
-    }
-
-    for (const auto& component : path) {
-        if (component == "." || component == "..") {
-            return false;
-        }
-    }
-
-    const auto normalized = path.lexically_normal();
-
-    return !normalized.empty() && normalized != "." &&
-           !normalized.is_absolute() && !normalized.has_root_name() &&
-           !normalized.has_root_directory();
+bool valid_identifier(std::string_view identifier) noexcept {
+    return detail::valid_relative_identifier(identifier, false);
 }
 
 std::expected<std::filesystem::path, Error>

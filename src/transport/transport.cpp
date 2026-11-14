@@ -100,20 +100,7 @@ bool valid_storage_operations(const StorageOperations& operations) noexcept {
 }
 
 bool valid_list_prefix(std::string_view prefix) noexcept {
-    if (prefix.empty() || prefix.find('\\') != std::string_view::npos) {
-        return false;
-    }
-    const auto path = platform::path::from_utf8(prefix);
-    if (path.is_absolute() || path.has_root_name() ||
-        path.has_root_directory()) {
-        return false;
-    }
-    for (const auto& component : path) {
-        if (component == "." || component == "..") {
-            return false;
-        }
-    }
-    return path.lexically_normal() == path;
+    return detail::valid_relative_identifier(prefix, true);
 }
 
 using BackendConfiguration =
@@ -175,40 +162,11 @@ std::expected<Transport, Error> accept_backend_transport(Transport transport) {
 }
 
 bool valid_batch_identifier(std::string_view identifier) noexcept {
-    if (identifier.empty() || identifier.find('\\') != std::string_view::npos) {
-        return false;
-    }
-    const auto path = platform::path::from_utf8(identifier);
-    if (path.is_absolute() || path.has_root_name() ||
-        path.has_root_directory()) {
-        return false;
-    }
-    for (const auto& component : path) {
-        if (component == "." || component == "..") {
-            return false;
-        }
-    }
-    return path.lexically_normal() == path;
+    return detail::valid_relative_identifier(identifier, true);
 }
 
 bool valid_object_identifier(std::string_view identifier) {
-    if (identifier.empty() || identifier.find('\\') != std::string_view::npos) {
-        return false;
-    }
-    const auto path = platform::path::from_utf8(identifier);
-    if (path.empty() || path.is_absolute() || path.has_root_name() ||
-        path.has_root_directory()) {
-        return false;
-    }
-    for (const auto& component : path) {
-        if (component == "." || component == "..") {
-            return false;
-        }
-    }
-    const auto normalized = path.lexically_normal();
-    return !normalized.empty() && normalized != "." &&
-           !normalized.is_absolute() && !normalized.has_root_name() &&
-           !normalized.has_root_directory();
+    return detail::valid_relative_identifier(identifier, false);
 }
 
 std::expected<void, Error> validate_copy_batch(const CopyBatch& batch) {
@@ -862,5 +820,33 @@ RemoveBatchResult remove_batch(Transport& transport, const RemoveBatch& batch) {
     }
     return transport.storage.remove_batch(state, batch);
 }
+
+namespace detail {
+
+bool valid_relative_identifier(std::string_view identifier,
+                               bool require_normal) noexcept {
+    if (identifier.empty() || identifier.find('\\') != std::string_view::npos) {
+        return false;
+    }
+    const auto path = platform::path::from_utf8(identifier);
+    if (path.empty() || path.is_absolute() || path.has_root_name() ||
+        path.has_root_directory()) {
+        return false;
+    }
+    for (const auto& component : path) {
+        if (component == "." || component == "..") {
+            return false;
+        }
+    }
+    const auto normalized = path.lexically_normal();
+    if (require_normal) {
+        return normalized == path;
+    }
+    return !normalized.empty() && normalized != "." &&
+           !normalized.is_absolute() && !normalized.has_root_name() &&
+           !normalized.has_root_directory();
+}
+
+} // namespace detail
 
 } // namespace kasumi::transport

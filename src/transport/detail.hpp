@@ -7,8 +7,13 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace kasumi::transport::detail {
+
+// Validates a non-empty relative slash-separated storage path.
+bool valid_relative_identifier(std::string_view identifier,
+                               bool require_normal) noexcept;
 
 // Configuration for local directory storage.
 struct LocalConfiguration {

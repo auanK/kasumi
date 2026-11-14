@@ -55,42 +55,9 @@ enum class RcMethod {
 };
 
 void record_endpoint_request(std::string_view path_suffix) noexcept {
-    if (!platform::perf_trace::enabled()) {
-        return;
-    }
-    if (path_suffix == "operations/check") {
+    if (platform::perf_trace::enabled()) {
         platform::perf_trace::count(
-            "rc.http_requests_by_endpoint.operations/check", 1);
-    } else if (path_suffix == "operations/hashsumfile") {
-        platform::perf_trace::count(
-            "rc.http_requests_by_endpoint.operations/hashsumfile", 1);
-    } else if (path_suffix == "operations/copyfile") {
-        platform::perf_trace::count(
-            "rc.http_requests_by_endpoint.operations/copyfile", 1);
-    } else if (path_suffix == "operations/deletefile") {
-        platform::perf_trace::count(
-            "rc.http_requests_by_endpoint.operations/deletefile", 1);
-    } else if (path_suffix == "operations/stat") {
-        platform::perf_trace::count(
-            "rc.http_requests_by_endpoint.operations/stat", 1);
-    } else if (path_suffix == "operations/mkdir") {
-        platform::perf_trace::count(
-            "rc.http_requests_by_endpoint.operations/mkdir", 1);
-    } else if (path_suffix == "operations/list") {
-        platform::perf_trace::count(
-            "rc.http_requests_by_endpoint.operations/list", 1);
-    } else if (path_suffix == "sync/copy") {
-        platform::perf_trace::count("rc.http_requests_by_endpoint.sync/copy",
-                                    1);
-    } else if (path_suffix == "core/pid") {
-        platform::perf_trace::count("rc.http_requests_by_endpoint.core/pid", 1);
-    } else if (path_suffix == "core/quit") {
-        platform::perf_trace::count("rc.http_requests_by_endpoint.core/quit",
-                                    1);
-    } else {
-        std::string dynamic_metric =
-            "rc.http_requests_by_endpoint." + std::string{path_suffix};
-        platform::perf_trace::count(dynamic_metric, 1);
+            "rc.http_requests_by_endpoint." + std::string{path_suffix}, 1);
     }
 }
 
