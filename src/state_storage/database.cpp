@@ -11,11 +11,13 @@
 #include <array>
 #include <charconv>
 #include <limits>
+#include <optional>
 #include <ranges>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 
@@ -23,6 +25,7 @@ namespace kasumi::state_storage {
 namespace {
 
 constexpr int schema_version = 1;
+constexpr std::size_t maximum_pending_materializations = 1'000'000;
 
 struct ColumnDefinition {
     std::string_view name;
@@ -191,21 +194,22 @@ bool has_binary_primary_key(sqlite3* database,
     return key_columns == 1;
 }
 
+template <std::size_t Size>
+bool valid_table(sqlite3* database,
+                 std::string_view name,
+                 std::string_view primary_key,
+                 const std::array<ColumnDefinition, Size>& columns) {
+    return object_kind(database, name) == ObjectKind::Table &&
+           has_columns(database, name, columns) &&
+           has_binary_primary_key(database, name, primary_key);
+}
+
 bool has_expected_schema(sqlite3* database) {
-    return object_kind(database, "nodes") == ObjectKind::Table &&
-           object_kind(database, "pending_materializations") ==
-               ObjectKind::Table &&
-           object_kind(database, "metadata") == ObjectKind::Table &&
-           has_columns(database, "nodes", node_columns) &&
-           has_columns(database, "pending_materializations", pending_columns) &&
-           has_columns(database, "metadata", metadata_columns) &&
-           object_kind(database, "file_cache") == ObjectKind::Table &&
-           has_columns(database, "file_cache", file_cache_columns) &&
-           has_binary_primary_key(database, "nodes", "path") &&
-           has_binary_primary_key(
-               database, "pending_materializations", "path") &&
-           has_binary_primary_key(database, "metadata", "key") &&
-           has_binary_primary_key(database, "file_cache", "path");
+    return valid_table(database, "nodes", "path", node_columns) &&
+           valid_table(
+               database, "pending_materializations", "path", pending_columns) &&
+           valid_table(database, "metadata", "key", metadata_columns) &&
+           valid_table(database, "file_cache", "path", file_cache_columns);
 }
 
 void create_file_cache(sqlite3* database) {
@@ -243,19 +247,8 @@ void create_schema(sqlite3* database) {
     create_file_cache(database);
 }
 
-std::int64_t mtime_value(const NodeRow& row) {
-    return row.mtime;
-}
-
-bool same_node(const NodeRow& left, const NodeRow& right) {
-    return left.path == right.path && left.hash == right.hash &&
-           left.size == right.size && left.mtime == right.mtime &&
-           left.is_directory == right.is_directory;
-}
-
 bool valid_pending_materializations(
     const Snapshot& tree, std::span<const NodeRow> pending_materializations) {
-    constexpr std::size_t maximum_pending_materializations = 1'000'000;
     if (pending_materializations.size() > maximum_pending_materializations) {
         return false;
     }
@@ -263,7 +256,7 @@ bool valid_pending_materializations(
     for (const auto& row : pending_materializations) {
         const auto* accepted = find_row(tree, row.path);
         if (row.is_directory || accepted == nullptr || accepted->is_directory ||
-            !same_node(*accepted, row) ||
+            *accepted != row ||
             row.size > static_cast<std::uint64_t>(
                            std::numeric_limits<std::int64_t>::max()) ||
             (previous != nullptr && !path_less(previous->path, row.path))) {
@@ -276,7 +269,6 @@ bool valid_pending_materializations(
 
 std::vector<NodeRow> load_pending_materializations(sqlite3* database,
                                                    const Snapshot& tree) {
-    constexpr std::size_t maximum_pending_materializations = 1'000'000;
     auto query = require_statement(sqlite::prepare(
         database,
         "SELECT path, hash, size, mtime FROM pending_materializations"));
@@ -317,7 +309,7 @@ void write_pending_materializations(
         require(sqlite::bind(insert, 1, row.path));
         require(sqlite::bind(insert, 2, hash_hex(row.hash)));
         require(sqlite::bind(insert, 3, static_cast<std::int64_t>(row.size)));
-        require(sqlite::bind(insert, 4, mtime_value(row)));
+        require(sqlite::bind(insert, 4, row.mtime));
         require(sqlite::run(insert));
         require(sqlite::reset(insert));
     }
@@ -327,7 +319,7 @@ void bind_node(sqlite::Statement& query, const NodeRow& row) {
     require(sqlite::bind(query, 1, row.path));
     require(sqlite::bind(query, 2, hash_hex(row.hash)));
     require(sqlite::bind(query, 3, static_cast<std::int64_t>(row.size)));
-    require(sqlite::bind(query, 4, mtime_value(row)));
+    require(sqlite::bind(query, 4, row.mtime));
     require(sqlite::bind(query, 5, row.is_directory ? 1 : 0));
 }
 
@@ -355,13 +347,13 @@ void write_tree_delta(sqlite3* database,
             require(sqlite::run(insert));
             require(sqlite::reset(insert));
             platform::perf_trace::count("state db node inserts");
-        } else if (same_node(*found->second, row)) {
+        } else if (*found->second == row) {
             platform::perf_trace::count("state db node unchanged");
         } else {
             require(sqlite::bind(update, 1, hash_hex(row.hash)));
             require(
                 sqlite::bind(update, 2, static_cast<std::int64_t>(row.size)));
-            require(sqlite::bind(update, 3, mtime_value(row)));
+            require(sqlite::bind(update, 3, row.mtime));
             require(sqlite::bind(update, 4, row.is_directory ? 1 : 0));
             require(sqlite::bind(update, 5, row.path));
             require(sqlite::run(update));
@@ -429,10 +421,10 @@ std::optional<std::uint64_t> parse_word(std::string_view value) {
                : std::nullopt;
 }
 
-
 constexpr std::int64_t kUnifiedMetadataKind = 3;
 
-bool same_cache_row(const FileCacheRow& left, const FileCacheRow& right) noexcept {
+bool same_cache_row(const FileCacheRow& left,
+                    const FileCacheRow& right) noexcept {
     return left.path == right.path && left.hash == right.hash &&
            left.size == right.size &&
            left.mtime_nanoseconds == right.mtime_nanoseconds &&
@@ -463,14 +455,14 @@ std::vector<FileCacheRow> read_cache_rows(sqlite3* database) {
             !hash) {
             continue;
         }
-        rows.push_back(FileCacheRow{
-            .path = sqlite::text(query, 0),
-            .hash = *hash,
-            .size = static_cast<std::uint64_t>(size),
-            .mtime_nanoseconds = static_cast<std::int64_t>(*words[3]),
-            .volume = *words[0],
-            .file_low = *words[1],
-            .file_high = *words[2]});
+        rows.push_back(FileCacheRow{.path = sqlite::text(query, 0),
+                                    .hash = *hash,
+                                    .size = static_cast<std::uint64_t>(size),
+                                    .mtime_nanoseconds =
+                                        static_cast<std::int64_t>(*words[3]),
+                                    .volume = *words[0],
+                                    .file_low = *words[1],
+                                    .file_high = *words[2]});
     }
     return rows;
 }
@@ -498,7 +490,9 @@ void write_cache_delta(sqlite3* database,
         require(sqlite::bind(upsert, 6, word_hex(row.file_low)));
         require(sqlite::bind(upsert, 7, word_hex(row.file_high)));
         require(sqlite::bind(
-            upsert, 8, word_hex(static_cast<std::uint64_t>(row.mtime_nanoseconds))));
+            upsert,
+            8,
+            word_hex(static_cast<std::uint64_t>(row.mtime_nanoseconds))));
         require(sqlite::run(upsert));
         require(sqlite::reset(upsert));
     };
@@ -527,6 +521,18 @@ void write_cache_delta(sqlite3* database,
     }
 }
 
+std::optional<std::uint64_t> parse_canonical_u64(std::string_view value) {
+    if (value.empty() || (value.size() > 1 && value.front() == '0')) {
+        return std::nullopt;
+    }
+    std::uint64_t result = 0;
+    const auto parsed =
+        std::from_chars(value.data(), value.data() + value.size(), result, 10);
+    return parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size()
+               ? std::optional<std::uint64_t>{result}
+               : std::nullopt;
+}
+
 } // namespace
 
 bool initialize(const std::filesystem::path& database_path) {
@@ -543,7 +549,7 @@ bool initialize(const std::filesystem::path& database_path) {
         }
         auto opened = detail::open_state_database_readwrite(database_path,
                                                             /*create=*/
-                                                                !database_existed);
+                                                            !database_existed);
         if (!opened) {
             return false;
         }
@@ -634,39 +640,37 @@ load_state(const std::filesystem::path& database_path) {
         std::string epoch_id;
         std::string epoch_sequence;
         std::size_t metadata_count = 0;
+        const std::array<
+            std::tuple<std::string_view, std::string*, const char*>,
+            5>
+            fields{{
+                {"generation",
+                 &generation,
+                 "state.db generation is duplicated"},
+                {"commit_id", &commit_id, "state.db commit ID is duplicated"},
+                {"ciphertext_id",
+                 &ciphertext_id,
+                 "state.db ciphertext ID is duplicated"},
+                {"epoch_id", &epoch_id, "state.db Epoch ID is duplicated"},
+                {"epoch_sequence",
+                 &epoch_sequence,
+                 "state.db Epoch sequence is duplicated"},
+            }};
         while (require_step(metadata)) {
             const auto key = sqlite::text(metadata, 0);
             ++metadata_count;
-            if (key == "generation") {
-                if (!generation.empty()) {
-                    return std::unexpected("state.db generation is duplicated");
-                }
-                generation = sqlite::text(metadata, 1);
-            } else if (key == "commit_id") {
-                if (!commit_id.empty()) {
-                    return std::unexpected("state.db commit ID is duplicated");
-                }
-                commit_id = sqlite::text(metadata, 1);
-            } else if (key == "ciphertext_id") {
-                if (!ciphertext_id.empty()) {
-                    return std::unexpected(
-                        "state.db ciphertext ID is duplicated");
-                }
-                ciphertext_id = sqlite::text(metadata, 1);
-            } else if (key == "epoch_id") {
-                if (!epoch_id.empty()) {
-                    return std::unexpected("state.db Epoch ID is duplicated");
-                }
-                epoch_id = sqlite::text(metadata, 1);
-            } else if (key == "epoch_sequence") {
-                if (!epoch_sequence.empty()) {
-                    return std::unexpected(
-                        "state.db Epoch sequence is duplicated");
-                }
-                epoch_sequence = sqlite::text(metadata, 1);
-            } else {
+            const auto it =
+                std::ranges::find(fields, key, [](const auto& entry) {
+                    return std::get<0>(entry);
+                });
+            if (it == fields.end()) {
                 return std::unexpected("state.db contains unknown metadata");
             }
+            auto* slot = std::get<1>(*it);
+            if (!slot->empty()) {
+                return std::unexpected(std::get<2>(*it));
+            }
+            *slot = sqlite::text(metadata, 1);
         }
         if (metadata_count == 0) {
             auto nodes = require_statement(
@@ -705,28 +709,25 @@ load_state(const std::filesystem::path& database_path) {
             return std::unexpected(tree.error());
         }
         auto pending = load_pending_materializations(opened->get(), *tree);
-        std::size_t consumed = 0;
-        const auto height = std::stoull(generation, &consumed);
-        if (consumed != generation.size() ||
-            std::to_string(height) != generation) {
+        const auto height = parse_canonical_u64(generation);
+        if (!height) {
             return std::unexpected("state.db generation is invalid");
         }
         std::uint64_t parsed_epoch_sequence = 0;
         if (!epoch_sequence.empty()) {
-            consumed = 0;
-            parsed_epoch_sequence = std::stoull(epoch_sequence, &consumed);
-            if (consumed != epoch_sequence.size() ||
-                std::to_string(parsed_epoch_sequence) != epoch_sequence) {
+            const auto parsed = parse_canonical_u64(epoch_sequence);
+            if (!parsed) {
                 return std::unexpected("state.db Epoch sequence is invalid");
             }
+            parsed_epoch_sequence = *parsed;
         }
         if (!valid_snapshot(*tree, false) ||
-            height == std::numeric_limits<std::uint64_t>::max()) {
+            *height == std::numeric_limits<std::uint64_t>::max()) {
             return std::unexpected("state.db state is invalid");
         }
         require(sqlite::commit(*transaction));
         StoredState state{.tree = std::move(*tree),
-                          .height = height,
+                          .height = *height,
                           .commit_id = std::move(commit_id),
                           .ciphertext_id = std::move(ciphertext_id),
                           .epoch_id = std::move(epoch_id),
@@ -782,40 +783,25 @@ bool save_state(const std::filesystem::path& database_path,
         require(sqlite::execute(opened->get(),
                                 "DELETE FROM metadata WHERE key NOT IN "
                                 "('epoch_id', 'epoch_sequence')"));
-        auto generation = require_statement(
+        auto upsert_meta = require_statement(
             sqlite::prepare(opened->get(),
                             "INSERT OR REPLACE INTO metadata (key, value) "
-                            "VALUES ('generation', ?)"));
-        require(sqlite::bind(generation, 1, std::to_string(state.height)));
-        require(sqlite::run(generation));
-        auto commit = require_statement(
-            sqlite::prepare(opened->get(),
-                            "INSERT OR REPLACE INTO metadata (key, value) "
-                            "VALUES ('commit_id', ?)"));
-        require(sqlite::bind(commit, 1, state.commit_id));
-        require(sqlite::run(commit));
+                            "VALUES (?, ?)"));
+        const auto put_meta = [&](std::string_view key,
+                                  std::string_view value) {
+            require(sqlite::bind(upsert_meta, 1, key));
+            require(sqlite::bind(upsert_meta, 2, value));
+            require(sqlite::run(upsert_meta));
+            require(sqlite::reset(upsert_meta));
+        };
+        put_meta("generation", std::to_string(state.height));
+        put_meta("commit_id", state.commit_id);
         if (!state.ciphertext_id.empty()) {
-            auto ciphertext = require_statement(
-                sqlite::prepare(opened->get(),
-                                "INSERT OR REPLACE INTO metadata (key, value) "
-                                "VALUES ('ciphertext_id', ?)"));
-            require(sqlite::bind(ciphertext, 1, state.ciphertext_id));
-            require(sqlite::run(ciphertext));
+            put_meta("ciphertext_id", state.ciphertext_id);
         }
         if (!state.epoch_id.empty()) {
-            auto epoch = require_statement(
-                sqlite::prepare(opened->get(),
-                                "INSERT OR REPLACE INTO metadata (key, value) "
-                                "VALUES ('epoch_id', ?)"));
-            require(sqlite::bind(epoch, 1, state.epoch_id));
-            require(sqlite::run(epoch));
-            auto sequence = require_statement(
-                sqlite::prepare(opened->get(),
-                                "INSERT OR REPLACE INTO metadata (key, value) "
-                                "VALUES ('epoch_sequence', ?)"));
-            require(sqlite::bind(
-                sequence, 1, std::to_string(state.epoch_sequence)));
-            require(sqlite::run(sequence));
+            put_meta("epoch_id", state.epoch_id);
+            put_meta("epoch_sequence", std::to_string(state.epoch_sequence));
         }
         const auto transaction_trace = platform::perf_trace::begin();
         require(sqlite::commit(*transaction));
