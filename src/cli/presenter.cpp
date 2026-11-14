@@ -1091,102 +1091,55 @@ int present(const application::Response& response, bool full) {
 }
 
 int present(const application::InspectionResponse& response) {
-    if (response.operation == application::InspectionOperation::RemoteHeads) {
-        if (const auto* report = std::get_if<application::RemoteHeadsReport>(
-                &response.payload)) {
-            return present_remote_heads(*report);
+    const auto match = [&]<typename Report>(
+                           application::InspectionOperation expected,
+                           int (*render)(const Report&)) -> std::optional<int> {
+        if (response.operation != expected) {
+            return std::nullopt;
         }
-    } else if (response.operation ==
-               application::InspectionOperation::RemoteTree) {
-        if (const auto* report =
-                std::get_if<application::RemoteTreeReport>(&response.payload)) {
-            return present_remote_tree(*report);
+        if (const auto* report = std::get_if<Report>(&response.payload)) {
+            return render(*report);
         }
-    } else if (response.operation ==
-               application::InspectionOperation::RemoteCommits) {
-        if (const auto* report = std::get_if<application::RemoteCommitsReport>(
-                &response.payload)) {
-            return present_remote_commits(*report);
-        }
-    } else if (response.operation ==
-               application::InspectionOperation::RemoteSummary) {
-        if (const auto* report = std::get_if<application::RemoteSummaryReport>(
-                &response.payload)) {
-            return present_remote_summary(*report);
-        }
-    } else if (response.operation ==
-               application::InspectionOperation::RemoteStat) {
-        if (const auto* report =
-                std::get_if<application::RemoteStatReport>(&response.payload)) {
-            return present_remote_stat(*report);
-        }
-    } else if (response.operation ==
-               application::InspectionOperation::RemoteCommit) {
-        if (const auto* report = std::get_if<application::RemoteCommitReport>(
-                &response.payload)) {
-            return present_remote_commit(*report);
-        }
-    } else if (response.operation ==
-               application::InspectionOperation::RemoteGet) {
-        if (const auto* report =
-                std::get_if<application::RemoteFileReport>(&response.payload)) {
-            return present_remote_file(*report);
-        }
-    } else if (response.operation ==
-               application::InspectionOperation::RemoteEpochs) {
-        if (const auto* report = std::get_if<application::RemoteEpochsReport>(
-                &response.payload)) {
-            return present_remote_epochs(*report);
-        }
-    } else if (response.operation ==
-               application::InspectionOperation::RemoteEpoch) {
-        if (const auto* report = std::get_if<application::RemoteEpochReport>(
-                &response.payload)) {
-            return present_remote_epoch(*report);
-        }
-    } else if (response.operation ==
-                   application::InspectionOperation::RemoteContents ||
-               response.operation ==
-                   application::InspectionOperation::RemoteContentsAudit) {
-        if (const auto* report = std::get_if<application::RemoteContentsReport>(
-                &response.payload)) {
-            return present_remote_contents(*report);
-        }
-    } else if (response.operation ==
-               application::InspectionOperation::RemoteContent) {
-        if (const auto* report = std::get_if<application::RemoteContentReport>(
-                &response.payload)) {
-            return present_remote_content(*report);
-        }
-    } else if (response.operation ==
-               application::InspectionOperation::RemoteMarkers) {
-        if (const auto* report = std::get_if<application::RemoteMarkersReport>(
-                &response.payload)) {
-            return present_remote_markers(*report);
-        }
-    } else if (response.operation ==
-               application::InspectionOperation::RemoteObjects) {
-        if (const auto* report = std::get_if<application::RemoteObjectsReport>(
-                &response.payload)) {
-            return present_remote_objects(*report);
-        }
-    } else if (response.operation ==
-               application::InspectionOperation::RemoteOrphans) {
-        if (const auto* report = std::get_if<application::RemoteOrphansReport>(
-                &response.payload)) {
-            return present_remote_orphans(*report);
-        }
-    } else if (response.operation ==
-               application::InspectionOperation::RemoteWriters) {
-        if (const auto* report = std::get_if<application::RemoteWritersReport>(
-                &response.payload)) {
-            return present_remote_writers(*report);
-        }
-    } else if (response.operation ==
-               application::InspectionOperation::RemoteHealth) {
-        if (const auto* report = std::get_if<application::RemoteHealthReport>(
-                &response.payload)) {
-            return present_remote_health(*report);
+        return std::nullopt;
+    };
+    const std::optional<int> rendered[] = {
+        match(application::InspectionOperation::RemoteHeads,
+              present_remote_heads),
+        match(application::InspectionOperation::RemoteTree,
+              present_remote_tree),
+        match(application::InspectionOperation::RemoteCommits,
+              present_remote_commits),
+        match(application::InspectionOperation::RemoteSummary,
+              present_remote_summary),
+        match(application::InspectionOperation::RemoteStat,
+              present_remote_stat),
+        match(application::InspectionOperation::RemoteCommit,
+              present_remote_commit),
+        match(application::InspectionOperation::RemoteGet, present_remote_file),
+        match(application::InspectionOperation::RemoteEpochs,
+              present_remote_epochs),
+        match(application::InspectionOperation::RemoteEpoch,
+              present_remote_epoch),
+        match(application::InspectionOperation::RemoteContents,
+              present_remote_contents),
+        match(application::InspectionOperation::RemoteContentsAudit,
+              present_remote_contents),
+        match(application::InspectionOperation::RemoteContent,
+              present_remote_content),
+        match(application::InspectionOperation::RemoteMarkers,
+              present_remote_markers),
+        match(application::InspectionOperation::RemoteObjects,
+              present_remote_objects),
+        match(application::InspectionOperation::RemoteOrphans,
+              present_remote_orphans),
+        match(application::InspectionOperation::RemoteWriters,
+              present_remote_writers),
+        match(application::InspectionOperation::RemoteHealth,
+              present_remote_health),
+    };
+    for (const auto& code : rendered) {
+        if (code.has_value()) {
+            return *code;
         }
     }
 
@@ -1199,6 +1152,14 @@ int present(const application::InspectionResponse& response) {
 }
 
 namespace {
+
+void print_error_line(std::string_view message) {
+    std::println("{}{}{} {}",
+                 style::red,
+                 i18n::tr(i18n::Key::LabelError),
+                 style::reset,
+                 message);
+}
 
 std::string sanitize_error_detail(std::string_view detail) {
     std::string result{detail};
@@ -1255,11 +1216,7 @@ int present(const application::Error& error) {
                 stage_key = i18n::Key::SyncErrorFinalizing;
                 break;
         }
-        std::println("{}{}{} {}",
-                     style::red,
-                     i18n::tr(i18n::Key::LabelError),
-                     style::reset,
-                     i18n::tr(stage_key));
+        print_error_line(i18n::tr(stage_key));
         std::println("{}",
                      i18n::format(i18n::Key::SyncErrorReason,
                                   sanitize_error_detail(error.detail)));
@@ -1272,52 +1229,28 @@ int present(const application::Error& error) {
         case application::ErrorCode::RuntimeFailure:
         case application::ErrorCode::CredentialsRequired:
         case application::ErrorCode::CredentialFailure:
-            std::println("{}{}{} {}",
-                         style::red,
-                         i18n::tr(i18n::Key::LabelError),
-                         style::reset,
-                         error.detail);
+            print_error_line(error.detail);
             break;
         case application::ErrorCode::PlanFailure:
-            std::println(
-                "{}{}{} {}",
-                style::red,
-                i18n::tr(i18n::Key::LabelError),
-                style::reset,
+            print_error_line(
                 i18n::format(i18n::Key::ErrorPlanCalculation, error.detail));
             break;
         case application::ErrorCode::FsckFailure:
             std::println("{}", i18n::tr(i18n::Key::ErrorFsckAuditing));
-            std::println(
-                "{}{}{} {}",
-                style::red,
-                i18n::tr(i18n::Key::LabelError),
-                style::reset,
+            print_error_line(
                 i18n::format(i18n::Key::ErrorFsckFailed, error.detail));
             break;
         case application::ErrorCode::GarbageCollectionFailure:
-            std::println(
-                "{}{}{} {}",
-                style::red,
-                i18n::tr(i18n::Key::LabelError),
-                style::reset,
+            print_error_line(
                 i18n::format(i18n::Key::ErrorGcCancelled, error.detail));
             break;
         case application::ErrorCode::WriterRemovalFailure:
-            std::println("{}{}{} {}",
-                         style::red,
-                         i18n::tr(i18n::Key::LabelError),
-                         style::reset,
-                         i18n::format(i18n::Key::ErrorWriterRemovalFailed,
-                                      error.detail));
+            print_error_line(i18n::format(i18n::Key::ErrorWriterRemovalFailed,
+                                          error.detail));
             break;
         case application::ErrorCode::BarrierRemovalFailure:
-            std::println("{}{}{} {}",
-                         style::red,
-                         i18n::tr(i18n::Key::LabelError),
-                         style::reset,
-                         i18n::format(i18n::Key::ErrorBarrierRemovalFailed,
-                                      error.detail));
+            print_error_line(i18n::format(i18n::Key::ErrorBarrierRemovalFailed,
+                                          error.detail));
             if (error.barrier_removal) {
                 const auto& br = *error.barrier_removal;
                 i18n::Key stage_key =
@@ -1380,12 +1313,8 @@ int present(const application::Error& error) {
             }
             break;
         case application::ErrorCode::InventoryAuditFailure:
-            std::println("{}{}{} {}",
-                         style::red,
-                         i18n::tr(i18n::Key::LabelError),
-                         style::reset,
-                         i18n::format(i18n::Key::ErrorInventoryAuditFailed,
-                                      error.detail));
+            print_error_line(i18n::format(i18n::Key::ErrorInventoryAuditFailed,
+                                          error.detail));
             if (error.sync_completed) {
                 std::println(
                     "{}",
@@ -1393,19 +1322,16 @@ int present(const application::Error& error) {
                 if (error.sync_completed->partial) {
                     render_pending_status(error.sync_completed->pending);
                 }
-            }
-            if (error.sync_completed && error.sync_completed->published) {
-                std::println("{}",
-                             i18n::tr(i18n::Key::ErrorInventoryAuditPublished));
+                if (error.sync_completed->published) {
+                    std::println(
+                        "{}",
+                        i18n::tr(i18n::Key::ErrorInventoryAuditPublished));
+                }
             }
             break;
         case application::ErrorCode::SynchronizationFailure:
         case application::ErrorCode::RecoveryFailure:
-            std::println(
-                "{}{}{} {}",
-                style::red,
-                i18n::tr(i18n::Key::LabelError),
-                style::reset,
+            print_error_line(
                 i18n::format(i18n::Key::ErrorSyncFailed, error.detail));
             break;
     }
@@ -1413,30 +1339,17 @@ int present(const application::Error& error) {
 }
 
 int present(const application::InspectionError& error) {
-    if (error.code == application::InspectionErrorCode::HeadSelectionRequired) {
-        std::println("{}{}{} {}",
-                     style::red,
-                     i18n::tr(i18n::Key::LabelError),
-                     style::reset,
-                     error.detail);
+    print_error_line(error.detail);
+    if (error.code == application::InspectionErrorCode::HeadSelectionRequired ||
+        (error.code == application::InspectionErrorCode::RemoteHeadNotFound &&
+         !error.candidate_ids.empty())) {
         std::println("{}", i18n::tr(i18n::Key::ErrorAvailableHeads));
         for (const auto& id : error.candidate_ids) {
             std::println("  {}", id);
         }
-        std::println("{}", i18n::tr(i18n::Key::ErrorUseRemoteTreeHead));
-        return 1;
-    }
-
-    std::println("{}{}{} {}",
-                 style::red,
-                 i18n::tr(i18n::Key::LabelError),
-                 style::reset,
-                 error.detail);
-    if (error.code == application::InspectionErrorCode::RemoteHeadNotFound &&
-        !error.candidate_ids.empty()) {
-        std::println("{}", i18n::tr(i18n::Key::ErrorAvailableHeads));
-        for (const auto& id : error.candidate_ids) {
-            std::println("  {}", id);
+        if (error.code ==
+            application::InspectionErrorCode::HeadSelectionRequired) {
+            std::println("{}", i18n::tr(i18n::Key::ErrorUseRemoteTreeHead));
         }
     }
     return 1;

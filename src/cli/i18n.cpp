@@ -459,8 +459,7 @@ void populate_strings_from_map(
 
 std::string try_read_file(const std::filesystem::path& path) {
     std::error_code ec;
-    if (!std::filesystem::exists(path, ec) ||
-        !std::filesystem::is_regular_file(path, ec)) {
+    if (!std::filesystem::is_regular_file(path, ec) || ec) {
         return "";
     }
     std::ifstream file(path, std::ios::in | std::ios::binary);

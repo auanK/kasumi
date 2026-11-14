@@ -1570,14 +1570,6 @@ bool official_asset_url(std::string_view tag,
 
 namespace {
 
-std::expected<std::string, std::string> new_identifier() {
-    auto id = platform::random::hex_id();
-    if (!id) {
-        return std::unexpected(id.error());
-    }
-    return *id;
-}
-
 bool is_regular_file_without_redirect(const std::filesystem::path& path) {
     std::error_code error;
     const auto status = std::filesystem::symlink_status(path, error);
@@ -1689,7 +1681,7 @@ InstallResult install_prepared_executable(const std::filesystem::path& prepared,
     if (!original_hash) {
         return std::unexpected(install_failure(original_hash.error()));
     }
-    auto id = new_identifier();
+    auto id = platform::random::hex_id();
     if (!id) {
         return std::unexpected(install_failure(id.error()));
     }
@@ -2740,7 +2732,7 @@ start_windows_helper(const std::filesystem::path& executable,
                      std::string_view version,
                      const WindowsFileIdentity& target_identity,
                      const platform::Workspace& workspace) {
-    auto id = new_identifier();
+    auto id = platform::random::hex_id();
     if (!id) {
         return std::unexpected(id.error());
     }
@@ -2758,24 +2750,23 @@ start_windows_helper(const std::filesystem::path& executable,
     const auto version_w = widen_ascii(version);
     const auto language_w = widen_ascii(language_code());
     const auto identity_w = widen_ascii(windows_identity_text(target_identity));
-    if (!version_w || !language_w || !identity_w ||
-        !workspace.identity.valid ||
+    if (!version_w || !language_w || !identity_w || !workspace.identity.valid ||
         !windows_path_has_no_reparse_points(executable) ||
         !windows_file_identity_matches(executable, target_identity)) {
         std::filesystem::remove(helper, error);
         return std::unexpected("invalid installer handoff arguments");
     }
-    const auto command_line =
-        join_windows_arguments({helper.wstring(),
-                                L"--kasumi-update-helper",
-                                archive.wstring(),
-                                *version_w,
-                                *language_w,
-                                std::to_wstring(self_process),
-                                *identity_w,
-                                std::to_wstring(workspace.identity.volume_or_dev),
-                                std::to_wstring(workspace.identity.file_id_low),
-                                std::to_wstring(workspace.identity.file_id_high)});
+    const auto command_line = join_windows_arguments(
+        {helper.wstring(),
+         L"--kasumi-update-helper",
+         archive.wstring(),
+         *version_w,
+         *language_w,
+         std::to_wstring(self_process),
+         *identity_w,
+         std::to_wstring(workspace.identity.volume_or_dev),
+         std::to_wstring(workspace.identity.file_id_low),
+         std::to_wstring(workspace.identity.file_id_high)});
     std::vector<wchar_t> mutable_command(command_line.begin(),
                                          command_line.end());
     mutable_command.push_back(L'\0');
@@ -2802,8 +2793,7 @@ start_windows_helper(const std::filesystem::path& executable,
     }
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
-    const auto ready_path =
-        workspace.root / platform::path::from_utf8("helper-ready");
+    const auto ready_path = workspace.root / "helper-ready";
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds{10};
     while (std::chrono::steady_clock::now() < deadline) {
@@ -2838,8 +2828,8 @@ int run_windows_wait_helper(int argc, char* argv[]) {
         return report_failure("invalid installer parent process");
     }
     const auto expected_identity = parse_windows_identity(argv[6]);
-    const auto parse_workspace_identity = [](const char* text)
-        -> std::optional<std::uint64_t> {
+    const auto parse_workspace_identity =
+        [](const char* text) -> std::optional<std::uint64_t> {
         std::uint64_t value = 0;
         const auto finish = text + std::char_traits<char>::length(text);
         const auto [position, error] = std::from_chars(text, finish, value);
@@ -2851,8 +2841,8 @@ int run_windows_wait_helper(int argc, char* argv[]) {
     const auto workspace_volume = parse_workspace_identity(argv[7]);
     const auto workspace_id_low = parse_workspace_identity(argv[8]);
     const auto workspace_id_high = parse_workspace_identity(argv[9]);
-    if (!expected_identity ||
-        !workspace_volume || !workspace_id_low || !workspace_id_high ||
+    if (!expected_identity || !workspace_volume || !workspace_id_low ||
+        !workspace_id_high ||
         windows_parent_process_id(GetCurrentProcessId()) != parent_id) {
         return report_failure(
             "installer was not started by the original Kasumi process");
@@ -2862,7 +2852,7 @@ int run_windows_wait_helper(int argc, char* argv[]) {
     ScopedWindowsHandle keep_parent{parent};
     if (!parent_path || !is_kasumi_executable(*parent_path) ||
         !windows_path_has_no_reparse_points(*parent_path) ||
-        parent_path->filename() != platform::path::from_utf8("kasumi.exe") ||
+        parent_path->filename() != "kasumi.exe" ||
         !windows_file_identity_matches(*parent_path, *expected_identity)) {
         if (parent != nullptr) {
             keep_parent.value = nullptr;
@@ -2881,7 +2871,7 @@ int run_windows_wait_helper(int argc, char* argv[]) {
         !windows_file_identity(archive)) {
         return report_failure("update staging directory is invalid");
     }
-    const auto ready = root / platform::path::from_utf8("helper-ready");
+    const auto ready = root / "helper-ready";
     const platform::Workspace handoff_workspace{
         .root = root,
         .identity = {.volume_or_dev = *workspace_volume,
@@ -2917,8 +2907,8 @@ int run_windows_wait_helper(int argc, char* argv[]) {
         return report_failure(
             i18n::format(i18n::Key::UpdateManagedInstallation, manager));
     }
-    auto digest = refetch_official_digest(
-        archive, version, *package, handoff_workspace);
+    auto digest =
+        refetch_official_digest(archive, version, *package, handoff_workspace);
     if (!digest) {
         return report_failure(digest.error());
     }
@@ -3164,8 +3154,7 @@ int run_linux_install_helper(int argc, char* argv[]) {
     const auto uid = invoking_user_id();
     const auto package = package_names_for_this_platform();
     const auto target = current_executable_path();
-    if (!uid || !package || !target ||
-        target->filename() != platform::path::from_utf8("kasumi")) {
+    if (!uid || !package || !target || target->filename() != "kasumi") {
         return report_failure(
             "could not validate the privileged update handoff");
     }
@@ -3254,7 +3243,7 @@ int run_public_update(bool allow_elevation = true) {
             "could not identify the running executable safely");
     }
 #if defined(_WIN32)
-    if (executable->filename() != platform::path::from_utf8("kasumi.exe")) {
+    if (executable->filename() != "kasumi.exe") {
         return report_failure("installation destination is not kasumi.exe");
     }
     if (!windows_path_has_no_reparse_points(*executable)) {
@@ -3273,7 +3262,7 @@ int run_public_update(bool allow_elevation = true) {
         return report_failure(writable.detail);
     }
 #else
-    if (executable->filename() != platform::path::from_utf8("kasumi")) {
+    if (executable->filename() != "kasumi") {
         return report_failure("installation destination is not kasumi");
     }
 #endif
@@ -3427,7 +3416,7 @@ int run_public_update(bool allow_elevation = true) {
 WindowsInstallationWritableResult check_windows_installation_writable(
     const std::filesystem::path& target,
     const WindowsIdentifierGenerator& id_generator) {
-    auto id = id_generator ? id_generator() : new_identifier();
+    auto id = id_generator ? id_generator() : platform::random::hex_id();
     if (!id) {
         return WindowsInstallationWritableResult{
             .state = WindowsInstallationWritableState::OtherFailure,
