@@ -1,23 +1,24 @@
-#include "application/sync/mutation_fault_test.hpp"
-#include "platform/perf_trace.hpp"
-#include "application/use_cases/context.hpp"
 #include "application/observation/state.hpp"
-#include "crypto/content.hpp"
-#include "kasumi/test/filesystem.hpp"
-#include "kasumi/test/history_storage.hpp"
-#include "kasumi/test/temp_workspace.hpp"
-#include "platform/path.hpp"
-#include "platform/private_storage.hpp"
-#include "state_storage/database.hpp"
-#include "transport/transport.hpp"
+#include "application/sync/journal.hpp"
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_detail.hpp"
+#include "application/sync/mutation_fault_test.hpp"
+#include "application/use_cases/context.hpp"
 #include "core/diff.hpp"
 #include "core/hasher.hpp"
 #include "core/node.hpp"
 #include "core/reconciliation/plan.hpp"
+#include "crypto/content.hpp"
+#include "kasumi/test/counting_transport.hpp"
+#include "kasumi/test/filesystem.hpp"
+#include "kasumi/test/history_storage.hpp"
+#include "kasumi/test/temp_workspace.hpp"
+#include "platform/path.hpp"
+#include "platform/perf_trace.hpp"
+#include "platform/private_storage.hpp"
 #include "platform/workspace.hpp"
-#include "application/sync/journal.hpp"
+#include "state_storage/database.hpp"
+#include "transport/transport.hpp"
 
 #include <algorithm>
 #include <array>
@@ -139,213 +140,10 @@ bool has_operation(const SyncPlan& plan,
     return false;
 }
 
-bool is_content_identifier(std::string_view identifier) noexcept {
-    return !identifier.empty() &&
-           identifier.find('/') == std::string_view::npos;
-}
-
-struct ContentCounterState {
-    kasumi::transport::Transport* base = nullptr;
-    mutable std::mutex mutex{};
-    std::size_t content_gets = 0;
-    std::size_t content_puts = 0;
-    std::size_t content_presences = 0;
-    std::size_t content_copies = 0;
-    std::vector<std::string> get_identifiers;
-    std::vector<std::string> put_identifiers;
-    std::vector<std::string> presence_identifiers;
-};
-
-void destroy_counter_state(void*) noexcept {}
-
-kasumi::transport::Result counter_initialize(void* context) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    return kasumi::transport::initialize(*state->base);
-}
-
-kasumi::transport::Result counter_put(void* context,
-                                      const std::filesystem::path& source,
-                                      std::string_view identifier) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    if (is_content_identifier(identifier)) {
-        std::lock_guard lock(state->mutex);
-        ++state->content_puts;
-        state->put_identifiers.emplace_back(identifier);
-    }
-    return kasumi::transport::put(*state->base, source, identifier);
-}
-
-kasumi::transport::Result
-counter_put_batch(void* context, const kasumi::transport::PutBatch& batch) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    {
-        std::lock_guard lock(state->mutex);
-        for (const auto& identifier : batch.identifiers) {
-            if (is_content_identifier(identifier)) {
-                ++state->content_puts;
-                state->put_identifiers.push_back(identifier);
-            }
-        }
-    }
-    return kasumi::transport::put_batch(*state->base, batch);
-}
-
-kasumi::transport::Result
-counter_put_files_batch(void* context,
-                        const kasumi::transport::PutFilesBatch& batch) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    auto result = kasumi::transport::put_files_batch(*state->base, batch);
-    if (result ||
-        result.error().code != kasumi::transport::ErrorCode::Unsupported) {
-        std::lock_guard lock(state->mutex);
-        for (const auto& item : batch.items) {
-            if (is_content_identifier(item.destination_identifier)) {
-                ++state->content_puts;
-                state->put_identifiers.push_back(item.destination_identifier);
-            }
-        }
-    }
-    return result;
-}
-
-kasumi::transport::Result counter_get(void* context,
-                                      std::string_view identifier,
-                                      const std::filesystem::path& destination) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    if (is_content_identifier(identifier)) {
-        std::lock_guard lock(state->mutex);
-        ++state->content_gets;
-        state->get_identifiers.emplace_back(identifier);
-    }
-    return kasumi::transport::get(*state->base, identifier, destination);
-}
-
-kasumi::transport::Result
-counter_get_batch(void* context, const kasumi::transport::GetBatch& batch) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    if (batch.source_prefix.empty()) {
-        std::lock_guard lock(state->mutex);
-        for (const auto& identifier : batch.identifiers) {
-            if (is_content_identifier(identifier)) {
-                ++state->content_gets;
-                state->get_identifiers.push_back(identifier);
-            }
-        }
-    }
-    return kasumi::transport::get_batch(*state->base, batch);
-}
-
-kasumi::transport::Result
-counter_copy(void* context,
-             std::string_view source_identifier,
-             std::string_view destination_identifier) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    auto result = kasumi::transport::copy(
-        *state->base, source_identifier, destination_identifier);
-    if (result ||
-        result.error().code != kasumi::transport::ErrorCode::Unsupported) {
-        if (is_content_identifier(source_identifier) ||
-            is_content_identifier(destination_identifier)) {
-            std::lock_guard lock(state->mutex);
-            ++state->content_copies;
-        }
-    }
-    return result;
-}
-
-kasumi::transport::Result
-counter_copy_batch(void* context, const kasumi::transport::CopyBatch& batch) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    auto result = kasumi::transport::copy_batch(*state->base, batch);
-    if (result ||
-        result.error().code != kasumi::transport::ErrorCode::Unsupported) {
-        std::lock_guard lock(state->mutex);
-        for (const auto& item : batch.items) {
-            if (is_content_identifier(item.source_identifier) ||
-                is_content_identifier(item.destination_identifier)) {
-                ++state->content_copies;
-            }
-        }
-    }
-    return result;
-}
-
-kasumi::transport::PresenceResult
-counter_presence(void* context, std::string_view identifier) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    if (is_content_identifier(identifier)) {
-        std::lock_guard lock(state->mutex);
-        ++state->content_presences;
-        state->presence_identifiers.emplace_back(identifier);
-    }
-    return kasumi::transport::presence(*state->base, identifier);
-}
-
-kasumi::transport::ListingResult counter_list(void* context) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    return kasumi::transport::list(*state->base);
-}
-
-kasumi::transport::ListingResult counter_list_prefix(void* context,
-                                                     std::string_view prefix) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    return kasumi::transport::list(*state->base, prefix);
-}
-
-kasumi::transport::ControlReadBatchResponse counter_control_read_batch(
-    void* context, const kasumi::transport::ControlReadBatchRequest& request) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    auto result = kasumi::transport::control_read_batch(*state->base, request);
-    if (result ||
-        result.error().code != kasumi::transport::ErrorCode::Unsupported) {
-        std::lock_guard lock(state->mutex);
-        for (const auto& identifier : request.presence_identifiers) {
-            if (is_content_identifier(identifier)) {
-                ++state->content_presences;
-                state->presence_identifiers.push_back(identifier);
-            }
-        }
-    }
-    return result;
-}
-
-kasumi::transport::RemovalResult counter_remove(void* context,
-                                                std::string_view identifier) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    return kasumi::transport::remove(*state->base, identifier);
-}
-
-kasumi::transport::RemoveBatchResult
-counter_remove_batch(void* context,
-                     const kasumi::transport::RemoveBatch& batch) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    return kasumi::transport::remove_batch(*state->base, batch);
-}
-
-kasumi::transport::Transport
-make_counting_transport(ContentCounterState& state) {
-    return kasumi::transport::Transport{
-        .state = kasumi::transport::TransportStateHandle{&state,
-                                                         destroy_counter_state},
-        .storage =
-            kasumi::transport::StorageOperations{
-                .initialize = counter_initialize,
-                .put = counter_put,
-                .put_batch = counter_put_batch,
-                .put_files_batch = counter_put_files_batch,
-                .get = counter_get,
-                .get_batch = counter_get_batch,
-                .copy = counter_copy,
-                .copy_batch = counter_copy_batch,
-                .presence = counter_presence,
-                .list = counter_list,
-                .list_prefix = counter_list_prefix,
-                .control_read_batch = counter_control_read_batch,
-                .remove = counter_remove,
-                .remove_batch = counter_remove_batch,
-            },
-    };
-}
+using kasumi::test::ContentCounterSnapshot;
+using kasumi::test::ContentCounterState;
+using kasumi::test::make_counting_transport;
+using kasumi::test::snapshot_content_counts;
 
 struct SyncNode {
     kasumi::test::TempWorkspace workspace{nullptr, nullptr};

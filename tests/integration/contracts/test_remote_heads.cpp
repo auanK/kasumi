@@ -2,6 +2,7 @@
 #include "application/history_storage/epoch.hpp"
 #include "application/profile.hpp"
 #include "cli/app.hpp"
+#include "kasumi/test/capture.hpp"
 #include "kasumi/test/history_storage.hpp"
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
@@ -9,23 +10,13 @@
 #include <algorithm>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <initializer_list>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
-
-std::string key_hex() {
-    constexpr char digits[] = "0123456789abcdef";
-    const auto key = test_key();
-    std::string result;
-    result.reserve(key.size() * 2);
-    for (const auto byte : key) {
-        result.push_back(digits[byte >> 4U]);
-        result.push_back(digits[byte & 0x0fU]);
-    }
-    return result;
-}
 
 void write_profile(const kasumi::application::ExecutionEnvironment& environment,
                    const std::filesystem::path& local,
@@ -38,45 +29,110 @@ void write_profile(const kasumi::application::ExecutionEnvironment& environment,
                                  "min_history_age_hours = 6\n");
 }
 
-TEST(RemoteHeadsContractTest, RealCliCallsInspectionWithoutMutation) {
-    auto remote = make_local_storage();
-    auto app_workspace =
-        kasumi::test::make_temp_workspace("remote-heads-cli-contract");
+struct RemoteHeadsCliEnv {
+    LocalStorage remote;
+    kasumi::test::TempWorkspace app_workspace;
+    kasumi::test::ScopedEnvironmentVariable app_root;
+    kasumi::test::ScopedEnvironmentVariable master_key;
+    kasumi::test::ScopedEnvironmentVariable no_password;
+    kasumi::test::ScopedEnvironmentVariable no_password_salt;
+    kasumi::application::ExecutionEnvironment environment;
+    std::filesystem::path local;
+    std::filesystem::path config_path;
+    std::filesystem::path key_path;
+    std::filesystem::path database_path;
+    std::vector<std::byte> config_before;
+    std::vector<std::byte> key_before;
+    std::vector<std::byte> database_before;
 
+    RemoteHeadsCliEnv(std::string_view name, bool create_persisted_profile)
+        : remote(make_local_storage()),
+          app_workspace(kasumi::test::make_temp_workspace(name)),
+          app_root(kasumi::test::scoped_config_home(
+              kasumi::test::workspace_path(app_workspace,
 #if defined(_WIN32)
-    auto app_root = kasumi::test::scoped_environment_variable(
-        "APPDATA",
-        kasumi::test::workspace_path(app_workspace, "appdata").string());
+                                           "appdata"
 #else
-    auto app_root = kasumi::test::scoped_environment_variable(
-        "XDG_CONFIG_HOME",
-        kasumi::test::workspace_path(app_workspace, "config").string());
+                                           "config"
 #endif
-    auto master_key = kasumi::test::scoped_environment_variable(
-        "KASUMI_MASTER_KEY", key_hex());
-    const auto environment =
-        kasumi::application::default_execution_environment();
-    const auto local = kasumi::test::workspace_path(app_workspace, "local");
-    write_profile(environment,
-                  local,
-                  kasumi::test::workspace_path(remote.workspace, "storage"));
+                                           ))),
+          master_key(kasumi::test::scoped_environment_variable(
+              "KASUMI_MASTER_KEY",
+              create_persisted_profile
+                  ? std::optional<std::string>{}
+                  : std::optional<std::string>{test_key_hex()})),
+          no_password(kasumi::test::scoped_environment_variable(
+              "KASUMI_PASSWORD", std::nullopt)),
+          no_password_salt(kasumi::test::scoped_environment_variable(
+              "KASUMI_PASSWORD2", std::nullopt)),
+          environment(kasumi::application::default_execution_environment()),
+          local(kasumi::test::workspace_path(app_workspace, "local")) {
+        const auto storage_dir =
+            kasumi::test::workspace_path(remote.workspace, "storage");
+        if (create_persisted_profile) {
+            std::filesystem::create_directories(
+                environment.app_data_dir.parent_path());
+            const kasumi::application::Profile profile{
+                .name = "demo",
+                .local_dir = local,
+                .remote_dir = storage_dir.string()};
+            const auto created = kasumi::application::create_profile(
+                environment,
+                profile,
+                kasumi::application::MasterKeyHex{test_key_hex()});
+            EXPECT_TRUE(created) << (created ? "" : created.error().detail);
+            config_path = environment.app_data_dir / "config.toml";
+            key_path = environment.app_data_dir / "profiles/demo/key.bin";
+            database_path =
+                environment.app_data_dir / "profiles/demo/db.sqlite";
+            config_before = kasumi::test::read_binary(config_path);
+            key_before = kasumi::test::read_binary(key_path);
+            database_before = kasumi::test::read_binary(database_path);
+        } else {
+            write_profile(environment, local, storage_dir);
+        }
+    }
 
+    void expect_profile_unchanged() const {
+        EXPECT_EQ(kasumi::test::read_binary(config_path), config_before);
+        EXPECT_EQ(kasumi::test::read_binary(key_path), key_before);
+        EXPECT_EQ(kasumi::test::read_binary(database_path), database_before);
+        EXPECT_FALSE(std::filesystem::exists(local));
+    }
+};
+
+std::string run_cli(std::initializer_list<std::string_view> args,
+                    int expected_exit = 0) {
+    std::vector<std::string> owned;
+    owned.reserve(args.size() + 1);
+    owned.emplace_back("kasumi");
+    for (const auto arg : args) {
+        owned.emplace_back(arg);
+    }
+    std::vector<char*> argv;
+    argv.reserve(owned.size());
+    for (auto& s : owned) {
+        argv.push_back(s.data());
+    }
+    int exit_code = -1;
+    auto output = kasumi::test::capture_stdout([&] {
+        exit_code =
+            kasumi::cli::run(static_cast<int>(argv.size()), argv.data());
+    });
+    EXPECT_EQ(exit_code, expected_exit) << output;
+    return output;
+}
+
+TEST(RemoteHeadsContractTest, RealCliCallsInspectionWithoutMutation) {
+    RemoteHeadsCliEnv cli("remote-heads-cli-contract", false);
     const auto published =
-        publish(remote, make_commit(0, {}, "file.txt", "contents").value());
+        publish(cli.remote, make_commit(0, {}, "file.txt", "contents").value());
     ASSERT_FALSE(published.head.commit_id.empty());
-    const auto before = kasumi::transport::list(remote.transport);
+    const auto before = kasumi::transport::list(cli.remote.transport);
 
-    char command[] = "kasumi";
-    char remote_command[] = "remote";
-    char heads[] = "heads";
-    char profile[] = "demo";
-    char* argv[] = {command, remote_command, heads, profile};
-    testing::internal::CaptureStdout();
-    const auto exit_code = kasumi::cli::run(4, argv);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = run_cli({"remote", "heads", "demo"});
 
-    const auto after = kasumi::transport::list(remote.transport);
-    EXPECT_EQ(exit_code, 0);
+    const auto after = kasumi::transport::list(cli.remote.transport);
     EXPECT_TRUE(output.find("Heads remotas (1)") != std::string::npos ||
                 output.find("Remote heads (1)") != std::string::npos);
     EXPECT_NE(output.find(published.head.commit_id), std::string::npos);
@@ -85,67 +141,22 @@ TEST(RemoteHeadsContractTest, RealCliCallsInspectionWithoutMutation) {
     ASSERT_TRUE(before.has_value());
     ASSERT_TRUE(after.has_value());
     EXPECT_EQ(*before, *after);
-    EXPECT_FALSE(std::filesystem::exists(local));
+    EXPECT_FALSE(std::filesystem::exists(cli.local));
     EXPECT_FALSE(
-        std::filesystem::exists(environment.app_data_dir / "profiles"));
+        std::filesystem::exists(cli.environment.app_data_dir / "profiles"));
 }
 
 TEST(RemoteHeadsContractTest,
      RealProfileUsesPersistedKeyWithoutEnvironmentCredentials) {
-    auto remote = make_local_storage();
-    auto app_workspace =
-        kasumi::test::make_temp_workspace("remote-heads-real-profile");
-
-#if defined(_WIN32)
-    auto app_root = kasumi::test::scoped_environment_variable(
-        "APPDATA",
-        kasumi::test::workspace_path(app_workspace, "appdata").string());
-#else
-    auto app_root = kasumi::test::scoped_environment_variable(
-        "XDG_CONFIG_HOME",
-        kasumi::test::workspace_path(app_workspace, "config").string());
-#endif
-    auto no_master_key = kasumi::test::scoped_environment_variable(
-        "KASUMI_MASTER_KEY", std::nullopt);
-    auto no_password = kasumi::test::scoped_environment_variable(
-        "KASUMI_PASSWORD", std::nullopt);
-    auto no_password_salt = kasumi::test::scoped_environment_variable(
-        "KASUMI_PASSWORD2", std::nullopt);
-    const auto environment =
-        kasumi::application::default_execution_environment();
-    std::filesystem::create_directories(environment.app_data_dir.parent_path());
-    const auto local = kasumi::test::workspace_path(app_workspace, "local");
-    const kasumi::application::Profile profile{
-        .name = "demo",
-        .local_dir = local,
-        .remote_dir =
-            kasumi::test::workspace_path(remote.workspace, "storage").string()};
-    const auto created = kasumi::application::create_profile(
-        environment, profile, kasumi::application::MasterKeyHex{key_hex()});
-    ASSERT_TRUE(created) << created.error().detail;
-
-    const auto config_path = environment.app_data_dir / "config.toml";
-    const auto key_path = environment.app_data_dir / "profiles/demo/key.bin";
-    const auto database_path = environment.app_data_dir / "profiles/demo/db.sqlite";
-    const auto config_before = kasumi::test::read_binary(config_path);
-    const auto key_before = kasumi::test::read_binary(key_path);
-    const auto database_before = kasumi::test::read_binary(database_path);
+    RemoteHeadsCliEnv cli("remote-heads-real-profile", true);
     const auto published =
-        publish(remote, make_commit(0, {}, "file.txt", "contents").value());
+        publish(cli.remote, make_commit(0, {}, "file.txt", "contents").value());
     ASSERT_FALSE(published.head.commit_id.empty());
-    const auto before = kasumi::transport::list(remote.transport);
+    const auto before = kasumi::transport::list(cli.remote.transport);
 
-    char command[] = "kasumi";
-    char remote_command[] = "remote";
-    char heads[] = "heads";
-    char profile_name[] = "demo";
-    char* argv[] = {command, remote_command, heads, profile_name};
-    testing::internal::CaptureStdout();
-    const auto exit_code = kasumi::cli::run(4, argv);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = run_cli({"remote", "heads", "demo"});
 
-    const auto after = kasumi::transport::list(remote.transport);
-    EXPECT_EQ(exit_code, 0);
+    const auto after = kasumi::transport::list(cli.remote.transport);
     EXPECT_TRUE(output.find("Heads remotas (1)") != std::string::npos ||
                 output.find("Remote heads (1)") != std::string::npos);
     EXPECT_NE(output.find(published.head.commit_id), std::string::npos);
@@ -154,86 +165,22 @@ TEST(RemoteHeadsContractTest,
     ASSERT_TRUE(before.has_value());
     ASSERT_TRUE(after.has_value());
     EXPECT_EQ(*before, *after);
-    EXPECT_EQ(kasumi::test::read_binary(config_path), config_before);
-    EXPECT_EQ(kasumi::test::read_binary(key_path), key_before);
-    EXPECT_EQ(kasumi::test::read_binary(database_path), database_before);
-    EXPECT_FALSE(std::filesystem::exists(local));
+    cli.expect_profile_unchanged();
 }
 
 TEST(RemoteHeadsContractTest,
      RealProfileRemoteTreeUsesPersistedKeyWithoutMutation) {
-    auto remote = make_local_storage();
-    auto app_workspace =
-        kasumi::test::make_temp_workspace("remote-tree-real-profile");
-
-#if defined(_WIN32)
-    auto app_root = kasumi::test::scoped_environment_variable(
-        "APPDATA",
-        kasumi::test::workspace_path(app_workspace, "appdata").string());
-#else
-    auto app_root = kasumi::test::scoped_environment_variable(
-        "XDG_CONFIG_HOME",
-        kasumi::test::workspace_path(app_workspace, "config").string());
-#endif
-    auto no_master_key = kasumi::test::scoped_environment_variable(
-        "KASUMI_MASTER_KEY", std::nullopt);
-    auto no_password = kasumi::test::scoped_environment_variable(
-        "KASUMI_PASSWORD", std::nullopt);
-    auto no_password_salt = kasumi::test::scoped_environment_variable(
-        "KASUMI_PASSWORD2", std::nullopt);
-    const auto environment =
-        kasumi::application::default_execution_environment();
-    std::filesystem::create_directories(environment.app_data_dir.parent_path());
-    const auto local = kasumi::test::workspace_path(app_workspace, "local");
-    const kasumi::application::Profile profile{
-        .name = "demo",
-        .local_dir = local,
-        .remote_dir =
-            kasumi::test::workspace_path(remote.workspace, "storage").string()};
-    const auto created = kasumi::application::create_profile(
-        environment, profile, kasumi::application::MasterKeyHex{key_hex()});
-    ASSERT_TRUE(created) << created.error().detail;
-
-    const auto config_path = environment.app_data_dir / "config.toml";
-    const auto key_path = environment.app_data_dir / "profiles/demo/key.bin";
-    const auto database_path = environment.app_data_dir / "profiles/demo/db.sqlite";
-    const auto config_before = kasumi::test::read_binary(config_path);
-    const auto key_before = kasumi::test::read_binary(key_path);
-    const auto database_before = kasumi::test::read_binary(database_path);
+    RemoteHeadsCliEnv cli("remote-tree-real-profile", true);
     const auto published =
-        publish(remote, make_commit(0, {}, "file.txt", "contents").value());
+        publish(cli.remote, make_commit(0, {}, "file.txt", "contents").value());
     ASSERT_FALSE(published.head.commit_id.empty());
-    const auto before = kasumi::transport::list(remote.transport);
+    const auto before = kasumi::transport::list(cli.remote.transport);
 
-    char command[] = "kasumi";
-    char remote_command[] = "remote";
-    char tree[] = "tree";
-    char profile_name[] = "demo";
-    char* automatic_argv[] = {command, remote_command, tree, profile_name};
-    testing::internal::CaptureStdout();
-    const auto automatic_exit = kasumi::cli::run(4, automatic_argv);
-    const auto automatic_output = testing::internal::GetCapturedStdout();
+    const auto automatic_output = run_cli({"remote", "tree", "demo"});
+    const auto explicit_output =
+        run_cli({"remote", "tree", "demo", "--head", published.head.commit_id});
 
-    char explicit_command[] = "kasumi";
-    char explicit_remote[] = "remote";
-    char explicit_tree[] = "tree";
-    char explicit_profile[] = "demo";
-    char head_option[] = "--head";
-    char head_id[65]{};
-    std::ranges::copy(published.head.commit_id, head_id);
-    char* explicit_argv[] = {explicit_command,
-                             explicit_remote,
-                             explicit_tree,
-                             explicit_profile,
-                             head_option,
-                             head_id};
-    testing::internal::CaptureStdout();
-    const auto explicit_exit = kasumi::cli::run(6, explicit_argv);
-    const auto explicit_output = testing::internal::GetCapturedStdout();
-
-    const auto after = kasumi::transport::list(remote.transport);
-    EXPECT_EQ(automatic_exit, 0);
-    EXPECT_EQ(explicit_exit, 0);
+    const auto after = kasumi::transport::list(cli.remote.transport);
     EXPECT_NE(automatic_output.find("Head: " + published.head.commit_id),
               std::string::npos);
     EXPECT_NE(automatic_output.find("file.txt"), std::string::npos);
@@ -242,71 +189,25 @@ TEST(RemoteHeadsContractTest,
     ASSERT_TRUE(before.has_value());
     ASSERT_TRUE(after.has_value());
     EXPECT_EQ(*before, *after);
-    EXPECT_EQ(kasumi::test::read_binary(config_path), config_before);
-    EXPECT_EQ(kasumi::test::read_binary(key_path), key_before);
-    EXPECT_EQ(kasumi::test::read_binary(database_path), database_before);
-    EXPECT_FALSE(std::filesystem::exists(local));
+    cli.expect_profile_unchanged();
 }
 
 TEST(RemoteHeadsContractTest,
      RealProfileRemoteCommitsUsesPersistedKeyWithoutMutation) {
-    auto remote = make_local_storage();
-    auto app_workspace =
-        kasumi::test::make_temp_workspace("remote-commits-real-profile");
-
-#if defined(_WIN32)
-    auto app_root = kasumi::test::scoped_environment_variable(
-        "APPDATA",
-        kasumi::test::workspace_path(app_workspace, "appdata").string());
-#else
-    auto app_root = kasumi::test::scoped_environment_variable(
-        "XDG_CONFIG_HOME",
-        kasumi::test::workspace_path(app_workspace, "config").string());
-#endif
-    auto no_master_key = kasumi::test::scoped_environment_variable(
-        "KASUMI_MASTER_KEY", std::nullopt);
-    auto no_password = kasumi::test::scoped_environment_variable(
-        "KASUMI_PASSWORD", std::nullopt);
-    auto no_password_salt = kasumi::test::scoped_environment_variable(
-        "KASUMI_PASSWORD2", std::nullopt);
-    const auto environment =
-        kasumi::application::default_execution_environment();
-    std::filesystem::create_directories(environment.app_data_dir.parent_path());
-    const auto local = kasumi::test::workspace_path(app_workspace, "local");
-    const kasumi::application::Profile profile{
-        .name = "demo",
-        .local_dir = local,
-        .remote_dir =
-            kasumi::test::workspace_path(remote.workspace, "storage").string()};
-    const auto created = kasumi::application::create_profile(
-        environment, profile, kasumi::application::MasterKeyHex{key_hex()});
-    ASSERT_TRUE(created) << created.error().detail;
-
-    const auto config_path = environment.app_data_dir / "config.toml";
-    const auto key_path = environment.app_data_dir / "profiles/demo/key.bin";
-    const auto database_path = environment.app_data_dir / "profiles/demo/db.sqlite";
-    const auto config_before = kasumi::test::read_binary(config_path);
-    const auto key_before = kasumi::test::read_binary(key_path);
-    const auto database_before = kasumi::test::read_binary(database_path);
+    RemoteHeadsCliEnv cli("remote-commits-real-profile", true);
     const auto c0 =
-        publish(remote, make_commit(0, {}, "c0.txt", "zero").value());
-    const auto c1 = publish(
-        remote, make_commit(1, {c0.head.commit_id}, "c1.txt", "one").value());
-    const auto c2 = publish(
-        remote, make_commit(2, {c1.head.commit_id}, "c2.txt", "two").value());
-    const auto before = kasumi::transport::list(remote.transport);
+        publish(cli.remote, make_commit(0, {}, "c0.txt", "zero").value());
+    const auto c1 =
+        publish(cli.remote,
+                make_commit(1, {c0.head.commit_id}, "c1.txt", "one").value());
+    const auto c2 =
+        publish(cli.remote,
+                make_commit(2, {c1.head.commit_id}, "c2.txt", "two").value());
+    const auto before = kasumi::transport::list(cli.remote.transport);
 
-    char command[] = "kasumi";
-    char remote_command[] = "remote";
-    char commits[] = "commits";
-    char profile_name[] = "demo";
-    char* argv[] = {command, remote_command, commits, profile_name};
-    testing::internal::CaptureStdout();
-    const auto exit_code = kasumi::cli::run(4, argv);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = run_cli({"remote", "commits", "demo"});
 
-    const auto after = kasumi::transport::list(remote.transport);
-    EXPECT_EQ(exit_code, 0);
+    const auto after = kasumi::transport::list(cli.remote.transport);
     EXPECT_TRUE(output.find("Commits remotos (3)") != std::string::npos ||
                 output.find("Remote commits (3)") != std::string::npos);
     EXPECT_NE(output.find(c2.head.commit_id), std::string::npos);
@@ -318,58 +219,19 @@ TEST(RemoteHeadsContractTest,
     ASSERT_TRUE(before.has_value());
     ASSERT_TRUE(after.has_value());
     EXPECT_EQ(*before, *after);
-    EXPECT_EQ(kasumi::test::read_binary(config_path), config_before);
-    EXPECT_EQ(kasumi::test::read_binary(key_path), key_before);
-    EXPECT_EQ(kasumi::test::read_binary(database_path), database_before);
-    EXPECT_FALSE(std::filesystem::exists(local));
+    cli.expect_profile_unchanged();
 }
 
 TEST(RemoteHeadsContractTest,
      RealProfileInspectionAndDownloadStayReadOnlyEndToEnd) {
-    auto remote = make_local_storage();
-    auto app_workspace =
-        kasumi::test::make_temp_workspace("remote-details-real-profile");
-
-#if defined(_WIN32)
-    auto app_root = kasumi::test::scoped_environment_variable(
-        "APPDATA",
-        kasumi::test::workspace_path(app_workspace, "appdata").string());
-#else
-    auto app_root = kasumi::test::scoped_environment_variable(
-        "XDG_CONFIG_HOME",
-        kasumi::test::workspace_path(app_workspace, "config").string());
-#endif
-    auto no_master_key = kasumi::test::scoped_environment_variable(
-        "KASUMI_MASTER_KEY", std::nullopt);
-    auto no_password = kasumi::test::scoped_environment_variable(
-        "KASUMI_PASSWORD", std::nullopt);
-    auto no_password_salt = kasumi::test::scoped_environment_variable(
-        "KASUMI_PASSWORD2", std::nullopt);
-    const auto environment =
-        kasumi::application::default_execution_environment();
-    std::filesystem::create_directories(environment.app_data_dir.parent_path());
-    const auto local = kasumi::test::workspace_path(app_workspace, "local");
-    const kasumi::application::Profile profile{
-        .name = "demo",
-        .local_dir = local,
-        .remote_dir =
-            kasumi::test::workspace_path(remote.workspace, "storage").string()};
-    ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, kasumi::application::MasterKeyHex{key_hex()}));
-
-    const auto config_path = environment.app_data_dir / "config.toml";
-    const auto key_path = environment.app_data_dir / "profiles/demo/key.bin";
-    const auto database_path = environment.app_data_dir / "profiles/demo/db.sqlite";
-    const auto config_before = kasumi::test::read_binary(config_path);
-    const auto key_before = kasumi::test::read_binary(key_path);
-    const auto database_before = kasumi::test::read_binary(database_path);
+    RemoteHeadsCliEnv cli("remote-details-real-profile", true);
     const auto remote_commit =
         make_commit(0, {}, "file.txt", "contents").value();
-    const auto published = publish(remote, remote_commit);
+    const auto published = publish(cli.remote, remote_commit);
     const auto plaintext =
-        kasumi::test::workspace_path(remote.workspace, "content.plain");
+        kasumi::test::workspace_path(cli.remote.workspace, "content.plain");
     const auto ciphertext =
-        kasumi::test::workspace_path(remote.workspace, "content.enc");
+        kasumi::test::workspace_path(cli.remote.workspace, "content.enc");
     kasumi::test::write_text(plaintext, "contents");
     ASSERT_TRUE(
         kasumi::crypto::encrypt_file(plaintext,
@@ -379,7 +241,7 @@ TEST(RemoteHeadsContractTest,
     const auto content_id = kasumi::crypto::content_identifier(
         test_key(), remote_commit.tree.rows.back().hash);
     ASSERT_TRUE(
-        kasumi::transport::put(remote.transport, ciphertext, content_id));
+        kasumi::transport::put(cli.remote.transport, ciphertext, content_id));
     const kasumi::application::history_storage::epoch::Epoch genesis{
         .vault_id = std::string(64, 'a'),
         .sequence = 0,
@@ -390,105 +252,35 @@ TEST(RemoteHeadsContractTest,
         kasumi::application::history_storage::epoch::seal(genesis, test_key());
     ASSERT_TRUE(sealed_epoch.has_value());
     ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
-        remote.transport,
+        cli.remote.transport,
         test_key(),
         *sealed_epoch,
-        kasumi::test::workspace_root(remote.workspace)));
-    const auto before = kasumi::transport::list(remote.transport);
+        kasumi::test::workspace_root(cli.remote.workspace)));
+    const auto before = kasumi::transport::list(cli.remote.transport);
     const auto remote_root =
-        kasumi::test::workspace_path(remote.workspace, "storage");
+        kasumi::test::workspace_path(cli.remote.workspace, "storage");
     const auto remote_bytes_before = kasumi::test::snapshot_tree(remote_root);
 
-    char command[] = "kasumi";
-    char remote_command[] = "remote";
-    char profile_name[] = "demo";
-    char summary[] = "summary";
-    char* summary_argv[] = {command, remote_command, summary, profile_name};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::run(4, summary_argv), 0);
-    const auto summary_output = testing::internal::GetCapturedStdout();
-
-    char stat[] = "stat";
-    char path[] = "file.txt";
-    char* stat_argv[] = {command, remote_command, stat, profile_name, path};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::run(5, stat_argv), 0);
-    const auto stat_output = testing::internal::GetCapturedStdout();
-
-    char commit[] = "commit";
-    char commit_id[65]{};
-    std::ranges::copy(published.head.commit_id, commit_id);
-    char* commit_argv[] = {
-        command, remote_command, commit, profile_name, commit_id};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::run(5, commit_argv), 0);
-    const auto commit_output = testing::internal::GetCapturedStdout();
+    const auto summary_output = run_cli({"remote", "summary", "demo"});
+    const auto stat_output = run_cli({"remote", "stat", "demo", "file.txt"});
+    const auto commit_output =
+        run_cli({"remote", "commit", "demo", published.head.commit_id});
 
     const auto destination =
-        kasumi::test::workspace_path(app_workspace, "download/file.txt");
+        kasumi::test::workspace_path(cli.app_workspace, "download/file.txt");
     std::filesystem::create_directories(destination.parent_path());
-    char get[] = "get";
-    char remote_path[] = "file.txt";
-    auto destination_string = destination.string();
-    char* get_argv[] = {command,
-                        remote_command,
-                        get,
-                        profile_name,
-                        remote_path,
-                        destination_string.data()};
-    testing::internal::CaptureStdout();
-    const auto get_exit_code = kasumi::cli::run(6, get_argv);
-    const auto get_output = testing::internal::GetCapturedStdout();
-    EXPECT_EQ(get_exit_code, 0) << get_output;
+    const auto get_output =
+        run_cli({"remote", "get", "demo", "file.txt", destination.string()});
+    const auto epochs_output = run_cli({"remote", "epochs", "demo"});
+    const auto epoch_output = run_cli({"remote", "epoch", "demo", "0"});
+    const auto contents_output = run_cli({"remote", "contents", "demo"});
+    const auto audit_output =
+        run_cli({"remote", "contents", "demo", "--audit"});
+    const auto content_output =
+        run_cli({"remote", "content", "demo", content_id});
 
-    char epochs[] = "epochs";
-    char* epochs_argv[] = {command, remote_command, epochs, profile_name};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::run(4, epochs_argv), 0);
-    const auto epochs_output = testing::internal::GetCapturedStdout();
-
-    char epoch[] = "epoch";
-    char epoch_sequence[] = "0";
-    char* epoch_argv[] = {
-        command, remote_command, epoch, profile_name, epoch_sequence};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::run(5, epoch_argv), 0);
-    const auto epoch_output = testing::internal::GetCapturedStdout();
-
-    char contents[] = "contents";
-    char* contents_argv[] = {command, remote_command, contents, profile_name};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::run(4, contents_argv), 0);
-    const auto contents_output = testing::internal::GetCapturedStdout();
-
-    char audit[] = "--audit";
-    char* audit_argv[] = {
-        command, remote_command, contents, profile_name, audit};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::run(5, audit_argv), 0);
-    const auto audit_output = testing::internal::GetCapturedStdout();
-
-    char content[] = "content";
-    char content_identifier[65]{};
-    std::ranges::copy(content_id, content_identifier);
-    char* content_argv[] = {
-        command, remote_command, content, profile_name, content_identifier};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::run(5, content_argv), 0);
-    const auto content_output = testing::internal::GetCapturedStdout();
-
-    const auto run_physical_inspection = [](std::string subcommand) {
-        std::vector<std::string> arguments{
-            "kasumi", "remote", std::move(subcommand), "demo"};
-        std::vector<char*> argv;
-        for (auto& argument : arguments) {
-            argv.push_back(argument.data());
-        }
-        testing::internal::CaptureStdout();
-        const auto exit_code =
-            kasumi::cli::run(static_cast<int>(argv.size()), argv.data());
-        auto output = testing::internal::GetCapturedStdout();
-        EXPECT_EQ(exit_code, 0) << output;
+    const auto run_physical_inspection = [](std::string_view subcommand) {
+        const auto output = run_cli({"remote", subcommand, "demo"});
         EXPECT_EQ(output.find("[Rede]"), std::string::npos);
         return output;
     };
@@ -498,7 +290,7 @@ TEST(RemoteHeadsContractTest,
     const auto writers_output = run_physical_inspection("writers");
     const auto health_output = run_physical_inspection("health");
 
-    const auto after = kasumi::transport::list(remote.transport);
+    const auto after = kasumi::transport::list(cli.remote.transport);
     const auto remote_bytes_after = kasumi::test::snapshot_tree(remote_root);
     EXPECT_TRUE(summary_output.find("Resumo remoto") != std::string::npos ||
                 summary_output.find("Remote summary") != std::string::npos);
@@ -551,24 +343,23 @@ TEST(RemoteHeadsContractTest,
         health_output.find("Saúde remota: saudável") != std::string::npos ||
         health_output.find("Remote health report") != std::string::npos ||
         health_output.find("healthy") != std::string::npos);
-    EXPECT_EQ(summary_output.find("[Rede]"), std::string::npos);
-    EXPECT_EQ(stat_output.find("[Rede]"), std::string::npos);
-    EXPECT_EQ(commit_output.find("[Rede]"), std::string::npos);
-    EXPECT_EQ(get_output.find("[Rede]"), std::string::npos);
-    EXPECT_EQ(epochs_output.find("[Rede]"), std::string::npos);
-    EXPECT_EQ(epoch_output.find("[Rede]"), std::string::npos);
-    EXPECT_EQ(contents_output.find("[Rede]"), std::string::npos);
-    EXPECT_EQ(audit_output.find("[Rede]"), std::string::npos);
-    EXPECT_EQ(content_output.find("[Rede]"), std::string::npos);
+    for (const auto* out : {&summary_output,
+                            &stat_output,
+                            &commit_output,
+                            &get_output,
+                            &epochs_output,
+                            &epoch_output,
+                            &contents_output,
+                            &audit_output,
+                            &content_output}) {
+        EXPECT_EQ(out->find("[Rede]"), std::string::npos);
+    }
     EXPECT_EQ(kasumi::test::read_text(destination), "contents");
     ASSERT_TRUE(before.has_value());
     ASSERT_TRUE(after.has_value());
     EXPECT_EQ(*before, *after);
     EXPECT_EQ(remote_bytes_after, remote_bytes_before);
-    EXPECT_EQ(kasumi::test::read_binary(config_path), config_before);
-    EXPECT_EQ(kasumi::test::read_binary(key_path), key_before);
-    EXPECT_EQ(kasumi::test::read_binary(database_path), database_before);
-    EXPECT_FALSE(std::filesystem::exists(local));
+    cli.expect_profile_unchanged();
 }
 
 } // namespace
