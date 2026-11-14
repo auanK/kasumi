@@ -85,11 +85,6 @@ ReachabilityMarkerState marker_state(detail::VariantState state) {
     return ReachabilityMarkerState::InvalidCommit;
 }
 
-void sort_unique(std::vector<std::string>& values) {
-    std::ranges::sort(values);
-    values.erase(std::ranges::unique(values).begin(), values.end());
-}
-
 struct TraceGuard {
     std::string_view name;
     platform::perf_trace::Token token;
@@ -156,12 +151,9 @@ ReachabilityResult inventory_impl(
     }
 
     if (storage.storage.get_batch != nullptr) {
-        const auto commits_dir = layout.commits_prefix.ends_with('/')
-                                     ? layout.commits_prefix.substr(
-                                           0, layout.commits_prefix.size() - 1)
-                                     : layout.commits_prefix;
         transport::GetBatch batch{
-            .source_prefix = std::string{commits_dir},
+            .source_prefix =
+                std::string{detail::trim_trailing_slash(layout.commits_prefix)},
             .destination_root = (*temporary)->workspace.root,
         };
         for (const auto& [unused, references] : listed->commit_variants) {
@@ -191,8 +183,11 @@ ReachabilityResult inventory_impl(
         auto& commit = commits.back();
         commit.variants.reserve(references.size());
         for (const auto& reference : references) {
-            auto loaded = detail::try_load_variant(
-                storage, key, reference, (*temporary)->workspace.root, sequence++);
+            auto loaded = detail::try_load_variant(storage,
+                                                   key,
+                                                   reference,
+                                                   (*temporary)->workspace.root,
+                                                   sequence++);
             if (!loaded) {
                 return std::unexpected(loaded.error());
             }
@@ -254,8 +249,8 @@ ReachabilityResult inventory_impl(
                 }
                 continue;
             }
-            const auto path =
-                (*temporary)->workspace.root / ("epoch-" + std::to_string(sequence++));
+            const auto path = (*temporary)->workspace.root /
+                              ("epoch-" + std::to_string(sequence++));
             const auto get_trace = platform::perf_trace::begin();
             auto downloaded = detail::download(storage, identifier, path);
             platform::perf_trace::finish("rc/get_epoch", get_trace);
@@ -316,8 +311,11 @@ ReachabilityResult inventory_impl(
         if (!marker.reference.has_value()) {
             continue;
         }
-        auto inspected = detail::inspect_marker(
-            storage, layout, *marker.reference, (*temporary)->workspace.root, sequence);
+        auto inspected = detail::inspect_marker(storage,
+                                                layout,
+                                                *marker.reference,
+                                                (*temporary)->workspace.root,
+                                                sequence);
         if (!inspected) {
             return std::unexpected(inspected.error());
         }
@@ -405,10 +403,10 @@ ReachabilityResult inventory_impl(
         }
     }
 
-    sort_unique(result.logical_heads);
-    sort_unique(result.missing_parent_ids);
-    sort_unique(result.invalid_parent_ids);
-    sort_unique(result.unknown_history_objects);
+    detail::sort_unique(result.logical_heads);
+    detail::sort_unique(result.missing_parent_ids);
+    detail::sort_unique(result.invalid_parent_ids);
+    detail::sort_unique(result.unknown_history_objects);
     for (auto& commit : commits) {
         if (commit.reachable) {
             result.reachable_commits.push_back(commit.commit_id);
@@ -426,13 +424,10 @@ ReachabilityResult
 inventory_reachability(transport::Transport& storage,
                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                        const std::filesystem::path& workspace_root) {
-    try {
+    return detail::guard_alloc([&] {
         return inventory_impl(
             storage, key, workspace_root, std::nullopt, std::nullopt);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 ReachabilityResult
@@ -441,17 +436,14 @@ inventory_reachability(transport::Transport& storage,
                        std::span<const std::string> identifiers,
                        const std::filesystem::path& workspace_root,
                        std::string_view trace_scope) {
-    try {
+    return detail::guard_alloc([&] {
         return inventory_impl(storage,
                               key,
                               workspace_root,
                               identifiers,
                               std::nullopt,
                               trace_scope);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 ReachabilityResult
@@ -460,13 +452,10 @@ inventory_reachability(transport::Transport& storage,
                        std::span<const std::string> identifiers,
                        std::span<const epoch::VerifiedEpoch> verified_epochs,
                        const std::filesystem::path& workspace_root) {
-    try {
+    return detail::guard_alloc([&] {
         return inventory_impl(
             storage, key, workspace_root, identifiers, verified_epochs);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 } // namespace kasumi::application::history_storage

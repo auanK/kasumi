@@ -15,7 +15,6 @@
 namespace kasumi::application::history_storage::maintenance_protocol {
 namespace {
 
-
 constexpr std::size_t maximum_marker_size = 512;
 constexpr std::size_t TOKEN_HEX_SIZE = 32;
 
@@ -26,11 +25,12 @@ bool is_canonical_hex32(std::string_view value) noexcept {
            });
 }
 
-Error error(ErrorCode code,
-            std::string detail,
-            std::optional<std::string> identifier = std::nullopt,
-            std::optional<BarrierRemovalStage> stage = std::nullopt,
-            std::optional<BarrierRemovalMutationState> mutation_state = std::nullopt) {
+Error error(
+    ErrorCode code,
+    std::string detail,
+    std::optional<std::string> identifier = std::nullopt,
+    std::optional<BarrierRemovalStage> stage = std::nullopt,
+    std::optional<BarrierRemovalMutationState> mutation_state = std::nullopt) {
     return Error{
         .code = code,
         .detail = std::move(detail),
@@ -46,8 +46,9 @@ Error transport_error(
     std::optional<std::string> identifier = std::nullopt,
     std::optional<BarrierRemovalStage> stage = std::nullopt,
     std::optional<BarrierRemovalMutationState> mutation_state = std::nullopt) {
-    std::string detail = prefix_msg ? (*prefix_msg + ": " + transport::describe(source))
-                                    : transport::describe(source);
+    std::string detail =
+        prefix_msg ? (*prefix_msg + ": " + transport::describe(source))
+                   : transport::describe(source);
     auto result = error(ErrorCode::TransportFailure,
                         std::move(detail),
                         std::move(identifier),
@@ -70,11 +71,14 @@ Error history_error(const history_storage::Error& source) {
 std::vector<std::uint8_t> payload(std::string_view kind,
                                   std::string_view token) {
     constexpr std::string_view prefix = "kasumi-gc-v1:";
-    const std::size_t max_allowed = std::string().max_size() - prefix.size() - 1;
-    if (kind.size() > max_allowed || token.size() > (max_allowed - kind.size())) {
+    const std::size_t max_allowed =
+        std::string().max_size() - prefix.size() - 1;
+    if (kind.size() > max_allowed ||
+        token.size() > (max_allowed - kind.size())) {
         return {};
     }
-    const std::size_t total_size = prefix.size() + kind.size() + 1 + token.size();
+    const std::size_t total_size =
+        prefix.size() + kind.size() + 1 + token.size();
     std::string value;
     value.reserve(total_size);
     value.append(prefix);
@@ -212,9 +216,8 @@ bool contains_name(const std::vector<std::string>& names,
     return std::ranges::find(names, name) != names.end();
 }
 
-bool valid_sha256(std::string_view value) {
-    const auto parsed = hash_from_hex(value);
-    return parsed && hash_hex(*parsed) == value;
+bool valid_sha256(std::string_view value) noexcept {
+    return history::valid_commit_id(value);
 }
 
 std::expected<bool, Error>
@@ -557,7 +560,8 @@ remove_barrier(transport::Transport& storage,
                const std::filesystem::path& workspace_root) {
     if (!transport::valid(storage) || workspace_root.empty()) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "invalid barrier removal context",
+            error(ErrorCode::InvalidInput,
+                  "invalid barrier removal context",
                   layout.barrier_identifier,
                   BarrierRemovalStage::CheckingPresence,
                   BarrierRemovalMutationState::NotAttempted));
@@ -565,12 +569,12 @@ remove_barrier(transport::Transport& storage,
 
     auto present = transport::presence(storage, layout.barrier_identifier);
     if (!present) {
-        return std::unexpected(transport_error(
-            present.error(),
-            "could not check maintenance barrier presence",
-            layout.barrier_identifier,
-            BarrierRemovalStage::CheckingPresence,
-            BarrierRemovalMutationState::NotAttempted));
+        return std::unexpected(
+            transport_error(present.error(),
+                            "could not check maintenance barrier presence",
+                            layout.barrier_identifier,
+                            BarrierRemovalStage::CheckingPresence,
+                            BarrierRemovalMutationState::NotAttempted));
     }
     if (*present == transport::Presence::Absent) {
         auto writers = active_writers(storage, layout);
@@ -606,12 +610,12 @@ remove_barrier(transport::Transport& storage,
                       BarrierRemovalStage::DownloadingPayload,
                       BarrierRemovalMutationState::NotAttempted));
         }
-        return std::unexpected(transport_error(
-            downloaded.error(),
-            "could not download maintenance barrier",
-            layout.barrier_identifier,
-            BarrierRemovalStage::DownloadingPayload,
-            BarrierRemovalMutationState::NotAttempted));
+        return std::unexpected(
+            transport_error(downloaded.error(),
+                            "could not download maintenance barrier",
+                            layout.barrier_identifier,
+                            BarrierRemovalStage::DownloadingPayload,
+                            BarrierRemovalMutationState::NotAttempted));
     }
     auto observed = detail::read_file(copy, maximum_marker_size);
     if (!observed) {
@@ -626,21 +630,21 @@ remove_barrier(transport::Transport& storage,
     const std::string_view payload_sv{
         reinterpret_cast<const char*>(observed->data()), observed->size()};
     if (!payload_sv.starts_with(prefix)) {
-        return std::unexpected(error(
-            ErrorCode::InvalidControlObject,
-            "invalid barrier payload prefix",
-            layout.barrier_identifier,
-            BarrierRemovalStage::ValidatingPayload,
-            BarrierRemovalMutationState::NotAttempted));
+        return std::unexpected(
+            error(ErrorCode::InvalidControlObject,
+                  "invalid barrier payload prefix",
+                  layout.barrier_identifier,
+                  BarrierRemovalStage::ValidatingPayload,
+                  BarrierRemovalMutationState::NotAttempted));
     }
     const auto token = payload_sv.substr(prefix.size());
     if (!is_canonical_hex32(token)) {
-        return std::unexpected(error(
-            ErrorCode::InvalidControlObject,
-            "invalid barrier token",
-            layout.barrier_identifier,
-            BarrierRemovalStage::ValidatingPayload,
-            BarrierRemovalMutationState::NotAttempted));
+        return std::unexpected(
+            error(ErrorCode::InvalidControlObject,
+                  "invalid barrier token",
+                  layout.barrier_identifier,
+                  BarrierRemovalStage::ValidatingPayload,
+                  BarrierRemovalMutationState::NotAttempted));
     }
 
     auto writers = active_writers(storage, layout);
@@ -655,53 +659,52 @@ remove_barrier(transport::Transport& storage,
 
     auto local_hash = crypto::physical::hash_file(copy, "sha256");
     if (!local_hash) {
-        return std::unexpected(error(
-            ErrorCode::WorkspaceFailure,
-            local_hash.error(),
-            layout.barrier_identifier,
-            BarrierRemovalStage::VerifyingPhysicalIdentity,
-            BarrierRemovalMutationState::NotAttempted));
+        return std::unexpected(
+            error(ErrorCode::WorkspaceFailure,
+                  local_hash.error(),
+                  layout.barrier_identifier,
+                  BarrierRemovalStage::VerifyingPhysicalIdentity,
+                  BarrierRemovalMutationState::NotAttempted));
     }
     const auto& expected_hash_hex = *local_hash;
 
-    auto remote_hash = transport::physical_hash(
-        storage, layout.barrier_identifier, "sha256");
+    auto remote_hash =
+        transport::physical_hash(storage, layout.barrier_identifier, "sha256");
     if (remote_hash) {
         if (!valid_sha256(*remote_hash)) {
-            return std::unexpected(error(
-                ErrorCode::VerificationFailure,
-                "invalid remote barrier SHA-256",
-                layout.barrier_identifier,
-                BarrierRemovalStage::VerifyingPhysicalIdentity,
-                BarrierRemovalMutationState::NotAttempted));
+            return std::unexpected(
+                error(ErrorCode::VerificationFailure,
+                      "invalid remote barrier SHA-256",
+                      layout.barrier_identifier,
+                      BarrierRemovalStage::VerifyingPhysicalIdentity,
+                      BarrierRemovalMutationState::NotAttempted));
         }
         if (*remote_hash != expected_hash_hex) {
-            return std::unexpected(error(
-                ErrorCode::VerificationFailure,
-                "maintenance barrier was replaced before removal",
-                layout.barrier_identifier,
-                BarrierRemovalStage::VerifyingPhysicalIdentity,
-                BarrierRemovalMutationState::NotAttempted));
+            return std::unexpected(
+                error(ErrorCode::VerificationFailure,
+                      "maintenance barrier was replaced before removal",
+                      layout.barrier_identifier,
+                      BarrierRemovalStage::VerifyingPhysicalIdentity,
+                      BarrierRemovalMutationState::NotAttempted));
         }
-    } else if (remote_hash.error().code == transport::ErrorCode::ObjectNotFound) {
-        return std::unexpected(error(
-            ErrorCode::VerificationFailure,
-            "maintenance barrier disappeared before removal",
-            layout.barrier_identifier,
-            BarrierRemovalStage::VerifyingPhysicalIdentity,
-            BarrierRemovalMutationState::NotAttempted));
+    } else if (remote_hash.error().code ==
+               transport::ErrorCode::ObjectNotFound) {
+        return std::unexpected(
+            error(ErrorCode::VerificationFailure,
+                  "maintenance barrier disappeared before removal",
+                  layout.barrier_identifier,
+                  BarrierRemovalStage::VerifyingPhysicalIdentity,
+                  BarrierRemovalMutationState::NotAttempted));
     } else if (remote_hash.error().code != transport::ErrorCode::Unsupported) {
-        return std::unexpected(transport_error(
-            remote_hash.error(),
-            "could not compute remote barrier SHA-256",
-            layout.barrier_identifier,
-            BarrierRemovalStage::VerifyingPhysicalIdentity,
-            BarrierRemovalMutationState::NotAttempted));
+        return std::unexpected(
+            transport_error(remote_hash.error(),
+                            "could not compute remote barrier SHA-256",
+                            layout.barrier_identifier,
+                            BarrierRemovalStage::VerifyingPhysicalIdentity,
+                            BarrierRemovalMutationState::NotAttempted));
     } else {
-        auto matches = marker_matches(storage,
-                                      layout.barrier_identifier,
-                                      *observed,
-                                      workspace_root);
+        auto matches = marker_matches(
+            storage, layout.barrier_identifier, *observed, workspace_root);
         if (!matches) {
             auto err = matches.error();
             err.stage = BarrierRemovalStage::VerifyingPhysicalIdentity;
@@ -710,12 +713,12 @@ remove_barrier(transport::Transport& storage,
             return std::unexpected(err);
         }
         if (!*matches) {
-            return std::unexpected(error(
-                ErrorCode::VerificationFailure,
-                "maintenance barrier was replaced before removal",
-                layout.barrier_identifier,
-                BarrierRemovalStage::VerifyingPhysicalIdentity,
-                BarrierRemovalMutationState::NotAttempted));
+            return std::unexpected(
+                error(ErrorCode::VerificationFailure,
+                      "maintenance barrier was replaced before removal",
+                      layout.barrier_identifier,
+                      BarrierRemovalStage::VerifyingPhysicalIdentity,
+                      BarrierRemovalMutationState::NotAttempted));
         }
     }
 
@@ -739,12 +742,12 @@ remove_barrier(transport::Transport& storage,
             BarrierRemovalMutationState::Uncertain));
     }
     if (*present != transport::Presence::Absent) {
-        return std::unexpected(error(
-            ErrorCode::VerificationFailure,
-            "maintenance barrier remains present after removal",
-            layout.barrier_identifier,
-            BarrierRemovalStage::ConfirmingAbsence,
-            BarrierRemovalMutationState::Uncertain));
+        return std::unexpected(
+            error(ErrorCode::VerificationFailure,
+                  "maintenance barrier remains present after removal",
+                  layout.barrier_identifier,
+                  BarrierRemovalStage::ConfirmingAbsence,
+                  BarrierRemovalMutationState::Uncertain));
     }
 
     return BarrierRemovalResult{
@@ -820,6 +823,6 @@ std::vector<std::uint8_t> format_payload(std::string_view kind,
                                          std::string_view token) {
     return payload(kind, token);
 }
-}
+} // namespace testing
 
 } // namespace kasumi::application::history_storage::maintenance_protocol

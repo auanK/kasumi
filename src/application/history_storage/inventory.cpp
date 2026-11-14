@@ -26,22 +26,14 @@ bool valid_hex_id(std::string_view id) noexcept {
     return history::valid_commit_id(id);
 }
 
-} // namespace kasumi::application::history_storage::detail
-
-namespace kasumi::application::history_storage {
-} // namespace kasumi::application::history_storage
-
-namespace kasumi::application::history_storage::detail {
-} // namespace kasumi::application::history_storage::detail
-
-namespace kasumi::application::history_storage {
-} // namespace kasumi::application::history_storage
-
-namespace kasumi::application::history_storage::detail {
-
 void sort_unique(std::vector<HeadReference>& references) {
     std::ranges::sort(references);
     references.erase(std::ranges::unique(references).begin(), references.end());
+}
+
+void sort_unique(std::vector<std::string>& values) {
+    std::ranges::sort(values);
+    values.erase(std::ranges::unique(values).begin(), values.end());
 }
 
 std::expected<HistoryInventory, Error>

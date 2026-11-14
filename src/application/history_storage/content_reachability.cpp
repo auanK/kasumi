@@ -28,16 +28,6 @@ struct RawReference {
     ContentReference reference;
 };
 
-bool valid_content_id(std::string_view identifier) noexcept {
-    const auto decoded = hash_from_hex(identifier);
-    return decoded && hash_hex(*decoded) == identifier;
-}
-
-void sort_unique(std::vector<std::string>& values) {
-    std::ranges::sort(values);
-    values.erase(std::ranges::unique(values).begin(), values.end());
-}
-
 std::expected<ContentObjectState, Error>
 audit_object(transport::Transport& storage,
              std::span<const std::uint8_t, crypto::KEY_SIZE> key,
@@ -94,11 +84,8 @@ audit_object(transport::Transport& storage,
         platform::perf_trace::count("reachability.audit_verify_calls");
         const auto verify_token = platform::perf_trace::begin();
         const auto actual_hash = crypto::content::hash_file(plaintext);
-        std::error_code size_error;
-        const auto actual_size =
-            std::filesystem::file_size(plaintext, size_error);
-        if (actual_hash && !size_error &&
-            (!expected_size || actual_size == *expected_size) &&
+        if (actual_hash && !plain_size_error &&
+            (!expected_size || plain_size == *expected_size) &&
             (!expected_plaintext_hash ||
              hash_hex(*actual_hash) == *expected_plaintext_hash) &&
             crypto::content_identifier(key, *actual_hash) == content_id) {
@@ -120,7 +107,7 @@ inventory_impl(transport::Transport& storage,
                const ReachabilityInventory& history_inventory,
                const std::filesystem::path& workspace_root,
                bool audit_payloads) {
-    try {
+    return detail::guard_alloc([&]() -> ContentReachabilityResult {
         if (!transport::valid(storage)) {
             return std::unexpected(
                 detail::error(ErrorCode::InvalidInput, "invalid transport"));
@@ -238,14 +225,14 @@ inventory_impl(transport::Transport& storage,
                         detail::error(ErrorCode::LimitExceeded,
                                       "too many content storage objects"));
                 }
-                if (valid_content_id(identifier)) {
+                if (detail::valid_hex_id(identifier)) {
                     physical.push_back(identifier);
                 } else {
                     unknown.push_back(identifier);
                 }
             }
         }
-        sort_unique(physical);
+        detail::sort_unique(physical);
 
         const auto is_referenced = [&](std::string_view id) {
             const auto it = std::ranges::lower_bound(
@@ -321,18 +308,15 @@ inventory_impl(transport::Transport& storage,
                                                    .references = {}});
         }
 
-        sort_unique(unknown);
-        sort_unique(result.reachable_content_ids);
-        sort_unique(result.missing_content_ids);
-        sort_unique(result.corrupt_content_ids);
-        sort_unique(result.orphan_content_ids);
+        detail::sort_unique(unknown);
+        detail::sort_unique(result.reachable_content_ids);
+        detail::sort_unique(result.missing_content_ids);
+        detail::sort_unique(result.corrupt_content_ids);
+        detail::sort_unique(result.orphan_content_ids);
         result.unknown_storage_objects = std::move(unknown);
         std::ranges::sort(result.contents, {}, &ContentEntry::content_id);
         return result;
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 ContentReachabilityResult inventory_content_reachability(

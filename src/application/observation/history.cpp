@@ -8,7 +8,6 @@
 #include "platform/perf_trace.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <exception>
 #include <iterator>
 #include <limits>
@@ -24,14 +23,7 @@ namespace {
 constexpr std::size_t maximum_audited_content_object_count = 1'000'000;
 
 bool valid_content_identifier(std::string_view identifier) noexcept {
-    if (identifier.size() != 64 ||
-        !std::ranges::all_of(identifier, [](unsigned char value) {
-            return std::isdigit(value) || (value >= 'a' && value <= 'f');
-        })) {
-        return false;
-    }
-    const auto decoded = hash_from_hex(identifier);
-    return decoded && hash_hex(*decoded) == identifier;
+    return kasumi::history::valid_commit_id(identifier);
 }
 
 Error storage_error(const kasumi::application::history_storage::Error& source) {
@@ -145,7 +137,7 @@ ancestral_heads(const std::vector<std::string>& marked,
     return result;
 }
 
-std::expected<void, Error>
+std::expected<std::vector<std::string>, Error>
 validate_resolution(const kasumi::history::Resolution& resolution,
                     const std::vector<std::string>& marked) {
     if (!kasumi::valid_snapshot(resolution.tree, false) ||
@@ -157,11 +149,7 @@ validate_resolution(const kasumi::history::Resolution& resolution,
                               : ErrorCode::ResolutionFailure,
                   .detail = "resolution produces an invalid tree or height"});
     }
-    auto ancestors = ancestral_heads(marked, resolution.heads);
-    if (!ancestors) {
-        return std::unexpected(ancestors.error());
-    }
-    return {};
+    return ancestral_heads(marked, resolution.heads);
 }
 
 } // namespace
@@ -337,10 +325,10 @@ ObserveResult observe(transport::Transport& storage,
             return std::unexpected(resolution_error(resolved.error()));
         }
         const auto validation_trace = platform::perf_trace::begin();
-        auto valid = validate_resolution(*resolved, loaded->marked_heads);
+        auto ancestors = validate_resolution(*resolved, loaded->marked_heads);
         platform::perf_trace::finish("history validation", validation_trace);
-        if (!valid) {
-            return std::unexpected(valid.error());
+        if (!ancestors) {
+            return std::unexpected(ancestors.error());
         }
 
         platform::perf_trace::count("history.reachable_commits",
@@ -363,8 +351,7 @@ ObserveResult observe(transport::Transport& storage,
         result.marked_head_identifiers =
             std::move(loaded->marked_head_identifiers);
         result.logical_heads = std::move(resolved->heads);
-        result.ancestral_marked_heads =
-            *ancestral_heads(result.marked_heads, result.logical_heads);
+        result.ancestral_marked_heads = std::move(*ancestors);
         result.history_present = true;
         result.has_conflicts = resolved->has_conflicts;
         result.epoch = std::move(loaded->epoch);

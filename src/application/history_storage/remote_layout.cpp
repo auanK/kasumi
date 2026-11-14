@@ -11,12 +11,32 @@ namespace {
 constexpr std::size_t HASH_HEX_SIZE = 64;
 constexpr std::size_t SEQUENCE_WIDTH = 20;
 
+bool valid_lower_hex(std::string_view value) noexcept {
+    return std::ranges::all_of(value, [](char character) {
+        return (character >= '0' && character <= '9') ||
+               (character >= 'a' && character <= 'f');
+    });
+}
+
 bool valid_hex_hash(std::string_view value) noexcept {
-    return value.size() == HASH_HEX_SIZE &&
-           std::ranges::all_of(value, [](char character) {
-               return (character >= '0' && character <= '9') ||
-                      (character >= 'a' && character <= 'f');
-           });
+    return value.size() == HASH_HEX_SIZE && valid_lower_hex(value);
+}
+
+std::optional<HeadReference> parse_head_reference(std::string_view identifier,
+                                                  std::string_view prefix,
+                                                  char separator) {
+    if (!identifier.starts_with(prefix)) {
+        return std::nullopt;
+    }
+    const auto body = identifier.substr(prefix.size());
+    if (body.size() != 129 || body[64] != separator) {
+        return std::nullopt;
+    }
+    HeadReference result{
+        .commit_id = std::string{body.substr(0, 64)},
+        .ciphertext_id = std::string{body.substr(65)},
+    };
+    return valid(result) ? std::optional{std::move(result)} : std::nullopt;
 }
 
 } // namespace
@@ -61,19 +81,7 @@ std::string marker_object(const RemoteLayout& layout,
 
 std::optional<HeadReference> parse_marker_object(const RemoteLayout& layout,
                                                  std::string_view identifier) {
-    if (!identifier.starts_with(layout.heads_prefix)) {
-        return std::nullopt;
-    }
-    const auto body = identifier.substr(layout.heads_prefix.size());
-    if (body.size() != 129 || body[64] != '-') {
-        return std::nullopt;
-    }
-
-    HeadReference result{
-        .commit_id = std::string{body.substr(0, 64)},
-        .ciphertext_id = std::string{body.substr(65)},
-    };
-    return valid(result) ? std::optional{std::move(result)} : std::nullopt;
+    return parse_head_reference(identifier, layout.heads_prefix, '-');
 }
 
 std::string commit_object(const RemoteLayout& layout,
@@ -84,22 +92,7 @@ std::string commit_object(const RemoteLayout& layout,
 
 std::optional<HeadReference> parse_commit_object(const RemoteLayout& layout,
                                                  std::string_view identifier) {
-    if (!identifier.starts_with(layout.commits_prefix)) {
-        return std::nullopt;
-    }
-    const auto body = identifier.substr(layout.commits_prefix.size());
-    const auto separator = body.find('/');
-    if (separator != 64 ||
-        body.find('/', separator + 1) != std::string_view::npos ||
-        body.size() != 129) {
-        return std::nullopt;
-    }
-
-    HeadReference result{
-        .commit_id = std::string{body.substr(0, separator)},
-        .ciphertext_id = std::string{body.substr(separator + 1)},
-    };
-    return valid(result) ? std::optional{std::move(result)} : std::nullopt;
+    return parse_head_reference(identifier, layout.commits_prefix, '/');
 }
 
 std::string epoch_object(const RemoteLayout& layout,
@@ -172,10 +165,7 @@ bool valid_writer_identifier(std::string_view identifier) noexcept {
         const auto component =
             identifier.substr(offset, component_sizes[index]);
         if (component.size() != component_sizes[index] ||
-            !std::ranges::all_of(component, [](char character) {
-                return (character >= '0' && character <= '9') ||
-                       (character >= 'a' && character <= 'f');
-            })) {
+            !valid_lower_hex(component)) {
             return false;
         }
         offset += component_sizes[index];
@@ -195,10 +185,7 @@ bool valid_writer_identifier(const RemoteLayout& layout,
         return false;
     }
     const auto token = identifier.substr(layout.writers_prefix.size());
-    return token.size() == 32 && std::ranges::all_of(token, [](char character) {
-               return (character >= '0' && character <= '9') ||
-                      (character >= 'a' && character <= 'f');
-           });
+    return token.size() == 32 && valid_lower_hex(token);
 }
 
 } // namespace kasumi::application::history_storage

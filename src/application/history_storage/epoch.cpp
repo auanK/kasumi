@@ -33,11 +33,16 @@ Error error(ErrorCode code, std::string detail) {
 }
 
 bool valid_id(std::string_view value) noexcept {
-    return value.size() == HASH_HEX_SIZE &&
-           std::ranges::all_of(value, [](char character) {
-               return (character >= '0' && character <= '9') ||
-                      (character >= 'a' && character <= 'f');
-           });
+    return history::valid_commit_id(value);
+}
+
+template <typename Fn> auto guard_alloc(Fn&& fn) -> decltype(fn()) {
+    try {
+        return std::forward<Fn>(fn)();
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(
+            error(ErrorCode::LimitExceeded, "allocation failed"));
+    }
 }
 
 std::expected<void, Error> validate(const Epoch& value) {
@@ -151,11 +156,8 @@ std::expected<EpochInventory, Error> discover_epoch_inventory(
             }
         }
     } else {
-        const auto directory = layout.epochs_prefix.ends_with('/')
-                                   ? layout.epochs_prefix.substr(
-                                         0, layout.epochs_prefix.size() - 1)
-                                   : layout.epochs_prefix;
-        auto listed = transport::list(storage, directory);
+        auto listed = transport::list(
+            storage, detail::trim_trailing_slash(layout.epochs_prefix));
         if (!listed) {
             if (listed.error().code == transport::ErrorCode::StorageNotFound) {
                 return EpochInventory{};
@@ -770,13 +772,10 @@ LatestResult
 load_latest(transport::Transport& storage,
             std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
             const std::filesystem::path& workspace_root) {
-    try {
+    return guard_alloc([&] {
         return load_latest_impl(
             storage, master_key, workspace_root, std::nullopt, std::nullopt);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 LatestResult
@@ -784,13 +783,10 @@ load_latest(transport::Transport& storage,
             std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
             const std::filesystem::path& workspace_root,
             std::span<const std::string> identifiers) {
-    try {
+    return guard_alloc([&] {
         return load_latest_impl(
             storage, master_key, workspace_root, identifiers, std::nullopt);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 LatestResult
@@ -798,16 +794,13 @@ load_latest(transport::Transport& storage,
             std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
             const std::filesystem::path& workspace_root,
             std::optional<Reference> trusted_ancestor) {
-    try {
+    return guard_alloc([&] {
         return load_latest_impl(storage,
                                 master_key,
                                 workspace_root,
                                 std::nullopt,
                                 std::move(trusted_ancestor));
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 LatestResult
@@ -816,29 +809,23 @@ load_latest(transport::Transport& storage,
             const std::filesystem::path& workspace_root,
             std::span<const std::string> identifiers,
             std::optional<Reference> trusted_ancestor) {
-    try {
+    return guard_alloc([&] {
         return load_latest_impl(storage,
                                 master_key,
                                 workspace_root,
                                 identifiers,
                                 std::move(trusted_ancestor));
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 ChainResult
 load_chain(transport::Transport& storage,
            std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
            const std::filesystem::path& workspace_root) {
-    try {
+    return guard_alloc([&] {
         return load_chain_impl(
             storage, master_key, workspace_root, std::nullopt);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 ChainResult
@@ -846,13 +833,10 @@ load_chain(transport::Transport& storage,
            std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
            const std::filesystem::path& workspace_root,
            std::span<const std::string> identifiers) {
-    try {
+    return guard_alloc([&] {
         return load_chain_impl(
             storage, master_key, workspace_root, identifiers);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 LatestResult
@@ -860,38 +844,15 @@ load_by_id(transport::Transport& storage,
            std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
            const std::filesystem::path& workspace_root,
            std::string_view epoch_id) {
-    try {
+    return guard_alloc([&]() -> LatestResult {
         if (!valid_id(epoch_id)) {
             return std::unexpected(
                 error(ErrorCode::InvalidInput, "invalid epoch ID"));
         }
 
         const auto layout = derive_remote_layout(master_key);
-        const auto directory = layout.epochs_prefix.ends_with('/')
-                                   ? layout.epochs_prefix.substr(
-                                         0, layout.epochs_prefix.size() - 1)
-                                   : layout.epochs_prefix;
-        auto listed = transport::list(storage, directory);
-        if (!listed) {
-            if (listed.error().code == transport::ErrorCode::StorageNotFound) {
-                return std::optional<VerifiedEpoch>{};
-            }
-            return std::unexpected(error(ErrorCode::TransportFailure,
-                                         transport::describe(listed.error())));
-        }
-        std::vector<std::string> identifiers;
-        identifiers.reserve(listed->size());
-        for (const auto& name : *listed) {
-            identifiers.push_back(name.starts_with(layout.epochs_prefix)
-                                      ? name
-                                      : layout.epochs_prefix + name);
-        }
-        auto inventory = discover_epoch_inventory(
-            storage,
-            layout,
-            std::optional<std::span<const std::string>>{
-                std::span<const std::string>{identifiers}},
-            false);
+        auto inventory =
+            discover_epoch_inventory(storage, layout, std::nullopt, false);
         if (!inventory) {
             return std::unexpected(inventory.error());
         }
@@ -913,10 +874,7 @@ load_by_id(transport::Transport& storage,
             return std::unexpected(loaded.error());
         }
         return std::optional<VerifiedEpoch>{std::move(*loaded)};
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 PruneResult plan_pruning(std::span<const kasumi::history::LoadedCommit> commits,

@@ -22,15 +22,22 @@ namespace kasumi::application::observation {
 namespace {
 
 std::expected<LocalTreeObservation, std::string>
-scan_local_tree(const std::filesystem::path& local_root) {
+scan_local_tree(const std::filesystem::path& local_root,
+                const kasumi::ignore::IgnoreList* ignore_list = nullptr) {
     std::error_code error;
     const auto status = std::filesystem::symlink_status(local_root, error);
     if (error || std::filesystem::is_symlink(status) ||
         !std::filesystem::is_directory(status)) {
         return std::unexpected("missing or invalid local directory");
     }
-    auto current =
-        scanner::scan_result(local_root, {}, scanner::ScanPolicy::FullHash);
+    auto current = ignore_list != nullptr
+                       ? scanner::scan_result(local_root,
+                                              {},
+                                              scanner::ScanPolicy::FullHash,
+                                              cache::read_file_metadata,
+                                              *ignore_list)
+                       : scanner::scan_result(
+                             local_root, {}, scanner::ScanPolicy::FullHash);
     if (!current) {
         return std::unexpected(scanner::describe(current.error()));
     }
@@ -176,25 +183,6 @@ reconciliation::Error state_error(reconciliation::ErrorCode code,
         .code = code, .detail = std::move(detail), .paths = {}};
 }
 
-bool same_cache(
-    const std::vector<state_storage::FileCacheRow>& left,
-    const std::vector<state_storage::FileCacheRow>& right) noexcept {
-    if (left.size() != right.size()) {
-        return false;
-    }
-    for (std::size_t index = 0; index < left.size(); ++index) {
-        const auto& a = left[index];
-        const auto& b = right[index];
-        if (a.path != b.path || a.hash != b.hash || a.size != b.size ||
-            a.mtime_nanoseconds != b.mtime_nanoseconds ||
-            a.volume != b.volume || a.file_low != b.file_low ||
-            a.file_high != b.file_high) {
-            return false;
-        }
-    }
-    return true;
-}
-
 std::optional<reconciliation::EpochRetentionPolicy> epoch_policy(
     const std::optional<history_storage::epoch::VerifiedEpoch>& epoch) {
     if (!epoch) {
@@ -232,6 +220,29 @@ void ensure_file_cache_loaded(LocalObservationSession& session) {
     session.cache_loaded = true;
 }
 
+reconciliation::StorageState to_storage_state(history::StorageView& observed) {
+    return reconciliation::StorageState{
+        .tree = std::move(observed.effective_tree),
+        .object_identifiers = std::move(observed.content_identifiers),
+        .reachable_commits = std::move(observed.reachable_commits),
+        .reachable_commit_ids = std::move(observed.reachable_commit_ids),
+        .marked_heads = std::move(observed.marked_heads),
+        .marked_head_identifiers = std::move(observed.marked_head_identifiers),
+        .logical_heads = std::move(observed.logical_heads),
+        .ancestral_marked_heads = std::move(observed.ancestral_marked_heads),
+        .epoch_vault_id =
+            observed.epoch ? observed.epoch->value.vault_id : std::string{},
+        .epoch_id =
+            observed.epoch ? observed.epoch->reference.epoch_id : std::string{},
+        .epoch_sequence = observed.epoch ? observed.epoch->value.sequence : 0,
+        .epoch_policy = epoch_policy(observed.epoch),
+        .epoch_anchors = epoch_anchors(observed.epoch),
+        .generation = observed.observed_height,
+        .history_present = observed.history_present,
+        .history_has_conflicts = observed.has_conflicts,
+    };
+}
+
 } // namespace
 
 std::expected<LocalTreeObservation, std::string>
@@ -240,30 +251,9 @@ collect_local_observation(const std::filesystem::path& local_root) {
 }
 
 std::expected<LocalTreeObservation, std::string>
-collect_local_observation(
-    const std::filesystem::path& local_root,
-    const kasumi::ignore::IgnoreList& ignore_list) {
-    std::error_code error;
-    const auto status = std::filesystem::symlink_status(local_root, error);
-    if (error || std::filesystem::is_symlink(status) ||
-        !std::filesystem::is_directory(status)) {
-        return std::unexpected("missing or invalid local directory");
-    }
-    auto current = scanner::scan_result(local_root,
-                                        {},
-                                        scanner::ScanPolicy::FullHash,
-                                        cache::read_file_metadata,
-                                        ignore_list);
-    if (!current) {
-        return std::unexpected(scanner::describe(current.error()));
-    }
-    if (!valid_snapshot(current->snapshot, false)) {
-        return std::unexpected("local snapshot has no valid root");
-    }
-    return LocalTreeObservation{
-        .snapshot = std::move(current->snapshot),
-        .physical_evidence = std::move(current->physical_evidence),
-    };
+collect_local_observation(const std::filesystem::path& local_root,
+                          const kasumi::ignore::IgnoreList& ignore_list) {
+    return scan_local_tree(local_root, &ignore_list);
 }
 
 std::expected<LocalTreeObservation, std::string>
@@ -294,8 +284,7 @@ collect_local_observation(const std::filesystem::path& local_root,
             session->cache = std::move(previous);
             return std::unexpected(scanner::describe(scanned.error()));
         }
-        session->cache_dirty =
-            cache_was_dirty || !same_cache(previous, scanned->cache);
+        session->cache_dirty = cache_was_dirty || previous != scanned->cache;
         session->cache = std::move(scanned->cache);
         return LocalTreeObservation{
             .snapshot = std::move(scanned->snapshot),
@@ -325,8 +314,7 @@ std::expected<Snapshot, std::string>
 collect_local_tree(const std::filesystem::path& local_root,
                    LocalObservationSession* session,
                    const kasumi::ignore::IgnoreList& ignore_list) {
-    auto observed =
-        collect_local_observation(local_root, session, ignore_list);
+    auto observed = collect_local_observation(local_root, session, ignore_list);
     if (!observed) {
         return std::unexpected(observed.error());
     }
@@ -353,30 +341,8 @@ collect_storage_observation(transport::Transport& storage,
     if (!observed) {
         return std::unexpected(observed.error().detail);
     }
-    reconciliation::StorageState state{
-        .tree = std::move(observed->effective_tree),
-        .object_identifiers = std::move(observed->content_identifiers),
-        .reachable_commits = std::move(observed->reachable_commits),
-        .reachable_commit_ids = std::move(observed->reachable_commit_ids),
-        .marked_heads = std::move(observed->marked_heads),
-        .marked_head_identifiers = std::move(observed->marked_head_identifiers),
-        .logical_heads = std::move(observed->logical_heads),
-        .ancestral_marked_heads = std::move(observed->ancestral_marked_heads),
-        .epoch_vault_id = observed->epoch
-                              ? std::move(observed->epoch->value.vault_id)
-                              : std::string{},
-        .epoch_id = observed->epoch
-                        ? std::move(observed->epoch->reference.epoch_id)
-                        : std::string{},
-        .epoch_sequence = observed->epoch ? observed->epoch->value.sequence : 0,
-        .epoch_policy = epoch_policy(observed->epoch),
-        .epoch_anchors = epoch_anchors(observed->epoch),
-        .generation = observed->observed_height,
-        .history_present = observed->history_present,
-        .history_has_conflicts = observed->has_conflicts,
-    };
     return StorageObservation{
-        .state = std::move(state),
+        .state = to_storage_state(*observed),
         .physical_identifiers = std::move(observed->physical_identifiers),
     };
 }
@@ -503,9 +469,9 @@ collect_reconciliation_input(
                                  remote_history_trace);
     local_scan.join();
     if (!local_observation) {
-        return std::unexpected(state_error(
-            reconciliation::ErrorCode::InvalidLocalTree,
-            local_observation.error()));
+        return std::unexpected(
+            state_error(reconciliation::ErrorCode::InvalidLocalTree,
+                        local_observation.error()));
     }
     input.local_tree = std::move(local_observation->snapshot);
     input.local_physical_evidence =
@@ -515,26 +481,7 @@ collect_reconciliation_input(
             state_error(reconciliation::ErrorCode::InvalidStorageTree,
                         observed.error().detail));
     }
-    input.storage = reconciliation::StorageState{
-        .tree = std::move(observed->effective_tree),
-        .object_identifiers = std::move(observed->content_identifiers),
-        .reachable_commits = std::move(observed->reachable_commits),
-        .reachable_commit_ids = std::move(observed->reachable_commit_ids),
-        .marked_heads = std::move(observed->marked_heads),
-        .marked_head_identifiers = std::move(observed->marked_head_identifiers),
-        .logical_heads = std::move(observed->logical_heads),
-        .ancestral_marked_heads = std::move(observed->ancestral_marked_heads),
-        .epoch_vault_id =
-            observed->epoch ? observed->epoch->value.vault_id : std::string{},
-        .epoch_id = observed->epoch ? observed->epoch->reference.epoch_id
-                                    : std::string{},
-        .epoch_sequence = observed->epoch ? observed->epoch->value.sequence : 0,
-        .epoch_policy = epoch_policy(observed->epoch),
-        .epoch_anchors = epoch_anchors(observed->epoch),
-        .generation = observed->observed_height,
-        .history_present = observed->history_present,
-        .history_has_conflicts = observed->has_conflicts,
-    };
+    input.storage = to_storage_state(*observed);
     if (input.base_state_present) {
         if (!input.storage.history_present) {
             return std::unexpected(state_error(
@@ -589,8 +536,7 @@ collect_reconciliation_input(
                             projected.error()));
         }
         input.local_tree = std::move(projected->snapshot);
-        input.local_physical_evidence =
-            std::move(projected->physical_evidence);
+        input.local_physical_evidence = std::move(projected->physical_evidence);
     }
     input.audit_storage_objects = audit_storage_objects;
     const bool maybe_disposable_removal =
@@ -602,10 +548,12 @@ collect_reconciliation_input(
                 const auto* base = find_row(input.base_tree, directory.path);
                 return !directory.path.empty() && !directory.ignored_entry &&
                        base != nullptr && base->is_directory &&
-                       find_row(input.storage.tree, directory.path) == nullptr &&
+                       find_row(input.storage.tree, directory.path) ==
+                           nullptr &&
                        std::ranges::any_of(
                            input.local_physical_evidence.ignored_entries,
-                           [&](const reconciliation::IgnoredEntryEvidence& item) {
+                           [&](const reconciliation::IgnoredEntryEvidence&
+                                   item) {
                                return item.disposition ==
                                           ignore::IgnoreDisposition::
                                               IgnoredDisposable &&
@@ -614,17 +562,16 @@ collect_reconciliation_input(
             });
     if (maybe_disposable_removal) {
         auto initial_plan = reconciliation::reconcile(input);
-        if (initial_plan &&
-            !initial_plan->disposable_paths_to_hash.empty()) {
+        if (initial_plan && !initial_plan->disposable_paths_to_hash.empty()) {
             auto content = scanner::hash_disposable_candidates(
                 runtime_data.local_dir,
                 input.local_physical_evidence,
                 initial_plan->disposable_paths_to_hash,
                 input.ignore_list);
             if (!content) {
-                return std::unexpected(state_error(
-                    reconciliation::ErrorCode::InvalidLocalTree,
-                    scanner::describe(content.error())));
+                return std::unexpected(
+                    state_error(reconciliation::ErrorCode::InvalidLocalTree,
+                                scanner::describe(content.error())));
             }
             input.disposable_ignored_content = std::move(*content);
         }

@@ -128,11 +128,6 @@ publish_commit_object_impl(transport::Transport& storage,
     if (!temporary) {
         return std::unexpected(temporary.error());
     }
-    const auto plaintext = (*temporary)->workspace.root / "commit.kcom";
-    const auto ciphertext = (*temporary)->workspace.root / "commit.ciphertext";
-    if (auto written = detail::write_file(plaintext, *canonical); !written) {
-        return std::unexpected(written.error());
-    }
 
     auto inventory = scoped ? std::expected<detail::HistoryInventory,
                                             Error>{detail::HistoryInventory{}}
@@ -148,8 +143,11 @@ publish_commit_object_impl(transport::Transport& storage,
     if (const auto found = inventory->commit_variants.find(commit_id);
         found != inventory->commit_variants.end()) {
         for (const auto& candidate : found->second) {
-            auto loaded = detail::try_load_variant(
-                storage, key, candidate, (*temporary)->workspace.root, sequence++);
+            auto loaded = detail::try_load_variant(storage,
+                                                   key,
+                                                   candidate,
+                                                   (*temporary)->workspace.root,
+                                                   sequence++);
             if (!loaded) {
                 return std::unexpected(loaded.error());
             }
@@ -159,8 +157,12 @@ publish_commit_object_impl(transport::Transport& storage,
             }
             auto loaded_bytes = history::serialize(loaded->commit->commit);
             if (loaded_bytes && *loaded_bytes == *canonical) {
-                auto marker_state = detail::inspect_marker(
-                    storage, layout, candidate, (*temporary)->workspace.root, sequence);
+                auto marker_state =
+                    detail::inspect_marker(storage,
+                                           layout,
+                                           candidate,
+                                           (*temporary)->workspace.root,
+                                           sequence);
                 if (!marker_state) {
                     return std::unexpected(marker_state.error());
                 }
@@ -182,6 +184,13 @@ publish_commit_object_impl(transport::Transport& storage,
     }
 
     if (!reused) {
+        const auto plaintext = (*temporary)->workspace.root / "commit.kcom";
+        const auto ciphertext =
+            (*temporary)->workspace.root / "commit.ciphertext";
+        if (auto written = detail::write_file(plaintext, *canonical);
+            !written) {
+            return std::unexpected(written.error());
+        }
         const auto encryption_trace = platform::perf_trace::begin();
         const bool encrypted_commit = crypto::encrypt_file(
             plaintext, ciphertext, key, crypto::FilePurpose::History);
@@ -274,8 +283,13 @@ verify_commit_object_impl(transport::Transport& storage,
         return std::unexpected(temporary.error());
     }
     std::size_t sequence = 0;
-    return detail::verify_published_commit(
-        storage, layout, key, commit, reference, (*temporary)->workspace.root, sequence);
+    return detail::verify_published_commit(storage,
+                                           layout,
+                                           key,
+                                           commit,
+                                           reference,
+                                           (*temporary)->workspace.root,
+                                           sequence);
 }
 
 PublishHeadResult
@@ -437,13 +451,10 @@ publish_commit_object(transport::Transport& storage,
                       std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                       const history::Commit& commit,
                       const std::filesystem::path& workspace_root) {
-    try {
+    return detail::guard_alloc([&] {
         return publish_commit_object_impl(
             storage, layout, key, commit, workspace_root, false);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 PublishObjectResult
@@ -461,13 +472,10 @@ PublishObjectResult publish_commit_object_scoped(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const history::Commit& commit,
     const std::filesystem::path& workspace_root) {
-    try {
+    return detail::guard_alloc([&] {
         return publish_commit_object_impl(
             storage, layout, key, commit, workspace_root, true);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 PublishObjectResult publish_commit_object_scoped(
@@ -487,7 +495,7 @@ verify_commit_object(transport::Transport& storage,
                      const HeadReference& reference,
                      const std::filesystem::path& workspace_root,
                      std::string_view local_physical_hash) {
-    try {
+    return detail::guard_alloc([&] {
         return verify_commit_object_impl(storage,
                                          layout,
                                          key,
@@ -495,10 +503,7 @@ verify_commit_object(transport::Transport& storage,
                                          reference,
                                          workspace_root,
                                          local_physical_hash);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 std::expected<void, Error>
@@ -522,13 +527,10 @@ publish_head_marker(transport::Transport& storage,
                     const RemoteLayout& layout,
                     const HeadReference& reference,
                     const std::filesystem::path& workspace_root) {
-    try {
+    return detail::guard_alloc([&] {
         return publish_head_marker_impl(
             storage, layout, reference, workspace_root, false);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 PublishHeadResult
@@ -536,13 +538,10 @@ publish_head_marker_scoped(transport::Transport& storage,
                            const RemoteLayout& layout,
                            const HeadReference& reference,
                            const std::filesystem::path& workspace_root) {
-    try {
+    return detail::guard_alloc([&] {
         return publish_head_marker_impl(
             storage, layout, reference, workspace_root, true);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 std::expected<void, Error>
@@ -551,13 +550,10 @@ verify_head_marker(transport::Transport& storage,
                    const HeadReference& reference,
                    const std::filesystem::path& workspace_root,
                    std::string_view local_physical_hash) {
-    try {
+    return detail::guard_alloc([&] {
         return verify_head_marker_impl(
             storage, layout, reference, workspace_root, local_physical_hash);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 HeadMarkerInspection
@@ -565,13 +561,10 @@ inspect_head_marker(transport::Transport& storage,
                     const RemoteLayout& layout,
                     const HeadReference& reference,
                     const std::filesystem::path& workspace_root) {
-    try {
+    return detail::guard_alloc([&] {
         return inspect_head_marker_impl(
             storage, layout, reference, workspace_root);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 std::string marker_identifier(const RemoteLayout& layout,
@@ -586,11 +579,8 @@ list_remote_head_commit_ids(transport::Transport& storage,
         return std::unexpected(
             detail::error(ErrorCode::InvalidInput, "invalid transport"));
     }
-    const auto heads_dir =
-        layout.heads_prefix.ends_with('/')
-            ? layout.heads_prefix.substr(0, layout.heads_prefix.size() - 1)
-            : layout.heads_prefix;
-    auto listing = transport::list(storage, heads_dir);
+    auto listing = transport::list(
+        storage, detail::trim_trailing_slash(layout.heads_prefix));
     if (!listing) {
         if (listing.error().code == transport::ErrorCode::StorageNotFound) {
             return std::vector<std::string>{};
@@ -608,8 +598,7 @@ list_remote_head_commit_ids(transport::Transport& storage,
             heads.push_back(ref->commit_id);
         }
     }
-    std::ranges::sort(heads);
-    heads.erase(std::ranges::unique(heads).begin(), heads.end());
+    detail::sort_unique(heads);
     return heads;
 }
 

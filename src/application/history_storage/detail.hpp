@@ -12,11 +12,13 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <new>
 #include <optional>
 #include <set>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace kasumi::application::history_storage::detail {
@@ -64,8 +66,27 @@ Error history_error(const history::Error& source);
 
 // Validates a canonical hexadecimal identifier.
 bool valid_hex_id(std::string_view id) noexcept;
-// Sorts and removes duplicate references.
+// Sorts and removes duplicate references or identifiers.
 void sort_unique(std::vector<HeadReference>& references);
+void sort_unique(std::vector<std::string>& values);
+
+// Strips any single trailing slash from a prefix when building directory names.
+inline std::string_view trim_trailing_slash(std::string_view value) noexcept {
+    if (value.ends_with('/')) {
+        value.remove_suffix(1);
+    }
+    return value;
+}
+
+// Translates allocation failures into uniform LimitExceeded results.
+template <typename Fn> auto guard_alloc(Fn&& fn) -> decltype(fn()) {
+    try {
+        return std::forward<Fn>(fn)();
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(
+            error(ErrorCode::LimitExceeded, "allocation failed"));
+    }
+}
 
 // Builds an inventory of all remote history objects.
 std::expected<HistoryInventory, Error>
@@ -143,8 +164,8 @@ inspect_marker(transport::Transport& storage,
 // Verifies the BLAKE3 identifier of the ciphertext.
 std::expected<bool, Error> ciphertext_matches(const std::filesystem::path& path,
                                               std::string_view ciphertext_id);
-// Enforces the maximum size of an encrypted commit.
-std::expected<void, Error>
+// Enforces the maximum size of an encrypted commit and returns its size.
+std::expected<std::uintmax_t, Error>
 validate_ciphertext_size(const std::filesystem::path& path);
 
 // Validation state of an encrypted variant.

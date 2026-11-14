@@ -16,16 +16,14 @@ RemoveMarkersResult remove_marker_variants_impl(
     const RemoteLayout& layout,
     std::span<const std::string> commit_ids,
     std::optional<std::span<const std::string>> identifiers) {
-    try {
+    return guard_alloc([&]() -> RemoveMarkersResult {
         std::vector<std::string> requested(commit_ids.begin(),
                                            commit_ids.end());
         if (!std::ranges::all_of(requested, history::valid_commit_id)) {
             return std::unexpected(
                 error(ErrorCode::InvalidIdentifier, "invalid commit ID"));
         }
-        std::ranges::sort(requested);
-        requested.erase(std::ranges::unique(requested).begin(),
-                        requested.end());
+        sort_unique(requested);
         if (requested.empty()) {
             return RemovedMarkers{};
         }
@@ -34,11 +32,8 @@ RemoveMarkersResult remove_marker_variants_impl(
         if (identifiers) {
             listing.assign(identifiers->begin(), identifiers->end());
         } else {
-            const auto heads_dir = layout.heads_prefix.ends_with('/')
-                                       ? layout.heads_prefix.substr(
-                                             0, layout.heads_prefix.size() - 1)
-                                       : layout.heads_prefix;
-            auto observed = transport::list(storage, heads_dir);
+            auto observed = transport::list(
+                storage, trim_trailing_slash(layout.heads_prefix));
             if (!observed) {
                 if (observed.error().code !=
                     transport::ErrorCode::StorageNotFound) {
@@ -81,10 +76,7 @@ RemoveMarkersResult remove_marker_variants_impl(
             }
         }
         return result;
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 } // namespace

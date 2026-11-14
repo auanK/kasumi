@@ -229,7 +229,7 @@ std::expected<bool, Error> ciphertext_matches(const std::filesystem::path& path,
     return hash_hex(*actual_hash) == ciphertext_id;
 }
 
-std::expected<void, Error>
+std::expected<std::uintmax_t, Error>
 validate_ciphertext_size(const std::filesystem::path& path) {
     std::error_code filesystem_error;
     const auto size = std::filesystem::file_size(path, filesystem_error);
@@ -241,7 +241,7 @@ validate_ciphertext_size(const std::filesystem::path& path) {
         return std::unexpected(
             error(ErrorCode::LimitExceeded, "ciphertext exceeds maximum size"));
     }
-    return {};
+    return size;
 }
 
 VariantResult
@@ -253,95 +253,82 @@ try_load_variant(transport::Transport& storage,
                  std::size_t sequence) {
     auto ciphertext = workspace / reference.commit_id / reference.ciphertext_id;
     std::error_code prefetched_error;
-    if (!std::filesystem::is_regular_file(ciphertext, prefetched_error)) {
+    const bool prefetched =
+        std::filesystem::is_regular_file(ciphertext, prefetched_error);
+    if (!prefetched) {
         ciphertext = workspace / ("ciphertext-" + std::to_string(sequence));
     }
     const auto plaintext =
         workspace / ("plaintext-" + std::to_string(sequence));
-    const auto invalid_ciphertext = [&]() -> VariantResult {
+    const auto cleanup = [&] {
         remove_file(ciphertext);
         remove_file(plaintext);
-        return LoadedVariant{.state = VariantState::InvalidCiphertext,
-                             .commit = std::nullopt};
     };
-    const auto invalid_commit = [&]() -> VariantResult {
-        remove_file(ciphertext);
-        remove_file(plaintext);
-        return LoadedVariant{.state = VariantState::InvalidCommit,
-                             .commit = std::nullopt};
+    const auto finish_invalid = [&](VariantState state) -> VariantResult {
+        cleanup();
+        return LoadedVariant{.state = state, .commit = std::nullopt};
     };
 
-    if (!std::filesystem::is_regular_file(ciphertext, prefetched_error)) {
+    if (!prefetched) {
         auto downloaded =
             download_commit_candidate(storage, layout, reference, ciphertext);
         if (!downloaded) {
+            cleanup();
             if (downloaded.error().code == ErrorCode::MissingCommit) {
-                remove_file(ciphertext);
-                remove_file(plaintext);
                 return LoadedVariant{.state = VariantState::Missing,
                                      .commit = std::nullopt};
             }
-            remove_file(ciphertext);
-            remove_file(plaintext);
             return std::unexpected(downloaded.error());
         }
     }
-    auto size_valid = validate_ciphertext_size(ciphertext);
-    if (!size_valid) {
-        if (size_valid.error().code == ErrorCode::LimitExceeded) {
-            return invalid_ciphertext();
+    auto cipher_size = validate_ciphertext_size(ciphertext);
+    if (!cipher_size) {
+        if (cipher_size.error().code == ErrorCode::LimitExceeded) {
+            return finish_invalid(VariantState::InvalidCiphertext);
         }
-        remove_file(ciphertext);
-        remove_file(plaintext);
-        return std::unexpected(size_valid.error());
+        cleanup();
+        return std::unexpected(cipher_size.error());
     }
     const auto auth_trace = platform::perf_trace::begin();
     platform::perf_trace::count("commit.decrypt_auth_count", 1);
-    std::error_code size_ec;
-    const auto cipher_size = std::filesystem::file_size(ciphertext, size_ec);
-    if (!size_ec) {
-        platform::perf_trace::count("commit.ciphertext_bytes", cipher_size);
-    }
+    platform::perf_trace::count("commit.ciphertext_bytes", *cipher_size);
     auto matches = ciphertext_matches(ciphertext, reference.ciphertext_id);
     if (!matches) {
         platform::perf_trace::finish("commit decrypt/auth", auth_trace);
-        remove_file(ciphertext);
-        remove_file(plaintext);
+        cleanup();
         return std::unexpected(matches.error());
     }
     if (!*matches ||
         !crypto::decrypt_file(
             ciphertext, plaintext, key, crypto::FilePurpose::History)) {
         platform::perf_trace::finish("commit decrypt/auth", auth_trace);
-        return invalid_ciphertext();
+        return finish_invalid(VariantState::InvalidCiphertext);
     }
 
     auto bytes = read_file(plaintext, history::maximum_commit_plaintext_size);
     if (!bytes) {
         platform::perf_trace::finish("commit decrypt/auth", auth_trace);
         if (bytes.error().code == ErrorCode::LimitExceeded) {
-            return invalid_commit();
+            return finish_invalid(VariantState::InvalidCommit);
         }
-        remove_file(ciphertext);
-        remove_file(plaintext);
+        cleanup();
         return std::unexpected(bytes.error());
     }
     auto commit = history::deserialize(*bytes);
     if (!commit) {
         platform::perf_trace::finish("commit decrypt/auth", auth_trace);
-        return invalid_commit();
+        return finish_invalid(VariantState::InvalidCommit);
     }
     auto canonical = history::serialize(*commit);
     if (!canonical) {
         platform::perf_trace::finish("commit decrypt/auth", auth_trace);
-        return invalid_commit();
+        return finish_invalid(VariantState::InvalidCommit);
     }
     const bool valid_commit =
         crypto::commit_identifier(key, *canonical) == reference.commit_id &&
         *canonical == *bytes;
     platform::perf_trace::finish("commit decrypt/auth", auth_trace);
-    remove_file(ciphertext);
-    remove_file(plaintext);
+    cleanup();
     if (!valid_commit) {
         return LoadedVariant{.state = VariantState::InvalidCommit,
                              .commit = std::nullopt};
@@ -763,11 +750,12 @@ LoadResult load_impl(transport::Transport& storage,
                                          trusted_marker_identifiers.end()
                                      ? std::expected<MarkerState,
                                                      Error>{MarkerState::Valid}
-                                     : inspect_marker(storage,
-                                                      layout,
-                                                      reference,
-                                                      (*marker_temporary)->workspace.root,
-                                                      sequence);
+                                     : inspect_marker(
+                                           storage,
+                                           layout,
+                                           reference,
+                                           (*marker_temporary)->workspace.root,
+                                           sequence);
                     if (!state) {
                         platform::perf_trace::finish("head loading",
                                                      heads_trace);
