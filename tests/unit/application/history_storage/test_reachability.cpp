@@ -21,30 +21,7 @@ HeadReference add_fake_commit(kasumi::transport::Transport& transport,
                               const Commit& commit,
                               std::string_view suffix,
                               bool add_marker = true) {
-    const auto canonical = kasumi::history::serialize(commit).value();
-    const auto plain =
-        kasumi::test::workspace_path(workspace, std::string{suffix} + ".plain");
-    const auto cipher = kasumi::test::workspace_path(
-        workspace, std::string{suffix} + ".cipher");
-    kasumi::test::write_binary(plain, std::as_bytes(std::span{canonical}));
-    EXPECT_TRUE(kasumi::crypto::encrypt_file(
-        plain, cipher, test_key(), kasumi::crypto::FilePurpose::History));
-    const auto hash = kasumi::crypto::content::hash_file(cipher).value();
-    const HeadReference reference{commit_id(commit), kasumi::hash_hex(hash)};
-    EXPECT_TRUE(
-        kasumi::transport::put(transport, cipher, object_path(reference)));
-    if (add_marker) {
-        const auto marker =
-            kasumi::application::history_storage::encode_marker(reference)
-                .value();
-        const auto marker_file = kasumi::test::workspace_path(
-            workspace, std::string{suffix} + ".head");
-        kasumi::test::write_binary(marker_file,
-                                   std::as_bytes(std::span{marker}));
-        EXPECT_TRUE(kasumi::transport::put(
-            transport, marker_file, marker_path(reference)));
-    }
-    return reference;
+    return publish_object(transport, workspace, commit, suffix, add_marker);
 }
 
 HeadReference add_fake_payload(kasumi::transport::Transport& transport,
@@ -53,30 +30,8 @@ HeadReference add_fake_payload(kasumi::transport::Transport& transport,
                                std::span<const std::uint8_t> payload,
                                std::string_view suffix,
                                bool add_marker = true) {
-    const auto plain =
-        kasumi::test::workspace_path(workspace, std::string{suffix} + ".plain");
-    const auto cipher = kasumi::test::workspace_path(
-        workspace, std::string{suffix} + ".cipher");
-    kasumi::test::write_binary(plain, std::as_bytes(payload));
-    EXPECT_TRUE(kasumi::crypto::encrypt_file(
-        plain, cipher, test_key(), kasumi::crypto::FilePurpose::History));
-    const auto hash = kasumi::crypto::content::hash_file(cipher).value();
-    const HeadReference reference{std::string{commit_identifier},
-                                  kasumi::hash_hex(hash)};
-    EXPECT_TRUE(
-        kasumi::transport::put(transport, cipher, object_path(reference)));
-    if (add_marker) {
-        const auto marker =
-            kasumi::application::history_storage::encode_marker(reference)
-                .value();
-        const auto marker_file = kasumi::test::workspace_path(
-            workspace, std::string{suffix} + ".head");
-        kasumi::test::write_binary(marker_file,
-                                   std::as_bytes(std::span{marker}));
-        EXPECT_TRUE(kasumi::transport::put(
-            transport, marker_file, marker_path(reference)));
-    }
-    return reference;
+    return publish_object(
+        transport, workspace, commit_identifier, payload, suffix, add_marker);
 }
 
 void add_fake_marker(FakeState& state, const HeadReference& reference) {

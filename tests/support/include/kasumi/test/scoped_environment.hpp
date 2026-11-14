@@ -1,6 +1,7 @@
 #ifndef KASUMI_TEST_SCOPED_ENVIRONMENT_HPP
 #define KASUMI_TEST_SCOPED_ENVIRONMENT_HPP
 
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -22,6 +23,15 @@ using ScopedEnvironmentVariable =
 ScopedEnvironmentVariable
 scoped_environment_variable(std::string name, std::optional<std::string> value);
 void restore_environment_variable(EnvironmentVariableData* data) noexcept;
+
+inline ScopedEnvironmentVariable
+scoped_config_home(const std::filesystem::path& path) {
+#if defined(_WIN32)
+    return scoped_environment_variable("APPDATA", path.string());
+#else
+    return scoped_environment_variable("XDG_CONFIG_HOME", path.string());
+#endif
+}
 
 #if defined(_WIN32)
 struct WindowsEnvironmentVariableData {

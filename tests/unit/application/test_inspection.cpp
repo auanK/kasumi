@@ -34,18 +34,6 @@ using kasumi::test::TempWorkspace;
 using HistoryHeadReference =
     kasumi::application::history_storage::HeadReference;
 
-std::string key_hex() {
-    constexpr char digits[] = "0123456789abcdef";
-    const auto key = test_key();
-    std::string result;
-    result.reserve(key.size() * 2);
-    for (const auto byte : key) {
-        result.push_back(digits[byte >> 4U]);
-        result.push_back(digits[byte & 0x0fU]);
-    }
-    return result;
-}
-
 void write_profile(const TempWorkspace& workspace,
                    const std::filesystem::path& remote) {
     const auto app = kasumi::test::workspace_path(workspace, "app");
@@ -68,11 +56,15 @@ auto inspect_request(const TempWorkspace& workspace,
          ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")}});
 }
 
-auto inspect(const TempWorkspace& workspace) {
-    return inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteHeads, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+auto inspect(const TempWorkspace& workspace, InspectionRequest request) {
+    return inspect_request(workspace,
+                           std::move(request),
+                           Credentials{MasterKeyHex{test_key_hex()}});
+}
+
+auto inspect(const TempWorkspace& workspace,
+             InspectionOperation operation = InspectionOperation::RemoteHeads) {
+    return inspect(workspace, InspectionRequest{operation, "demo"});
 }
 
 void persist_state(const TempWorkspace& workspace,
@@ -187,26 +179,11 @@ void put_object(LocalStorage& storage,
 }
 
 std::string put_content(LocalStorage& storage, std::string_view contents) {
-    const auto hash = kasumi::hasher::hash_string(contents);
-    const auto identifier =
-        kasumi::crypto::content_identifier(test_key(), hash);
-    const auto source = kasumi::test::workspace_path(
-        storage.workspace, "content-" + kasumi::hash_hex(hash) + ".plain");
-    const auto encrypted = kasumi::test::workspace_path(
-        storage.workspace, "content-" + kasumi::hash_hex(hash) + ".enc");
-    kasumi::test::write_text(source, contents);
-    if (!kasumi::crypto::encrypt_file(source,
-                                      encrypted,
-                                      test_key(),
-                                      kasumi::crypto::FilePurpose::Content)) {
-        ADD_FAILURE() << "could not encrypt test content";
-        return {};
-    }
-    if (!kasumi::transport::put(storage.transport, encrypted, identifier)) {
-        ADD_FAILURE() << "could not publish test content";
-        return {};
-    }
-    return identifier;
+    return ::put_content(
+        storage.transport,
+        storage.workspace,
+        contents,
+        "content-" + kasumi::hash_hex(kasumi::hasher::hash_string(contents)));
 }
 
 TEST(ApplicationInspectionTest, WarmFrontierPreservesHeadsAndTreeResults) {
@@ -236,10 +213,8 @@ TEST(ApplicationInspectionTest, WarmFrontierPreservesHeadsAndTreeResults) {
     ASSERT_TRUE(previous.has_value());
 
     kasumi::platform::perf_trace::force_enable(true);
-    const auto cold_heads = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteHeads, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto cold_heads =
+        inspect(workspace, InspectionOperation::RemoteHeads);
     const auto cold_heads_frontier = perf_count("inspection frontier used");
     const auto cold_heads_state = perf_count("inspection state load");
     const auto cold_heads_observation =
@@ -258,10 +233,7 @@ TEST(ApplicationInspectionTest, WarmFrontierPreservesHeadsAndTreeResults) {
     EXPECT_EQ(cold_heads_total, 1U);
 
     kasumi::platform::perf_trace::force_enable(true);
-    const auto cold_tree = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteTree, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto cold_tree = inspect(workspace, InspectionOperation::RemoteTree);
     kasumi::platform::perf_trace::force_enable(false);
     ASSERT_TRUE(cold_tree.has_value()) << cold_tree.error().detail;
     const auto* cold_tree_report =
@@ -278,10 +250,8 @@ TEST(ApplicationInspectionTest, WarmFrontierPreservesHeadsAndTreeResults) {
     const auto remote_before = kasumi::transport::list(fixture.transport);
 
     kasumi::platform::perf_trace::force_enable(true);
-    const auto warm_heads = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteHeads, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto warm_heads =
+        inspect(workspace, InspectionOperation::RemoteHeads);
     const auto warm_heads_persisted =
         perf_count("inspection persisted state available");
     const auto warm_heads_frontier = perf_count("inspection frontier used");
@@ -305,10 +275,7 @@ TEST(ApplicationInspectionTest, WarmFrontierPreservesHeadsAndTreeResults) {
     expect_same_heads(*warm_heads_report, *cold_heads_report);
 
     kasumi::platform::perf_trace::force_enable(true);
-    const auto warm_tree = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteTree, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto warm_tree = inspect(workspace, InspectionOperation::RemoteTree);
     const auto warm_tree_persisted =
         perf_count("inspection persisted state available");
     const auto warm_tree_frontier = perf_count("inspection frontier used");
@@ -395,10 +362,7 @@ TEST(ApplicationInspectionTest,
     persist_state(workspace, cached, *previous);
 
     kasumi::platform::perf_trace::force_enable(true);
-    const auto at_six = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteCommits, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto at_six = inspect(workspace, InspectionOperation::RemoteCommits);
     const auto at_six_frontier = perf_count("inspection frontier used");
     const auto at_six_full = perf_count("inspection full history observation");
     const auto at_six_trusted = perf_count("inspection trusted marker used");
@@ -431,10 +395,8 @@ TEST(ApplicationInspectionTest,
     }
 
     kasumi::platform::perf_trace::force_enable(true);
-    const auto at_eight = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteCommits, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto at_eight =
+        inspect(workspace, InspectionOperation::RemoteCommits);
     const auto at_eight_frontier = perf_count("inspection frontier used");
     const auto at_eight_full =
         perf_count("inspection full history observation");
@@ -456,10 +418,8 @@ TEST(ApplicationInspectionTest,
     EXPECT_EQ(at_eight_gets, 2U);
 
     kasumi::platform::perf_trace::force_enable(true);
-    const auto unchanged = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteCommits, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto unchanged =
+        inspect(workspace, InspectionOperation::RemoteCommits);
     const auto unchanged_gets = perf_count("rc/get_commit");
     const auto unchanged_cache =
         perf_count("inspection history cache unchanged");
@@ -504,10 +464,7 @@ TEST(ApplicationInspectionTest,
     ASSERT_TRUE(previous.has_value());
     persist_state(workspace, commits.back(), *previous);
 
-    const auto cold = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteCommits, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto cold = inspect(workspace, InspectionOperation::RemoteCommits);
     ASSERT_TRUE(cold.has_value()) << cold.error().detail;
 
     const auto historical_content_id = kasumi::crypto::content_identifier(
@@ -526,8 +483,7 @@ TEST(ApplicationInspectionTest,
     };
     for (const auto& request : requests) {
         kasumi::platform::perf_trace::force_enable(true);
-        const auto result = inspect_request(
-            workspace, request, Credentials{MasterKeyHex{key_hex()}});
+        const auto result = inspect(workspace, request);
         const auto cache_used = perf_count("inspection history cache used");
         const auto commit_gets = perf_count("rc/get_commit");
         kasumi::platform::perf_trace::force_enable(false);
@@ -585,16 +541,14 @@ TEST(ApplicationInspectionTest,
 
     const auto request =
         InspectionRequest{InspectionOperation::RemoteCommits, "demo"};
-    ASSERT_TRUE(inspect_request(
-        workspace, request, Credentials{MasterKeyHex{key_hex()}}));
+    ASSERT_TRUE(inspect(workspace, request));
     kasumi::test::write_text(
         kasumi::test::workspace_path(
             workspace, "app/profiles/demo/inspection-history-v1.cache"),
         "invalid cache");
 
     kasumi::platform::perf_trace::force_enable(true);
-    const auto recovered = inspect_request(
-        workspace, request, Credentials{MasterKeyHex{key_hex()}});
+    const auto recovered = inspect(workspace, request);
     const auto cache_used = perf_count("inspection history cache used");
     const auto full = perf_count("inspection full history observation");
     const auto commit_gets = perf_count("rc/get_commit");
@@ -646,8 +600,7 @@ TEST(ApplicationInspectionTest,
                        kasumi::test::workspace_root(fixture.workspace)));
     const auto request =
         InspectionRequest{InspectionOperation::RemoteCommits, "demo"};
-    const auto cached = inspect_request(
-        workspace, request, Credentials{MasterKeyHex{key_hex()}});
+    const auto cached = inspect(workspace, request);
     ASSERT_TRUE(cached.has_value()) << cached.error().detail;
     EXPECT_EQ(
         std::get<kasumi::application::RemoteCommitsReport>(cached->payload)
@@ -668,8 +621,7 @@ TEST(ApplicationInspectionTest,
                        kasumi::test::workspace_root(fixture.workspace)));
 
     kasumi::platform::perf_trace::force_enable(true);
-    const auto advanced = inspect_request(
-        workspace, request, Credentials{MasterKeyHex{key_hex()}});
+    const auto advanced = inspect(workspace, request);
     const auto fallback = perf_count("inspection history cache fallback");
     const auto cache_saved = perf_count("inspection history cache saved");
     kasumi::platform::perf_trace::force_enable(false);
@@ -683,8 +635,7 @@ TEST(ApplicationInspectionTest,
     EXPECT_EQ(report.commits.front().commit_id, third.head.commit_id);
 
     kasumi::platform::perf_trace::force_enable(true);
-    const auto warm = inspect_request(
-        workspace, request, Credentials{MasterKeyHex{key_hex()}});
+    const auto warm = inspect(workspace, request);
     const auto warm_fallback = perf_count("inspection history cache fallback");
     const auto warm_gets = perf_count("rc/get_commit");
     kasumi::platform::perf_trace::force_enable(false);
@@ -719,7 +670,7 @@ TEST(ApplicationInspectionTest, EmptyRemoteIsSuccessfulAndUntouched) {
         InspectionRequest{.operation = InspectionOperation::RemoteTree,
                           .profile_name = "demo",
                           .head_commit_id = std::string(64, 'a')},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     ASSERT_FALSE(requested.has_value());
     EXPECT_EQ(requested.error().code, InspectionErrorCode::RemoteHeadNotFound);
 }
@@ -730,10 +681,7 @@ TEST(ApplicationInspectionTest, RemoteTreeEmptyHistoryIsSuccessful) {
     const auto remote = kasumi::test::workspace_path(workspace, "remote");
     write_profile(workspace, remote);
 
-    const auto result = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteTree, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto result = inspect(workspace, InspectionOperation::RemoteTree);
 
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->operation, InspectionOperation::RemoteTree);
@@ -763,7 +711,7 @@ TEST(ApplicationInspectionTest, RemoteTreeUsesExactSnapshotOfSingleHead) {
     const auto result = inspect_request(
         app_workspace,
         InspectionRequest{InspectionOperation::RemoteTree, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
 
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     const auto* report =
@@ -810,7 +758,7 @@ TEST(ApplicationInspectionTest, RemoteTreeAllowsRootOnlySnapshot) {
     const auto result = inspect_request(
         app_workspace,
         InspectionRequest{InspectionOperation::RemoteTree, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
 
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     const auto* report =
@@ -840,7 +788,7 @@ TEST(ApplicationInspectionTest,
     const auto ambiguous = inspect_request(
         app_workspace,
         InspectionRequest{InspectionOperation::RemoteTree, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     ASSERT_FALSE(ambiguous.has_value());
     EXPECT_EQ(ambiguous.error().code,
               InspectionErrorCode::HeadSelectionRequired);
@@ -855,7 +803,7 @@ TEST(ApplicationInspectionTest,
         InspectionRequest{.operation = InspectionOperation::RemoteTree,
                           .profile_name = "demo",
                           .head_commit_id = left.head.commit_id},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     ASSERT_TRUE(selected_left.has_value()) << selected_left.error().detail;
     const auto* left_report =
         std::get_if<kasumi::application::RemoteTreeReport>(
@@ -875,7 +823,7 @@ TEST(ApplicationInspectionTest,
         InspectionRequest{.operation = InspectionOperation::RemoteTree,
                           .profile_name = "demo",
                           .head_commit_id = right.head.commit_id},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     ASSERT_TRUE(selected_right.has_value()) << selected_right.error().detail;
     const auto* right_report =
         std::get_if<kasumi::application::RemoteTreeReport>(
@@ -907,7 +855,7 @@ TEST(ApplicationInspectionTest, RemoteTreeRejectsAncestorAndUnknownHeadIds) {
         InspectionRequest{.operation = InspectionOperation::RemoteTree,
                           .profile_name = "demo",
                           .head_commit_id = ancestor.head.commit_id},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     ASSERT_FALSE(old_result.has_value());
     EXPECT_EQ(old_result.error().code, InspectionErrorCode::RemoteHeadNotFound);
     ASSERT_EQ(old_result.error().candidate_ids.size(), 1U);
@@ -918,7 +866,7 @@ TEST(ApplicationInspectionTest, RemoteTreeRejectsAncestorAndUnknownHeadIds) {
         InspectionRequest{.operation = InspectionOperation::RemoteTree,
                           .profile_name = "demo",
                           .head_commit_id = std::string(64, 'f')},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     ASSERT_FALSE(unknown_result.has_value());
     EXPECT_EQ(unknown_result.error().code,
               InspectionErrorCode::RemoteHeadNotFound);
@@ -957,7 +905,7 @@ TEST(ApplicationInspectionTest,
         .remote_dir = kasumi::platform::path::to_utf8(
             kasumi::test::workspace_path(fixture.workspace, "storage"))};
     ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{key_hex()}));
+        environment, profile, MasterKeyHex{test_key_hex()}));
 
     const auto config_path = environment.app_data_dir / "config.toml";
     const auto key_path = environment.app_data_dir / "profiles/demo/key.bin";
@@ -1097,7 +1045,7 @@ TEST(ApplicationInspectionTest, UsesPersistedKeyFromProfileCreatedNormally) {
             kasumi::test::workspace_path(fixture.workspace, "storage"))};
 
     ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{key_hex()}));
+        environment, profile, MasterKeyHex{test_key_hex()}));
     const auto key_path =
         kasumi::test::workspace_path(workspace, "app/profiles/demo/key.bin");
     const auto database_path =
@@ -1195,10 +1143,7 @@ TEST(ApplicationInspectionTest, RemoteCommitsEmptyHistoryIsSuccessful) {
     const auto remote = kasumi::test::workspace_path(workspace, "remote");
     write_profile(workspace, remote);
 
-    const auto result = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteCommits, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto result = inspect(workspace, InspectionOperation::RemoteCommits);
 
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->operation, InspectionOperation::RemoteCommits);
@@ -1242,10 +1187,7 @@ TEST(ApplicationInspectionTest,
     const auto p3 = publish(fixture, c3);
 
     const auto before = kasumi::transport::list(fixture.transport);
-    const auto result = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteCommits, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto result = inspect(workspace, InspectionOperation::RemoteCommits);
     const auto after = kasumi::transport::list(fixture.transport);
 
     ASSERT_TRUE(result.has_value()) << result.error().detail;
@@ -1329,10 +1271,7 @@ TEST(ApplicationInspectionTest,
             .value());
 
     kasumi::platform::perf_trace::force_enable(true);
-    const auto result = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteCommits, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto result = inspect(workspace, InspectionOperation::RemoteCommits);
     const auto classification_index_builds =
         perf_count("inspection commit classification index builds");
     const auto classification_index_entries =
@@ -1401,10 +1340,7 @@ TEST(ApplicationInspectionTest,
                     2, {first.head.commit_id}, make_tree("right", "right"), 300)
                     .value());
 
-    const auto result = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteCommits, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto result = inspect(workspace, InspectionOperation::RemoteCommits);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     const auto* report =
         std::get_if<kasumi::application::RemoteCommitsReport>(&result->payload);
@@ -1445,10 +1381,7 @@ TEST(ApplicationInspectionTest, RemoteCommitsPreservesMergeParents) {
                                    400)
                                    .value());
 
-    const auto result = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteCommits, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto result = inspect(workspace, InspectionOperation::RemoteCommits);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     const auto* report =
         std::get_if<kasumi::application::RemoteCommitsReport>(&result->payload);
@@ -1488,10 +1421,7 @@ TEST(ApplicationInspectionTest, RemoteCommitsExcludesPhysicalOrphan) {
     ASSERT_TRUE(kasumi::transport::remove(fixture.transport,
                                           marker_path(orphan_reference)));
 
-    const auto result = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteCommits, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto result = inspect(workspace, InspectionOperation::RemoteCommits);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     const auto* report =
         std::get_if<kasumi::application::RemoteCommitsReport>(&result->payload);
@@ -1542,10 +1472,7 @@ TEST(ApplicationInspectionTest,
                layout.writers_prefix + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
     const auto before = kasumi::transport::list(fixture.transport);
-    const auto result = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteSummary, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto result = inspect(workspace, InspectionOperation::RemoteSummary);
     const auto after = kasumi::transport::list(fixture.transport);
 
     ASSERT_TRUE(result.has_value()) << result.error().detail;
@@ -1580,10 +1507,7 @@ TEST(ApplicationInspectionTest,
         test_key(), commit.tree.rows.back().hash);
     put_object(fixture, content_id, "ciphertext deliberately invalid");
 
-    const auto result = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteSummary, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto result = inspect(workspace, InspectionOperation::RemoteSummary);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     const auto* report =
         std::get_if<kasumi::application::RemoteSummaryReport>(&result->payload);
@@ -1603,10 +1527,7 @@ TEST(ApplicationInspectionTest,
         test_key(), kasumi::hasher::hash_string("orphan"));
     put_object(fixture, content_id);
 
-    const auto result = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteSummary, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto result = inspect(workspace, InspectionOperation::RemoteSummary);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     const auto* report =
         std::get_if<kasumi::application::RemoteSummaryReport>(&result->payload);
@@ -1632,7 +1553,7 @@ TEST(ApplicationInspectionTest, RemoteStatReadsExactEffectiveTreeEntries) {
             InspectionRequest{.operation = InspectionOperation::RemoteStat,
                               .profile_name = "demo",
                               .logical_path = std::move(path)},
-            Credentials{MasterKeyHex{key_hex()}});
+            Credentials{MasterKeyHex{test_key_hex()}});
     };
     const auto file = inspect_path("docs/a.txt");
     ASSERT_TRUE(file.has_value()) << file.error().detail;
@@ -1715,7 +1636,7 @@ TEST(ApplicationInspectionTest,
         InspectionRequest{.operation = InspectionOperation::RemoteCommit,
                           .profile_name = "demo",
                           .commit_id = current.head.commit_id},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     const auto* report =
         std::get_if<kasumi::application::RemoteCommitReport>(&result->payload);
@@ -1757,7 +1678,7 @@ TEST(ApplicationInspectionTest,
         InspectionRequest{.operation = InspectionOperation::RemoteCommit,
                           .profile_name = "demo",
                           .commit_id = published.head.commit_id},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     const auto commit_gets = perf_count("rc/get_commit");
     kasumi::platform::perf_trace::force_enable(false);
 
@@ -1798,7 +1719,7 @@ TEST(ApplicationInspectionTest, RemoteCommitRejectsMalformedAndUnreachableIds) {
         InspectionRequest{.operation = InspectionOperation::RemoteCommit,
                           .profile_name = "demo",
                           .commit_id = orphan_reference.commit_id},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     ASSERT_FALSE(unreachable.has_value());
     EXPECT_EQ(unreachable.error().code,
               InspectionErrorCode::RemoteCommitNotFound);
@@ -1846,7 +1767,7 @@ TEST(ApplicationInspectionTest,
         workspace,
         InspectionRequest{.operation = InspectionOperation::RemoteEpochs,
                           .profile_name = "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     ASSERT_TRUE(list.has_value()) << list.error().detail;
     const auto* epochs =
         std::get_if<kasumi::application::RemoteEpochsReport>(&list->payload);
@@ -1866,7 +1787,7 @@ TEST(ApplicationInspectionTest,
             InspectionRequest{.operation = InspectionOperation::RemoteEpoch,
                               .profile_name = "demo",
                               .epoch_selector = selector},
-            Credentials{MasterKeyHex{key_hex()}});
+            Credentials{MasterKeyHex{test_key_hex()}});
         ASSERT_TRUE(detail.has_value()) << detail.error().detail;
         const auto* report =
             std::get_if<kasumi::application::RemoteEpochReport>(
@@ -1904,7 +1825,7 @@ TEST(ApplicationInspectionTest,
         InspectionRequest{.operation = InspectionOperation::RemoteEpoch,
                           .profile_name = "demo",
                           .epoch_selector = "0"},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     ASSERT_FALSE(missing.has_value());
     EXPECT_EQ(missing.error().code, InspectionErrorCode::RemoteEpochNotFound);
 
@@ -1926,7 +1847,7 @@ TEST(ApplicationInspectionTest,
         workspace,
         InspectionRequest{.operation = InspectionOperation::RemoteEpochs,
                           .profile_name = "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(rejected.error().code,
               InspectionErrorCode::RemoteObservationFailure);
@@ -1954,7 +1875,7 @@ TEST(ApplicationInspectionTest,
         workspace,
         InspectionRequest{.operation = InspectionOperation::RemoteContents,
                           .profile_name = "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     ASSERT_TRUE(list.has_value()) << list.error().detail;
     const auto* inventory =
         std::get_if<kasumi::application::RemoteContentsReport>(&list->payload);
@@ -1989,7 +1910,7 @@ TEST(ApplicationInspectionTest,
         workspace,
         InspectionRequest{.operation = InspectionOperation::RemoteContentsAudit,
                           .profile_name = "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     ASSERT_TRUE(audit.has_value()) << audit.error().detail;
     const auto* audited =
         std::get_if<kasumi::application::RemoteContentsReport>(&audit->payload);
@@ -2022,7 +1943,7 @@ TEST(ApplicationInspectionTest,
         InspectionRequest{.operation = InspectionOperation::RemoteContent,
                           .profile_name = "demo",
                           .content_id = valid_id},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     ASSERT_TRUE(detail.has_value()) << detail.error().detail;
     const auto* content =
         std::get_if<kasumi::application::RemoteContentReport>(&detail->payload);
@@ -2059,7 +1980,7 @@ TEST(ApplicationInspectionTest, RemoteContentRejectsInvalidAndUnknownIds) {
         InspectionRequest{.operation = InspectionOperation::RemoteContent,
                           .profile_name = "demo",
                           .content_id = std::string(64, 'a')},
-        Credentials{MasterKeyHex{key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}});
     ASSERT_FALSE(unknown.has_value());
     EXPECT_EQ(unknown.error().code, InspectionErrorCode::RemoteContentNotFound);
 }
@@ -2094,7 +2015,7 @@ TEST(ApplicationInspectionTest,
                            .logical_path = "relatório final.txt",
                            .destination_path =
                                kasumi::platform::path::to_utf8(destination)},
-         Credentials{MasterKeyHex{key_hex()}},
+         Credentials{MasterKeyHex{test_key_hex()}},
          ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")}});
 
     ASSERT_TRUE(result.has_value()) << result.error().detail;
@@ -2141,7 +2062,7 @@ TEST(ApplicationInspectionTest, RemoteGetInstallsUnicodeDestination) {
                            .logical_path = "カード💝.png",
                            .destination_path =
                                kasumi::platform::path::to_utf8(destination)},
-         Credentials{MasterKeyHex{key_hex()}},
+         Credentials{MasterKeyHex{test_key_hex()}},
          ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")}});
 
     ASSERT_TRUE(result) << result.error().detail;
@@ -2184,7 +2105,7 @@ TEST(
                  .logical_path = std::move(path),
                  .destination_path =
                      kasumi::platform::path::to_utf8(destination)},
-             Credentials{MasterKeyHex{key_hex()}},
+             Credentials{MasterKeyHex{test_key_hex()}},
              ExecutionEnvironment{
                  kasumi::test::workspace_path(workspace, "app")}});
     };
@@ -2271,10 +2192,7 @@ TEST(ApplicationInspectionTest,
     put_object(fixture, "namespace/desconhecido");
     const auto before = kasumi::test::snapshot_tree(remote_root);
 
-    const auto markers = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteMarkers, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto markers = inspect(workspace, InspectionOperation::RemoteMarkers);
     ASSERT_TRUE(markers.has_value()) << markers.error().detail;
     const auto* marker_report =
         std::get_if<kasumi::application::RemoteMarkersReport>(
@@ -2295,10 +2213,7 @@ TEST(ApplicationInspectionTest,
                        kasumi::application::RemoteMarkerState::Ancestral;
         }));
 
-    const auto objects = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteObjects, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto objects = inspect(workspace, InspectionOperation::RemoteObjects);
     ASSERT_TRUE(objects.has_value()) << objects.error().detail;
     const auto* object_report =
         std::get_if<kasumi::application::RemoteObjectsReport>(
@@ -2378,10 +2293,7 @@ TEST(ApplicationInspectionTest,
     const auto before = kasumi::test::snapshot_tree(remote_root);
 
     kasumi::platform::perf_trace::force_enable(true);
-    const auto result = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteOrphans, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto result = inspect(workspace, InspectionOperation::RemoteOrphans);
     const auto orphans_list = perf_count("transport list");
     const auto orphans_prefix_list = perf_count("transport list prefix");
     EXPECT_EQ(orphans_list, 1U);
@@ -2420,7 +2332,8 @@ TEST(ApplicationInspectionTest,
     EXPECT_EQ(kasumi::test::snapshot_tree(remote_root), before);
 }
 
-TEST(ApplicationInspectionTest, RemoteWritersAndHealthAuthenticateAndStayReadOnly) {
+TEST(ApplicationInspectionTest,
+     RemoteWritersAndHealthAuthenticateAndStayReadOnly) {
     namespace epoch = kasumi::application::history_storage::epoch;
     auto fixture = make_local_storage();
     auto workspace =
@@ -2457,10 +2370,7 @@ TEST(ApplicationInspectionTest, RemoteWritersAndHealthAuthenticateAndStayReadOnl
 
     const auto inspect_health = [&] {
         kasumi::platform::perf_trace::force_enable(true);
-        auto result = inspect_request(
-            workspace,
-            InspectionRequest{InspectionOperation::RemoteHealth, "demo"},
-            Credentials{MasterKeyHex{key_hex()}});
+        auto result = inspect(workspace, InspectionOperation::RemoteHealth);
         return result;
     };
 
@@ -2516,10 +2426,7 @@ TEST(ApplicationInspectionTest, RemoteWritersAndHealthAuthenticateAndStayReadOnl
 
     put_object(fixture, layout.barrier_identifier);
     put_object(fixture, layout.writers_prefix + "invalido");
-    const auto writers = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteWriters, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto writers = inspect(workspace, InspectionOperation::RemoteWriters);
     ASSERT_TRUE(writers.has_value()) << writers.error().detail;
     const auto& writer_report =
         std::get<kasumi::application::RemoteWritersReport>(writers->payload);
@@ -2553,10 +2460,7 @@ TEST(ApplicationInspectionTest,
         kasumi::test::write_text(heads / (id + "-" + std::string(64, 'a')),
                                  "x");
     }
-    const auto limited = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteMarkers, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto limited = inspect(workspace, InspectionOperation::RemoteMarkers);
     ASSERT_FALSE(limited.has_value());
     EXPECT_EQ(limited.error().code,
               InspectionErrorCode::RemoteObservationFailure);
@@ -2565,18 +2469,16 @@ TEST(ApplicationInspectionTest,
         kasumi::test::workspace_path(workspace, "blocked-transport");
     kasumi::test::write_text(blocked, "arquivo");
     write_profile(workspace, blocked / "remote");
-    const auto transport_failure = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteObjects, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    const auto transport_failure =
+        inspect(workspace, InspectionOperation::RemoteObjects);
     ASSERT_FALSE(transport_failure.has_value());
     EXPECT_EQ(transport_failure.error().code,
               InspectionErrorCode::RuntimeFailure);
 }
 
-
-TEST(ApplicationInspectionTest,
-     RemoteWritersReportBarrierPresenceAndFullIdentifierWithoutModifyingStorage) {
+TEST(
+    ApplicationInspectionTest,
+    RemoteWritersReportBarrierPresenceAndFullIdentifierWithoutModifyingStorage) {
     auto fixture = make_local_storage();
     auto workspace =
         kasumi::test::make_temp_workspace("application-writers-barrier-id");
@@ -2588,30 +2490,28 @@ TEST(ApplicationInspectionTest,
         kasumi::application::history_storage::derive_remote_layout(test_key());
 
     // 1. Absent barrier
-    auto writers_before = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteWriters, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    auto writers_before =
+        inspect(workspace, InspectionOperation::RemoteWriters);
     ASSERT_TRUE(writers_before.has_value()) << writers_before.error().detail;
     const auto& report_before =
-        std::get<kasumi::application::RemoteWritersReport>(writers_before->payload);
+        std::get<kasumi::application::RemoteWritersReport>(
+            writers_before->payload);
     EXPECT_FALSE(report_before.barrier_present);
     EXPECT_FALSE(report_before.barrier_identifier.has_value());
 
     // 2. Present barrier
     put_object(fixture, layout.barrier_identifier);
-    auto writers_after = inspect_request(
-        workspace,
-        InspectionRequest{InspectionOperation::RemoteWriters, "demo"},
-        Credentials{MasterKeyHex{key_hex()}});
+    auto writers_after = inspect(workspace, InspectionOperation::RemoteWriters);
     ASSERT_TRUE(writers_after.has_value()) << writers_after.error().detail;
     const auto& report_after =
-        std::get<kasumi::application::RemoteWritersReport>(writers_after->payload);
+        std::get<kasumi::application::RemoteWritersReport>(
+            writers_after->payload);
     EXPECT_TRUE(report_after.barrier_present);
     ASSERT_TRUE(report_after.barrier_identifier.has_value());
     EXPECT_EQ(*report_after.barrier_identifier, layout.barrier_identifier);
 
     // 3. Inspection remains strictly read-only and non-destructive
-    EXPECT_TRUE(std::filesystem::exists(remote_root / std::filesystem::path{layout.barrier_identifier}));
+    EXPECT_TRUE(std::filesystem::exists(
+        remote_root / std::filesystem::path{layout.barrier_identifier}));
 }
 } // namespace

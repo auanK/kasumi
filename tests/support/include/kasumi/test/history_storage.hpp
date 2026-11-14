@@ -3,15 +3,18 @@
 
 #include "application/history_storage/history_storage.hpp"
 #include "application/history_storage/remote_layout.hpp"
+#include "core/hasher.hpp"
 #include "core/history.hpp"
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
 #include "crypto/physical_hash.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
+#include "runtime/resolver.hpp"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -50,6 +53,32 @@ std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> test_key() {
     return key;
 }
 
+[[maybe_unused]] inline const kasumi::application::history_storage::
+    RemoteLayout&
+    test_layout() {
+    static const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    return layout;
+}
+
+[[maybe_unused]] std::string test_key_hex() {
+    return kasumi::hash_hex(std::bit_cast<kasumi::Hash>(test_key()));
+}
+
+[[maybe_unused]] kasumi::runtime::RuntimeData
+runtime_data(TempWorkspace& workspace) {
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto profile = kasumi::test::workspace_path(workspace, "profile");
+    EXPECT_TRUE(std::filesystem::create_directories(local));
+    EXPECT_TRUE(std::filesystem::create_directories(profile));
+    return kasumi::runtime::RuntimeData{
+        .local_dir = local,
+        .database_path = profile / "db.sqlite",
+        .key_path = profile / "key.bin",
+        .storage_location = "unused",
+    };
+}
+
 Snapshot make_tree(std::string_view path, std::string_view contents) {
     Snapshot tree{
         .rows =
@@ -85,16 +114,12 @@ make_commit(std::uint64_t height,
 }
 
 std::string object_path(const HeadReference& reference) {
-    const auto layout =
-        kasumi::application::history_storage::derive_remote_layout(test_key());
-    return kasumi::application::history_storage::commit_object(layout,
+    return kasumi::application::history_storage::commit_object(test_layout(),
                                                                reference);
 }
 
 std::string marker_path(const HeadReference& reference) {
-    const auto layout =
-        kasumi::application::history_storage::derive_remote_layout(test_key());
-    return kasumi::application::history_storage::marker_object(layout,
+    return kasumi::application::history_storage::marker_object(test_layout(),
                                                                reference);
 }
 
@@ -118,30 +143,70 @@ struct LocalStorage {
 }
 
 [[maybe_unused]] HeadReference
-add_variant_bytes(LocalStorage& storage,
-                  std::span<const std::uint8_t> canonical) {
+publish_object(kasumi::transport::Transport& transport,
+               TempWorkspace& workspace,
+               std::string_view commit_identifier,
+               std::span<const std::uint8_t> payload,
+               std::string_view suffix,
+               bool marker = true) {
     const auto key = test_key();
+    const auto prefix = std::string{suffix};
     const auto plaintext =
-        kasumi::test::workspace_path(storage.workspace, "variant.canonical");
+        kasumi::test::workspace_path(workspace, prefix + ".plain");
     const auto ciphertext =
-        kasumi::test::workspace_path(storage.workspace, "variant.ciphertext");
-    kasumi::test::write_binary(plaintext, std::as_bytes(std::span{canonical}));
+        kasumi::test::workspace_path(workspace, prefix + ".cipher");
+    kasumi::test::write_binary(plaintext, std::as_bytes(payload));
     EXPECT_TRUE(kasumi::crypto::encrypt_file(
         plaintext, ciphertext, key, kasumi::crypto::FilePurpose::History));
     const auto hash = kasumi::crypto::content::hash_file(ciphertext).value();
-    HeadReference reference{
-        .commit_id = kasumi::crypto::commit_identifier(key, canonical),
-        .ciphertext_id = kasumi::hash_hex(hash)};
-    EXPECT_TRUE(kasumi::transport::put(
-        storage.transport, ciphertext, object_path(reference)));
-    const auto marker =
-        kasumi::application::history_storage::encode_marker(reference).value();
-    const auto marker_file =
-        kasumi::test::workspace_path(storage.workspace, "variant.marker");
-    kasumi::test::write_binary(marker_file, std::as_bytes(std::span{marker}));
-    EXPECT_TRUE(kasumi::transport::put(
-        storage.transport, marker_file, marker_path(reference)));
+    HeadReference reference{.commit_id = std::string{commit_identifier},
+                            .ciphertext_id = kasumi::hash_hex(hash)};
+    EXPECT_TRUE(
+        kasumi::transport::put(transport, ciphertext, object_path(reference)));
+    if (marker) {
+        const auto encoded =
+            kasumi::application::history_storage::encode_marker(reference)
+                .value();
+        const auto marker_file =
+            kasumi::test::workspace_path(workspace, prefix + ".head");
+        kasumi::test::write_binary(marker_file,
+                                   std::as_bytes(std::span{encoded}));
+        EXPECT_TRUE(kasumi::transport::put(
+            transport, marker_file, marker_path(reference)));
+    }
     return reference;
+}
+
+[[maybe_unused]] HeadReference
+publish_object(kasumi::transport::Transport& transport,
+               TempWorkspace& workspace,
+               std::span<const std::uint8_t> canonical,
+               std::string_view suffix,
+               bool marker = true) {
+    return publish_object(
+        transport,
+        workspace,
+        kasumi::crypto::commit_identifier(test_key(), canonical),
+        canonical,
+        suffix,
+        marker);
+}
+
+[[maybe_unused]] HeadReference
+publish_object(kasumi::transport::Transport& transport,
+               TempWorkspace& workspace,
+               const Commit& commit,
+               std::string_view suffix,
+               bool marker = true) {
+    const auto canonical = kasumi::history::serialize(commit).value();
+    return publish_object(transport, workspace, canonical, suffix, marker);
+}
+
+[[maybe_unused]] HeadReference
+add_variant_bytes(LocalStorage& storage,
+                  std::span<const std::uint8_t> canonical) {
+    return publish_object(
+        storage.transport, storage.workspace, canonical, "variant", true);
 }
 
 [[maybe_unused]] HeadReference add_variant(LocalStorage& storage,
@@ -150,17 +215,60 @@ add_variant_bytes(LocalStorage& storage,
     return add_variant_bytes(storage, canonical);
 }
 
+[[maybe_unused]] void put_object_bytes(kasumi::transport::Transport& transport,
+                                       TempWorkspace& workspace,
+                                       std::string_view identifier,
+                                       std::span<const std::uint8_t> bytes,
+                                       std::string_view suffix) {
+    const auto path =
+        kasumi::test::workspace_path(workspace, std::string{suffix} + ".bin");
+    kasumi::test::write_binary(path, std::as_bytes(bytes));
+    EXPECT_TRUE(kasumi::transport::put(transport, path, identifier));
+}
+
+[[maybe_unused]] std::string content_identifier(std::string_view contents) {
+    return kasumi::crypto::content_identifier(
+        test_key(), kasumi::hasher::hash_string(contents));
+}
+
+[[maybe_unused]] std::string
+put_content(kasumi::transport::Transport& transport,
+            TempWorkspace& workspace,
+            std::string_view contents,
+            std::string_view suffix) {
+    const auto identifier = content_identifier(contents);
+    const auto plain =
+        kasumi::test::workspace_path(workspace, std::string{suffix} + ".plain");
+    const auto cipher =
+        kasumi::test::workspace_path(workspace, std::string{suffix} + ".enc");
+    kasumi::test::write_text(plain, contents);
+    EXPECT_TRUE(kasumi::crypto::encrypt_file(plain, cipher, test_key()));
+    EXPECT_TRUE(kasumi::transport::put(transport, cipher, identifier));
+    return identifier;
+}
+
 [[maybe_unused]] kasumi::application::history_storage::PublishedCommit
-publish(LocalStorage& storage, const Commit& commit) {
+publish(kasumi::transport::Transport& transport,
+        TempWorkspace& workspace,
+        const Commit& commit) {
     auto key = test_key();
     auto result = kasumi::application::history_storage::publish_commit(
-        storage.transport,
-        key,
-        commit,
-        kasumi::test::workspace_root(storage.workspace));
+        transport, key, commit, kasumi::test::workspace_root(workspace));
     EXPECT_TRUE(result.has_value());
     return result ? *result
                   : kasumi::application::history_storage::PublishedCommit{};
+}
+
+[[maybe_unused]] kasumi::application::history_storage::PublishedCommit
+publish(LocalStorage& storage, const Commit& commit) {
+    return publish(storage.transport, storage.workspace, commit);
+}
+
+[[maybe_unused]] kasumi::application::history_storage::PublishedCommit
+publish_remote(kasumi::transport::Transport& transport,
+               TempWorkspace& workspace,
+               const Commit& commit) {
+    return publish(transport, workspace, commit);
 }
 
 [[maybe_unused]] LoadedHistory load(LocalStorage& storage) {
@@ -422,11 +530,10 @@ kasumi::transport::Result fake_put(void* context,
         if (ambiguous_target) {
             state->put_then_fail_identifier.clear();
         }
-        return std::unexpected(
-            kasumi::transport::Error{.code = ambiguous_target
-                                                  ? state->put_then_fail_code
-                                                  : kasumi::transport::ErrorCode::Io,
-                                     .message = "injected put failure"});
+        return std::unexpected(kasumi::transport::Error{
+            .code = ambiguous_target ? state->put_then_fail_code
+                                     : kasumi::transport::ErrorCode::Io,
+            .message = "injected put failure"});
     }
     return {};
 }
@@ -666,7 +773,8 @@ kasumi::transport::PresenceResult fake_presence(void* context,
     if (state->on_operation) {
         state->on_operation(*state, "presence", identifier);
     }
-    if (state->fail_barrier_presence && identifier == layout.barrier_identifier) {
+    if (state->fail_barrier_presence &&
+        identifier == layout.barrier_identifier) {
         return std::unexpected(kasumi::transport::Error{
             .code = kasumi::transport::ErrorCode::Io,
             .message = "injected barrier presence failure"});
@@ -798,8 +906,8 @@ kasumi::transport::RemovalResult fake_remove(void* context,
     const auto test_layout =
         kasumi::application::history_storage::derive_remote_layout(test_key());
     const bool candidate_removal =
-        !kasumi::application::history_storage::is_control_object(
-            test_layout, identifier);
+        !kasumi::application::history_storage::is_control_object(test_layout,
+                                                                 identifier);
     if (candidate_removal) {
         ++state->candidate_remove_count;
     }
@@ -811,7 +919,8 @@ kasumi::transport::RemovalResult fake_remove(void* context,
         state->physical_hashes.erase(std::string{identifier});
         state->objects.erase(std::string{identifier});
         return std::unexpected(kasumi::transport::Error{
-            .code = state->fail_remove_code.value_or(kasumi::transport::ErrorCode::Io),
+            .code = state->fail_remove_code.value_or(
+                kasumi::transport::ErrorCode::Io),
             .message = "injected remove failure",
             .native_code = state->remove_failure_native_code});
     }
@@ -832,7 +941,8 @@ kasumi::transport::RemovalResult fake_remove(void* context,
     if (identifier == state->fail_remove_identifier) {
         state->fail_remove_identifier.clear();
         return std::unexpected(kasumi::transport::Error{
-            .code = state->fail_remove_code.value_or(kasumi::transport::ErrorCode::Io),
+            .code = state->fail_remove_code.value_or(
+                kasumi::transport::ErrorCode::Io),
             .message = "injected remove failure",
             .native_code = state->remove_failure_native_code});
     }
@@ -868,12 +978,14 @@ fake_remove_batch(void* context, const kasumi::transport::RemoveBatch& batch) {
     auto* state = fake_state(context);
     const std::size_t batch_idx = state->remove_batch_count++;
     const std::size_t batch_num = batch_idx + 1;
-    state->batch_lifecycle_events.push_back("batch_" + std::to_string(batch_num) + "_started");
+    state->batch_lifecycle_events.push_back(
+        "batch_" + std::to_string(batch_num) + "_started");
     struct LifecycleGuard {
         FakeState* s;
         std::size_t num;
         ~LifecycleGuard() {
-            s->batch_lifecycle_events.push_back("batch_" + std::to_string(num) + "_completed");
+            s->batch_lifecycle_events.push_back("batch_" + std::to_string(num) +
+                                                "_completed");
         }
     } lifecycle_guard{state, batch_num};
     state->remove_batch_item_count += batch.items.size();
@@ -1138,6 +1250,14 @@ enable_fake_physical_hash_batch(kasumi::transport::Transport& transport,
     state.physical_hash_batch_supported = true;
     state.physical_hash_batch_min_objects = min_objects;
     transport.storage.physical_hash_batch_min_objects = min_objects;
+}
+
+[[maybe_unused]] inline void reset_remote_counts(FakeState& state) {
+    state.list_count = 0;
+    state.get_count = 0;
+    state.commit_get_count = 0;
+    state.marker_get_count = 0;
+    state.physical_hash_count = 0;
 }
 
 [[maybe_unused]] kasumi::transport::Transport

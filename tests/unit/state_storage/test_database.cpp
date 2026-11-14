@@ -116,6 +116,18 @@ kasumi::Snapshot make_snapshot(std::string_view file_path,
     return snapshot;
 }
 
+struct DbWorkspace {
+    kasumi::test::TempWorkspace workspace;
+    std::filesystem::path database_path;
+};
+
+DbWorkspace make_db(std::string_view name) {
+    auto workspace = kasumi::test::make_temp_workspace(name);
+    auto database_path = kasumi::test::workspace_path(workspace, "state.db");
+    EXPECT_TRUE(kasumi::state_storage::initialize(database_path));
+    return {std::move(workspace), std::move(database_path)};
+}
+
 TEST(StateStorageDatabaseTest, InitializesFreshDatabaseIdempotently) {
     auto workspace =
         kasumi::test::make_temp_workspace("persistence-initialize");
@@ -239,10 +251,7 @@ TEST(StateStorageDatabaseTest, UnknownAuxiliaryTablesAreIgnoredAndPreserved) {
               std::vector<std::string>{"1"});
 }
 TEST(StateStorageDatabaseTest, FreshDatabaseCreatesInitialSchemaAndEmptyCache) {
-    auto workspace = kasumi::test::make_temp_workspace("persistence-schema");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-schema");
     EXPECT_EQ(query_text(database_path, "PRAGMA user_version").front(), "1");
     EXPECT_TRUE(
         query_text(database_path,
@@ -397,21 +406,14 @@ TEST(StateStorageDatabaseTest, StateAndPendingRowsCommitAtomically) {
 }
 
 TEST(StateStorageDatabaseTest, MissingCanonicalPendingTableFailsClosed) {
-    auto workspace = kasumi::test::make_temp_workspace("pending-schema");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("pending-schema");
     execute_sql(database_path, "DROP TABLE pending_materializations");
     EXPECT_FALSE(kasumi::state_storage::initialize(database_path));
     EXPECT_FALSE(kasumi::state_storage::load_state(database_path).has_value());
 }
 
 TEST(StateStorageDatabaseTest, FileCacheDeltaIsNonAuthoritative) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-file-cache");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-file-cache");
     const auto snapshot = make_snapshot("a.txt", "a", 10);
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
@@ -488,11 +490,7 @@ TEST(StateStorageDatabaseTest, EpochReferenceRoundTripsWithNonZeroSequence) {
 }
 
 TEST(StateStorageDatabaseTest, RejectsEpochSequenceWithoutEpochId) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-epoch-invariant");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-epoch-invariant");
 
     EXPECT_FALSE(kasumi::state_storage::save_state(
         database_path,
@@ -503,11 +501,7 @@ TEST(StateStorageDatabaseTest, RejectsEpochSequenceWithoutEpochId) {
 }
 
 TEST(StateStorageDatabaseTest, MalformedFileCacheEntryIsDiscarded) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-cache-corrupt");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-cache-corrupt");
     execute_sql(database_path,
                 "INSERT INTO file_cache VALUES ('bad', 'not-a-hash', 1, 99, "
                 "'0', '0', '0', '0')");
@@ -546,11 +540,7 @@ TEST(StateStorageDatabaseTest, RoundTripsSnapshotAndGeneration) {
 }
 
 TEST(StateStorageDatabaseTest, StateWithoutKnownCiphertextIdRemainsValid) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-unknown-ciphertext");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-unknown-ciphertext");
 
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
@@ -564,11 +554,7 @@ TEST(StateStorageDatabaseTest, StateWithoutKnownCiphertextIdRemainsValid) {
 }
 
 TEST(StateStorageDatabaseTest, RejectsInvalidCiphertextId) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-invalid-ciphertext");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-invalid-ciphertext");
 
     EXPECT_FALSE(kasumi::state_storage::save_state(
         database_path,
@@ -680,9 +666,8 @@ TEST(StateStorageDatabaseTest,
         kasumi::test::make_temp_workspace("persistence-empty-existing");
     const auto database_path =
         kasumi::test::workspace_path(workspace, "state.db");
-    execute_sql(database_path,
-                "SELECT 1;",
-                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
+    execute_sql(
+        database_path, "SELECT 1;", SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
 
     EXPECT_FALSE(kasumi::state_storage::initialize(database_path));
     EXPECT_TRUE(query_text(database_path,
@@ -707,12 +692,7 @@ TEST(StateStorageDatabaseTest, ValidationRequiresCurrentExistingSchema) {
 }
 
 TEST(StateStorageDatabaseTest, CorruptHashReturnsControlledError) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-corrupt-hash");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-corrupt-hash");
     execute_sql(database_path,
                 "INSERT INTO nodes (path, hash, size, mtime, is_dir) VALUES "
                 "('docs/bad.txt', 'not-a-hash', 3, 0, 0); "
@@ -725,11 +705,7 @@ TEST(StateStorageDatabaseTest, CorruptHashReturnsControlledError) {
 }
 
 TEST(StateStorageDatabaseTest, NegativeIsDirectoryReturnsControlledError) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-negative-is-dir");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-negative-is-dir");
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
         {.tree = make_snapshot("docs/state.txt", "state", 500),
@@ -743,11 +719,7 @@ TEST(StateStorageDatabaseTest, NegativeIsDirectoryReturnsControlledError) {
 }
 
 TEST(StateStorageDatabaseTest, OutOfRangeIsDirectoryReturnsControlledError) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-large-is-dir");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-large-is-dir");
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
         {.tree = make_snapshot("docs/state.txt", "state", 501),
@@ -761,11 +733,7 @@ TEST(StateStorageDatabaseTest, OutOfRangeIsDirectoryReturnsControlledError) {
 }
 
 TEST(StateStorageDatabaseTest, NegativeSizeReturnsControlledError) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-negative-size");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-negative-size");
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
         {.tree = make_snapshot("docs/state.txt", "state", 502),
@@ -779,11 +747,7 @@ TEST(StateStorageDatabaseTest, NegativeSizeReturnsControlledError) {
 }
 
 TEST(StateStorageDatabaseTest, RejectsInvalidStoredStateBeforeWriting) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-invalid-state");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-invalid-state");
     const auto tree = make_snapshot("docs/state.txt", "state", 600);
 
     EXPECT_FALSE(kasumi::state_storage::save_state(
@@ -799,11 +763,7 @@ TEST(StateStorageDatabaseTest, RejectsInvalidStoredStateBeforeWriting) {
 }
 
 TEST(StateStorageDatabaseTest, SaveStateCanonicalizesMetadata) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-metadata-canonical");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-metadata-canonical");
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
         {.tree = make_snapshot("docs/old.txt", "old", 700),
@@ -830,11 +790,7 @@ TEST(StateStorageDatabaseTest, SaveStateCanonicalizesMetadata) {
 }
 
 TEST(StateStorageDatabaseTest, SaveStateFailureKeepsPreviousTuple) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-metadata-rollback");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-metadata-rollback");
     const auto previous = kasumi::state_storage::StoredState{
         .tree = make_snapshot("docs/old.txt", "old", 800),
         .height = 3,
@@ -873,33 +829,21 @@ TEST(StateStorageDatabaseTest, RejectsVersionZeroWithExistingTables) {
 }
 
 TEST(StateStorageDatabaseTest, RejectsPreReleaseSchemaVersion) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-version-prerelease");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-version-prerelease");
     execute_sql(database_path, "PRAGMA user_version = 5");
     EXPECT_FALSE(kasumi::state_storage::initialize(database_path));
     EXPECT_FALSE(kasumi::state_storage::load_state(database_path).has_value());
 }
 
 TEST(StateStorageDatabaseTest, RejectsUnknownFutureVersion) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-version-future");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-version-future");
     execute_sql(database_path, "PRAGMA user_version = 99");
     EXPECT_FALSE(kasumi::state_storage::initialize(database_path));
     EXPECT_FALSE(kasumi::state_storage::load_state(database_path).has_value());
 }
 
 TEST(StateStorageDatabaseTest, RejectsEmptyMetadataWithNodes) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-empty-metadata");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-empty-metadata");
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
         {.tree = make_snapshot("docs/state.txt", "state", 900),
@@ -910,11 +854,7 @@ TEST(StateStorageDatabaseTest, RejectsEmptyMetadataWithNodes) {
 }
 
 TEST(StateStorageDatabaseTest, RejectsMissingGeneration) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-missing-generation");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-missing-generation");
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
         {.tree = make_snapshot("docs/state.txt", "state", 901),
@@ -925,11 +865,7 @@ TEST(StateStorageDatabaseTest, RejectsMissingGeneration) {
 }
 
 TEST(StateStorageDatabaseTest, RejectsMissingCommitId) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-missing-commit");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-missing-commit");
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
         {.tree = make_snapshot("docs/state.txt", "state", 902),
@@ -940,11 +876,7 @@ TEST(StateStorageDatabaseTest, RejectsMissingCommitId) {
 }
 
 TEST(StateStorageDatabaseTest, RejectsNonCanonicalGeneration) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-generation-format");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-generation-format");
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
         {.tree = make_snapshot("docs/state.txt", "state", 903),
@@ -961,11 +893,7 @@ TEST(StateStorageDatabaseTest, RejectsNonCanonicalGeneration) {
 }
 
 TEST(StateStorageDatabaseTest, RejectsMaximumGeneration) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-generation-maximum");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-generation-maximum");
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
         {.tree = make_snapshot("docs/state.txt", "state", 904),
@@ -978,11 +906,7 @@ TEST(StateStorageDatabaseTest, RejectsMaximumGeneration) {
 }
 
 TEST(StateStorageDatabaseTest, RejectsEmptyCommitId) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-empty-commit");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-empty-commit");
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
         {.tree = make_snapshot("docs/state.txt", "state", 905),
@@ -994,11 +918,7 @@ TEST(StateStorageDatabaseTest, RejectsEmptyCommitId) {
 }
 
 TEST(StateStorageDatabaseTest, RejectsMalformedCommitId) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-malformed-commit");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-malformed-commit");
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
         {.tree = make_snapshot("docs/state.txt", "state", 906),
@@ -1010,11 +930,7 @@ TEST(StateStorageDatabaseTest, RejectsMalformedCommitId) {
 }
 
 TEST(StateStorageDatabaseTest, RejectsUnknownMetadataOnLoad) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-unknown-metadata");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-unknown-metadata");
     ASSERT_TRUE(kasumi::state_storage::save_state(
         database_path,
         {.tree = make_snapshot("docs/state.txt", "state", 907),
@@ -1026,11 +942,7 @@ TEST(StateStorageDatabaseTest, RejectsUnknownMetadataOnLoad) {
 }
 
 TEST(StateStorageDatabaseTest, InitializesWithWalJournalMode) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-wal-journal-mode");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-wal-journal-mode");
 
     // An independent connection verifies the persistent database header setting
     const auto journal_mode = query_text(database_path, "PRAGMA journal_mode");
@@ -1039,11 +951,8 @@ TEST(StateStorageDatabaseTest, InitializesWithWalJournalMode) {
 }
 
 TEST(StateStorageDatabaseTest, NewReadWriteConnectionAppliesSynchronousNormal) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-connection-synchronous");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] =
+        make_db("persistence-connection-synchronous");
 
     // Raw unconfigured SQLite connection defaults to synchronous=FULL (2)
     {
@@ -1075,11 +984,8 @@ TEST(StateStorageDatabaseTest, NewReadWriteConnectionAppliesSynchronousNormal) {
 }
 
 TEST(StateStorageDatabaseTest, ReadOnlyConnectionDoesNotExecuteWritePragmas) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-connection-readonly");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] =
+        make_db("persistence-connection-readonly");
 
     auto readonly_conn =
         kasumi::state_storage::detail::open_state_database_readonly(
@@ -1145,11 +1051,7 @@ TEST(StateStorageDatabaseTest, UnicodePathRoundTrip) {
 }
 
 TEST(StateStorageDatabaseTest, UnifiedMetadataCachePersistenceFullFidelity) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-unified-metadata");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-unified-metadata");
 
     const auto row = kasumi::state_storage::FileCacheRow{
         .path = "photos/holiday.jpg",
@@ -1178,11 +1080,7 @@ TEST(StateStorageDatabaseTest, UnifiedMetadataCachePersistenceFullFidelity) {
 }
 
 TEST(StateStorageDatabaseTest, ExtremeTimestampsPreservedBitwise) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-extreme-timestamps");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-extreme-timestamps");
 
     const std::vector<kasumi::state_storage::FileCacheRow> rows{
         kasumi::state_storage::FileCacheRow{
@@ -1210,36 +1108,48 @@ TEST(StateStorageDatabaseTest, ExtremeTimestampsPreservedBitwise) {
             .file_low = 8,
             .file_high = 9}};
 
-    ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(database_path, rows));
+    ASSERT_TRUE(
+        kasumi::state_storage::save_file_cache_delta(database_path, rows));
     const auto loaded = kasumi::state_storage::load_file_cache(database_path);
     ASSERT_TRUE(loaded.has_value());
     ASSERT_EQ(loaded->size(), 3U);
-    EXPECT_EQ(loaded->at(0).mtime_nanoseconds, std::numeric_limits<std::int64_t>::max());
-    EXPECT_EQ(loaded->at(1).mtime_nanoseconds, std::numeric_limits<std::int64_t>::min());
+    EXPECT_EQ(loaded->at(0).mtime_nanoseconds,
+              std::numeric_limits<std::int64_t>::max());
+    EXPECT_EQ(loaded->at(1).mtime_nanoseconds,
+              std::numeric_limits<std::int64_t>::min());
     EXPECT_EQ(loaded->at(2).mtime_nanoseconds, 0);
 }
 
 TEST(StateStorageDatabaseTest, UnknownFingerprintKindsAreIgnoredAndPreserved) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-unknown-fingerprints");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] =
+        make_db("persistence-unknown-fingerprints");
 
     const std::string dummy_hash(64, '0');
     execute_sql(database_path,
-        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
-        "VALUES ('platform_kind_one.txt', '" + dummy_hash + "', 100, 1, "
-        "'0000000000000001', '0000000000000002', '0000000000000003', '0000000000000004')");
+                "INSERT INTO file_cache (path, hash, size, fingerprint_kind, "
+                "fp0, fp1, fp2, fp3) "
+                "VALUES ('platform_kind_one.txt', '" +
+                    dummy_hash +
+                    "', 100, 1, "
+                    "'0000000000000001', '0000000000000002', "
+                    "'0000000000000003', '0000000000000004')");
     execute_sql(database_path,
-        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
-        "VALUES ('platform_kind_two.txt', '" + dummy_hash + "', 200, 2, "
-        "'0000000000000005', '0000000000000006', '0000000000000007', '0000000000000008')");
+                "INSERT INTO file_cache (path, hash, size, fingerprint_kind, "
+                "fp0, fp1, fp2, fp3) "
+                "VALUES ('platform_kind_two.txt', '" +
+                    dummy_hash +
+                    "', 200, 2, "
+                    "'0000000000000005', '0000000000000006', "
+                    "'0000000000000007', '0000000000000008')");
 
     execute_sql(database_path,
-        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
-        "VALUES ('unified.txt', '" + dummy_hash + "', 300, 3, "
-        "'0000000000000009', '000000000000000a', '000000000000000b', '000000000000000c')");
+                "INSERT INTO file_cache (path, hash, size, fingerprint_kind, "
+                "fp0, fp1, fp2, fp3) "
+                "VALUES ('unified.txt', '" +
+                    dummy_hash +
+                    "', 300, 3, "
+                    "'0000000000000009', '000000000000000a', "
+                    "'000000000000000b', '000000000000000c')");
 
     const auto loaded = kasumi::state_storage::load_file_cache(database_path);
     ASSERT_TRUE(loaded.has_value());
@@ -1259,31 +1169,35 @@ TEST(StateStorageDatabaseTest, UnknownFingerprintKindsAreIgnoredAndPreserved) {
         database_path,
         std::span<const kasumi::state_storage::FileCacheRow>{&new_row, 1}));
 
-    const auto remaining_unknown = query_text(
-        database_path,
-        "SELECT path FROM file_cache WHERE fingerprint_kind != 3 ORDER BY path");
+    const auto remaining_unknown =
+        query_text(database_path,
+                   "SELECT path FROM file_cache WHERE fingerprint_kind != 3 "
+                   "ORDER BY path");
     EXPECT_EQ(remaining_unknown,
               (std::vector<std::string>{"platform_kind_one.txt",
                                         "platform_kind_two.txt"}));
 }
 
 TEST(StateStorageDatabaseTest, CorruptedCacheEntriesIgnoredFailClosed) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-corrupted-cache");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-corrupted-cache");
 
     const std::string dummy_hash(64, 'a');
     execute_sql(database_path,
-        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
-        "VALUES ('bad_hex.txt', '" + dummy_hash + "', 10, 3, 'NOT_HEX_VALUE!!', '0', '0', '0')");
+                "INSERT INTO file_cache (path, hash, size, fingerprint_kind, "
+                "fp0, fp1, fp2, fp3) "
+                "VALUES ('bad_hex.txt', '" +
+                    dummy_hash + "', 10, 3, 'NOT_HEX_VALUE!!', '0', '0', '0')");
     execute_sql(database_path,
-        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
-        "VALUES ('bad_hash.txt', 'short_hash', 10, 3, '0000000000000001', '0', '0', '0')");
+                "INSERT INTO file_cache (path, hash, size, fingerprint_kind, "
+                "fp0, fp1, fp2, fp3) "
+                "VALUES ('bad_hash.txt', 'short_hash', 10, 3, "
+                "'0000000000000001', '0', '0', '0')");
     execute_sql(database_path,
-        "INSERT INTO file_cache (path, hash, size, fingerprint_kind, fp0, fp1, fp2, fp3) "
-        "VALUES ('neg_size.txt', '" + dummy_hash + "', -5, 3, '0000000000000001', '0', '0', '0')");
+                "INSERT INTO file_cache (path, hash, size, fingerprint_kind, "
+                "fp0, fp1, fp2, fp3) "
+                "VALUES ('neg_size.txt', '" +
+                    dummy_hash +
+                    "', -5, 3, '0000000000000001', '0', '0', '0')");
 
     const auto loaded = kasumi::state_storage::load_file_cache(database_path);
     ASSERT_TRUE(loaded.has_value());
@@ -1291,11 +1205,7 @@ TEST(StateStorageDatabaseTest, CorruptedCacheEntriesIgnoredFailClosed) {
 }
 
 TEST(StateStorageDatabaseTest, UnchangedCacheDeltaAvoidsRedundantWrites) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-unchanged-delta");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-unchanged-delta");
 
     const auto row = kasumi::state_storage::FileCacheRow{
         .path = "steady.txt",
@@ -1317,18 +1227,19 @@ TEST(StateStorageDatabaseTest, UnchangedCacheDeltaAvoidsRedundantWrites) {
         database_path,
         std::span<const kasumi::state_storage::FileCacheRow>{&row, 1}));
 
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache unchanged"), 1U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache inserts"), 0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache updates"), 0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache deletes"), 0U);
+    EXPECT_EQ(
+        kasumi::platform::perf_trace::get_count("state db cache unchanged"),
+        1U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache inserts"),
+              0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache updates"),
+              0U);
+    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache deletes"),
+              0U);
 }
 
 TEST(StateStorageDatabaseTest, ObsoleteEntriesRemovedByDelta) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("persistence-obsolete-entries");
-    const auto database_path =
-        kasumi::test::workspace_path(workspace, "state.db");
-    ASSERT_TRUE(kasumi::state_storage::initialize(database_path));
+    auto [workspace, database_path] = make_db("persistence-obsolete-entries");
 
     const std::vector<kasumi::state_storage::FileCacheRow> initial{
         kasumi::state_storage::FileCacheRow{
@@ -1348,12 +1259,15 @@ TEST(StateStorageDatabaseTest, ObsoleteEntriesRemovedByDelta) {
             .file_low = 2,
             .file_high = 2}};
 
-    ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(database_path, initial));
-    ASSERT_EQ(kasumi::state_storage::load_file_cache(database_path)->size(), 2U);
+    ASSERT_TRUE(
+        kasumi::state_storage::save_file_cache_delta(database_path, initial));
+    ASSERT_EQ(kasumi::state_storage::load_file_cache(database_path)->size(),
+              2U);
 
-    const auto delta = std::span<const kasumi::state_storage::FileCacheRow>{
-        initial.data(), 1};
-    ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(database_path, delta));
+    const auto delta =
+        std::span<const kasumi::state_storage::FileCacheRow>{initial.data(), 1};
+    ASSERT_TRUE(
+        kasumi::state_storage::save_file_cache_delta(database_path, delta));
 
     const auto loaded = kasumi::state_storage::load_file_cache(database_path);
     ASSERT_TRUE(loaded.has_value());

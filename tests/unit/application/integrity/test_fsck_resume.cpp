@@ -24,45 +24,6 @@ namespace {
 using kasumi::application::history_storage::PublishedCommit;
 using kasumi::runtime::RuntimeData;
 
-
-RuntimeData make_test_runtime_data(TempWorkspace& workspace) {
-    const auto local = kasumi::test::workspace_path(workspace, "local");
-    const auto profile = kasumi::test::workspace_path(workspace, "profile");
-    EXPECT_TRUE(std::filesystem::create_directories(local));
-    EXPECT_TRUE(std::filesystem::create_directories(profile));
-    return RuntimeData{
-        .local_dir = local,
-        .database_path = profile / "db.sqlite",
-        .key_path = profile / "key.bin",
-        .storage_location = "unused",
-    };
-}
-
-std::string put_content(kasumi::transport::Transport& transport,
-                        TempWorkspace& workspace,
-                        std::string_view content,
-                        std::string_view suffix) {
-    const auto identifier = kasumi::crypto::content_identifier(
-        test_key(), kasumi::hasher::hash_string(content));
-    const auto plain =
-        kasumi::test::workspace_path(workspace, std::string{suffix} + ".plain");
-    const auto encrypted =
-        kasumi::test::workspace_path(workspace, std::string{suffix} + ".enc");
-    kasumi::test::write_text(plain, content);
-    EXPECT_TRUE(kasumi::crypto::encrypt_file(plain, encrypted, test_key()));
-    EXPECT_TRUE(kasumi::transport::put(transport, encrypted, identifier));
-    return identifier;
-}
-
-PublishedCommit publish_remote(kasumi::transport::Transport& transport,
-                               TempWorkspace& workspace,
-                               const Commit& commit) {
-    auto published = kasumi::application::history_storage::publish_commit(
-        transport, test_key(), commit, kasumi::test::workspace_root(workspace));
-    EXPECT_TRUE(published.has_value()) << published.error().detail;
-    return published ? *published : PublishedCommit{};
-}
-
 // Global hook for fake lying transport
 std::string g_fake_lying_target_id;
 std::string g_fake_lying_reported_hash;
@@ -82,10 +43,10 @@ fake_lying_physical_hash(void*, std::string_view identifier, std::string_view) {
     });
 }
 
-kasumi::transport::Result fake_lying_get(
-    void* context,
-    std::string_view identifier,
-    const std::filesystem::path& destination) {
+kasumi::transport::Result
+fake_lying_get(void* context,
+               std::string_view identifier,
+               const std::filesystem::path& destination) {
     if (identifier == g_fake_lying_target_id) {
         g_fake_lying_download_called = true;
     }
@@ -95,7 +56,7 @@ kasumi::transport::Result fake_lying_get(
 
 TEST(FsckResumeTest, ColdAuditPersistsCheckpointWithVerifiedProof) {
     auto storage = make_local_storage();
-    auto runtime = make_test_runtime_data(storage.workspace);
+    auto runtime = runtime_data(storage.workspace);
 
     const auto commit =
         make_commit(0, {}, "test.txt", "cold audit test content").value();
@@ -140,7 +101,7 @@ TEST(FsckResumeTest, ColdAuditPersistsCheckpointWithVerifiedProof) {
 
 TEST(FsckResumeTest, WarmAuditLoadsCheckpointAndIdentifiesCandidates) {
     auto storage = make_local_storage();
-    auto runtime = make_test_runtime_data(storage.workspace);
+    auto runtime = runtime_data(storage.workspace);
 
     const auto commit =
         make_commit(0, {}, "warm.txt", "warm resume test content").value();
@@ -176,7 +137,7 @@ TEST(FsckResumeTest,
     // Kasumi falls back to full audit, downloads ciphertext, AEAD decrypt
     // fails, and corruption is detected!
     auto storage = make_local_storage();
-    auto runtime = make_test_runtime_data(storage.workspace);
+    auto runtime = runtime_data(storage.workspace);
 
     const auto commit =
         make_commit(0, {}, "adversarial.txt", "authentic payload bytes")
@@ -213,7 +174,8 @@ TEST(FsckResumeTest,
     ASSERT_TRUE(old_actual_hash.has_value()) << old_actual_hash.error();
     ASSERT_EQ(*old_actual_hash, h_old);
 
-    constexpr std::streamoff tamper_offset = 40; // mutate inside encrypted ciphertext header / MAC
+    constexpr std::streamoff tamper_offset =
+        40; // mutate inside encrypted ciphertext header / MAC
     char original_byte = 0;
     {
         std::ifstream file(remote_file_path, std::ios::binary);
@@ -275,7 +237,8 @@ TEST(FsckResumeTest,
               std::string::npos);
 
     // 4. Checkpoint integrity verification:
-    // FSCK must never promote or overwrite the checkpoint when corruption is detected.
+    // FSCK must never promote or overwrite the checkpoint when corruption is
+    // detected.
     const auto ckpt_hash_after =
         kasumi::crypto::physical::hash_file(ckpt_path, "sha256");
     ASSERT_TRUE(ckpt_hash_after.has_value());
@@ -294,7 +257,7 @@ TEST(
     // Section 37: remote ciphertext changed, hash mismatch -> full audit ->
     // corruption detected
     auto storage = make_local_storage();
-    auto runtime = make_test_runtime_data(storage.workspace);
+    auto runtime = runtime_data(storage.workspace);
 
     auto tree = make_tree("changed.txt", "initial content");
     tree.rows.push_back(
@@ -412,7 +375,7 @@ TEST(FsckResumeTest, WrongVaultIdentityRejectsCheckpointAndExecutesFullAudit) {
     // Section 40: checkpoint from vault A + run FSCK for vault B -> rejected,
     // full normal audit
     auto storage = make_local_storage();
-    auto runtime = make_test_runtime_data(storage.workspace);
+    auto runtime = runtime_data(storage.workspace);
 
     const auto commit =
         make_commit(0, {}, "vault.txt", "vault content").value();
@@ -454,7 +417,7 @@ TEST(FsckResumeTest, WrongVaultIdentityRejectsCheckpointAndExecutesFullAudit) {
 TEST(FsckResumeTest, CorruptedCheckpointFileFallsBackToFullAuditFailClosed) {
     // Section 41: corrupted checkpoint file does not fail FSCK; full audit runs
     auto storage = make_local_storage();
-    auto runtime = make_test_runtime_data(storage.workspace);
+    auto runtime = runtime_data(storage.workspace);
 
     const auto commit = make_commit(0, {}, "file.txt", "file content").value();
     (void)publish_remote(storage.transport, storage.workspace, commit);
@@ -479,7 +442,7 @@ TEST(FsckResumeTest,
     // Section 46: Invariance test
     // Remote state has 1 healthy object, 1 missing object
     auto storage = make_local_storage();
-    auto runtime = make_test_runtime_data(storage.workspace);
+    auto runtime = runtime_data(storage.workspace);
 
     const auto commit = make_commit(0, {}, "obj1.txt", "content 1").value();
     (void)publish_remote(storage.transport, storage.workspace, commit);

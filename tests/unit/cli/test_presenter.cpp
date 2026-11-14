@@ -1,6 +1,7 @@
 #include "application/inspection/result.hpp"
 #include "cli/i18n.hpp"
 #include "cli/presenter.hpp"
+#include "kasumi/test/capture.hpp"
 #include "platform/cancellation.hpp"
 
 #include <algorithm>
@@ -31,11 +32,17 @@ Response response(ResponseData data, Operation operation = Operation::Preview) {
                     .data = std::move(data)};
 }
 
+template <typename Payload>
+std::string present_out(Payload&& payload, int expected_code = 0) {
+    return kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present(std::forward<Payload>(payload)),
+                  expected_code);
+    });
+}
+
 TEST(CliPresenterTest, PresentsEmptyAndPopulatedPlansWithTrafficAndRename) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(PlanReport{})), 0);
-    const auto empty_output = testing::internal::GetCapturedStdout();
+    const auto empty_output = present_out(response(PlanReport{}));
     EXPECT_NE(empty_output.find("Nada a fazer"), std::string::npos);
     PlanReport report;
     report.has_conflicts = true;
@@ -44,13 +51,8 @@ TEST(CliPresenterTest, PresentsEmptyAndPopulatedPlansWithTrafficAndRename) {
     report.items = {{PlanAction::RenameLocal, "old", "new", 0},
                     {PlanAction::Upload, "file", {}, 10},
                     {PlanAction::Download, "other", {}, 20},
-                    {PlanAction::DeleteIgnoredLocalFile,
-                     "cache.bak",
-                     {},
-                     10}};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(report)), 0);
-    const auto output = testing::internal::GetCapturedStdout();
+                    {PlanAction::DeleteIgnoredLocalFile, "cache.bak", {}, 10}};
+    const auto output = present_out(response(report));
     EXPECT_NE(output.find("modificações independentes"), std::string::npos);
     EXPECT_NE(output.find("old -> new"), std::string::npos);
     EXPECT_NE(output.find("Upload"), std::string::npos);
@@ -60,23 +62,17 @@ TEST(CliPresenterTest, PresentsEmptyAndPopulatedPlansWithTrafficAndRename) {
 
 TEST(CliPresenterTest, PresentsSuccessfulResponseVariants) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(SyncCompleted{}, Operation::Sync)),
-              0);
-    const auto sync_output = testing::internal::GetCapturedStdout();
+    const auto sync_output =
+        present_out(response(SyncCompleted{}, Operation::Sync));
     EXPECT_NE(sync_output.find("[OK]"), std::string::npos);
     EXPECT_NE(sync_output.find("Sincronização concluída."), std::string::npos);
     EXPECT_EQ(sync_output.find("sem erros"), std::string::npos);
     EXPECT_EQ(sync_output.find("Local:"), std::string::npos);
     EXPECT_EQ(sync_output.find("Destino:"), std::string::npos);
 
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(
-        kasumi::cli::present(response(
-            FsckCompleted{.checked_objects = 1, .checked_plaintext_bytes = 6},
-            Operation::Fsck)),
-        0);
-    const auto fsck_output = testing::internal::GetCapturedStdout();
+    const auto fsck_output = present_out(response(
+        FsckCompleted{.checked_objects = 1, .checked_plaintext_bytes = 6},
+        Operation::Fsck));
     EXPECT_NE(fsck_output.find("1 objeto único auditado"), std::string::npos);
     EXPECT_NE(fsck_output.find("6 bytes"), std::string::npos);
     EXPECT_EQ(fsck_output.find("[Auditing destination integrity]"),
@@ -89,11 +85,8 @@ TEST(CliPresenterTest, PresentsSuccessfulResponseVariants) {
 
 TEST(CliPresenterTest, RejectsCompletionPayloadForDifferentOperation) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(
-                  response(SyncCompleted{}, Operation::GarbageCollect)),
-              1);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output =
+        present_out(response(SyncCompleted{}, Operation::GarbageCollect), 1);
     EXPECT_EQ(output.find("Sincronização concluída."), std::string::npos);
     EXPECT_EQ(output.find("[OK]"), std::string::npos);
 }
@@ -102,9 +95,9 @@ TEST(CliPresenterTest, PartialSyncIsLocalizedAndReturnsDistinctExitCode) {
     SyncCompleted partial{
         .pending = 1, .pending_paths = {"docs/missing.txt"}, .partial = true};
     const ScopedLanguage english{kasumi::cli::i18n::Language::English};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(partial, Operation::Sync)), 2);
-    const auto english_output = testing::internal::GetCapturedStdout();
+    const auto english_output = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present(response(partial, Operation::Sync)), 2);
+    });
     EXPECT_NE(english_output.find("Synchronization completed partially"),
               std::string::npos);
     EXPECT_NE(english_output.find("1 file is waiting"), std::string::npos);
@@ -113,9 +106,9 @@ TEST(CliPresenterTest, PartialSyncIsLocalizedAndReturnsDistinctExitCode) {
     EXPECT_EQ(english_output.find("Everything in sync"), std::string::npos);
 
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::Portuguese);
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(partial, Operation::Sync)), 2);
-    const auto portuguese_output = testing::internal::GetCapturedStdout();
+    const auto portuguese_output = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present(response(partial, Operation::Sync)), 2);
+    });
     EXPECT_NE(portuguese_output.find("concluída parcialmente"),
               std::string::npos);
     EXPECT_NE(portuguese_output.find("1 arquivo aguarda"), std::string::npos);
@@ -132,9 +125,9 @@ TEST(CliPresenterTest, PresentsStructuralInventoryAuditAndExitStatus) {
         .orphan_content = 1,
         .unknown_objects = 0,
     };
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(audited), 2);
-    const auto english_output = testing::internal::GetCapturedStdout();
+    const auto english_output = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present(audited), 2);
+    });
     EXPECT_NE(english_output.find("Structural inventory audit"),
               std::string::npos);
     EXPECT_NE(english_output.find("Referenced content: 4"), std::string::npos);
@@ -145,9 +138,7 @@ TEST(CliPresenterTest, PresentsStructuralInventoryAuditAndExitStatus) {
         .referenced_content = 1,
         .present_content = 1,
     };
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(audited), 0);
-    const auto portuguese_output = testing::internal::GetCapturedStdout();
+    const auto portuguese_output = present_out(audited);
     EXPECT_NE(portuguese_output.find("Auditoria estrutural"),
               std::string::npos);
     EXPECT_NE(portuguese_output.find("Conteúdo referenciado: 1"),
@@ -163,9 +154,7 @@ TEST(CliPresenterTest, AuditFailureStatesSyncCompletionAndPublication) {
         .sync_completed =
             SyncCompleted{.published = true, .pending = 2, .partial = true},
     };
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(error), 1);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = present_out(error, 1);
     EXPECT_NE(output.find("Inventory audit failed"), std::string::npos);
     EXPECT_NE(output.find("Synchronization completed before"),
               std::string::npos);
@@ -183,9 +172,9 @@ TEST(CliPresenterTest, PendingPathsAreBoundedUnlessFullIsRequested) {
                                           static_cast<char>('a' + index));
     }
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(report)), 2);
-    const auto bounded = testing::internal::GetCapturedStdout();
+    const auto bounded = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present(response(report)), 2);
+    });
     EXPECT_NE(bounded.find("pending-a"), std::string::npos);
     EXPECT_NE(bounded.find("pending-e"), std::string::npos);
     EXPECT_EQ(bounded.find("pending-f"), std::string::npos);
@@ -194,21 +183,17 @@ TEST(CliPresenterTest, PendingPathsAreBoundedUnlessFullIsRequested) {
     EXPECT_NE(bounded.find("2 paths omitted"), std::string::npos);
     EXPECT_EQ(bounded.find("Nothing to do"), std::string::npos);
 
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(report), true), 2);
-    const auto complete = testing::internal::GetCapturedStdout();
+    const auto complete = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present(response(report), true), 2);
+    });
     EXPECT_NE(complete.find("pending-f"), std::string::npos);
     EXPECT_EQ(complete.find("paths omitted"), std::string::npos);
 }
 
 TEST(CliPresenterTest, PresentsPluralFsckSummaryAndOmitsUnknownBytes) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
-    testing::internal::CaptureStdout();
-
-    EXPECT_EQ(kasumi::cli::present(response(FsckCompleted{.checked_objects = 2},
-                                            Operation::Fsck)),
-              0);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = present_out(
+        response(FsckCompleted{.checked_objects = 2}, Operation::Fsck));
     EXPECT_NE(output.find("2 unique objects audited."), std::string::npos);
     EXPECT_EQ(output.find("Expected plaintext:"), std::string::npos);
 }
@@ -219,9 +204,7 @@ TEST(CliPresenterTest, PresentsSynchronizationErrorsWithoutSecrets) {
                       .code = ErrorCode::SynchronizationFailure,
                       .detail = "falha controlada",
                       .runtime = std::nullopt};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(error), 1);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = present_out(error, 1);
     EXPECT_NE(output.find("falha controlada"), std::string::npos);
 }
 
@@ -241,9 +224,7 @@ TEST(CliPresenterTest, PresentsRemoteHeadsSemantically) {
                                 .created_at = 200,
                                 .root_hash = "root-b"};
 
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(InspectionResponse{}), 0);
-    const auto empty = testing::internal::GetCapturedStdout();
+    const auto empty = present_out(InspectionResponse{});
     EXPECT_EQ(empty, "Nenhuma head remota publicada.\n");
     EXPECT_TRUE(std::holds_alternative<RemoteHeadsReport>(
         InspectionResponse{}.payload));
@@ -252,9 +233,7 @@ TEST(CliPresenterTest, PresentsRemoteHeadsSemantically) {
         .payload = RemoteHeadsReport{.history_present = true,
                                      .observed_height = 9,
                                      .heads = {first, second}}};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response), 0);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = present_out(response);
     EXPECT_NE(output.find("Heads remotas (2)"), std::string::npos);
     EXPECT_NE(output.find("Commit: commit-a"), std::string::npos);
     EXPECT_NE(output.find("Commit: commit-b"), std::string::npos);
@@ -292,9 +271,7 @@ TEST(CliPresenterTest, PresentsRemoteTreeSemantically) {
     const InspectionResponse response{
         .operation = InspectionOperation::RemoteTree, .payload = report};
 
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response), 0);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = present_out(response);
     EXPECT_NE(output.find("Head: commit-tree"), std::string::npos);
     EXPECT_NE(output.find("Altura: 14"), std::string::npos);
     EXPECT_NE(output.find("Arquivos: 2"), std::string::npos);
@@ -315,9 +292,7 @@ TEST(CliPresenterTest, PresentsRemoteCommitsWithoutInternalDetails) {
     const InspectionResponse empty{.operation =
                                        InspectionOperation::RemoteCommits,
                                    .payload = RemoteCommitsReport{}};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(empty), 0);
-    const auto empty_output = testing::internal::GetCapturedStdout();
+    const auto empty_output = present_out(empty);
     EXPECT_EQ(empty_output, "Nenhum commit remoto publicado.\n");
 
     const InspectionResponse response{
@@ -343,9 +318,7 @@ TEST(CliPresenterTest, PresentsRemoteCommitsWithoutInternalDetails) {
                     .commit_id = "commit-old", .height = 1, .created_at = 100},
             }}};
 
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response), 0);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = present_out(response);
     EXPECT_NE(output.find("Commits remotos (3)"), std::string::npos);
     EXPECT_NE(output.find("HEAD"), std::string::npos);
     EXPECT_NE(output.find("MARKER ANCESTRAL"), std::string::npos);
@@ -365,9 +338,7 @@ TEST(CliPresenterTest, PresentsRemoteTreeSelectionErrorsWithCandidates) {
         .code = InspectionErrorCode::HeadSelectionRequired,
         .detail = "Remote history has multiple logical heads.",
         .candidate_ids = {"head-a", "head-b"}};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(multiple), 1);
-    const auto multiple_output = testing::internal::GetCapturedStdout();
+    const auto multiple_output = present_out(multiple, 1);
     EXPECT_NE(multiple_output.find("multiple logical heads"),
               std::string::npos);
     EXPECT_NE(multiple_output.find("head-a"), std::string::npos);
@@ -379,9 +350,7 @@ TEST(CliPresenterTest, PresentsRemoteTreeSelectionErrorsWithCandidates) {
         .code = InspectionErrorCode::RemoteHeadNotFound,
         .detail = "requested head is not among current logical heads",
         .candidate_ids = {"head-a"}};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(missing), 1);
-    const auto missing_output = testing::internal::GetCapturedStdout();
+    const auto missing_output = present_out(missing, 1);
     EXPECT_NE(missing_output.find(
                   "requested head is not among current logical heads"),
               std::string::npos);
@@ -393,9 +362,7 @@ TEST(CliPresenterTest, RejectsIncoherentInspectionPayloadWithoutThrowing) {
     const InspectionResponse response{.operation =
                                           InspectionOperation::RemoteTree,
                                       .payload = RemoteHeadsReport{}};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response), 1);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = present_out(response, 1);
     EXPECT_NE(output.find("resposta de inspeção inconsistente"),
               std::string::npos);
 }
@@ -412,9 +379,7 @@ TEST(CliPresenterTest, PresentsRemoteSummarySemantically) {
                                        .missing_content_count = 1,
                                        .orphan_content_count = 3,
                                        .active_writer_count = 1}};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response), 0);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = present_out(response);
     EXPECT_NE(output.find("Resumo remoto"), std::string::npos);
     EXPECT_NE(output.find("Histórico: presente"), std::string::npos);
     EXPECT_NE(output.find("Altura: 6"), std::string::npos);
@@ -440,9 +405,7 @@ TEST(CliPresenterTest, PresentsRemoteStatSemantically) {
                                           .size = 42,
                                           .modified_at_unix_nanoseconds = 123,
                                       }};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response), 0);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = present_out(response);
     EXPECT_NE(output.find("Propriedades remotas"), std::string::npos);
     EXPECT_NE(output.find("árvore lógica efetiva"), std::string::npos);
     EXPECT_NE(output.find("Caminho: docs/relatório final.pdf"),
@@ -481,9 +444,7 @@ TEST(CliPresenterTest, PresentsRemoteCommitParentsAndVariants) {
                     .object_identifier = "history/commits/commit/c",
                     .state = RemoteCommitVariantState::InvalidCommit},
             }}};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response), 0);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = present_out(response);
     EXPECT_NE(output.find("Commit remoto"), std::string::npos);
     EXPECT_NE(output.find("Pais (2)"), std::string::npos);
     EXPECT_NE(output.find("parent-a"), std::string::npos);
@@ -505,9 +466,7 @@ TEST(CliPresenterTest, PresentsAuthenticatedRemoteFileDownload) {
                              .logical_hash = "logical-hash",
                              .content_id = "content-id",
                              .size = 42}};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response), 0);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = present_out(response);
     EXPECT_NE(output.find("Arquivo remoto salvo"), std::string::npos);
     EXPECT_NE(output.find("Caminho: docs/relatório.pdf"), std::string::npos);
     EXPECT_NE(output.find("Destino: download/relatório.pdf"),
@@ -531,12 +490,9 @@ TEST(CliPresenterTest, PresentsAuthenticatedEpochChainAndLinks) {
         .previous_epoch_id = "previous-id",
         .next_epoch_id = "next-id",
     };
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(InspectionResponse{
-                  .operation = InspectionOperation::RemoteEpochs,
-                  .payload = RemoteEpochsReport{.epochs = {epoch}}}),
-              0);
-    const auto list_output = testing::internal::GetCapturedStdout();
+    const auto list_output = present_out(
+        InspectionResponse{.operation = InspectionOperation::RemoteEpochs,
+                           .payload = RemoteEpochsReport{.epochs = {epoch}}});
     EXPECT_NE(list_output.find("Epochs remotos: 1"), std::string::npos);
     EXPECT_NE(list_output.find("Vault ID: vault-id"), std::string::npos);
     EXPECT_NE(list_output.find("Retenção mínima: 5 commit(s), 6 hora(s)"),
@@ -546,13 +502,10 @@ TEST(CliPresenterTest, PresentsAuthenticatedEpochChainAndLinks) {
               std::string::npos);
     EXPECT_NE(list_output.find("Próximo Epoch: next-id"), std::string::npos);
 
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(InspectionResponse{
-                  .operation = InspectionOperation::RemoteEpoch,
-                  .payload = RemoteEpochReport{.epoch = std::move(epoch)}}),
-              0);
-    EXPECT_NE(testing::internal::GetCapturedStdout().find("Epoch remoto"),
-              std::string::npos);
+    const auto epoch_output = present_out(InspectionResponse{
+        .operation = InspectionOperation::RemoteEpoch,
+        .payload = RemoteEpochReport{.epoch = std::move(epoch)}});
+    EXPECT_NE(epoch_output.find("Epoch remoto"), std::string::npos);
 }
 
 TEST(CliPresenterTest, PresentsContentInventoryAuditAndDetail) {
@@ -567,38 +520,29 @@ TEST(CliPresenterTest, PresentsContentInventoryAuditAndDetail) {
         .current_tree = true,
         .state = RemoteContentState::Valid,
     };
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(InspectionResponse{
-                  .operation = InspectionOperation::RemoteContentsAudit,
-                  .payload = RemoteContentsReport{.audited = true,
-                                                  .referenced_count = 1,
-                                                  .physical_count = 1,
-                                                  .valid_count = 1,
-                                                  .contents = {content}}}),
-              0);
-    const auto audit_output = testing::internal::GetCapturedStdout();
+    const auto audit_output = present_out(InspectionResponse{
+        .operation = InspectionOperation::RemoteContentsAudit,
+        .payload = RemoteContentsReport{.audited = true,
+                                        .referenced_count = 1,
+                                        .physical_count = 1,
+                                        .valid_count = 1,
+                                        .contents = {content}}});
     EXPECT_NE(audit_output.find("auditoria profunda"), std::string::npos);
     EXPECT_NE(audit_output.find("Válidos: 1"), std::string::npos);
     EXPECT_NE(audit_output.find("Estado: válido"), std::string::npos);
     EXPECT_NE(audit_output.find("docs/a.txt"), std::string::npos);
 
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(
-        kasumi::cli::present(InspectionResponse{
-            .operation = InspectionOperation::RemoteContent,
-            .payload = RemoteContentReport{.content = std::move(content)}}),
-        0);
-    const auto detail_output = testing::internal::GetCapturedStdout();
+    const auto detail_output = present_out(InspectionResponse{
+        .operation = InspectionOperation::RemoteContent,
+        .payload = RemoteContentReport{.content = std::move(content)}});
     EXPECT_NE(detail_output.find("Conteúdo remoto"), std::string::npos);
     EXPECT_NE(detail_output.find("Content ID: content-id"), std::string::npos);
 }
 
 TEST(CliPresenterTest, PresentsEveryPhysicalInspectionReportInPortuguese) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
-    const auto present_and_capture = [](InspectionResponse response) {
-        testing::internal::CaptureStdout();
-        EXPECT_EQ(kasumi::cli::present(response), 0);
-        const auto output = testing::internal::GetCapturedStdout();
+    const auto present_and_capture = [](const InspectionResponse& response) {
+        const auto output = present_out(response);
         EXPECT_EQ(output.find("[Rede]"), std::string::npos);
         return output;
     };
@@ -666,10 +610,8 @@ TEST(CliPresenterTest, PresentsEveryPhysicalInspectionReportInPortuguese) {
 
 TEST(CliPresenterTest, PresentsEveryPhysicalInspectionReportInEnglish) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
-    const auto present_and_capture = [](InspectionResponse response) {
-        testing::internal::CaptureStdout();
-        EXPECT_EQ(kasumi::cli::present(response), 0);
-        const auto output = testing::internal::GetCapturedStdout();
+    const auto present_and_capture = [](const InspectionResponse& response) {
+        const auto output = present_out(response);
         EXPECT_EQ(output.find("[Rede]"), std::string::npos);
         return output;
     };
@@ -745,35 +687,27 @@ TEST(CliPresenterTest, PresentsRemoteLookupErrors) {
                             InspectionErrorCode::RemoteContentInvalid,
                             InspectionErrorCode::DestinationFailure,
                             InspectionErrorCode::RemoteEpochNotFound}) {
-        testing::internal::CaptureStdout();
-        EXPECT_EQ(kasumi::cli::present(InspectionError{
-                      .operation = InspectionOperation::RemoteStat,
-                      .code = code,
-                      .detail = "not found"}),
-                  1);
-        EXPECT_NE(testing::internal::GetCapturedStdout().find("not found"),
-                  std::string::npos);
+        const auto error_output = present_out(
+            InspectionError{.operation = InspectionOperation::RemoteStat,
+                            .code = code,
+                            .detail = "not found"},
+            1);
+        EXPECT_NE(error_output.find("not found"), std::string::npos);
     }
 }
 
 TEST(CliPresenterTest, PresentsOutputsInEnglishWhenConfigured) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
 
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(PlanReport{})), 0);
-    const auto empty_output = testing::internal::GetCapturedStdout();
+    const auto empty_output = present_out(response(PlanReport{}));
     EXPECT_NE(empty_output.find("Nothing to do"), std::string::npos);
 
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(SyncCompleted{}, Operation::Sync)),
-              0);
-    const auto sync_output = testing::internal::GetCapturedStdout();
+    const auto sync_output =
+        present_out(response(SyncCompleted{}, Operation::Sync));
     EXPECT_NE(sync_output.find("Synchronization completed."),
               std::string::npos);
 
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(InspectionResponse{}), 0);
-    const auto heads_empty = testing::internal::GetCapturedStdout();
+    const auto heads_empty = present_out(InspectionResponse{});
     EXPECT_NE(heads_empty.find("No remote heads published."),
               std::string::npos);
 }
@@ -781,36 +715,36 @@ TEST(CliPresenterTest, PresentsOutputsInEnglishWhenConfigured) {
 TEST(CliPresenterTest, PresentsSyncProgressStagesAndSummaryInPortuguese) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
 
-    testing::internal::CaptureStdout();
-    kasumi::cli::present(kasumi::application::SyncProgress{
-        .stage = kasumi::application::SyncStage::Observing});
-    kasumi::cli::present(kasumi::application::SyncProgress{
-        .stage = kasumi::application::SyncStage::Calculating});
-    kasumi::application::SyncCompleted summary{
-        .total = 137,
-        .uploaded = 92,
-        .downloaded = 31,
-        .removed = 14,
-        .renamed = 0,
-        .created_dirs = 0,
-        .removed_dirs = 0,
-        .published = true,
-    };
-    kasumi::cli::present(kasumi::application::SyncProgress{
-        .stage = kasumi::application::SyncStage::Calculating,
-        .summary = summary,
-        .total_items = 137});
-    kasumi::cli::present(kasumi::application::SyncProgress{
-        .stage = kasumi::application::SyncStage::Applying, .total_items = 137});
-    kasumi::cli::present(kasumi::application::SyncProgress{
-        .stage = kasumi::application::SyncStage::Publishing});
-    kasumi::cli::present(kasumi::application::SyncProgress{
-        .stage = kasumi::application::SyncStage::Finalizing});
-    EXPECT_EQ(kasumi::cli::present(
-                  response(summary, kasumi::application::Operation::Sync)),
-              0);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = kasumi::test::capture_stdout([&] {
+        kasumi::cli::present(kasumi::application::SyncProgress{
+            .stage = kasumi::application::SyncStage::Observing});
+        kasumi::cli::present(kasumi::application::SyncProgress{
+            .stage = kasumi::application::SyncStage::Calculating});
+        kasumi::application::SyncCompleted summary{
+            .total = 137,
+            .uploaded = 92,
+            .downloaded = 31,
+            .removed = 14,
+            .renamed = 0,
+            .created_dirs = 0,
+            .removed_dirs = 0,
+            .published = true,
+        };
+        kasumi::cli::present(kasumi::application::SyncProgress{
+            .stage = kasumi::application::SyncStage::Calculating,
+            .summary = summary,
+            .total_items = 137});
+        kasumi::cli::present(kasumi::application::SyncProgress{
+            .stage = kasumi::application::SyncStage::Applying,
+            .total_items = 137});
+        kasumi::cli::present(kasumi::application::SyncProgress{
+            .stage = kasumi::application::SyncStage::Publishing});
+        kasumi::cli::present(kasumi::application::SyncProgress{
+            .stage = kasumi::application::SyncStage::Finalizing});
+        EXPECT_EQ(kasumi::cli::present(
+                      response(summary, kasumi::application::Operation::Sync)),
+                  0);
+    });
     EXPECT_NE(output.find("[1/5] Observando estado local e remoto..."),
               std::string::npos);
     EXPECT_NE(output.find("[2/5] Calculando alterações..."), std::string::npos);
@@ -832,35 +766,35 @@ TEST(CliPresenterTest, PresentsSyncProgressStagesAndSummaryInPortuguese) {
 TEST(CliPresenterTest, PresentsSyncProgressStagesAndSummaryInEnglish) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
 
-    testing::internal::CaptureStdout();
-    kasumi::cli::present(kasumi::application::SyncProgress{
-        .stage = kasumi::application::SyncStage::Observing});
-    kasumi::cli::present(kasumi::application::SyncProgress{
-        .stage = kasumi::application::SyncStage::Calculating});
-    kasumi::application::SyncCompleted summary{
-        .total = 5,
-        .uploaded = 2,
-        .downloaded = 1,
-        .removed = 1,
-        .renamed = 1,
-        .created_dirs = 0,
-        .removed_dirs = 0,
-        .published = false,
-    };
-    kasumi::cli::present(kasumi::application::SyncProgress{
-        .stage = kasumi::application::SyncStage::Calculating,
-        .summary = summary,
-        .total_items = 5});
-    kasumi::cli::present(kasumi::application::SyncProgress{
-        .stage = kasumi::application::SyncStage::Applying, .total_items = 5});
-    // Stage 4 (Publishing) omitted when publication is not required
-    kasumi::cli::present(kasumi::application::SyncProgress{
-        .stage = kasumi::application::SyncStage::Finalizing});
-    EXPECT_EQ(kasumi::cli::present(
-                  response(summary, kasumi::application::Operation::Sync)),
-              0);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = kasumi::test::capture_stdout([&] {
+        kasumi::cli::present(kasumi::application::SyncProgress{
+            .stage = kasumi::application::SyncStage::Observing});
+        kasumi::cli::present(kasumi::application::SyncProgress{
+            .stage = kasumi::application::SyncStage::Calculating});
+        kasumi::application::SyncCompleted summary{
+            .total = 5,
+            .uploaded = 2,
+            .downloaded = 1,
+            .removed = 1,
+            .renamed = 1,
+            .created_dirs = 0,
+            .removed_dirs = 0,
+            .published = false,
+        };
+        kasumi::cli::present(kasumi::application::SyncProgress{
+            .stage = kasumi::application::SyncStage::Calculating,
+            .summary = summary,
+            .total_items = 5});
+        kasumi::cli::present(kasumi::application::SyncProgress{
+            .stage = kasumi::application::SyncStage::Applying,
+            .total_items = 5});
+        // Stage 4 (Publishing) omitted when publication is not required
+        kasumi::cli::present(kasumi::application::SyncProgress{
+            .stage = kasumi::application::SyncStage::Finalizing});
+        EXPECT_EQ(kasumi::cli::present(
+                      response(summary, kasumi::application::Operation::Sync)),
+                  0);
+    });
     EXPECT_NE(output.find("[1/5] Observing local and remote state..."),
               std::string::npos);
     EXPECT_NE(output.find("[2/5] Calculating changes..."), std::string::npos);
@@ -876,20 +810,19 @@ TEST(CliPresenterTest, PresentsSyncProgressStagesAndSummaryInEnglish) {
 TEST(CliPresenterTest, PresentsSyncProgressNoChangesInPortugueseAndEnglish) {
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::Portuguese);
     {
-        testing::internal::CaptureStdout();
-        kasumi::cli::present(kasumi::application::SyncProgress{
-            .stage = kasumi::application::SyncStage::Observing});
-        kasumi::cli::present(kasumi::application::SyncProgress{
-            .stage = kasumi::application::SyncStage::Calculating});
-        kasumi::application::SyncCompleted empty_summary{};
-        kasumi::cli::present(kasumi::application::SyncProgress{
-            .stage = kasumi::application::SyncStage::Calculating,
-            .summary = empty_summary});
-        EXPECT_EQ(kasumi::cli::present(response(
-                      empty_summary, kasumi::application::Operation::Sync)),
-                  0);
-
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            kasumi::cli::present(kasumi::application::SyncProgress{
+                .stage = kasumi::application::SyncStage::Observing});
+            kasumi::cli::present(kasumi::application::SyncProgress{
+                .stage = kasumi::application::SyncStage::Calculating});
+            kasumi::application::SyncCompleted empty_summary{};
+            kasumi::cli::present(kasumi::application::SyncProgress{
+                .stage = kasumi::application::SyncStage::Calculating,
+                .summary = empty_summary});
+            EXPECT_EQ(kasumi::cli::present(response(
+                          empty_summary, kasumi::application::Operation::Sync)),
+                      0);
+        });
         EXPECT_NE(output.find("[1/5] Observando estado local e remoto..."),
                   std::string::npos);
         EXPECT_NE(output.find("[2/5] Calculando alterações..."),
@@ -904,20 +837,19 @@ TEST(CliPresenterTest, PresentsSyncProgressNoChangesInPortugueseAndEnglish) {
 
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
     {
-        testing::internal::CaptureStdout();
-        kasumi::cli::present(kasumi::application::SyncProgress{
-            .stage = kasumi::application::SyncStage::Observing});
-        kasumi::cli::present(kasumi::application::SyncProgress{
-            .stage = kasumi::application::SyncStage::Calculating});
-        kasumi::application::SyncCompleted empty_summary{};
-        kasumi::cli::present(kasumi::application::SyncProgress{
-            .stage = kasumi::application::SyncStage::Calculating,
-            .summary = empty_summary});
-        EXPECT_EQ(kasumi::cli::present(response(
-                      empty_summary, kasumi::application::Operation::Sync)),
-                  0);
-
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            kasumi::cli::present(kasumi::application::SyncProgress{
+                .stage = kasumi::application::SyncStage::Observing});
+            kasumi::cli::present(kasumi::application::SyncProgress{
+                .stage = kasumi::application::SyncStage::Calculating});
+            kasumi::application::SyncCompleted empty_summary{};
+            kasumi::cli::present(kasumi::application::SyncProgress{
+                .stage = kasumi::application::SyncStage::Calculating,
+                .summary = empty_summary});
+            EXPECT_EQ(kasumi::cli::present(response(
+                          empty_summary, kasumi::application::Operation::Sync)),
+                      0);
+        });
         EXPECT_NE(output.find("[1/5] Observing local and remote state..."),
                   std::string::npos);
         EXPECT_NE(output.find("[2/5] Calculating changes..."),
@@ -934,53 +866,53 @@ TEST(CliPresenterTest, PresentsSyncProgressNoChangesInPortugueseAndEnglish) {
 TEST(CliPresenterTest, PresentsDirectoriesAndSingularPluralCorrectly) {
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::Portuguese);
     {
-        testing::internal::CaptureStdout();
-        kasumi::application::SyncCompleted summary{
-            .total = 4,
-            .uploaded = 1,
-            .downloaded = 0,
-            .removed = 1,
-            .renamed = 0,
-            .created_dirs = 1,
-            .removed_dirs = 1,
-            .published = false,
-        };
-        kasumi::cli::present(kasumi::application::SyncProgress{
-            .stage = kasumi::application::SyncStage::Calculating,
-            .summary = summary,
-            .total_items = 4});
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            kasumi::application::SyncCompleted summary{
+                .total = 4,
+                .uploaded = 1,
+                .downloaded = 0,
+                .removed = 1,
+                .renamed = 0,
+                .created_dirs = 1,
+                .removed_dirs = 1,
+                .published = false,
+            };
+            kasumi::cli::present(kasumi::application::SyncProgress{
+                .stage = kasumi::application::SyncStage::Calculating,
+                .summary = summary,
+                .total_items = 4});
+        });
         EXPECT_NE(output.find("4 alterações | ↑ 1 | - 1 | + 1 dir | - 1 dir"),
                   std::string::npos);
     }
 
     {
-        testing::internal::CaptureStdout();
-        kasumi::application::SyncCompleted single{
-            .total = 1,
-            .uploaded = 1,
-        };
-        kasumi::cli::present(kasumi::application::SyncProgress{
-            .stage = kasumi::application::SyncStage::Calculating,
-            .summary = single,
-            .total_items = 1});
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            kasumi::application::SyncCompleted single{
+                .total = 1,
+                .uploaded = 1,
+            };
+            kasumi::cli::present(kasumi::application::SyncProgress{
+                .stage = kasumi::application::SyncStage::Calculating,
+                .summary = single,
+                .total_items = 1});
+        });
         EXPECT_NE(output.find("1 alteração | ↑ 1"), std::string::npos);
     }
 
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
     {
-        testing::internal::CaptureStdout();
-        kasumi::application::SyncCompleted multiple_dirs{
-            .total = 4,
-            .created_dirs = 2,
-            .removed_dirs = 2,
-        };
-        kasumi::cli::present(kasumi::application::SyncProgress{
-            .stage = kasumi::application::SyncStage::Calculating,
-            .summary = multiple_dirs,
-            .total_items = 4});
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            kasumi::application::SyncCompleted multiple_dirs{
+                .total = 4,
+                .created_dirs = 2,
+                .removed_dirs = 2,
+            };
+            kasumi::cli::present(kasumi::application::SyncProgress{
+                .stage = kasumi::application::SyncStage::Calculating,
+                .summary = multiple_dirs,
+                .total_items = 4});
+        });
         EXPECT_NE(output.find("4 changes | + 2 dirs | - 2 dirs"),
                   std::string::npos);
     }
@@ -1020,10 +952,11 @@ TEST(CliPresenterTest, PresentsCancellationAsWarningWithExitCode130) {
     // Portuguese
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::Portuguese);
     {
-        testing::internal::CaptureStdout();
-        const int code = kasumi::cli::present_cancellation(
-            kasumi::application::Operation::Sync);
-        const auto output = testing::internal::GetCapturedStdout();
+        int code = 0;
+        const auto output = kasumi::test::capture_stdout([&] {
+            code = kasumi::cli::present_cancellation(
+                kasumi::application::Operation::Sync);
+        });
         EXPECT_EQ(code, 130);
         EXPECT_NE(output.find("[AVISO]"), std::string::npos);
         EXPECT_NE(output.find("Sincronização cancelada pelo usuário."),
@@ -1036,10 +969,11 @@ TEST(CliPresenterTest, PresentsCancellationAsWarningWithExitCode130) {
     // English
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
     {
-        testing::internal::CaptureStdout();
-        const int code = kasumi::cli::present_cancellation(
-            kasumi::application::Operation::Sync);
-        const auto output = testing::internal::GetCapturedStdout();
+        int code = 0;
+        const auto output = kasumi::test::capture_stdout([&] {
+            code = kasumi::cli::present_cancellation(
+                kasumi::application::Operation::Sync);
+        });
         EXPECT_EQ(code, 130);
         EXPECT_NE(output.find("[WARNING]"), std::string::npos);
         EXPECT_NE(output.find("Synchronization cancelled by user."),
@@ -1050,13 +984,14 @@ TEST(CliPresenterTest, PresentsCancellationAsWarningWithExitCode130) {
     // Automatic cancellation recognition via platform::cancellation
     kasumi::platform::cancellation::request();
     {
-        testing::internal::CaptureStdout();
-        const kasumi::application::Error error{
-            .operation = kasumi::application::Operation::Sync,
-            .code = kasumi::application::ErrorCode::SynchronizationFailure,
-            .detail = "operation cancelled by user"};
-        const int code = kasumi::cli::present(error);
-        const auto output = testing::internal::GetCapturedStdout();
+        int code = 0;
+        const auto output = kasumi::test::capture_stdout([&] {
+            const kasumi::application::Error error{
+                .operation = kasumi::application::Operation::Sync,
+                .code = kasumi::application::ErrorCode::SynchronizationFailure,
+                .detail = "operation cancelled by user"};
+            code = kasumi::cli::present(error);
+        });
         EXPECT_EQ(code, 130);
         EXPECT_NE(output.find("[WARNING]"), std::string::npos);
         EXPECT_NE(output.find("Synchronization cancelled by user."),
@@ -1069,14 +1004,14 @@ TEST(CliPresenterTest, PresentsCancellationAsWarningWithExitCode130) {
 TEST(CliPresenterTest, PresentsErrorsWithStageContextInPortugueseAndEnglish) {
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::Portuguese);
     {
-        testing::internal::CaptureStdout();
-        const kasumi::application::Error error{
-            .operation = kasumi::application::Operation::Sync,
-            .code = kasumi::application::ErrorCode::PlanFailure,
-            .detail = "conexão recusada",
-            .stage = kasumi::application::SyncStage::Observing};
-        EXPECT_EQ(kasumi::cli::present(error), 1);
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            const kasumi::application::Error error{
+                .operation = kasumi::application::Operation::Sync,
+                .code = kasumi::application::ErrorCode::PlanFailure,
+                .detail = "conexão recusada",
+                .stage = kasumi::application::SyncStage::Observing};
+            EXPECT_EQ(kasumi::cli::present(error), 1);
+        });
         EXPECT_NE(output.find("[ERRO]"), std::string::npos);
         EXPECT_NE(output.find("Falha durante a observação."),
                   std::string::npos);
@@ -1084,14 +1019,14 @@ TEST(CliPresenterTest, PresentsErrorsWithStageContextInPortugueseAndEnglish) {
     }
 
     {
-        testing::internal::CaptureStdout();
-        const kasumi::application::Error error{
-            .operation = kasumi::application::Operation::Sync,
-            .code = kasumi::application::ErrorCode::PlanFailure,
-            .detail = "conflito irrecuperável",
-            .stage = kasumi::application::SyncStage::Calculating};
-        EXPECT_EQ(kasumi::cli::present(error), 1);
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            const kasumi::application::Error error{
+                .operation = kasumi::application::Operation::Sync,
+                .code = kasumi::application::ErrorCode::PlanFailure,
+                .detail = "conflito irrecuperável",
+                .stage = kasumi::application::SyncStage::Calculating};
+            EXPECT_EQ(kasumi::cli::present(error), 1);
+        });
         EXPECT_NE(output.find("[ERRO]"), std::string::npos);
         EXPECT_NE(output.find("Falha ao calcular alterações."),
                   std::string::npos);
@@ -1100,14 +1035,14 @@ TEST(CliPresenterTest, PresentsErrorsWithStageContextInPortugueseAndEnglish) {
     }
 
     {
-        testing::internal::CaptureStdout();
-        const kasumi::application::Error error{
-            .operation = kasumi::application::Operation::Sync,
-            .code = kasumi::application::ErrorCode::SynchronizationFailure,
-            .detail = "disco cheio",
-            .stage = kasumi::application::SyncStage::Applying};
-        EXPECT_EQ(kasumi::cli::present(error), 1);
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            const kasumi::application::Error error{
+                .operation = kasumi::application::Operation::Sync,
+                .code = kasumi::application::ErrorCode::SynchronizationFailure,
+                .detail = "disco cheio",
+                .stage = kasumi::application::SyncStage::Applying};
+            EXPECT_EQ(kasumi::cli::present(error), 1);
+        });
         EXPECT_NE(output.find("[ERRO]"), std::string::npos);
         EXPECT_NE(output.find("Falha ao aplicar alterações."),
                   std::string::npos);
@@ -1115,14 +1050,14 @@ TEST(CliPresenterTest, PresentsErrorsWithStageContextInPortugueseAndEnglish) {
     }
 
     {
-        testing::internal::CaptureStdout();
-        const kasumi::application::Error error{
-            .operation = kasumi::application::Operation::Sync,
-            .code = kasumi::application::ErrorCode::SynchronizationFailure,
-            .detail = "CommitUploaded falhou",
-            .stage = kasumi::application::SyncStage::Publishing};
-        EXPECT_EQ(kasumi::cli::present(error), 1);
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            const kasumi::application::Error error{
+                .operation = kasumi::application::Operation::Sync,
+                .code = kasumi::application::ErrorCode::SynchronizationFailure,
+                .detail = "CommitUploaded falhou",
+                .stage = kasumi::application::SyncStage::Publishing};
+            EXPECT_EQ(kasumi::cli::present(error), 1);
+        });
         EXPECT_NE(output.find("[ERRO]"), std::string::npos);
         EXPECT_NE(output.find("Falha durante a publicação."),
                   std::string::npos);
@@ -1133,14 +1068,14 @@ TEST(CliPresenterTest, PresentsErrorsWithStageContextInPortugueseAndEnglish) {
     }
 
     {
-        testing::internal::CaptureStdout();
-        const kasumi::application::Error error{
-            .operation = kasumi::application::Operation::Sync,
-            .code = kasumi::application::ErrorCode::SynchronizationFailure,
-            .detail = "falha de liberação",
-            .stage = kasumi::application::SyncStage::Finalizing};
-        EXPECT_EQ(kasumi::cli::present(error), 1);
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            const kasumi::application::Error error{
+                .operation = kasumi::application::Operation::Sync,
+                .code = kasumi::application::ErrorCode::SynchronizationFailure,
+                .detail = "falha de liberação",
+                .stage = kasumi::application::SyncStage::Finalizing};
+            EXPECT_EQ(kasumi::cli::present(error), 1);
+        });
         EXPECT_NE(output.find("[ERRO]"), std::string::npos);
         EXPECT_NE(output.find("Falha ao finalizar a sincronização."),
                   std::string::npos);
@@ -1150,28 +1085,28 @@ TEST(CliPresenterTest, PresentsErrorsWithStageContextInPortugueseAndEnglish) {
     // English
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
     {
-        testing::internal::CaptureStdout();
-        const kasumi::application::Error error{
-            .operation = kasumi::application::Operation::Sync,
-            .code = kasumi::application::ErrorCode::SynchronizationFailure,
-            .detail = "network timeout",
-            .stage = kasumi::application::SyncStage::Publishing};
-        EXPECT_EQ(kasumi::cli::present(error), 1);
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            const kasumi::application::Error error{
+                .operation = kasumi::application::Operation::Sync,
+                .code = kasumi::application::ErrorCode::SynchronizationFailure,
+                .detail = "network timeout",
+                .stage = kasumi::application::SyncStage::Publishing};
+            EXPECT_EQ(kasumi::cli::present(error), 1);
+        });
         EXPECT_NE(output.find("[ERROR]"), std::string::npos);
         EXPECT_NE(output.find("Failure during publication."),
                   std::string::npos);
         EXPECT_NE(output.find("Reason: network timeout"), std::string::npos);
     }
     {
-        testing::internal::CaptureStdout();
-        const kasumi::application::Error error{
-            .operation = kasumi::application::Operation::Sync,
-            .code = kasumi::application::ErrorCode::SynchronizationFailure,
-            .detail = "CommitUploaded failed",
-            .stage = kasumi::application::SyncStage::Publishing};
-        EXPECT_EQ(kasumi::cli::present(error), 1);
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            const kasumi::application::Error error{
+                .operation = kasumi::application::Operation::Sync,
+                .code = kasumi::application::ErrorCode::SynchronizationFailure,
+                .detail = "CommitUploaded failed",
+                .stage = kasumi::application::SyncStage::Publishing};
+            EXPECT_EQ(kasumi::cli::present(error), 1);
+        });
         EXPECT_NE(output.find("[ERROR]"), std::string::npos);
         EXPECT_NE(output.find("Failure during publication."),
                   std::string::npos);
@@ -1181,72 +1116,67 @@ TEST(CliPresenterTest, PresentsErrorsWithStageContextInPortugueseAndEnglish) {
     }
 }
 
-TEST(CliPresenterTest,
-     PresentsSyncSummaryWithoutEmbeddingDomainDuration) {
+TEST(CliPresenterTest, PresentsSyncSummaryWithoutEmbeddingDomainDuration) {
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::Portuguese);
     {
-        testing::internal::CaptureStdout();
-        kasumi::application::SyncCompleted summary{
-            .total = 137,
-            .uploaded = 92,
-            .downloaded = 31,
-            .removed = 14,
-            .renamed = 0,
-            .created_dirs = 0,
-            .removed_dirs = 0,
-            .upload_bytes = 1524713390,  // 1.42 GB
-            .download_bytes = 297795584, // 284 MB
-            .published = true,
-            .duration = std::chrono::milliseconds(4800),
-        };
+        const auto output = kasumi::test::capture_stdout([&] {
+            kasumi::application::SyncCompleted summary{
+                .total = 137,
+                .uploaded = 92,
+                .downloaded = 31,
+                .removed = 14,
+                .renamed = 0,
+                .created_dirs = 0,
+                .removed_dirs = 0,
+                .upload_bytes = 1524713390,  // 1.42 GB
+                .download_bytes = 297795584, // 284 MB
+                .published = true,
+                .duration = std::chrono::milliseconds(4800),
+            };
 
-        kasumi::cli::present(kasumi::application::SyncProgress{
-            .stage = kasumi::application::SyncStage::Calculating,
-            .summary = summary,
-            .total_items = 137});
-        EXPECT_EQ(kasumi::cli::present(
-                      response(summary, kasumi::application::Operation::Sync)),
-                  0);
-
-        const auto output = testing::internal::GetCapturedStdout();
+            kasumi::cli::present(kasumi::application::SyncProgress{
+                .stage = kasumi::application::SyncStage::Calculating,
+                .summary = summary,
+                .total_items = 137});
+            EXPECT_EQ(kasumi::cli::present(response(
+                          summary, kasumi::application::Operation::Sync)),
+                      0);
+        });
         EXPECT_NE(output.find(
                       "137 alterações | ↑ 92 (1.42 GB) | ↓ 31 (284 MB) | - 14"),
                   std::string::npos);
         EXPECT_NE(output.find("[OK]"), std::string::npos);
-        EXPECT_NE(output.find("Sincronização concluída."),
-                  std::string::npos);
+        EXPECT_NE(output.find("Sincronização concluída."), std::string::npos);
     }
 
     // English
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
     {
-        testing::internal::CaptureStdout();
-        kasumi::application::SyncCompleted summary{
-            .total = 137,
-            .uploaded = 92,
-            .downloaded = 31,
-            .removed = 14,
-            .upload_bytes = 1524713390,
-            .download_bytes = 297795584,
-            .published = true,
-            .duration = std::chrono::milliseconds(4800),
-        };
+        const auto output = kasumi::test::capture_stdout([&] {
+            kasumi::application::SyncCompleted summary{
+                .total = 137,
+                .uploaded = 92,
+                .downloaded = 31,
+                .removed = 14,
+                .upload_bytes = 1524713390,
+                .download_bytes = 297795584,
+                .published = true,
+                .duration = std::chrono::milliseconds(4800),
+            };
 
-        kasumi::cli::present(kasumi::application::SyncProgress{
-            .stage = kasumi::application::SyncStage::Calculating,
-            .summary = summary,
-            .total_items = 137});
-        EXPECT_EQ(kasumi::cli::present(
-                      response(summary, kasumi::application::Operation::Sync)),
-                  0);
-
-        const auto output = testing::internal::GetCapturedStdout();
+            kasumi::cli::present(kasumi::application::SyncProgress{
+                .stage = kasumi::application::SyncStage::Calculating,
+                .summary = summary,
+                .total_items = 137});
+            EXPECT_EQ(kasumi::cli::present(response(
+                          summary, kasumi::application::Operation::Sync)),
+                      0);
+        });
         EXPECT_NE(
             output.find("137 changes | ↑ 92 (1.42 GB) | ↓ 31 (284 MB) | - 14"),
             std::string::npos);
         EXPECT_NE(output.find("[OK]"), std::string::npos);
-        EXPECT_NE(output.find("Synchronization completed."),
-                  std::string::npos);
+        EXPECT_NE(output.find("Synchronization completed."), std::string::npos);
     }
 }
 
@@ -1254,16 +1184,16 @@ TEST(CliPresenterTest, PresentsPlanProgressStagesInPortugueseAndEnglish) {
     // Portuguese
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::Portuguese);
     {
-        testing::internal::CaptureStdout();
-        kasumi::cli::present(
-            kasumi::application::SyncProgress{
-                .stage = kasumi::application::SyncStage::Observing},
-            kasumi::application::Operation::Preview);
-        kasumi::cli::present(
-            kasumi::application::SyncProgress{
-                .stage = kasumi::application::SyncStage::Calculating},
-            kasumi::application::Operation::Preview);
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            kasumi::cli::present(
+                kasumi::application::SyncProgress{
+                    .stage = kasumi::application::SyncStage::Observing},
+                kasumi::application::Operation::Preview);
+            kasumi::cli::present(
+                kasumi::application::SyncProgress{
+                    .stage = kasumi::application::SyncStage::Calculating},
+                kasumi::application::Operation::Preview);
+        });
         EXPECT_NE(output.find("[1/2] Observando estado local e remoto..."),
                   std::string::npos);
         EXPECT_NE(output.find("[2/2] Calculando alterações..."),
@@ -1271,16 +1201,16 @@ TEST(CliPresenterTest, PresentsPlanProgressStagesInPortugueseAndEnglish) {
         EXPECT_EQ(output.find("[1/5]"), std::string::npos);
     }
     {
-        testing::internal::CaptureStdout();
-        kasumi::cli::present(
-            kasumi::application::SyncProgress{
-                .stage = kasumi::application::SyncStage::Observing},
-            kasumi::application::Operation::Status);
-        kasumi::cli::present(
-            kasumi::application::SyncProgress{
-                .stage = kasumi::application::SyncStage::Calculating},
-            kasumi::application::Operation::Status);
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            kasumi::cli::present(
+                kasumi::application::SyncProgress{
+                    .stage = kasumi::application::SyncStage::Observing},
+                kasumi::application::Operation::Status);
+            kasumi::cli::present(
+                kasumi::application::SyncProgress{
+                    .stage = kasumi::application::SyncStage::Calculating},
+                kasumi::application::Operation::Status);
+        });
         EXPECT_NE(output.find("[1/2] Observando estado local e remoto..."),
                   std::string::npos);
         EXPECT_NE(output.find("[2/2] Calculando alterações..."),
@@ -1291,16 +1221,16 @@ TEST(CliPresenterTest, PresentsPlanProgressStagesInPortugueseAndEnglish) {
     // English
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
     {
-        testing::internal::CaptureStdout();
-        kasumi::cli::present(
-            kasumi::application::SyncProgress{
-                .stage = kasumi::application::SyncStage::Observing},
-            kasumi::application::Operation::Preview);
-        kasumi::cli::present(
-            kasumi::application::SyncProgress{
-                .stage = kasumi::application::SyncStage::Calculating},
-            kasumi::application::Operation::Preview);
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            kasumi::cli::present(
+                kasumi::application::SyncProgress{
+                    .stage = kasumi::application::SyncStage::Observing},
+                kasumi::application::Operation::Preview);
+            kasumi::cli::present(
+                kasumi::application::SyncProgress{
+                    .stage = kasumi::application::SyncStage::Calculating},
+                kasumi::application::Operation::Preview);
+        });
         EXPECT_NE(output.find("[1/2] Observing local and remote state..."),
                   std::string::npos);
         EXPECT_NE(output.find("[2/2] Calculating changes..."),
@@ -1312,14 +1242,14 @@ TEST(CliPresenterTest, PresentsPlanProgressStagesInPortugueseAndEnglish) {
 TEST(CliPresenterTest, PresentsPlanErrorsWithStageContext) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
     {
-        testing::internal::CaptureStdout();
-        const kasumi::application::Error error{
-            .operation = kasumi::application::Operation::Status,
-            .code = kasumi::application::ErrorCode::PlanFailure,
-            .detail = "falha na observação local",
-            .stage = kasumi::application::SyncStage::Observing};
-        EXPECT_EQ(kasumi::cli::present(error), 1);
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            const kasumi::application::Error error{
+                .operation = kasumi::application::Operation::Status,
+                .code = kasumi::application::ErrorCode::PlanFailure,
+                .detail = "falha na observação local",
+                .stage = kasumi::application::SyncStage::Observing};
+            EXPECT_EQ(kasumi::cli::present(error), 1);
+        });
         EXPECT_NE(output.find("[ERRO]"), std::string::npos);
         EXPECT_NE(output.find("Falha durante a observação."),
                   std::string::npos);
@@ -1327,14 +1257,14 @@ TEST(CliPresenterTest, PresentsPlanErrorsWithStageContext) {
                   std::string::npos);
     }
     {
-        testing::internal::CaptureStdout();
-        const kasumi::application::Error error{
-            .operation = kasumi::application::Operation::Preview,
-            .code = kasumi::application::ErrorCode::PlanFailure,
-            .detail = "conflito irrecuperável",
-            .stage = kasumi::application::SyncStage::Calculating};
-        EXPECT_EQ(kasumi::cli::present(error), 1);
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = kasumi::test::capture_stdout([&] {
+            const kasumi::application::Error error{
+                .operation = kasumi::application::Operation::Preview,
+                .code = kasumi::application::ErrorCode::PlanFailure,
+                .detail = "conflito irrecuperável",
+                .stage = kasumi::application::SyncStage::Calculating};
+            EXPECT_EQ(kasumi::cli::present(error), 1);
+        });
         EXPECT_NE(output.find("[ERRO]"), std::string::npos);
         EXPECT_NE(output.find("Falha ao calcular alterações."),
                   std::string::npos);
@@ -1354,9 +1284,7 @@ TEST(CliPresenterTest,
     // Portuguese default (full = false)
     {
         const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
-        testing::internal::CaptureStdout();
-        EXPECT_EQ(kasumi::cli::present(response(report)), 0);
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = present_out(response(report));
 
         for (int i = 0; i < 5; ++i) {
             EXPECT_NE(output.find("file_" + std::to_string(i)),
@@ -1376,9 +1304,7 @@ TEST(CliPresenterTest,
     // English default (full = false)
     {
         const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
-        testing::internal::CaptureStdout();
-        EXPECT_EQ(kasumi::cli::present(response(report)), 0);
-        const auto output = testing::internal::GetCapturedStdout();
+        const auto output = present_out(response(report));
 
         EXPECT_NE(output.find("... (5 more items) ..."), std::string::npos);
     }
@@ -1391,9 +1317,9 @@ TEST(CliPresenterTest, PresentsPlanReportWithoutTruncationWhenFullFlagIsTrue) {
             {PlanAction::Upload, "file_" + std::to_string(i), {}, 10});
     }
 
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(report), true), 0);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present(response(report), true), 0);
+    });
 
     for (int i = 0; i < 15; ++i) {
         EXPECT_NE(output.find("file_" + std::to_string(i)), std::string::npos);
@@ -1409,9 +1335,7 @@ TEST(CliPresenterTest,
             {PlanAction::Upload, "file_" + std::to_string(i), {}, 10});
     }
 
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(response(report), false), 0);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = present_out(response(report), false);
 
     for (int i = 0; i < 10; ++i) {
         EXPECT_NE(output.find("file_" + std::to_string(i)), std::string::npos);
@@ -1424,37 +1348,36 @@ TEST(CliPresenterTest,
     const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
     kasumi::cli::GarbageCollectProgressDisplayState state;
 
-    testing::internal::CaptureStdout();
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Preparing},
-        state);
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Analyzing},
-        state);
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Analyzing,
-            .candidate_count = 8},
-        state);
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Applying},
-        state);
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Finalizing},
-        state);
-    kasumi::application::GarbageCollectCompleted summary{
-        .candidate_objects = 8,
-        .analysis_only = false,
-    };
-    EXPECT_EQ(kasumi::cli::present(response(
-                  summary, kasumi::application::Operation::GarbageCollect)),
-              0);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = kasumi::test::capture_stdout([&] {
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Preparing},
+            state);
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Analyzing},
+            state);
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Analyzing,
+                .candidate_count = 8},
+            state);
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Applying},
+            state);
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Finalizing},
+            state);
+        kasumi::application::GarbageCollectCompleted summary{
+            .candidate_objects = 8,
+            .analysis_only = false,
+        };
+        EXPECT_EQ(kasumi::cli::present(response(
+                      summary, kasumi::application::Operation::GarbageCollect)),
+                  0);
+    });
     EXPECT_NE(output.find("[1/4] Preparando coleta de lixo..."),
               std::string::npos);
     EXPECT_NE(output.find("[2/4] Analisando estado remoto..."),
@@ -1477,37 +1400,36 @@ TEST(CliPresenterTest,
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
     kasumi::cli::GarbageCollectProgressDisplayState state;
 
-    testing::internal::CaptureStdout();
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Preparing},
-        state);
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Analyzing},
-        state);
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Analyzing,
-            .candidate_count = 8},
-        state);
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Applying},
-        state);
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Finalizing},
-        state);
-    kasumi::application::GarbageCollectCompleted summary{
-        .candidate_objects = 8,
-        .analysis_only = false,
-    };
-    EXPECT_EQ(kasumi::cli::present(response(
-                  summary, kasumi::application::Operation::GarbageCollect)),
-              0);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = kasumi::test::capture_stdout([&] {
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Preparing},
+            state);
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Analyzing},
+            state);
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Analyzing,
+                .candidate_count = 8},
+            state);
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Applying},
+            state);
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Finalizing},
+            state);
+        kasumi::application::GarbageCollectCompleted summary{
+            .candidate_objects = 8,
+            .analysis_only = false,
+        };
+        EXPECT_EQ(kasumi::cli::present(response(
+                      summary, kasumi::application::Operation::GarbageCollect)),
+                  0);
+    });
     EXPECT_NE(output.find("[1/4] Preparing garbage collection..."),
               std::string::npos);
     EXPECT_NE(output.find("[2/4] Analyzing remote state..."),
@@ -1527,35 +1449,38 @@ TEST(CliPresenterTest, DoesNotRepeatGarbageCollectProgressMessages) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
     kasumi::cli::GarbageCollectProgressDisplayState state;
 
-    testing::internal::CaptureStdout();
-    for (int i = 0; i < 3; ++i) {
+    const auto output = kasumi::test::capture_stdout([&] {
+        for (int i = 0; i < 3; ++i) {
+            kasumi::cli::present(
+                kasumi::application::GarbageCollectProgress{
+                    .stage =
+                        kasumi::application::GarbageCollectStage::Preparing},
+                state);
+        }
         kasumi::cli::present(
             kasumi::application::GarbageCollectProgress{
-                .stage = kasumi::application::GarbageCollectStage::Preparing},
+                .stage = kasumi::application::GarbageCollectStage::Analyzing},
             state);
-    }
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Analyzing},
-        state);
-    for (int i = 0; i < 2; ++i) {
+        for (int i = 0; i < 2; ++i) {
+            kasumi::cli::present(
+                kasumi::application::GarbageCollectProgress{
+                    .stage =
+                        kasumi::application::GarbageCollectStage::Analyzing,
+                    .candidate_count = 8},
+                state);
+        }
+        for (int i = 0; i < 6; ++i) {
+            kasumi::cli::present(
+                kasumi::application::GarbageCollectProgress{
+                    .stage =
+                        kasumi::application::GarbageCollectStage::Applying},
+                state);
+        }
         kasumi::cli::present(
             kasumi::application::GarbageCollectProgress{
-                .stage = kasumi::application::GarbageCollectStage::Analyzing,
-                .candidate_count = 8},
+                .stage = kasumi::application::GarbageCollectStage::Finalizing},
             state);
-    }
-    for (int i = 0; i < 6; ++i) {
-        kasumi::cli::present(
-            kasumi::application::GarbageCollectProgress{
-                .stage = kasumi::application::GarbageCollectStage::Applying},
-            state);
-    }
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Finalizing},
-        state);
-    const auto output = testing::internal::GetCapturedStdout();
+    });
     const auto expect_once = [&](const std::string& message) {
         const auto first = output.find(message);
         EXPECT_NE(first, std::string::npos);
@@ -1574,18 +1499,20 @@ TEST(CliPresenterTest, GarbageCollectProgressStateIsPerExecution) {
     kasumi::cli::GarbageCollectProgressDisplayState first_state;
     kasumi::cli::GarbageCollectProgressDisplayState second_state;
 
-    testing::internal::CaptureStdout();
-    for (auto* state : {&first_state, &second_state}) {
-        kasumi::cli::present(
-            kasumi::application::GarbageCollectProgress{
-                .stage = kasumi::application::GarbageCollectStage::Preparing},
-            *state);
-        kasumi::cli::present(
-            kasumi::application::GarbageCollectProgress{
-                .stage = kasumi::application::GarbageCollectStage::Analyzing},
-            *state);
-    }
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = kasumi::test::capture_stdout([&] {
+        for (auto* state : {&first_state, &second_state}) {
+            kasumi::cli::present(
+                kasumi::application::GarbageCollectProgress{
+                    .stage =
+                        kasumi::application::GarbageCollectStage::Preparing},
+                *state);
+            kasumi::cli::present(
+                kasumi::application::GarbageCollectProgress{
+                    .stage =
+                        kasumi::application::GarbageCollectStage::Analyzing},
+                *state);
+        }
+    });
     for (const std::string message : {"[1/4] Preparing garbage collection...",
                                       "[2/4] Analyzing remote state..."}) {
         const auto first = output.find(message);
@@ -1601,39 +1528,38 @@ TEST(CliPresenterTest,
     const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
     kasumi::cli::GarbageCollectProgressDisplayState state;
 
-    testing::internal::CaptureStdout();
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Preparing},
-        state);
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Analyzing},
-        state);
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Analyzing,
-            .candidate_count = 0},
-        state);
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Analyzing,
-            .candidate_count = 0},
-        state);
-    // Stage 3 (Applying) omitted when no destructive work is performed.
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Finalizing},
-        state);
-    kasumi::application::GarbageCollectCompleted summary{
-        .candidate_objects = 0,
-        .analysis_only = false,
-    };
-    EXPECT_EQ(kasumi::cli::present(response(
-                  summary, kasumi::application::Operation::GarbageCollect)),
-              0);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = kasumi::test::capture_stdout([&] {
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Preparing},
+            state);
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Analyzing},
+            state);
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Analyzing,
+                .candidate_count = 0},
+            state);
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Analyzing,
+                .candidate_count = 0},
+            state);
+        // Stage 3 (Applying) omitted when no destructive work is performed.
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Finalizing},
+            state);
+        kasumi::application::GarbageCollectCompleted summary{
+            .candidate_objects = 0,
+            .analysis_only = false,
+        };
+        EXPECT_EQ(kasumi::cli::present(response(
+                      summary, kasumi::application::Operation::GarbageCollect)),
+                  0);
+    });
     EXPECT_NE(output.find("[1/4] Preparando coleta de lixo..."),
               std::string::npos);
     EXPECT_NE(output.find("[2/4] Analisando estado remoto..."),
@@ -1653,33 +1579,32 @@ TEST(CliPresenterTest, PresentsGarbageCollectProgressAnalysisOnlyWarning) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
     kasumi::cli::GarbageCollectProgressDisplayState state;
 
-    testing::internal::CaptureStdout();
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Preparing},
-        state);
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Analyzing},
-        state);
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Analyzing,
-            .candidate_count = 42},
-        state);
-    kasumi::cli::present(
-        kasumi::application::GarbageCollectProgress{
-            .stage = kasumi::application::GarbageCollectStage::Finalizing},
-        state);
-    kasumi::application::GarbageCollectCompleted summary{
-        .candidate_objects = 42,
-        .analysis_only = true,
-    };
-    EXPECT_EQ(kasumi::cli::present(response(
-                  summary, kasumi::application::Operation::GarbageCollect)),
-              0);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = kasumi::test::capture_stdout([&] {
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Preparing},
+            state);
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Analyzing},
+            state);
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Analyzing,
+                .candidate_count = 42},
+            state);
+        kasumi::cli::present(
+            kasumi::application::GarbageCollectProgress{
+                .stage = kasumi::application::GarbageCollectStage::Finalizing},
+            state);
+        kasumi::application::GarbageCollectCompleted summary{
+            .candidate_objects = 42,
+            .analysis_only = true,
+        };
+        EXPECT_EQ(kasumi::cli::present(response(
+                      summary, kasumi::application::Operation::GarbageCollect)),
+                  0);
+    });
     EXPECT_NE(output.find("[1/4] Preparing garbage collection..."),
               std::string::npos);
     EXPECT_NE(output.find("[2/4] Analyzing remote state..."),
@@ -1697,31 +1622,33 @@ TEST(CliPresenterTest, PresentsFsckProgressInPortugueseIncludingZeroBytes) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
     kasumi::cli::FsckProgressDisplayState state;
 
-    testing::internal::CaptureStdout();
-    for (const auto stage :
-         {FsckStage::Preparing, FsckStage::Observing, FsckStage::Analyzing}) {
-        kasumi::cli::present(FsckProgress{.stage = stage}, state);
-    }
-    kasumi::cli::present(
-        FsckProgress{
-            .stage = FsckStage::AuditingContent,
-            .completed_objects = 0,
-            .total_objects = 1,
-            .completed_plaintext_bytes = 0,
-            .total_plaintext_bytes = 0,
-        },
-        state);
-    kasumi::cli::present(
-        FsckProgress{
-            .stage = FsckStage::AuditingContent,
-            .completed_objects = 1,
-            .total_objects = 1,
-            .completed_plaintext_bytes = 0,
-            .total_plaintext_bytes = 0,
-        },
-        state);
-    kasumi::cli::present(FsckProgress{.stage = FsckStage::Finalizing}, state);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = kasumi::test::capture_stdout([&] {
+        for (const auto stage : {FsckStage::Preparing,
+                                 FsckStage::Observing,
+                                 FsckStage::Analyzing}) {
+            kasumi::cli::present(FsckProgress{.stage = stage}, state);
+        }
+        kasumi::cli::present(
+            FsckProgress{
+                .stage = FsckStage::AuditingContent,
+                .completed_objects = 0,
+                .total_objects = 1,
+                .completed_plaintext_bytes = 0,
+                .total_plaintext_bytes = 0,
+            },
+            state);
+        kasumi::cli::present(
+            FsckProgress{
+                .stage = FsckStage::AuditingContent,
+                .completed_objects = 1,
+                .total_objects = 1,
+                .completed_plaintext_bytes = 0,
+                .total_plaintext_bytes = 0,
+            },
+            state);
+        kasumi::cli::present(FsckProgress{.stage = FsckStage::Finalizing},
+                             state);
+    });
 
     EXPECT_NE(output.find("Preparando auditoria"), std::string::npos);
     EXPECT_NE(output.find("Observando histórico remoto"), std::string::npos);
@@ -1739,26 +1666,26 @@ TEST(CliPresenterTest, PresentsObjectAndBytePercentagesInEnglish) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
     kasumi::cli::FsckProgressDisplayState state;
 
-    testing::internal::CaptureStdout();
-    kasumi::cli::present(
-        FsckProgress{
-            .stage = FsckStage::AuditingContent,
-            .completed_objects = 1,
-            .total_objects = 4,
-            .completed_plaintext_bytes = 50,
-            .total_plaintext_bytes = 100,
-        },
-        state);
-    kasumi::cli::present(
-        FsckProgress{
-            .stage = FsckStage::AuditingContent,
-            .completed_objects = 4,
-            .total_objects = 4,
-            .completed_plaintext_bytes = 100,
-            .total_plaintext_bytes = 100,
-        },
-        state);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = kasumi::test::capture_stdout([&] {
+        kasumi::cli::present(
+            FsckProgress{
+                .stage = FsckStage::AuditingContent,
+                .completed_objects = 1,
+                .total_objects = 4,
+                .completed_plaintext_bytes = 50,
+                .total_plaintext_bytes = 100,
+            },
+            state);
+        kasumi::cli::present(
+            FsckProgress{
+                .stage = FsckStage::AuditingContent,
+                .completed_objects = 4,
+                .total_objects = 4,
+                .completed_plaintext_bytes = 100,
+                .total_plaintext_bytes = 100,
+            },
+            state);
+    });
 
     EXPECT_NE(output.find("1/4 unique objects (25%)"), std::string::npos);
     EXPECT_NE(output.find("50 bytes / 100 bytes (50%)"), std::string::npos);
@@ -1772,24 +1699,26 @@ TEST(CliPresenterTest, BoundsFsckProgressOutputAndOmitsUnknownByteTotals) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
     kasumi::cli::FsckProgressDisplayState state;
 
-    testing::internal::CaptureStdout();
-    for (const auto stage :
-         {FsckStage::Preparing, FsckStage::Observing, FsckStage::Analyzing}) {
-        kasumi::cli::present(FsckProgress{.stage = stage}, state);
-    }
-    for (std::size_t completed = 0; completed <= 10'000; ++completed) {
-        kasumi::cli::present(
-            FsckProgress{
-                .stage = FsckStage::AuditingContent,
-                .completed_objects = completed,
-                .total_objects = 10'000,
-                .completed_plaintext_bytes = std::nullopt,
-                .total_plaintext_bytes = std::nullopt,
-            },
-            state);
-    }
-    kasumi::cli::present(FsckProgress{.stage = FsckStage::Finalizing}, state);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = kasumi::test::capture_stdout([&] {
+        for (const auto stage : {FsckStage::Preparing,
+                                 FsckStage::Observing,
+                                 FsckStage::Analyzing}) {
+            kasumi::cli::present(FsckProgress{.stage = stage}, state);
+        }
+        for (std::size_t completed = 0; completed <= 10'000; ++completed) {
+            kasumi::cli::present(
+                FsckProgress{
+                    .stage = FsckStage::AuditingContent,
+                    .completed_objects = completed,
+                    .total_objects = 10'000,
+                    .completed_plaintext_bytes = std::nullopt,
+                    .total_plaintext_bytes = std::nullopt,
+                },
+                state);
+        }
+        kasumi::cli::present(FsckProgress{.stage = FsckStage::Finalizing},
+                             state);
+    });
 
     EXPECT_LE(std::count(output.begin(), output.end(), '\n'), 120);
     EXPECT_NE(output.find("0%"), std::string::npos);
@@ -1810,16 +1739,16 @@ TEST(CliPresenterTest, PresentsEmptyFsckInventoryWithoutAFalsePercentage) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
     kasumi::cli::FsckProgressDisplayState state;
 
-    testing::internal::CaptureStdout();
-    kasumi::cli::present(
-        FsckProgress{
-            .stage = FsckStage::AuditingContent,
-            .total_objects = 0,
-            .completed_plaintext_bytes = 0,
-            .total_plaintext_bytes = 0,
-        },
-        state);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = kasumi::test::capture_stdout([&] {
+        kasumi::cli::present(
+            FsckProgress{
+                .stage = FsckStage::AuditingContent,
+                .total_objects = 0,
+                .completed_plaintext_bytes = 0,
+                .total_plaintext_bytes = 0,
+            },
+            state);
+    });
     EXPECT_NE(output.find("No referenced content objects"), std::string::npos);
     EXPECT_EQ(output.find("%"), std::string::npos);
 }
@@ -1832,18 +1761,18 @@ TEST(CliPresenterTest, FullObjectProgressFollowedByFailureHasNoSuccessSummary) {
                       .detail = "corrupt content",
                       .runtime = std::nullopt};
 
-    testing::internal::CaptureStdout();
-    kasumi::cli::present(
-        FsckProgress{
-            .stage = FsckStage::AuditingContent,
-            .completed_objects = 1,
-            .total_objects = 1,
-            .completed_plaintext_bytes = 6,
-            .total_plaintext_bytes = 6,
-        },
-        state);
-    kasumi::cli::present(error);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = kasumi::test::capture_stdout([&] {
+        kasumi::cli::present(
+            FsckProgress{
+                .stage = FsckStage::AuditingContent,
+                .completed_objects = 1,
+                .total_objects = 1,
+                .completed_plaintext_bytes = 6,
+                .total_plaintext_bytes = 6,
+            },
+            state);
+        kasumi::cli::present(error);
+    });
 
     EXPECT_NE(output.find("100%"), std::string::npos);
     EXPECT_NE(output.find("Audit finished with failures"), std::string::npos);
@@ -1856,11 +1785,11 @@ TEST(CliPresenterTest, FullObjectProgressFollowedByFailureHasNoSuccessSummary) {
 TEST(CliPresenterTest,
      PresentsGarbageCollectCancellationAsWarningWithExitCode130) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::Portuguese};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present_cancellation(
-                  kasumi::application::Operation::GarbageCollect),
-              130);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_cancellation(
+                      kasumi::application::Operation::GarbageCollect),
+                  130);
+    });
     EXPECT_NE(output.find("[AVISO]"), std::string::npos);
     EXPECT_NE(output.find("Operação cancelada pelo usuário."),
               std::string::npos);
@@ -1876,81 +1805,71 @@ TEST(CliPresenterTest, PresentsGarbageCollectBoundedOutputLines) {
             }
         };
 
-    testing::internal::CaptureStdout();
-    repeat_progress(
-        {.stage = kasumi::application::GarbageCollectStage::Preparing});
-    repeat_progress(
-        {.stage = kasumi::application::GarbageCollectStage::Analyzing,
-         .candidate_count = 100000});
-    repeat_progress(
-        {.stage = kasumi::application::GarbageCollectStage::Applying});
-    repeat_progress(
-        {.stage = kasumi::application::GarbageCollectStage::Finalizing});
-    kasumi::application::GarbageCollectCompleted summary{
-        .candidate_objects = 100000,
-        .analysis_only = false,
-    };
-    EXPECT_EQ(kasumi::cli::present(response(
-                  summary, kasumi::application::Operation::GarbageCollect)),
-              0);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = kasumi::test::capture_stdout([&] {
+        repeat_progress(
+            {.stage = kasumi::application::GarbageCollectStage::Preparing});
+        repeat_progress(
+            {.stage = kasumi::application::GarbageCollectStage::Analyzing,
+             .candidate_count = 100000});
+        repeat_progress(
+            {.stage = kasumi::application::GarbageCollectStage::Applying});
+        repeat_progress(
+            {.stage = kasumi::application::GarbageCollectStage::Finalizing});
+        kasumi::application::GarbageCollectCompleted summary{
+            .candidate_objects = 100000,
+            .analysis_only = false,
+        };
+        EXPECT_EQ(kasumi::cli::present(response(
+                      summary, kasumi::application::Operation::GarbageCollect)),
+                  0);
+    });
     const auto line_count = std::count(output.begin(), output.end(), '\n');
     EXPECT_LE(line_count, 12);
 }
 
 TEST(CliPresenterTest, PresentsTrustedContentWarningWhenReused) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(
-                  response(SyncCompleted{.published = true, .trusted_content_reused = 5},
-                           Operation::Sync)),
-              0);
-    const auto output = testing::internal::GetCapturedStdout();
-    EXPECT_NE(output.find("[WARNING] Reused 5 unverified remote content objects"), std::string::npos);
+    const auto output = present_out(
+        response(SyncCompleted{.published = true, .trusted_content_reused = 5},
+                 Operation::Sync));
+    EXPECT_NE(
+        output.find("[WARNING] Reused 5 unverified remote content objects"),
+        std::string::npos);
     EXPECT_NE(output.find("kasumi fsck"), std::string::npos);
 }
 
-
 TEST(CliPresenterTest, RemoteWritersPresentsBarrierIdentifierWhenPresent) {
     const ScopedLanguage lang_en{kasumi::cli::i18n::Language::English};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(kasumi::application::InspectionResponse{
-                  .operation = kasumi::application::InspectionOperation::RemoteWriters,
-                  .payload = kasumi::application::RemoteWritersReport{
-                      .barrier_present = true,
-                      .barrier_identifier = "gc/v1/barrier/sample-barrier-id",
-                      .writers = {}}}),
-              0);
-    const auto output_en = testing::internal::GetCapturedStdout();
+    const auto output_en = present_out(kasumi::application::InspectionResponse{
+        .operation = kasumi::application::InspectionOperation::RemoteWriters,
+        .payload = kasumi::application::RemoteWritersReport{
+            .barrier_present = true,
+            .barrier_identifier = "gc/v1/barrier/sample-barrier-id",
+            .writers = {}}});
     EXPECT_NE(output_en.find("Barrier: present"), std::string::npos);
-    EXPECT_NE(output_en.find("Identifier: gc/v1/barrier/sample-barrier-id"), std::string::npos);
+    EXPECT_NE(output_en.find("Identifier: gc/v1/barrier/sample-barrier-id"),
+              std::string::npos);
 
     const ScopedLanguage lang_pt{kasumi::cli::i18n::Language::Portuguese};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(kasumi::application::InspectionResponse{
-                  .operation = kasumi::application::InspectionOperation::RemoteWriters,
-                  .payload = kasumi::application::RemoteWritersReport{
-                      .barrier_present = true,
-                      .barrier_identifier = "gc/v1/barrier/sample-barrier-id",
-                      .writers = {}}}),
-              0);
-    const auto output_pt = testing::internal::GetCapturedStdout();
+    const auto output_pt = present_out(kasumi::application::InspectionResponse{
+        .operation = kasumi::application::InspectionOperation::RemoteWriters,
+        .payload = kasumi::application::RemoteWritersReport{
+            .barrier_present = true,
+            .barrier_identifier = "gc/v1/barrier/sample-barrier-id",
+            .writers = {}}});
     EXPECT_NE(output_pt.find("Barrier: presente"), std::string::npos);
-    EXPECT_NE(output_pt.find("Identificador: gc/v1/barrier/sample-barrier-id"), std::string::npos);
+    EXPECT_NE(output_pt.find("Identificador: gc/v1/barrier/sample-barrier-id"),
+              std::string::npos);
 }
 
 TEST(CliPresenterTest, RemoteWritersOmitsBarrierIdentifierWhenAbsent) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(kasumi::application::InspectionResponse{
-                  .operation = kasumi::application::InspectionOperation::RemoteWriters,
-                  .payload = kasumi::application::RemoteWritersReport{
-                      .barrier_present = false,
-                      .barrier_identifier = std::nullopt,
-                      .writers = {}}}),
-              0);
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = present_out(kasumi::application::InspectionResponse{
+        .operation = kasumi::application::InspectionOperation::RemoteWriters,
+        .payload = kasumi::application::RemoteWritersReport{
+            .barrier_present = false,
+            .barrier_identifier = std::nullopt,
+            .writers = {}}});
     EXPECT_NE(output.find("Barrier: absent"), std::string::npos);
     EXPECT_EQ(output.find("Identifier:"), std::string::npos);
 }
@@ -1958,105 +1877,113 @@ TEST(CliPresenterTest, RemoteWritersOmitsBarrierIdentifierWhenAbsent) {
 TEST(CliPresenterTest, ManualBarrierRemovalPresentation) {
     const ScopedLanguage lang{kasumi::cli::i18n::Language::English};
 
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(kasumi::application::Response{
-                  .operation = kasumi::application::Operation::RemoveBarrier,
-                  .data = kasumi::application::ManualBarrierRemovalCompleted{
-                      .identifier = "history/gc/v1/barrier",
-                      .outcome = kasumi::application::BarrierRemovalOutcome::Removed,
-                      .active_writers_count = 0,
-                  }}),
-              0);
-    const auto removed_clean = testing::internal::GetCapturedStdout();
-    EXPECT_NE(removed_clean.find("Removed maintenance barrier: history/gc/v1/barrier"), std::string::npos);
+    const auto removed_clean = present_out(kasumi::application::Response{
+        .operation = kasumi::application::Operation::RemoveBarrier,
+        .data = kasumi::application::ManualBarrierRemovalCompleted{
+            .identifier = "history/gc/v1/barrier",
+            .outcome = kasumi::application::BarrierRemovalOutcome::Removed,
+            .active_writers_count = 0,
+        }});
+    EXPECT_NE(removed_clean.find(
+                  "Removed maintenance barrier: history/gc/v1/barrier"),
+              std::string::npos);
 
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(kasumi::application::Response{
-                  .operation = kasumi::application::Operation::RemoveBarrier,
-                  .data = kasumi::application::ManualBarrierRemovalCompleted{
-                      .identifier = "history/gc/v1/barrier",
-                      .outcome = kasumi::application::BarrierRemovalOutcome::Removed,
-                      .active_writers_count = 2,
-                  }}),
-              0);
-    const auto removed_with_writers = testing::internal::GetCapturedStdout();
-    EXPECT_NE(removed_with_writers.find("Removed maintenance barrier: history/gc/v1/barrier"), std::string::npos);
+    const auto removed_with_writers = present_out(kasumi::application::Response{
+        .operation = kasumi::application::Operation::RemoveBarrier,
+        .data = kasumi::application::ManualBarrierRemovalCompleted{
+            .identifier = "history/gc/v1/barrier",
+            .outcome = kasumi::application::BarrierRemovalOutcome::Removed,
+            .active_writers_count = 2,
+        }});
+    EXPECT_NE(removed_with_writers.find(
+                  "Removed maintenance barrier: history/gc/v1/barrier"),
+              std::string::npos);
     EXPECT_NE(removed_with_writers.find("remove-writer"), std::string::npos);
 
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(kasumi::application::Response{
-                  .operation = kasumi::application::Operation::RemoveBarrier,
-                  .data = kasumi::application::ManualBarrierRemovalCompleted{
-                      .identifier = "history/gc/v1/barrier",
-                      .outcome = kasumi::application::BarrierRemovalOutcome::AlreadyAbsent,
-                      .active_writers_count = 0,
-                  }}),
-              0);
-    const auto absent = testing::internal::GetCapturedStdout();
+    const auto absent = present_out(kasumi::application::Response{
+        .operation = kasumi::application::Operation::RemoveBarrier,
+        .data = kasumi::application::ManualBarrierRemovalCompleted{
+            .identifier = "history/gc/v1/barrier",
+            .outcome =
+                kasumi::application::BarrierRemovalOutcome::AlreadyAbsent,
+            .active_writers_count = 0,
+        }});
     EXPECT_NE(absent.find("already absent"), std::string::npos);
 }
 
 TEST(CliPresenterTest, ManualBarrierRemovalErrorPresentationWithDiagnostics) {
     const ScopedLanguage lang_en{kasumi::cli::i18n::Language::English};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(kasumi::application::Error{
-                  .operation = kasumi::application::Operation::RemoveBarrier,
-                  .code = kasumi::application::ErrorCode::BarrierRemovalFailure,
-                  .detail = "could not remove maintenance barrier: transport error: timeout: connection reset (native_code=10054)",
-                  .barrier_removal = kasumi::application::BarrierRemovalFailure{
-                      .barrier_identifier = "gc/v1/barrier",
-                      .stage = kasumi::application::BarrierRemovalStage::Removing,
-                      .mutation_state = kasumi::application::BarrierRemovalMutationState::Uncertain,
-                      .transport_error = kasumi::transport::Error{
-                          .code = kasumi::transport::ErrorCode::Timeout,
-                          .message = "connection reset",
-                          .native_code = 10054,
-                      },
-                  }}),
-              1);
-    const auto output_en = testing::internal::GetCapturedStdout();
-    EXPECT_NE(output_en.find("Failed to remove maintenance barrier"), std::string::npos);
+    const auto output_en = present_out(
+        kasumi::application::Error{
+            .operation = kasumi::application::Operation::RemoveBarrier,
+            .code = kasumi::application::ErrorCode::BarrierRemovalFailure,
+            .detail = "could not remove maintenance barrier: transport error: "
+                      "timeout: connection reset (native_code=10054)",
+            .barrier_removal =
+                kasumi::application::BarrierRemovalFailure{
+                    .barrier_identifier = "gc/v1/barrier",
+                    .stage = kasumi::application::BarrierRemovalStage::Removing,
+                    .mutation_state = kasumi::application::
+                        BarrierRemovalMutationState::Uncertain,
+                    .transport_error =
+                        kasumi::transport::Error{
+                            .code = kasumi::transport::ErrorCode::Timeout,
+                            .message = "connection reset",
+                            .native_code = 10054,
+                        },
+                }},
+        1);
+    EXPECT_NE(output_en.find("Failed to remove maintenance barrier"),
+              std::string::npos);
     EXPECT_NE(output_en.find("Stage: Removing barrier"), std::string::npos);
     EXPECT_NE(output_en.find("Mutation state: Uncertain"), std::string::npos);
-    EXPECT_NE(output_en.find("Transport error: timeout: connection reset (native_code=10054)"), std::string::npos);
+    EXPECT_NE(
+        output_en.find(
+            "Transport error: timeout: connection reset (native_code=10054)"),
+        std::string::npos);
 
     const ScopedLanguage lang_pt{kasumi::cli::i18n::Language::Portuguese};
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(kasumi::application::Error{
-                  .operation = kasumi::application::Operation::RemoveBarrier,
-                  .code = kasumi::application::ErrorCode::BarrierRemovalFailure,
-                  .detail = "could not remove maintenance barrier",
-                  .barrier_removal = kasumi::application::BarrierRemovalFailure{
-                      .barrier_identifier = "gc/v1/barrier",
-                      .stage = kasumi::application::BarrierRemovalStage::ConfirmingAbsence,
-                      .mutation_state = kasumi::application::BarrierRemovalMutationState::Uncertain,
-                      .transport_error = kasumi::transport::Error{
-                          .code = kasumi::transport::ErrorCode::Io,
-                          .message = "disk full",
-                          .native_code = 28,
-                      },
-                  }}),
-              1);
-    const auto output_pt = testing::internal::GetCapturedStdout();
-    EXPECT_NE(output_pt.find("Etapa: Confirmando ausência da barreira"), std::string::npos);
+    const auto output_pt = present_out(
+        kasumi::application::Error{
+            .operation = kasumi::application::Operation::RemoveBarrier,
+            .code = kasumi::application::ErrorCode::BarrierRemovalFailure,
+            .detail = "could not remove maintenance barrier",
+            .barrier_removal =
+                kasumi::application::BarrierRemovalFailure{
+                    .barrier_identifier = "gc/v1/barrier",
+                    .stage = kasumi::application::BarrierRemovalStage::
+                        ConfirmingAbsence,
+                    .mutation_state = kasumi::application::
+                        BarrierRemovalMutationState::Uncertain,
+                    .transport_error =
+                        kasumi::transport::Error{
+                            .code = kasumi::transport::ErrorCode::Io,
+                            .message = "disk full",
+                            .native_code = 28,
+                        },
+                }},
+        1);
+    EXPECT_NE(output_pt.find("Etapa: Confirmando ausência da barreira"),
+              std::string::npos);
     EXPECT_NE(output_pt.find("Estado da mutação: Incerta"), std::string::npos);
-    EXPECT_NE(output_pt.find("Erro de transporte: io: disk full (native_code=28)"), std::string::npos);
+    EXPECT_NE(
+        output_pt.find("Erro de transporte: io: disk full (native_code=28)"),
+        std::string::npos);
 }
 } // namespace
 
 TEST(CliPresenterTest, ResolveMissingSuccessIsLocalized) {
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::Portuguese);
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(kasumi::application::Response{
+    const auto resolved = present_out(kasumi::application::Response{
         .operation = kasumi::application::Operation::ResolveMissing,
-        .data = kasumi::application::ResolveMissingCompleted{.resolved_count = 2}}), 0);
-    const auto resolved = testing::internal::GetCapturedStdout();
-    EXPECT_NE(resolved.find("2 caminhos ausentes resolvidos"), std::string::npos);
-    testing::internal::CaptureStdout();
-    EXPECT_EQ(kasumi::cli::present(kasumi::application::Response{
+        .data =
+            kasumi::application::ResolveMissingCompleted{.resolved_count = 2}});
+    EXPECT_NE(resolved.find("2 caminhos ausentes resolvidos"),
+              std::string::npos);
+    const auto empty = present_out(kasumi::application::Response{
         .operation = kasumi::application::Operation::ResolveMissing,
-        .data = kasumi::application::ResolveMissingCompleted{}}), 0);
-    const auto empty = testing::internal::GetCapturedStdout();
-    EXPECT_NE(empty.find("Nenhum caminho ausente pendente para resolver"), std::string::npos);
+        .data = kasumi::application::ResolveMissingCompleted{}});
+    EXPECT_NE(empty.find("Nenhum caminho ausente pendente para resolver"),
+              std::string::npos);
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
 }

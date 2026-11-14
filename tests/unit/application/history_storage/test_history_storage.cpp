@@ -14,20 +14,6 @@
 
 namespace {
 
-const auto& test_layout() {
-    static const auto layout =
-        kasumi::application::history_storage::derive_remote_layout(test_key());
-    return layout;
-}
-
-void reset_remote_counts(FakeState& state) {
-    state.list_count = 0;
-    state.get_count = 0;
-    state.commit_get_count = 0;
-    state.marker_get_count = 0;
-    state.physical_hash_count = 0;
-}
-
 kasumi::transport::Result
 fake_get_batch(void* context, const kasumi::transport::GetBatch& batch) {
     ++fake_state(context)->get_batch_count;
@@ -422,11 +408,7 @@ TEST(HistoryStorageTest, StrongPhysicalHashAvoidsCommitAndHeadReadback) {
     reset_remote_counts(*state);
     auto head_verified =
         kasumi::application::history_storage::verify_head_marker(
-            storage,
-            test_layout(),
-            object->head,
-            root,
-            marker->physical_hash);
+            storage, test_layout(), object->head, root, marker->physical_hash);
     ASSERT_TRUE(head_verified.has_value()) << head_verified.error().detail;
     EXPECT_EQ(state->physical_hash_count, 1U);
     EXPECT_EQ(state->marker_get_count, 0U);
@@ -501,11 +483,7 @@ TEST(HistoryStorageTest, PhysicalHashMismatchFailsCommitAndHeadVerification) {
         kasumi::application::history_storage::ErrorCode::VerificationFailure);
     const auto head_verified =
         kasumi::application::history_storage::verify_head_marker(
-            storage,
-            test_layout(),
-            object->head,
-            root,
-            marker->physical_hash);
+            storage, test_layout(), object->head, root, marker->physical_hash);
     ASSERT_FALSE(head_verified.has_value());
     EXPECT_EQ(
         head_verified.error().code,
@@ -551,11 +529,7 @@ TEST(HistoryStorageTest,
     reset_remote_counts(*state);
     const auto head_verified =
         kasumi::application::history_storage::verify_head_marker(
-            storage,
-            test_layout(),
-            object->head,
-            root,
-            marker->physical_hash);
+            storage, test_layout(), object->head, root, marker->physical_hash);
     ASSERT_FALSE(head_verified.has_value());
     EXPECT_EQ(
         head_verified.error().code,
@@ -1584,9 +1558,8 @@ TEST(HistoryStorageTest, EmptyMarkerRemovalDoesNotList) {
     ASSERT_TRUE(kasumi::transport::initialize(transport));
 
     const auto result =
-        kasumi::application::history_storage::remove_marker_variants(transport,
-                                                                     test_layout(),
-                                                                     {});
+        kasumi::application::history_storage::remove_marker_variants(
+            transport, test_layout(), {});
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->removed, 0U);
     EXPECT_EQ(state->list_count, 0U);
@@ -1744,8 +1717,7 @@ TEST(HistoryStorageTest,
         std::unique_lock lock(gates.mutex);
         all_three_entered =
             gates.cv.wait_for(lock, std::chrono::seconds(5), [&] {
-                return gates.batch_entered &&
-                       gates.epoch_entered &&
+                return gates.batch_entered && gates.epoch_entered &&
                        gates.marker_entered;
             });
     }
@@ -1869,7 +1841,8 @@ TEST(HistoryStorageTest, DrainsAllLanesWhenOneFailsEarly) {
     GatesSessionGuard guard{gates, worker};
 
     // In a three-lane model, all lanes must be drained/joined before
-    // load_history returns. Give it a short moment, then release epoch and marker
+    // load_history returns. Give it a short moment, then release epoch and
+    // marker
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     gates.release_all();
     worker.join();
@@ -1914,7 +1887,8 @@ TEST(HistoryStorageTest, RespectsGlobalCancellationAndDrains) {
     ASSERT_FALSE(loaded.has_value());
 }
 
-TEST(HistoryStorageTest, GatesSequentialOrConcurrentRepeatedRunsPreserveIsolation) {
+TEST(HistoryStorageTest,
+     GatesSequentialOrConcurrentRepeatedRunsPreserveIsolation) {
     for (int run = 0; run < 5; ++run) {
         auto fixture = make_test_history_fixture("history-repeated-isolation");
         HistoryReadGates gates;

@@ -60,50 +60,6 @@ static_assert(std::is_same_v<decltype(&kasumi::application::integrity::fsck),
         kasumi::application::integrity::FsckProgressCallback{});
 }
 
-inline const auto& test_layout() {
-    static const auto layout =
-        kasumi::application::history_storage::derive_remote_layout(test_key());
-    return layout;
-}
-
-RuntimeData runtime_data(TempWorkspace& workspace) {
-    const auto local = kasumi::test::workspace_path(workspace, "local");
-    const auto profile = kasumi::test::workspace_path(workspace, "profile");
-    EXPECT_TRUE(std::filesystem::create_directories(local));
-    EXPECT_TRUE(std::filesystem::create_directories(profile));
-    return RuntimeData{
-        .local_dir = local,
-        .database_path = profile / "db.sqlite",
-        .key_path = profile / "key.bin",
-        .storage_location = "unused",
-    };
-}
-
-std::string put_content(kasumi::transport::Transport& transport,
-                        TempWorkspace& workspace,
-                        std::string_view content,
-                        std::string_view suffix) {
-    const auto identifier = kasumi::crypto::content_identifier(
-        test_key(), kasumi::hasher::hash_string(content));
-    const auto plain =
-        kasumi::test::workspace_path(workspace, std::string{suffix} + ".plain");
-    const auto encrypted =
-        kasumi::test::workspace_path(workspace, std::string{suffix} + ".enc");
-    kasumi::test::write_text(plain, content);
-    EXPECT_TRUE(kasumi::crypto::encrypt_file(plain, encrypted, test_key()));
-    EXPECT_TRUE(kasumi::transport::put(transport, encrypted, identifier));
-    return identifier;
-}
-
-PublishedCommit publish_remote(kasumi::transport::Transport& transport,
-                               TempWorkspace& workspace,
-                               const Commit& commit) {
-    auto published = kasumi::application::history_storage::publish_commit(
-        transport, test_key(), commit, kasumi::test::workspace_root(workspace));
-    EXPECT_TRUE(published.has_value()) << published.error().detail;
-    return published ? *published : PublishedCommit{};
-}
-
 class BarrierOwnershipTest : public ::testing::Test {
 protected:
     TempWorkspace workspace =
@@ -224,8 +180,7 @@ TEST_F(BarrierOwnershipTest, ReleaseDoesNotRemoveForeignBarrier) {
 }
 
 TEST(BarrierOwnershipControl, AmbiguousAppliedPutDoesNotAdmitWriter) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("barrier-ambiguous-put");
+    auto workspace = kasumi::test::make_temp_workspace("barrier-ambiguous-put");
     FakeState* state = nullptr;
     auto storage = make_fake_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(storage));
