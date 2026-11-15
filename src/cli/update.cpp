@@ -20,10 +20,12 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <print>
 #include <reproc++/run.hpp>
 #include <set>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -166,39 +168,41 @@ bool safe_environment_value(const char* value, std::size_t limit) {
 
 using LinuxEnvironment = std::vector<std::pair<std::string, std::string>>;
 
+void append_safe_env(LinuxEnvironment& environment,
+                     std::initializer_list<const char*> names) {
+    for (const auto* name : names) {
+        if (const char* value = std::getenv(name);
+            safe_environment_value(value, 4096)) {
+            environment.emplace_back(name, value);
+        }
+    }
+}
+
 LinuxEnvironment linux_base_environment(bool include_proxy = false) {
     LinuxEnvironment environment{
         {"PATH", linux_trusted_path_value()}, {"LANG", "C"}, {"LC_ALL", "C"}};
     if (include_proxy && ::geteuid() != 0) {
-        for (const auto* name : {"http_proxy",
-                                 "https_proxy",
-                                 "HTTP_PROXY",
-                                 "HTTPS_PROXY",
-                                 "all_proxy",
-                                 "ALL_PROXY",
-                                 "no_proxy",
-                                 "NO_PROXY"}) {
-            const char* value = std::getenv(name);
-            if (safe_environment_value(value, 4096)) {
-                environment.emplace_back(name, value);
-            }
-        }
+        append_safe_env(environment,
+                        {"http_proxy",
+                         "https_proxy",
+                         "HTTP_PROXY",
+                         "HTTPS_PROXY",
+                         "all_proxy",
+                         "ALL_PROXY",
+                         "no_proxy",
+                         "NO_PROXY"});
     }
     return environment;
 }
 
 LinuxEnvironment linux_pkexec_environment() {
     auto environment = linux_base_environment();
-    for (const auto* name : {"DISPLAY",
-                             "WAYLAND_DISPLAY",
-                             "XAUTHORITY",
-                             "DBUS_SESSION_BUS_ADDRESS",
-                             "XDG_RUNTIME_DIR"}) {
-        const char* value = std::getenv(name);
-        if (safe_environment_value(value, 4096)) {
-            environment.emplace_back(name, value);
-        }
-    }
+    append_safe_env(environment,
+                    {"DISPLAY",
+                     "WAYLAND_DISPLAY",
+                     "XAUTHORITY",
+                     "DBUS_SESSION_BUS_ADDRESS",
+                     "XDG_RUNTIME_DIR"});
     if (const char* term = std::getenv("TERM");
         safe_environment_value(term, 64) &&
         std::ranges::all_of(std::string_view{term},
@@ -289,12 +293,16 @@ std::string lower_ascii(std::string_view value) {
     return result;
 }
 
+bool is_hex_string(std::string_view value) noexcept {
+    return std::ranges::all_of(value, [](char character) {
+        return (character >= '0' && character <= '9') ||
+               (character >= 'a' && character <= 'f') ||
+               (character >= 'A' && character <= 'F');
+    });
+}
+
 bool valid_sha256(std::string_view value) noexcept {
-    return value.size() == 64 && std::ranges::all_of(value, [](char character) {
-               return (character >= '0' && character <= '9') ||
-                      (character >= 'a' && character <= 'f') ||
-                      (character >= 'A' && character <= 'F');
-           });
+    return value.size() == 64 && is_hex_string(value);
 }
 
 struct ProcessResult {
@@ -486,6 +494,72 @@ std::optional<std::string> header_location(const std::filesystem::path& path) {
 #endif
 
 #if defined(_WIN32)
+
+struct ScopedWindowsHandle {
+    HANDLE value = nullptr;
+    ScopedWindowsHandle() = default;
+    explicit ScopedWindowsHandle(HANDLE handle) noexcept : value(handle) {
+    }
+    ScopedWindowsHandle(const ScopedWindowsHandle&) = delete;
+    ScopedWindowsHandle& operator=(const ScopedWindowsHandle&) = delete;
+    ~ScopedWindowsHandle() {
+        if (value != nullptr && value != INVALID_HANDLE_VALUE) {
+            CloseHandle(value);
+        }
+    }
+    explicit operator bool() const noexcept {
+        return value != nullptr && value != INVALID_HANDLE_VALUE;
+    }
+};
+
+struct LocalFreeDeleter {
+    void operator()(void* ptr) const noexcept {
+        if (ptr != nullptr) {
+            LocalFree(ptr);
+        }
+    }
+};
+
+using LocalSecurityDescriptor = std::unique_ptr<void, LocalFreeDeleter>;
+
+bool windows_has_attribute_flags(const std::filesystem::path& path,
+                                 DWORD flags,
+                                 DWORD forbidden_attributes,
+                                 FILE_ID_INFO* out_id = nullptr) {
+    const ScopedWindowsHandle handle{
+        CreateFileW(path.c_str(),
+                    FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT | flags,
+                    nullptr)};
+    if (!handle) {
+        return false;
+    }
+    FILE_ATTRIBUTE_TAG_INFO attributes{};
+    if (GetFileInformationByHandleEx(handle.value,
+                                     FileAttributeTagInfo,
+                                     &attributes,
+                                     sizeof(attributes)) == 0 ||
+        (attributes.FileAttributes & forbidden_attributes) != 0) {
+        return false;
+    }
+    return out_id == nullptr ||
+           GetFileInformationByHandleEx(
+               handle.value, FileIdInfo, out_id, sizeof(*out_id)) != 0;
+}
+
+std::string bytes_to_hex(std::span<const std::uint8_t> bytes) {
+    constexpr char hex[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(bytes.size() * 2);
+    for (const auto byte : bytes) {
+        result.push_back(hex[byte >> 4U]);
+        result.push_back(hex[byte & 0x0fU]);
+    }
+    return result;
+}
 
 struct InternetHandle {
     HINTERNET value = nullptr;
@@ -894,14 +968,7 @@ sha256_file_impl(const std::filesystem::path& path) {
     }
     BCryptDestroyHash(hash);
     BCryptCloseAlgorithmProvider(algorithm, 0);
-    constexpr char hex[] = "0123456789abcdef";
-    std::string result;
-    result.reserve(64);
-    for (const auto byte : digest) {
-        result.push_back(hex[byte >> 4U]);
-        result.push_back(hex[byte & 0x0fU]);
-    }
-    return result;
+    return bytes_to_hex(digest);
 #else
     auto result =
         run_capture({"sha256sum", "--", platform::path::to_utf8(path)});
@@ -930,6 +997,16 @@ download_asset(std::string url,
 #endif
 }
 
+std::optional<std::filesystem::path>
+resolve_regular_executable(const std::filesystem::path& candidate) {
+    std::error_code error;
+    auto resolved = std::filesystem::canonical(candidate, error);
+    if (error || !std::filesystem::is_regular_file(resolved, error) || error) {
+        return std::nullopt;
+    }
+    return resolved;
+}
+
 } // namespace
 
 std::optional<std::filesystem::path> current_executable_path() {
@@ -942,15 +1019,8 @@ std::optional<std::filesystem::path> current_executable_path() {
             return std::nullopt;
         }
         if (length < buffer.size() - 1) {
-            std::error_code error;
-            auto resolved = std::filesystem::canonical(
-                std::filesystem::path{std::wstring_view{buffer.data(), length}},
-                error);
-            if (error || !std::filesystem::is_regular_file(resolved, error) ||
-                error) {
-                return std::nullopt;
-            }
-            return resolved;
+            return resolve_regular_executable(
+                std::filesystem::path{std::wstring_view{buffer.data(), length}});
         }
         if (buffer.size() >= 32768) {
             return std::nullopt;
@@ -966,16 +1036,9 @@ std::optional<std::filesystem::path> current_executable_path() {
             return std::nullopt;
         }
         if (static_cast<std::size_t>(length) < buffer.size()) {
-            std::error_code error;
-            auto resolved = std::filesystem::canonical(
-                std::filesystem::path{std::string_view{
-                    buffer.data(), static_cast<std::size_t>(length)}},
-                error);
-            if (error || !std::filesystem::is_regular_file(resolved, error) ||
-                error) {
-                return std::nullopt;
-            }
-            return resolved;
+            return resolve_regular_executable(std::filesystem::path{
+                std::string_view{buffer.data(),
+                                 static_cast<std::size_t>(length)}});
         }
         if (buffer.size() >= 65536) {
             return std::nullopt;
@@ -1051,12 +1114,11 @@ std::expected<std::string, std::string>
 extract_and_validate(const std::filesystem::path& archive,
                      const PackageNames& package,
                      const std::filesystem::path& destination) {
+    const auto archive_utf8 = platform::path::to_utf8(archive);
 #if defined(_WIN32)
-    const auto listing =
-        run_capture({"tar", "-tvf", platform::path::to_utf8(archive)});
+    const auto listing = run_capture({"tar", "-tvf", archive_utf8});
 #else
-    const auto listing =
-        run_capture({"tar", "-tvzf", platform::path::to_utf8(archive)});
+    const auto listing = run_capture({"tar", "-tvzf", archive_utf8});
 #endif
     if (!listing || listing->exit_code != 0) {
         return std::unexpected(listing ? "package archive is invalid"
@@ -1069,29 +1131,25 @@ extract_and_validate(const std::filesystem::path& archive,
     if (!std::filesystem::create_directory(destination, error) || error) {
         return std::unexpected("could not create package extraction directory");
     }
+    std::vector<std::string> extract_args{
+        "tar",
 #if defined(_WIN32)
-    const auto extracted = run_capture({"tar",
-                                        "-xf",
-                                        platform::path::to_utf8(archive),
-                                        "-C",
-                                        platform::path::to_utf8(destination),
-                                        "--",
-                                        package.executable,
-                                        "LICENSE",
-                                        "THIRD_PARTY_NOTICES.md"});
+        "-xf",
 #else
-    const auto extracted = run_capture({"tar",
-                                        "-xzf",
-                                        platform::path::to_utf8(archive),
-                                        "-C",
-                                        platform::path::to_utf8(destination),
-                                        "--no-same-owner",
-                                        "--no-same-permissions",
-                                        "--",
-                                        package.executable,
-                                        "LICENSE",
-                                        "THIRD_PARTY_NOTICES.md"});
+        "-xzf",
 #endif
+        archive_utf8,
+        "-C",
+        platform::path::to_utf8(destination),
+#if !defined(_WIN32)
+        "--no-same-owner",
+        "--no-same-permissions",
+#endif
+        "--",
+        package.executable,
+        "LICENSE",
+        "THIRD_PARTY_NOTICES.md"};
+    const auto extracted = run_capture(extract_args);
     if (!extracted || extracted->exit_code != 0) {
         return std::unexpected(extracted ? "could not extract verified package"
                                          : extracted.error());
@@ -1550,6 +1608,20 @@ bool valid_verbose_archive_listing(std::string_view listing,
     });
 }
 
+std::string make_official_asset_url(std::string_view tag,
+                                    std::string_view name) {
+    std::string url;
+    url.reserve(19 + GITHUB_REPOSITORY.size() + 19 + tag.size() + 1 +
+                name.size());
+    url.append("https://github.com/");
+    url.append(GITHUB_REPOSITORY);
+    url.append("/releases/download/");
+    url.append(tag);
+    url.push_back('/');
+    url.append(name);
+    return url;
+}
+
 bool official_asset_url(std::string_view tag,
                         std::string_view name,
                         std::string_view url) {
@@ -1557,16 +1629,7 @@ bool official_asset_url(std::string_view tag,
         name.find_first_of("/\\?#\r\n") != std::string_view::npos) {
         return false;
     }
-    std::string expected_url;
-    expected_url.reserve(19 + GITHUB_REPOSITORY.size() + 19 + tag.size() + 1 +
-                         name.size());
-    expected_url.append("https://github.com/");
-    expected_url.append(GITHUB_REPOSITORY);
-    expected_url.append("/releases/download/");
-    expected_url.append(tag);
-    expected_url.push_back('/');
-    expected_url.append(name);
-    return url == expected_url;
+    return url == make_official_asset_url(tag, name);
 }
 
 namespace {
@@ -1619,6 +1682,43 @@ InstallFailure replacement_failure(std::string detail) {
     }
     return install_failure(std::move(detail));
 }
+
+#if !defined(_WIN32)
+std::expected<void, InstallFailure>
+preserve_posix_attributes(const std::filesystem::path& path,
+                          const struct stat& original_stat,
+                          const std::filesystem::file_status& target_status,
+                          std::string_view inspect_error,
+                          std::string_view ownership_error,
+                          std::string_view permission_error) {
+    struct stat entry_stat{};
+    if (::stat(path.c_str(), &entry_stat) != 0) {
+        return std::unexpected(filesystem_failure(
+            inspect_error, std::error_code{errno, std::generic_category()}));
+    }
+    if ((entry_stat.st_uid != original_stat.st_uid ||
+         entry_stat.st_gid != original_stat.st_gid) &&
+        ::chown(path.c_str(),
+                entry_stat.st_uid == original_stat.st_uid
+                    ? static_cast<uid_t>(-1)
+                    : original_stat.st_uid,
+                entry_stat.st_gid == original_stat.st_gid
+                    ? static_cast<gid_t>(-1)
+                    : original_stat.st_gid) != 0) {
+        return std::unexpected(filesystem_failure(
+            ownership_error, std::error_code{errno, std::generic_category()}));
+    }
+    std::error_code error;
+    std::filesystem::permissions(path,
+                                 target_status.permissions(),
+                                 std::filesystem::perm_options::replace,
+                                 error);
+    if (error) {
+        return std::unexpected(filesystem_failure(permission_error, error));
+    }
+    return {};
+}
+#endif
 
 } // namespace
 
@@ -1710,33 +1810,20 @@ InstallResult install_prepared_executable(const std::filesystem::path& prepared,
     }
 #if !defined(_WIN32)
     struct stat original_stat{};
-    struct stat staged_stat{};
-    if (::stat(target.c_str(), &original_stat) != 0 ||
-        ::stat(staged.c_str(), &staged_stat) != 0) {
-        const std::error_code status_error{errno, std::generic_category()};
+    if (::stat(target.c_str(), &original_stat) != 0) {
         return std::unexpected(filesystem_failure(
-            "could not inspect executable ownership", status_error));
+            "could not inspect executable ownership",
+            std::error_code{errno, std::generic_category()}));
     }
-    if ((staged_stat.st_uid != original_stat.st_uid ||
-         staged_stat.st_gid != original_stat.st_gid) &&
-        ::chown(staged.c_str(),
-                staged_stat.st_uid == original_stat.st_uid
-                    ? static_cast<uid_t>(-1)
-                    : original_stat.st_uid,
-                staged_stat.st_gid == original_stat.st_gid
-                    ? static_cast<gid_t>(-1)
-                    : original_stat.st_gid) != 0) {
-        const std::error_code owner_error{errno, std::generic_category()};
-        return std::unexpected(filesystem_failure(
-            "could not preserve executable ownership", owner_error));
-    }
-    std::filesystem::permissions(staged,
-                                 target_status.permissions(),
-                                 std::filesystem::perm_options::replace,
-                                 error);
-    if (error) {
-        return std::unexpected(filesystem_failure(
-            "could not preserve executable permissions", error));
+    if (const auto preserved =
+            preserve_posix_attributes(staged,
+                                      original_stat,
+                                      target_status,
+                                      "could not inspect executable ownership",
+                                      "could not preserve executable ownership",
+                                      "could not preserve executable permissions");
+        !preserved) {
+        return std::unexpected(preserved.error());
     }
 #endif
     const auto staged_hash = hash_file(staged);
@@ -1758,32 +1845,15 @@ InstallResult install_prepared_executable(const std::filesystem::path& prepared,
             error));
     }
 #if !defined(_WIN32)
-    struct stat backup_stat{};
-    if (::stat(backup.c_str(), &backup_stat) != 0) {
-        const std::error_code status_error{errno, std::generic_category()};
-        return std::unexpected(filesystem_failure(
-            "could not inspect recovery copy ownership", status_error));
-    }
-    if ((backup_stat.st_uid != original_stat.st_uid ||
-         backup_stat.st_gid != original_stat.st_gid) &&
-        ::chown(backup.c_str(),
-                backup_stat.st_uid == original_stat.st_uid
-                    ? static_cast<uid_t>(-1)
-                    : original_stat.st_uid,
-                backup_stat.st_gid == original_stat.st_gid
-                    ? static_cast<gid_t>(-1)
-                    : original_stat.st_gid) != 0) {
-        const std::error_code owner_error{errno, std::generic_category()};
-        return std::unexpected(filesystem_failure(
-            "could not preserve recovery copy ownership", owner_error));
-    }
-    std::filesystem::permissions(backup,
-                                 target_status.permissions(),
-                                 std::filesystem::perm_options::replace,
-                                 error);
-    if (error) {
-        return std::unexpected(filesystem_failure(
-            "could not preserve recovery copy permissions", error));
+    if (const auto preserved = preserve_posix_attributes(
+            backup,
+            original_stat,
+            target_status,
+            "could not inspect recovery copy ownership",
+            "could not preserve recovery copy ownership",
+            "could not preserve recovery copy permissions");
+        !preserved) {
+        return std::unexpected(preserved.error());
     }
 #endif
     const auto backup_hash = hash_file(backup);
@@ -1858,61 +1928,92 @@ InstallResult install_once_then_elevate(const InstallAction& install,
 namespace {
 
 #if defined(_WIN32)
-std::expected<void, std::string>
-validate_windows_workspace_acl_impl(const std::filesystem::path& root) {
-    auto path = root.native();
+struct WindowsWellKnownSid {
+    alignas(DWORD) std::array<std::byte, SECURITY_MAX_SID_SIZE> data{};
+    bool init(WELL_KNOWN_SID_TYPE type) noexcept {
+        DWORD size = static_cast<DWORD>(data.size());
+        return CreateWellKnownSid(type, nullptr, data.data(), &size) != 0;
+    }
+    PSID get() noexcept {
+        return data.data();
+    }
+};
+
+bool query_current_user_token(std::vector<std::byte>& token_data) {
+    HANDLE raw_token = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw_token) == 0) {
+        return false;
+    }
+    const ScopedWindowsHandle token{raw_token};
+    DWORD required = 0;
+    GetTokenInformation(token.value, TokenUser, nullptr, 0, &required);
+    token_data.resize(required);
+    return required != 0 &&
+           GetTokenInformation(token.value,
+                               TokenUser,
+                               token_data.data(),
+                               required,
+                               &required) != 0;
+}
+
+struct WindowsWorkspaceAcl {
+    std::wstring path;
+    LocalSecurityDescriptor descriptor;
     PACL dacl = nullptr;
-    PSID security_owner = nullptr;
-    PSECURITY_DESCRIPTOR descriptor = nullptr;
-    const auto query = GetNamedSecurityInfoW(path.data(),
-                                             SE_FILE_OBJECT,
-                                             DACL_SECURITY_INFORMATION |
-                                                 OWNER_SECURITY_INFORMATION,
-                                             &security_owner,
-                                             nullptr,
-                                             &dacl,
-                                             nullptr,
-                                             &descriptor);
-    if (query != ERROR_SUCCESS || descriptor == nullptr || dacl == nullptr) {
-        if (descriptor != nullptr) {
-            LocalFree(descriptor);
-        }
-        return std::unexpected("could not verify update workspace permissions");
+    PSID owner = nullptr;
+    bool protected_dacl = false;
+    ACL_SIZE_INFORMATION info{};
+};
+
+std::expected<WindowsWorkspaceAcl, std::string>
+query_windows_workspace_acl(const std::filesystem::path& root,
+                            std::string_view read_error) {
+    WindowsWorkspaceAcl acl{.path = root.native()};
+    PSECURITY_DESCRIPTOR raw_descriptor = nullptr;
+    const auto query = GetNamedSecurityInfoW(
+        acl.path.data(),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION,
+        &acl.owner,
+        nullptr,
+        &acl.dacl,
+        nullptr,
+        &raw_descriptor);
+    acl.descriptor.reset(raw_descriptor);
+    if (query != ERROR_SUCCESS || !acl.descriptor || acl.dacl == nullptr) {
+        return std::unexpected(std::string{read_error});
     }
     SECURITY_DESCRIPTOR_CONTROL control = 0;
     DWORD revision = 0;
-    const bool protected_dacl =
-        GetSecurityDescriptorControl(descriptor, &control, &revision) != 0 &&
-        (control & SE_DACL_PROTECTED) != 0;
+    acl.protected_dacl =
+        GetSecurityDescriptorControl(acl.descriptor.get(), &control, &revision) !=
+            0 &&
+        (control & SE_DACL_PROTECTED) != 0 &&
+        GetAclInformation(
+            acl.dacl, &acl.info, sizeof(acl.info), AclSizeInformation) != 0;
+    return acl;
+}
 
-    bool valid = protected_dacl;
-    valid = valid && security_owner != nullptr;
-    alignas(DWORD) std::array<std::byte, SECURITY_MAX_SID_SIZE>
-        system_sid_storage{};
-    DWORD system_sid_size = static_cast<DWORD>(system_sid_storage.size());
-    valid = valid && CreateWellKnownSid(WinLocalSystemSid,
-                                        nullptr,
-                                        system_sid_storage.data(),
-                                        &system_sid_size) != 0;
-    alignas(DWORD) std::array<std::byte, SECURITY_MAX_SID_SIZE>
-        admin_sid_storage{};
-    DWORD admin_sid_size = static_cast<DWORD>(admin_sid_storage.size());
-    valid = valid && CreateWellKnownSid(WinBuiltinAdministratorsSid,
-                                        nullptr,
-                                        admin_sid_storage.data(),
-                                        &admin_sid_size) != 0;
-    ACL_SIZE_INFORMATION acl_info{};
-    valid = valid &&
-            GetAclInformation(
-                dacl, &acl_info, sizeof(acl_info), AclSizeInformation) != 0 &&
-            acl_info.AceCount == 3;
+std::expected<void, std::string>
+validate_windows_workspace_acl_impl(const std::filesystem::path& root) {
+    auto acl = query_windows_workspace_acl(
+        root, "could not verify update workspace permissions");
+    if (!acl) {
+        return std::unexpected(acl.error());
+    }
+    WindowsWellKnownSid system_sid;
+    WindowsWellKnownSid admin_sid;
+    bool valid = acl->protected_dacl && acl->owner != nullptr &&
+                 system_sid.init(WinLocalSystemSid) &&
+                 admin_sid.init(WinBuiltinAdministratorsSid) &&
+                 acl->info.AceCount == 3;
     bool has_workspace_user = false;
     bool has_system = false;
     bool has_admin_read = false;
     PSID workspace_user = nullptr;
-    for (DWORD index = 0; valid && index < acl_info.AceCount; ++index) {
+    for (DWORD index = 0; valid && index < acl->info.AceCount; ++index) {
         void* raw_ace = nullptr;
-        if (!GetAce(dacl, index, &raw_ace) || raw_ace == nullptr) {
+        if (!GetAce(acl->dacl, index, &raw_ace) || raw_ace == nullptr) {
             valid = false;
             break;
         }
@@ -1922,9 +2023,9 @@ validate_windows_workspace_acl_impl(const std::filesystem::path& root) {
             break;
         }
         auto* sid = reinterpret_cast<PSID>(&ace->SidStart);
-        if (EqualSid(sid, system_sid_storage.data())) {
+        if (EqualSid(sid, system_sid.get())) {
             has_system = ace->Mask == FILE_ALL_ACCESS;
-        } else if (EqualSid(sid, admin_sid_storage.data())) {
+        } else if (EqualSid(sid, admin_sid.get())) {
             has_admin_read =
                 ace->Mask == (FILE_GENERIC_READ | FILE_GENERIC_EXECUTE) &&
                 ace->Header.AceFlags ==
@@ -1936,41 +2037,23 @@ validate_windows_workspace_acl_impl(const std::filesystem::path& root) {
             valid = false;
         }
     }
-    HANDLE token = nullptr;
-    valid = valid &&
-            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) != 0;
     std::vector<std::byte> token_data;
-    if (valid) {
-        DWORD required = 0;
-        GetTokenInformation(token, TokenUser, nullptr, 0, &required);
-        token_data.resize(required);
-        valid =
-            required != 0 &&
-            GetTokenInformation(
-                token, TokenUser, token_data.data(), required, &required) != 0;
-    }
-    if (token != nullptr) {
-        CloseHandle(token);
-    }
+    valid = valid && query_current_user_token(token_data);
     const auto* current_user =
         valid ? reinterpret_cast<const TOKEN_USER*>(token_data.data())
               : nullptr;
     const bool current_is_owner =
         current_user != nullptr && workspace_user != nullptr &&
         EqualSid(current_user->User.Sid, workspace_user);
-    BOOL current_is_admin = FALSE;
-    if (valid && !current_is_owner) {
-        BOOL is_member = FALSE;
-        current_is_admin = CheckTokenMembership(nullptr,
-                                                admin_sid_storage.data(),
-                                                &is_member) != 0 &&
-                           is_member;
-    }
+    BOOL is_member = FALSE;
+    const bool current_is_admin =
+        valid && !current_is_owner &&
+        CheckTokenMembership(nullptr, admin_sid.get(), &is_member) != 0 &&
+        is_member;
     const bool owner_is_expected =
-        security_owner != nullptr && workspace_user != nullptr &&
-        (EqualSid(security_owner, workspace_user) ||
-         EqualSid(security_owner, admin_sid_storage.data()));
-    LocalFree(descriptor);
+        acl->owner != nullptr && workspace_user != nullptr &&
+        (EqualSid(acl->owner, workspace_user) ||
+         EqualSid(acl->owner, admin_sid.get()));
     if (!valid || !owner_is_expected || !has_workspace_user || !has_system ||
         !has_admin_read || (!current_is_owner && !current_is_admin)) {
         return std::unexpected("update workspace ACL does not preserve owner "
@@ -1978,29 +2061,29 @@ validate_windows_workspace_acl_impl(const std::filesystem::path& root) {
     }
     return {};
 }
+
+bool windows_entry_is_not_reparse_point(const std::filesystem::path& path) {
+    return windows_has_attribute_flags(
+        path, FILE_FLAG_BACKUP_SEMANTICS, FILE_ATTRIBUTE_REPARSE_POINT);
+}
 #endif
 
-#if defined(_WIN32)
-bool windows_entry_is_not_reparse_point(const std::filesystem::path& path) {
-    HANDLE handle =
-        CreateFileW(path.c_str(),
-                    FILE_READ_ATTRIBUTES,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    nullptr,
-                    OPEN_EXISTING,
-                    FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
-                    nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        return false;
+#if defined(__linux__)
+std::optional<uid_t> invoking_user_id() {
+    const char* value = std::getenv("PKEXEC_UID");
+    if (value == nullptr) {
+        value = std::getenv("SUDO_UID");
     }
-    FILE_ATTRIBUTE_TAG_INFO attributes{};
-    const bool valid =
-        GetFileInformationByHandleEx(
-            handle, FileAttributeTagInfo, &attributes, sizeof(attributes)) !=
-            0 &&
-        (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
-    CloseHandle(handle);
-    return valid;
+    if (value == nullptr || *value == '\0') {
+        return std::nullopt;
+    }
+    uid_t result = 0;
+    const auto end = value + std::char_traits<char>::length(value);
+    const auto [parsed, error] = std::from_chars(value, end, result);
+    if (error != std::errc{} || parsed != end || result == 0) {
+        return std::nullopt;
+    }
+    return result;
 }
 #endif
 
@@ -2015,14 +2098,11 @@ validate_staging_root(const std::filesystem::path& root) {
         return std::unexpected("update staging directory is invalid");
     }
 #if defined(_WIN32)
-    if (!root.is_absolute() || !windows_entry_is_not_reparse_point(root)) {
+    if (!windows_entry_is_not_reparse_point(root)) {
         return std::unexpected(
             "update staging directory cannot be resolved safely");
     }
-    auto secure = validate_windows_workspace_acl_impl(root);
-    if (!secure) {
-        return secure;
-    }
+    return validate_windows_workspace_acl_impl(root);
 #else
     const auto canonical_root = std::filesystem::canonical(root, error);
     if (error || canonical_root != root) {
@@ -2039,26 +2119,21 @@ validate_staging_root(const std::filesystem::path& root) {
             return std::unexpected(
                 "update staging directory has an unexpected owner");
         }
-        const char* original_uid = std::getenv("PKEXEC_UID");
-        if (original_uid == nullptr) {
-            original_uid = std::getenv("SUDO_UID");
-        }
-        uid_t expected_uid = 0;
-        if (original_uid == nullptr) {
+#if defined(__linux__)
+        const auto expected_uid = invoking_user_id();
+        if (!expected_uid) {
             return std::unexpected("could not validate update staging owner");
         }
-        const auto [uid_end, uid_error] = std::from_chars(
-            original_uid,
-            original_uid + std::char_traits<char>::length(original_uid),
-            expected_uid);
-        if (uid_error != std::errc{} || *uid_end != '\0' ||
-            workspace_stat.st_uid != expected_uid) {
+        if (workspace_stat.st_uid != *expected_uid) {
             return std::unexpected(
                 "update staging directory has an unexpected owner");
         }
-    }
+#else
+        return std::unexpected("could not validate update staging owner");
 #endif
+    }
     return {};
+#endif
 }
 
 [[maybe_unused]] std::expected<PreparedExecutable, std::string>
@@ -2095,6 +2170,27 @@ prepare_archive_for_install(const std::filesystem::path& archive,
     return *prepared;
 }
 
+ApiGet make_workspace_api_get(const platform::Workspace& workspace) {
+    return [&](std::string_view url,
+               std::size_t limit) -> std::expected<HttpResponse, std::string> {
+        auto body = get_text(std::string{url}, limit, workspace);
+        if (!body) {
+            return std::unexpected(body.error());
+        }
+        return HttpResponse{.status = 200, .body = std::move(*body)};
+    };
+}
+
+struct ScopedWorkspaceCleanup {
+    platform::Workspace value;
+    bool released = false;
+    ~ScopedWorkspaceCleanup() {
+        if (!released) {
+            platform::cleanup_workspace(value);
+        }
+    }
+};
+
 std::optional<std::string> release_asset_url(const Release& release,
                                              std::string_view name);
 
@@ -2112,16 +2208,7 @@ refetch_official_digest(const std::filesystem::path& archive,
         installed_version_is_current_or_newer(current->text, *requested)) {
         return std::unexpected("installer handoff release is invalid or older");
     }
-    const ApiGet get =
-        [&](std::string_view url,
-            std::size_t limit) -> std::expected<HttpResponse, std::string> {
-        auto body = get_text(std::string{url}, limit, workspace);
-        if (!body) {
-            return std::unexpected(body.error());
-        }
-        return HttpResponse{.status = 200, .body = std::move(*body)};
-    };
-    auto releases = fetch_releases(get);
+    auto releases = fetch_releases(make_workspace_api_get(workspace));
     if (!releases) {
         return std::unexpected(releases.error());
     }
@@ -2312,23 +2399,6 @@ curl_checksum_as_user(std::string_view url, uid_t uid) {
         return std::unexpected("checksum redirect left the GitHub allowlist");
     }
     return output.substr(0, separator);
-}
-
-std::optional<uid_t> invoking_user_id() {
-    const char* value = std::getenv("PKEXEC_UID");
-    if (value == nullptr) {
-        value = std::getenv("SUDO_UID");
-    }
-    if (value == nullptr || *value == '\0') {
-        return std::nullopt;
-    }
-    uid_t result = 0;
-    const auto end = value + std::char_traits<char>::length(value);
-    const auto [parsed, error] = std::from_chars(value, end, result);
-    if (error != std::errc{} || parsed != end || result == 0) {
-        return std::nullopt;
-    }
-    return result;
 }
 #endif
 
@@ -2573,72 +2643,40 @@ std::optional<std::filesystem::path> windows_process_path(DWORD process_id,
     return path;
 }
 
-struct ScopedWindowsHandle {
-    HANDLE value = nullptr;
-    ~ScopedWindowsHandle() {
-        if (value != nullptr && value != INVALID_HANDLE_VALUE) {
-            CloseHandle(value);
-        }
-    }
-};
-
 std::optional<DWORD> windows_parent_process_id(DWORD process_id) {
-    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) {
+    const ScopedWindowsHandle snapshot{
+        CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)};
+    if (!snapshot) {
         return std::nullopt;
     }
     PROCESSENTRY32W entry{};
     entry.dwSize = sizeof(entry);
     std::optional<DWORD> result;
-    if (Process32FirstW(snapshot, &entry)) {
+    if (Process32FirstW(snapshot.value, &entry)) {
         do {
             if (entry.th32ProcessID == process_id) {
                 result = entry.th32ParentProcessID;
                 break;
             }
-        } while (Process32NextW(snapshot, &entry));
+        } while (Process32NextW(snapshot.value, &entry));
     }
-    CloseHandle(snapshot);
     return result;
 }
 
 bool windows_path_has_no_reparse_points(const std::filesystem::path& path) {
-    const auto check = [](const std::filesystem::path& item) {
-        HANDLE handle = CreateFileW(
-            item.c_str(),
-            FILE_READ_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
-            nullptr);
-        if (handle == INVALID_HANDLE_VALUE) {
-            return false;
-        }
-        FILE_ATTRIBUTE_TAG_INFO info{};
-        const bool valid =
-            GetFileInformationByHandleEx(
-                handle, FileAttributeTagInfo, &info, sizeof(info)) != 0 &&
-            (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
-        CloseHandle(handle);
-        return valid;
-    };
     if (!path.is_absolute()) {
         return false;
     }
     auto current = path.root_path();
-    if (current.empty() || !check(current)) {
+    if (current.empty() || !windows_entry_is_not_reparse_point(current)) {
         return false;
     }
     for (const auto& component : path.relative_path()) {
         if (component.empty() || component == L".") {
             continue;
         }
-        if (component == L"..") {
-            return false;
-        }
-        current /= component;
-        if (!check(current)) {
+        if (component == L".." ||
+            !windows_entry_is_not_reparse_point(current /= component)) {
             return false;
         }
     }
@@ -2653,20 +2691,12 @@ std::string windows_identity_text(const WindowsFileIdentity& identity) {
         result[15 - index] = hex[serial & 0x0fU];
         serial >>= 4U;
     }
-    for (const auto byte : identity.file_id) {
-        result.push_back(hex[byte >> 4U]);
-        result.push_back(hex[byte & 0x0fU]);
-    }
-    return result;
+    return result + bytes_to_hex(identity.file_id);
 }
 
 std::optional<WindowsFileIdentity>
 parse_windows_identity(std::string_view value) {
-    if (value.size() != 48 || !std::ranges::all_of(value, [](char character) {
-            return (character >= '0' && character <= '9') ||
-                   (character >= 'a' && character <= 'f') ||
-                   (character >= 'A' && character <= 'F');
-        })) {
+    if (value.size() != 48 || !is_hex_string(value)) {
         return std::nullopt;
     }
     WindowsFileIdentity result;
@@ -3098,15 +3128,8 @@ InstallResult install_linux_handoff(const std::filesystem::path& archive,
         return std::unexpected(
             install_failure("invalid privileged update handoff"));
     }
-    std::string checksum_url;
-    checksum_url.reserve(19 + GITHUB_REPOSITORY.size() + 19 + tag.size() + 1 +
-                         package->checksum.size());
-    checksum_url.append("https://github.com/");
-    checksum_url.append(GITHUB_REPOSITORY);
-    checksum_url.append("/releases/download/");
-    checksum_url.append(tag);
-    checksum_url.push_back('/');
-    checksum_url.append(package->checksum);
+    const std::string checksum_url =
+        make_official_asset_url(tag, package->checksum);
     if (!official_asset_url(tag, package->checksum, checksum_url)) {
         return std::unexpected(
             install_failure("official checksum URL is invalid"));
@@ -3185,12 +3208,7 @@ int run_linux_install_helper(int argc, char* argv[]) {
     if (!workspace) {
         return report_failure(workspace.error());
     }
-    struct Cleanup {
-        platform::Workspace value;
-        ~Cleanup() {
-            platform::cleanup_workspace(value);
-        }
-    } cleanup{.value = *workspace};
+    const ScopedWorkspaceCleanup cleanup{.value = *workspace};
     const auto trusted_archive =
         platform::workspace_file(*workspace, package->archive);
     if (trusted_archive.empty() ||
@@ -3289,25 +3307,8 @@ int run_public_update(bool allow_elevation = true) {
         return report_failure(admin_read.error());
     }
 #endif
-    struct Cleanup {
-        platform::Workspace value;
-        bool released = false;
-        ~Cleanup() {
-            if (!released) {
-                platform::cleanup_workspace(value);
-            }
-        }
-    } cleanup{.value = *workspace};
-    const ApiGet get =
-        [&](std::string_view url,
-            std::size_t limit) -> std::expected<HttpResponse, std::string> {
-        auto body = get_text(std::string{url}, limit, *workspace);
-        if (!body) {
-            return std::unexpected(body.error());
-        }
-        return HttpResponse{.status = 200, .body = std::move(*body)};
-    };
-    auto releases = fetch_releases(get);
+    ScopedWorkspaceCleanup cleanup{.value = *workspace};
+    auto releases = fetch_releases(make_workspace_api_get(*workspace));
     if (!releases) {
         return report_failure(releases.error());
     }
@@ -3452,74 +3453,27 @@ WindowsInstallationWritableResult check_windows_installation_writable(
 
 std::expected<void, std::string>
 grant_windows_admin_read_access(const std::filesystem::path& root) {
-    PACL dacl = nullptr;
-    PSID owner = nullptr;
-    PSECURITY_DESCRIPTOR descriptor = nullptr;
-    auto writable = root.wstring();
-    const auto query = GetNamedSecurityInfoW(writable.data(),
-                                             SE_FILE_OBJECT,
-                                             DACL_SECURITY_INFORMATION |
-                                                 OWNER_SECURITY_INFORMATION,
-                                             &owner,
-                                             nullptr,
-                                             &dacl,
-                                             nullptr,
-                                             &descriptor);
-    if (query != ERROR_SUCCESS || descriptor == nullptr || dacl == nullptr) {
-        if (descriptor != nullptr) {
-            LocalFree(descriptor);
-        }
-        return std::unexpected(
-            "could not inspect update workspace permissions");
+    auto acl = query_windows_workspace_acl(
+        root, "could not inspect update workspace permissions");
+    if (!acl) {
+        return std::unexpected(acl.error());
     }
-    SECURITY_DESCRIPTOR_CONTROL control = 0;
-    DWORD revision = 0;
-    const bool control_valid =
-        GetSecurityDescriptorControl(descriptor, &control, &revision) != 0 &&
-        (control & SE_DACL_PROTECTED) != 0;
-    const bool owner_valid = owner != nullptr;
-    bool valid = control_valid && owner_valid;
-    alignas(DWORD) std::array<std::byte, SECURITY_MAX_SID_SIZE> system_sid{};
-    DWORD system_size = static_cast<DWORD>(system_sid.size());
-    alignas(DWORD) std::array<std::byte, SECURITY_MAX_SID_SIZE> admin_sid{};
-    DWORD admin_size = static_cast<DWORD>(admin_sid.size());
-    valid =
-        valid &&
-        CreateWellKnownSid(
-            WinLocalSystemSid, nullptr, system_sid.data(), &system_size) != 0 &&
-        CreateWellKnownSid(WinBuiltinAdministratorsSid,
-                           nullptr,
-                           admin_sid.data(),
-                           &admin_size) != 0;
-    HANDLE token = nullptr;
-    valid = valid &&
-            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) != 0;
+    WindowsWellKnownSid system_sid;
+    WindowsWellKnownSid admin_sid;
     std::vector<std::byte> token_data;
-    if (valid) {
-        DWORD required = 0;
-        GetTokenInformation(token, TokenUser, nullptr, 0, &required);
-        token_data.resize(required);
-        valid =
-            required != 0 &&
-            GetTokenInformation(
-                token, TokenUser, token_data.data(), required, &required) != 0;
-    }
-    if (token != nullptr) {
-        CloseHandle(token);
-    }
+    bool valid = acl->protected_dacl && acl->owner != nullptr &&
+                 system_sid.init(WinLocalSystemSid) &&
+                 admin_sid.init(WinBuiltinAdministratorsSid) &&
+                 query_current_user_token(token_data) && acl->info.AceCount == 2;
     const auto* current_user =
         valid ? reinterpret_cast<const TOKEN_USER*>(token_data.data())
               : nullptr;
-    ACL_SIZE_INFORMATION info{};
-    const bool acl_readable =
-        GetAclInformation(dacl, &info, sizeof(info), AclSizeInformation) != 0;
-    valid = valid && acl_readable && info.AceCount == 2;
     bool has_workspace_user = false;
     bool has_system = false;
     PSID workspace_user = nullptr;
-    for (DWORD index = 0; valid && index < info.AceCount; ++index) {
+    for (DWORD index = 0; valid && index < acl->info.AceCount; ++index) {
         void* raw = nullptr;
-        if (!GetAce(dacl, index, &raw) || raw == nullptr) {
+        if (!GetAce(acl->dacl, index, &raw) || raw == nullptr) {
             valid = false;
             break;
         }
@@ -3528,7 +3482,7 @@ grant_windows_admin_read_access(const std::filesystem::path& root) {
         if (ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE ||
             ace->Mask != FILE_ALL_ACCESS) {
             valid = false;
-        } else if (EqualSid(sid, system_sid.data())) {
+        } else if (EqualSid(sid, system_sid.get())) {
             has_system = true;
         } else if (current_user != nullptr &&
                    EqualSid(sid, current_user->User.Sid)) {
@@ -3539,11 +3493,10 @@ grant_windows_admin_read_access(const std::filesystem::path& root) {
         }
     }
     const bool owner_is_expected =
-        owner != nullptr &&
-        ((workspace_user != nullptr && EqualSid(owner, workspace_user)) ||
-         EqualSid(owner, admin_sid.data()));
+        acl->owner != nullptr &&
+        ((workspace_user != nullptr && EqualSid(acl->owner, workspace_user)) ||
+         EqualSid(acl->owner, admin_sid.get()));
     if (!valid || !has_workspace_user || !has_system || !owner_is_expected) {
-        LocalFree(descriptor);
         return std::unexpected(
             "update workspace ACL is not the expected private ACL");
     }
@@ -3553,17 +3506,16 @@ grant_windows_admin_read_access(const std::filesystem::path& root) {
     access.grfInheritance = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
     access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
     access.Trustee.TrusteeType = TRUSTEE_IS_GROUP;
-    access.Trustee.ptstrName = reinterpret_cast<LPWSTR>(admin_sid.data());
+    access.Trustee.ptstrName = reinterpret_cast<LPWSTR>(admin_sid.get());
     PACL updated_acl = nullptr;
-    const auto merge = SetEntriesInAclW(1, &access, dacl, &updated_acl);
-    LocalFree(descriptor);
-    if (merge != ERROR_SUCCESS || updated_acl == nullptr) {
-        if (updated_acl != nullptr) {
-            LocalFree(updated_acl);
-        }
+    const auto merge = SetEntriesInAclW(1, &access, acl->dacl, &updated_acl);
+    const LocalSecurityDescriptor updated_guard{updated_acl};
+    acl->descriptor.reset();
+    if (merge != ERROR_SUCCESS || !updated_guard) {
         return std::unexpected("could not grant read-only administrator access "
                                "to update workspace");
     }
+    std::wstring writable = root.wstring();
     const auto set = SetNamedSecurityInfoW(
         writable.data(),
         SE_FILE_OBJECT,
@@ -3572,7 +3524,6 @@ grant_windows_admin_read_access(const std::filesystem::path& root) {
         nullptr,
         updated_acl,
         nullptr);
-    LocalFree(updated_acl);
     if (set != ERROR_SUCCESS) {
         return std::unexpected(
             "could not secure update workspace for UAC handoff");
@@ -3587,28 +3538,12 @@ validate_windows_workspace_acl(const std::filesystem::path& root) {
 
 std::optional<WindowsFileIdentity>
 windows_file_identity(const std::filesystem::path& path) {
-    HANDLE file =
-        CreateFileW(path.c_str(),
-                    FILE_READ_ATTRIBUTES,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    nullptr,
-                    OPEN_EXISTING,
-                    FILE_FLAG_OPEN_REPARSE_POINT,
-                    nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        return std::nullopt;
-    }
-    FILE_ATTRIBUTE_TAG_INFO attributes{};
     FILE_ID_INFO info{};
-    const bool valid =
-        GetFileInformationByHandleEx(
-            file, FileAttributeTagInfo, &attributes, sizeof(attributes)) != 0 &&
-        (attributes.FileAttributes &
-         (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0 &&
-        GetFileInformationByHandleEx(file, FileIdInfo, &info, sizeof(info)) !=
-            0;
-    CloseHandle(file);
-    if (!valid) {
+    if (!windows_has_attribute_flags(
+            path,
+            0,
+            FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY,
+            &info)) {
         return std::nullopt;
     }
     WindowsFileIdentity result;
