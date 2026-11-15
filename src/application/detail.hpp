@@ -139,6 +139,16 @@ maintenance_workspace_root(const runtime::RuntimeData& runtime) {
     return std::filesystem::temp_directory_path();
 }
 
+inline std::array<std::filesystem::path, 3>
+sqlite_sidecar_paths(const std::filesystem::path& db_path) {
+    const auto with_suffix = [&](std::string_view suffix) {
+        auto path = db_path;
+        path += suffix;
+        return path;
+    };
+    return {with_suffix("-wal"), with_suffix("-shm"), with_suffix("-journal")};
+}
+
 } // namespace kasumi::application::detail
 
 #endif

@@ -241,40 +241,17 @@ enum class LockProbe {
 };
 
 bool can_read_first_byte(const std::filesystem::path& path) {
-#if defined(_WIN32)
-    const HANDLE handle =
-        CreateFileW(path.c_str(),
-                    GENERIC_READ,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    nullptr,
-                    OPEN_EXISTING,
-                    FILE_FLAG_OPEN_REPARSE_POINT,
-                    nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-    char byte = 0;
-    DWORD read = 0;
-    const bool result = ReadFile(handle, &byte, 1, &read, nullptr) && read == 1;
-    CloseHandle(handle);
-    return result;
-#else
-    int flags = O_RDONLY;
-#ifdef O_CLOEXEC
-    flags |= O_CLOEXEC;
-#endif
-#ifdef O_NOFOLLOW
-    flags |= O_NOFOLLOW;
-#endif
-    const int handle = ::open(path.c_str(), flags);
-    if (handle < 0) {
-        return false;
-    }
-    char byte = 0;
-    const auto count = ::read(handle, &byte, 1);
-    static_cast<void>(::close(handle));
-    return count == 1;
-#endif
+    std::array<std::uint8_t, 1> buffer{};
+    bool read_any = false;
+    static_cast<void>(platform::private_storage::stream_regular_file(
+        path, buffer, [&](std::span<const std::uint8_t> chunk) {
+            if (!chunk.empty()) {
+                read_any = true;
+                return false;
+            }
+            return true;
+        }));
+    return read_any;
 }
 
 // Opening an existing lock without creating or modifying it: only an absent
@@ -1316,17 +1293,13 @@ clone_profile(const ExecutionEnvironment& environment,
     {
         db_ok = state_storage::initialize(dest_paths_res->database_path);
     }
-    auto wal_path = dest_paths_res->database_path;
-    wal_path += "-wal";
-    auto shm_path = dest_paths_res->database_path;
-    shm_path += "-shm";
-    auto rollback_path = dest_paths_res->database_path;
-    rollback_path += "-journal";
+    const auto sidecars =
+        detail::sqlite_sidecar_paths(dest_paths_res->database_path);
     const bool database_files_owned =
         db_ok && remember_clone_file(dest_paths_res->database_path, true) &&
-        remember_clone_file(wal_path, false) &&
-        remember_clone_file(shm_path, false) &&
-        remember_clone_file(rollback_path, false);
+        remember_clone_file(sidecars[0], false) &&
+        remember_clone_file(sidecars[1], false) &&
+        remember_clone_file(sidecars[2], false);
     if (!database_files_owned) {
         return fail_with_rollback("failed to initialize profile database");
     }

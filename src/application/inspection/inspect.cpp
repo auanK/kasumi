@@ -8,6 +8,7 @@
 #include "application/history_storage/reachability.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
+#include "core/node.hpp"
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
 #include "crypto/key_derivation.hpp"
@@ -423,29 +424,7 @@ make_commits_report(const observation::history::StorageView& observed,
 }
 
 bool valid_logical_path(std::string_view path) {
-    if (path == "/") {
-        return true;
-    }
-    if (path.empty() || path.starts_with('/') || path.ends_with('/') ||
-        path.contains('\\') || path.contains("//") ||
-        (path.size() >= 2 &&
-         std::isalpha(static_cast<unsigned char>(path.front())) &&
-         path[1] == ':')) {
-        return false;
-    }
-    std::size_t offset = 0;
-    while (offset < path.size()) {
-        const auto separator = path.find('/', offset);
-        const auto component = path.substr(offset, separator - offset);
-        if (component == "." || component == "..") {
-            return false;
-        }
-        if (separator == std::string_view::npos) {
-            break;
-        }
-        offset = separator + 1;
-    }
-    return true;
+    return path == "/" || kasumi::valid_logical_path(path);
 }
 
 std::expected<RemoteStatReport, InspectionError>
@@ -549,42 +528,30 @@ install_remote_file(const std::filesystem::path& plaintext,
             platform::private_storage::remove_private_file_if_owned(
                 *private_tmp));
     };
-    {
-        std::ifstream input(plaintext, std::ios::binary);
-        if (!input) {
-            cleanup();
-            return std::unexpected(
-                error(operation,
-                      InspectionErrorCode::DestinationFailure,
-                      "failed to read downloaded file"));
-        }
-        std::array<char, 65536> buffer{};
-        while (input) {
-            input.read(buffer.data(),
-                       static_cast<std::streamsize>(buffer.size()));
-            const auto count = input.gcount();
-            if (count > 0) {
-                if (auto written =
-                        platform::private_storage::write_private_file(
-                            *private_tmp,
-                            buffer.data(),
-                            static_cast<std::size_t>(count));
-                    !written) {
-                    cleanup();
-                    return std::unexpected(
-                        error(operation,
-                              InspectionErrorCode::DestinationFailure,
-                              "failed to prepare destination file"));
-                }
+    std::array<std::uint8_t, 65536> buffer{};
+    std::expected<void, InspectionError> write_error;
+    const auto streamed = platform::private_storage::stream_regular_file(
+        plaintext, buffer, [&](std::span<const std::uint8_t> chunk) {
+            if (auto written = platform::private_storage::write_private_file(
+                    *private_tmp, chunk.data(), chunk.size());
+                !written) {
+                write_error = std::unexpected(
+                    error(operation,
+                          InspectionErrorCode::DestinationFailure,
+                          "failed to prepare destination file"));
+                return false;
             }
-        }
-        if (input.bad() || (input.fail() && !input.eof())) {
-            cleanup();
-            return std::unexpected(
-                error(operation,
-                      InspectionErrorCode::DestinationFailure,
-                      "failed to read downloaded file"));
-        }
+            return true;
+        });
+    if (!write_error) {
+        cleanup();
+        return write_error;
+    }
+    if (!streamed) {
+        cleanup();
+        return std::unexpected(error(operation,
+                                     InspectionErrorCode::DestinationFailure,
+                                     "failed to read downloaded file"));
     }
     if (auto published = platform::private_storage::publish_private_file(
             *private_tmp, destination);

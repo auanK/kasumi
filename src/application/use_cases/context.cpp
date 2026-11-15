@@ -1,5 +1,6 @@
 #include "application/use_cases/context.hpp"
 
+#include "application/detail.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
 #include "application/observation/history_detail.hpp"
@@ -191,13 +192,11 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
             return fail("cannot inspect local transaction state: " +
                         journal_paths.error());
         }
+        const auto sidecars = sqlite_sidecar_paths(runtime_data->database_path);
         for (const auto& path : {
-                 std::filesystem::path{runtime_data->database_path.string() +
-                                       "-wal"},
-                 std::filesystem::path{runtime_data->database_path.string() +
-                                       "-shm"},
-                 std::filesystem::path{runtime_data->database_path.string() +
-                                       "-journal"},
+                 sidecars[0],
+                 sidecars[1],
+                 sidecars[2],
                  journal_paths->final_path.parent_path(),
                  profile_directory / "transaction.bin.enc.cleared",
              }) {

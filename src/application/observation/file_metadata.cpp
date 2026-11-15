@@ -1,5 +1,7 @@
 #include "application/observation/file_metadata.hpp"
 
+#include "platform/private_storage.hpp"
+
 #include <cerrno>
 #include <cstring>
 #include <limits>
@@ -152,33 +154,6 @@ read_file_metadata(const std::filesystem::path& physical_path,
 }
 #else
 namespace {
-struct ScopedHandle {
-    HANDLE handle = INVALID_HANDLE_VALUE;
-
-    explicit ScopedHandle(HANDLE h = INVALID_HANDLE_VALUE) noexcept
-        : handle(h) {
-    }
-    ~ScopedHandle() noexcept {
-        if (handle != INVALID_HANDLE_VALUE && handle != nullptr) {
-            ::CloseHandle(handle);
-        }
-    }
-    ScopedHandle(const ScopedHandle&) = delete;
-    ScopedHandle& operator=(const ScopedHandle&) = delete;
-    ScopedHandle(ScopedHandle&& other) noexcept : handle(other.handle) {
-        other.handle = INVALID_HANDLE_VALUE;
-    }
-    ScopedHandle& operator=(ScopedHandle&& other) noexcept {
-        if (this != &other) {
-            if (handle != INVALID_HANDLE_VALUE && handle != nullptr) {
-                ::CloseHandle(handle);
-            }
-            handle = other.handle;
-            other.handle = INVALID_HANDLE_VALUE;
-        }
-        return *this;
-    }
-};
 
 bool is_unsupported_id_error(DWORD error) noexcept {
     return error == ERROR_NOT_SUPPORTED || error == ERROR_INVALID_FUNCTION ||
@@ -213,11 +188,12 @@ read_file_metadata(const std::filesystem::path& physical_path,
             FileMetadataErrorCode::IoError, static_cast<int>(err)));
     }
 
-    const ScopedHandle handle{raw_handle};
+    const platform::private_storage::PrivateHandle handle{
+        reinterpret_cast<std::intptr_t>(raw_handle)};
 
     FILE_BASIC_INFO basic{};
     if (!::GetFileInformationByHandleEx(
-            handle.handle, FileBasicInfo, &basic, sizeof(basic))) {
+            raw_handle, FileBasicInfo, &basic, sizeof(basic))) {
         return std::unexpected(
             make_metadata_error(FileMetadataErrorCode::IoError,
                                 static_cast<int>(::GetLastError())));
@@ -236,7 +212,7 @@ read_file_metadata(const std::filesystem::path& physical_path,
 
     FILE_STANDARD_INFO standard{};
     if (!::GetFileInformationByHandleEx(
-            handle.handle, FileStandardInfo, &standard, sizeof(standard))) {
+            raw_handle, FileStandardInfo, &standard, sizeof(standard))) {
         return std::unexpected(
             make_metadata_error(FileMetadataErrorCode::IoError,
                                 static_cast<int>(::GetLastError())));
@@ -257,7 +233,7 @@ read_file_metadata(const std::filesystem::path& physical_path,
 
     FILE_ID_INFO id{};
     if (::GetFileInformationByHandleEx(
-            handle.handle, FileIdInfo, &id, sizeof(id))) {
+            raw_handle, FileIdInfo, &id, sizeof(id))) {
         FileIdentity file_identity{};
         file_identity.volume = id.VolumeSerialNumber;
         std::memcpy(&file_identity.file_low,
