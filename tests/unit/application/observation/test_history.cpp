@@ -49,15 +49,19 @@ TEST(ObservationHints, PreservesAcceptedEpochAndRejectsInvalidMarker) {
     state.ciphertext_id = std::string(64, 'b');
     state.epoch_id = std::string(64, 'c');
     state.epoch_sequence = 7;
+    state.tree.rows.push_back({.path = "", .is_directory = true});
+    const auto* rows = state.tree.rows.data();
     const auto layout = history_storage::derive_remote_layout(Key{});
     const auto hints =
-        observation::history::make_observation_hints(state, layout);
+        observation::history::make_observation_hints(std::move(state), layout);
     ASSERT_TRUE(hints.frontier);
     ASSERT_EQ(hints.frontier->anchors.size(), 1);
-    EXPECT_EQ(hints.frontier->anchors.front().commit_id, state.commit_id);
+    EXPECT_EQ(hints.frontier->anchors.front().commit_id, std::string(64, 'a'));
+    EXPECT_EQ(hints.frontier->anchors.front().tree.rows.data(), rows);
     ASSERT_TRUE(hints.frontier->accepted_epoch);
     EXPECT_EQ(hints.frontier->accepted_epoch->sequence, state.epoch_sequence);
     EXPECT_EQ(hints.trusted_marker_identifiers.size(), 1);
+    state.commit_id = std::string(64, 'a');
     state.ciphertext_id = "invalid";
     const auto untrusted =
         observation::history::make_observation_hints(state, layout, false);

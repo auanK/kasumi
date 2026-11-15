@@ -315,10 +315,7 @@ collect_reconciliation_input(
     auto persisted = state_storage::load_state(runtime_data.database_path);
 
     reconciliation::Input input;
-    history::ObservationHints hints;
     if (persisted && *persisted) {
-        hints = history::make_observation_hints(
-            **persisted, history_storage::derive_remote_layout(key));
         input.base_tree = std::move((*persisted)->tree);
         input.pending_materializations =
             std::move((*persisted)->pending_materializations);
@@ -361,6 +358,18 @@ collect_reconciliation_input(
     if (history_workspace.empty() ||
         !std::filesystem::exists(history_workspace, workspace_error)) {
         history_workspace = runtime_data.local_dir.parent_path();
+    }
+    history::ObservationHints hints;
+    if (input.base_state_present) {
+        hints = history::make_observation_hints(
+            state_storage::StoredState{
+                .tree = input.base_tree,
+                .height = input.local_generation,
+                .commit_id = input.base_commit_id,
+                .ciphertext_id = input.base_ciphertext_id,
+                .epoch_id = (*persisted)->epoch_id,
+                .epoch_sequence = (*persisted)->epoch_sequence},
+            history_storage::derive_remote_layout(key));
     }
     const auto& derived_trusted_markers = hints.trusted_marker_identifiers;
     std::span<const std::string> effective_trusted_markers{};

@@ -161,7 +161,7 @@ make_observation_hints(const runtime::RuntimeData& runtime_data,
                               operation == InspectionOperation::RemoteStat ||
                               operation == InspectionOperation::RemoteGet;
     return observation::history::make_observation_hints(
-        **persisted, layout, use_frontier);
+        std::move(**persisted), layout, use_frontier);
 }
 
 using ObservedCommitIndex =

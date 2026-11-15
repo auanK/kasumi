@@ -29,7 +29,7 @@ struct ObservationHints {
 };
 
 ObservationHints
-make_observation_hints(const state_storage::StoredState& state,
+make_observation_hints(state_storage::StoredState state,
                        const history_storage::RemoteLayout& layout,
                        bool use_frontier = true);
 

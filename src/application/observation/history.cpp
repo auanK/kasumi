@@ -20,7 +20,7 @@
 
 namespace kasumi::application::observation::history {
 ObservationHints
-make_observation_hints(const state_storage::StoredState& state,
+make_observation_hints(state_storage::StoredState state,
                        const history_storage::RemoteLayout& layout,
                        bool use_frontier) {
     ObservationHints hints;
@@ -29,15 +29,17 @@ make_observation_hints(const state_storage::StoredState& state,
         hints.frontier->anchors.push_back(
             history_storage::KnownHistoryAnchor{.commit_id = state.commit_id,
                                                 .height = state.height,
-                                                .tree = state.tree});
+                                                .tree = std::move(state.tree)});
         if (!state.epoch_id.empty()) {
             hints.frontier->accepted_epoch = history_storage::epoch::Reference{
-                .sequence = state.epoch_sequence, .epoch_id = state.epoch_id};
+                .sequence = state.epoch_sequence,
+                .epoch_id = std::move(state.epoch_id)};
         }
     }
     const history_storage::HeadReference reference{
-        .commit_id = state.commit_id, .ciphertext_id = state.ciphertext_id};
-    if (!state.ciphertext_id.empty() && history_storage::valid(reference)) {
+        .commit_id = std::move(state.commit_id),
+        .ciphertext_id = std::move(state.ciphertext_id)};
+    if (!reference.ciphertext_id.empty() && history_storage::valid(reference)) {
         hints.trusted_marker_identifiers.push_back(
             history_storage::marker_object(layout, reference));
     }
