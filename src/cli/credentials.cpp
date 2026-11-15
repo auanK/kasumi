@@ -26,20 +26,17 @@ namespace {
 
 constexpr std::size_t maximum_secret_size = 4096;
 
-void wipe(std::string& value) noexcept {
-    value.resize(value.capacity(), '\0');
-    auto* bytes = reinterpret_cast<volatile char*>(value.data());
-    for (std::size_t index = 0; index < value.size(); ++index) {
-        bytes[index] = '\0';
-    }
-    value.clear();
-}
-
 void wipe_bytes(char* data, std::size_t size) noexcept {
     auto* bytes = reinterpret_cast<volatile char*>(data);
     for (std::size_t index = 0; index < size; ++index) {
         bytes[index] = '\0';
     }
+}
+
+void wipe(std::string& value) noexcept {
+    value.resize(value.capacity(), '\0');
+    wipe_bytes(value.data(), value.size());
+    value.clear();
 }
 
 #if defined(_WIN32)

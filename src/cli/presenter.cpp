@@ -301,6 +301,16 @@ std::size_t entry_depth(std::string_view path) {
     return 1 + static_cast<std::size_t>(std::ranges::count(path, '/'));
 }
 
+template <typename Range, typename Fn>
+void render_indexed(const Range& items,
+                    Fn&& render,
+                    std::string_view prefix = "\n") {
+    for (std::size_t index = 0; index < items.size(); ++index) {
+        std::println("{}[{}]", prefix, index + 1);
+        render(items[index]);
+    }
+}
+
 int present_remote_heads(const application::RemoteHeadsReport& report) {
     if (report.heads.empty()) {
         std::println("{}", i18n::tr(i18n::Key::RemoteHeadsNone));
@@ -308,9 +318,7 @@ int present_remote_heads(const application::RemoteHeadsReport& report) {
     }
 
     i18n::println(i18n::Key::RemoteHeadsHeader, report.heads.size());
-    for (std::size_t index = 0; index < report.heads.size(); ++index) {
-        const auto& head = report.heads[index];
-        std::println("\n[{}]", index + 1);
+    render_indexed(report.heads, [](const auto& head) {
         i18n::println(i18n::Key::FieldCommit, head.commit_id);
         i18n::println(i18n::Key::FieldHeight, head.height);
         i18n::println(i18n::Key::FieldCreatedAt, head.created_at);
@@ -319,7 +327,7 @@ int present_remote_heads(const application::RemoteHeadsReport& report) {
         i18n::println(i18n::Key::FieldDirectories, head.directory_count);
         i18n::println(i18n::Key::FieldSize, format_size(head.total_bytes));
         i18n::println(i18n::Key::FieldRoot, head.root_hash);
-    }
+    });
     return 0;
 }
 
@@ -439,13 +447,14 @@ int present_remote_commit(const application::RemoteCommitReport& report) {
         std::println("    {}", parent);
     }
     i18n::println(i18n::Key::FieldPhysicalVariants, report.variants.size());
-    for (std::size_t index = 0; index < report.variants.size(); ++index) {
-        const auto& variant = report.variants[index];
-        std::println("\n  [{}]", index + 1);
-        i18n::println(i18n::Key::FieldCiphertext, variant.ciphertext_id);
-        i18n::println(i18n::Key::FieldObject, variant.object_identifier);
-        i18n::println(i18n::Key::FieldState, variant_state(variant.state));
-    }
+    render_indexed(
+        report.variants,
+        [](const auto& variant) {
+            i18n::println(i18n::Key::FieldCiphertext, variant.ciphertext_id);
+            i18n::println(i18n::Key::FieldObject, variant.object_identifier);
+            i18n::println(i18n::Key::FieldState, variant_state(variant.state));
+        },
+        "\n  ");
     return 0;
 }
 
@@ -482,10 +491,7 @@ void present_epoch_info(const application::RemoteEpochInfo& epoch) {
 
 int present_remote_epochs(const application::RemoteEpochsReport& report) {
     i18n::println(i18n::Key::RemoteEpochsHeader, report.epochs.size());
-    for (std::size_t index = 0; index < report.epochs.size(); ++index) {
-        std::println("\n[{}]", index + 1);
-        present_epoch_info(report.epochs[index]);
-    }
+    render_indexed(report.epochs, present_epoch_info);
     return 0;
 }
 
@@ -537,10 +543,7 @@ int present_remote_contents(const application::RemoteContentsReport& report) {
         i18n::println(i18n::Key::FieldValidCount, report.valid_count);
         i18n::println(i18n::Key::FieldInvalidCount, report.invalid_count);
     }
-    for (std::size_t index = 0; index < report.contents.size(); ++index) {
-        std::println("\n[{}]", index + 1);
-        present_content_info(report.contents[index]);
-    }
+    render_indexed(report.contents, present_content_info);
     return 0;
 }
 
@@ -570,9 +573,7 @@ int present_remote_markers(const application::RemoteMarkersReport& report) {
     i18n::println(i18n::Key::FieldLogicalHeads, report.logical_count);
     i18n::println(i18n::Key::FieldAncestralsCount, report.ancestral_count);
     i18n::println(i18n::Key::FieldInvalidCount, report.invalid_count);
-    for (std::size_t index = 0; index < report.markers.size(); ++index) {
-        const auto& marker = report.markers[index];
-        std::println("\n[{}]", index + 1);
+    render_indexed(report.markers, [](const auto& marker) {
         i18n::println(i18n::Key::FieldObject, marker.object_identifier);
         i18n::println(i18n::Key::FieldCommit,
                       marker.commit_id.empty() ? "-" : marker.commit_id);
@@ -580,7 +581,7 @@ int present_remote_markers(const application::RemoteMarkersReport& report) {
                       marker.ciphertext_id.empty() ? "-"
                                                    : marker.ciphertext_id);
         i18n::println(i18n::Key::FieldState, marker_state(marker.state));
-    }
+    });
     return 0;
 }
 
@@ -601,9 +602,7 @@ std::string_view object_category(application::RemoteObjectCategory category) {
 int present_remote_objects(const application::RemoteObjectsReport& report) {
     i18n::println(i18n::Key::RemoteObjectsHeader, report.objects.size());
     i18n::println(i18n::Key::FieldUnknownOrInvalid, report.unknown_count);
-    for (std::size_t index = 0; index < report.objects.size(); ++index) {
-        const auto& object = report.objects[index];
-        std::println("\n[{}]", index + 1);
+    render_indexed(report.objects, [](const auto& object) {
         i18n::println(i18n::Key::FieldIdentifier, object.identifier);
         i18n::println(i18n::Key::FieldCategory,
                       object_category(object.category));
@@ -612,7 +611,7 @@ int present_remote_objects(const application::RemoteObjectsReport& report) {
                           ? i18n::tr(i18n::Key::FieldStructureValid)
                           : i18n::tr(i18n::Key::FieldStructureInvalid));
         i18n::println(i18n::Key::FieldRelation, object.relation);
-    }
+    });
     return 0;
 }
 
@@ -632,14 +631,12 @@ std::string_view orphan_kind(application::RemoteOrphanKind kind) {
 int present_remote_orphans(const application::RemoteOrphansReport& report) {
     i18n::println(i18n::Key::RemoteOrphansHeader, report.objects.size());
     std::println("{}", i18n::tr(i18n::Key::RemoteOrphansReadOnlyHint));
-    for (std::size_t index = 0; index < report.objects.size(); ++index) {
-        const auto& object = report.objects[index];
-        std::println("\n[{}]", index + 1);
+    render_indexed(report.objects, [](const auto& object) {
         i18n::println(i18n::Key::FieldIdentifier, object.identifier);
         i18n::println(i18n::Key::FieldClassification, orphan_kind(object.kind));
         i18n::println(i18n::Key::FieldStructuralCandidate,
                       yes_no(object.removal_candidate));
-    }
+    });
     return 0;
 }
 
@@ -655,15 +652,13 @@ int present_remote_writers(const application::RemoteWritersReport& report) {
                   yes_no(report.maintenance_blocked));
     i18n::println(i18n::Key::FieldProtocolConsistent,
                   yes_no(report.protocol_consistent));
-    for (std::size_t index = 0; index < report.writers.size(); ++index) {
-        const auto& writer = report.writers[index];
-        std::println("\n[{}]", index + 1);
+    render_indexed(report.writers, [](const auto& writer) {
         i18n::println(i18n::Key::FieldIdentifier, writer.identifier);
         i18n::println(i18n::Key::FieldState,
                       writer.state == application::RemoteWriterState::Invalid
                           ? i18n::tr(i18n::Key::WriterStateInvalid)
                           : i18n::tr(i18n::Key::WriterStateIndeterminate));
-    }
+    });
     return 0;
 }
 

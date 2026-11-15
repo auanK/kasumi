@@ -83,32 +83,51 @@ bool trusted_root_stat(const struct stat& status, bool directory) {
            (directory ? S_ISDIR(status.st_mode) : S_ISREG(status.st_mode));
 }
 
-bool trusted_canonical_path(const std::filesystem::path& path,
-                            bool final_directory) {
-    std::error_code error;
+std::expected<void, std::string>
+validate_root_path(const std::filesystem::path& path,
+                   bool final_directory,
+                   bool allow_root_symlinks) {
     if (!path.is_absolute() || path.lexically_normal() != path) {
-        return false;
+        return std::unexpected(
+            "system tool path is not an absolute normalized path");
     }
     struct stat status{};
     if (::lstat("/", &status) != 0 || !trusted_root_stat(status, true)) {
-        return false;
+        return std::unexpected("root directory is not root-controlled");
     }
     auto current = std::filesystem::path{"/"};
     const auto components = path.relative_path();
     for (auto iterator = components.begin(); iterator != components.end();
          ++iterator) {
         if (*iterator == "." || *iterator == ".." || iterator->empty()) {
-            return false;
+            return std::unexpected(
+                "system tool path contains an unsafe component");
         }
         current /= *iterator;
-        if (::lstat(current.c_str(), &status) != 0 ||
-            !trusted_root_stat(status,
-                               std::next(iterator) != components.end() ||
-                                   final_directory)) {
-            return false;
+        if (::lstat(current.c_str(), &status) != 0) {
+            return std::unexpected(
+                "system tool path cannot be inspected safely");
+        }
+        if (allow_root_symlinks && S_ISLNK(status.st_mode)) {
+            if (status.st_uid != 0) {
+                return std::unexpected(
+                    "system tool path contains a non-root symlink");
+            }
+            continue;
+        }
+        const bool is_dir =
+            std::next(iterator) != components.end() || final_directory;
+        if (!trusted_root_stat(status, is_dir)) {
+            return std::unexpected(
+                "system tool path contains an untrusted or writable entry");
         }
     }
-    return true;
+    return {};
+}
+
+bool trusted_canonical_path(const std::filesystem::path& path,
+                            bool final_directory) {
+    return validate_root_path(path, final_directory, false).has_value();
 }
 
 bool trusted_system_directory(const std::filesystem::path& path,
@@ -174,10 +193,11 @@ void append_safe_env(LinuxEnvironment& environment,
     }
 }
 
-LinuxEnvironment linux_base_environment(bool include_proxy = false) {
+LinuxEnvironment linux_base_environment(bool include_proxy = false,
+                                        bool allow_when_root = false) {
     LinuxEnvironment environment{
         {"PATH", linux_trusted_path_value()}, {"LANG", "C"}, {"LC_ALL", "C"}};
-    if (include_proxy && ::geteuid() != 0) {
+    if (include_proxy && (allow_when_root || ::geteuid() != 0)) {
         append_safe_env(environment,
                         {"http_proxy",
                          "https_proxy",
@@ -321,6 +341,23 @@ struct CappedSink {
     }
 };
 
+reproc::stop_actions default_process_stop_actions() {
+    return reproc::stop_actions{
+        {reproc::stop::wait, reproc::milliseconds{300000}},
+        {reproc::stop::terminate, reproc::milliseconds{1000}},
+        {reproc::stop::kill, reproc::milliseconds{1000}},
+    };
+}
+
+#if defined(__linux__)
+void apply_linux_process_environment(reproc::options& options,
+                                     LinuxEnvironment& environment) {
+    options.env.behavior = reproc::env::empty;
+    options.env.extra = environment;
+    options.working_directory = "/";
+}
+#endif
+
 std::expected<ProcessResult, std::string>
 run_capture(const std::vector<std::string>& arguments,
             std::size_t output_limit = PROCESS_OUTPUT_LIMIT,
@@ -332,11 +369,7 @@ run_capture(const std::vector<std::string>& arguments,
     reproc::options options;
     options.redirect.out.type = reproc::redirect::pipe;
     options.redirect.err.type = reproc::redirect::pipe;
-    options.stop = reproc::stop_actions{
-        {reproc::stop::wait, reproc::milliseconds{300000}},
-        {reproc::stop::terminate, reproc::milliseconds{1000}},
-        {reproc::stop::kill, reproc::milliseconds{1000}},
-    };
+    options.stop = default_process_stop_actions();
 #if defined(__linux__)
     const auto tool = resolve_linux_system_tool(arguments.front());
     if (!tool) {
@@ -344,9 +377,7 @@ run_capture(const std::vector<std::string>& arguments,
     }
     child_arguments.front() = platform::path::to_utf8(*tool);
     auto environment = linux_base_environment(arguments.front() == "curl");
-    options.env.behavior = reproc::env::empty;
-    options.env.extra = environment;
-    options.working_directory = "/";
+    apply_linux_process_environment(options, environment);
 #endif
     CappedSink output{.limit = output_limit};
     CappedSink error_output{.limit = error_limit};
@@ -379,9 +410,7 @@ run_inherited(const std::vector<std::string>& arguments) {
         safe_environment_value(term, 64)) {
         environment.emplace_back("TERM", term);
     }
-    options.env.behavior = reproc::env::empty;
-    options.env.extra = environment;
-    options.working_directory = "/";
+    apply_linux_process_environment(options, environment);
 #endif
     const auto [exit_code, error] =
         reproc::run(reproc::arguments{child_arguments}, options);
@@ -459,7 +488,53 @@ bool allowed_api_host(std::string_view host) {
     return host == "api.github.com";
 }
 
+template <typename StepFn>
+auto https_with_redirects(std::string url, bool api_request, StepFn&& step)
+    -> decltype(step(url,
+                     std::declval<std::string&>(),
+                     std::declval<bool&>())) {
+    for (int redirect = 0; redirect <= 5; ++redirect) {
+        const auto parts = parse_https_url(url);
+        if (!parts || !(api_request ? allowed_api_host(parts->host)
+                                    : allowed_download_host(parts->host))) {
+            return std::unexpected(
+                "download URL is outside the GitHub allowlist");
+        }
+        std::string next_url;
+        bool is_redirect = false;
+        auto result = step(url, next_url, is_redirect);
+        if (!result || !is_redirect) {
+            return result;
+        }
+        const auto next = parse_https_url(next_url);
+        if (api_request || !next || !allowed_download_host(next->host) ||
+            redirect == 5) {
+            return std::unexpected("GitHub redirect was rejected");
+        }
+        url = std::move(next_url);
+    }
+    return std::unexpected("too many GitHub redirects");
+}
+
 #if !defined(_WIN32)
+std::vector<std::string> base_curl_args(std::string executable,
+                                        std::size_t maximum_bytes,
+                                        int max_time_seconds) {
+    return {std::move(executable),
+            "--disable",
+            "--silent",
+            "--show-error",
+            "--globoff",
+            "--proto",
+            "=https",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            std::to_string(max_time_seconds),
+            "--max-filesize",
+            std::to_string(maximum_bytes)};
+}
+
 std::optional<std::string> header_location(const std::filesystem::path& path) {
     auto headers = read_limited_file(path, 64U * 1024U);
     if (!headers) {
@@ -774,32 +849,26 @@ download_url(std::string url,
              const std::filesystem::path& destination,
              std::size_t maximum_bytes,
              bool api_request) {
-    for (int redirect = 0; redirect <= 5; ++redirect) {
-        const auto parts = parse_https_url(url);
-        if (!parts || !(api_request ? allowed_api_host(parts->host)
-                                    : allowed_download_host(parts->host))) {
-            return std::unexpected(
-                "download URL is outside the GitHub allowlist");
-        }
-        int status = 0;
-        auto result = winhttp_location(url, maximum_bytes, destination, status);
-        if (!result) {
-            std::error_code ignored;
-            std::filesystem::remove(destination, ignored);
-            return std::unexpected(result.error());
-        }
-        if (!result->empty()) {
-            const auto next = parse_https_url(*result);
-            if (api_request || !next || !allowed_download_host(next->host) ||
-                redirect == 5) {
-                return std::unexpected("GitHub redirect was rejected");
+    return https_with_redirects(
+        std::move(url),
+        api_request,
+        [&](const std::string& current_url,
+            std::string& next_url,
+            bool& is_redirect) -> std::expected<void, std::string> {
+            int status = 0;
+            auto result = winhttp_location(
+                current_url, maximum_bytes, destination, status);
+            if (!result) {
+                std::error_code ignored;
+                std::filesystem::remove(destination, ignored);
+                return std::unexpected(result.error());
             }
-            url = std::move(*result);
-            continue;
-        }
-        return {};
-    }
-    return std::unexpected("too many GitHub redirects");
+            if (!result->empty()) {
+                next_url = std::move(*result);
+                is_redirect = true;
+            }
+            return {};
+        });
 }
 
 #else
@@ -815,75 +884,59 @@ download_url(std::string url,
     if (header_path.empty()) {
         return std::unexpected("could not allocate HTTP header file");
     }
-    for (int redirect = 0; redirect <= 5; ++redirect) {
-        const auto parts = parse_https_url(url);
-        if (!parts || !(api_request ? allowed_api_host(parts->host)
-                                    : allowed_download_host(parts->host))) {
-            return std::unexpected(
-                "download URL is outside the GitHub allowlist");
-        }
-        std::error_code ignored;
-        std::filesystem::remove(destination, ignored);
-        std::filesystem::remove(header_path, ignored);
-        auto response = run_capture({"curl",
-                                     "--disable",
-                                     "--silent",
-                                     "--show-error",
-                                     "--globoff",
-                                     "--proto",
-                                     "=https",
-                                     "--connect-timeout",
-                                     "15",
-                                     "--max-time",
-                                     api_request ? "30" : "180",
-                                     "--max-filesize",
-                                     std::to_string(maximum_bytes),
-                                     "--dump-header",
-                                     platform::path::to_utf8(header_path),
-                                     "--output",
-                                     platform::path::to_utf8(destination),
-                                     "--write-out",
-                                     "%{http_code}\n",
-                                     url});
-        if (!response || response->exit_code != 0) {
+    return https_with_redirects(
+        std::move(url),
+        api_request,
+        [&](const std::string& current_url,
+            std::string& next_url,
+            bool& is_redirect) -> std::expected<void, std::string> {
+            std::error_code ignored;
             std::filesystem::remove(destination, ignored);
-            return std::unexpected(response ? (response->error_output.empty()
-                                                   ? "HTTPS download failed"
-                                                   : response->error_output)
-                                            : response.error());
-        }
-        int status = 0;
-        const auto [end, parse_error] =
-            std::from_chars(response->output.data(),
-                            response->output.data() + response->output.size(),
-                            status);
-        if (parse_error != std::errc{} || end == response->output.data()) {
-            return std::unexpected("could not read HTTP response status");
-        }
-        if (status >= 300 && status < 400) {
-            const auto location = header_location(header_path);
-            const auto next =
-                location ? parse_https_url(*location) : std::nullopt;
-            if (api_request || !location || !next ||
-                !allowed_download_host(next->host) || redirect == 5) {
-                return std::unexpected("GitHub redirect was rejected");
+            std::filesystem::remove(header_path, ignored);
+            auto arguments =
+                base_curl_args("curl", maximum_bytes, api_request ? 30 : 180);
+            arguments.insert(arguments.end(),
+                             {"--dump-header",
+                              platform::path::to_utf8(header_path),
+                              "--output",
+                              platform::path::to_utf8(destination),
+                              "--write-out",
+                              "%{http_code}\n",
+                              current_url});
+            auto response = run_capture(arguments);
+            if (!response || response->exit_code != 0) {
+                std::filesystem::remove(destination, ignored);
+                return std::unexpected(response
+                                           ? (response->error_output.empty()
+                                                  ? "HTTPS download failed"
+                                                  : response->error_output)
+                                           : response.error());
             }
-            url = *location;
-            continue;
-        }
-        if (status != 200) {
-            std::filesystem::remove(destination, ignored);
-            return std::unexpected("GitHub returned HTTP " +
-                                   std::to_string(status));
-        }
-        auto body = read_limited_file(destination, maximum_bytes);
-        if (!body) {
-            std::filesystem::remove(destination, ignored);
-            return std::unexpected(body.error());
-        }
-        return {};
-    }
-    return std::unexpected("too many GitHub redirects");
+            int status = 0;
+            const auto [end, parse_error] = std::from_chars(
+                response->output.data(),
+                response->output.data() + response->output.size(),
+                status);
+            if (parse_error != std::errc{} || end == response->output.data()) {
+                return std::unexpected("could not read HTTP response status");
+            }
+            if (status >= 300 && status < 400) {
+                next_url = header_location(header_path).value_or("");
+                is_redirect = true;
+                return {};
+            }
+            if (status != 200) {
+                std::filesystem::remove(destination, ignored);
+                return std::unexpected("GitHub returned HTTP " +
+                                       std::to_string(status));
+            }
+            auto body = read_limited_file(destination, maximum_bytes);
+            if (!body) {
+                std::filesystem::remove(destination, ignored);
+                return std::unexpected(body.error());
+            }
+            return {};
+        });
 }
 
 #endif
@@ -2097,7 +2150,22 @@ struct ScopedWorkspaceCleanup {
 };
 
 std::optional<std::string> release_asset_url(const Release& release,
-                                             std::string_view name);
+                                             std::string_view name) {
+    const Asset* found = nullptr;
+    for (const auto& asset : release.assets) {
+        if (asset.name == name) {
+            if (found != nullptr) {
+                return std::nullopt;
+            }
+            found = &asset;
+        }
+    }
+    if (found == nullptr ||
+        !official_asset_url(release.tag, name, found->url)) {
+        return std::nullopt;
+    }
+    return found->url;
+}
 
 #if defined(_WIN32)
 std::expected<std::string, std::string>
@@ -2173,11 +2241,6 @@ curl_get_as_user_once(std::string_view url,
                       bool api_request,
                       uid_t uid,
                       std::string& redirect_url) {
-    const auto parts = parse_https_url(url);
-    if (!parts || !(api_request ? allowed_api_host(parts->host)
-                                : allowed_download_host(parts->host))) {
-        return std::unexpected("download URL is outside the GitHub allowlist");
-    }
     const auto curl = resolve_linux_system_tool("curl");
     if (!curl) {
         return std::unexpected(curl.error());
@@ -2205,26 +2268,12 @@ curl_get_as_user_once(std::string_view url,
         group_count = required;
         groups.resize(static_cast<std::size_t>(group_count));
     }
-    const std::string address{url};
-    const std::string max_size = std::to_string(max_bytes);
-    const std::string max_time = api_request ? "30" : "30";
-    std::vector<std::string> argument_values{curl->string(),
-                                             "--disable",
-                                             "--silent",
-                                             "--show-error",
-                                             "--globoff",
-                                             "--proto",
-                                             "=https",
-                                             "--connect-timeout",
-                                             "15",
-                                             "--max-time",
-                                             max_time,
-                                             "--max-filesize",
-                                             max_size,
-                                             "--write-out",
-                                             "\n%{http_code}\n%{redirect_url}",
-                                             "--url",
-                                             address};
+    auto argument_values = base_curl_args(curl->string(), max_bytes, 30);
+    argument_values.insert(argument_values.end(),
+                           {"--write-out",
+                            "\n%{http_code}\n%{redirect_url}",
+                            "--url",
+                            std::string{url}});
     if (api_request) {
         argument_values.push_back("--header");
         argument_values.push_back("Accept: application/vnd.github+json");
@@ -2237,22 +2286,9 @@ curl_get_as_user_once(std::string_view url,
         arguments.push_back(argument.data());
     }
     arguments.push_back(nullptr);
-    std::vector<std::string> environment{"PATH=" + linux_trusted_path_value(),
-                                         "HOME=" + home,
-                                         "LANG=C",
-                                         "LC_ALL=C"};
-    for (const auto* name : {"http_proxy",
-                             "https_proxy",
-                             "HTTP_PROXY",
-                             "HTTPS_PROXY",
-                             "all_proxy",
-                             "ALL_PROXY",
-                             "no_proxy",
-                             "NO_PROXY"}) {
-        if (const char* value = std::getenv(name);
-            safe_environment_value(value, 4096)) {
-            environment.push_back(std::string{name} + "=" + value);
-        }
+    std::vector<std::string> environment{"HOME=" + home};
+    for (const auto& [name, value] : linux_base_environment(true, true)) {
+        environment.push_back(name + "=" + value);
     }
     std::vector<char*> environment_pointers;
     environment_pointers.reserve(environment.size() + 1);
@@ -2347,26 +2383,19 @@ std::expected<HttpResponse, std::string> curl_as_user(std::string url,
                                                       std::size_t max_bytes,
                                                       bool api_request,
                                                       uid_t uid) {
-    for (int redirect = 0; redirect <= 5; ++redirect) {
-        std::string next_url;
-        auto response =
-            curl_get_as_user_once(url, max_bytes, api_request, uid, next_url);
-        if (!response) {
-            return std::unexpected(response.error());
-        }
-        if (response->status >= 300 && response->status < 400) {
-            const auto next_parts = parse_https_url(next_url);
-            if (api_request || !next_parts ||
-                !allowed_download_host(next_parts->host) || redirect == 5) {
-                return std::unexpected(
-                    "checksum redirect left the GitHub allowlist");
+    return https_with_redirects(
+        std::move(url),
+        api_request,
+        [&](const std::string& current_url,
+            std::string& next_url,
+            bool& is_redirect) -> std::expected<HttpResponse, std::string> {
+            auto response = curl_get_as_user_once(
+                current_url, max_bytes, api_request, uid, next_url);
+            if (response && response->status >= 300 && response->status < 400) {
+                is_redirect = true;
             }
-            url = std::move(next_url);
-            continue;
-        }
-        return response;
-    }
-    return std::unexpected("too many GitHub redirects");
+            return response;
+        });
 }
 
 std::expected<std::string, std::string>
@@ -2399,24 +2428,6 @@ int report_failure(std::string_view detail) {
     }
     std::println("{}", i18n::format(i18n::Key::UpdateFailed, detail));
     return 1;
-}
-
-std::optional<std::string> release_asset_url(const Release& release,
-                                             std::string_view name) {
-    const Asset* found = nullptr;
-    for (const auto& asset : release.assets) {
-        if (asset.name == name) {
-            if (found != nullptr) {
-                return std::nullopt;
-            }
-            found = &asset;
-        }
-    }
-    if (found == nullptr ||
-        !official_asset_url(release.tag, name, found->url)) {
-        return std::nullopt;
-    }
-    return found->url;
 }
 
 } // namespace
@@ -2482,17 +2493,11 @@ install_with_elevation(const std::filesystem::path& executable,
                                          std::string{language}};
             reproc::options options;
             auto environment = linux_pkexec_environment();
-            options.env.behavior = reproc::env::empty;
-            options.env.extra = environment;
-            options.working_directory = "/";
+            apply_linux_process_environment(options, environment);
             options.redirect.in.type = reproc::redirect::parent;
             options.redirect.out.type = reproc::redirect::parent;
             options.redirect.err.type = reproc::redirect::pipe;
-            options.stop = reproc::stop_actions{
-                {reproc::stop::wait, reproc::milliseconds{300000}},
-                {reproc::stop::terminate, reproc::milliseconds{1000}},
-                {reproc::stop::kill, reproc::milliseconds{1000}},
-            };
+            options.stop = default_process_stop_actions();
             CappedSink error_output{.limit = 8192};
             const auto [exit_code, error] =
                 reproc::run(reproc::arguments{command},
@@ -3000,37 +3005,8 @@ resolve_linux_system_tool(std::string_view name) {
 
 std::expected<void, std::string>
 validate_linux_system_tool(const std::filesystem::path& path) {
-    if (!path.is_absolute() || path.lexically_normal() != path) {
-        return std::unexpected(
-            "system tool path is not an absolute normalized path");
-    }
-    struct stat status{};
-    auto current = path.root_path();
-    const auto components = path.relative_path();
-    for (auto iterator = components.begin(); iterator != components.end();
-         ++iterator) {
-        if (*iterator == "." || *iterator == ".." || iterator->empty()) {
-            return std::unexpected(
-                "system tool path contains an unsafe component");
-        }
-        current /= *iterator;
-        if (::lstat(current.c_str(), &status) != 0) {
-            return std::unexpected(
-                "system tool path cannot be inspected safely");
-        }
-        if (S_ISLNK(status.st_mode)) {
-            if (status.st_uid != 0) {
-                return std::unexpected(
-                    "system tool path contains a non-root symlink");
-            }
-        } else {
-            const bool final_component =
-                std::next(iterator) == components.end();
-            if (!trusted_root_stat(status, !final_component)) {
-                return std::unexpected(
-                    "system tool path contains an untrusted or writable entry");
-            }
-        }
+    if (auto checked = validate_root_path(path, false, true); !checked) {
+        return checked;
     }
     std::error_code error;
     const auto canonical = std::filesystem::canonical(path, error);
@@ -3203,20 +3179,6 @@ bool copy_private_staged_archive(const std::filesystem::path& archive,
     return copied > 0 && copied == static_cast<std::size_t>(src_stat.st_size);
 }
 
-std::optional<std::pair<dev_t, ino_t>>
-linux_target_identity(const std::filesystem::path& path) {
-    const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0) {
-        return std::nullopt;
-    }
-    platform::private_storage::PrivateHandle guard{fd};
-    struct stat st{};
-    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
-        return std::nullopt;
-    }
-    return std::pair<dev_t, ino_t>{st.st_dev, st.st_ino};
-}
-
 int run_linux_install_helper(int argc, char* argv[]) {
     if (argc != 5 || argv[2] == nullptr || argv[3] == nullptr ||
         argv[4] == nullptr ||
@@ -3232,8 +3194,9 @@ int run_linux_install_helper(int argc, char* argv[]) {
     const auto package = package_names_for_this_platform();
     const auto target = current_executable_path();
     const auto target_id =
-        target ? linux_target_identity(*target) : std::nullopt;
-    if (!uid || !package || !target || !target_id ||
+        target ? platform::private_storage::query_file_identity(*target)
+               : platform::private_storage::FileIdentity{};
+    if (!uid || !package || !target || !target_id.valid ||
         target->filename() != "kasumi") {
         return report_failure(
             "could not validate the privileged update handoff");
@@ -3290,15 +3253,15 @@ int run_linux_install_helper(int argc, char* argv[]) {
         -> std::expected<PreparedExecutable, std::string> {
         return prepare_verified_package(source, digest, *package, *workspace);
     };
-    hooks.install = [target_id =
-                         *target_id](const PreparedExecutable& prepared,
-                                     const std::filesystem::path& destination) {
+    hooks.install = [target_id](const PreparedExecutable& prepared,
+                                const std::filesystem::path& destination) {
         InstallHooks install_hooks;
         install_hooks.validate_target =
             [target_id](const std::filesystem::path& dest)
             -> std::expected<void, std::string> {
-            const auto current_id = linux_target_identity(dest);
-            if (!current_id || *current_id != target_id) {
+            const auto current_id =
+                platform::private_storage::query_file_identity(dest);
+            if (!current_id.valid || !(current_id == target_id)) {
                 return std::unexpected(
                     "installed kasumi binary changed during update");
             }

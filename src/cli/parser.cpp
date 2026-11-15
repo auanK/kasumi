@@ -137,27 +137,20 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         bool initial = false;
         bool audit_inventory = false;
         bool trust_existing_content = false;
+        const std::array<std::pair<std::string_view, bool*>, 4> sync_flags{{
+            {"--dry-run", &dry_run},
+            {"--initial", &initial},
+            {"--audit-inventory", &audit_inventory},
+            {"--trust-existing-content", &trust_existing_content},
+        }};
         for (int i = 3; i < argc; ++i) {
             const std::string_view flag{argv[i]};
-            if (flag == "--dry-run") {
-                if (dry_run)
-                    return std::unexpected(ParseError{});
-                dry_run = true;
-            } else if (flag == "--initial") {
-                if (initial)
-                    return std::unexpected(ParseError{});
-                initial = true;
-            } else if (flag == "--audit-inventory") {
-                if (audit_inventory)
-                    return std::unexpected(ParseError{});
-                audit_inventory = true;
-            } else if (flag == "--trust-existing-content") {
-                if (trust_existing_content)
-                    return std::unexpected(ParseError{});
-                trust_existing_content = true;
-            } else {
+            const auto found = std::ranges::find(
+                sync_flags, flag, &std::pair<std::string_view, bool*>::first);
+            if (found == sync_flags.end() || *found->second) {
                 return std::unexpected(ParseError{});
             }
+            *found->second = true;
         }
         if (audit_inventory && (dry_run || initial || trust_existing_content)) {
             return std::unexpected(
