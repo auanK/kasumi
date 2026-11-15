@@ -982,40 +982,31 @@ apply_copy_local(const Operation& operation,
         }
     } staging_guard{&staged_file.value()};
 
-    std::ifstream in(source, std::ios::binary);
-    if (!in) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "failed to open copy source",
-                                          source,
-                                          operation_index));
-    }
-
-    std::array<char, 64 * 1024> buffer;
-    while (in) {
-        in.read(buffer.data(), buffer.size());
-        const auto bytes_read = in.gcount();
-        if (bytes_read > 0) {
+    std::array<std::uint8_t, 64 * 1024> buffer;
+    std::optional<MutationError> write_error;
+    auto streamed = platform::private_storage::stream_regular_file(
+        source, buffer, [&](std::span<const std::uint8_t> chunk) {
             mutation_fault_test::hit("during_copy_local_write", candidate);
-            auto written = platform::private_storage::write_private_file(
-                *staging_guard.file,
-                buffer.data(),
-                static_cast<std::size_t>(bytes_read));
-            if (!written) {
-                return std::unexpected(make_error(
-                    MutationErrorCode::LocalIo,
-                    "failed to write staging bytes: " + written.error(),
-                    candidate,
-                    operation_index));
+            if (auto written = platform::private_storage::write_private_file(
+                    *staging_guard.file, chunk.data(), chunk.size());
+                !written) {
+                write_error = make_error(MutationErrorCode::LocalIo,
+                                         "failed to write staging bytes: " +
+                                             written.error(),
+                                         candidate,
+                                         operation_index);
+                return false;
             }
-        }
-    }
-    if (in.bad()) {
+            return true;
+        });
+    if (write_error)
+        return std::unexpected(std::move(*write_error));
+    if (!streamed) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "failed reading copy source",
+                                          streamed.error().detail,
                                           source,
                                           operation_index));
     }
-    in.close();
 
     auto flushed = platform::private_storage::flush_and_close_private_file(
         *staging_guard.file);

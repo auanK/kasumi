@@ -194,6 +194,18 @@ validate_backup(const std::filesystem::path& backup,
 }
 
 std::expected<void, MutationError>
+verify_backup(const platform::Workspace& workspace,
+              const transaction::OperationProgress& progress,
+              const std::filesystem::path& path,
+              std::string_view expected_hash,
+              std::size_t operation_index) {
+    auto backup = backup_path(workspace, progress, path, operation_index);
+    if (!backup)
+        return std::unexpected(backup.error());
+    return validate_backup(*backup, expected_hash, operation_index);
+}
+
+std::expected<void, MutationError>
 make_backup_durable(const std::filesystem::path& backup,
                     std::size_t operation_index) {
     if (auto synced = sync_file_checked(backup, operation_index); !synced) {
@@ -675,13 +687,12 @@ rollback_file_operation(const Operation& operation,
         return std::unexpected(backup.error());
     }
     if (condition && condition->backup) {
-        auto transferred =
-            backup_path(workspace, *condition->backup, *path, operation_index);
-        if (!transferred)
-            return std::unexpected(transferred.error());
-        auto verified = validate_backup(
-            *transferred, condition->backup->previous_hash, operation_index);
-        if (!verified)
+        if (auto verified = verify_backup(workspace,
+                                          *condition->backup,
+                                          *path,
+                                          condition->backup->previous_hash,
+                                          operation_index);
+            !verified)
             return verified;
     }
 
@@ -960,13 +971,12 @@ prepare_operation(const Operation& operation,
              operation.action == Action::RenameLocal ||
              operation.action == Action::MoveLocal);
         if (requires_file_backup) {
-            auto backup = backup_path(
-                workspace, current_progress, operation.path, operation_index);
-            if (!backup)
-                return std::unexpected(backup.error());
-            auto checked = validate_backup(
-                *backup, current_progress.previous_hash, operation_index);
-            if (!checked)
+            if (auto checked = verify_backup(workspace,
+                                             current_progress,
+                                             operation.path,
+                                             current_progress.previous_hash,
+                                             operation_index);
+                !checked)
                 return std::unexpected(checked.error());
         }
         return current_progress;
@@ -1441,23 +1451,21 @@ MutationResult detail::validate_prepared_destination(
     if (!valid)
         return valid;
     if (progress.had_original) {
-        auto backup =
-            backup_path(workspace, progress, destination, operation_index);
-        if (!backup)
-            return std::unexpected(backup.error());
-        auto backup_valid =
-            validate_backup(*backup, progress.previous_hash, operation_index);
-        if (!backup_valid)
+        if (auto backup_valid = verify_backup(workspace,
+                                              progress,
+                                              destination,
+                                              progress.previous_hash,
+                                              operation_index);
+            !backup_valid)
             return backup_valid;
     }
     if (condition && condition->backup) {
-        auto backup = backup_path(
-            workspace, *condition->backup, destination, operation_index);
-        if (!backup)
-            return std::unexpected(backup.error());
-        auto verified = validate_backup(
-            *backup, condition->backup->previous_hash, operation_index);
-        if (!verified)
+        if (auto verified = verify_backup(workspace,
+                                          *condition->backup,
+                                          destination,
+                                          condition->backup->previous_hash,
+                                          operation_index);
+            !verified)
             return verified;
     }
     auto status = read_status(destination, operation_index);
@@ -1600,10 +1608,8 @@ MutationResult detail::validate_prepared_rename(
     if (!valid)
         return valid;
     if (progress.had_original) {
-        auto backup = backup_path(workspace, progress, source, index);
-        if (!backup)
-            return std::unexpected(backup.error());
-        valid = validate_backup(*backup, progress.previous_hash, index);
+        valid = verify_backup(
+            workspace, progress, source, progress.previous_hash, index);
         if (!valid)
             return valid;
     }
