@@ -76,6 +76,45 @@ InspectionError error(InspectionOperation operation,
                            .candidate_ids = std::move(candidate_ids)};
 }
 
+std::unexpected<InspectionError>
+fail(InspectionOperation operation,
+     InspectionErrorCode code,
+     std::string detail,
+     std::vector<std::string> candidate_ids = {}) {
+    return std::unexpected(
+        error(operation, code, std::move(detail), std::move(candidate_ids)));
+}
+
+std::unexpected<InspectionError> obs_fail(InspectionOperation operation,
+                                          std::string detail) {
+    return fail(operation,
+                InspectionErrorCode::RemoteObservationFailure,
+                std::move(detail));
+}
+
+std::unexpected<InspectionError> dest_fail(InspectionOperation operation,
+                                           std::string detail) {
+    return fail(
+        operation, InspectionErrorCode::DestinationFailure, std::move(detail));
+}
+
+template <typename PayloadT>
+InspectionResponse make_response(InspectionOperation operation,
+                                 PayloadT&& payload) {
+    return InspectionResponse{.operation = operation,
+                              .payload = std::forward<PayloadT>(payload)};
+}
+
+template <typename PayloadT>
+std::expected<InspectionResponse, InspectionError>
+make_response(InspectionOperation operation,
+              std::expected<PayloadT, InspectionError> payload) {
+    if (!payload) {
+        return std::unexpected(payload.error());
+    }
+    return make_response(operation, std::move(*payload));
+}
+
 InspectionError map_runtime_error(InspectionOperation operation,
                                   const runtime::Error& source) {
     return error(
@@ -164,10 +203,8 @@ std::expected<ObservedCommitIndex, InspectionError> index_observed_commits(
     result.reserve(commits.size());
     for (const auto& commit : commits) {
         if (!result.emplace(commit.id, &commit).second) {
-            return std::unexpected(
-                error(operation,
-                      InspectionErrorCode::RemoteObservationFailure,
-                      "remote history contains duplicate commit"));
+            return obs_fail(operation,
+                            "remote history contains duplicate commit");
         }
     }
     return result;
@@ -186,6 +223,14 @@ bool higher_head_first(std::uint64_t left_height,
                                        : left_id < right_id;
 }
 
+void count_tree_entries(const Snapshot& tree,
+                        std::uint64_t& directories,
+                        std::uint64_t& files) noexcept {
+    for (std::size_t index = 1; index < tree.rows.size(); ++index) {
+        ++(tree.rows[index].is_directory ? directories : files);
+    }
+}
+
 std::expected<RemoteHeadInfo, InspectionError>
 make_head_info(std::string_view id,
                const ObservedCommitIndex& commits,
@@ -193,10 +238,8 @@ make_head_info(std::string_view id,
     const auto observed = commits.find(id);
     if (observed == commits.end() ||
         !valid_commit_snapshot(*observed->second)) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteObservationFailure,
-                  "logical head does not have a valid observed commit"));
+        return obs_fail(operation,
+                        "logical head does not have a valid observed commit");
     }
     const auto* match = observed->second;
     const auto& tree = match->commit.tree;
@@ -206,13 +249,7 @@ make_head_info(std::string_view id,
                           .parent_ids = match->commit.parents,
                           .root_hash = hash_hex(tree.rows.front().hash),
                           .total_bytes = tree.rows.front().size};
-    for (std::size_t index = 1; index < tree.rows.size(); ++index) {
-        if (tree.rows[index].is_directory) {
-            ++result.directory_count;
-        } else {
-            ++result.file_count;
-        }
-    }
+    count_tree_entries(tree, result.directory_count, result.file_count);
     return result;
 }
 
@@ -257,19 +294,16 @@ make_tree_report(const InspectionRequest& request,
     RemoteTreeReport report{.history_present = observed.history_present};
     if (!observed.history_present) {
         if (request.head_commit_id) {
-            return std::unexpected(
-                error(operation,
-                      InspectionErrorCode::RemoteHeadNotFound,
-                      "requested head is not among current logical heads"));
+            return fail(operation,
+                        InspectionErrorCode::RemoteHeadNotFound,
+                        "requested head is not among current logical heads");
         }
         return report;
     }
 
     if (heads.empty()) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteObservationFailure,
-                  "remote history has no observed logical head"));
+        return obs_fail(operation,
+                        "remote history has no observed logical head");
     }
 
     std::string selected_id;
@@ -277,21 +311,18 @@ make_tree_report(const InspectionRequest& request,
         const auto selected =
             std::ranges::find(observed.logical_heads, *request.head_commit_id);
         if (selected == observed.logical_heads.end()) {
-            return std::unexpected(
-                error(operation,
-                      InspectionErrorCode::RemoteHeadNotFound,
-                      "requested head is not among current logical heads",
-                      head_ids(heads)));
+            return fail(operation,
+                        InspectionErrorCode::RemoteHeadNotFound,
+                        "requested head is not among current logical heads",
+                        head_ids(heads));
         }
         selected_id = *selected;
+    } else if (heads.size() > 1) {
+        return fail(operation,
+                    InspectionErrorCode::HeadSelectionRequired,
+                    "Remote history has multiple logical heads.",
+                    head_ids(heads));
     } else {
-        if (heads.size() > 1) {
-            return std::unexpected(
-                error(operation,
-                      InspectionErrorCode::HeadSelectionRequired,
-                      "Remote history has multiple logical heads.",
-                      head_ids(heads)));
-        }
         selected_id = heads.front().commit_id;
     }
 
@@ -299,10 +330,8 @@ make_tree_report(const InspectionRequest& request,
         observed.reachable_commits, selected_id, &history::LoadedCommit::id);
     if (selected == observed.reachable_commits.end() ||
         !valid_commit_snapshot(*selected)) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteObservationFailure,
-                  "logical head does not have a valid observed commit"));
+        return obs_fail(operation,
+                        "logical head does not have a valid observed commit");
     }
 
     const auto& tree = selected->commit.tree;
@@ -322,12 +351,8 @@ make_tree_report(const InspectionRequest& request,
             .logical_hash = hash_hex(row.hash),
             .size = row.size,
         });
-        if (row.is_directory) {
-            ++report.directory_count;
-        } else {
-            ++report.file_count;
-        }
     }
+    count_tree_entries(tree, report.directory_count, report.file_count);
     return report;
 }
 
@@ -359,10 +384,8 @@ make_commits_report(const observation::history::StorageView& observed,
         return report;
     }
     if (observed.reachable_commits.empty()) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteObservationFailure,
-                  "remote history has no observed reachable commits"));
+        return obs_fail(operation,
+                        "remote history has no observed reachable commits");
     }
 
     const std::unordered_set<std::string_view> logical_head_ids(
@@ -377,12 +400,9 @@ make_commits_report(const observation::history::StorageView& observed,
     std::vector<std::pair<std::uint64_t, std::string>> logical_heads;
     logical_heads.reserve(observed.logical_heads.size());
     for (const auto& loaded : observed.reachable_commits) {
-        const auto& rows = loaded.commit.tree.rows;
-        if (rows.empty()) {
-            return std::unexpected(
-                error(operation,
-                      InspectionErrorCode::RemoteObservationFailure,
-                      "remote history contains commit without tree"));
+        if (loaded.commit.tree.rows.empty()) {
+            return obs_fail(operation,
+                            "remote history contains commit without tree");
         }
 
         const bool logical_head = logical_head_ids.contains(loaded.id);
@@ -397,10 +417,8 @@ make_commits_report(const observation::history::StorageView& observed,
     }
 
     if (logical_heads.size() != observed.logical_heads.size()) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteObservationFailure,
-                  "remote resolution references unreachable head"));
+        return obs_fail(operation,
+                        "remote resolution references unreachable head");
     }
     std::ranges::sort(logical_heads, [](const auto& left, const auto& right) {
         return higher_head_first(
@@ -412,13 +430,8 @@ make_commits_report(const observation::history::StorageView& observed,
     }
 
     std::ranges::sort(report.commits, [](const auto& left, const auto& right) {
-        if (left.height != right.height) {
-            return left.height > right.height;
-        }
-        if (left.created_at != right.created_at) {
-            return left.created_at > right.created_at;
-        }
-        return left.commit_id < right.commit_id;
+        return std::tie(right.height, right.created_at, left.commit_id) <
+               std::tie(left.height, left.created_at, right.commit_id);
     });
     return report;
 }
@@ -432,20 +445,14 @@ make_stat_report(const InspectionRequest& request,
                  const observation::history::StorageView& observed,
                  InspectionOperation operation) {
     const auto requested = request.logical_path.value_or("");
-    if (!valid_logical_path(requested)) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::InvalidRequest,
-                                     "requested logical path is invalid"));
-    }
     const auto canonical = requested == "/" ? std::string_view{} : requested;
     const auto* row = observed.history_present
                           ? find_row(observed.effective_tree, canonical)
                           : nullptr;
     if (row == nullptr) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::RemotePathNotFound,
-                                     "path does not exist in remote logical "
-                                     "tree"));
+        return fail(operation,
+                    InspectionErrorCode::RemotePathNotFound,
+                    "path does not exist in remote logical tree");
     }
     return RemoteStatReport{
         .observed_height = observed.observed_height,
@@ -464,9 +471,9 @@ resolve_destination(const InspectionRequest& request,
                     InspectionOperation operation) {
     const auto requested = request.destination_path.value_or("");
     if (requested.empty()) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::InvalidRequest,
-                                     "requested destination is invalid"));
+        return fail(operation,
+                    InspectionErrorCode::InvalidRequest,
+                    "requested destination is invalid");
     }
     std::error_code filesystem_error;
     auto destination =
@@ -474,18 +481,15 @@ resolve_destination(const InspectionRequest& request,
                                   filesystem_error)
             .lexically_normal();
     if (filesystem_error || destination.filename().empty()) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::DestinationFailure,
-                                     "failed to resolve destination"));
+        return dest_fail(operation, "failed to resolve destination");
     }
     const auto parent_status = std::filesystem::symlink_status(
         destination.parent_path(), filesystem_error);
     if (filesystem_error || std::filesystem::is_symlink(parent_status) ||
         !std::filesystem::is_directory(parent_status)) {
-        return std::unexpected(error(
+        return dest_fail(
             operation,
-            InspectionErrorCode::DestinationFailure,
-            "destination parent directory does not exist or is not safe"));
+            "destination parent directory does not exist or is not safe");
     }
     const auto destination_status =
         std::filesystem::symlink_status(destination, filesystem_error);
@@ -497,9 +501,7 @@ resolve_destination(const InspectionRequest& request,
                (!std::filesystem::is_regular_file(destination_status) &&
                 destination_status.type() !=
                     std::filesystem::file_type::not_found)) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::DestinationFailure,
-                                     "destination is not a safe regular file"));
+        return dest_fail(operation, "destination is not a safe regular file");
     }
     return destination;
 }
@@ -510,18 +512,14 @@ install_remote_file(const std::filesystem::path& plaintext,
                     InspectionOperation operation) {
     auto token = platform::random::hex_id();
     if (!token) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::DestinationFailure,
-                                     "failed to prepare destination"));
+        return dest_fail(operation, "failed to prepare destination");
     }
     const auto temporary =
         destination.parent_path() / (".kasumi-download-" + *token + ".tmp");
     auto private_tmp =
         platform::private_storage::create_private_file(temporary);
     if (!private_tmp) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::DestinationFailure,
-                                     "failed to prepare destination file"));
+        return dest_fail(operation, "failed to prepare destination file");
     }
     const auto cleanup = [&] {
         static_cast<void>(
@@ -532,13 +530,10 @@ install_remote_file(const std::filesystem::path& plaintext,
     std::expected<void, InspectionError> write_error;
     const auto streamed = platform::private_storage::stream_regular_file(
         plaintext, buffer, [&](std::span<const std::uint8_t> chunk) {
-            if (auto written = platform::private_storage::write_private_file(
-                    *private_tmp, chunk.data(), chunk.size());
-                !written) {
-                write_error = std::unexpected(
-                    error(operation,
-                          InspectionErrorCode::DestinationFailure,
-                          "failed to prepare destination file"));
+            if (!platform::private_storage::write_private_file(
+                    *private_tmp, chunk.data(), chunk.size())) {
+                write_error =
+                    dest_fail(operation, "failed to prepare destination file");
                 return false;
             }
             return true;
@@ -549,17 +544,12 @@ install_remote_file(const std::filesystem::path& plaintext,
     }
     if (!streamed) {
         cleanup();
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::DestinationFailure,
-                                     "failed to read downloaded file"));
+        return dest_fail(operation, "failed to read downloaded file");
     }
-    if (auto published = platform::private_storage::publish_private_file(
-            *private_tmp, destination);
-        !published) {
+    if (!platform::private_storage::publish_private_file(*private_tmp,
+                                                         destination)) {
         cleanup();
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::DestinationFailure,
-                                     "failed to install download"));
+        return dest_fail(operation, "failed to install download");
     }
     return {};
 }
@@ -574,15 +564,14 @@ download_remote_file(const InspectionRequest& request,
                                      request.logical_path.value_or(""))
                           : nullptr;
     if (row == nullptr) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::RemotePathNotFound,
-                                     "path does not exist in remote logical "
-                                     "tree"));
+        return fail(operation,
+                    InspectionErrorCode::RemotePathNotFound,
+                    "path does not exist in remote logical tree");
     }
     if (row->is_directory) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::RemotePathIsDirectory,
-                                     "remote path is a directory"));
+        return fail(operation,
+                    InspectionErrorCode::RemotePathIsDirectory,
+                    "remote path is a directory");
     }
     auto destination = resolve_destination(request, operation);
     if (!destination) {
@@ -595,23 +584,19 @@ download_remote_file(const InspectionRequest& request,
     const auto plaintext = context.workspace->root / "remote-content.plain";
     auto downloaded = transport::get(context.storage, content_id, encrypted);
     if (!downloaded) {
-        const auto code =
-            downloaded.error().code == transport::ErrorCode::ObjectNotFound
-                ? InspectionErrorCode::RemoteContentNotFound
-                : InspectionErrorCode::RemoteObservationFailure;
-        return std::unexpected(
-            error(operation,
-                  code,
-                  code == InspectionErrorCode::RemoteContentNotFound
-                      ? "remote file content not found"
-                      : "failed to download remote content"));
+        const bool not_found =
+            downloaded.error().code == transport::ErrorCode::ObjectNotFound;
+        return fail(operation,
+                    not_found ? InspectionErrorCode::RemoteContentNotFound
+                              : InspectionErrorCode::RemoteObservationFailure,
+                    not_found ? "remote file content not found"
+                              : "failed to download remote content");
     }
     if (!crypto::decrypt_file(encrypted, plaintext, context.key) ||
         !crypto::content::verify_file(plaintext, logical_hash, row->size)) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteContentInvalid,
-                  "remote content failed cryptographic authentication"));
+        return fail(operation,
+                    InspectionErrorCode::RemoteContentInvalid,
+                    "remote content failed cryptographic authentication");
     }
     if (auto installed =
             install_remote_file(plaintext, *destination, operation);
@@ -668,10 +653,7 @@ inspect_epochs(const InspectionRequest& request,
     auto chain = history_storage::epoch::load_chain(
         context.storage, context.key, context.workspace->root);
     if (!chain) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteObservationFailure,
-                  "failed to authenticate remote Epoch chain"));
+        return obs_fail(operation, "failed to authenticate remote Epoch chain");
     }
     if (operation == InspectionOperation::RemoteEpochs) {
         RemoteEpochsReport report;
@@ -679,8 +661,7 @@ inspect_epochs(const InspectionRequest& request,
         for (std::size_t index = 0; index < chain->size(); ++index) {
             report.epochs.push_back(epoch_info(*chain, index));
         }
-        return InspectionResponse{.operation = operation,
-                                  .payload = std::move(report)};
+        return make_response(operation, std::move(report));
     }
 
     const auto& selector = *request.epoch_selector;
@@ -691,14 +672,13 @@ inspect_epochs(const InspectionRequest& request,
                    : sequence && epoch.reference.sequence == *sequence;
     });
     if (selected == chain->end()) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::RemoteEpochNotFound,
-                                     "requested remote Epoch does not exist"));
+        return fail(operation,
+                    InspectionErrorCode::RemoteEpochNotFound,
+                    "requested remote Epoch does not exist");
     }
     const auto index = static_cast<std::size_t>(selected - chain->begin());
-    return InspectionResponse{
-        .operation = operation,
-        .payload = RemoteEpochReport{.epoch = epoch_info(*chain, index)}};
+    return make_response(operation,
+                         RemoteEpochReport{.epoch = epoch_info(*chain, index)});
 }
 
 std::expected<RemoteContentsReport, InspectionError>
@@ -731,17 +711,12 @@ inspect_contents(const observation::history::StorageView& observed,
         return true;
     };
     if (!add_rows(observed.effective_tree, true)) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteObservationFailure,
-                  "logical content inventory is inconsistent"));
+        return obs_fail(operation, "logical content inventory is inconsistent");
     }
     for (const auto& commit : observed.reachable_commits) {
         if (!add_rows(commit.commit.tree, false)) {
-            return std::unexpected(
-                error(operation,
-                      InspectionErrorCode::RemoteObservationFailure,
-                      "history has inconsistent content metadata"));
+            return obs_fail(operation,
+                            "history has inconsistent content metadata");
         }
     }
     for (const auto& content_id : observed.content_object_identifiers) {
@@ -775,10 +750,8 @@ inspect_contents(const observation::history::StorageView& observed,
             context.workspace->root,
             audit_index++);
         if (!audited) {
-            return std::unexpected(
-                error(operation,
-                      InspectionErrorCode::RemoteObservationFailure,
-                      "failed to download object during audit"));
+            return obs_fail(operation,
+                            "failed to download object during audit");
         }
         if (audited->state == history_storage::ContentObjectState::Missing) {
             content.physically_present = false;
@@ -842,10 +815,7 @@ std::expected<std::vector<std::string>, InspectionError>
 physical_objects(InspectionContext& context, InspectionOperation operation) {
     auto listed = list_remote_identifiers(context.storage, true, "objects");
     if (!listed) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteObservationFailure,
-                  listed.error()));
+        return obs_fail(operation, listed.error());
     }
     return std::move(*listed);
 }
@@ -910,12 +880,60 @@ auto unwrap_inventory(ExpectedT inventory,
                       std::string_view message)
     -> std::expected<typename ExpectedT::value_type, InspectionError> {
     if (!inventory) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteObservationFailure,
-                  std::string{message}));
+        return obs_fail(operation, std::string{message});
     }
     return std::move(*inventory);
+}
+
+struct PhysicalInventories {
+    history_storage::ReachabilityInventory history;
+    history_storage::ContentReachabilityInventory content;
+};
+
+std::expected<PhysicalInventories, std::string>
+load_physical_inventories(transport::Transport& storage,
+                          std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                          const std::vector<std::string>& identifiers,
+                          const std::filesystem::path& workspace_root,
+                          bool load_epochs,
+                          bool require_consistent_history,
+                          const char* epoch_error,
+                          const char* history_error,
+                          const char* content_error) {
+    std::expected<history_storage::ReachabilityInventory,
+                  history_storage::Error>
+        history_inventory;
+    if (load_epochs) {
+        auto epochs = history_storage::epoch::load_chain(
+            storage, key, workspace_root, identifiers);
+        if (!epochs) {
+            return std::unexpected(epoch_error);
+        }
+        history_inventory = history_storage::inventory_reachability(
+            storage, key, identifiers, *epochs, workspace_root);
+    } else {
+        history_inventory = history_storage::inventory_reachability(
+            storage, key, identifiers, workspace_root);
+    }
+    if (!history_inventory) {
+        return std::unexpected(history_error);
+    }
+    if (require_consistent_history &&
+        (history_inventory->logical_heads.empty() ||
+         !history_inventory->missing_parent_ids.empty() ||
+         !history_inventory->invalid_parent_ids.empty())) {
+        return std::unexpected(
+            "remote history is incomplete; inventory is inconclusive");
+    }
+    auto content_inventory = history_storage::inventory_content_reachability(
+        storage, key, identifiers, *history_inventory, workspace_root);
+    if (!content_inventory) {
+        return std::unexpected(content_error);
+    }
+    return PhysicalInventories{
+        .history = std::move(*history_inventory),
+        .content = std::move(*content_inventory),
+    };
 }
 
 std::set<std::string_view>
@@ -965,25 +983,25 @@ ancestral_markers(const history_storage::ReachabilityInventory& inventory) {
 
 RemoteMarkerState marker_state(history_storage::ReachabilityMarkerState state,
                                bool ancestral) {
-    using Source = history_storage::ReachabilityMarkerState;
-    switch (state) {
-        case Source::InvalidPath:
-            return RemoteMarkerState::InvalidPath;
-        case Source::Missing:
-            return RemoteMarkerState::Missing;
-        case Source::InvalidMarker:
-            return RemoteMarkerState::InvalidMarker;
-        case Source::MissingCommit:
-            return RemoteMarkerState::MissingCommit;
-        case Source::InvalidCiphertext:
-            return RemoteMarkerState::InvalidCiphertext;
-        case Source::InvalidCommit:
-            return RemoteMarkerState::InvalidCommit;
-        case Source::Valid:
-            return ancestral ? RemoteMarkerState::Ancestral
-                             : RemoteMarkerState::LogicalHead;
+    using S = history_storage::ReachabilityMarkerState;
+    using R = RemoteMarkerState;
+    if (state == S::Valid) {
+        return ancestral ? R::Ancestral : R::LogicalHead;
     }
-    return RemoteMarkerState::InvalidMarker;
+    static constexpr std::pair<S, R> kMap[] = {
+        {S::InvalidPath, R::InvalidPath},
+        {S::Missing, R::Missing},
+        {S::InvalidMarker, R::InvalidMarker},
+        {S::MissingCommit, R::MissingCommit},
+        {S::InvalidCiphertext, R::InvalidCiphertext},
+        {S::InvalidCommit, R::InvalidCommit},
+    };
+    for (const auto& [src, dst] : kMap) {
+        if (src == state) {
+            return dst;
+        }
+    }
+    return R::InvalidMarker;
 }
 
 RemoteMarkersReport
@@ -1126,58 +1144,41 @@ std::expected<RemoteHealthReport, InspectionError>
 make_health_report(InspectionContext& context,
                    InspectionOperation operation,
                    const std::vector<std::string>& identifiers) {
-    auto epochs = history_storage::epoch::load_chain(
-        context.storage, context.key, context.workspace->root, identifiers);
-    if (!epochs) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteObservationFailure,
-                  "failed to authenticate Epoch continuity"));
+    auto inventories = load_physical_inventories(
+        context.storage,
+        context.key,
+        identifiers,
+        context.workspace->root,
+        true,
+        false,
+        "failed to authenticate Epoch continuity",
+        "failed to authenticate physical history inventory",
+        "failed to audit remote content reachability");
+    if (!inventories) {
+        return obs_fail(operation, inventories.error());
     }
-    auto history_inventory = unwrap_inventory(
-        history_storage::inventory_reachability(context.storage,
-                                                context.key,
-                                                identifiers,
-                                                *epochs,
-                                                context.workspace->root),
-        operation,
-        "failed to authenticate physical history inventory");
-    if (!history_inventory) {
-        return std::unexpected(history_inventory.error());
-    }
-    auto content_inventory =
-        unwrap_inventory(history_storage::inventory_content_reachability(
-                             context.storage,
-                             context.key,
-                             identifiers,
-                             *history_inventory,
-                             context.workspace->root),
-                         operation,
-                         "failed to audit remote content reachability");
-    if (!content_inventory) {
-        return std::unexpected(content_inventory.error());
-    }
-    const auto markers = make_markers_report(*history_inventory);
+    const auto markers = make_markers_report(inventories->history);
     const auto objects = make_objects_report(context.layout, identifiers);
     const auto writers = make_writers_report(context.layout, identifiers);
     const auto orphans = make_orphans_report(
-        context.layout, *history_inventory, *content_inventory);
+        context.layout, inventories->history, inventories->content);
 
     RemoteHealthReport report{
         .marker_count = markers.markers.size(),
-        .reachable_commit_count = history_inventory->reachable_commits.size(),
+        .reachable_commit_count = inventories->history.reachable_commits.size(),
         .orphan_count = static_cast<std::size_t>(
             std::ranges::count_if(orphans.objects,
                                   [](const auto& item) {
                                       return item.removal_candidate;
                                   })),
-        .missing_content_count = content_inventory->missing_content_ids.size(),
+        .missing_content_count =
+            inventories->content.missing_content_ids.size(),
         .writer_count = writers.writers.size(),
         .unknown_object_count = objects.unknown_count,
     };
     report.invalid_content_count =
         static_cast<std::size_t>(std::ranges::count_if(
-            content_inventory->contents, [](const auto& content) {
+            inventories->content.contents, [](const auto& content) {
                 return content.reachable &&
                        content.state ==
                            history_storage::ContentObjectState::Corrupt;
@@ -1191,9 +1192,9 @@ make_health_report(InspectionContext& context,
         }
     };
     add_count_reason(markers.invalid_count, "invalid physical markers");
-    add_count_reason(history_inventory->missing_parent_ids.size(),
+    add_count_reason(inventories->history.missing_parent_ids.size(),
                      "missing commit parents");
-    add_count_reason(history_inventory->invalid_parent_ids.size(),
+    add_count_reason(inventories->history.invalid_parent_ids.size(),
                      "invalid commit parents");
     add_count_reason(report.missing_content_count, "missing required contents");
     add_count_reason(report.invalid_content_count, "invalid required contents");
@@ -1214,10 +1215,6 @@ make_health_report(InspectionContext& context,
 
 std::expected<InspectionResponse, InspectionError>
 inspect_physical(InspectionContext& context, InspectionOperation operation) {
-    const auto respond = [&](auto payload) {
-        return InspectionResponse{.operation = operation,
-                                  .payload = std::move(payload)};
-    };
     if (operation == InspectionOperation::RemoteMarkers) {
         auto inventory = unwrap_inventory(
             history_storage::inventory_reachability(
@@ -1227,50 +1224,42 @@ inspect_physical(InspectionContext& context, InspectionOperation operation) {
         if (!inventory) {
             return std::unexpected(inventory.error());
         }
-        return respond(make_markers_report(*inventory));
+        return make_response(operation, make_markers_report(*inventory));
     }
     auto identifiers = physical_objects(context, operation);
     if (!identifiers) {
         return std::unexpected(identifiers.error());
     }
     if (operation == InspectionOperation::RemoteOrphans) {
-        auto history_inventory = unwrap_inventory(
-            history_storage::inventory_reachability(context.storage,
-                                                    context.key,
-                                                    *identifiers,
-                                                    context.workspace->root),
-            operation,
-            "failed to authenticate physical history inventory");
-        if (!history_inventory) {
-            return std::unexpected(history_inventory.error());
+        auto inventories = load_physical_inventories(
+            context.storage,
+            context.key,
+            *identifiers,
+            context.workspace->root,
+            false,
+            false,
+            "",
+            "failed to authenticate physical history inventory",
+            "failed to audit remote content reachability");
+        if (!inventories) {
+            return obs_fail(operation, inventories.error());
         }
-        auto contents =
-            unwrap_inventory(history_storage::inventory_content_reachability(
-                                 context.storage,
-                                 context.key,
-                                 *identifiers,
-                                 *history_inventory,
-                                 context.workspace->root),
-                             operation,
-                             "failed to audit remote content reachability");
-        if (!contents) {
-            return std::unexpected(contents.error());
-        }
-        return respond(
-            make_orphans_report(context.layout, *history_inventory, *contents));
+        return make_response(operation,
+                             make_orphans_report(context.layout,
+                                                 inventories->history,
+                                                 inventories->content));
     }
     if (operation == InspectionOperation::RemoteObjects) {
-        return respond(
+        return make_response(
+            operation,
             make_objects_report(context.layout, std::move(*identifiers)));
     }
     if (operation == InspectionOperation::RemoteWriters) {
-        return respond(make_writers_report(context.layout, *identifiers));
+        return make_response(operation,
+                             make_writers_report(context.layout, *identifiers));
     }
-    auto health = make_health_report(context, operation, *identifiers);
-    if (!health) {
-        return std::unexpected(health.error());
-    }
-    return respond(std::move(*health));
+    return make_response(operation,
+                         make_health_report(context, operation, *identifiers));
 }
 
 RemoteCommitInfo
@@ -1295,16 +1284,12 @@ make_commit_report(const InspectionRequest& request,
                                             selected_id,
                                             &kasumi::history::LoadedCommit::id);
     if (selected == observed.reachable_commits.end()) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::RemoteCommitNotFound,
-                                     "commit is not reachable in current "
-                                     "remote history"));
+        return fail(operation,
+                    InspectionErrorCode::RemoteCommitNotFound,
+                    "commit is not reachable in current remote history");
     }
     if (!valid_commit_snapshot(*selected)) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteObservationFailure,
-                  "remote commit does not have a valid tree"));
+        return obs_fail(operation, "remote commit does not have a valid tree");
     }
 
     const auto authenticated =
@@ -1320,26 +1305,21 @@ make_commit_report(const InspectionRequest& request,
             ? std::nullopt
             : std::optional{*authenticated});
     if (!inspected) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteObservationFailure,
-                  "failed to authenticate physical commit variants"));
+        return obs_fail(operation,
+                        "failed to authenticate physical commit variants");
     }
 
     RemoteCommitReport report{.commit = commit_info(*selected, observed)};
     report.variants.reserve(inspected->size());
+    using S = history_storage::PhysicalCommitVariantState;
     for (const auto& variant : *inspected) {
-        const auto state =
-            variant.state == history_storage::PhysicalCommitVariantState::Valid
-                ? RemoteCommitVariantState::Valid
-            : variant.state ==
-                    history_storage::PhysicalCommitVariantState::InvalidCommit
-                ? RemoteCommitVariantState::InvalidCommit
-                : RemoteCommitVariantState::InvalidCiphertext;
         report.variants.push_back(RemoteCommitVariantInfo{
             .ciphertext_id = variant.reference.ciphertext_id,
             .object_identifier = variant.identifier,
-            .state = state,
+            .state = variant.state == S::Valid ? RemoteCommitVariantState::Valid
+                     : variant.state == S::InvalidCommit
+                         ? RemoteCommitVariantState::InvalidCommit
+                         : RemoteCommitVariantState::InvalidCiphertext,
         });
     }
     return report;
@@ -1350,70 +1330,50 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     const auto operation = input.request.operation;
     const auto& req = input.request;
     const auto invalid = [&](std::string msg) {
-        return std::unexpected(error(
-            operation, InspectionErrorCode::InvalidRequest, std::move(msg)));
+        return fail(
+            operation, InspectionErrorCode::InvalidRequest, std::move(msg));
     };
+    if (static_cast<std::size_t>(operation) >
+        static_cast<std::size_t>(InspectionOperation::RemoteHealth)) {
+        return fail(operation,
+                    InspectionErrorCode::RuntimeFailure,
+                    "unknown inspection operation");
+    }
+    using Op = InspectionOperation;
     const bool allowed_selectors =
-        (!req.head_commit_id || operation == InspectionOperation::RemoteTree) &&
-        (!req.logical_path || operation == InspectionOperation::RemoteStat ||
-         operation == InspectionOperation::RemoteGet) &&
-        (!req.commit_id || operation == InspectionOperation::RemoteCommit) &&
-        (!req.destination_path ||
-         operation == InspectionOperation::RemoteGet) &&
-        (!req.epoch_selector ||
-         operation == InspectionOperation::RemoteEpoch) &&
-        (!req.content_id || operation == InspectionOperation::RemoteContent);
+        (!req.head_commit_id || operation == Op::RemoteTree) &&
+        (!req.logical_path || operation == Op::RemoteStat ||
+         operation == Op::RemoteGet) &&
+        (!req.commit_id || operation == Op::RemoteCommit) &&
+        (!req.destination_path || operation == Op::RemoteGet) &&
+        (!req.epoch_selector || operation == Op::RemoteEpoch) &&
+        (!req.content_id || operation == Op::RemoteContent);
     if (!allowed_selectors) {
         return invalid(
             "selector does not belong to requested inspection operation");
     }
-    switch (operation) {
-        case InspectionOperation::RemoteHeads:
-        case InspectionOperation::RemoteCommits:
-        case InspectionOperation::RemoteSummary:
-        case InspectionOperation::RemoteEpochs:
-        case InspectionOperation::RemoteContents:
-        case InspectionOperation::RemoteContentsAudit:
-        case InspectionOperation::RemoteMarkers:
-        case InspectionOperation::RemoteObjects:
-        case InspectionOperation::RemoteOrphans:
-        case InspectionOperation::RemoteWriters:
-        case InspectionOperation::RemoteHealth:
-        case InspectionOperation::RemoteTree:
-            break;
-        case InspectionOperation::RemoteStat:
-            if (!req.logical_path || !valid_logical_path(*req.logical_path)) {
-                return invalid("requested logical path is invalid");
-            }
-            break;
-        case InspectionOperation::RemoteGet:
-            if (!req.logical_path || !valid_logical_path(*req.logical_path) ||
-                *req.logical_path == "/" || !req.destination_path ||
-                req.destination_path->empty()) {
-                return invalid("remote path or destination is invalid");
-            }
-            break;
-        case InspectionOperation::RemoteCommit:
-            if (!req.commit_id || !history::valid_commit_id(*req.commit_id)) {
-                return invalid("requested commit ID is invalid");
-            }
-            break;
-        case InspectionOperation::RemoteContent:
-            if (!req.content_id || !history::valid_commit_id(*req.content_id)) {
-                return invalid("requested content ID is invalid");
-            }
-            break;
-        case InspectionOperation::RemoteEpoch:
-            if (!req.epoch_selector ||
-                (!history::valid_commit_id(*req.epoch_selector) &&
-                 !epoch_sequence(*req.epoch_selector))) {
-                return invalid("requested Epoch ID or sequence is invalid");
-            }
-            break;
-        default:
-            return std::unexpected(error(operation,
-                                         InspectionErrorCode::RuntimeFailure,
-                                         "unknown inspection operation"));
+    if (operation == Op::RemoteStat &&
+        (!req.logical_path || !valid_logical_path(*req.logical_path))) {
+        return invalid("requested logical path is invalid");
+    }
+    if (operation == Op::RemoteGet &&
+        (!req.logical_path || !kasumi::valid_logical_path(*req.logical_path) ||
+         !req.destination_path || req.destination_path->empty())) {
+        return invalid("remote path or destination is invalid");
+    }
+    if (operation == Op::RemoteCommit &&
+        (!req.commit_id || !history::valid_commit_id(*req.commit_id))) {
+        return invalid("requested commit ID is invalid");
+    }
+    if (operation == Op::RemoteContent &&
+        (!req.content_id || !history::valid_commit_id(*req.content_id))) {
+        return invalid("requested content ID is invalid");
+    }
+    if (operation == Op::RemoteEpoch &&
+        (!req.epoch_selector ||
+         (!history::valid_commit_id(*req.epoch_selector) &&
+          !epoch_sequence(*req.epoch_selector)))) {
+        return invalid("requested Epoch ID or sequence is invalid");
     }
 
     auto runtime_data = runtime::resolve(input.environment.app_data_dir,
@@ -1439,47 +1399,30 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     auto opened = transport::open_transport(context.runtime.storage_location,
                                             context.runtime.local_dir);
     if (!opened) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::RuntimeFailure,
-                                     "failed to open remote storage"));
+        return fail(operation,
+                    InspectionErrorCode::RuntimeFailure,
+                    "failed to open remote storage");
     }
     context.storage = std::move(*opened);
 
     auto workspace = platform::create_workspace("remote-inspection");
     if (!workspace) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteObservationFailure,
-                  "failed to prepare remote observation"));
+        return obs_fail(operation, "failed to prepare remote observation");
     }
     context.workspace = std::move(*workspace);
 
-    const auto respond = [&](auto expected_payload)
-        -> std::expected<InspectionResponse, InspectionError> {
-        if (!expected_payload) {
-            return std::unexpected(expected_payload.error());
-        }
-        return InspectionResponse{.operation = operation,
-                                  .payload = std::move(*expected_payload)};
-    };
-
-    if (operation == InspectionOperation::RemoteEpochs ||
-        operation == InspectionOperation::RemoteEpoch) {
+    if (operation == Op::RemoteEpochs || operation == Op::RemoteEpoch) {
         return inspect_epochs(input.request, context, operation);
     }
-    if (operation == InspectionOperation::RemoteMarkers ||
-        operation == InspectionOperation::RemoteObjects ||
-        operation == InspectionOperation::RemoteOrphans ||
-        operation == InspectionOperation::RemoteWriters ||
-        operation == InspectionOperation::RemoteHealth) {
+    if (operation == Op::RemoteMarkers || operation == Op::RemoteObjects ||
+        operation == Op::RemoteOrphans || operation == Op::RemoteWriters ||
+        operation == Op::RemoteHealth) {
         return inspect_physical(context, operation);
     }
 
     const bool audit_content_objects =
-        operation == InspectionOperation::RemoteSummary ||
-        operation == InspectionOperation::RemoteContents ||
-        operation == InspectionOperation::RemoteContentsAudit ||
-        operation == InspectionOperation::RemoteContent;
+        operation == Op::RemoteSummary || operation == Op::RemoteContents ||
+        operation == Op::RemoteContentsAudit || operation == Op::RemoteContent;
     auto observed = observation::history::observe(
         context.storage,
         context.key,
@@ -1489,49 +1432,41 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
         context.hints.trusted_marker_identifiers,
         requires_complete_history(operation));
     if (!observed) {
-        return std::unexpected(
-            error(operation,
-                  InspectionErrorCode::RemoteObservationFailure,
-                  "failed to observe remote history"));
+        return obs_fail(operation, "failed to observe remote history");
     }
 
-    if (operation == InspectionOperation::RemoteContents ||
-        operation == InspectionOperation::RemoteContentsAudit ||
-        operation == InspectionOperation::RemoteContent) {
-        auto contents = inspect_contents(
-            *observed,
-            context,
-            operation,
-            operation == InspectionOperation::RemoteContentsAudit);
-        if (!contents || operation != InspectionOperation::RemoteContent) {
-            return respond(std::move(contents));
+    if (operation == Op::RemoteContents ||
+        operation == Op::RemoteContentsAudit ||
+        operation == Op::RemoteContent) {
+        auto contents = inspect_contents(*observed,
+                                         context,
+                                         operation,
+                                         operation == Op::RemoteContentsAudit);
+        if (!contents || operation != Op::RemoteContent) {
+            return make_response(operation, std::move(contents));
         }
         const auto selected = std::ranges::find(contents->contents,
                                                 *input.request.content_id,
                                                 &RemoteContentInfo::content_id);
         if (selected == contents->contents.end()) {
-            return std::unexpected(error(
+            return fail(
                 operation,
                 InspectionErrorCode::RemoteContentNotFound,
-                "requested content ID does not exist in remote inventory"));
+                "requested content ID does not exist in remote inventory");
         }
-        return InspectionResponse{
-            .operation = operation,
-            .payload = RemoteContentReport{.content = std::move(*selected)}};
+        return make_response(
+            operation, RemoteContentReport{.content = std::move(*selected)});
     }
 
-    if (operation == InspectionOperation::RemoteSummary) {
+    if (operation == Op::RemoteSummary) {
         auto writers = history_storage::maintenance_protocol::active_writers(
             context.storage, context.layout);
         if (!writers) {
-            return std::unexpected(
-                error(operation,
-                      InspectionErrorCode::RemoteObservationFailure,
-                      "failed to observe remote writers"));
+            return obs_fail(operation, "failed to observe remote writers");
         }
-        return InspectionResponse{
-            .operation = operation,
-            .payload = RemoteSummaryReport{
+        return make_response(
+            operation,
+            RemoteSummaryReport{
                 .history_present = observed->history_present,
                 .observed_height = observed->observed_height,
                 .reachable_commit_count = observed->reachable_commit_ids.size(),
@@ -1540,44 +1475,46 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
                 .missing_content_count = observed->missing_content_count,
                 .orphan_content_count = observed->orphan_content_count,
                 .active_writer_count = writers->size(),
-            }};
+            });
     }
 
-    if (operation == InspectionOperation::RemoteHeads ||
-        operation == InspectionOperation::RemoteTree) {
+    if (operation == Op::RemoteHeads || operation == Op::RemoteTree) {
         auto heads = make_head_infos(*observed, operation);
         if (!heads) {
             return std::unexpected(heads.error());
         }
-        if (operation == InspectionOperation::RemoteTree) {
-            return respond(
+        if (operation == Op::RemoteTree) {
+            return make_response(
+                operation,
                 make_tree_report(input.request, *observed, *heads, operation));
         }
-        return InspectionResponse{
-            .operation = operation,
-            .payload = RemoteHeadsReport{
-                .history_present = observed->history_present,
-                .observed_height = observed->observed_height,
-                .physical_marker_count =
-                    observed->marked_head_identifiers.size(),
-                .ancestral_marker_count =
-                    observed->ancestral_marked_heads.size(),
-                .heads = std::move(*heads),
-            }};
+        return make_response(operation,
+                             RemoteHeadsReport{
+                                 .history_present = observed->history_present,
+                                 .observed_height = observed->observed_height,
+                                 .physical_marker_count =
+                                     observed->marked_head_identifiers.size(),
+                                 .ancestral_marker_count =
+                                     observed->ancestral_marked_heads.size(),
+                                 .heads = std::move(*heads),
+                             });
     }
 
-    if (operation == InspectionOperation::RemoteStat) {
-        return respond(make_stat_report(input.request, *observed, operation));
+    if (operation == Op::RemoteStat) {
+        return make_response(
+            operation, make_stat_report(input.request, *observed, operation));
     }
-    if (operation == InspectionOperation::RemoteCommit) {
-        return respond(
+    if (operation == Op::RemoteCommit) {
+        return make_response(
+            operation,
             make_commit_report(input.request, *observed, context, operation));
     }
-    if (operation == InspectionOperation::RemoteGet) {
-        return respond(
+    if (operation == Op::RemoteGet) {
+        return make_response(
+            operation,
             download_remote_file(input.request, *observed, context, operation));
     }
-    return respond(make_commits_report(*observed, operation));
+    return make_response(operation, make_commits_report(*observed, operation));
 }
 
 void finish_inspection(InspectionInput& input, InspectionContext& context) {
@@ -1599,93 +1536,65 @@ audit_remote_inventory(transport::Transport& storage,
     if (!workspace) {
         return std::unexpected("failed to prepare remote inventory audit");
     }
-    std::expected<InventoryAuditReport, std::string> result =
-        std::unexpected("remote inventory audit failed");
+    struct Guard {
+        platform::Workspace& workspace;
+        ~Guard() {
+            platform::cleanup_workspace(workspace);
+        }
+    } guard{*workspace};
+
     try {
-        do {
-            const auto identifiers =
-                list_remote_identifiers(storage, false, "inventory");
-            if (!identifiers) {
-                result = std::unexpected(identifiers.error());
-                break;
-            }
-            const auto layout = history_storage::derive_remote_layout(key);
-            const auto writers = make_writers_report(layout, *identifiers);
-            if (writers.maintenance_blocked || !writers.protocol_consistent) {
-                result =
-                    std::unexpected("remote inventory is inconclusive while "
-                                    "maintenance or a writer is active");
-                break;
-            }
-            auto epochs = history_storage::epoch::load_chain(
-                storage, key, workspace->root, *identifiers);
-            if (!epochs) {
-                result = std::unexpected(
-                    "failed to authenticate remote Epoch history");
-                break;
-            }
-            auto history_inventory = history_storage::inventory_reachability(
-                storage, key, *identifiers, *epochs, workspace->root);
-            if (!history_inventory) {
-                result = std::unexpected(
-                    "failed to authenticate remote history inventory");
-                break;
-            }
-            if (history_inventory->logical_heads.empty() ||
-                !history_inventory->missing_parent_ids.empty() ||
-                !history_inventory->invalid_parent_ids.empty()) {
-                result = std::unexpected(
-                    "remote history is incomplete; inventory is inconclusive");
-                break;
-            }
-            auto content_inventory =
-                history_storage::inventory_content_reachability(
-                    storage,
-                    key,
-                    *identifiers,
-                    *history_inventory,
-                    workspace->root);
-            if (!content_inventory) {
-                result = std::unexpected(
-                    "failed to classify remote content reachability");
-                break;
-            }
-            const auto objects = make_objects_report(layout, *identifiers);
-            const auto unchanged =
-                list_remote_identifiers(storage, false, "inventory");
-            if (!unchanged) {
-                result = std::unexpected(unchanged.error());
-                break;
-            }
-            if (*identifiers != *unchanged) {
-                result =
-                    std::unexpected("remote inventory changed during audit; "
-                                    "results are inconclusive");
-                break;
-            }
-            if (content_inventory->missing_content_ids.size() >
-                content_inventory->reachable_content_ids.size()) {
-                result = std::unexpected(
-                    "remote content inventory is internally inconsistent");
-                break;
-            }
-            result = InventoryAuditReport{
-                .referenced_content =
-                    content_inventory->reachable_content_ids.size(),
-                .present_content =
-                    content_inventory->reachable_content_ids.size() -
-                    content_inventory->missing_content_ids.size(),
-                .missing_content =
-                    content_inventory->missing_content_ids.size(),
-                .orphan_content = content_inventory->orphan_content_ids.size(),
-                .unknown_objects = objects.unknown_count,
-            };
-        } while (false);
+        const auto identifiers =
+            list_remote_identifiers(storage, false, "inventory");
+        if (!identifiers) {
+            return std::unexpected(identifiers.error());
+        }
+        const auto layout = history_storage::derive_remote_layout(key);
+        const auto writers = make_writers_report(layout, *identifiers);
+        if (writers.maintenance_blocked || !writers.protocol_consistent) {
+            return std::unexpected("remote inventory is inconclusive while "
+                                   "maintenance or a writer is active");
+        }
+        auto inventories = load_physical_inventories(
+            storage,
+            key,
+            *identifiers,
+            workspace->root,
+            true,
+            true,
+            "failed to authenticate remote Epoch history",
+            "failed to authenticate remote history inventory",
+            "failed to classify remote content reachability");
+        if (!inventories) {
+            return std::unexpected(inventories.error());
+        }
+        const auto objects = make_objects_report(layout, *identifiers);
+        const auto unchanged =
+            list_remote_identifiers(storage, false, "inventory");
+        if (!unchanged) {
+            return std::unexpected(unchanged.error());
+        }
+        if (*identifiers != *unchanged) {
+            return std::unexpected("remote inventory changed during audit; "
+                                   "results are inconclusive");
+        }
+        const auto& content = inventories->content;
+        if (content.missing_content_ids.size() >
+            content.reachable_content_ids.size()) {
+            return std::unexpected(
+                "remote content inventory is internally inconsistent");
+        }
+        return InventoryAuditReport{
+            .referenced_content = content.reachable_content_ids.size(),
+            .present_content = content.reachable_content_ids.size() -
+                               content.missing_content_ids.size(),
+            .missing_content = content.missing_content_ids.size(),
+            .orphan_content = content.orphan_content_ids.size(),
+            .unknown_objects = objects.unknown_count,
+        };
     } catch (...) {
-        result = std::unexpected("exception during remote inventory audit");
+        return std::unexpected("exception during remote inventory audit");
     }
-    platform::cleanup_workspace(*workspace);
-    return result;
 }
 
 std::expected<InspectionResponse, InspectionError>

@@ -57,61 +57,21 @@ bool valid_logical_path_component(std::string_view name) noexcept {
         return false;
     }
 
-    for (std::size_t i = 0; i < name.size(); ++i) {
-        const auto b0 = static_cast<unsigned char>(name[i]);
-        if (b0 <= 0x7F) {
-            if (b0 < 0x20 || b0 == 0x7F) {
-                return false;
-            }
-            switch (b0) {
-                case '<':
-                case '>':
-                case ':':
-                case '"':
-                case '/':
-                case '\\':
-                case '|':
-                case '?':
-                case '*':
-                    return false;
-                default:
-                    break;
-            }
-        } else if (b0 >= 0xC2 && b0 <= 0xDF) {
-            if (i + 1 >= name.size()) {
-                return false;
-            }
-            const auto b1 = static_cast<unsigned char>(name[++i]);
-            if (b1 < 0x80 || b1 > 0xBF) {
-                return false;
-            }
-        } else if (b0 >= 0xE0 && b0 <= 0xEF) {
-            if (i + 2 >= name.size()) {
-                return false;
-            }
-            const auto b1 = static_cast<unsigned char>(name[++i]);
-            const unsigned char b1_min = b0 == 0xE0 ? 0xA0 : 0x80;
-            const unsigned char b1_max = b0 == 0xED ? 0x9F : 0xBF;
-            const auto b2 = static_cast<unsigned char>(name[++i]);
-            if (b1 < b1_min || b1 > b1_max || b2 < 0x80 || b2 > 0xBF) {
-                return false;
-            }
-        } else if (b0 >= 0xF0 && b0 <= 0xF4) {
-            if (i + 3 >= name.size()) {
-                return false;
-            }
-            const auto b1 = static_cast<unsigned char>(name[++i]);
-            const unsigned char b1_min = b0 == 0xF0 ? 0x90 : 0x80;
-            const unsigned char b1_max = b0 == 0xF4 ? 0x8F : 0xBF;
-            const auto b2 = static_cast<unsigned char>(name[++i]);
-            const auto b3 = static_cast<unsigned char>(name[++i]);
-            if (b1 < b1_min || b1 > b1_max || b2 < 0x80 || b2 > 0xBF ||
-                b3 < 0x80 || b3 > 0xBF) {
-                return false;
-            }
-        } else {
+    const auto* ptr = reinterpret_cast<const utf8proc_uint8_t*>(name.data());
+    auto remaining = static_cast<utf8proc_ssize_t>(name.size());
+    while (remaining > 0) {
+        utf8proc_int32_t codepoint = 0;
+        const utf8proc_ssize_t bytes_read =
+            utf8proc_iterate(ptr, remaining, &codepoint);
+        if (bytes_read <= 0 ||
+            (codepoint <= 0x7F &&
+             (codepoint < 0x20 || codepoint == 0x7F ||
+              std::string_view{"<>:\"/\\|?*"}.find(
+                  static_cast<char>(codepoint)) != std::string_view::npos))) {
             return false;
         }
+        ptr += bytes_read;
+        remaining -= bytes_read;
     }
 
     const auto dot = name.find('.');

@@ -78,34 +78,26 @@ validate_workspace_root(const std::filesystem::path& root) {
         return std::unexpected(Error{.code = ErrorCode::InvalidInput,
                                      .detail = "workspace root is empty"});
     }
-
+    const auto fail = [](std::string detail) {
+        return std::unexpected(Error{.code = ErrorCode::WorkspaceFailure,
+                                     .detail = std::move(detail)});
+    };
     std::error_code filesystem_error;
     const auto status = std::filesystem::symlink_status(root, filesystem_error);
     if (filesystem_error) {
-        if (filesystem_error == std::errc::no_such_file_or_directory) {
-            return std::unexpected(
-                Error{.code = ErrorCode::WorkspaceFailure,
-                      .detail = "workspace root does not exist"});
-        }
-        return std::unexpected(
-            Error{.code = ErrorCode::WorkspaceFailure,
-                  .detail = "could not inspect workspace root: " +
-                            filesystem_error.message()});
+        return fail(filesystem_error == std::errc::no_such_file_or_directory
+                        ? "workspace root does not exist"
+                        : "could not inspect workspace root: " +
+                              filesystem_error.message());
     }
     if (std::filesystem::is_symlink(status)) {
-        return std::unexpected(
-            Error{.code = ErrorCode::WorkspaceFailure,
-                  .detail = "workspace root is a symbolic link"});
+        return fail("workspace root is a symbolic link");
     }
     if (!std::filesystem::exists(status)) {
-        return std::unexpected(
-            Error{.code = ErrorCode::WorkspaceFailure,
-                  .detail = "workspace root does not exist"});
+        return fail("workspace root does not exist");
     }
     if (!std::filesystem::is_directory(status)) {
-        return std::unexpected(
-            Error{.code = ErrorCode::WorkspaceFailure,
-                  .detail = "workspace root is not a directory"});
+        return fail("workspace root is not a directory");
     }
     return {};
 }

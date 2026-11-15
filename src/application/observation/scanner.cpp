@@ -458,39 +458,27 @@ scan_result(const std::filesystem::path& local_root,
         auto& parent_evidence =
             physical_evidence.directories[frame.evidence_index];
         parent_evidence.physically_empty = false;
-        if (entry_type->linklike) {
-            if (ignored) {
-                physical_evidence.ignored_entries.push_back(
-                    {.path = relative,
-                     .kind = reconciliation::PhysicalEntryKind::LinkLike,
-                     .disposition = IgnoreDisposition::IgnoredProtected});
-                parent_evidence.has_ignored_descendants = true;
-                parent_evidence.has_protected_descendants = true;
-                if (entry_type->directory) {
-                    physical_evidence.directories.push_back(
-                        {.path = relative,
-                         .ignored_entry = true,
-                         .has_protected_descendants = true});
-                }
-            } else {
-                parent_evidence.has_unexpected_descendants = true;
-            }
+        if (entry_type->linklike && !ignored) {
+            parent_evidence.has_unexpected_descendants = true;
             continue;
         }
         if (ignored) {
             const auto kind =
-                entry_type->directory
+                entry_type->linklike
+                    ? reconciliation::PhysicalEntryKind::LinkLike
+                : entry_type->directory
                     ? reconciliation::PhysicalEntryKind::Directory
-                    : (entry_type->regular_file
-                           ? reconciliation::PhysicalEntryKind::RegularFile
-                           : reconciliation::PhysicalEntryKind::Unsupported);
-            auto effective_disposition = disposition;
+                : entry_type->regular_file
+                    ? reconciliation::PhysicalEntryKind::RegularFile
+                    : reconciliation::PhysicalEntryKind::Unsupported;
+            auto effective_disposition =
+                entry_type->linklike || !entry_type->regular_file ||
+                        !valid_logical_path_component(entry_name)
+                    ? IgnoreDisposition::IgnoredProtected
+                    : disposition;
             std::uint64_t ignored_size = 0;
             PhysicalFileIdentity identity{};
-            if (!entry_type->regular_file ||
-                !valid_logical_path_component(entry_name)) {
-                effective_disposition = IgnoreDisposition::IgnoredProtected;
-            } else if (disposition == IgnoreDisposition::IgnoredDisposable) {
+            if (effective_disposition == IgnoreDisposition::IgnoredDisposable) {
                 const auto metadata =
                     query_file_metadata(metadata_query,
                                         entry.path(),
@@ -498,12 +486,10 @@ scan_result(const std::filesystem::path& local_root,
                                         "read disposable file metadata",
                                         "");
                 if (!metadata) {
-                    if (metadata.error().detail.empty()) {
-                        effective_disposition =
-                            IgnoreDisposition::IgnoredProtected;
-                    } else {
+                    if (!metadata.error().detail.empty()) {
                         return std::unexpected(metadata.error());
                     }
+                    effective_disposition = IgnoreDisposition::IgnoredProtected;
                 } else if (!metadata->identity.has_value()) {
                     effective_disposition = IgnoreDisposition::IgnoredProtected;
                 } else {

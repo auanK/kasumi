@@ -54,19 +54,6 @@ Error make_error(ErrorCode code,
     };
 }
 
-Error transport_error(const transport::Error& error,
-                      std::string identifier = {}) {
-    return make_error(ErrorCode::TransportFailure,
-                      transport::describe(error),
-                      identifier.empty()
-                          ? std::nullopt
-                          : std::optional<std::string>{std::move(identifier)});
-}
-
-bool not_found(const std::error_code& error) noexcept {
-    return error == std::errc::no_such_file_or_directory;
-}
-
 std::vector<std::string>
 physical_identifiers(const reconciliation::StorageState& state) {
     return {state.object_identifiers.begin(), state.object_identifiers.end()};
@@ -115,85 +102,6 @@ std::string path_detail(const std::vector<std::filesystem::path>& paths) {
            ')';
 }
 
-std::expected<bool, Error> check_regular_file(const std::filesystem::path& path,
-                                              ErrorCode failure_code,
-                                              bool allow_absent,
-                                              std::string_view detail) {
-    std::error_code error;
-    const auto status = std::filesystem::symlink_status(path, error);
-    if ((allow_absent && not_found(error)) ||
-        status.type() == std::filesystem::file_type::not_found) {
-        if (allow_absent) {
-            return false;
-        }
-        return std::unexpected(make_error(failure_code, std::string{detail}));
-    }
-    if (error) {
-        return std::unexpected(make_error(
-            failure_code, std::string{detail} + ": " + error.message()));
-    }
-    if (std::filesystem::is_symlink(status) ||
-        !std::filesystem::is_regular_file(status)) {
-        return std::unexpected(make_error(failure_code, std::string{detail}));
-    }
-    return true;
-}
-
-std::expected<void, Error>
-remove_temporary_file(const std::filesystem::path& path) {
-    std::error_code error;
-    std::filesystem::remove(path, error);
-    if (error) {
-        return std::unexpected(
-            make_error(ErrorCode::WorkspaceFailure,
-                       "failed to remove temporary file: " + error.message()));
-    }
-    return {};
-}
-
-std::expected<void, Error>
-prepare_workspace_file(const std::filesystem::path& path) {
-    auto present = check_regular_file(path,
-                                      ErrorCode::WorkspaceFailure,
-                                      true,
-                                      "temporary file has invalid type");
-    if (!present) {
-        return std::unexpected(present.error());
-    }
-    return *present ? remove_temporary_file(path)
-                    : std::expected<void, Error>{};
-}
-
-std::expected<void, Error> verify_content(const std::filesystem::path& path,
-                                          std::string_view identifier,
-                                          std::uint64_t expected_size,
-                                          ErrorCode io_failure) {
-    if (auto regular = check_regular_file(
-            path, io_failure, false, "file is not regular for verification");
-        !regular) {
-        return std::unexpected(regular.error());
-    }
-    std::error_code error;
-    const auto actual_size = std::filesystem::file_size(path, error);
-    if (error) {
-        return std::unexpected(make_error(
-            io_failure, "could not read file size: " + error.message()));
-    }
-    if (actual_size != expected_size) {
-        return std::unexpected(make_error(
-            ErrorCode::IntegrityFailure, "object size does not match history"));
-    }
-    auto actual_hash = crypto::content::hash_file(path);
-    if (!actual_hash) {
-        return std::unexpected(make_error(io_failure, actual_hash.error()));
-    }
-    if (hash_hex(*actual_hash) != identifier) {
-        return std::unexpected(make_error(
-            ErrorCode::IntegrityFailure, "object hash does not match history"));
-    }
-    return {};
-}
-
 std::expected<AuditState, Error>
 audit_object(transport::Transport& storage,
              KeySpan key,
@@ -207,62 +115,32 @@ audit_object(transport::Transport& storage,
     }
     const auto remote_identifier =
         crypto::content_identifier(key, *plaintext_hash);
-    const auto encrypted =
-        platform::workspace_file(workspace, index, ".audit.enc");
-    const auto plaintext =
-        platform::workspace_file(workspace, index, ".audit.plain");
-    if (auto p = prepare_workspace_file(encrypted); !p)
-        return std::unexpected(p.error());
-    if (auto p = prepare_workspace_file(plaintext); !p)
-        return std::unexpected(p.error());
-
-    const auto cleanup_temporaries = [&]() -> std::expected<void, Error> {
-        for (const auto& path : {encrypted, plaintext}) {
-            if (auto removed = remove_temporary_file(path); !removed) {
-                return std::unexpected(removed.error());
-            }
-        }
-        return {};
-    };
-
-    auto downloaded = transport::get(storage, remote_identifier, encrypted);
-    if (!downloaded) {
-        if (auto cleaned = cleanup_temporaries(); !cleaned)
-            return std::unexpected(cleaned.error());
-        if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
-            return AuditState::Missing;
-        }
+    auto audited = history_storage::audit_content_object(storage,
+                                                         key,
+                                                         remote_identifier,
+                                                         reference.identifier,
+                                                         reference.size,
+                                                         workspace.root,
+                                                         index);
+    if (!audited) {
+        const auto code =
+            audited.error().code == history_storage::ErrorCode::TransportFailure
+                ? ErrorCode::TransportFailure
+                : ErrorCode::WorkspaceFailure;
         return std::unexpected(
-            transport_error(downloaded.error(), reference.identifier));
+            make_error(code,
+                       audited.error().detail,
+                       code == ErrorCode::TransportFailure
+                           ? std::optional<std::string>{reference.identifier}
+                           : std::nullopt));
     }
-
-    if (auto regular = check_regular_file(encrypted,
-                                          ErrorCode::WorkspaceFailure,
-                                          false,
-                                          "invalid temporary download");
-        !regular) {
-        return std::unexpected(regular.error());
+    if (audited->state == history_storage::ContentObjectState::Missing) {
+        return AuditState::Missing;
     }
-
-    AuditState result = AuditState::Healthy;
-    if (!crypto::decrypt_file(encrypted, plaintext, key)) {
-        result = AuditState::Corrupt;
-    } else {
-        auto verified = verify_content(plaintext,
-                                       reference.identifier,
-                                       reference.size,
-                                       ErrorCode::WorkspaceFailure);
-        if (!verified) {
-            if (verified.error().code != ErrorCode::IntegrityFailure) {
-                return std::unexpected(verified.error());
-            }
-            result = AuditState::Corrupt;
-        }
+    if (audited->state == history_storage::ContentObjectState::Corrupt) {
+        return AuditState::Corrupt;
     }
-
-    if (auto cleaned = cleanup_temporaries(); !cleaned)
-        return std::unexpected(cleaned.error());
-    return result;
+    return AuditState::Healthy;
 }
 
 } // namespace

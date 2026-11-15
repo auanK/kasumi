@@ -23,6 +23,50 @@ struct ReferencedContent {
 
 } // namespace
 
+namespace {
+
+std::unexpected<Error> ws_fail(std::string detail) {
+    return std::unexpected(
+        detail::error(ErrorCode::WorkspaceFailure, std::move(detail)));
+}
+
+std::expected<void, Error> check_temp_file(const std::filesystem::path& path,
+                                           bool remove_if_present,
+                                           std::string_view detail) {
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    if ((remove_if_present && error == std::errc::no_such_file_or_directory) ||
+        status.type() == std::filesystem::file_type::not_found) {
+        return remove_if_present ? std::expected<void, Error>{}
+                                 : ws_fail(std::string{detail});
+    }
+    if (error || std::filesystem::is_symlink(status) ||
+        !std::filesystem::is_regular_file(status)) {
+        return ws_fail(error ? std::string{detail} + ": " + error.message()
+                             : std::string{detail});
+    }
+    if (remove_if_present && !std::filesystem::remove(path, error) && error) {
+        return ws_fail("failed to remove temporary file: " + error.message());
+    }
+    return {};
+}
+
+std::expected<void, Error>
+remove_temp_pair(const std::filesystem::path& enc,
+                 const std::filesystem::path& plain) {
+    for (const auto& path : {enc, plain}) {
+        std::error_code error;
+        std::filesystem::remove(path, error);
+        if (error) {
+            return ws_fail("failed to remove temporary file: " +
+                           error.message());
+        }
+    }
+    return {};
+}
+
+} // namespace
+
 std::expected<ContentAuditResult, Error>
 audit_content_object(transport::Transport& storage,
                      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
@@ -35,38 +79,61 @@ audit_content_object(transport::Transport& storage,
         workspace / ("content-" + std::to_string(sequence) + ".enc");
     const auto plaintext =
         workspace / ("content-" + std::to_string(sequence) + ".plain");
-    const auto cleanup = [&] {
-        detail::remove_file(encrypted);
-        detail::remove_file(plaintext);
-    };
-    cleanup();
+    for (const auto& path : {encrypted, plaintext}) {
+        if (auto ok =
+                check_temp_file(path, true, "temporary file has invalid type");
+            !ok) {
+            return std::unexpected(ok.error());
+        }
+    }
 
     const auto downloaded = transport::get(storage, content_id, encrypted);
     if (!downloaded) {
-        cleanup();
+        if (auto cleaned = remove_temp_pair(encrypted, plaintext); !cleaned) {
+            return std::unexpected(cleaned.error());
+        }
         if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
             return ContentAuditResult{.state = ContentObjectState::Missing};
         }
         return std::unexpected(detail::transport_error(downloaded.error()));
     }
+    if (auto ok =
+            check_temp_file(encrypted, false, "invalid temporary download");
+        !ok) {
+        return std::unexpected(ok.error());
+    }
 
     ContentAuditResult result{.state = ContentObjectState::Corrupt};
     if (crypto::decrypt_file(encrypted, plaintext, key)) {
+        if (auto ok = check_temp_file(
+                plaintext, false, "file is not regular for verification");
+            !ok) {
+            return std::unexpected(ok.error());
+        }
         std::error_code plain_size_error;
         const auto plain_size =
             std::filesystem::file_size(plaintext, plain_size_error);
+        if (plain_size_error) {
+            return ws_fail("could not read file size: " +
+                           plain_size_error.message());
+        }
         const auto actual_hash = crypto::content::hash_file(plaintext);
-        if (actual_hash && !plain_size_error &&
-            (!expected_size || plain_size == *expected_size) &&
+        if (!actual_hash) {
+            return ws_fail(actual_hash.error());
+        }
+        const auto actual_hex = hash_hex(*actual_hash);
+        if ((!expected_size || plain_size == *expected_size) &&
             (!expected_plaintext_hash ||
-             hash_hex(*actual_hash) == *expected_plaintext_hash) &&
+             actual_hex == *expected_plaintext_hash) &&
             crypto::content_identifier(key, *actual_hash) == content_id) {
             result.state = ContentObjectState::Present;
-            result.plaintext_hash = hash_hex(*actual_hash);
+            result.plaintext_hash = actual_hex;
             result.size = plain_size;
         }
     }
-    cleanup();
+    if (auto cleaned = remove_temp_pair(encrypted, plaintext); !cleaned) {
+        return std::unexpected(cleaned.error());
+    }
     return result;
 }
 

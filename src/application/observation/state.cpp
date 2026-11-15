@@ -55,6 +55,7 @@ struct IgnoreIdentity {
     bool regular_file = false;
     Hash hash{};
     std::uint64_t size = 0;
+    bool operator==(const IgnoreIdentity&) const noexcept = default;
 };
 
 IgnoreIdentity ignore_identity(const Snapshot& tree) {
@@ -103,14 +104,6 @@ local_ignore_identity(const std::filesystem::path& local_root) {
     return identity;
 }
 
-bool same_ignore_identity(const IgnoreIdentity& left,
-                          const IgnoreIdentity& right) noexcept {
-    return left.present == right.present && left.directory == right.directory &&
-           left.regular_file == right.regular_file &&
-           (!left.regular_file ||
-            (left.hash == right.hash && left.size == right.size));
-}
-
 std::expected<kasumi::ignore::IgnoreList, std::string>
 load_remote_ignore_list(transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
@@ -151,10 +144,8 @@ effective_ignore_list(const std::filesystem::path& local_root,
         return std::unexpected(local_version.error());
     }
     const auto remote_version = ignore_identity(remote_tree);
-    const bool local_changed =
-        !same_ignore_identity(*local_version, base_version);
-    const bool remote_changed =
-        !same_ignore_identity(remote_version, base_version);
+    const bool local_changed = *local_version != base_version;
+    const bool remote_changed = remote_version != base_version;
 
     // Preserve local-wins behavior for local edits and simultaneous changes.
     if (local_changed) {
@@ -182,30 +173,6 @@ reconciliation::Error state_error(reconciliation::ErrorCode code,
         .code = code, .detail = std::move(detail), .paths = {}};
 }
 
-std::optional<reconciliation::EpochRetentionPolicy> epoch_policy(
-    const std::optional<history_storage::epoch::VerifiedEpoch>& epoch) {
-    if (!epoch) {
-        return std::nullopt;
-    }
-    return reconciliation::EpochRetentionPolicy{
-        .min_history_depth = epoch->value.policy.min_history_depth,
-        .min_history_age_hours = epoch->value.policy.min_history_age_hours};
-}
-
-std::vector<reconciliation::EpochAnchor> epoch_anchors(
-    const std::optional<history_storage::epoch::VerifiedEpoch>& epoch) {
-    std::vector<reconciliation::EpochAnchor> result;
-    if (!epoch) {
-        return result;
-    }
-    result.reserve(epoch->value.anchors.size());
-    for (const auto& anchor : epoch->value.anchors) {
-        result.push_back(
-            {.commit_id = anchor.commit_id, .height = anchor.height});
-    }
-    return result;
-}
-
 void ensure_file_cache_loaded(LocalObservationSession& session) {
     if (session.cache_loaded) {
         return;
@@ -220,7 +187,7 @@ void ensure_file_cache_loaded(LocalObservationSession& session) {
 }
 
 reconciliation::StorageState to_storage_state(history::StorageView& observed) {
-    return reconciliation::StorageState{
+    reconciliation::StorageState result{
         .tree = std::move(observed.effective_tree),
         .object_identifiers = std::move(observed.content_identifiers),
         .reachable_commits = std::move(observed.reachable_commits),
@@ -229,17 +196,25 @@ reconciliation::StorageState to_storage_state(history::StorageView& observed) {
         .marked_head_identifiers = std::move(observed.marked_head_identifiers),
         .logical_heads = std::move(observed.logical_heads),
         .ancestral_marked_heads = std::move(observed.ancestral_marked_heads),
-        .epoch_vault_id =
-            observed.epoch ? observed.epoch->value.vault_id : std::string{},
-        .epoch_id =
-            observed.epoch ? observed.epoch->reference.epoch_id : std::string{},
-        .epoch_sequence = observed.epoch ? observed.epoch->value.sequence : 0,
-        .epoch_policy = epoch_policy(observed.epoch),
-        .epoch_anchors = epoch_anchors(observed.epoch),
         .generation = observed.observed_height,
         .history_present = observed.history_present,
         .history_has_conflicts = observed.has_conflicts,
     };
+    if (observed.epoch) {
+        result.epoch_vault_id = observed.epoch->value.vault_id;
+        result.epoch_id = observed.epoch->reference.epoch_id;
+        result.epoch_sequence = observed.epoch->value.sequence;
+        result.epoch_policy = reconciliation::EpochRetentionPolicy{
+            .min_history_depth = observed.epoch->value.policy.min_history_depth,
+            .min_history_age_hours =
+                observed.epoch->value.policy.min_history_age_hours};
+        result.epoch_anchors.reserve(observed.epoch->value.anchors.size());
+        for (const auto& anchor : observed.epoch->value.anchors) {
+            result.epoch_anchors.push_back(
+                {.commit_id = anchor.commit_id, .height = anchor.height});
+        }
+    }
+    return result;
 }
 
 } // namespace
