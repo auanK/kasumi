@@ -1,5 +1,6 @@
 #include "crypto/file_crypto.hpp"
 
+#include "core/wire.hpp"
 #include "crypto/physical_hash.hpp"
 #include "crypto/secure_memory.hpp"
 #include "platform/durability.hpp"
@@ -24,24 +25,8 @@ inline constexpr std::array<std::uint8_t, 8> format_magic{
     'K', 'A', 'S', 'U', 'M', 'I', 2, 0};
 inline constexpr std::size_t header_ad_size =
     format_magic.size() + NONCE_SIZE + sizeof(std::uint64_t);
-inline constexpr std::size_t header_size = FILE_HEADER_SIZE;
 inline constexpr std::size_t chunk_ad_size =
     header_ad_size + 2 * sizeof(std::uint64_t);
-
-void encode_u64_le(std::uint64_t value, std::uint8_t* output) noexcept {
-    for (std::size_t index = 0; index < sizeof(value); ++index) {
-        output[index] =
-            static_cast<std::uint8_t>((value >> (index * 8)) & 0xffU);
-    }
-}
-
-std::uint64_t decode_u64_le(const std::uint8_t* input) noexcept {
-    std::uint64_t result = 0;
-    for (std::size_t index = 0; index < sizeof(result); ++index) {
-        result |= static_cast<std::uint64_t>(input[index]) << (index * 8);
-    }
-    return result;
-}
 
 std::array<std::uint8_t, header_ad_size>
 make_header_ad(const std::uint8_t* base_nonce,
@@ -52,8 +37,8 @@ make_header_ad(const std::uint8_t* base_nonce,
                 NONCE_SIZE,
                 result.begin() +
                     static_cast<std::ptrdiff_t>(format_magic.size()));
-    encode_u64_le(plaintext_size,
-                  result.data() + format_magic.size() + NONCE_SIZE);
+    wire::encode_le<std::uint64_t>(
+        plaintext_size, result.data() + format_magic.size() + NONCE_SIZE);
     return result;
 }
 
@@ -63,9 +48,9 @@ make_chunk_ad(const std::array<std::uint8_t, header_ad_size>& header,
               std::uint64_t chunk_size) noexcept {
     std::array<std::uint8_t, chunk_ad_size> result{};
     std::copy(header.begin(), header.end(), result.begin());
-    encode_u64_le(chunk_index, result.data() + header.size());
-    encode_u64_le(chunk_size,
-                  result.data() + header.size() + sizeof(chunk_index));
+    wire::encode_le<std::uint64_t>(chunk_index, result.data() + header.size());
+    wire::encode_le<std::uint64_t>(
+        chunk_size, result.data() + header.size() + sizeof(chunk_index));
     return result;
 }
 
@@ -322,26 +307,22 @@ bool header_mac_op(std::uint8_t* mac,
     return ok;
 }
 
-bool encoded_size_matches(std::uint64_t plaintext_size,
-                          std::uintmax_t input_size) noexcept {
-    constexpr std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+} // namespace
+
+std::optional<std::uint64_t>
+encoded_file_size(std::uint64_t plaintext_size) noexcept {
+    constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
     const auto chunks = plaintext_size / CHUNK_SIZE +
                         (plaintext_size % CHUNK_SIZE != 0 ? 1 : 0);
-
-    if (plaintext_size > maximum - header_size) {
-        return false;
+    if (plaintext_size > maximum - FILE_HEADER_SIZE) {
+        return std::nullopt;
     }
-
-    auto encoded_size = header_size + plaintext_size;
-    if (chunks > (maximum - encoded_size) / MAC_SIZE) {
-        return false;
+    const auto base = FILE_HEADER_SIZE + plaintext_size;
+    if (chunks > (maximum - base) / MAC_SIZE) {
+        return std::nullopt;
     }
-
-    encoded_size += chunks * MAC_SIZE;
-    return input_size == encoded_size;
+    return base + chunks * MAC_SIZE;
 }
-
-} // namespace
 
 std::optional<EncryptionResult>
 encrypt_file_with_hashes(const std::filesystem::path& input_path,
@@ -533,14 +514,14 @@ bool decrypt_file(const std::filesystem::path& input_path,
             std::copy_n(header.data() + format_magic.size(),
                         session.base_nonce.size(),
                         session.base_nonce.data());
-            const auto expected_size =
-                decode_u64_le(header.data() + format_magic.size() + NONCE_SIZE);
+            const auto expected_size = wire::decode_le<std::uint64_t>(
+                header.data() + format_magic.size() + NONCE_SIZE);
 
             input.read(reinterpret_cast<char*>(session.header_mac.data()),
                        static_cast<std::streamsize>(session.header_mac.size()));
             if (input.gcount() !=
                     static_cast<std::streamsize>(session.header_mac.size()) ||
-                !encoded_size_matches(expected_size, input_size) ||
+                encoded_file_size(expected_size) != input_size ||
                 !header_mac_op(session.header_mac.data(),
                                session.base_nonce.data(),
                                header,

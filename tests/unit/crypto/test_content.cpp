@@ -17,12 +17,25 @@
 #include <filesystem>
 #include <future>
 #include <gtest/gtest.h>
+#include <limits>
 #include <span>
 #include <string>
 #include <thread>
 #include <vector>
 
 namespace {
+
+TEST(CryptoFileTest, EncodedSizeIncludesEveryChunkMacAndRejectsOverflow) {
+    using namespace kasumi::crypto;
+    EXPECT_EQ(encoded_file_size(0), FILE_HEADER_SIZE);
+    EXPECT_EQ(encoded_file_size(CHUNK_SIZE),
+              FILE_HEADER_SIZE + CHUNK_SIZE + MAC_SIZE);
+    EXPECT_EQ(encoded_file_size(CHUNK_SIZE + 1),
+              FILE_HEADER_SIZE + CHUNK_SIZE + 1 + 2 * MAC_SIZE);
+    constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
+    EXPECT_FALSE(encoded_file_size(maximum));
+    EXPECT_FALSE(encoded_file_size(maximum - FILE_HEADER_SIZE));
+}
 
 TEST(CryptoContentTest, HashesAnEmptyFile) {
     auto workspace = kasumi::test::make_temp_workspace("content-empty");

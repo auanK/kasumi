@@ -38,6 +38,11 @@ struct EncryptionResult {
     std::string ciphertext_sha256;
 };
 
+// Encoded size including the authenticated header and chunk MACs; rejects
+// overflow.
+std::optional<std::uint64_t>
+encoded_file_size(std::uint64_t plaintext_size) noexcept;
+
 // Encrypts and computes hashes; removes partial output on failure.
 std::optional<EncryptionResult>
 encrypt_file_with_hashes(const std::filesystem::path& input_path,

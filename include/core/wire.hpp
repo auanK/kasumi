@@ -42,19 +42,28 @@ struct Reader {
 // Appends raw bytes to the buffer.
 void write_bytes(Writer& writer, std::span<const std::byte> bytes);
 
+// Callers provide storage for sizeof(T) bytes.
+template <WireScalar T> inline void encode_le(T value, void* output) noexcept {
+    auto bytes = std::bit_cast<std::array<std::byte, sizeof(T)>>(value);
+    if constexpr (std::endian::native != std::endian::little) {
+        std::ranges::reverse(bytes);
+    }
+    std::memcpy(output, bytes.data(), bytes.size());
+}
+
+template <WireScalar T> inline T decode_le(const void* input) noexcept {
+    std::array<std::byte, sizeof(T)> bytes;
+    std::memcpy(bytes.data(), input, bytes.size());
+    if constexpr (std::endian::native != std::endian::little) {
+        std::ranges::reverse(bytes);
+    }
+    return std::bit_cast<T>(bytes);
+}
+
 // Encodes a number in little-endian.
 template <WireScalar T> inline void write(Writer& writer, T value) {
-    using WireInt = std::conditional_t<
-        std::is_integral_v<T>,
-        T,
-        std::conditional_t<sizeof(T) == 4, std::uint32_t, std::uint64_t>>;
-    auto wire_val = std::bit_cast<WireInt>(value);
-    if constexpr (sizeof(WireInt) > 1 &&
-                  std::endian::native != std::endian::little) {
-        wire_val = std::byteswap(wire_val);
-    }
     std::array<std::byte, sizeof(T)> bytes;
-    std::memcpy(bytes.data(), &wire_val, sizeof(T));
+    encode_le(value, bytes.data());
     write_bytes(writer, bytes);
 }
 
@@ -84,17 +93,7 @@ template <WireScalar T> inline std::expected<T, Error> read(Reader& reader) {
     if (!bytes) {
         return std::unexpected(bytes.error());
     }
-    using WireInt = std::conditional_t<
-        std::is_integral_v<T>,
-        T,
-        std::conditional_t<sizeof(T) == 4, std::uint32_t, std::uint64_t>>;
-    WireInt wire_val;
-    std::memcpy(&wire_val, bytes->data(), sizeof(T));
-    if constexpr (sizeof(WireInt) > 1 &&
-                  std::endian::native != std::endian::little) {
-        wire_val = std::byteswap(wire_val);
-    }
-    return std::bit_cast<T>(wire_val);
+    return decode_le<T>(bytes->data());
 }
 
 // Decodes the underlying value of an enum.

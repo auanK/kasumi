@@ -42,6 +42,16 @@ namespace kasumi::application::sync::journal {
 
 namespace {
 
+struct SessionGuard {
+    Session* session;
+    bool keep = false;
+    ~SessionGuard() {
+        if (!keep && session) {
+            session->invalidate();
+        }
+    }
+};
+
 inline constexpr std::array<std::uint8_t, 4> journal_magic{'K', 'T', 'X', '3'};
 inline constexpr std::array<std::uint8_t, 4> journal_log_magic{
     'K', 'T', 'D', '3'};
@@ -92,21 +102,6 @@ inline constexpr std::size_t maximum_pending_path_count = 1'000'000;
 
 bool path_not_found(const std::error_code& error) noexcept {
     return error == std::errc::no_such_file_or_directory;
-}
-
-template <typename T> void encode_le(T value, std::uint8_t* output) noexcept {
-    for (std::size_t index = 0; index < sizeof(value); ++index) {
-        output[index] =
-            static_cast<std::uint8_t>((value >> (index * 8)) & 0xffU);
-    }
-}
-
-template <typename T> T decode_le(const std::uint8_t* input) noexcept {
-    T value = 0;
-    for (std::size_t index = 0; index < sizeof(value); ++index) {
-        value |= static_cast<T>(input[index]) << (index * 8);
-    }
-    return value;
 }
 
 std::expected<void, std::string> validate_paths(const Paths& paths) {
@@ -344,11 +339,11 @@ validate_log_entry_header(std::span<const std::uint8_t> bytes,
         return std::unexpected("incompatible journal delta format");
     }
     if (count >= maximum_delta_count ||
-        decode_le<std::uint64_t>(ptr + 4) != count ||
+        wire::decode_le<std::uint64_t>(ptr + 4) != count ||
         std::memcmp(chain.data(), ptr + 12, 32) != 0) {
         return std::unexpected("journal delta sequence or chain mismatch");
     }
-    const auto payload_size = decode_le<std::uint32_t>(ptr + 44);
+    const auto payload_size = wire::decode_le<std::uint32_t>(ptr + 44);
     if (payload_size > maximum_payload_size ||
         payload_size > limit - offset - log_header_size) {
         return std::unexpected("invalid or truncated journal delta payload");
@@ -522,9 +517,9 @@ make_delta_aad(std::uint64_t seq,
                std::string_view operation_id) {
     std::vector<std::uint8_t> aad(48 + operation_id.size());
     std::copy(journal_log_magic.begin(), journal_log_magic.end(), aad.begin());
-    encode_le<std::uint64_t>(seq, aad.data() + 4);
+    wire::encode_le<std::uint64_t>(seq, aad.data() + 4);
     std::memcpy(aad.data() + 12, prev_hash.data(), kasumi::HASH_SIZE);
-    encode_le<std::uint32_t>(payload_len, aad.data() + 44);
+    wire::encode_le<std::uint32_t>(payload_len, aad.data() + 44);
     std::memcpy(aad.data() + 48, operation_id.data(), operation_id.size());
     return aad;
 }
@@ -787,8 +782,8 @@ std::expected<void, std::string> write_tip(const Paths& paths,
     const auto& magic = retirement ? retirement_magic : tip_magic;
     std::copy(magic.begin(), magic.end(), bytes.begin());
     std::memcpy(bytes.data() + 4, tip.snapshot.data(), 32);
-    encode_le<std::uint64_t>(tip.bytes, bytes.data() + 36);
-    encode_le<std::uint64_t>(tip.count, bytes.data() + 44);
+    wire::encode_le<std::uint64_t>(tip.bytes, bytes.data() + 36);
+    wire::encode_le<std::uint64_t>(tip.count, bytes.data() + 44);
     std::memcpy(bytes.data() + 52, tip.chain.data(), 32);
     if (auto sealed = seal_aead_frame(
             bytes, tip_aad_size, std::span{bytes}.first(tip_aad_size), key);
@@ -854,8 +849,8 @@ read_tip(const Paths& paths, const crypto::Key& key, bool retirement = false) {
         return std::unexpected(ok.error());
     Tip tip;
     std::memcpy(tip.snapshot.data(), bytes->data() + 4, 32);
-    tip.bytes = decode_le<std::uint64_t>(bytes->data() + 36);
-    tip.count = decode_le<std::uint64_t>(bytes->data() + 44);
+    tip.bytes = wire::decode_le<std::uint64_t>(bytes->data() + 36);
+    tip.count = wire::decode_le<std::uint64_t>(bytes->data() + 44);
     std::memcpy(tip.chain.data(), bytes->data() + 52, 32);
     if (tip.bytes > maximum_log_size || tip.count > maximum_delta_count ||
         tip.count > tip.bytes / log_header_size)
@@ -955,7 +950,7 @@ std::expected<Replay, std::string> replay(const Paths& paths,
     if (hasher::hash_bytes(snapshot->data(), snapshot->size()) != tip->snapshot)
         return std::unexpected(
             "journal snapshot/confirmation generation mismatch");
-    auto size = decode_le<std::uint64_t>(snapshot->data() + 4);
+    auto size = wire::decode_le<std::uint64_t>(snapshot->data() + 4);
     if (size != snapshot->size() - header_size || size > maximum_payload_size)
         return std::unexpected("invalid journal snapshot payload size");
     SensitiveBytes plaintext(static_cast<std::size_t>(size));
@@ -1041,7 +1036,7 @@ std::expected<Tip, std::string> save_snapshot(const Paths& paths,
         return std::unexpected("journal snapshot exceeds limit");
     std::vector<std::uint8_t> bytes(header_size + encoded->size());
     std::copy(journal_magic.begin(), journal_magic.end(), bytes.begin());
-    encode_le<std::uint64_t>(encoded->size(), bytes.data() + 4);
+    wire::encode_le<std::uint64_t>(encoded->size(), bytes.data() + 4);
     if (auto sealed = seal_aead_frame(
             bytes, aad_size, std::span{bytes}.first(aad_size), key, *encoded);
         !sealed)
@@ -1502,14 +1497,7 @@ save(const Paths& paths,
     try {
         if (session && session->state == SessionState::Retired)
             return std::unexpected("journal session is retired");
-        struct SessionGuard {
-            Session* session;
-            bool keep = false;
-            ~SessionGuard() {
-                if (!keep && session)
-                    session->invalidate();
-            }
-        } guard{session};
+        SessionGuard guard{session};
         if (mode != SaveMode::Advance && mode != SaveMode::Rollback)
             return std::unexpected("unknown journal save mode");
         auto structural = validate_paths(paths);
@@ -1661,23 +1649,14 @@ load(const Paths& paths,
      Session* session) {
     std::lock_guard lock(journal_mutex);
     KeyGuard journal_key{crypto::derive_key(key, crypto::KeyPurpose::Journal)};
-    const auto invalidate_session = [&]() noexcept {
-        if (session)
-            session->invalidate();
-    };
-    const auto fail = [&](std::string message)
-        -> std::expected<std::optional<transaction::Record>, std::string> {
-        invalidate_session();
-        return std::unexpected(std::move(message));
-    };
+    SessionGuard guard{session};
     const auto retire_and_clear = [&]()
         -> std::expected<std::optional<transaction::Record>, std::string> {
         auto cleared = clear_locked(paths, journal_key.value);
         if (!cleared)
-            return fail(cleared.error());
+            return std::unexpected(cleared.error());
         if (session) {
             session->state = SessionState::Retired;
-            session->invalidate();
         }
         return std::optional<transaction::Record>{};
     };
@@ -1687,40 +1666,42 @@ load(const Paths& paths,
         const auto key_id = journal_key_id(journal_key);
         if (session && session->is_valid() &&
             !session->bound_to(paths, key_id)) {
-            return fail("active journal session paths/key changed");
+            return std::unexpected("active journal session paths/key changed");
         }
         auto structural = validate_paths(paths);
         if (!structural)
-            return fail(structural.error());
+            return std::unexpected(structural.error());
         auto retired = read_status(retired_path(paths));
         if (!retired)
-            return fail(retired.error());
+            return std::unexpected(retired.error());
         if (!missing(*retired))
             return retire_and_clear();
         auto outer =
             validate_parent_directory(paths.final_path.parent_path(), true);
         if (!outer)
-            return fail(outer.error());
+            return std::unexpected(outer.error());
         auto parent = validate_parent_directory(paths.final_path, true);
         if (!parent)
-            return fail(parent.error());
+            return std::unexpected(parent.error());
         auto directory = read_status(paths.final_path.parent_path());
         if (!directory)
-            return fail(directory.error());
+            return std::unexpected(directory.error());
         if (missing(*directory)) {
-            invalidate_session();
-            if (session)
+            if (session) {
+                session->invalidate();
                 session->state = SessionState::Uninitialized;
+            }
+            guard.keep = true;
             return std::optional<transaction::Record>{};
         }
         auto proof = read_status(retirement_path(paths));
         if (!proof)
-            return fail(proof.error());
+            return std::unexpected(proof.error());
         if (!missing(*proof))
             return retire_and_clear();
         auto loaded = replay(paths, journal_key.value);
         if (!loaded)
-            return fail(loaded.error());
+            return std::unexpected(loaded.error());
         journal_fault_test::hit("loaded", &loaded->record);
         if (auto bound =
                 SessionAccess::bind(session,
@@ -1729,11 +1710,15 @@ load(const Paths& paths,
                                     transaction::Record{loaded->record},
                                     loaded->tip);
             !bound) {
-            return fail(bound.error());
+            return std::unexpected(bound.error());
         }
-        return std::optional<transaction::Record>{std::move(loaded->record)};
+        auto result =
+            std::optional<transaction::Record>{std::move(loaded->record)};
+        guard.keep = true;
+        return result;
     } catch (const std::exception& error) {
-        return fail(std::string{"failed to load journal: "} + error.what());
+        return std::unexpected(std::string{"failed to load journal: "} +
+                               error.what());
     }
 }
 
@@ -1743,24 +1728,19 @@ clear(const Paths& paths,
       Session* session) {
     std::lock_guard lock(journal_mutex);
     KeyGuard journal_key{crypto::derive_key(key, crypto::KeyPurpose::Journal)};
+    SessionGuard guard{session};
     try {
         const auto key_id = journal_key_id(journal_key);
         if (session && session->is_valid() &&
             !session->bound_to(paths, key_id)) {
-            session->invalidate();
             return std::unexpected("active journal session paths/key changed");
         }
         auto result = clear_locked(paths, journal_key.value);
         if (result && session) {
             session->state = SessionState::Retired;
-            session->invalidate();
-        } else if (!result && session) {
-            session->invalidate();
         }
         return result;
     } catch (const std::exception& error) {
-        if (session)
-            session->invalidate();
         return std::unexpected(std::string{"failed to clear journal: "} +
                                error.what());
     }

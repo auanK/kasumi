@@ -264,26 +264,6 @@ fetch_decrypt_and_verify(transport::Transport& storage,
 
 namespace detail {
 
-std::optional<std::uintmax_t>
-encoded_content_size(std::uint64_t plaintext_size) noexcept {
-    constexpr auto header_size =
-        static_cast<std::uintmax_t>(crypto::FILE_HEADER_SIZE);
-    constexpr auto maximum = std::numeric_limits<std::uintmax_t>::max();
-
-    if (plaintext_size > maximum - header_size) {
-        return std::nullopt;
-    }
-
-    const auto chunks = plaintext_size / crypto::CHUNK_SIZE +
-                        (plaintext_size % crypto::CHUNK_SIZE != 0 ? 1 : 0);
-    auto encoded_size = header_size + plaintext_size;
-    if (chunks > (maximum - encoded_size) / crypto::MAC_SIZE) {
-        return std::nullopt;
-    }
-    encoded_size += chunks * crypto::MAC_SIZE;
-    return encoded_size;
-}
-
 std::expected<void, MutationError> verify_uploaded_content_object(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
@@ -348,7 +328,8 @@ std::expected<void, MutationError> verify_uploaded_content_object(
                                           operation_index));
     }
 
-    const auto expected_ciphertext_size = encoded_content_size(expected_size);
+    const auto expected_ciphertext_size =
+        crypto::encoded_file_size(expected_size);
     if (!expected_ciphertext_size) {
         return std::unexpected(
             make_error(MutationErrorCode::IntegrityMismatch,
@@ -1304,22 +1285,28 @@ apply_operation(const Operation& operation,
             return sync_parent_checked(*path, operation_index);
         }
 
-        case Action::DeleteLocal: {
+        case Action::DeleteLocal:
+        case Action::DeleteLocalDirectory: {
+            const bool directory =
+                operation.action == Action::DeleteLocalDirectory;
             auto path =
                 resolve_local_path(local_root, operation.path, operation_index);
             if (!path) {
                 return std::unexpected(path.error());
             }
-            auto prepared =
-                detail::validate_prepared_destination(operation,
-                                                      operation_index,
-                                                      *path,
-                                                      workspace,
-                                                      progress,
-                                                      condition);
-            if (!prepared)
-                return prepared;
-            mutation_fault_test::hit("before_delete_local", *path);
+            if (!directory) {
+                auto prepared =
+                    detail::validate_prepared_destination(operation,
+                                                          operation_index,
+                                                          *path,
+                                                          workspace,
+                                                          progress,
+                                                          condition);
+                if (!prepared) {
+                    return prepared;
+                }
+                mutation_fault_test::hit("before_delete_local", *path);
+            }
             // shortcut: validation and removal are separate; upgrade if
             // external-writer isolation becomes required.
             auto status = read_status(*path, operation_index);
@@ -1336,48 +1323,12 @@ apply_operation(const Operation& operation,
                                *path,
                                operation_index));
             }
-            if (!std::filesystem::is_regular_file(*status)) {
+            if (directory ? !std::filesystem::is_directory(*status)
+                          : !std::filesystem::is_regular_file(*status)) {
                 return std::unexpected(
                     make_error(MutationErrorCode::DestinationConflict,
-                               "path is not a regular file",
-                               *path,
-                               operation_index));
-            }
-            std::error_code error;
-            std::filesystem::remove(*path, error);
-            if (error)
-                return std::unexpected(
-                    make_error(MutationErrorCode::LocalIo,
-                               "failed to remove file: " + error.message(),
-                               *path,
-                               operation_index));
-            return sync_parent_checked(*path, operation_index);
-        }
-
-        case Action::DeleteLocalDirectory: {
-            auto path =
-                resolve_local_path(local_root, operation.path, operation_index);
-            if (!path) {
-                return std::unexpected(path.error());
-            }
-            auto status = read_status(*path, operation_index);
-            if (!status) {
-                return std::unexpected(status.error());
-            }
-            if (missing(*status)) {
-                return {};
-            }
-            if (std::filesystem::is_symlink(*status)) {
-                return std::unexpected(
-                    make_error(MutationErrorCode::UnsafePath,
-                               "removing symlinks is not allowed",
-                               *path,
-                               operation_index));
-            }
-            if (!std::filesystem::is_directory(*status)) {
-                return std::unexpected(
-                    make_error(MutationErrorCode::DestinationConflict,
-                               "path is not a directory",
+                               directory ? "path is not a directory"
+                                         : "path is not a regular file",
                                *path,
                                operation_index));
             }
@@ -1385,8 +1336,8 @@ apply_operation(const Operation& operation,
             std::filesystem::remove(*path, error);
             if (error) {
                 bool directory_not_empty =
-                    error == std::errc::directory_not_empty;
-                if (!directory_not_empty) {
+                    directory && error == std::errc::directory_not_empty;
+                if (directory && !directory_not_empty) {
                     std::error_code inspection_error;
                     const bool empty =
                         std::filesystem::is_empty(*path, inspection_error);
@@ -1396,13 +1347,16 @@ apply_operation(const Operation& operation,
                     directory_not_empty ? MutationErrorCode::DestinationConflict
                                         : MutationErrorCode::LocalIo,
                     directory_not_empty
-                        ? "directory contains entries not observed "
-                          "as ignored or managed"
-                        : "failed to remove directory: " + error.message(),
+                        ? "directory contains entries not observed as ignored "
+                          "or managed"
+                        : std::string{"failed to remove "} +
+                              (directory ? "directory: " : "file: ") +
+                              error.message(),
                     *path,
                     operation_index));
             }
-            return {};
+            return directory ? std::expected<void, MutationError>{}
+                             : sync_parent_checked(*path, operation_index);
         }
 
         case Action::DeleteRemote:

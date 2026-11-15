@@ -14,6 +14,17 @@
 
 namespace {
 
+TEST(WireTest, RawLittleEndianUsesExactBytesInUnalignedStorage) {
+    std::array<std::uint8_t, 10> bytes;
+    bytes.fill(0xaa);
+    constexpr std::uint64_t value = 0xfedcba9876543210ULL;
+    wire::encode_le(value, bytes.data() + 1);
+    EXPECT_EQ(bytes,
+              (std::array<std::uint8_t, 10>{
+                  0xaa, 0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0xaa}));
+    EXPECT_EQ(wire::decode_le<std::uint64_t>(bytes.data() + 1), value);
+}
+
 constexpr std::size_t default_string_limit = 4096;
 
 template <typename T, std::size_t N>
