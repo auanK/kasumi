@@ -15,6 +15,36 @@
 
 namespace kasumi::cli {
 
+int run_profile_query(const application::ExecutionEnvironment& environment,
+                      std::string_view profile_name) {
+    auto profiles = application::list_profiles(environment);
+    if (!profiles) {
+        print_error_line(profiles.error().detail);
+        return 1;
+    }
+    for (const auto& profile : *profiles) {
+        if (profile_name.empty()) {
+            std::println("{}", profile.name);
+        } else if (profile.name == profile_name) {
+            i18n::println(
+                i18n::Key::WizardProfileDetails,
+                profile.name,
+                platform::path::to_utf8(profile.local_dir),
+                profile.remote_dir,
+                application::to_string(application::inspect_profile_local_state(
+                    environment, profile.name)),
+                profile.min_history_depth,
+                profile.min_history_age_hours);
+            return 0;
+        }
+    }
+    if (!profile_name.empty()) {
+        print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));
+        return 1;
+    }
+    return 0;
+}
+
 int run_config_wizard(const application::ExecutionEnvironment& environment) {
     const auto prompt_line = [](std::string_view label, std::string& value) {
         std::print("{}", label);
@@ -25,7 +55,6 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             platform::cancellation::request();
             return false;
         }
-        std::println("");
         return !platform::cancellation::requested();
     };
     const auto report_result =
@@ -52,14 +81,13 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         if (profiles.empty()) {
             i18n::println(i18n::Key::WizardNoProfiles);
         } else {
+            i18n::println(i18n::Key::WizardProfileListHeader);
             for (const auto& prof : profiles) {
                 const auto state = application::inspect_profile_local_state(
                     environment, prof.name);
                 i18n::println(i18n::Key::WizardProfileListEntry,
                               prof.name,
-                              application::to_string(state),
-                              platform::path::to_utf8(prof.local_dir),
-                              prof.remote_dir);
+                              application::to_string(state));
             }
         }
 
@@ -67,6 +95,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         if (!prompt_line(i18n::tr(i18n::Key::WizardMenu), choice)) {
             break;
         }
+        std::println();
         if (choice.size() == 1) {
             choice[0] = static_cast<char>(
                 std::tolower(static_cast<unsigned char>(choice[0])));
@@ -88,6 +117,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                              new_profile)) {
                 break;
             }
+            std::println();
             if (std::ranges::any_of(profiles, [&](const auto& profile) {
                     return profile.name == new_profile;
                 })) {
@@ -102,6 +132,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                              new_remote)) {
                 break;
             }
+            std::println();
             if (!platform::path::from_utf8(new_local).is_absolute()) {
                 print_error_line(
                     i18n::tr(i18n::Key::WizardLocalPathMustBeAbsolute));

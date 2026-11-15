@@ -71,6 +71,8 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 | Purpose | Command |
 |---|---|
 | Manage local profiles | `kasumi config` |
+| List profile names | `kasumi list` |
+| Show profile settings and local state | `kasumi show <profile>` |
 | Inspect the current plan | `kasumi status <profile>` or `kasumi sync <profile> --dry-run` |
 | Synchronize | `kasumi sync <profile>` |
 | Audit referenced payloads | `kasumi fsck <profile>` |

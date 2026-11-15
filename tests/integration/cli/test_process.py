@@ -78,6 +78,9 @@ class CliProcessTest(unittest.TestCase):
             ("unknown-command",),
             ("remote", "contents"),
             ("remote", "get", "demo", "source"),
+            ("list", "demo"),
+            ("show",),
+            ("show", "demo", "extra"),
             ("sync", "demo", "--unknown"),
             ("sync", "demo", "--full", "--full"),
             ("sync", "demo", "--dry-run", "--initial"),
@@ -282,14 +285,26 @@ class CliProcessTest(unittest.TestCase):
         profiles = tomllib.loads(config.read_text(encoding="utf-8"))["profiles"]
         self.assertEqual(Path(profiles["demo"]["local_dir"]), local)
         self.assertEqual(profiles["demo"]["remote_dir"], str(remote))
+        before = self._tree_snapshot(data)
+        names = self.invoke_raw("list")
+        self.assertEqual(names.returncode, 0, names.stderr)
+        self.assertEqual(names.stdout.splitlines(), [b"demo"])
+        details = self.invoke_raw("show", "demo")
+        self.assertEqual(details.returncode, 0, details.stderr)
+        self.assertIn(str(local).encode(), details.stdout)
+        self.assertIn(str(remote).encode(), details.stdout)
+        self.assertNotIn(source_key.read_bytes(), details.stdout)
+        self.assertEqual(self.invoke_raw("show", "absent").returncode, 1)
+        self.assertEqual(self._tree_snapshot(data), before)
+        self.assertFalse(remote.exists())
         listed = self.invoke("config", input=b"q\n")
-        self.assertIn(b"- demo [Initialized]", listed)
+        self.assertRegex(listed, rb"\bdemo\s+Initialized\b")
         self.invoke("status", "demo", "--full")
 
         self.invoke("sync", "demo")
         self.invoke("remote", "contents", "demo", "--audit")
         listed = self.invoke("config", input=b"q\n")
-        self.assertIn(b"- demo [Ready]", listed)
+        self.assertRegex(listed, rb"\bdemo\s+Ready\b")
         remote_snapshot = self._tree_snapshot(remote)
         source_key_bytes = source_key.read_bytes()
         source_db_bytes = source_db.read_bytes()
@@ -309,7 +324,7 @@ class CliProcessTest(unittest.TestCase):
         self.assertEqual(clone_key.read_bytes(), source_key_bytes)
         self.assertTrue(clone_db.is_file())
         self.assertFalse(source_db.samefile(clone_db))
-        self.assertIn(b"- copy [Initialized]", cloned)
+        self.assertRegex(cloned, rb"\bcopy\s+Initialized\b")
         profiles = tomllib.loads(config.read_text(encoding="utf-8"))["profiles"]
         self.assertEqual(profiles["copy"]["local_dir"], str(local))
         self.assertEqual(profiles["copy"]["remote_dir"], str(remote))
@@ -393,10 +408,10 @@ class CliProcessTest(unittest.TestCase):
         }
         output = self.invoke("--lang", "pt-BR", "config", input=b"q\n")
         self.assertIn("Perfis Kasumi".encode(), output)
-        self.assertIn("- initialized [Initialized]".encode(), output)
-        self.assertIn("- ready [Ready]".encode(), output)
-        self.assertIn("- pending [Pending]".encode(), output)
-        self.assertIn("- problem [Problem]".encode(), output)
+        self.assertRegex(output, rb"\binitialized\s+Initialized\b")
+        self.assertRegex(output, rb"\bready\s+Ready\b")
+        self.assertRegex(output, rb"\bpending\s+Pending\b")
+        self.assertRegex(output, rb"\bproblem\s+Problem\b")
         self.assertEqual(self._tree_snapshot(data), persistent_before)
         self.assertEqual(
             {name: self._tree_snapshot(self.root / f"remote-{name}") for name in profiles},

@@ -406,9 +406,13 @@ TEST(CliWizardTest, ListsAllLocalStatesInBothLanguagesWithoutSideEffects) {
 
         EXPECT_EQ(result, 0);
         for (const auto& [name, state] : displayed_states) {
-            EXPECT_NE(output.find("- " + name + " [" + state + "]"),
-                      std::string::npos)
-                << output;
+            const auto position = output.find(name);
+            ASSERT_NE(position, std::string::npos) << output;
+            std::istringstream row{output.substr(position)};
+            std::string displayed_name, displayed_state;
+            row >> displayed_name >> displayed_state;
+            EXPECT_EQ(displayed_name, name);
+            EXPECT_EQ(displayed_state, state);
         }
     }
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);

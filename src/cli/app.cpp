@@ -138,6 +138,13 @@ int run(int argc, char* argv[]) {
 
     const auto environment = application::default_execution_environment();
 
+    if (std::holds_alternative<ListInvocation>(*parse_result)) {
+        return run_profile_query(environment);
+    }
+    if (const auto* show = std::get_if<ShowInvocation>(&*parse_result)) {
+        return run_profile_query(environment, show->profile_name);
+    }
+
     if (std::holds_alternative<ConfigureInvocation>(*parse_result)) {
         const int code = run_config_wizard(environment);
         return finish(

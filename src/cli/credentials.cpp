@@ -220,7 +220,7 @@ std::string read_secret(const char* environment_name,
     } else if (!std::getline(std::cin, secret)) {
         platform::cancellation::request();
     }
-    std::cout << "\n\n";
+    std::cout << '\n';
     return secret;
 }
 
@@ -260,6 +260,7 @@ application::PasswordPair read_password_pair(const SecretPrompt& prompt) {
             if (matches) {
                 accepted = std::move(first);
                 wipe(first);
+                std::cout << '\n';
                 return accepted;
             }
             wipe(first);

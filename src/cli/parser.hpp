@@ -12,6 +12,10 @@ namespace kasumi::cli {
 
 // Requests opening the interactive configuration wizard.
 struct ConfigureInvocation {};
+struct ListInvocation {};
+struct ShowInvocation {
+    std::string profile_name;
+};
 struct UpdateInvocation {};
 struct HelpInvocation {
     std::string topic;
@@ -21,6 +25,8 @@ struct HelpInvocation {
 using Invocation = std::variant<application::Request,
                                 application::InspectionRequest,
                                 ConfigureInvocation,
+                                ListInvocation,
+                                ShowInvocation,
                                 UpdateInvocation,
                                 HelpInvocation>;
 

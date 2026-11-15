@@ -4,6 +4,12 @@
 
 ## Ownership and credentials
 
+`kasumi list` prints only configured profile names, one per line. `kasumi show <profile>`
+shows the selected profile's local path, remote destination, retention settings,
+and local state. Neither query contacts remote storage or changes persistent
+profile data; credentials are never displayed. The wizard lists names and states
+in a compact table; paths and retention details are available through `show`.
+
 `config.toml` at the application data root owns named profiles: absolute synchronized `local_dir`, local or rclone `remote_dir`, and positive history-retention depth/age. Each profile has a separate `profiles/<name>/` private directory, `key.bin`, SQLite state, and local operation lock. A profile name must be safe for a child of `profiles/`. Configuration is saved by atomic private-file replacement; loading it may enforce owner-focused permissions. Configuration mutations are serialized by `config.lock` at the application data root, with a bounded acquisition wait. This lock is distinct from per-profile execution locks; configuration reads do not acquire it. Separate profiles do not implicitly share an accepted base or key; to use one vault on another machine, configure the same remote destination and master key. Creating a profile does not publish remote history.
 
 The creation API accepts either a 32-byte master key encoded as hex or a Password/Password Salt pair; the interactive wizard prompts for the pair and derives the key with Argon2id. It writes `key.bin` using reversible masking plus filesystem access controls, **not** encryption at rest. Routine operations read `key.bin` or a matching `KASUMI_MASTER_KEY`; passwords are not rederived or checked after creation. See [Security](../security.md).
