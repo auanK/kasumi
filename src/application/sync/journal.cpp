@@ -759,6 +759,25 @@ seal_aead_frame(std::span<std::uint8_t> frame,
     return {};
 }
 
+std::expected<void, std::string>
+unlock_aead_frame(const std::uint8_t* nonce_and_mac,
+                  std::span<const std::uint8_t> aad,
+                  const crypto::Key& key,
+                  std::span<const std::uint8_t> ciphertext,
+                  std::uint8_t* plaintext,
+                  std::string_view error_message) {
+    if (crypto_aead_unlock(plaintext,
+                           nonce_and_mac + nonce_size,
+                           key.data(),
+                           nonce_and_mac,
+                           aad.data(),
+                           aad.size(),
+                           ciphertext.empty() ? nullptr : ciphertext.data(),
+                           ciphertext.size()) != 0)
+        return std::unexpected(std::string{error_message});
+    return {};
+}
+
 std::expected<void, std::string> write_tip(const Paths& paths,
                                            const Tip& tip,
                                            const transaction::Record& record,
@@ -824,15 +843,15 @@ read_tip(const Paths& paths, const crypto::Key& key, bool retirement = false) {
     if (bytes->size() != tip_size ||
         !std::equal(magic.begin(), magic.end(), bytes->begin()))
         return std::unexpected("incompatible journal confirmation format");
-    if (crypto_aead_unlock(nullptr,
-                           bytes->data() + tip_aad_size + nonce_size,
-                           key.data(),
-                           bytes->data() + tip_aad_size,
-                           bytes->data(),
-                           tip_aad_size,
-                           nullptr,
-                           0) != 0)
-        return std::unexpected("journal confirmation authentication failed");
+    if (auto ok =
+            unlock_aead_frame(bytes->data() + tip_aad_size,
+                              std::span{*bytes}.first(tip_aad_size),
+                              key,
+                              {},
+                              nullptr,
+                              "journal confirmation authentication failed");
+        !ok)
+        return std::unexpected(ok.error());
     Tip tip;
     std::memcpy(tip.snapshot.data(), bytes->data() + 4, 32);
     tip.bytes = decode_le<std::uint64_t>(bytes->data() + 36);
@@ -940,15 +959,14 @@ std::expected<Replay, std::string> replay(const Paths& paths,
     if (size != snapshot->size() - header_size || size > maximum_payload_size)
         return std::unexpected("invalid journal snapshot payload size");
     SensitiveBytes plaintext(static_cast<std::size_t>(size));
-    if (crypto_aead_unlock(plaintext.data(),
-                           snapshot->data() + aad_size + nonce_size,
-                           key.data(),
-                           snapshot->data() + aad_size,
-                           snapshot->data(),
-                           aad_size,
-                           snapshot->data() + header_size,
-                           plaintext.size()) != 0)
-        return std::unexpected("journal snapshot authentication failed");
+    if (auto ok = unlock_aead_frame(snapshot->data() + aad_size,
+                                    std::span{*snapshot}.first(aad_size),
+                                    key,
+                                    std::span{*snapshot}.subspan(header_size),
+                                    plaintext.data(),
+                                    "journal snapshot authentication failed");
+        !ok)
+        return std::unexpected(ok.error());
     auto record =
         transaction::codec::decode(std::as_bytes(std::span{plaintext}));
     if (!record)
@@ -982,15 +1000,15 @@ std::expected<Replay, std::string> replay(const Paths& paths,
             const auto aad = make_delta_aad(
                 count, chain, payload_size, record->operation_id);
             SensitiveBytes delta(payload_size);
-            if (crypto_aead_unlock(delta.data(),
-                                   ptr + 48 + nonce_size,
-                                   log_key.value.data(),
-                                   ptr + 48,
-                                   aad.data(),
-                                   aad.size(),
-                                   ptr + log_header_size,
-                                   payload_size) != 0)
-                return std::unexpected("journal delta authentication failed");
+            if (auto ok =
+                    unlock_aead_frame(ptr + 48,
+                                      aad,
+                                      log_key.value,
+                                      {ptr + log_header_size, payload_size},
+                                      delta.data(),
+                                      "journal delta authentication failed");
+                !ok)
+                return ok;
             if (auto applied =
                     apply_delta(*record, std::as_bytes(std::span{delta}));
                 !applied)
@@ -1481,72 +1499,60 @@ save(const Paths& paths,
      Session* session) {
     std::lock_guard lock(journal_mutex);
     KeyGuard journal_key{crypto::derive_key(key, crypto::KeyPurpose::Journal)};
-    const auto invalidate = [&] {
-        if (session) {
-            session->invalidate();
-        }
-    };
     try {
         if (session && session->state == SessionState::Retired)
             return std::unexpected("journal session is retired");
-        if (mode != SaveMode::Advance && mode != SaveMode::Rollback) {
-            invalidate();
+        struct SessionGuard {
+            Session* session;
+            bool keep = false;
+            ~SessionGuard() {
+                if (!keep && session)
+                    session->invalidate();
+            }
+        } guard{session};
+        if (mode != SaveMode::Advance && mode != SaveMode::Rollback)
             return std::unexpected("unknown journal save mode");
-        }
         auto structural = validate_paths(paths);
-        if (!structural) {
-            invalidate();
+        if (!structural)
             return structural;
-        }
-        if (session && session->confirmed() == &record) {
-            invalidate();
+        if (session && session->confirmed() == &record)
             return std::unexpected(
                 "requested record must be independent of the session cache");
-        }
         const auto key_id = journal_key_id(journal_key);
-        if (session && session->is_valid() &&
-            !session->bound_to(paths, key_id)) {
-            invalidate();
+        if (session && session->is_valid() && !session->bound_to(paths, key_id))
             return std::unexpected("active journal session paths/key changed");
-        }
         auto codec_validation = transaction::codec::validate(record);
-        if (!codec_validation) {
-            invalidate();
+        if (!codec_validation)
             return codec_validation;
-        }
         auto semantic = validate_record_semantics(record, true);
-        if (!semantic) {
-            invalidate();
+        if (!semantic)
             return semantic;
-        }
         auto retired = read_status(retired_path(paths));
-        if (!retired) {
-            invalidate();
+        if (!retired)
             return std::unexpected(retired.error());
-        }
         auto proof = read_status(retirement_path(paths));
-        if (!proof) {
-            invalidate();
+        if (!proof)
             return std::unexpected(proof.error());
-        }
-        if (!missing(*retired) || !missing(*proof)) {
-            invalidate();
+        if (!missing(*retired) || !missing(*proof))
             return std::unexpected(
                 "journal retirement must finish before saving");
-        }
-        const auto bind = [&](transaction::Record&& confirmed, const Tip& tip) {
+        const auto bind_session =
+            [&](auto make_confirmed,
+                const Tip& tip) -> std::expected<void, std::string> {
+            if (!session)
+                return {};
+            if (journal_fault_test::cleanup_fail("session-update"))
+                throw std::bad_alloc{};
             return SessionAccess::bind(
-                session, paths, key_id, std::move(confirmed), tip);
+                session, paths, key_id, make_confirmed(), tip);
         };
         if (session && session->is_valid()) {
             // Check before private-storage validation updates ACL/ctime itself.
             auto snapshot = artifact_state(paths.final_path);
             auto log = artifact_state(paths.log_path);
-            if (!snapshot || !log) {
-                invalidate();
+            if (!snapshot || !log)
                 return std::unexpected(!snapshot ? snapshot.error()
                                                  : log.error());
-            }
             const bool artifacts_match =
                 same_artifact(snapshot->fingerprint,
                               session->snapshot_fingerprint) &&
@@ -1557,15 +1563,11 @@ save(const Paths& paths,
                      : same_artifact(log->fingerprint,
                                      session->log_fingerprint));
             auto validation = validate_save_paths(paths);
-            if (!validation) {
-                invalidate();
+            if (!validation)
                 return validation;
-            }
             auto disk_tip = read_tip(paths, journal_key.value);
-            if (!disk_tip) {
-                invalidate();
+            if (!disk_tip)
                 return std::unexpected(disk_tip.error());
-            }
             const Tip session_tip{.snapshot = session->tip_snapshot,
                                   .bytes = session->tip_bytes,
                                   .count = session->tip_count,
@@ -1577,99 +1579,77 @@ save(const Paths& paths,
                                             *session->confirmed_record,
                                             session_tip,
                                             mode);
-                if (!saved_tip) {
-                    invalidate();
+                if (!saved_tip)
                     return std::unexpected(saved_tip.error());
-                }
                 if (journal_fault_test::cleanup_fail("session-update"))
                     throw std::bad_alloc{};
                 journal_fault_test::hit(
                     "before-session-update", &record, saved_tip->count);
                 if (auto refreshed =
                         SessionAccess::refresh(*session, paths, *saved_tip);
-                    !refreshed) {
-                    invalidate();
+                    !refreshed)
                     return refreshed;
-                }
                 assign_mutable_fields(*session->confirmed_record, record);
+                guard.keep = true;
                 return {};
             }
-            invalidate();
+            session->invalidate();
         }
         auto outer =
             validate_parent_directory(paths.final_path.parent_path(), false);
-        if (!outer) {
-            invalidate();
+        if (!outer)
             return outer;
-        }
         auto status = read_status(paths.final_path.parent_path());
-        if (!status) {
-            invalidate();
+        if (!status)
             return std::unexpected(status.error());
-        }
         const bool fresh = missing(*status);
-        if (fresh && mode == SaveMode::Rollback) {
-            invalidate();
+        if (fresh && mode == SaveMode::Rollback)
             return std::unexpected("rollback requires active authority");
-        }
         if (fresh) {
             auto created = platform::private_storage::create_directory(
                 paths.final_path.parent_path());
-            if (!created) {
-                invalidate();
+            if (!created)
                 return created;
-            }
         }
         auto validation = validate_save_paths(paths);
-        if (!validation) {
-            invalidate();
+        if (!validation)
             return validation;
-        }
         if (fresh) {
             auto tip = save_snapshot(paths, record, journal_key.value);
-            if (!tip) {
-                invalidate();
+            if (!tip)
                 return std::unexpected(tip.error());
-            }
-            if (session) {
-                if (journal_fault_test::cleanup_fail("session-update"))
-                    throw std::bad_alloc{};
-                auto bound = bind(transaction::Record{record}, *tip);
-                if (!bound) {
-                    invalidate();
-                    return bound;
-                }
-            }
+            if (auto bound = bind_session(
+                    [&] {
+                        return transaction::Record{record};
+                    },
+                    *tip);
+                !bound)
+                return bound;
+            guard.keep = true;
             return {};
         }
         auto previous = replay(paths, journal_key.value);
-        if (!previous) {
-            invalidate();
+        if (!previous)
             return std::unexpected(previous.error());
-        }
         auto saved_tip = save_delta(paths,
                                     record,
                                     journal_key.value,
                                     previous->record,
                                     previous->tip,
                                     mode);
-        if (!saved_tip) {
-            invalidate();
+        if (!saved_tip)
             return std::unexpected(saved_tip.error());
-        }
-        if (session) {
-            if (journal_fault_test::cleanup_fail("session-update"))
-                throw std::bad_alloc{};
-            assign_mutable_fields(previous->record, record);
-            auto bound = bind(std::move(previous->record), *saved_tip);
-            if (!bound) {
-                invalidate();
-                return bound;
-            }
-        }
+        if (auto bound = bind_session(
+                [&] {
+                    assign_mutable_fields(previous->record, record);
+                    return std::move(previous->record);
+                },
+                *saved_tip);
+            !bound)
+            return bound;
+        guard.keep = true;
         return {};
     } catch (const std::exception& error) {
-        invalidate();
         return std::unexpected(std::string{"failed to save journal: "} +
                                error.what());
     }
