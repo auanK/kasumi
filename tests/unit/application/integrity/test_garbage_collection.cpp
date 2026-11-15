@@ -29,6 +29,8 @@
 namespace {
 
 namespace protocol = kasumi::application::history_storage::maintenance_protocol;
+namespace gc_int = kasumi::application::integrity;
+using GcErrorCode = gc_int::ErrorCode;
 using kasumi::NodeRow;
 using kasumi::Snapshot;
 using kasumi::application::GarbageCollectProgress;
@@ -137,8 +139,25 @@ struct LocalFixture {
                   kasumi::application::integrity::Error>
     collect(kasumi::application::integrity::GarbageCollectProgressCallback
                 progress = {}) {
-        return kasumi::application::integrity::garbage_collect(
+        return gc_int::garbage_collect(
             runtime, storage.transport, test_key(), std::move(progress));
+    }
+
+    HeadReference publish(const kasumi::history::Commit& commit,
+                          std::string_view suffix,
+                          bool create_head = true) {
+        return publish_object(
+            storage.transport, storage.workspace, commit, suffix, create_head);
+    }
+
+    std::string put_content(std::string_view contents,
+                            std::string_view suffix) {
+        return ::put_content(
+            storage.transport, storage.workspace, contents, suffix);
+    }
+
+    bool present(std::string_view identifier) {
+        return object_present(storage.transport, identifier);
     }
 };
 
@@ -159,8 +178,29 @@ struct FakeFixture {
                   kasumi::application::integrity::Error>
     collect(kasumi::application::integrity::GarbageCollectProgressCallback
                 progress = {}) {
-        return kasumi::application::integrity::garbage_collect(
+        return gc_int::garbage_collect(
             runtime, transport, test_key(), std::move(progress));
+    }
+
+    HeadReference publish(const kasumi::history::Commit& commit,
+                          std::string_view suffix,
+                          bool create_head = true) {
+        return publish_object(
+            transport, workspace, commit, suffix, create_head);
+    }
+
+    std::string put_content(std::string_view contents,
+                            std::string_view suffix) {
+        return ::put_content(transport, workspace, contents, suffix);
+    }
+
+    bool present(std::string_view identifier) {
+        return object_present(transport, identifier);
+    }
+
+    HeadReference add_variant(const kasumi::history::Commit& commit,
+                              std::string_view suffix) {
+        return add_variant_object(transport, workspace, commit, suffix);
     }
 };
 
@@ -243,6 +283,36 @@ auto measure_gc(Fixture& fixture, std::string_view scenario) {
     return result;
 }
 
+template <typename Fixture>
+std::optional<kasumi::application::GarbageCollectFailure>
+collect_diagnostic(Fixture& fixture) {
+    const auto result = fixture.collect();
+    if (result.has_value()) {
+        ADD_FAILURE() << "expected GC failure, succeeded instead";
+        return std::nullopt;
+    }
+    if (!result.error().garbage_collection.has_value()) {
+        ADD_FAILURE() << "expected garbage_collection diagnostic payload";
+        return std::nullopt;
+    }
+    return *result.error().garbage_collection;
+}
+
+template <typename Fixture>
+[[nodiscard]] ::testing::AssertionResult
+expect_collect_error(Fixture& fixture, GcErrorCode expected) {
+    const auto result = fixture.collect();
+    if (result.has_value()) {
+        return ::testing::AssertionFailure()
+               << "expected GC error, succeeded instead";
+    }
+    if (result.error().code != expected) {
+        return ::testing::AssertionFailure()
+               << "unexpected error detail: " << result.error().detail;
+    }
+    return ::testing::AssertionSuccess();
+}
+
 struct Repository {
     HeadReference head;
     std::string live_content;
@@ -283,8 +353,7 @@ TEST(GarbageCollectionTest, BarrierReplacementBeforeApplyPreventsAllDeletes) {
             });
 
         ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().code,
-                  kasumi::application::integrity::ErrorCode::ConcurrentChange);
+        EXPECT_EQ(result.error().code, GcErrorCode::ConcurrentChange);
         ASSERT_TRUE(result.error().garbage_collection.has_value());
         const auto& diagnostic = *result.error().garbage_collection;
         EXPECT_EQ(diagnostic.candidate_objects, 2U);
@@ -321,8 +390,7 @@ TEST(GarbageCollectionTest, BarrierDisappearanceBeforeApplyPreventsAllDeletes) {
             });
 
         ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().code,
-                  kasumi::application::integrity::ErrorCode::ConcurrentChange);
+        EXPECT_EQ(result.error().code, GcErrorCode::ConcurrentChange);
         ASSERT_TRUE(result.error().garbage_collection.has_value());
         EXPECT_EQ(result.error().garbage_collection->confirmed_removed, 0U);
         EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
@@ -355,8 +423,7 @@ TEST(GarbageCollectionTest,
         });
 
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::TransportFailure);
+    EXPECT_EQ(result.error().code, GcErrorCode::TransportFailure);
     ASSERT_TRUE(result.error().transport_failure.has_value());
     EXPECT_EQ(result.error().transport_failure->code,
               kasumi::transport::ErrorCode::Timeout);
@@ -410,13 +477,11 @@ TEST(GarbageCollectionTest,
 TEST(GarbageCollectionTest,
      DeleteExceptionAfterPartialApplyAndCleanupIsNotRetried) {
     FakeFixture fixture("gc-partial-exception-cleanup");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
     std::vector<std::string> orphans;
     for (const auto name : {"exception-a", "exception-b", "exception-c"}) {
-        orphans.push_back(
-            put_content(fixture.transport, fixture.workspace, name, name));
+        orphans.push_back(fixture.put_content(name, name));
     }
     std::ranges::sort(orphans);
     fixture.state->on_operation =
@@ -462,35 +527,28 @@ TEST(GarbageCollectionTest, DeleteErrorCategoryDoesNotProveNoMutation) {
                             ErrorCode::Timeout}) {
         SCOPED_TRACE(kasumi::transport::error_code_name(code));
         FakeFixture fixture("gc-delete-error-state");
-        publish_object(fixture.transport,
-                       fixture.workspace,
-                       commit_with_file("live"),
-                       "head");
-        put_content(fixture.transport, fixture.workspace, "live", "live");
+        fixture.publish(commit_with_file("live"), "head");
+        fixture.put_content("live", "live");
         std::vector<std::string> orphans;
         for (const auto name : {"error-a", "error-b", "error-c"}) {
-            orphans.push_back(
-                put_content(fixture.transport, fixture.workspace, name, name));
+            orphans.push_back(fixture.put_content(name, name));
         }
         std::ranges::sort(orphans);
         fixture.state->remove_then_fail_identifier = orphans[1];
         fixture.state->fail_remove_code = code;
         fixture.state->remove_failure_native_code = 10054;
 
-        const auto result = fixture.collect();
-
-        ASSERT_FALSE(result.has_value());
-        ASSERT_TRUE(result.error().garbage_collection.has_value());
-        const auto& diagnostic = *result.error().garbage_collection;
-        EXPECT_EQ(diagnostic.confirmed_removed, 1U);
-        EXPECT_EQ(diagnostic.failed_identifier,
+        const auto diagnostic = collect_diagnostic(fixture);
+        ASSERT_TRUE(diagnostic.has_value());
+        EXPECT_EQ(diagnostic->confirmed_removed, 1U);
+        EXPECT_EQ(diagnostic->failed_identifier,
                   std::optional<std::string>{orphans[1]});
-        EXPECT_EQ(diagnostic.mutation_state,
+        EXPECT_EQ(diagnostic->mutation_state,
                   kasumi::application::GarbageCollectMutationState::Uncertain);
-        ASSERT_TRUE(diagnostic.transport_error.has_value());
-        EXPECT_EQ(diagnostic.transport_error->code, code);
-        EXPECT_EQ(diagnostic.transport_error->native_code, 10054);
-        EXPECT_TRUE(diagnostic.barrier_release_confirmed);
+        ASSERT_TRUE(diagnostic->transport_error.has_value());
+        EXPECT_EQ(diagnostic->transport_error->code, code);
+        EXPECT_EQ(diagnostic->transport_error->native_code, 10054);
+        EXPECT_TRUE(diagnostic->barrier_release_confirmed);
         EXPECT_EQ(candidate_remove_attempts(*fixture.state), 2U);
         EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
         EXPECT_FALSE(fixture.state->objects.contains(orphans[0]));
@@ -505,11 +563,8 @@ TEST(GarbageCollectionTest, OwnershipChecksStayFixedWithOneThousandCandidates) {
             SCOPED_TRACE(physical_hash);
             SCOPED_TRACE(count);
             FakeFixture fixture("gc-fixed-ownership-checks");
-            publish_object(fixture.transport,
-                           fixture.workspace,
-                           commit_with_file("live"),
-                           "head");
-            put_content(fixture.transport, fixture.workspace, "live", "live");
+            fixture.publish(commit_with_file("live"), "head");
+            fixture.put_content("live", "live");
             for (std::size_t index = 0; index < count; ++index) {
                 const auto contents = "fixed-" + std::to_string(index);
                 put_corrupt_content(
@@ -594,9 +649,8 @@ struct ScopedGcTrace {
 
 TEST(GarbageCollectionTest, TraceMeasuresInventoryPlanAndPreApplySeparately) {
     FakeFixture fixture("gc-trace-inventory");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
     for (const auto name : {"metric-a", "metric-b", "metric-c"}) {
         put_corrupt_content(fixture.transport, fixture.workspace, name, name);
     }
@@ -632,11 +686,8 @@ TEST(GarbageCollectionTest,
     for (const bool throws : {false, true}) {
         SCOPED_TRACE(throws);
         FakeFixture fixture("gc-trace-partial");
-        publish_object(fixture.transport,
-                       fixture.workspace,
-                       commit_with_file("live"),
-                       "head");
-        put_content(fixture.transport, fixture.workspace, "live", "live");
+        fixture.publish(commit_with_file("live"), "head");
+        fixture.put_content("live", "live");
         for (const auto name :
              {"partial-a", "partial-b", "partial-c", "partial-d"}) {
             put_corrupt_content(
@@ -653,23 +704,21 @@ TEST(GarbageCollectionTest,
             }
         };
         ScopedGcTrace tracing;
-        const auto result = fixture.collect();
-        ASSERT_FALSE(result.has_value());
-        ASSERT_TRUE(result.error().garbage_collection.has_value());
-        const auto& diagnostic = *result.error().garbage_collection;
+        const auto diagnostic = collect_diagnostic(fixture);
+        ASSERT_TRUE(diagnostic.has_value());
         using kasumi::platform::perf_trace::get_count;
         EXPECT_EQ(get_count("gc.candidate_remove_attempts"), 3U);
         EXPECT_EQ(get_count("gc.candidate_remove_acknowledged"), 2U);
         EXPECT_EQ(get_count("gc.confirmed_removed"),
-                  diagnostic.confirmed_removed);
+                  diagnostic->confirmed_removed);
         EXPECT_EQ(get_count("gc.candidate_remove_errors"), 1U);
         EXPECT_EQ(get_count("gc.barrier_cleanup_errors"), 1U);
         EXPECT_EQ(get_count("gc.errors"), 1U);
-        EXPECT_EQ(diagnostic.confirmed_removed, 2U);
-        EXPECT_EQ(diagnostic.mutation_state,
+        EXPECT_EQ(diagnostic->confirmed_removed, 2U);
+        EXPECT_EQ(diagnostic->mutation_state,
                   kasumi::application::GarbageCollectMutationState::Uncertain);
-        EXPECT_TRUE(diagnostic.barrier_cleanup_error.has_value());
-        EXPECT_FALSE(diagnostic.barrier_release_confirmed);
+        EXPECT_TRUE(diagnostic->barrier_cleanup_error.has_value());
+        EXPECT_FALSE(diagnostic->barrier_release_confirmed);
         EXPECT_EQ(candidate_remove_attempts(*fixture.state), 3U);
         EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
     }
@@ -681,11 +730,8 @@ TEST(GarbageCollectionTest,
     for (const auto count : {1U, 100U, 1000U}) {
         SCOPED_TRACE(count);
         FakeFixture fixture("gc-trace-fixed-cost");
-        publish_object(fixture.transport,
-                       fixture.workspace,
-                       commit_with_file("live"),
-                       "head");
-        put_content(fixture.transport, fixture.workspace, "live", "live");
+        fixture.publish(commit_with_file("live"), "head");
+        fixture.put_content("live", "live");
         for (std::size_t index = 0; index < count; ++index) {
             const auto contents = "counter-" + std::to_string(index);
             put_corrupt_content(
@@ -740,24 +786,17 @@ TEST(GarbageCollectionTest, TracingDisabledPreservesCollectionBehavior) {
 
 TEST(GarbageCollectionTest, RemovesAuthenticatedOrphanContent) {
     LocalFixture fixture;
-    const auto orphan = put_content(fixture.storage.transport,
-                                    fixture.storage.workspace,
-                                    "orphan",
-                                    "orphan");
-    publish_object(fixture.storage.transport,
-                   fixture.storage.workspace,
-                   commit_with_file("live"),
-                   "head");
-    const auto live = put_content(
-        fixture.storage.transport, fixture.storage.workspace, "live", "live");
+    const auto orphan = fixture.put_content("orphan", "orphan");
+    fixture.publish(commit_with_file("live"), "head");
+    const auto live = fixture.put_content("live", "live");
 
     const auto result = fixture.collect();
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 1U);
     EXPECT_EQ(result->removed_objects, 1U);
     EXPECT_FALSE(result->analysis_only);
-    EXPECT_FALSE(object_present(fixture.storage.transport, orphan));
-    EXPECT_TRUE(object_present(fixture.storage.transport, live));
+    EXPECT_FALSE(fixture.present(orphan));
+    EXPECT_TRUE(fixture.present(live));
 }
 
 TEST(GarbageCollectionTest, RemovesOnlyRedundantValidCommitVariants) {
@@ -774,27 +813,17 @@ TEST(GarbageCollectionTest, RemovesOnlyRedundantValidCommitVariants) {
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 2U);
     EXPECT_EQ(result->removed_objects, 2U);
-    EXPECT_FALSE(object_present(fixture.storage.transport,
-                                object_path(repository.redundant_variant)));
-    EXPECT_TRUE(object_present(fixture.storage.transport, required_path));
-    EXPECT_TRUE(
-        object_present(fixture.storage.transport, object_path(corrupt)));
-    EXPECT_FALSE(
-        object_present(fixture.storage.transport, repository.orphan_content));
+    EXPECT_FALSE(fixture.present(object_path(repository.redundant_variant)));
+    EXPECT_TRUE(fixture.present(required_path));
+    EXPECT_TRUE(fixture.present(object_path(corrupt)));
+    EXPECT_FALSE(fixture.present(repository.orphan_content));
 }
 
 TEST(GarbageCollectionTest, RemovesCorruptOrphanContent) {
     LocalFixture fixture;
-    publish_object(fixture.storage.transport,
-                   fixture.storage.workspace,
-                   commit_with_file("live"),
-                   "head");
-    put_content(
-        fixture.storage.transport, fixture.storage.workspace, "live", "live");
-    const auto valid = put_content(fixture.storage.transport,
-                                   fixture.storage.workspace,
-                                   "valid-orphan",
-                                   "valid-orphan");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto valid = fixture.put_content("valid-orphan", "valid-orphan");
     put_corrupt_content(fixture.storage.transport,
                         fixture.storage.workspace,
                         "corrupt-orphan",
@@ -805,8 +834,8 @@ TEST(GarbageCollectionTest, RemovesCorruptOrphanContent) {
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 2U);
     EXPECT_EQ(result->removed_objects, 2U);
-    EXPECT_FALSE(object_present(fixture.storage.transport, valid));
-    EXPECT_FALSE(object_present(fixture.storage.transport, corrupt));
+    EXPECT_FALSE(fixture.present(valid));
+    EXPECT_FALSE(fixture.present(corrupt));
 }
 
 TEST(GarbageCollectionTest, PreservesReachableContentAndRequiredHistory) {
@@ -816,33 +845,24 @@ TEST(GarbageCollectionTest, PreservesReachableContentAndRequiredHistory) {
 
     const auto result = fixture.collect();
     ASSERT_TRUE(result.has_value()) << result.error().detail;
-    EXPECT_TRUE(
-        object_present(fixture.storage.transport, repository.live_content));
-    EXPECT_TRUE(object_present(fixture.storage.transport,
-                               object_path(repository.head)));
-    EXPECT_TRUE(object_present(fixture.storage.transport,
-                               marker_path(repository.head)));
+    EXPECT_TRUE(fixture.present(repository.live_content));
+    EXPECT_TRUE(fixture.present(object_path(repository.head)));
+    EXPECT_TRUE(fixture.present(marker_path(repository.head)));
 }
 
 // CONTENT-R01
 TEST(GarbageCollectionTest, ContentRevalidationAllowsStillOrphan) {
     LocalFixture fixture;
-    publish_object(fixture.storage.transport,
-                   fixture.storage.workspace,
-                   commit_with_file("live"),
-                   "head");
-    put_content(
-        fixture.storage.transport, fixture.storage.workspace, "live", "live");
-    const auto orphan = put_content(fixture.storage.transport,
-                                    fixture.storage.workspace,
-                                    "revalidated-orphan",
-                                    "revalidated-orphan");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto orphan =
+        fixture.put_content("revalidated-orphan", "revalidated-orphan");
 
     const auto result = fixture.collect();
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 1U);
     EXPECT_EQ(result->removed_objects, 1U);
-    EXPECT_FALSE(object_present(fixture.storage.transport, orphan));
+    EXPECT_FALSE(fixture.present(orphan));
 }
 
 // CONTENT-R02: under the cooperative contract, reachability is established by
@@ -850,14 +870,12 @@ TEST(GarbageCollectionTest, ContentRevalidationAllowsStillOrphan) {
 TEST(GarbageCollectionTest,
      AnalysisPreservesContentMadeReachableBeforeObservation) {
     FakeFixture fixture("gc-content-reachable");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
     const auto deferred = commit_with_file("protected");
-    const auto deferred_reference = publish_object(
-        fixture.transport, fixture.workspace, deferred, "deferred", false);
-    const auto content = put_content(
-        fixture.transport, fixture.workspace, "protected", "protected");
+    const auto deferred_reference =
+        fixture.publish(deferred, "deferred", false);
+    const auto content = fixture.put_content("protected", "protected");
     ASSERT_EQ(content, content_identifier("protected"));
     fixture.state->objects[marker_path(deferred_reference)] =
         marker_bytes(deferred_reference);
@@ -867,7 +885,7 @@ TEST(GarbageCollectionTest,
     EXPECT_EQ(result->candidate_objects, 0U);
     EXPECT_EQ(result->removed_objects, 0U);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
-    EXPECT_TRUE(object_present(fixture.transport, content));
+    EXPECT_TRUE(fixture.present(content));
 }
 
 // CONTENT-R03: a history payload replaced between LIST and GET is still inside
@@ -875,23 +893,18 @@ TEST(GarbageCollectionTest,
 TEST(GarbageCollectionTest, AnalysisRejectsHistoryPayloadReplacedAfterListing) {
     FakeFixture fixture("gc-content-history-replacement");
     const auto head = commit_with_file("live");
-    const auto reference =
-        publish_object(fixture.transport, fixture.workspace, head, "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
-    const auto orphan =
-        put_content(fixture.transport, fixture.workspace, "orphan", "orphan");
+    const auto reference = fixture.publish(head, "head");
+    fixture.put_content("live", "live");
+    const auto orphan = fixture.put_content("orphan", "orphan");
     const auto head_object = object_path(reference);
 
     after_full_list(fixture.state, 1, [head_object](FakeState& state) {
         state.objects[head_object] = {0xde, 0xad, 0xbe, 0xef};
     });
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::IntegrityFailure);
+    ASSERT_TRUE(expect_collect_error(fixture, GcErrorCode::IntegrityFailure));
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
-    EXPECT_TRUE(object_present(fixture.transport, orphan));
+    EXPECT_TRUE(fixture.present(orphan));
 }
 
 // CONTENT-R04: the same fail-closed rule applies when a listed history object
@@ -899,23 +912,18 @@ TEST(GarbageCollectionTest, AnalysisRejectsHistoryPayloadReplacedAfterListing) {
 TEST(GarbageCollectionTest, AnalysisRejectsHistoryObjectRemovedAfterListing) {
     FakeFixture fixture("gc-content-incomplete-history");
     const auto head = commit_with_file("live");
-    const auto reference =
-        publish_object(fixture.transport, fixture.workspace, head, "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
-    const auto orphan =
-        put_content(fixture.transport, fixture.workspace, "orphan", "orphan");
+    const auto reference = fixture.publish(head, "head");
+    fixture.put_content("live", "live");
+    const auto orphan = fixture.put_content("orphan", "orphan");
     const auto head_object = object_path(reference);
 
     after_full_list(fixture.state, 1, [head_object](FakeState& state) {
         state.objects.erase(head_object);
     });
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::IntegrityFailure);
+    ASSERT_TRUE(expect_collect_error(fixture, GcErrorCode::IntegrityFailure));
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
-    EXPECT_TRUE(object_present(fixture.transport, orphan));
+    EXPECT_TRUE(fixture.present(orphan));
 }
 
 // CONTENT-R05
@@ -923,35 +931,24 @@ TEST(GarbageCollectionTest,
      PhysicallyValidContentReferencedByHistoryIsPreserved) {
     LocalFixture fixture;
     const auto commit = commit_with_file("protected");
-    publish_object(
-        fixture.storage.transport, fixture.storage.workspace, commit, "head");
-    const auto content = put_content(fixture.storage.transport,
-                                     fixture.storage.workspace,
-                                     "protected",
-                                     "protected");
+    fixture.publish(commit, "head");
+    const auto content = fixture.put_content("protected", "protected");
 
     const auto result = fixture.collect();
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 0U);
     EXPECT_EQ(result->removed_objects, 0U);
-    EXPECT_TRUE(object_present(fixture.storage.transport, content));
+    EXPECT_TRUE(fixture.present(content));
 }
 
 TEST(GarbageCollectionTest, MissingReachableContentBlocksAllMutation) {
     LocalFixture fixture;
     const auto commit = commit_with_file("missing");
-    publish_object(
-        fixture.storage.transport, fixture.storage.workspace, commit, "head");
-    const auto orphan = put_content(fixture.storage.transport,
-                                    fixture.storage.workspace,
-                                    "orphan",
-                                    "orphan");
+    fixture.publish(commit, "head");
+    const auto orphan = fixture.put_content("orphan", "orphan");
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::IntegrityFailure);
-    EXPECT_TRUE(object_present(fixture.storage.transport, orphan));
+    ASSERT_TRUE(expect_collect_error(fixture, GcErrorCode::IntegrityFailure));
+    EXPECT_TRUE(fixture.present(orphan));
 }
 
 TEST(GarbageCollectionTest, UnknownPhysicalAndHistoryObjectsBlockMutation) {
@@ -965,14 +962,9 @@ TEST(GarbageCollectionTest, UnknownPhysicalAndHistoryObjectsBlockMutation) {
                      byte,
                      "unknown-history");
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::IntegrityFailure);
-    EXPECT_TRUE(
-        object_present(fixture.storage.transport, repository.orphan_content));
-    EXPECT_TRUE(object_present(fixture.storage.transport,
-                               object_path(repository.redundant_variant)));
+    ASSERT_TRUE(expect_collect_error(fixture, GcErrorCode::IntegrityFailure));
+    EXPECT_TRUE(fixture.present(repository.orphan_content));
+    EXPECT_TRUE(fixture.present(object_path(repository.redundant_variant)));
 }
 
 TEST(GarbageCollectionTest, UnknownStorageObjectsBlockMutation) {
@@ -986,29 +978,18 @@ TEST(GarbageCollectionTest, UnknownStorageObjectsBlockMutation) {
                      byte,
                      "unknown-storage");
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::IntegrityFailure);
-    EXPECT_TRUE(
-        object_present(fixture.storage.transport, repository.orphan_content));
+    ASSERT_TRUE(expect_collect_error(fixture, GcErrorCode::IntegrityFailure));
+    EXPECT_TRUE(fixture.present(repository.orphan_content));
 }
 
 TEST(GarbageCollectionTest, UnreachableCommitVariantsArePreserved) {
     LocalFixture fixture;
     const auto reachable = commit_with_file("live");
-    publish_object(fixture.storage.transport,
-                   fixture.storage.workspace,
-                   reachable,
-                   "head");
-    put_content(
-        fixture.storage.transport, fixture.storage.workspace, "live", "live");
+    fixture.publish(reachable, "head");
+    fixture.put_content("live", "live");
     const auto orphan_commit = commit_with_file("unreachable");
-    const auto orphan_head = publish_object(fixture.storage.transport,
-                                            fixture.storage.workspace,
-                                            orphan_commit,
-                                            "orphan-commit",
-                                            false);
+    const auto orphan_head =
+        fixture.publish(orphan_commit, "orphan-commit", false);
     const auto orphan_variant = add_variant_object(fixture.storage.transport,
                                                    fixture.storage.workspace,
                                                    orphan_commit,
@@ -1018,10 +999,8 @@ TEST(GarbageCollectionTest, UnreachableCommitVariantsArePreserved) {
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 0U);
     EXPECT_EQ(result->removed_objects, 0U);
-    EXPECT_TRUE(
-        object_present(fixture.storage.transport, object_path(orphan_head)));
-    EXPECT_TRUE(
-        object_present(fixture.storage.transport, object_path(orphan_variant)));
+    EXPECT_TRUE(fixture.present(object_path(orphan_head)));
+    EXPECT_TRUE(fixture.present(object_path(orphan_variant)));
 }
 
 TEST(GarbageCollectionTest, UnmarkedReachableCommitKeepsOneRequiredVariant) {
@@ -1031,16 +1010,10 @@ TEST(GarbageCollectionTest, UnmarkedReachableCommitKeepsOneRequiredVariant) {
     const auto child =
         kasumi::history::make_commit(1, {commit_id(parent)}, child_tree)
             .value();
-    const auto parent_head = publish_object(
-        fixture.storage.transport, fixture.storage.workspace, parent, "parent");
-    publish_object(
-        fixture.storage.transport, fixture.storage.workspace, child, "child");
-    put_content(
-        fixture.storage.transport, fixture.storage.workspace, "child", "child");
-    put_content(fixture.storage.transport,
-                fixture.storage.workspace,
-                "parent",
-                "parent");
+    const auto parent_head = fixture.publish(parent, "parent");
+    fixture.publish(child, "child");
+    fixture.put_content("child", "child");
+    fixture.put_content("parent", "parent");
     ASSERT_TRUE(kasumi::transport::remove(fixture.storage.transport,
                                           marker_path(parent_head)));
     const auto extra = add_variant_object(fixture.storage.transport,
@@ -1052,10 +1025,8 @@ TEST(GarbageCollectionTest, UnmarkedReachableCommitKeepsOneRequiredVariant) {
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 1U);
     EXPECT_EQ(result->removed_objects, 1U);
-    const bool original_present =
-        object_present(fixture.storage.transport, object_path(parent_head));
-    const bool extra_present =
-        object_present(fixture.storage.transport, object_path(extra));
+    const bool original_present = fixture.present(object_path(parent_head));
+    const bool extra_present = fixture.present(object_path(extra));
     EXPECT_NE(original_present, extra_present);
     const auto inventory =
         kasumi::application::history_storage::inventory_reachability(
@@ -1081,25 +1052,19 @@ TEST(GarbageCollectionTest, CancellationBeforeMutationStopsCleanly) {
             }
         });
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::StateFailure);
-    EXPECT_TRUE(
-        object_present(fixture.storage.transport, repository.orphan_content));
-    EXPECT_TRUE(object_present(fixture.storage.transport,
-                               object_path(repository.redundant_variant)));
+    EXPECT_EQ(result.error().code, GcErrorCode::StateFailure);
+    EXPECT_TRUE(fixture.present(repository.orphan_content));
+    EXPECT_TRUE(fixture.present(object_path(repository.redundant_variant)));
 }
 
 // Old contract: a post-REMOVE presence read confirmed physical absence.
 // New contract: a successful REMOVE is API-acknowledged and is not read back.
 TEST(GarbageCollectionTest, SuccessfulRemoveIsNotReadBackWithPresence) {
     FakeFixture fixture("gc-post-removal-visibility");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
-    const auto first =
-        put_content(fixture.transport, fixture.workspace, "orphan-a", "a");
-    const auto second =
-        put_content(fixture.transport, fixture.workspace, "orphan-b", "b");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto first = fixture.put_content("orphan-a", "a");
+    const auto second = fixture.put_content("orphan-b", "b");
     fixture.state->fail_presence_after_removal_identifier =
         std::min(first, second);
     fixture.state->remove_count = 0;
@@ -1109,86 +1074,77 @@ TEST(GarbageCollectionTest, SuccessfulRemoveIsNotReadBackWithPresence) {
     EXPECT_EQ(result->removed_objects, 2U);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 2U);
     fixture.state->fail_presence_after_removal_identifier.clear();
-    EXPECT_FALSE(object_present(fixture.transport, first));
-    EXPECT_FALSE(object_present(fixture.transport, second));
+    EXPECT_FALSE(fixture.present(first));
+    EXPECT_FALSE(fixture.present(second));
 }
 
 // PARTIAL-R01: analysis failure before Apply keeps zero mutation counts.
 TEST(GarbageCollectionTest, AnalysisFailureBeforeApplyKeepsZeroCounts) {
     FakeFixture fixture("gc-partial-before-first");
     const auto head = commit_with_file("live");
-    const auto reference =
-        publish_object(fixture.transport, fixture.workspace, head, "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
-    put_content(fixture.transport, fixture.workspace, "orphan", "orphan");
+    const auto reference = fixture.publish(head, "head");
+    fixture.put_content("live", "live");
+    fixture.put_content("orphan", "orphan");
     const auto head_object = object_path(reference);
     after_full_list(fixture.state, 1, [head_object](FakeState& state) {
         state.objects[head_object] = {0xde, 0xad, 0xbe, 0xef};
     });
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.error().garbage_collection.has_value());
-    const auto& diagnostic = *result.error().garbage_collection;
-    EXPECT_EQ(diagnostic.stage, GarbageCollectStage::Analyzing);
-    EXPECT_EQ(diagnostic.confirmed_removed, 0U);
-    EXPECT_FALSE(diagnostic.failed_identifier.has_value());
-    EXPECT_EQ(diagnostic.mutation_state,
+    const auto diagnostic = collect_diagnostic(fixture);
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->stage, GarbageCollectStage::Analyzing);
+    EXPECT_EQ(diagnostic->confirmed_removed, 0U);
+    EXPECT_FALSE(diagnostic->failed_identifier.has_value());
+    EXPECT_EQ(diagnostic->mutation_state,
               kasumi::application::GarbageCollectMutationState::NotAttempted);
-    EXPECT_TRUE(diagnostic.barrier_release_attempted);
-    EXPECT_TRUE(diagnostic.barrier_release_confirmed);
+    EXPECT_TRUE(diagnostic->barrier_release_attempted);
+    EXPECT_TRUE(diagnostic->barrier_release_confirmed);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
 }
 
 // PARTIAL-R02
 TEST(GarbageCollectionTest, PartialFailureAtThirtySeventhRemovalKeepsCounts) {
     FakeFixture fixture("gc-partial-thirty-seven");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
     std::vector<std::string> orphans;
     for (std::size_t index = 0; index < 100; ++index) {
-        orphans.push_back(put_content(fixture.transport,
-                                      fixture.workspace,
-                                      "partial-" + std::to_string(index),
-                                      "partial-" + std::to_string(index)));
+        orphans.push_back(
+            fixture.put_content("partial-" + std::to_string(index),
+                                "partial-" + std::to_string(index)));
     }
     std::ranges::sort(orphans);
     fixture.state->fail_candidate_remove_at = 37;
     fixture.state->remove_failure_native_code = 123;
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.error().garbage_collection.has_value());
-    const auto& diagnostic = *result.error().garbage_collection;
-    EXPECT_EQ(diagnostic.candidate_objects, 100U);
-    EXPECT_EQ(diagnostic.confirmed_removed, 36U);
-    EXPECT_EQ(diagnostic.failed_identifier,
+    const auto diagnostic = collect_diagnostic(fixture);
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->candidate_objects, 100U);
+    EXPECT_EQ(diagnostic->confirmed_removed, 36U);
+    EXPECT_EQ(diagnostic->failed_identifier,
               std::optional<std::string>{orphans[36]});
-    EXPECT_EQ(diagnostic.stage, GarbageCollectStage::Applying);
-    EXPECT_EQ(diagnostic.mutation_state,
+    EXPECT_EQ(diagnostic->stage, GarbageCollectStage::Applying);
+    EXPECT_EQ(diagnostic->mutation_state,
               kasumi::application::GarbageCollectMutationState::Uncertain);
-    ASSERT_TRUE(diagnostic.transport_error.has_value());
-    EXPECT_EQ(diagnostic.transport_error->code,
+    ASSERT_TRUE(diagnostic->transport_error.has_value());
+    EXPECT_EQ(diagnostic->transport_error->code,
               kasumi::transport::ErrorCode::Io);
-    EXPECT_EQ(diagnostic.transport_error->native_code, 123);
-    EXPECT_TRUE(diagnostic.barrier_release_attempted);
-    EXPECT_TRUE(diagnostic.barrier_release_confirmed);
+    EXPECT_EQ(diagnostic->transport_error->native_code, 123);
+    EXPECT_TRUE(diagnostic->barrier_release_attempted);
+    EXPECT_TRUE(diagnostic->barrier_release_confirmed);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 37U);
-    EXPECT_FALSE(object_present(fixture.transport, orphans[35]));
-    EXPECT_TRUE(object_present(fixture.transport, orphans[36]));
-    EXPECT_TRUE(object_present(fixture.transport, orphans[37]));
+    EXPECT_FALSE(fixture.present(orphans[35]));
+    EXPECT_TRUE(fixture.present(orphans[36]));
+    EXPECT_TRUE(fixture.present(orphans[37]));
 }
 
 // PARTIAL-R03
 TEST(GarbageCollectionTest,
      AmbiguousRemovalPreservesNativeCodeAndUncertainMutation) {
     FakeFixture fixture("gc-partial-ambiguous");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
-    const auto orphan =
-        put_content(fixture.transport, fixture.workspace, "orphan", "orphan");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto orphan = fixture.put_content("orphan", "orphan");
     fixture.state->remove_then_fail_identifier = orphan;
     fixture.state->remove_failure_native_code = 4321;
 
@@ -1205,22 +1161,20 @@ TEST(GarbageCollectionTest,
               kasumi::transport::ErrorCode::Io);
     EXPECT_EQ(diagnostic.transport_error->native_code, 4321);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 1U);
-    EXPECT_FALSE(object_present(fixture.transport, orphan));
+    EXPECT_FALSE(fixture.present(orphan));
 }
 
 // PLAN-R04: the third of eight REMOVE calls fails with an ambiguous I/O
 // result. Two are acknowledged, the third is uncertain, and no fourth starts.
 TEST(GarbageCollectionTest, ThirdRemovalFailureKeepsPartialDiagnostic) {
     FakeFixture fixture("gc-partial-third-remove");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
     std::vector<std::string> orphans;
     for (std::size_t index = 0; index < 8; ++index) {
-        orphans.push_back(put_content(fixture.transport,
-                                      fixture.workspace,
-                                      "third-" + std::to_string(index),
-                                      "third-" + std::to_string(index)));
+        orphans.push_back(
+            fixture.put_content("third-" + std::to_string(index),
+                                "third-" + std::to_string(index)));
     }
     std::ranges::sort(orphans);
     fixture.state->fail_candidate_remove_at = 3;
@@ -1229,8 +1183,7 @@ TEST(GarbageCollectionTest, ThirdRemovalFailureKeepsPartialDiagnostic) {
 
     const auto result = fixture.collect();
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::TransportFailure);
+    EXPECT_EQ(result.error().code, GcErrorCode::TransportFailure);
     ASSERT_TRUE(result.error().garbage_collection.has_value());
     const auto& diagnostic = *result.error().garbage_collection;
     EXPECT_EQ(diagnostic.candidate_objects, 8U);
@@ -1247,23 +1200,21 @@ TEST(GarbageCollectionTest, ThirdRemovalFailureKeepsPartialDiagnostic) {
     EXPECT_TRUE(diagnostic.barrier_release_attempted);
     EXPECT_TRUE(diagnostic.barrier_release_confirmed);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 3U);
-    EXPECT_FALSE(object_present(fixture.transport, orphans[0]));
-    EXPECT_FALSE(object_present(fixture.transport, orphans[1]));
-    EXPECT_TRUE(object_present(fixture.transport, orphans[2]));
-    EXPECT_TRUE(object_present(fixture.transport, orphans[3]));
+    EXPECT_FALSE(fixture.present(orphans[0]));
+    EXPECT_FALSE(fixture.present(orphans[1]));
+    EXPECT_TRUE(fixture.present(orphans[2]));
+    EXPECT_TRUE(fixture.present(orphans[3]));
 }
 
 // PARTIAL-R06 / BARRIER-R07
 TEST(GarbageCollectionTest,
      CancellationAfterConfirmedRemovalPreservesCountsAndCleanup) {
     FakeFixture fixture("gc-partial-cancellation");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
     std::vector<std::string> orphans;
     for (const std::string_view name : {"cancel-a", "cancel-b", "cancel-c"}) {
-        orphans.push_back(
-            put_content(fixture.transport, fixture.workspace, name, name));
+        orphans.push_back(fixture.put_content(name, name));
     }
     std::ranges::sort(orphans);
     ResetCancellation reset_guard;
@@ -1288,16 +1239,15 @@ TEST(GarbageCollectionTest,
     EXPECT_TRUE(diagnostic.barrier_release_confirmed);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 1U);
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
-    EXPECT_FALSE(object_present(fixture.transport, orphans.front()));
-    EXPECT_TRUE(object_present(fixture.transport, orphans[1]));
-    EXPECT_TRUE(object_present(fixture.transport, orphans[2]));
+    EXPECT_FALSE(fixture.present(orphans.front()));
+    EXPECT_TRUE(fixture.present(orphans[1]));
+    EXPECT_TRUE(fixture.present(orphans[2]));
 }
 
 TEST(GarbageCollectionTest, AnalysisOnlyCountsCorruptCandidates) {
     FakeFixture fixture("gc-analysis-only-corrupt");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
     put_corrupt_content(
         fixture.transport, fixture.workspace, "corrupt", "corrupt");
     fixture.state->hide_probe_listing = true;
@@ -1316,10 +1266,7 @@ TEST(GarbageCollectionTest, ExistingBarrierBlocksBeforeEstablishingOwnership) {
     fixture.state->objects[layout().barrier_identifier] = {1, 2, 3};
     fixture.state->remove_count = 0;
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::ConcurrentChange);
+    ASSERT_TRUE(expect_collect_error(fixture, GcErrorCode::ConcurrentChange));
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
 }
 
@@ -1333,10 +1280,7 @@ TEST(GarbageCollectionTest, ActiveWriterBlocksMutation) {
     ASSERT_TRUE(writer.has_value()) << writer.error().detail;
     fixture.state->remove_count = 0;
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::ConcurrentChange);
+    ASSERT_TRUE(expect_collect_error(fixture, GcErrorCode::ConcurrentChange));
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
     EXPECT_TRUE(protocol::release_registration(*writer));
 }
@@ -1364,26 +1308,21 @@ TEST(GarbageCollectionTest, CooperativeWriterCannotRegisterWhileBarrierActive) {
 TEST(GarbageCollectionTest,
      BarrierReplacementDuringApplyPreservesAcknowledgedRemovals) {
     FakeFixture fixture("gc-barrier-replaced");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
-    const auto first =
-        put_content(fixture.transport, fixture.workspace, "orphan-a", "a");
-    const auto second =
-        put_content(fixture.transport, fixture.workspace, "orphan-b", "b");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto first = fixture.put_content("orphan-a", "a");
+    const auto second = fixture.put_content("orphan-b", "b");
     fixture.state->replace_barrier_after_source_remove_count = 1;
     fixture.state->remove_count = 0;
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.error().garbage_collection.has_value());
-    const auto& diagnostic = *result.error().garbage_collection;
-    EXPECT_EQ(diagnostic.confirmed_removed, 2U);
+    const auto diagnostic = collect_diagnostic(fixture);
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->confirmed_removed, 2U);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 2U);
-    EXPECT_FALSE(object_present(fixture.transport, std::min(first, second)));
-    EXPECT_FALSE(object_present(fixture.transport, std::max(first, second)));
-    EXPECT_FALSE(diagnostic.barrier_release_attempted);
-    EXPECT_TRUE(object_present(fixture.transport, layout().barrier_identifier));
+    EXPECT_FALSE(fixture.present(std::min(first, second)));
+    EXPECT_FALSE(fixture.present(std::max(first, second)));
+    EXPECT_FALSE(diagnostic->barrier_release_attempted);
+    EXPECT_TRUE(fixture.present(layout().barrier_identifier));
 }
 
 // BARRIER-R01
@@ -1395,44 +1334,37 @@ TEST(GarbageCollectionTest, SuccessfulRunReleasesBarrierExactlyOnce) {
     const auto result = fixture.collect();
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
-    EXPECT_FALSE(
-        object_present(fixture.transport, layout().barrier_identifier));
+    EXPECT_FALSE(fixture.present(layout().barrier_identifier));
 }
 
 // BARRIER-R02
 TEST(GarbageCollectionTest,
      PrimaryFailureKeepsSuccessfulBarrierCleanupDiagnostic) {
     FakeFixture fixture("gc-barrier-primary-cleanup-ok");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
-    const auto orphan =
-        put_content(fixture.transport, fixture.workspace, "orphan", "orphan");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto orphan = fixture.put_content("orphan", "orphan");
     fixture.state->fail_candidate_remove_at = 1;
     fixture.state->remove_attempts.clear();
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.error().garbage_collection.has_value());
-    const auto& diagnostic = *result.error().garbage_collection;
-    EXPECT_EQ(diagnostic.failed_identifier, std::optional<std::string>{orphan});
-    EXPECT_TRUE(diagnostic.barrier_release_attempted);
-    EXPECT_TRUE(diagnostic.barrier_release_confirmed);
-    EXPECT_FALSE(diagnostic.barrier_cleanup_error.has_value());
+    const auto diagnostic = collect_diagnostic(fixture);
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->failed_identifier,
+              std::optional<std::string>{orphan});
+    EXPECT_TRUE(diagnostic->barrier_release_attempted);
+    EXPECT_TRUE(diagnostic->barrier_release_confirmed);
+    EXPECT_FALSE(diagnostic->barrier_cleanup_error.has_value());
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
-    EXPECT_FALSE(
-        object_present(fixture.transport, layout().barrier_identifier));
+    EXPECT_FALSE(fixture.present(layout().barrier_identifier));
 }
 
 // BARRIER-R03
 TEST(GarbageCollectionTest,
      PrimaryAndBarrierCleanupFailuresRemainDistinguishable) {
     FakeFixture fixture("gc-barrier-primary-cleanup-fail");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
-    const auto orphan =
-        put_content(fixture.transport, fixture.workspace, "orphan", "orphan");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto orphan = fixture.put_content("orphan", "orphan");
     fixture.state->fail_candidate_remove_at = 1;
     fixture.state->fail_remove_identifier = layout().barrier_identifier;
     fixture.state->remove_failure_native_code = 777;
@@ -1440,8 +1372,7 @@ TEST(GarbageCollectionTest,
 
     const auto result = fixture.collect();
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::TransportFailure);
+    EXPECT_EQ(result.error().code, GcErrorCode::TransportFailure);
     EXPECT_NE(result.error().detail.find("candidate remove failure"),
               std::string::npos);
     ASSERT_TRUE(result.error().garbage_collection.has_value());
@@ -1457,78 +1388,66 @@ TEST(GarbageCollectionTest,
               kasumi::transport::ErrorCode::Io);
     EXPECT_EQ(diagnostic.barrier_cleanup_transport_error->native_code, 777);
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
-    EXPECT_TRUE(object_present(fixture.transport, layout().barrier_identifier));
+    EXPECT_TRUE(fixture.present(layout().barrier_identifier));
 }
 
 // BARRIER-R04
 TEST(GarbageCollectionTest, AmbiguousBarrierRemovalIsNotRetriedOrConfirmed) {
     FakeFixture fixture("gc-barrier-ambiguous-release");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
-    const auto orphan =
-        put_content(fixture.transport, fixture.workspace, "orphan", "orphan");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto orphan = fixture.put_content("orphan", "orphan");
     fixture.state->remove_then_fail_identifier = layout().barrier_identifier;
     fixture.state->remove_failure_native_code = 778;
     fixture.state->remove_attempts.clear();
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.error().garbage_collection.has_value());
-    const auto& diagnostic = *result.error().garbage_collection;
-    EXPECT_EQ(diagnostic.candidate_objects, 1U);
-    EXPECT_EQ(diagnostic.confirmed_removed, 1U);
-    EXPECT_EQ(diagnostic.stage, GarbageCollectStage::Finalizing);
-    EXPECT_EQ(diagnostic.mutation_state,
+    const auto diagnostic = collect_diagnostic(fixture);
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->candidate_objects, 1U);
+    EXPECT_EQ(diagnostic->confirmed_removed, 1U);
+    EXPECT_EQ(diagnostic->stage, GarbageCollectStage::Finalizing);
+    EXPECT_EQ(diagnostic->mutation_state,
               kasumi::application::GarbageCollectMutationState::Confirmed);
-    EXPECT_TRUE(diagnostic.barrier_release_attempted);
-    EXPECT_FALSE(diagnostic.barrier_release_confirmed);
-    ASSERT_TRUE(diagnostic.barrier_cleanup_transport_error.has_value());
-    EXPECT_EQ(diagnostic.barrier_cleanup_transport_error->native_code, 778);
+    EXPECT_TRUE(diagnostic->barrier_release_attempted);
+    EXPECT_FALSE(diagnostic->barrier_release_confirmed);
+    ASSERT_TRUE(diagnostic->barrier_cleanup_transport_error.has_value());
+    EXPECT_EQ(diagnostic->barrier_cleanup_transport_error->native_code, 778);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 1U);
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
-    EXPECT_FALSE(object_present(fixture.transport, orphan));
-    EXPECT_FALSE(
-        object_present(fixture.transport, layout().barrier_identifier));
+    EXPECT_FALSE(fixture.present(orphan));
+    EXPECT_FALSE(fixture.present(layout().barrier_identifier));
 }
 
 // BARRIER-R05
 TEST(GarbageCollectionTest, ForeignBarrierIsNotRemovedDuringCleanup) {
     FakeFixture fixture("gc-barrier-foreign-cleanup");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
-    const auto first =
-        put_content(fixture.transport, fixture.workspace, "orphan-a", "a");
-    const auto second =
-        put_content(fixture.transport, fixture.workspace, "orphan-b", "b");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto first = fixture.put_content("orphan-a", "a");
+    const auto second = fixture.put_content("orphan-b", "b");
     fixture.state->replace_barrier_after_source_remove_count = 1;
     fixture.state->remove_attempts.clear();
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.error().garbage_collection.has_value());
-    const auto& diagnostic = *result.error().garbage_collection;
-    EXPECT_FALSE(diagnostic.barrier_release_attempted);
-    EXPECT_FALSE(diagnostic.barrier_release_confirmed);
-    EXPECT_EQ(diagnostic.confirmed_removed, 2U);
-    ASSERT_TRUE(diagnostic.barrier_cleanup_error.has_value());
+    const auto diagnostic = collect_diagnostic(fixture);
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_FALSE(diagnostic->barrier_release_attempted);
+    EXPECT_FALSE(diagnostic->barrier_release_confirmed);
+    EXPECT_EQ(diagnostic->confirmed_removed, 2U);
+    ASSERT_TRUE(diagnostic->barrier_cleanup_error.has_value());
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 0U);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 2U);
-    EXPECT_TRUE(object_present(fixture.transport, layout().barrier_identifier));
-    EXPECT_FALSE(object_present(fixture.transport, std::min(first, second)));
-    EXPECT_FALSE(object_present(fixture.transport, std::max(first, second)));
+    EXPECT_TRUE(fixture.present(layout().barrier_identifier));
+    EXPECT_FALSE(fixture.present(std::min(first, second)));
+    EXPECT_FALSE(fixture.present(std::max(first, second)));
 }
 
 TEST(GarbageCollectionTest, ExceptionDuringApplyKeepsPartialDiagnostic) {
     FakeFixture fixture("gc-apply-exception");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
     std::vector<std::string> orphans;
     for (const std::string_view name : {"apply-a", "apply-b"}) {
-        orphans.push_back(
-            put_content(fixture.transport, fixture.workspace, name, name));
+        orphans.push_back(fixture.put_content(name, name));
     }
     std::ranges::sort(orphans);
     fixture.state->on_operation =
@@ -1542,8 +1461,7 @@ TEST(GarbageCollectionTest, ExceptionDuringApplyKeepsPartialDiagnostic) {
 
     const auto result = fixture.collect();
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::StateFailure);
+    EXPECT_EQ(result.error().code, GcErrorCode::StateFailure);
     EXPECT_NE(result.error().detail.find("injected apply exception"),
               std::string::npos);
     ASSERT_TRUE(result.error().garbage_collection.has_value());
@@ -1559,7 +1477,7 @@ TEST(GarbageCollectionTest, ExceptionDuringApplyKeepsPartialDiagnostic) {
     EXPECT_TRUE(diagnostic.barrier_release_confirmed);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 1U);
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
-    EXPECT_TRUE(object_present(fixture.transport, orphans.front()));
+    EXPECT_TRUE(fixture.present(orphans.front()));
 }
 
 // GC-R2.2
@@ -1579,8 +1497,7 @@ TEST(GarbageCollectionTest,
 
     const auto result = fixture.collect();
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::StateFailure);
+    EXPECT_EQ(result.error().code, GcErrorCode::StateFailure);
     EXPECT_NE(result.error().detail.find("injected analysis exception"),
               std::string::npos);
     ASSERT_TRUE(result.error().garbage_collection.has_value());
@@ -1598,7 +1515,7 @@ TEST(GarbageCollectionTest,
     EXPECT_EQ(diagnostic.barrier_cleanup_transport_error->native_code, 783);
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
-    EXPECT_TRUE(object_present(fixture.transport, layout().barrier_identifier));
+    EXPECT_TRUE(fixture.present(layout().barrier_identifier));
 }
 
 // BARRIER-R06
@@ -1615,13 +1532,11 @@ TEST(GarbageCollectionTest, ExceptionDuringAnalysisReleasesBarrierOnce) {
 
     const auto result = fixture.collect();
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::StateFailure);
+    EXPECT_EQ(result.error().code, GcErrorCode::StateFailure);
     EXPECT_NE(result.error().detail.find("injected analysis exception"),
               std::string::npos);
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
-    EXPECT_FALSE(
-        object_present(fixture.transport, layout().barrier_identifier));
+    EXPECT_FALSE(fixture.present(layout().barrier_identifier));
 }
 
 TEST(GarbageCollectionTest,
@@ -1638,7 +1553,7 @@ TEST(GarbageCollectionTest,
     EXPECT_EQ(result->candidate_objects, 2U);
     EXPECT_EQ(result->removed_objects, 0U);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
-    EXPECT_TRUE(object_present(fixture.transport, repository.orphan_content));
+    EXPECT_TRUE(fixture.present(repository.orphan_content));
 }
 
 TEST(GarbageCollectionTest, ProbeTransportFailureFailsClosed) {
@@ -1647,10 +1562,7 @@ TEST(GarbageCollectionTest, ProbeTransportFailureFailsClosed) {
     fixture.state->fail_probe_listing = true;
     fixture.state->remove_count = 0;
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::TransportFailure);
+    ASSERT_TRUE(expect_collect_error(fixture, GcErrorCode::TransportFailure));
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
 }
 
@@ -1658,8 +1570,7 @@ TEST(GarbageCollectionTest, ObjectsAppearingAfterObservationAreNotPlanned) {
     FakeFixture fixture("gc-divergent-observation");
     const auto repository =
         seed_repository(fixture.transport, fixture.workspace);
-    const auto hidden =
-        put_content(fixture.transport, fixture.workspace, "hidden", "hidden");
+    const auto hidden = fixture.put_content("hidden", "hidden");
     const auto bytes = fixture.state->objects.at(hidden);
     fixture.state->objects.erase(hidden);
     fixture.state->hidden_objects[hidden] = bytes;
@@ -1676,20 +1587,17 @@ TEST(GarbageCollectionTest, ObjectsAppearingAfterObservationAreNotPlanned) {
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->removed_objects, 2U);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 2U);
-    EXPECT_TRUE(object_present(fixture.transport, hidden));
-    EXPECT_FALSE(object_present(fixture.transport, repository.orphan_content));
-    EXPECT_FALSE(object_present(fixture.transport,
-                                object_path(repository.redundant_variant)));
+    EXPECT_TRUE(fixture.present(hidden));
+    EXPECT_FALSE(fixture.present(repository.orphan_content));
+    EXPECT_FALSE(fixture.present(object_path(repository.redundant_variant)));
 }
 
 TEST(GarbageCollectionTest,
      CandidateMissingAfterListRemainsInFrozenPlanAndAcknowledgesAbsent) {
     FakeFixture fixture("gc-missing-candidate");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
-    const auto orphan =
-        put_content(fixture.transport, fixture.workspace, "extra", "extra");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto orphan = fixture.put_content("extra", "extra");
     fixture.state->on_operation = [orphan](FakeState& state,
                                            std::string_view operation,
                                            std::string_view) {
@@ -1708,12 +1616,9 @@ TEST(GarbageCollectionTest,
 
 TEST(GarbageCollectionTest, OrphanContentRemovedWithoutPayloadGet) {
     FakeFixture fixture("gc-orphan-no-get");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    const auto live =
-        put_content(fixture.transport, fixture.workspace, "live", "live");
-    const auto orphan =
-        put_content(fixture.transport, fixture.workspace, "orphan", "orphan");
+    fixture.publish(commit_with_file("live"), "head");
+    const auto live = fixture.put_content("live", "live");
+    const auto orphan = fixture.put_content("orphan", "orphan");
     fixture.state->observed_payload_identifiers.insert(orphan);
 
     std::vector<std::string> get_calls;
@@ -1728,43 +1633,36 @@ TEST(GarbageCollectionTest, OrphanContentRemovedWithoutPayloadGet) {
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 1U);
     EXPECT_EQ(result->removed_objects, 1U);
-    EXPECT_TRUE(object_present(fixture.transport, live));
-    EXPECT_FALSE(object_present(fixture.transport, orphan));
+    EXPECT_TRUE(fixture.present(live));
+    EXPECT_FALSE(fixture.present(orphan));
     EXPECT_EQ(fixture.state->orphan_payload_get_count, 0U);
     EXPECT_EQ(std::ranges::count(get_calls, orphan), 0);
 }
 
 TEST(GarbageCollectionTest, OrphanRemovalSucceedsWhenContentGetFails) {
     FakeFixture fixture("gc-orphan-get-fail");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    const auto live =
-        put_content(fixture.transport, fixture.workspace, "live", "live");
-    const auto orphan =
-        put_content(fixture.transport, fixture.workspace, "orphan", "orphan");
+    fixture.publish(commit_with_file("live"), "head");
+    const auto live = fixture.put_content("live", "live");
+    const auto orphan = fixture.put_content("orphan", "orphan");
     fixture.state->fail_get_identifier = orphan;
 
     const auto result = fixture.collect();
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 1U);
     EXPECT_EQ(result->removed_objects, 1U);
-    EXPECT_TRUE(object_present(fixture.transport, live));
-    EXPECT_FALSE(object_present(fixture.transport, orphan));
+    EXPECT_TRUE(fixture.present(live));
+    EXPECT_FALSE(fixture.present(orphan));
 }
 
 TEST(GarbageCollectionTest, ManyOrphansCollectedWithZeroContentGets) {
     FakeFixture fixture("gc-many-orphans");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    const auto live =
-        put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    const auto live = fixture.put_content("live", "live");
 
     std::unordered_set<std::string> orphan_ids;
     for (std::size_t i = 0; i < 50; ++i) {
-        const auto id = put_content(fixture.transport,
-                                    fixture.workspace,
-                                    "orphan-" + std::to_string(i),
-                                    "orphan-" + std::to_string(i));
+        const auto id = fixture.put_content("orphan-" + std::to_string(i),
+                                            "orphan-" + std::to_string(i));
         orphan_ids.insert(id);
         fixture.state->observed_payload_identifiers.insert(id);
     }
@@ -1781,11 +1679,11 @@ TEST(GarbageCollectionTest, ManyOrphansCollectedWithZeroContentGets) {
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 50U);
     EXPECT_EQ(result->removed_objects, 50U);
-    EXPECT_TRUE(object_present(fixture.transport, live));
+    EXPECT_TRUE(fixture.present(live));
     EXPECT_EQ(fixture.state->orphan_payload_get_count, 0U);
     EXPECT_EQ(fixture.state->full_list_count, 1U);
     for (const auto& id : orphan_ids) {
-        EXPECT_FALSE(object_present(fixture.transport, id));
+        EXPECT_FALSE(fixture.present(id));
         EXPECT_EQ(std::ranges::count(get_calls, id), 0);
         EXPECT_EQ(
             std::ranges::count(fixture.state->gc_events, "physical_hash:" + id),
@@ -1795,12 +1693,10 @@ TEST(GarbageCollectionTest, ManyOrphansCollectedWithZeroContentGets) {
 
 TEST(GarbageCollectionTest, ReferencedCorruptContentIsPreservedWithoutGet) {
     FakeFixture fixture("gc-referenced-corrupt");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
+    fixture.publish(commit_with_file("live"), "head");
     put_corrupt_content(fixture.transport, fixture.workspace, "live", "live");
     const auto live = content_identifier("live");
-    const auto orphan =
-        put_content(fixture.transport, fixture.workspace, "orphan", "orphan");
+    const auto orphan = fixture.put_content("orphan", "orphan");
 
     std::vector<std::string> get_calls;
     fixture.state->on_operation =
@@ -1814,8 +1710,8 @@ TEST(GarbageCollectionTest, ReferencedCorruptContentIsPreservedWithoutGet) {
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 1U);
     EXPECT_EQ(result->removed_objects, 1U);
-    EXPECT_TRUE(object_present(fixture.transport, live));
-    EXPECT_FALSE(object_present(fixture.transport, orphan));
+    EXPECT_TRUE(fixture.present(live));
+    EXPECT_FALSE(fixture.present(orphan));
     EXPECT_EQ(std::ranges::count(get_calls, live), 0);
     EXPECT_EQ(std::ranges::count(get_calls, orphan), 0);
 }
@@ -1823,41 +1719,31 @@ TEST(GarbageCollectionTest, ReferencedCorruptContentIsPreservedWithoutGet) {
 TEST(GarbageCollectionTest, RemovalFailureIsNotRetried) {
     FakeFixture fixture("gc-remove-failure");
     seed_repository(fixture.transport, fixture.workspace);
-    const auto extra =
-        put_content(fixture.transport, fixture.workspace, "extra", "extra");
+    const auto extra = fixture.put_content("extra", "extra");
     fixture.state->fail_candidate_remove_at = 1;
     fixture.state->remove_failure_native_code = 23;
     fixture.state->remove_count = 0;
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::TransportFailure);
+    ASSERT_TRUE(expect_collect_error(fixture, GcErrorCode::TransportFailure));
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 1U);
-    EXPECT_TRUE(object_present(fixture.transport, extra));
+    EXPECT_TRUE(fixture.present(extra));
 }
 
 TEST(GarbageCollectionTest, AmbiguousRemovalStopsWithoutCompensatingRetry) {
     FakeFixture fixture("gc-ambiguous-remove");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
-    const auto first =
-        put_content(fixture.transport, fixture.workspace, "orphan-a", "a");
-    const auto second =
-        put_content(fixture.transport, fixture.workspace, "orphan-b", "b");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto first = fixture.put_content("orphan-a", "a");
+    const auto second = fixture.put_content("orphan-b", "b");
     const auto removed = std::min(first, second);
     fixture.state->remove_then_fail_identifier = removed;
     fixture.state->remove_failure_native_code = 41;
     fixture.state->remove_count = 0;
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::TransportFailure);
+    ASSERT_TRUE(expect_collect_error(fixture, GcErrorCode::TransportFailure));
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 1U);
-    EXPECT_FALSE(object_present(fixture.transport, removed));
-    EXPECT_TRUE(object_present(fixture.transport, std::max(first, second)));
+    EXPECT_FALSE(fixture.present(removed));
+    EXPECT_TRUE(fixture.present(std::max(first, second)));
 }
 
 TEST(GarbageCollectionTest,
@@ -1910,18 +1796,14 @@ TEST(GarbageCollectionTest, GarbageCollectFsckGarbageCollectRoundTrip) {
     ASSERT_TRUE(first.has_value()) << first.error().detail;
     EXPECT_EQ(first->candidate_objects, 2U);
     EXPECT_EQ(first->removed_objects, 2U);
-    EXPECT_FALSE(
-        object_present(fixture.storage.transport, repository.orphan_content));
-    EXPECT_FALSE(object_present(fixture.storage.transport,
-                                object_path(repository.redundant_variant)));
-    EXPECT_TRUE(
-        object_present(fixture.storage.transport, repository.live_content));
-    EXPECT_TRUE(object_present(fixture.storage.transport,
-                               object_path(repository.head)));
-    EXPECT_TRUE(object_present(fixture.storage.transport, *epoch_object));
+    EXPECT_FALSE(fixture.present(repository.orphan_content));
+    EXPECT_FALSE(fixture.present(object_path(repository.redundant_variant)));
+    EXPECT_TRUE(fixture.present(repository.live_content));
+    EXPECT_TRUE(fixture.present(object_path(repository.head)));
+    EXPECT_TRUE(fixture.present(*epoch_object));
 
-    const auto audit = kasumi::application::integrity::fsck(
-        fixture.runtime, fixture.storage.transport, test_key(), 1);
+    const auto audit =
+        gc_int::fsck(fixture.runtime, fixture.storage.transport, test_key(), 1);
     ASSERT_TRUE(audit.has_value()) << audit.error().detail;
     EXPECT_GT(audit->checked_objects, 0U);
     EXPECT_EQ(audit->repaired_objects, 0U);
@@ -1976,13 +1858,12 @@ TEST(GarbageCollectionTest, LegacyConcurrencyHintsAreValidated) {
     LocalFixture fixture;
     seed_repository(fixture.storage.transport, fixture.storage.workspace);
 
-    const auto invalid = kasumi::application::integrity::garbage_collect(
+    const auto invalid = gc_int::garbage_collect(
         fixture.runtime, fixture.storage.transport, test_key(), 1, 0, 1);
     ASSERT_FALSE(invalid.has_value());
-    EXPECT_EQ(invalid.error().code,
-              kasumi::application::integrity::ErrorCode::InvalidInput);
+    EXPECT_EQ(invalid.error().code, GcErrorCode::InvalidInput);
 
-    const auto valid = kasumi::application::integrity::garbage_collect(
+    const auto valid = gc_int::garbage_collect(
         fixture.runtime, fixture.storage.transport, test_key(), 2, 3, 4);
     ASSERT_TRUE(valid.has_value()) << valid.error().detail;
     EXPECT_EQ(valid->removed_objects, 2U);
@@ -1992,17 +1873,13 @@ TEST(GarbageCollectionTest, FailureInjectionPositionsStopAfterOneAttempt) {
     for (const std::size_t position : {0U, 1U, 5U, 50U, 99U}) {
         SCOPED_TRACE("candidate position " + std::to_string(position));
         FakeFixture fixture("gc-injection");
-        publish_object(fixture.transport,
-                       fixture.workspace,
-                       commit_with_file("live"),
-                       "head");
-        put_content(fixture.transport, fixture.workspace, "live", "live");
+        fixture.publish(commit_with_file("live"), "head");
+        fixture.put_content("live", "live");
         std::vector<std::string> orphans;
         for (std::size_t index = 0; index < 100; ++index) {
-            orphans.push_back(put_content(fixture.transport,
-                                          fixture.workspace,
-                                          "orphan-" + std::to_string(index),
-                                          "orphan-" + std::to_string(index)));
+            orphans.push_back(
+                fixture.put_content("orphan-" + std::to_string(index),
+                                    "orphan-" + std::to_string(index)));
         }
         std::ranges::sort(orphans);
         fixture.state->fail_candidate_remove_at = position;
@@ -2016,78 +1893,57 @@ TEST(GarbageCollectionTest, FailureInjectionPositionsStopAfterOneAttempt) {
             continue;
         }
         ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().code,
-                  kasumi::application::integrity::ErrorCode::TransportFailure);
+        EXPECT_EQ(result.error().code, GcErrorCode::TransportFailure);
         EXPECT_EQ(candidate_remove_attempts(*fixture.state), position);
         if (position > 1) {
-            EXPECT_FALSE(
-                object_present(fixture.transport, orphans[position - 2]));
+            EXPECT_FALSE(fixture.present(orphans[position - 2]));
         }
-        EXPECT_TRUE(object_present(fixture.transport, orphans[position - 1]));
+        EXPECT_TRUE(fixture.present(orphans[position - 1]));
     }
 }
 
 TEST(GarbageCollectionBenchmarkTest, ZeroCandidates) {
     LocalFixture fixture;
-    publish_object(fixture.storage.transport,
-                   fixture.storage.workspace,
-                   commit_with_file("live"),
-                   "bench-zero-head");
-    const auto protected_content = put_content(fixture.storage.transport,
-                                               fixture.storage.workspace,
-                                               "live",
-                                               "bench-live");
+    fixture.publish(commit_with_file("live"), "bench-zero-head");
+    const auto protected_content = fixture.put_content("live", "bench-live");
 
     const auto result = measure_gc(fixture, "0_candidates");
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 0U);
     EXPECT_EQ(result->removed_objects, 0U);
-    EXPECT_TRUE(object_present(fixture.storage.transport, protected_content));
+    EXPECT_TRUE(fixture.present(protected_content));
 }
 
 TEST(GarbageCollectionBenchmarkTest, TenOrphanContents) {
     LocalFixture fixture;
-    publish_object(fixture.storage.transport,
-                   fixture.storage.workspace,
-                   commit_with_file("live"),
-                   "bench-ten-head");
-    const auto protected_content = put_content(fixture.storage.transport,
-                                               fixture.storage.workspace,
-                                               "live",
-                                               "bench-ten-live");
+    fixture.publish(commit_with_file("live"), "bench-ten-head");
+    const auto protected_content =
+        fixture.put_content("live", "bench-ten-live");
     std::vector<std::string> orphans;
     for (std::size_t index = 0; index < 10; ++index) {
         const auto contents = "bench-ten-orphan-" + std::to_string(index);
-        orphans.push_back(put_content(fixture.storage.transport,
-                                      fixture.storage.workspace,
-                                      contents,
-                                      contents));
+        orphans.push_back(fixture.put_content(contents, contents));
     }
 
     const auto result = measure_gc(fixture, "10_content_orphans");
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 10U);
     EXPECT_EQ(result->removed_objects, 10U);
-    EXPECT_TRUE(object_present(fixture.storage.transport, protected_content));
+    EXPECT_TRUE(fixture.present(protected_content));
     EXPECT_TRUE(std::ranges::all_of(orphans, [&](const auto& identifier) {
-        return !object_present(fixture.storage.transport, identifier);
+        return !fixture.present(identifier);
     }));
 }
 
 TEST(GarbageCollectionBenchmarkTest, OneHundredContentOrphans) {
     LocalFixture fixture;
-    publish_object(fixture.storage.transport,
-                   fixture.storage.workspace,
-                   commit_with_file("live"),
-                   "head");
-    put_content(
-        fixture.storage.transport, fixture.storage.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
     std::vector<std::string> orphans;
     for (std::size_t index = 0; index < 100; ++index) {
-        orphans.push_back(put_content(fixture.storage.transport,
-                                      fixture.storage.workspace,
-                                      "load-content-" + std::to_string(index),
-                                      "load-content-" + std::to_string(index)));
+        orphans.push_back(
+            fixture.put_content("load-content-" + std::to_string(index),
+                                "load-content-" + std::to_string(index)));
     }
 
     const auto result = measure_gc(fixture, "100_content_orphans");
@@ -2095,7 +1951,7 @@ TEST(GarbageCollectionBenchmarkTest, OneHundredContentOrphans) {
     EXPECT_EQ(result->candidate_objects, 100U);
     EXPECT_EQ(result->removed_objects, 100U);
     EXPECT_TRUE(std::ranges::all_of(orphans, [&](const auto& identifier) {
-        return !object_present(fixture.storage.transport, identifier);
+        return !fixture.present(identifier);
     }));
 }
 
@@ -2106,22 +1962,10 @@ void benchmark_redundant_variants(std::size_t candidate_count) {
     const auto child =
         kasumi::history::make_commit(1, {commit_id(parent)}, child_tree)
             .value();
-    publish_object(fixture.storage.transport,
-                   fixture.storage.workspace,
-                   parent,
-                   "load-parent");
-    publish_object(fixture.storage.transport,
-                   fixture.storage.workspace,
-                   child,
-                   "load-child");
-    put_content(fixture.storage.transport,
-                fixture.storage.workspace,
-                "parent",
-                "load-parent-content");
-    put_content(fixture.storage.transport,
-                fixture.storage.workspace,
-                "child",
-                "load-child-content");
+    fixture.publish(parent, "load-parent");
+    fixture.publish(child, "load-child");
+    fixture.put_content("parent", "load-parent-content");
+    fixture.put_content("child", "load-child-content");
     std::vector<HeadReference> variants;
     for (std::size_t index = 0; index < candidate_count / 2; ++index) {
         variants.push_back(
@@ -2143,7 +1987,7 @@ void benchmark_redundant_variants(std::size_t candidate_count) {
     EXPECT_EQ(result->candidate_objects, candidate_count);
     EXPECT_EQ(result->removed_objects, candidate_count);
     EXPECT_TRUE(std::ranges::all_of(variants, [&](const auto& variant) {
-        return !object_present(fixture.storage.transport, object_path(variant));
+        return !fixture.present(object_path(variant));
     }));
     const auto inventory =
         kasumi::application::history_storage::inventory_reachability(
@@ -2185,19 +2029,15 @@ TEST(GarbageCollectionBenchmarkTest, OneHundredRedundantVariants) {
 TEST(GarbageCollectionTest, LocalLoadRemovesHybridCandidates) {
     LocalFixture fixture;
     const auto commit = commit_with_file("live");
-    publish_object(
-        fixture.storage.transport, fixture.storage.workspace, commit, "head");
-    put_content(
-        fixture.storage.transport, fixture.storage.workspace, "live", "live");
+    fixture.publish(commit, "head");
+    fixture.put_content("live", "live");
     for (std::size_t index = 0; index < 50; ++index) {
         add_variant_object(fixture.storage.transport,
                            fixture.storage.workspace,
                            commit,
                            "hybrid-variant-" + std::to_string(index));
-        put_content(fixture.storage.transport,
-                    fixture.storage.workspace,
-                    "hybrid-content-" + std::to_string(index),
-                    "hybrid-content-" + std::to_string(index));
+        fixture.put_content("hybrid-content-" + std::to_string(index),
+                            "hybrid-content-" + std::to_string(index));
     }
 
     const auto result = fixture.collect();
@@ -2209,17 +2049,11 @@ TEST(GarbageCollectionTest, LocalLoadRemovesHybridCandidates) {
 TEST(GarbageCollectionTest,
      DISABLED_LocalLoadRemovesOneThousandContentCandidates) {
     LocalFixture fixture;
-    publish_object(fixture.storage.transport,
-                   fixture.storage.workspace,
-                   commit_with_file("live"),
-                   "head");
-    put_content(
-        fixture.storage.transport, fixture.storage.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
     for (std::size_t index = 0; index < 1000; ++index) {
-        put_content(fixture.storage.transport,
-                    fixture.storage.workspace,
-                    "thousand-" + std::to_string(index),
-                    "thousand-" + std::to_string(index));
+        fixture.put_content("thousand-" + std::to_string(index),
+                            "thousand-" + std::to_string(index));
     }
 
     const auto result = fixture.collect();
@@ -2231,14 +2065,9 @@ TEST(GarbageCollectionTest,
 TEST(GarbageCollectionTest, EpochRetentionIsPreserved) {
     LocalFixture fixture;
     const auto commit = commit_with_file("live");
-    publish_object(
-        fixture.storage.transport, fixture.storage.workspace, commit, "head");
-    put_content(
-        fixture.storage.transport, fixture.storage.workspace, "live", "live");
-    const auto orphan = put_content(fixture.storage.transport,
-                                    fixture.storage.workspace,
-                                    "orphan",
-                                    "orphan");
+    fixture.publish(commit, "head");
+    fixture.put_content("live", "live");
+    const auto orphan = fixture.put_content("orphan", "orphan");
     add_variant_object(fixture.storage.transport,
                        fixture.storage.workspace,
                        commit,
@@ -2266,8 +2095,8 @@ TEST(GarbageCollectionTest, EpochRetentionIsPreserved) {
     const auto result = fixture.collect();
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->removed_objects, 2U);
-    EXPECT_FALSE(object_present(fixture.storage.transport, orphan));
-    EXPECT_TRUE(object_present(fixture.storage.transport, *epoch_object));
+    EXPECT_FALSE(fixture.present(orphan));
+    EXPECT_TRUE(fixture.present(*epoch_object));
 }
 
 // These cases used to be caught by per-candidate history revalidation. Under
@@ -2279,21 +2108,16 @@ class PostApplyMutationTest : public testing::TestWithParam<std::string> {};
 TEST_P(PostApplyMutationTest, MutationAfterFirstRemovalDoesNotChangeThePlan) {
     FakeFixture fixture("gc-variant-concurrent-change");
     const auto parent = commit_with_file("parent");
-    const auto parent_reference = publish_object(
-        fixture.transport, fixture.workspace, parent, "parent", false);
+    const auto parent_reference = fixture.publish(parent, "parent", false);
     const auto child =
         kasumi::history::make_commit(
             1, {commit_id(parent)}, commit_with_file("live").tree)
             .value();
-    const auto head =
-        publish_object(fixture.transport, fixture.workspace, child, "head");
-    put_content(
-        fixture.transport, fixture.workspace, "parent", "parent-content");
-    put_content(fixture.transport, fixture.workspace, "live", "live-content");
-    const auto a =
-        add_variant_object(fixture.transport, fixture.workspace, child, "a");
-    const auto b =
-        add_variant_object(fixture.transport, fixture.workspace, child, "b");
+    const auto head = fixture.publish(child, "head");
+    fixture.put_content("parent", "parent-content");
+    fixture.put_content("live", "live-content");
+    const auto a = fixture.add_variant(child, "a");
+    const auto b = fixture.add_variant(child, "b");
     const auto first = std::min(object_path(a), object_path(b));
     const auto second = std::max(object_path(a), object_path(b));
     const auto second_reference = object_path(a) == second ? a : b;
@@ -2351,16 +2175,15 @@ TEST_P(PostApplyMutationTest, MutationAfterFirstRemovalDoesNotChangeThePlan) {
     fixture.state->remove_attempts.clear();
     const auto result = fixture.collect();
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 2U);
-    EXPECT_FALSE(object_present(fixture.transport, first));
-    EXPECT_FALSE(object_present(fixture.transport, second));
+    EXPECT_FALSE(fixture.present(first));
+    EXPECT_FALSE(fixture.present(second));
     if (change == "barrier") {
         ASSERT_FALSE(result.has_value());
         ASSERT_TRUE(result.error().garbage_collection.has_value());
         const auto& diagnostic = *result.error().garbage_collection;
         EXPECT_EQ(diagnostic.confirmed_removed, 2U);
         EXPECT_EQ(barrier_remove_attempts(*fixture.state), 0U);
-        EXPECT_TRUE(
-            object_present(fixture.transport, layout().barrier_identifier));
+        EXPECT_TRUE(fixture.present(layout().barrier_identifier));
     } else if (change == "exception_cleanup") {
         ASSERT_FALSE(result.has_value());
         ASSERT_TRUE(result.error().garbage_collection.has_value());
@@ -2396,12 +2219,10 @@ INSTANTIATE_TEST_SUITE_P(
 TEST(GarbageCollectionOptimizationTest, UncertainVariantRemoveIsNeverRetried) {
     FakeFixture fixture("gc-variant-uncertain");
     const auto commit = commit_with_file("live");
-    publish_object(fixture.transport, fixture.workspace, commit, "head");
-    put_content(fixture.transport, fixture.workspace, "live", "content");
-    const auto a = object_path(
-        add_variant_object(fixture.transport, fixture.workspace, commit, "a"));
-    const auto b = object_path(
-        add_variant_object(fixture.transport, fixture.workspace, commit, "b"));
+    fixture.publish(commit, "head");
+    fixture.put_content("live", "content");
+    const auto a = object_path(fixture.add_variant(commit, "a"));
+    const auto b = object_path(fixture.add_variant(commit, "b"));
     fixture.state->remove_then_fail_identifier = std::min(a, b);
     fixture.state->remove_attempts.clear();
     const auto result = fixture.collect();
@@ -2411,7 +2232,7 @@ TEST(GarbageCollectionOptimizationTest, UncertainVariantRemoveIsNeverRetried) {
     EXPECT_EQ(result.error().garbage_collection->mutation_state,
               kasumi::application::GarbageCollectMutationState::Uncertain);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 1U);
-    EXPECT_TRUE(object_present(fixture.transport, std::max(a, b)));
+    EXPECT_TRUE(fixture.present(std::max(a, b)));
 }
 
 TEST(GarbageCollectionOptimizationTest, PlanPreservesOneVariantPerCommit) {
@@ -2420,17 +2241,11 @@ TEST(GarbageCollectionOptimizationTest, PlanPreservesOneVariantPerCommit) {
     std::vector<std::string> redundant;
     for (const std::string_view contents : {"a", "b"}) {
         const auto commit = commit_with_file(contents);
-        heads.push_back(
-            object_path(publish_object(fixture.transport,
-                                       fixture.workspace,
-                                       commit,
-                                       std::string{contents} + "-head")));
-        put_content(fixture.transport, fixture.workspace, contents, contents);
+        heads.push_back(object_path(
+            fixture.publish(commit, std::string{contents} + "-head")));
+        fixture.put_content(contents, contents);
         redundant.push_back(object_path(
-            add_variant_object(fixture.transport,
-                               fixture.workspace,
-                               commit,
-                               std::string{contents} + "-variant")));
+            fixture.add_variant(commit, std::string{contents} + "-variant")));
     }
     std::ranges::sort(redundant);
     fixture.state->remove_attempts.clear();
@@ -2440,10 +2255,10 @@ TEST(GarbageCollectionOptimizationTest, PlanPreservesOneVariantPerCommit) {
     EXPECT_EQ(result->removed_objects, 2U);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 2U);
     for (const auto& identifier : heads) {
-        EXPECT_TRUE(object_present(fixture.transport, identifier));
+        EXPECT_TRUE(fixture.present(identifier));
     }
     for (const auto& identifier : redundant) {
-        EXPECT_FALSE(object_present(fixture.transport, identifier));
+        EXPECT_FALSE(fixture.present(identifier));
     }
     const auto inventory =
         kasumi::application::history_storage::inventory_reachability(
@@ -2459,28 +2274,23 @@ TEST(GarbageCollectionOptimizationTest,
      RemovesEveryRedundantVariantOfOneCommit) {
     FakeFixture fixture("gc-variant-get-budget");
     const auto commit = commit_with_file("live");
-    const auto head =
-        publish_object(fixture.transport, fixture.workspace, commit, "head");
-    put_content(fixture.transport, fixture.workspace, "live", "content");
+    const auto head = fixture.publish(commit, "head");
+    fixture.put_content("live", "content");
     for (std::size_t index = 0; index < 10; ++index) {
-        add_variant_object(fixture.transport,
-                           fixture.workspace,
-                           commit,
-                           "variant-" + std::to_string(index));
+        fixture.add_variant(commit, "variant-" + std::to_string(index));
     }
     const auto result = fixture.collect();
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->removed_objects, 10U);
-    EXPECT_TRUE(object_present(fixture.transport, object_path(head)));
+    EXPECT_TRUE(fixture.present(object_path(head)));
 }
 
 TEST(GarbageCollectionOptimizationTest,
      FailedListDoesNotCountAnUnperformedReconstruction) {
     FakeFixture fixture("gc-reconstruction-counter");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "content");
-    put_content(fixture.transport, fixture.workspace, "orphan", "orphan");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "content");
+    fixture.put_content("orphan", "orphan");
     fixture.state->fail_list = kasumi::transport::ErrorCode::Io;
     fixture.state->fail_list_at = 1;
     kasumi::platform::perf_trace::force_enable(true);
@@ -2498,34 +2308,29 @@ TEST(GarbageCollectionOptimizationTest,
 // a fresh observation and re-plans the objects that are still present.
 TEST(GarbageCollectionTest, NewRunAfterPartialFailureReplansFromCurrentState) {
     FakeFixture fixture("gc-rerun-after-partial-failure");
-    const auto head = publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    const auto live =
-        put_content(fixture.transport, fixture.workspace, "live", "live");
+    const auto head = fixture.publish(commit_with_file("live"), "head");
+    const auto live = fixture.put_content("live", "live");
     std::vector<std::string> orphans;
     for (std::size_t index = 0; index < 6; ++index) {
-        orphans.push_back(put_content(fixture.transport,
-                                      fixture.workspace,
-                                      "rerun-" + std::to_string(index),
-                                      "rerun-" + std::to_string(index)));
+        orphans.push_back(
+            fixture.put_content("rerun-" + std::to_string(index),
+                                "rerun-" + std::to_string(index)));
     }
     std::ranges::sort(orphans);
 
     fixture.state->fail_candidate_remove_at = 3;
     fixture.state->remove_failure_native_code = 456;
     fixture.state->remove_attempts.clear();
-    const auto first = fixture.collect();
-    ASSERT_FALSE(first.has_value());
-    ASSERT_TRUE(first.error().garbage_collection.has_value());
-    const auto& first_diagnostic = *first.error().garbage_collection;
-    EXPECT_EQ(first_diagnostic.candidate_objects, 6U);
-    EXPECT_EQ(first_diagnostic.confirmed_removed, 2U);
-    EXPECT_EQ(first_diagnostic.failed_identifier,
+    const auto first_diagnostic = collect_diagnostic(fixture);
+    ASSERT_TRUE(first_diagnostic.has_value());
+    EXPECT_EQ(first_diagnostic->candidate_objects, 6U);
+    EXPECT_EQ(first_diagnostic->confirmed_removed, 2U);
+    EXPECT_EQ(first_diagnostic->failed_identifier,
               std::optional<std::string>{orphans[2]});
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 3U);
-    EXPECT_FALSE(object_present(fixture.transport, orphans[0]));
-    EXPECT_FALSE(object_present(fixture.transport, orphans[1]));
-    EXPECT_TRUE(object_present(fixture.transport, orphans[2]));
+    EXPECT_FALSE(fixture.present(orphans[0]));
+    EXPECT_FALSE(fixture.present(orphans[1]));
+    EXPECT_TRUE(fixture.present(orphans[2]));
 
     fixture.state->fail_candidate_remove_at = 0;
     fixture.state->remove_failure_native_code = 0;
@@ -2536,10 +2341,10 @@ TEST(GarbageCollectionTest, NewRunAfterPartialFailureReplansFromCurrentState) {
     EXPECT_EQ(second->removed_objects, 4U);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 4U);
     for (const auto& orphan : orphans) {
-        EXPECT_FALSE(object_present(fixture.transport, orphan));
+        EXPECT_FALSE(fixture.present(orphan));
     }
-    EXPECT_TRUE(object_present(fixture.transport, live));
-    EXPECT_TRUE(object_present(fixture.transport, object_path(head)));
+    EXPECT_TRUE(fixture.present(live));
+    EXPECT_TRUE(fixture.present(object_path(head)));
 
     const auto inventory =
         kasumi::application::history_storage::inventory_reachability(
@@ -2553,12 +2358,8 @@ TEST(GarbageCollectionTest, NewRunAfterPartialFailureReplansFromCurrentState) {
 TEST(GarbageCollectionTest, GlobalPlanPreservesOneOfThreeValidVariants) {
     LocalFixture fixture;
     const auto commit = commit_with_file("live");
-    const auto head = publish_object(fixture.storage.transport,
-                                     fixture.storage.workspace,
-                                     commit,
-                                     "three-head");
-    put_content(
-        fixture.storage.transport, fixture.storage.workspace, "live", "live");
+    const auto head = fixture.publish(commit, "three-head");
+    fixture.put_content("live", "live");
     std::vector<std::string> variants{object_path(head)};
     for (const std::string_view suffix : {"three-a", "three-b"}) {
         variants.push_back(
@@ -2575,9 +2376,7 @@ TEST(GarbageCollectionTest, GlobalPlanPreservesOneOfThreeValidVariants) {
     EXPECT_EQ(result->removed_objects, 2U);
     EXPECT_EQ(std::ranges::count_if(variants,
                                     [&](const auto& identifier) {
-                                        return object_present(
-                                            fixture.storage.transport,
-                                            identifier);
+                                        return fixture.present(identifier);
                                     }),
               1);
 
@@ -2597,16 +2396,12 @@ TEST_P(GlobalPlanSizeTest, PlanIsCompleteDeterministicAndSafe) {
     const auto count = GetParam();
     FakeFixture fixture("gc-plan-size-" + std::to_string(count));
     const auto head = commit_with_file("live");
-    const auto reference =
-        publish_object(fixture.transport, fixture.workspace, head, "head");
-    const auto live =
-        put_content(fixture.transport, fixture.workspace, "live", "live");
+    const auto reference = fixture.publish(head, "head");
+    const auto live = fixture.put_content("live", "live");
     std::vector<std::string> orphans;
     for (std::size_t index = 0; index < count; ++index) {
-        orphans.push_back(put_content(fixture.transport,
-                                      fixture.workspace,
-                                      "plan-" + std::to_string(index),
-                                      "plan-" + std::to_string(index)));
+        orphans.push_back(fixture.put_content("plan-" + std::to_string(index),
+                                              "plan-" + std::to_string(index)));
     }
     std::ranges::sort(orphans);
     fixture.state->remove_attempts.clear();
@@ -2624,10 +2419,10 @@ TEST_P(GlobalPlanSizeTest, PlanIsCompleteDeterministicAndSafe) {
         }
     }
     EXPECT_EQ(attempted, orphans);
-    EXPECT_TRUE(object_present(fixture.transport, live));
-    EXPECT_TRUE(object_present(fixture.transport, object_path(reference)));
+    EXPECT_TRUE(fixture.present(live));
+    EXPECT_TRUE(fixture.present(object_path(reference)));
     for (const auto& identifier : orphans) {
-        EXPECT_FALSE(object_present(fixture.transport, identifier));
+        EXPECT_FALSE(fixture.present(identifier));
     }
 }
 
@@ -2646,22 +2441,10 @@ TEST(GarbageCollectionTest, GlobalPlanPreservesAnchoredCommitVariant) {
         kasumi::history::make_commit(
             1, {commit_id(parent)}, commit_with_file("child").tree)
             .value();
-    publish_object(fixture.storage.transport,
-                   fixture.storage.workspace,
-                   parent,
-                   "anchor-parent");
-    publish_object(fixture.storage.transport,
-                   fixture.storage.workspace,
-                   child,
-                   "anchor-child");
-    put_content(fixture.storage.transport,
-                fixture.storage.workspace,
-                "parent",
-                "anchor-parent-content");
-    put_content(fixture.storage.transport,
-                fixture.storage.workspace,
-                "child",
-                "anchor-child-content");
+    fixture.publish(parent, "anchor-parent");
+    fixture.publish(child, "anchor-child");
+    fixture.put_content("parent", "anchor-parent-content");
+    fixture.put_content("child", "anchor-child-content");
     const auto parent_variant = add_variant_object(fixture.storage.transport,
                                                    fixture.storage.workspace,
                                                    parent,
@@ -2694,11 +2477,9 @@ TEST(GarbageCollectionTest, GlobalPlanPreservesAnchoredCommitVariant) {
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 2U);
     EXPECT_EQ(result->removed_objects, 2U);
-    EXPECT_FALSE(
-        object_present(fixture.storage.transport, object_path(parent_variant)));
-    EXPECT_FALSE(
-        object_present(fixture.storage.transport, object_path(child_variant)));
-    EXPECT_TRUE(object_present(fixture.storage.transport, *epoch_object));
+    EXPECT_FALSE(fixture.present(object_path(parent_variant)));
+    EXPECT_FALSE(fixture.present(object_path(child_variant)));
+    EXPECT_TRUE(fixture.present(*epoch_object));
 
     const auto inventory =
         kasumi::application::history_storage::inventory_reachability(
@@ -2743,19 +2524,15 @@ TEST(GarbageCollectionTest, BatchDivisionExactForVariousCandidateCounts) {
         SCOPED_TRACE("candidate_count " + std::to_string(candidate_count));
         FakeBatchFixture fixture("gc-batch-div-" +
                                  std::to_string(candidate_count));
-        publish_object(fixture.transport,
-                       fixture.workspace,
-                       commit_with_file("live"),
-                       "head");
-        put_content(fixture.transport, fixture.workspace, "live", "live");
+        fixture.publish(commit_with_file("live"), "head");
+        fixture.put_content("live", "live");
 
         std::vector<std::string> orphans;
         orphans.reserve(candidate_count);
         for (std::size_t index = 0; index < candidate_count; ++index) {
-            orphans.push_back(put_content(fixture.transport,
-                                          fixture.workspace,
-                                          "orphan-" + std::to_string(index),
-                                          "orphan-" + std::to_string(index)));
+            orphans.push_back(
+                fixture.put_content("orphan-" + std::to_string(index),
+                                    "orphan-" + std::to_string(index)));
         }
 
         const auto result = fixture.collect();
@@ -2773,15 +2550,12 @@ TEST(GarbageCollectionTest, BatchDivisionExactForVariousCandidateCounts) {
 // 2. concurrency == 8, com nenhum lote contendo mais de oito identificadores.
 TEST(GarbageCollectionTest, BatchConcurrencyIsEightAndBatchesNeverExceedEight) {
     FakeBatchFixture fixture("gc-batch-concurrency");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
 
     for (std::size_t index = 0; index < 20; ++index) {
-        put_content(fixture.transport,
-                    fixture.workspace,
-                    "batch20-" + std::to_string(index),
-                    "batch20-" + std::to_string(index));
+        fixture.put_content("batch20-" + std::to_string(index),
+                            "batch20-" + std::to_string(index));
     }
 
     const auto result = fixture.collect();
@@ -2799,15 +2573,12 @@ TEST(GarbageCollectionTest, BatchConcurrencyIsEightAndBatchesNeverExceedEight) {
 // 3. Ausencia de lote seguinte enquanto o anterior nao tiver sido concluido.
 TEST(GarbageCollectionTest, BatchDoesNotStartNextBeforePreviousCompletes) {
     FakeBatchFixture fixture("gc-batch-sequence");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
 
     for (std::size_t index = 0; index < 16; ++index) {
-        put_content(fixture.transport,
-                    fixture.workspace,
-                    "seq-" + std::to_string(index),
-                    "seq-" + std::to_string(index));
+        fixture.put_content("seq-" + std::to_string(index),
+                            "seq-" + std::to_string(index));
     }
 
     const auto result = fixture.collect();
@@ -2826,16 +2597,14 @@ TEST(GarbageCollectionTest, BatchDoesNotStartNextBeforePreviousCompletes) {
 // 4. Fallback sequencial quando a capacidade nativa nao existe.
 TEST(GarbageCollectionTest, BatchFallbackToSequentialWhenNativeUnsupported) {
     FakeFixture fixture("gc-batch-fallback-native");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
 
     std::vector<std::string> orphans;
     for (std::size_t index = 0; index < 10; ++index) {
-        orphans.push_back(put_content(fixture.transport,
-                                      fixture.workspace,
-                                      "native-fall-" + std::to_string(index),
-                                      "native-fall-" + std::to_string(index)));
+        orphans.push_back(
+            fixture.put_content("native-fall-" + std::to_string(index),
+                                "native-fall-" + std::to_string(index)));
     }
 
     ASSERT_EQ(fixture.transport.storage.remove_batch, nullptr);
@@ -2846,7 +2615,7 @@ TEST(GarbageCollectionTest, BatchFallbackToSequentialWhenNativeUnsupported) {
     EXPECT_EQ(fixture.state->remove_batch_count, 0U);
     EXPECT_EQ(fixture.state->source_remove_count, 10U);
     for (const auto& orphan : orphans) {
-        EXPECT_FALSE(object_present(fixture.transport, orphan));
+        EXPECT_FALSE(fixture.present(orphan));
     }
     EXPECT_EQ(
         kasumi::platform::perf_trace::get_count("gc.candidate_remove_attempts"),
@@ -2868,16 +2637,14 @@ TEST(GarbageCollectionTest, BatchFallbackToSequentialWhenNativeUnsupported) {
 TEST(GarbageCollectionTest,
      BatchFallbackAfterUnsupportedErrorWithoutSubmission) {
     FakeBatchFixture fixture("gc-batch-fallback-unsupported");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
 
     std::vector<std::string> orphans;
     for (std::size_t index = 0; index < 17; ++index) {
-        orphans.push_back(put_content(fixture.transport,
-                                      fixture.workspace,
-                                      "unsupp-fall-" + std::to_string(index),
-                                      "unsupp-fall-" + std::to_string(index)));
+        orphans.push_back(
+            fixture.put_content("unsupp-fall-" + std::to_string(index),
+                                "unsupp-fall-" + std::to_string(index)));
     }
 
     fixture.state->remove_batch_supported =
@@ -2891,22 +2658,19 @@ TEST(GarbageCollectionTest,
     EXPECT_EQ(fixture.state->source_remove_count,
               17U); // All 17 deleted via sequential fallback
     for (const auto& orphan : orphans) {
-        EXPECT_FALSE(object_present(fixture.transport, orphan));
+        EXPECT_FALSE(fixture.present(orphan));
     }
 }
 
 // 5a. Fallback e contadores nao duplicados
 TEST(GarbageCollectionTest, BatchFallbackCountersAreNotDuplicated) {
     FakeBatchFixture fixture("gc-batch-fallback-counters");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
 
     for (std::size_t index = 0; index < 8; ++index) {
-        put_content(fixture.transport,
-                    fixture.workspace,
-                    "fall-cnt-" + std::to_string(index),
-                    "fall-cnt-" + std::to_string(index));
+        fixture.put_content("fall-cnt-" + std::to_string(index),
+                            "fall-cnt-" + std::to_string(index));
     }
 
     fixture.state->remove_batch_supported =
@@ -2941,15 +2705,12 @@ TEST(GarbageCollectionTest, BatchFallbackCountersAreNotDuplicated) {
 TEST(GarbageCollectionTest,
      BatchFallbackAcrossMultipleBatchesFollowsSequentialOnly) {
     FakeBatchFixture fixture("gc-batch-fallback-multi");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
 
     for (std::size_t index = 0; index < 17; ++index) {
-        put_content(fixture.transport,
-                    fixture.workspace,
-                    "multi-fall-" + std::to_string(index),
-                    "multi-fall-" + std::to_string(index));
+        fixture.put_content("multi-fall-" + std::to_string(index),
+                            "multi-fall-" + std::to_string(index));
     }
 
     fixture.state->remove_batch_supported = false;
@@ -2981,16 +2742,14 @@ TEST(GarbageCollectionTest,
 TEST(GarbageCollectionTest,
      BatchPartialFailureWithinFirstBatchStopsSubsequentBatches) {
     FakeBatchFixture fixture("gc-batch-partial-first");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
 
     std::vector<std::string> orphans;
     for (std::size_t index = 0; index < 8; ++index) {
-        orphans.push_back(put_content(fixture.transport,
-                                      fixture.workspace,
-                                      "batch-part-" + std::to_string(index),
-                                      "batch-part-" + std::to_string(index)));
+        orphans.push_back(
+            fixture.put_content("batch-part-" + std::to_string(index),
+                                "batch-part-" + std::to_string(index)));
     }
     std::ranges::sort(orphans);
 
@@ -3001,8 +2760,7 @@ TEST(GarbageCollectionTest,
 
     const auto result = fixture.collect();
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::integrity::ErrorCode::TransportFailure);
+    EXPECT_EQ(result.error().code, GcErrorCode::TransportFailure);
     ASSERT_TRUE(result.error().garbage_collection.has_value());
     const auto& diagnostic = *result.error().garbage_collection;
     EXPECT_EQ(diagnostic.candidate_objects, 8U);
@@ -3025,16 +2783,14 @@ TEST(GarbageCollectionTest,
 TEST(GarbageCollectionTest,
      BatchPartialFailureAfterFullBatchesPreservesCounts) {
     FakeBatchFixture fixture("gc-batch-partial-second");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
 
     std::vector<std::string> orphans;
     for (std::size_t index = 0; index < 16; ++index) {
-        orphans.push_back(put_content(fixture.transport,
-                                      fixture.workspace,
-                                      "batch-two-" + std::to_string(index),
-                                      "batch-two-" + std::to_string(index)));
+        orphans.push_back(
+            fixture.put_content("batch-two-" + std::to_string(index),
+                                "batch-two-" + std::to_string(index)));
     }
     std::ranges::sort(orphans);
 
@@ -3045,16 +2801,14 @@ TEST(GarbageCollectionTest,
     fixture.state->remove_batch_fail_single_index = 1;
     fixture.state->remove_failure_native_code = 555;
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.error().garbage_collection.has_value());
-    const auto& diagnostic = *result.error().garbage_collection;
-    EXPECT_EQ(diagnostic.candidate_objects, 16U);
-    EXPECT_EQ(diagnostic.confirmed_removed,
+    const auto diagnostic = collect_diagnostic(fixture);
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->candidate_objects, 16U);
+    EXPECT_EQ(diagnostic->confirmed_removed,
               15U); // 8 from batch 0 + 7 from batch 1
-    EXPECT_EQ(diagnostic.failed_identifier,
+    EXPECT_EQ(diagnostic->failed_identifier,
               std::optional<std::string>{orphans[9]});
-    EXPECT_EQ(diagnostic.mutation_state,
+    EXPECT_EQ(diagnostic->mutation_state,
               kasumi::application::GarbageCollectMutationState::Uncertain);
     EXPECT_EQ(fixture.state->remove_batch_count, 2U);
 }
@@ -3062,16 +2816,14 @@ TEST(GarbageCollectionTest,
 // 8. Resultados individuais fora de ordem.
 TEST(GarbageCollectionTest, BatchReportResultsOutOfOrderAreCorrectlyMatched) {
     FakeBatchFixture fixture("gc-batch-reorder");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
 
     std::vector<std::string> orphans;
     for (std::size_t index = 0; index < 8; ++index) {
-        orphans.push_back(put_content(fixture.transport,
-                                      fixture.workspace,
-                                      "reorder-" + std::to_string(index),
-                                      "reorder-" + std::to_string(index)));
+        orphans.push_back(
+            fixture.put_content("reorder-" + std::to_string(index),
+                                "reorder-" + std::to_string(index)));
     }
 
     fixture.state->remove_batch_reverse_report = true;
@@ -3080,7 +2832,7 @@ TEST(GarbageCollectionTest, BatchReportResultsOutOfOrderAreCorrectlyMatched) {
     EXPECT_EQ(result->removed_objects, 8U);
     EXPECT_EQ(fixture.state->remove_batch_count, 1U);
     for (const auto& orphan : orphans) {
-        EXPECT_FALSE(object_present(fixture.transport, orphan));
+        EXPECT_FALSE(fixture.present(orphan));
     }
 }
 
@@ -3090,73 +2842,52 @@ TEST(GarbageCollectionTest,
     // 9a: Incomplete report (omits item)
     {
         FakeBatchFixture fixture("gc-batch-incomplete");
-        publish_object(fixture.transport,
-                       fixture.workspace,
-                       commit_with_file("live"),
-                       "head");
-        put_content(fixture.transport, fixture.workspace, "live", "live");
+        fixture.publish(commit_with_file("live"), "head");
+        fixture.put_content("live", "live");
         for (std::size_t index = 0; index < 8; ++index) {
-            put_content(fixture.transport,
-                        fixture.workspace,
-                        "incomp-" + std::to_string(index),
-                        "incomp-" + std::to_string(index));
+            fixture.put_content("incomp-" + std::to_string(index),
+                                "incomp-" + std::to_string(index));
         }
         fixture.state->remove_batch_incomplete_report = true;
-        const auto result = fixture.collect();
-        ASSERT_FALSE(result.has_value());
-        ASSERT_TRUE(result.error().garbage_collection.has_value());
-        const auto& diagnostic = *result.error().garbage_collection;
-        EXPECT_EQ(diagnostic.mutation_state,
+        const auto diagnostic = collect_diagnostic(fixture);
+        ASSERT_TRUE(diagnostic.has_value());
+        EXPECT_EQ(diagnostic->mutation_state,
                   kasumi::application::GarbageCollectMutationState::Uncertain);
-        EXPECT_FALSE(diagnostic.failed_identifier.has_value());
+        EXPECT_FALSE(diagnostic->failed_identifier.has_value());
     }
 
     // 9b: Duplicate report
     {
         FakeBatchFixture fixture("gc-batch-duplicate");
-        publish_object(fixture.transport,
-                       fixture.workspace,
-                       commit_with_file("live"),
-                       "head");
-        put_content(fixture.transport, fixture.workspace, "live", "live");
+        fixture.publish(commit_with_file("live"), "head");
+        fixture.put_content("live", "live");
         for (std::size_t index = 0; index < 8; ++index) {
-            put_content(fixture.transport,
-                        fixture.workspace,
-                        "dup-" + std::to_string(index),
-                        "dup-" + std::to_string(index));
+            fixture.put_content("dup-" + std::to_string(index),
+                                "dup-" + std::to_string(index));
         }
         fixture.state->remove_batch_duplicate_report = true;
-        const auto result = fixture.collect();
-        ASSERT_FALSE(result.has_value());
-        ASSERT_TRUE(result.error().garbage_collection.has_value());
-        const auto& diagnostic = *result.error().garbage_collection;
-        EXPECT_EQ(diagnostic.mutation_state,
+        const auto diagnostic = collect_diagnostic(fixture);
+        ASSERT_TRUE(diagnostic.has_value());
+        EXPECT_EQ(diagnostic->mutation_state,
                   kasumi::application::GarbageCollectMutationState::Uncertain);
-        EXPECT_FALSE(diagnostic.failed_identifier.has_value());
+        EXPECT_FALSE(diagnostic->failed_identifier.has_value());
     }
 
     // 9c: Unknown item in report
     {
         FakeBatchFixture fixture("gc-batch-unknown-item");
-        publish_object(fixture.transport,
-                       fixture.workspace,
-                       commit_with_file("live"),
-                       "head");
-        put_content(fixture.transport, fixture.workspace, "live", "live");
+        fixture.publish(commit_with_file("live"), "head");
+        fixture.put_content("live", "live");
         for (std::size_t index = 0; index < 8; ++index) {
-            put_content(fixture.transport,
-                        fixture.workspace,
-                        "unkn-" + std::to_string(index),
-                        "unkn-" + std::to_string(index));
+            fixture.put_content("unkn-" + std::to_string(index),
+                                "unkn-" + std::to_string(index));
         }
         fixture.state->remove_batch_unknown_item_report = true;
-        const auto result = fixture.collect();
-        ASSERT_FALSE(result.has_value());
-        ASSERT_TRUE(result.error().garbage_collection.has_value());
-        const auto& diagnostic = *result.error().garbage_collection;
-        EXPECT_EQ(diagnostic.mutation_state,
+        const auto diagnostic = collect_diagnostic(fixture);
+        ASSERT_TRUE(diagnostic.has_value());
+        EXPECT_EQ(diagnostic->mutation_state,
                   kasumi::application::GarbageCollectMutationState::Uncertain);
-        EXPECT_FALSE(diagnostic.failed_identifier.has_value());
+        EXPECT_FALSE(diagnostic->failed_identifier.has_value());
     }
 }
 
@@ -3164,15 +2895,12 @@ TEST(GarbageCollectionTest,
 TEST(GarbageCollectionTest,
      BatchAmbiguousErrorYieldsUncertainMutationWithoutFallback) {
     FakeBatchFixture fixture("gc-batch-timeout");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
 
     for (std::size_t index = 0; index < 8; ++index) {
-        put_content(fixture.transport,
-                    fixture.workspace,
-                    "timeout-" + std::to_string(index),
-                    "timeout-" + std::to_string(index));
+        fixture.put_content("timeout-" + std::to_string(index),
+                            "timeout-" + std::to_string(index));
     }
 
     fixture.state->remove_batch_failure = kasumi::transport::ErrorCode::Timeout;
@@ -3180,18 +2908,16 @@ TEST(GarbageCollectionTest,
         0; // entire batch call fails with Timeout
     fixture.state->remove_failure_native_code = 504;
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.error().garbage_collection.has_value());
-    const auto& diagnostic = *result.error().garbage_collection;
-    EXPECT_EQ(diagnostic.mutation_state,
+    const auto diagnostic = collect_diagnostic(fixture);
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->mutation_state,
               kasumi::application::GarbageCollectMutationState::Uncertain);
-    EXPECT_FALSE(diagnostic.failed_identifier.has_value());
-    EXPECT_EQ(diagnostic.confirmed_removed, 0U);
-    ASSERT_TRUE(diagnostic.transport_error.has_value());
-    EXPECT_EQ(diagnostic.transport_error->code,
+    EXPECT_FALSE(diagnostic->failed_identifier.has_value());
+    EXPECT_EQ(diagnostic->confirmed_removed, 0U);
+    ASSERT_TRUE(diagnostic->transport_error.has_value());
+    EXPECT_EQ(diagnostic->transport_error->code,
               kasumi::transport::ErrorCode::Timeout);
-    EXPECT_EQ(diagnostic.transport_error->native_code, 504);
+    EXPECT_EQ(diagnostic->transport_error->native_code, 504);
     EXPECT_EQ(fixture.state->remove_batch_count, 1U);
     EXPECT_EQ(fixture.state->source_remove_count,
               0U); // No sequential fallback attempt
@@ -3200,15 +2926,12 @@ TEST(GarbageCollectionTest,
 // 10a. Falha de lote inteiro deixa failed_identifier vazio
 TEST(GarbageCollectionTest, BatchWholeFailureLeavesFailedIdentifierEmpty) {
     FakeBatchFixture fixture("gc-batch-whole-failure");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
 
     for (std::size_t index = 0; index < 8; ++index) {
-        put_content(fixture.transport,
-                    fixture.workspace,
-                    "whole-fail-" + std::to_string(index),
-                    "whole-fail-" + std::to_string(index));
+        fixture.put_content("whole-fail-" + std::to_string(index),
+                            "whole-fail-" + std::to_string(index));
     }
 
     fixture.state->remove_batch_failure = kasumi::transport::ErrorCode::Timeout;
@@ -3216,19 +2939,17 @@ TEST(GarbageCollectionTest, BatchWholeFailureLeavesFailedIdentifierEmpty) {
         0; // whole batch fails without report
     fixture.state->remove_failure_native_code = 504;
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.error().garbage_collection.has_value());
-    const auto& diagnostic = *result.error().garbage_collection;
-    EXPECT_EQ(diagnostic.mutation_state,
+    const auto diagnostic = collect_diagnostic(fixture);
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->mutation_state,
               kasumi::application::GarbageCollectMutationState::Uncertain);
-    EXPECT_FALSE(diagnostic.failed_identifier
+    EXPECT_FALSE(diagnostic->failed_identifier
                      .has_value()); // Must NOT attribute to candidate 0
-    EXPECT_EQ(diagnostic.confirmed_removed, 0U);
-    ASSERT_TRUE(diagnostic.transport_error.has_value());
-    EXPECT_EQ(diagnostic.transport_error->code,
+    EXPECT_EQ(diagnostic->confirmed_removed, 0U);
+    ASSERT_TRUE(diagnostic->transport_error.has_value());
+    EXPECT_EQ(diagnostic->transport_error->code,
               kasumi::transport::ErrorCode::Timeout);
-    EXPECT_EQ(diagnostic.transport_error->native_code, 504);
+    EXPECT_EQ(diagnostic->transport_error->native_code, 504);
 }
 
 // 10b. Segundo lote falha integralmente: preserva confirmados do primeiro e
@@ -3237,15 +2958,12 @@ TEST(
     GarbageCollectionTest,
     BatchSecondBatchWholeFailureLeavesFailedIdentifierEmptyAndPreservesFirstBatch) {
     FakeBatchFixture fixture("gc-batch-second-whole-fail");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
 
     for (std::size_t index = 0; index < 16; ++index) {
-        put_content(fixture.transport,
-                    fixture.workspace,
-                    "second-fail-" + std::to_string(index),
-                    "second-fail-" + std::to_string(index));
+        fixture.put_content("second-fail-" + std::to_string(index),
+                            "second-fail-" + std::to_string(index));
     }
 
     // Batch 0 succeeds (8 items removed). Batch 1 fails at batch level with
@@ -3257,20 +2975,18 @@ TEST(
         0; // Whole batch failure on batch 1
     fixture.state->remove_failure_native_code = 503;
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.error().garbage_collection.has_value());
-    const auto& diagnostic = *result.error().garbage_collection;
-    EXPECT_EQ(diagnostic.confirmed_removed, 8U); // 8 from batch 0
+    const auto diagnostic = collect_diagnostic(fixture);
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_EQ(diagnostic->confirmed_removed, 8U); // 8 from batch 0
     EXPECT_FALSE(
-        diagnostic.failed_identifier
+        diagnostic->failed_identifier
             .has_value()); // Whole batch failure, no individual candidate
-    EXPECT_EQ(diagnostic.mutation_state,
+    EXPECT_EQ(diagnostic->mutation_state,
               kasumi::application::GarbageCollectMutationState::Uncertain);
-    ASSERT_TRUE(diagnostic.transport_error.has_value());
-    EXPECT_EQ(diagnostic.transport_error->code,
+    ASSERT_TRUE(diagnostic->transport_error.has_value());
+    EXPECT_EQ(diagnostic->transport_error->code,
               kasumi::transport::ErrorCode::BackendUnavailable);
-    EXPECT_EQ(diagnostic.transport_error->native_code, 503);
+    EXPECT_EQ(diagnostic->transport_error->native_code, 503);
     EXPECT_EQ(fixture.state->remove_batch_count, 2U);
 }
 
@@ -3281,16 +2997,11 @@ TEST(GarbageCollectionTest, BatchCancellationCheckedBeforeAndBetweenBatches) {
     // 11a: Cancellation before first batch
     {
         FakeBatchFixture fixture("gc-batch-cancel-before");
-        publish_object(fixture.transport,
-                       fixture.workspace,
-                       commit_with_file("live"),
-                       "head");
-        put_content(fixture.transport, fixture.workspace, "live", "live");
+        fixture.publish(commit_with_file("live"), "head");
+        fixture.put_content("live", "live");
         for (std::size_t index = 0; index < 8; ++index) {
-            put_content(fixture.transport,
-                        fixture.workspace,
-                        "cbef-" + std::to_string(index),
-                        "cbef-" + std::to_string(index));
+            fixture.put_content("cbef-" + std::to_string(index),
+                                "cbef-" + std::to_string(index));
         }
         const auto result =
             fixture.collect([](const GarbageCollectProgress& progress) {
@@ -3314,16 +3025,11 @@ TEST(GarbageCollectionTest, BatchCancellationCheckedBeforeAndBetweenBatches) {
     {
         kasumi::platform::cancellation::reset();
         FakeBatchFixture fixture("gc-batch-cancel-between");
-        publish_object(fixture.transport,
-                       fixture.workspace,
-                       commit_with_file("live"),
-                       "head");
-        put_content(fixture.transport, fixture.workspace, "live", "live");
+        fixture.publish(commit_with_file("live"), "head");
+        fixture.put_content("live", "live");
         for (std::size_t index = 0; index < 16; ++index) {
-            put_content(fixture.transport,
-                        fixture.workspace,
-                        "cbetw-" + std::to_string(index),
-                        "cbetw-" + std::to_string(index));
+            fixture.put_content("cbetw-" + std::to_string(index),
+                                "cbetw-" + std::to_string(index));
         }
 
         fixture.state->on_operation =
@@ -3353,43 +3059,34 @@ TEST(GarbageCollectionTest, BatchCancellationCheckedBeforeAndBetweenBatches) {
 TEST(GarbageCollectionTest,
      BatchBarrierCleanupExecutedAndConfirmedAfterPartialFailure) {
     FakeBatchFixture fixture("gc-batch-cleanup-partial");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
 
     for (std::size_t index = 0; index < 8; ++index) {
-        put_content(fixture.transport,
-                    fixture.workspace,
-                    "cleanpart-" + std::to_string(index),
-                    "cleanpart-" + std::to_string(index));
+        fixture.put_content("cleanpart-" + std::to_string(index),
+                            "cleanpart-" + std::to_string(index));
     }
 
     fixture.state->remove_batch_failure = kasumi::transport::ErrorCode::Io;
     fixture.state->remove_batch_fail_single_index = 4;
 
-    const auto result = fixture.collect();
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.error().garbage_collection.has_value());
-    const auto& diagnostic = *result.error().garbage_collection;
-    EXPECT_TRUE(diagnostic.barrier_release_attempted);
-    EXPECT_TRUE(diagnostic.barrier_release_confirmed);
-    EXPECT_FALSE(
-        object_present(fixture.transport, layout().barrier_identifier));
+    const auto diagnostic = collect_diagnostic(fixture);
+    ASSERT_TRUE(diagnostic.has_value());
+    EXPECT_TRUE(diagnostic->barrier_release_attempted);
+    EXPECT_TRUE(diagnostic->barrier_release_confirmed);
+    EXPECT_FALSE(fixture.present(layout().barrier_identifier));
 }
 
 // 13. Zero GETs de Content orfao.
 TEST(GarbageCollectionTest, BatchDeletionPerformsZeroContentPayloadGets) {
     FakeBatchFixture fixture("gc-batch-zero-gets");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
 
     std::unordered_set<std::string> orphan_ids;
     for (std::size_t index = 0; index < 24; ++index) {
-        const auto id = put_content(fixture.transport,
-                                    fixture.workspace,
-                                    "zeroget-" + std::to_string(index),
-                                    "zeroget-" + std::to_string(index));
+        const auto id = fixture.put_content("zeroget-" + std::to_string(index),
+                                            "zeroget-" + std::to_string(index));
         orphan_ids.insert(id);
     }
 
@@ -3419,10 +3116,9 @@ TEST(GarbageCollectionTest,
 
     std::vector<std::string> orphans;
     for (std::size_t index = 0; index < 8; ++index) {
-        orphans.push_back(put_content(fixture.transport,
-                                      fixture.workspace,
-                                      "prot-orph-" + std::to_string(index),
-                                      "prot-orph-" + std::to_string(index)));
+        orphans.push_back(
+            fixture.put_content("prot-orph-" + std::to_string(index),
+                                "prot-orph-" + std::to_string(index)));
     }
 
     const auto result = fixture.collect();
@@ -3430,8 +3126,8 @@ TEST(GarbageCollectionTest,
     EXPECT_EQ(result->removed_objects, 10U);
 
     // Protected objects must still exist
-    EXPECT_TRUE(object_present(fixture.transport, repo.live_content));
-    EXPECT_TRUE(object_present(fixture.transport, object_path(repo.head)));
+    EXPECT_TRUE(fixture.present(repo.live_content));
+    EXPECT_TRUE(fixture.present(object_path(repo.head)));
 
     // Verify no batch contained any protected object
     for (const auto& event : fixture.state->gc_events) {
@@ -3446,15 +3142,12 @@ TEST(GarbageCollectionTest,
 TEST(GarbageCollectionTest,
      BatchDeletionPerformsNoReadbackOrPresenceVerificationPerCandidate) {
     FakeBatchFixture fixture("gc-batch-no-presence");
-    publish_object(
-        fixture.transport, fixture.workspace, commit_with_file("live"), "head");
-    put_content(fixture.transport, fixture.workspace, "live", "live");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
 
     for (std::size_t index = 0; index < 16; ++index) {
-        put_content(fixture.transport,
-                    fixture.workspace,
-                    "nopresence-" + std::to_string(index),
-                    "nopresence-" + std::to_string(index));
+        fixture.put_content("nopresence-" + std::to_string(index),
+                            "nopresence-" + std::to_string(index));
     }
 
     ScopedGcTrace tracing;

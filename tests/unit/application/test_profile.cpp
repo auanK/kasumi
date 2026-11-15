@@ -62,9 +62,15 @@ extern char** environ;
 namespace {
 
 using kasumi::application::ExecutionEnvironment;
+
+namespace app_fault = kasumi::application::fault_test;
+using kasumi::application::clone_profile;
+using kasumi::application::inspect_profile_local_state;
 using kasumi::application::MasterKeyHex;
 using kasumi::application::Profile;
 using kasumi::application::ProfileCredentials;
+using kasumi::application::ProfileErrorCode;
+using kasumi::application::ProfileLocalState;
 using kasumi::test::TempWorkspace;
 
 struct TestDirectoryIdentity {
@@ -285,6 +291,10 @@ struct ProfileEnv {
         return profile;
     }
 
+    ProfileLocalState local_state(std::string_view name = "main") const {
+        return inspect_profile_local_state(environment, name);
+    }
+
     kasumi::runtime::ProfilePaths resolve(std::string_view name) const {
         auto paths = kasumi::runtime::resolve_profile_paths(
             environment.app_data_dir, name);
@@ -410,8 +420,7 @@ TEST(ApplicationProfileTest, RejectsDuplicateNames) {
     const auto duplicate =
         kasumi::application::create_profile(environment, profile, key());
     ASSERT_FALSE(duplicate.has_value());
-    EXPECT_EQ(duplicate.error().code,
-              kasumi::application::ProfileErrorCode::AlreadyExists);
+    EXPECT_EQ(duplicate.error().code, ProfileErrorCode::AlreadyExists);
     const Profile invalid{
         "../escape",
         kasumi::test::workspace_path(workspace, "local"),
@@ -419,7 +428,7 @@ TEST(ApplicationProfileTest, RejectsDuplicateNames) {
     EXPECT_EQ(kasumi::application::create_profile(environment, invalid, key())
                   .error()
                   .code,
-              kasumi::application::ProfileErrorCode::InvalidName);
+              ProfileErrorCode::InvalidName);
 }
 
 TEST(ApplicationProfileTest,
@@ -481,8 +490,7 @@ TEST(ApplicationProfileTest, RejectsRelativeLocalAndStoragePaths) {
     const auto relative_local = kasumi::application::create_profile(
         environment, Profile{"local", "relative", "remote:root"}, key());
     ASSERT_FALSE(relative_local.has_value());
-    EXPECT_EQ(relative_local.error().code,
-              kasumi::application::ProfileErrorCode::StorageFailure);
+    EXPECT_EQ(relative_local.error().code, ProfileErrorCode::StorageFailure);
 
     const auto relative_storage = kasumi::application::create_profile(
         environment,
@@ -491,8 +499,7 @@ TEST(ApplicationProfileTest, RejectsRelativeLocalAndStoragePaths) {
                 "relative"},
         key());
     ASSERT_FALSE(relative_storage.has_value());
-    EXPECT_EQ(relative_storage.error().code,
-              kasumi::application::ProfileErrorCode::StorageFailure);
+    EXPECT_EQ(relative_storage.error().code, ProfileErrorCode::StorageFailure);
 }
 
 TEST(ApplicationProfileTest, InvalidRetentionDoesNotCreateProfileArtifacts) {
@@ -511,8 +518,7 @@ TEST(ApplicationProfileTest, InvalidRetentionDoesNotCreateProfileArtifacts) {
     const auto result =
         kasumi::application::create_profile(environment, invalid, key());
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code,
-              kasumi::application::ProfileErrorCode::ConfigFailure);
+    EXPECT_EQ(result.error().code, ProfileErrorCode::ConfigFailure);
     EXPECT_FALSE(std::filesystem::exists(
         kasumi::test::workspace_path(workspace, "app/config.toml")));
     EXPECT_FALSE(std::filesystem::exists(
@@ -571,21 +577,17 @@ TEST(ApplicationProfileTest,
 
 TEST(ApplicationProfileTest, CloneRejectsNonexistentSource) {
     ProfileEnv env("app-profile-clone-no-source");
-    auto res = kasumi::application::clone_profile(
-        env.environment, "nonexistent", "destination");
+    auto res = clone_profile(env.environment, "nonexistent", "destination");
     ASSERT_FALSE(res.has_value());
-    EXPECT_EQ(res.error().code,
-              kasumi::application::ProfileErrorCode::NotFound);
+    EXPECT_EQ(res.error().code, ProfileErrorCode::NotFound);
 }
 
 TEST(ApplicationProfileTest, CloneRejectsDuplicateDestination) {
     ProfileEnv env("app-profile-clone-dup-dest");
     env.create_profile("source");
-    auto res =
-        kasumi::application::clone_profile(env.environment, "source", "source");
+    auto res = clone_profile(env.environment, "source", "source");
     ASSERT_FALSE(res.has_value());
-    EXPECT_EQ(res.error().code,
-              kasumi::application::ProfileErrorCode::AlreadyExists);
+    EXPECT_EQ(res.error().code, ProfileErrorCode::AlreadyExists);
 }
 
 TEST(ApplicationProfileTest, CloneRejectsOccupiedPrivateDirectory) {
@@ -594,11 +596,9 @@ TEST(ApplicationProfileTest, CloneRejectsOccupiedPrivateDirectory) {
     const auto dest_paths = env.resolve("destination");
     std::filesystem::create_directories(dest_paths.profile_dir);
 
-    auto res = kasumi::application::clone_profile(
-        env.environment, "source", "destination");
+    auto res = clone_profile(env.environment, "source", "destination");
     ASSERT_FALSE(res.has_value());
-    EXPECT_EQ(res.error().code,
-              kasumi::application::ProfileErrorCode::StorageFailure);
+    EXPECT_EQ(res.error().code, ProfileErrorCode::StorageFailure);
 }
 
 TEST(ApplicationProfileTest,
@@ -622,8 +622,7 @@ TEST(ApplicationProfileTest,
     ASSERT_TRUE(kasumi::application::sync::journal::save(
         *source_journal_paths, *source_journal, *source_key));
 
-    auto res = kasumi::application::clone_profile(
-        env.environment, "source", "destination");
+    auto res = clone_profile(env.environment, "source", "destination");
     ASSERT_TRUE(res.has_value()) << res.error().detail;
 
     auto profiles_res = kasumi::application::list_profiles(env.environment);
@@ -665,8 +664,7 @@ TEST(ApplicationProfileTest, CloneInitializesIndependentDatabaseSchema) {
     ProfileEnv env("app-profile-clone-schema");
     env.create_profile("source");
 
-    ASSERT_TRUE(kasumi::application::clone_profile(
-        env.environment, "source", "destination"));
+    ASSERT_TRUE(clone_profile(env.environment, "source", "destination"));
     EXPECT_TRUE(kasumi::state_storage::validate(
         env.resolve("destination").database_path));
 }
@@ -702,9 +700,9 @@ TEST(ApplicationProfileTest,
     bool sidecar_preexisted = false;
     bool sidecar_installed = false;
     {
-        kasumi::application::fault_test::ScopedCloneFaultInjection fault(
-            kasumi::application::fault_test::CloneFaultStage::FailConfigSave,
-            [&](kasumi::application::fault_test::CloneFaultStage) {
+        app_fault::ScopedCloneFaultInjection fault(
+            app_fault::CloneFaultStage::FailConfigSave,
+            [&](app_fault::CloneFaultStage) {
                 directory_identity =
                     test_directory_identity(destination.profile_dir);
                 sidecar_preexisted =
@@ -723,11 +721,10 @@ TEST(ApplicationProfileTest,
                             wal_path);
                 }
             });
-        const auto result = kasumi::application::clone_profile(
-            env.environment, "source", "destination");
+        const auto result =
+            clone_profile(env.environment, "source", "destination");
         ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().code,
-                  kasumi::application::ProfileErrorCode::ConfigFailure);
+        EXPECT_EQ(result.error().code, ProfileErrorCode::ConfigFailure);
         EXPECT_NE(result.error().detail.find("rollback also failed"),
                   std::string::npos);
     }
@@ -759,9 +756,9 @@ TEST(ApplicationProfileTest,
     bool sidecars_created = false;
     bool sidecars_removed = false;
     {
-        kasumi::application::fault_test::ScopedCloneFaultInjection fault(
-            kasumi::application::fault_test::CloneFaultStage::FailConfigSave,
-            [&](kasumi::application::fault_test::CloneFaultStage) {
+        app_fault::ScopedCloneFaultInjection fault(
+            app_fault::CloneFaultStage::FailConfigSave,
+            [&](app_fault::CloneFaultStage) {
                 auto database = kasumi::sqlite::open(destination.database_path,
                                                      SQLITE_OPEN_READWRITE);
                 if (!database ||
@@ -781,11 +778,10 @@ TEST(ApplicationProfileTest,
                 sidecars_removed = !std::filesystem::exists(wal_path) &&
                                    !std::filesystem::exists(shm_path);
             });
-        const auto result = kasumi::application::clone_profile(
-            env.environment, "source", "destination");
+        const auto result =
+            clone_profile(env.environment, "source", "destination");
         ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().code,
-                  kasumi::application::ProfileErrorCode::ConfigFailure);
+        EXPECT_EQ(result.error().code, ProfileErrorCode::ConfigFailure);
         EXPECT_EQ(result.error().detail.find("rollback also failed"),
                   std::string::npos);
     }
@@ -809,9 +805,9 @@ TEST(ApplicationProfileTest,
     kasumi::platform::private_storage::FileIdentity unknown_identity;
     bool installed = false;
     {
-        kasumi::application::fault_test::ScopedCloneFaultInjection fault(
-            kasumi::application::fault_test::CloneFaultStage::FailConfigSave,
-            [&](kasumi::application::fault_test::CloneFaultStage) {
+        app_fault::ScopedCloneFaultInjection fault(
+            app_fault::CloneFaultStage::FailConfigSave,
+            [&](app_fault::CloneFaultStage) {
                 directory_identity =
                     test_directory_identity(destination.profile_dir);
                 installed = install_file(unknown_path, staged_path, contents);
@@ -819,8 +815,8 @@ TEST(ApplicationProfileTest,
                     kasumi::platform::private_storage::query_file_identity(
                         unknown_path);
             });
-        const auto result = kasumi::application::clone_profile(
-            env.environment, "source", "destination");
+        const auto result =
+            clone_profile(env.environment, "source", "destination");
         ASSERT_FALSE(result.has_value());
         EXPECT_NE(result.error().detail.find("rollback also failed"),
                   std::string::npos);
@@ -853,9 +849,9 @@ TEST(ApplicationProfileTest,
     TestDirectoryIdentity directory_identity;
     std::error_code error;
     {
-        kasumi::application::fault_test::ScopedCloneFaultInjection fault(
-            kasumi::application::fault_test::CloneFaultStage::FailConfigSave,
-            [&](kasumi::application::fault_test::CloneFaultStage) {
+        app_fault::ScopedCloneFaultInjection fault(
+            app_fault::CloneFaultStage::FailConfigSave,
+            [&](app_fault::CloneFaultStage) {
                 directory_identity =
                     test_directory_identity(destination.profile_dir);
                 original_identity =
@@ -867,11 +863,10 @@ TEST(ApplicationProfileTest,
                         target, destination.key_path, error);
                 }
             });
-        const auto result = kasumi::application::clone_profile(
-            env.environment, "source", "destination");
+        const auto result =
+            clone_profile(env.environment, "source", "destination");
         ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().code,
-                  kasumi::application::ProfileErrorCode::ConfigFailure);
+        EXPECT_EQ(result.error().code, ProfileErrorCode::ConfigFailure);
         if (!error) {
             EXPECT_NE(result.error().detail.find("rollback also failed"),
                       std::string::npos);
@@ -914,9 +909,9 @@ TEST(ApplicationProfileTest,
     std::error_code move_error;
     std::error_code junction_error;
     {
-        kasumi::application::fault_test::ScopedCloneFaultInjection fault(
-            kasumi::application::fault_test::CloneFaultStage::FailDatabaseInit,
-            [&](kasumi::application::fault_test::CloneFaultStage) {
+        app_fault::ScopedCloneFaultInjection fault(
+            app_fault::CloneFaultStage::FailDatabaseInit,
+            [&](app_fault::CloneFaultStage) {
                 fault_reached = true;
                 std::filesystem::rename(
                     destination.profile_dir, moved, move_error);
@@ -926,8 +921,8 @@ TEST(ApplicationProfileTest,
                         destination.profile_dir, outside, junction_error);
                 }
             });
-        const auto result = kasumi::application::clone_profile(
-            env.environment, "source", "destination");
+        const auto result =
+            clone_profile(env.environment, "source", "destination");
         ASSERT_FALSE(result.has_value());
         if (junction_created) {
             EXPECT_NE(result.error().detail.find("rollback also failed"),
@@ -961,9 +956,9 @@ TEST(ApplicationProfileTest, CloneRollbackPreservesSubstitutedDestination) {
     bool replacement_created = false;
     std::error_code error;
     {
-        kasumi::application::fault_test::ScopedCloneFaultInjection fault(
-            kasumi::application::fault_test::CloneFaultStage::FailDatabaseInit,
-            [&](kasumi::application::fault_test::CloneFaultStage) {
+        app_fault::ScopedCloneFaultInjection fault(
+            app_fault::CloneFaultStage::FailDatabaseInit,
+            [&](app_fault::CloneFaultStage) {
                 fault_reached = true;
                 std::filesystem::rename(destination.profile_dir, moved, error);
                 if (error) {
@@ -978,8 +973,8 @@ TEST(ApplicationProfileTest, CloneRollbackPreservesSubstitutedDestination) {
                 stream << contents;
                 replacement_created = static_cast<bool>(stream);
             });
-        const auto result = kasumi::application::clone_profile(
-            env.environment, "source", "destination");
+        const auto result =
+            clone_profile(env.environment, "source", "destination");
         ASSERT_FALSE(result.has_value());
         EXPECT_NE(result.error().detail.find("rollback also failed"),
                   std::string::npos);
@@ -1001,9 +996,9 @@ TEST(ApplicationProfileTest, CloneRollbackOnKeyWriteFailure) {
     bool key_not_yet_created = false;
 
     {
-        kasumi::application::fault_test::ScopedCloneFaultInjection fault(
-            kasumi::application::fault_test::CloneFaultStage::FailKeyWrite,
-            [&](kasumi::application::fault_test::CloneFaultStage) {
+        app_fault::ScopedCloneFaultInjection fault(
+            app_fault::CloneFaultStage::FailKeyWrite,
+            [&](app_fault::CloneFaultStage) {
                 reached_stage = true;
                 profile_dir_existed =
                     std::filesystem::exists(dest_paths.profile_dir);
@@ -1011,11 +1006,9 @@ TEST(ApplicationProfileTest, CloneRollbackOnKeyWriteFailure) {
                     !std::filesystem::exists(dest_paths.key_path);
             });
 
-        auto res = kasumi::application::clone_profile(
-            env.environment, "source", "destination");
+        auto res = clone_profile(env.environment, "source", "destination");
         ASSERT_FALSE(res.has_value());
-        EXPECT_EQ(res.error().code,
-                  kasumi::application::ProfileErrorCode::StorageFailure);
+        EXPECT_EQ(res.error().code, ProfileErrorCode::StorageFailure);
     }
 
     EXPECT_TRUE(reached_stage);
@@ -1035,20 +1028,18 @@ TEST(ApplicationProfileTest, CloneRollbackOnDatabaseInitFailure) {
     bool key_existed = false;
 
     {
-        kasumi::application::fault_test::ScopedCloneFaultInjection fault(
-            kasumi::application::fault_test::CloneFaultStage::FailDatabaseInit,
-            [&](kasumi::application::fault_test::CloneFaultStage) {
+        app_fault::ScopedCloneFaultInjection fault(
+            app_fault::CloneFaultStage::FailDatabaseInit,
+            [&](app_fault::CloneFaultStage) {
                 reached_stage = true;
                 profile_dir_existed =
                     std::filesystem::exists(dest_paths.profile_dir);
                 key_existed = std::filesystem::exists(dest_paths.key_path);
             });
 
-        auto res = kasumi::application::clone_profile(
-            env.environment, "source", "destination");
+        auto res = clone_profile(env.environment, "source", "destination");
         ASSERT_FALSE(res.has_value());
-        EXPECT_EQ(res.error().code,
-                  kasumi::application::ProfileErrorCode::StorageFailure);
+        EXPECT_EQ(res.error().code, ProfileErrorCode::StorageFailure);
     }
 
     EXPECT_TRUE(reached_stage);
@@ -1070,9 +1061,9 @@ TEST(ApplicationProfileTest, CloneRollbackOnConfigSaveFailure) {
     bool db_existed = false;
 
     {
-        kasumi::application::fault_test::ScopedCloneFaultInjection fault(
-            kasumi::application::fault_test::CloneFaultStage::FailConfigSave,
-            [&](kasumi::application::fault_test::CloneFaultStage) {
+        app_fault::ScopedCloneFaultInjection fault(
+            app_fault::CloneFaultStage::FailConfigSave,
+            [&](app_fault::CloneFaultStage) {
                 reached_stage = true;
                 profile_dir_existed =
                     std::filesystem::exists(dest_paths.profile_dir);
@@ -1080,11 +1071,9 @@ TEST(ApplicationProfileTest, CloneRollbackOnConfigSaveFailure) {
                 db_existed = std::filesystem::exists(dest_paths.database_path);
             });
 
-        auto res = kasumi::application::clone_profile(
-            env.environment, "source", "destination");
+        auto res = clone_profile(env.environment, "source", "destination");
         ASSERT_FALSE(res.has_value());
-        EXPECT_EQ(res.error().code,
-                  kasumi::application::ProfileErrorCode::ConfigFailure);
+        EXPECT_EQ(res.error().code, ProfileErrorCode::ConfigFailure);
     }
 
     EXPECT_TRUE(reached_stage);
@@ -1106,15 +1095,13 @@ TEST(ApplicationProfileTest, CloneRollbackFailureReportsBothErrors) {
 
     bool fault_hit = false;
     {
-        kasumi::application::fault_test::ScopedCloneFaultInjection fault(
-            kasumi::application::fault_test::CloneFaultStage::
-                FailRollbackRemove,
-            [&](kasumi::application::fault_test::CloneFaultStage) {
+        app_fault::ScopedCloneFaultInjection fault(
+            app_fault::CloneFaultStage::FailRollbackRemove,
+            [&](app_fault::CloneFaultStage) {
                 fault_hit = true;
             });
 
-        auto res = kasumi::application::clone_profile(
-            env.environment, "source", "destination");
+        auto res = clone_profile(env.environment, "source", "destination");
         ASSERT_FALSE(res.has_value());
         EXPECT_NE(res.error().detail.find("rollback also failed"),
                   std::string::npos);
@@ -1132,22 +1119,20 @@ TEST(ApplicationProfileTest, CloneRetryAfterPartialFailureSucceeds) {
 
     bool first_attempt_failed_at_db = false;
     {
-        kasumi::application::fault_test::ScopedCloneFaultInjection fault(
-            kasumi::application::fault_test::CloneFaultStage::FailDatabaseInit,
-            [&](kasumi::application::fault_test::CloneFaultStage) {
+        app_fault::ScopedCloneFaultInjection fault(
+            app_fault::CloneFaultStage::FailDatabaseInit,
+            [&](app_fault::CloneFaultStage) {
                 first_attempt_failed_at_db = true;
             });
 
-        auto fail_res = kasumi::application::clone_profile(
-            env.environment, "source", "destination");
+        auto fail_res = clone_profile(env.environment, "source", "destination");
         ASSERT_FALSE(fail_res.has_value());
     }
 
     EXPECT_TRUE(first_attempt_failed_at_db);
     EXPECT_FALSE(std::filesystem::exists(dest_paths.profile_dir));
 
-    auto retry_res = kasumi::application::clone_profile(
-        env.environment, "source", "destination");
+    auto retry_res = clone_profile(env.environment, "source", "destination");
     ASSERT_TRUE(retry_res.has_value()) << retry_res.error().detail;
 
     expect_profile_intact(env, "destination");
@@ -1166,8 +1151,8 @@ TEST(ApplicationProfileTest, CloneSourceRemainsIntactOnFailure) {
         kasumi::runtime::vault::read_only(src_paths.key_path);
     ASSERT_TRUE(key_before.has_value());
 
-    auto fail_res = kasumi::application::clone_profile(
-        env.environment, "source", "invalid name with spaces");
+    auto fail_res =
+        clone_profile(env.environment, "source", "invalid name with spaces");
     ASSERT_FALSE(fail_res.has_value());
 
     const auto key_after =
@@ -1183,10 +1168,9 @@ TEST(ApplicationProfileTest, ClonePreservesOtherProfilesResources) {
     const auto other_paths = env.resolve("other");
 
     {
-        kasumi::application::fault_test::ScopedCloneFaultInjection fault(
-            kasumi::application::fault_test::CloneFaultStage::FailKeyWrite);
-        auto fail_res = kasumi::application::clone_profile(
-            env.environment, "source", "target");
+        app_fault::ScopedCloneFaultInjection fault(
+            app_fault::CloneFaultStage::FailKeyWrite);
+        auto fail_res = clone_profile(env.environment, "source", "target");
         ASSERT_FALSE(fail_res.has_value());
     }
 
@@ -1209,8 +1193,7 @@ TEST(ApplicationProfileTest,
         threads.emplace_back([&, i] {
             start_gate.arrive_and_wait();
             std::string dest_name = "clone_" + std::to_string(i);
-            results[i] = kasumi::application::clone_profile(
-                env.environment, "base", dest_name);
+            results[i] = clone_profile(env.environment, "base", dest_name);
         });
     }
 
@@ -1239,14 +1222,12 @@ TEST(ApplicationProfileTest, ConfigOperationFailsWhenLockAcquisitionFails) {
     auto held_lock = kasumi::platform::acquire_profile_lock(lock_path);
     ASSERT_TRUE(held_lock.has_value());
 
-    auto res =
-        kasumi::application::clone_profile(env.environment, "source", "target");
+    auto res = clone_profile(env.environment, "source", "target");
 
     kasumi::platform::release_profile_lock(*held_lock);
 
     ASSERT_FALSE(res.has_value());
-    EXPECT_EQ(res.error().code,
-              kasumi::application::ProfileErrorCode::LockFailure);
+    EXPECT_EQ(res.error().code, ProfileErrorCode::LockFailure);
 }
 
 struct FileSnapshot {
@@ -1632,6 +1613,10 @@ struct ProfileFixture {
             kasumi::application::create_profile(environment, profile, key()));
     }
 
+    ProfileLocalState local_state(std::string_view name = "main") const {
+        return inspect_profile_local_state(environment, name);
+    }
+
     std::filesystem::path profile_dir() const {
         auto paths = kasumi::runtime::resolve_profile_paths(
             environment.app_data_dir, "main");
@@ -1699,7 +1684,7 @@ TEST(ApplicationProfileTest, ClonesAndConfigReadersKeepCompleteSnapshots) {
     for (std::size_t i = 0; i < clones; ++i) {
         workers.emplace_back([&, i] {
             start_gate.arrive_and_wait();
-            cloned[i] = kasumi::application::clone_profile(
+            cloned[i] = clone_profile(
                 fixture.environment, "main", "clone_" + std::to_string(i));
         });
     }
@@ -1895,12 +1880,10 @@ TEST(ApplicationProfileTest, BusyConfigLockDoesNotModifyParentAcl) {
 
     auto contender = kasumi::platform::acquire_profile_lock(lock_path);
     EXPECT_FALSE(contender.has_value());
-    const auto clone = kasumi::application::clone_profile(
-        fixture.environment, "main", "blocked");
+    const auto clone = clone_profile(fixture.environment, "main", "blocked");
     EXPECT_FALSE(clone.has_value());
     if (!clone) {
-        EXPECT_EQ(clone.error().code,
-                  kasumi::application::ProfileErrorCode::LockFailure);
+        EXPECT_EQ(clone.error().code, ProfileErrorCode::LockFailure);
     }
     EXPECT_EQ(windows_security_hash(directory), before);
     EXPECT_EQ(capture_directory_snapshot(directory), resources_before);
@@ -2189,17 +2172,13 @@ bool create_signal(const std::filesystem::path& path) {
 TEST(ApplicationProfileTest,
      InspectLocalStateInitializedDatabaseHasNoAcceptedState) {
     ProfileFixture fixture{"app-profile-state-init"};
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Initialized);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Initialized);
 }
 
 TEST(ApplicationProfileTest, InspectLocalStateReadyHasConsistentAcceptedState) {
     ProfileFixture fixture{"app-profile-state-ready"};
     ASSERT_TRUE(save_height(fixture.database_path(), 1));
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Ready);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Ready);
 }
 
 TEST(ApplicationProfileTest,
@@ -2220,9 +2199,7 @@ TEST(ApplicationProfileTest,
     ASSERT_TRUE(loaded->has_value());
     EXPECT_EQ((*loaded)->height, 2U);
 
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Ready);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Ready);
 }
 
 TEST(ApplicationProfileTest,
@@ -2232,18 +2209,14 @@ TEST(ApplicationProfileTest,
     auto reader = WalReaderGuard::open_and_hold_reader(fixture.database_path());
     ASSERT_TRUE(reader.has_value());
     ASSERT_TRUE(save_height(fixture.database_path(), 2, true));
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Pending);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Pending);
 }
 
 TEST(ApplicationProfileTest,
      InspectLocalStatePendingMaterializationsInTableIsPending) {
     ProfileFixture fixture{"app-profile-state-pending"};
     ASSERT_TRUE(save_height(fixture.database_path(), 1, true));
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Pending);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Pending);
 }
 
 TEST(ApplicationProfileTest, InspectLocalStateRollbackJournalIsPending) {
@@ -2259,9 +2232,7 @@ TEST(ApplicationProfileTest, InspectLocalStateRollbackJournalIsPending) {
         writer->get(), "CREATE TABLE interrupted_write (value INTEGER)"));
     ASSERT_TRUE(std::filesystem::exists(journal_file));
     ASSERT_GT(std::filesystem::file_size(journal_file), 0U);
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Pending);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Pending);
     EXPECT_TRUE(kasumi::sqlite::execute(writer->get(), "ROLLBACK"));
 }
 
@@ -2285,14 +2256,13 @@ TEST(ApplicationProfileTest,
     bool rollback_succeeded = false;
     bool journal_removed = false;
     ScopedTempRoot temp(fixture.workspace);
-    auto state = kasumi::application::ProfileLocalState::Ready;
+    auto state = ProfileLocalState::Ready;
     {
-        kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-            kasumi::application::fault_test::InspectFaultStage::
-                ConcurrentSnapshotBarrier,
-            [&](kasumi::application::fault_test::InspectFaultStage stage) {
-                if (stage == kasumi::application::fault_test::
-                                 InspectFaultStage::ConcurrentSnapshotBarrier) {
+        app_fault::ScopedInspectFaultInjection fault(
+            app_fault::InspectFaultStage::ConcurrentSnapshotBarrier,
+            [&](app_fault::InspectFaultStage stage) {
+                if (stage ==
+                    app_fault::InspectFaultStage::ConcurrentSnapshotBarrier) {
                     barrier_reached = true;
                     rollback_succeeded = static_cast<bool>(
                         kasumi::sqlite::execute(writer->get(), "ROLLBACK"));
@@ -2300,14 +2270,13 @@ TEST(ApplicationProfileTest,
                                       !std::filesystem::exists(rollback);
                 }
             });
-        state = kasumi::application::inspect_profile_local_state(
-            fixture.environment, "main");
+        state = fixture.local_state();
     }
 
     EXPECT_TRUE(barrier_reached);
     EXPECT_TRUE(rollback_succeeded);
     EXPECT_TRUE(journal_removed);
-    EXPECT_EQ(state, kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(state, ProfileLocalState::Problem);
     EXPECT_TRUE(temp.inspection_directories().empty());
 }
 
@@ -2324,9 +2293,7 @@ TEST(ApplicationProfileTest, InspectLocalStateKasumiSyncJournalIsPending) {
     ASSERT_TRUE(journal_paths.has_value());
     ASSERT_TRUE(kasumi::application::sync::journal::save(
         *journal_paths, *record, *key_bytes));
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Pending);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Pending);
 }
 
 TEST(ApplicationProfileTest, InspectActiveJournalDoesNotHideCorruptedDatabase) {
@@ -2344,9 +2311,7 @@ TEST(ApplicationProfileTest, InspectActiveJournalDoesNotHideCorruptedDatabase) {
         *journal_paths, *record, *key_bytes));
     kasumi::test::write_text(fixture.database_path(), "not a SQLite database");
 
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
 }
 
 TEST(ApplicationProfileTest, InspectDetectsJournalCreatedDuringSnapshot) {
@@ -2361,17 +2326,15 @@ TEST(ApplicationProfileTest, InspectDetectsJournalCreatedDuringSnapshot) {
         kasumi::application::sync::journal::make_paths(fixture.profile_dir());
     ASSERT_TRUE(journal_paths.has_value());
     bool journal_created = false;
-    kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-        kasumi::application::fault_test::InspectFaultStage::AfterTempDirCreated,
-        [&](kasumi::application::fault_test::InspectFaultStage) {
+    app_fault::ScopedInspectFaultInjection fault(
+        app_fault::InspectFaultStage::AfterTempDirCreated,
+        [&](app_fault::InspectFaultStage) {
             journal_created = kasumi::application::sync::journal::save(
                                   *journal_paths, *record, *key_bytes)
                                   .has_value();
         });
 
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Pending);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Pending);
     EXPECT_TRUE(journal_created);
 }
 
@@ -2382,9 +2345,7 @@ TEST(ApplicationProfileTest, InspectLocalStateCorruptedKasumiJournalIsProblem) {
     std::ofstream fake_snapshot(journal_dir / "snapshot.enc", std::ios::binary);
     fake_snapshot << "corrupted random data not matching magic header";
     fake_snapshot.close();
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
 }
 
 TEST(ApplicationProfileTest,
@@ -2403,9 +2364,7 @@ TEST(ApplicationProfileTest,
     auto saved = kasumi::application::sync::journal::save(
         *journal_paths, *record, *key_bytes);
     ASSERT_TRUE(saved.has_value()) << saved.error();
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Pending);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Pending);
 }
 
 TEST(ApplicationProfileTest, InspectLocalStateRetiredKasumiJournalIsReady) {
@@ -2424,9 +2383,7 @@ TEST(ApplicationProfileTest, InspectLocalStateRetiredKasumiJournalIsReady) {
         *journal_paths, *record, *key_bytes));
     ASSERT_TRUE(
         kasumi::application::sync::journal::clear(*journal_paths, *key_bytes));
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Ready);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Ready);
 }
 
 TEST(ApplicationProfileTest,
@@ -2437,18 +2394,14 @@ TEST(ApplicationProfileTest,
     std::ofstream fake_retired(journal_dir / "retired.enc", std::ios::binary);
     fake_retired << "forged unauthenticated retired marker";
     fake_retired.close();
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
 }
 
 TEST(ApplicationProfileTest, InspectLocalStateEmptyRetiredDirectoryIsProblem) {
     ProfileFixture fixture{"app-profile-state-empty-retired"};
     std::filesystem::create_directories(fixture.profile_dir() /
                                         "transaction.bin.enc.cleared");
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
 }
 
 TEST(ApplicationProfileTest,
@@ -2458,34 +2411,26 @@ TEST(ApplicationProfileTest,
                                         "transaction.bin.enc");
     std::filesystem::create_directories(fixture.profile_dir() /
                                         "transaction.bin.enc.cleared");
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
 }
 
 TEST(ApplicationProfileTest,
      InspectLocalStateMissingOrCorruptedArtifactsIsProblem) {
     ProfileFixture fixture{"app-profile-state-corrupt"};
     std::filesystem::remove(fixture.key_path());
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
 
     std::ofstream bad_key(fixture.key_path(), std::ios::binary);
     bad_key << std::string(31, 'a');
     bad_key.close();
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
 
     std::ofstream good_key(fixture.key_path(), std::ios::binary);
     good_key << std::string(32, 'a');
     good_key.close();
 
     std::filesystem::remove(fixture.database_path());
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
 }
 
 TEST(ApplicationProfileTest, InspectLocalStateJunctionIsProblem) {
@@ -2505,9 +2450,8 @@ TEST(ApplicationProfileTest, InspectLocalStateJunctionIsProblem) {
     if (std::system(command.c_str()) != 0) {
         GTEST_SKIP() << "junction creation is unavailable";
     }
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(environment,
-                                                               "junction_prof"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(inspect_profile_local_state(environment, "junction_prof"),
+              ProfileLocalState::Problem);
 #endif
 }
 
@@ -2516,9 +2460,7 @@ TEST(ApplicationProfileTest, InspectLockPathDirectoryIsProblem) {
     const auto lock_path =
         fixture.environment.app_data_dir / "profile-main.lock";
     ASSERT_TRUE(std::filesystem::create_directory(lock_path));
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
 }
 
 TEST(ApplicationProfileTest, InspectAvailableLockIsReadOnlyAndInactive) {
@@ -2531,9 +2473,7 @@ TEST(ApplicationProfileTest, InspectAvailableLockIsReadOnlyAndInactive) {
         stream << "available lock contents";
     }
     const auto before = capture_path(lock_path);
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Ready);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Ready);
     EXPECT_EQ(before, capture_path(lock_path));
 }
 
@@ -2558,9 +2498,7 @@ TEST(ApplicationProfileTest, InspectLockSymlinkIsProblem) {
     std::filesystem::create_symlink(target, lock_path, error);
     ASSERT_FALSE(error) << error.message();
 #endif
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
 }
 
 TEST(ApplicationProfileTest, InspectLockOpenAndAcquireErrorsAreProblem) {
@@ -2571,15 +2509,10 @@ TEST(ApplicationProfileTest, InspectLockOpenAndAcquireErrorsAreProblem) {
         std::ofstream stream(lock_path, std::ios::binary);
         stream << "available lock";
     }
-    for (const auto stage :
-         {kasumi::application::fault_test::InspectFaultStage::FailLockOpen,
-          kasumi::application::fault_test::InspectFaultStage::
-              FailLockAcquire}) {
-        kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-            stage, nullptr, lock_path);
-        EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                      fixture.environment, "main"),
-                  kasumi::application::ProfileLocalState::Problem);
+    for (const auto stage : {app_fault::InspectFaultStage::FailLockOpen,
+                             app_fault::InspectFaultStage::FailLockAcquire}) {
+        app_fault::ScopedInspectFaultInjection fault(stage, nullptr, lock_path);
+        EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
     }
 }
 
@@ -2587,13 +2520,9 @@ TEST(ApplicationProfileTest, InspectSidecarMetadataErrorIsProblem) {
     ProfileFixture fixture{"app-profile-state-metadata-error"};
     ASSERT_TRUE(save_height(fixture.database_path(), 1));
     const auto wal_path = fixture.profile_dir() / "db.sqlite-wal";
-    kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-        kasumi::application::fault_test::InspectFaultStage::FailMetadataQuery,
-        nullptr,
-        wal_path);
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    app_fault::ScopedInspectFaultInjection fault(
+        app_fault::InspectFaultStage::FailMetadataQuery, nullptr, wal_path);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
 }
 
 TEST(ApplicationProfileTest, InspectLockPathUnreadableIsProblem) {
@@ -2608,9 +2537,7 @@ TEST(ApplicationProfileTest, InspectLockPathUnreadableIsProblem) {
     if (!denied.active()) {
         GTEST_SKIP() << "access denial is unavailable";
     }
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
     EXPECT_TRUE(denied.restore());
 }
 
@@ -2619,9 +2546,7 @@ TEST(ApplicationProfileTest, InspectActiveProfileLockIsProblem) {
     auto held = kasumi::platform::acquire_profile_lock(
         fixture.environment.app_data_dir / "profile-main.lock");
     ASSERT_TRUE(held.has_value());
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
     kasumi::platform::release_profile_lock(*held);
 }
 
@@ -2654,9 +2579,7 @@ TEST(ApplicationProfileTest, InspectLocalStateHasNoSideEffectsWithWalAndShm) {
     EXPECT_TRUE(before.contains("db.sqlite-shm"));
 
     for (int i = 0; i < 5; ++i) {
-        EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                      fixture.environment, "main"),
-                  kasumi::application::ProfileLocalState::Ready);
+        EXPECT_EQ(fixture.local_state(), ProfileLocalState::Ready);
     }
 
     EXPECT_EQ(before, capture_directory_snapshot(fixture.profile_dir()));
@@ -2676,9 +2599,7 @@ TEST(ApplicationProfileTest, InspectLocalStateDoesNotCreateSqliteSidecars) {
     ASSERT_FALSE(std::filesystem::exists(shm_path));
 
     const auto before = capture_directory_snapshot(fixture.profile_dir());
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Ready);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Ready);
     EXPECT_EQ(before, capture_directory_snapshot(fixture.profile_dir()));
     EXPECT_FALSE(std::filesystem::exists(wal_path));
     EXPECT_FALSE(std::filesystem::exists(shm_path));
@@ -2724,9 +2645,7 @@ TEST(ApplicationProfileTest,
     const auto before =
         capture_directory_snapshot(wal_only_fixture.profile_dir());
     ScopedTempRoot temp(wal_only_fixture.workspace);
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  wal_only_fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Ready);
+    EXPECT_EQ(wal_only_fixture.local_state(), ProfileLocalState::Ready);
     EXPECT_TRUE(temp.inspection_directories().empty());
     EXPECT_EQ(before,
               capture_directory_snapshot(wal_only_fixture.profile_dir()));
@@ -2779,25 +2698,22 @@ TEST(ApplicationProfileTest, InspectDoesNotRecreateWalRemovedAfterPreflight) {
     expected.erase("db.sqlite-wal");
     bool wal_removed = false;
     ScopedTempRoot temp(target_fixture.workspace);
-    kasumi::application::ProfileLocalState state =
-        kasumi::application::ProfileLocalState::Problem;
+    kasumi::application::ProfileLocalState state = ProfileLocalState::Problem;
     {
-        kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-            kasumi::application::fault_test::InspectFaultStage::
-                AfterTempDirCreated,
-            [&](kasumi::application::fault_test::InspectFaultStage stage) {
-                if (stage == kasumi::application::fault_test::
-                                 InspectFaultStage::AfterTempDirCreated) {
+        app_fault::ScopedInspectFaultInjection fault(
+            app_fault::InspectFaultStage::AfterTempDirCreated,
+            [&](app_fault::InspectFaultStage stage) {
+                if (stage ==
+                    app_fault::InspectFaultStage::AfterTempDirCreated) {
                     wal_removed =
                         std::filesystem::remove(target_wal, error) && !error;
                 }
             });
-        state = kasumi::application::inspect_profile_local_state(
-            target_fixture.environment, "main");
+        state = target_fixture.local_state();
     }
 
     EXPECT_TRUE(wal_removed);
-    EXPECT_EQ(state, kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(state, ProfileLocalState::Problem);
     EXPECT_TRUE(temp.inspection_directories().empty());
     EXPECT_EQ(expected,
               capture_directory_snapshot(target_fixture.profile_dir()));
@@ -2833,14 +2749,13 @@ TEST(ApplicationProfileTest, InspectSeesWalCreatedAfterPreflight) {
     std::map<std::string, FileSnapshot> before_inspection;
     std::map<std::string, FileSnapshot> app_data_before;
     ScopedTempRoot temp(fixture.workspace);
-    auto state = kasumi::application::ProfileLocalState::Problem;
+    auto state = ProfileLocalState::Problem;
     {
-        kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-            kasumi::application::fault_test::InspectFaultStage::
-                AfterTempDirCreated,
-            [&](kasumi::application::fault_test::InspectFaultStage stage) {
-                if (stage != kasumi::application::fault_test::
-                                 InspectFaultStage::AfterTempDirCreated) {
+        app_fault::ScopedInspectFaultInjection fault(
+            app_fault::InspectFaultStage::AfterTempDirCreated,
+            [&](app_fault::InspectFaultStage stage) {
+                if (stage !=
+                    app_fault::InspectFaultStage::AfterTempDirCreated) {
                     return;
                 }
                 preflight_saw_no_sidecars = !std::filesystem::exists(wal) &&
@@ -2853,8 +2768,7 @@ TEST(ApplicationProfileTest, InspectSeesWalCreatedAfterPreflight) {
                 app_data_before = capture_directory_snapshot(
                     fixture.environment.app_data_dir);
             });
-        state = kasumi::application::inspect_profile_local_state(
-            fixture.environment, "main");
+        state = fixture.local_state();
     }
     const auto profile_after =
         capture_directory_snapshot(fixture.profile_dir());
@@ -2868,7 +2782,7 @@ TEST(ApplicationProfileTest, InspectSeesWalCreatedAfterPreflight) {
     EXPECT_TRUE(preflight_saw_no_sidecars);
     EXPECT_TRUE(writer_committed);
     EXPECT_TRUE(wal_has_commit);
-    EXPECT_EQ(state, kasumi::application::ProfileLocalState::Ready);
+    EXPECT_EQ(state, ProfileLocalState::Ready);
     EXPECT_EQ(before_inspection, profile_after);
     EXPECT_EQ(app_data_before, app_data_after);
     EXPECT_TRUE(temp.inspection_directories().empty());
@@ -2909,14 +2823,13 @@ TEST(ApplicationProfileTest,
     bool main_database_unchanged_after_writer = false;
     bool copy_kept_initial_state = false;
     ScopedTempRoot temp(fixture.workspace);
-    auto state = kasumi::application::ProfileLocalState::Problem;
+    auto state = ProfileLocalState::Problem;
     {
-        kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-            kasumi::application::fault_test::InspectFaultStage::
-                ConcurrentSnapshotBarrier,
-            [&](kasumi::application::fault_test::InspectFaultStage stage) {
-                if (stage == kasumi::application::fault_test::
-                                 InspectFaultStage::ConcurrentSnapshotBarrier) {
+        app_fault::ScopedInspectFaultInjection fault(
+            app_fault::InspectFaultStage::ConcurrentSnapshotBarrier,
+            [&](app_fault::InspectFaultStage stage) {
+                if (stage ==
+                    app_fault::InspectFaultStage::ConcurrentSnapshotBarrier) {
                     barrier_saw_no_wal = !std::filesystem::exists(wal) &&
                                          !std::filesystem::exists(shm);
                     writer_committed =
@@ -2935,9 +2848,8 @@ TEST(ApplicationProfileTest,
                     main_database_unchanged_after_writer =
                         capture_path(fixture.database_path()).sha256 ==
                         database_before.sha256;
-                } else if (stage ==
-                           kasumi::application::fault_test::InspectFaultStage::
-                               SnapshotDatabaseCopied) {
+                } else if (stage == app_fault::InspectFaultStage::
+                                        SnapshotDatabaseCopied) {
                     const auto directories = temp.inspection_directories();
                     if (directories.size() == 1) {
                         auto copied = kasumi::state_storage::load_state(
@@ -2949,13 +2861,12 @@ TEST(ApplicationProfileTest,
                     }
                 }
             });
-        state = kasumi::application::inspect_profile_local_state(
-            fixture.environment, "main");
+        state = fixture.local_state();
     }
     ASSERT_TRUE(create_signal(release));
     EXPECT_EQ(child->wait_for_exit(std::chrono::seconds{10}), 0);
 
-    EXPECT_EQ(state, kasumi::application::ProfileLocalState::Ready);
+    EXPECT_EQ(state, ProfileLocalState::Ready);
     EXPECT_TRUE(barrier_saw_no_wal);
     EXPECT_TRUE(writer_committed);
     EXPECT_TRUE(wal_was_readable);
@@ -3015,14 +2926,13 @@ TEST(ApplicationProfileTest,
     std::size_t copied_nodes = 0;
     bool copied_state_valid = false;
     ScopedTempRoot temp(fixture.workspace);
-    auto state = kasumi::application::ProfileLocalState::Problem;
+    auto state = ProfileLocalState::Problem;
     {
-        kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-            kasumi::application::fault_test::InspectFaultStage::
-                ConcurrentSnapshotBarrier,
-            [&](kasumi::application::fault_test::InspectFaultStage stage) {
-                if (stage == kasumi::application::fault_test::
-                                 InspectFaultStage::ConcurrentSnapshotBarrier) {
+        app_fault::ScopedInspectFaultInjection fault(
+            app_fault::InspectFaultStage::ConcurrentSnapshotBarrier,
+            [&](app_fault::InspectFaultStage stage) {
+                if (stage ==
+                    app_fault::InspectFaultStage::ConcurrentSnapshotBarrier) {
                     if (create_signal(trigger) &&
                         child->wait_for(done, std::chrono::seconds{10})) {
                         writer_attempt_finished = true;
@@ -3044,9 +2954,8 @@ TEST(ApplicationProfileTest,
                             changed.size == database_before.size &&
                             changed.sha256 != database_before.sha256;
                     }
-                } else if (stage ==
-                           kasumi::application::fault_test::InspectFaultStage::
-                               SnapshotDatabaseCopied) {
+                } else if (stage == app_fault::InspectFaultStage::
+                                        SnapshotDatabaseCopied) {
                     database_copy_completed = true;
                     if (transaction_spilled) {
                         const bool released = create_signal(release);
@@ -3066,10 +2975,10 @@ TEST(ApplicationProfileTest,
                         create_signal(release);
                         child->wait_for_exit(std::chrono::seconds{10});
                     }
-                } else if (stage == kasumi::application::fault_test::
-                                        InspectFaultStage::SnapshotReady) {
+                } else if (stage ==
+                           app_fault::InspectFaultStage::SnapshotReady) {
                     auto copied = kasumi::state_storage::load_state(
-                        kasumi::application::fault_test::g_inspect_fault_path);
+                        app_fault::g_inspect_fault_path);
                     if (copied && copied->has_value()) {
                         copied_state_valid = true;
                         copied_height = copied->value().height;
@@ -3077,8 +2986,7 @@ TEST(ApplicationProfileTest,
                     }
                 }
             });
-        state = kasumi::application::inspect_profile_local_state(
-            fixture.environment, "main");
+        state = fixture.local_state();
     }
     if (!std::filesystem::exists(release)) {
         create_signal(release);
@@ -3105,11 +3013,9 @@ TEST(ApplicationProfileTest,
     RecordProperty("mtime_changed_after_rollback",
                    source_mtime_changed_after_rollback ? "true" : "false");
     RecordProperty("inspection_result",
-                   state == kasumi::application::ProfileLocalState::Problem
-                       ? "Problem"
-                       : "Ready");
+                   state == ProfileLocalState::Problem ? "Problem" : "Ready");
     if (transaction_spilled) {
-        EXPECT_EQ(state, kasumi::application::ProfileLocalState::Problem);
+        EXPECT_EQ(state, ProfileLocalState::Problem);
         EXPECT_TRUE(rollback_was_present);
         EXPECT_TRUE(copied_while_uncommitted);
         EXPECT_TRUE(source_was_restored);
@@ -3118,7 +3024,7 @@ TEST(ApplicationProfileTest,
         EXPECT_FALSE(copied_state_valid);
     } else {
         EXPECT_TRUE(writer_blocked);
-        EXPECT_EQ(state, kasumi::application::ProfileLocalState::Ready);
+        EXPECT_EQ(state, ProfileLocalState::Ready);
         EXPECT_TRUE(copied_state_valid);
         EXPECT_EQ(copied_height, 1U);
         EXPECT_EQ(copied_nodes, 2U);
@@ -3134,11 +3040,9 @@ TEST(ApplicationProfileTest,
 TEST(ApplicationProfileTest, InspectTempDirFailsExplicitlyOnRandomIdFailure) {
     ProfileFixture fixture{"app-profile-rand-fail"};
     ScopedTempRoot temp(fixture.workspace);
-    kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-        kasumi::application::fault_test::InspectFaultStage::FailRandomId);
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    app_fault::ScopedInspectFaultInjection fault(
+        app_fault::InspectFaultStage::FailRandomId);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
     EXPECT_TRUE(temp.inspection_directories().empty());
 }
 
@@ -3148,14 +3052,11 @@ TEST(ApplicationProfileTest,
     const auto colliding_path =
         kasumi::test::workspace_path(fixture.workspace, "collision");
     ASSERT_TRUE(std::filesystem::create_directory(colliding_path));
-    kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-        kasumi::application::fault_test::InspectFaultStage::
-            SimulateTempDirCollision,
+    app_fault::ScopedInspectFaultInjection fault(
+        app_fault::InspectFaultStage::SimulateTempDirCollision,
         nullptr,
         colliding_path);
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
     EXPECT_TRUE(std::filesystem::is_directory(colliding_path));
 }
 
@@ -3170,14 +3071,11 @@ TEST(ApplicationProfileTest, InspectTempDirCollisionPreservesImportantFiles) {
         std::ofstream stream(important_file, std::ios::binary);
         stream << important_content;
     }
-    kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-        kasumi::application::fault_test::InspectFaultStage::
-            SimulateTempDirCollision,
+    app_fault::ScopedInspectFaultInjection fault(
+        app_fault::InspectFaultStage::SimulateTempDirCollision,
         nullptr,
         colliding_path);
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
     EXPECT_TRUE(std::filesystem::exists(important_file));
     std::string read_content;
     {
@@ -3192,11 +3090,9 @@ TEST(ApplicationProfileTest,
      InspectSnapshotFailureLeavesNoTemporarySqliteCopies) {
     ProfileFixture fixture{"app-profile-snapshot-fail"};
     ScopedTempRoot temp(fixture.workspace);
-    kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-        kasumi::application::fault_test::InspectFaultStage::FailSnapshot);
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    app_fault::ScopedInspectFaultInjection fault(
+        app_fault::InspectFaultStage::FailSnapshot);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
     EXPECT_TRUE(temp.inspection_directories().empty());
 }
 
@@ -3204,27 +3100,20 @@ TEST(ApplicationProfileTest,
      InspectCleanupFailureReportsProblemAndRetainsOwnership) {
     ProfileFixture fixture{"app-profile-clean-fail"};
     ScopedTempRoot temp(fixture.workspace);
-    kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-        kasumi::application::fault_test::InspectFaultStage::FailCleanup);
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
-    EXPECT_TRUE(
-        kasumi::application::fault_test::g_inspect_cleanup_failure_consumed);
+    app_fault::ScopedInspectFaultInjection fault(
+        app_fault::InspectFaultStage::FailCleanup);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
+    EXPECT_TRUE(app_fault::g_inspect_cleanup_failure_consumed);
     EXPECT_TRUE(temp.inspection_directories().empty());
 }
 
 TEST(ApplicationProfileTest, InspectCleanupRetriesAfterFileRemovalFailure) {
     ProfileFixture fixture{"app-profile-clean-file-retry"};
     ScopedTempRoot temp(fixture.workspace);
-    kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-        kasumi::application::fault_test::InspectFaultStage::
-            FailCleanupFileRemove);
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
-    EXPECT_TRUE(
-        kasumi::application::fault_test::g_inspect_cleanup_failure_consumed);
+    app_fault::ScopedInspectFaultInjection fault(
+        app_fault::InspectFaultStage::FailCleanupFileRemove);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
+    EXPECT_TRUE(app_fault::g_inspect_cleanup_failure_consumed);
     EXPECT_TRUE(temp.inspection_directories().empty());
 }
 
@@ -3232,14 +3121,10 @@ TEST(ApplicationProfileTest,
      InspectCleanupRetriesAfterDirectoryRemovalFailure) {
     ProfileFixture fixture{"app-profile-clean-directory-retry"};
     ScopedTempRoot temp(fixture.workspace);
-    kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-        kasumi::application::fault_test::InspectFaultStage::
-            FailCleanupDirectoryRemove);
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
-    EXPECT_TRUE(
-        kasumi::application::fault_test::g_inspect_cleanup_failure_consumed);
+    app_fault::ScopedInspectFaultInjection fault(
+        app_fault::InspectFaultStage::FailCleanupDirectoryRemove);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
+    EXPECT_TRUE(app_fault::g_inspect_cleanup_failure_consumed);
     EXPECT_TRUE(temp.inspection_directories().empty());
 }
 
@@ -3247,9 +3132,7 @@ TEST(ApplicationProfileTest,
      InspectSuccessfulOperationCleansUpTemporaryResources) {
     ProfileFixture fixture{"app-profile-succ-clean"};
     ScopedTempRoot temp(fixture.workspace);
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Initialized);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Initialized);
     EXPECT_TRUE(temp.inspection_directories().empty());
 }
 
@@ -3257,16 +3140,12 @@ TEST(ApplicationProfileTest,
      InspectDirectoryIdentityFailureLeavesNoUnownedCleanup) {
     ProfileFixture fixture{"app-profile-inspect-identity-failure"};
     ScopedTempRoot temp(fixture.workspace);
-    kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-        kasumi::application::fault_test::InspectFaultStage::
-            FailDirectoryIdentity);
+    app_fault::ScopedInspectFaultInjection fault(
+        app_fault::InspectFaultStage::FailDirectoryIdentity);
 
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
-    EXPECT_TRUE(
-        kasumi::application::fault_test::g_inspect_identity_failure_consumed);
-    EXPECT_GT(kasumi::application::fault_test::g_inspect_cleanup_attempts, 0U);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
+    EXPECT_TRUE(app_fault::g_inspect_identity_failure_consumed);
+    EXPECT_GT(app_fault::g_inspect_cleanup_attempts, 0U);
 
     const auto directories = temp.inspection_directories();
     ASSERT_EQ(directories.size(), 1U);
@@ -3284,9 +3163,9 @@ TEST(ApplicationProfileTest,
     ScopedTempRoot temp(fixture.workspace);
     std::filesystem::path important_file;
     const std::string content = "external data must survive inspection cleanup";
-    kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-        kasumi::application::fault_test::InspectFaultStage::AfterTempDirCreated,
-        [&](kasumi::application::fault_test::InspectFaultStage) {
+    app_fault::ScopedInspectFaultInjection fault(
+        app_fault::InspectFaultStage::AfterTempDirCreated,
+        [&](app_fault::InspectFaultStage) {
             const auto directories = temp.inspection_directories();
             if (directories.empty()) {
                 return;
@@ -3295,9 +3174,7 @@ TEST(ApplicationProfileTest,
             std::ofstream stream(important_file, std::ios::binary);
             stream << content;
         });
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
     ASSERT_FALSE(important_file.empty());
     ASSERT_TRUE(std::filesystem::exists(important_file));
     std::ifstream stream(important_file, std::ios::binary);
@@ -3312,9 +3189,9 @@ TEST(ApplicationProfileTest,
     ScopedTempRoot temp(fixture.workspace);
     std::filesystem::path replacement;
     const std::string content = "replacement data must survive";
-    kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-        kasumi::application::fault_test::InspectFaultStage::AfterTempDirCreated,
-        [&](kasumi::application::fault_test::InspectFaultStage) {
+    app_fault::ScopedInspectFaultInjection fault(
+        app_fault::InspectFaultStage::AfterTempDirCreated,
+        [&](app_fault::InspectFaultStage) {
             const auto directories = temp.inspection_directories();
             if (directories.empty()) {
                 return;
@@ -3327,9 +3204,7 @@ TEST(ApplicationProfileTest,
                                  std::ios::binary);
             stream << content;
         });
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
     ASSERT_FALSE(replacement.empty());
     EXPECT_TRUE(std::filesystem::exists(replacement / "important.txt"));
     EXPECT_FALSE(std::filesystem::exists(replacement / "db.sqlite"));
@@ -3351,9 +3226,7 @@ TEST(ApplicationProfileTest, InspectDoesNotTreatUnreadableWalAsAbsent) {
     if (!denied.active()) {
         GTEST_SKIP() << "access denial is unavailable";
     }
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
     EXPECT_TRUE(denied.restore());
 }
 
@@ -3369,9 +3242,7 @@ TEST(ApplicationProfileTest, InspectDoesNotNeedReadableShm) {
     if (!denied.active()) {
         GTEST_SKIP() << "access denial is unavailable";
     }
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Ready);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Ready);
     EXPECT_TRUE(denied.restore());
 }
 
@@ -3387,9 +3258,7 @@ TEST(ApplicationProfileTest,
     if (!denied.active()) {
         GTEST_SKIP() << "access denial is unavailable";
     }
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
     EXPECT_TRUE(denied.restore());
 }
 
@@ -3402,9 +3271,7 @@ TEST(ApplicationProfileTest,
         stream << "rollback journal evidence";
     }
     kasumi::test::write_text(fixture.database_path(), "not a SQLite database");
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
 }
 
 TEST(ApplicationProfileTest, InspectDoesNotTreatUnreadableDatabaseAsAbsent) {
@@ -3414,9 +3281,7 @@ TEST(ApplicationProfileTest, InspectDoesNotTreatUnreadableDatabaseAsAbsent) {
     if (!denied.active()) {
         GTEST_SKIP() << "access denial is unavailable";
     }
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
     EXPECT_TRUE(denied.restore());
 }
 
@@ -3450,9 +3315,7 @@ TEST(ApplicationProfileTest, InspectJournalInspectionDoesNotModifyArtifacts) {
     }
     EXPECT_EQ(before, capture_directory_snapshot(fixture.profile_dir()));
 
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Pending);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Pending);
     EXPECT_EQ(before, capture_directory_snapshot(fixture.profile_dir()));
 }
 
@@ -3479,33 +3342,30 @@ TEST(ApplicationProfileTest, InspectSnapshotIsConsistentUnderConcurrentWriter) {
     bool writer_committed_during_snapshot = false;
     bool snapshot_was_consistent = false;
     ScopedTempRoot temp(fixture.workspace);
-    kasumi::application::ProfileLocalState state =
-        kasumi::application::ProfileLocalState::Problem;
+    kasumi::application::ProfileLocalState state = ProfileLocalState::Problem;
     {
-        kasumi::application::fault_test::ScopedInspectFaultInjection fault(
-            kasumi::application::fault_test::InspectFaultStage::
-                ConcurrentSnapshotBarrier,
-            [&](kasumi::application::fault_test::InspectFaultStage stage) {
-                if (stage == kasumi::application::fault_test::
-                                 InspectFaultStage::ConcurrentSnapshotBarrier) {
+        app_fault::ScopedInspectFaultInjection fault(
+            app_fault::InspectFaultStage::ConcurrentSnapshotBarrier,
+            [&](app_fault::InspectFaultStage stage) {
+                if (stage ==
+                    app_fault::InspectFaultStage::ConcurrentSnapshotBarrier) {
                     writer_committed_during_snapshot =
                         create_signal(trigger) &&
                         child->wait_for(done, std::chrono::seconds{10});
-                } else if (stage == kasumi::application::fault_test::
-                                        InspectFaultStage::SnapshotReady) {
+                } else if (stage ==
+                           app_fault::InspectFaultStage::SnapshotReady) {
                     const auto snapshot = kasumi::state_storage::load_state(
-                        kasumi::application::fault_test::g_inspect_fault_path);
+                        app_fault::g_inspect_fault_path);
                     snapshot_was_consistent = snapshot &&
                                               snapshot->has_value() &&
                                               (snapshot->value().height == 2 ||
                                                snapshot->value().height == 3);
                 }
             });
-        state = kasumi::application::inspect_profile_local_state(
-            fixture.environment, "main");
+        state = fixture.local_state();
     }
 
-    EXPECT_EQ(state, kasumi::application::ProfileLocalState::Problem);
+    EXPECT_EQ(state, ProfileLocalState::Problem);
     EXPECT_TRUE(writer_committed_during_snapshot);
     EXPECT_FALSE(snapshot_was_consistent);
     EXPECT_TRUE(temp.inspection_directories().empty());
@@ -3520,9 +3380,7 @@ TEST(ApplicationProfileTest,
         capture_directory_snapshot(fixture.environment.app_data_dir);
     EXPECT_FALSE(std::filesystem::exists(fixture.environment.app_data_dir /
                                          "profile-main.lock"));
-    EXPECT_EQ(kasumi::application::inspect_profile_local_state(
-                  fixture.environment, "main"),
-              kasumi::application::ProfileLocalState::Initialized);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Initialized);
     EXPECT_EQ(before,
               capture_directory_snapshot(fixture.environment.app_data_dir));
     EXPECT_FALSE(std::filesystem::exists(fixture.environment.app_data_dir /
