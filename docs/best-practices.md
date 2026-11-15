@@ -79,16 +79,16 @@ integrity tools below to audit payloads.
 
 Kasumi provides distinct tools for auditing vault integrity and remote storage health:
 
-* **`kasumi fsck <profile>`**: Audits the observed vault structure and downloads every content payload referenced by the effective remote tree. For each referenced payload, Fsck decrypts AEAD ciphertext, verifies plaintext BLAKE3 logical hash and size against committed metadata, and verifies keyed Content ID binding. Fsck tracks progress in a private local checkpoint (`fsck_checkpoint.bin.enc`) and recovers interrupted sync transactions before auditing.
+* **`kasumi fsck <profile>`**: Audits the observed vault structure and downloads every content payload referenced by the effective remote tree. For each referenced payload, Fsck decrypts AEAD ciphertext, verifies plaintext BLAKE3 logical hash and size against committed metadata, and verifies keyed Content ID binding. Fsck recovers interrupted sync transactions before auditing.
 * **`kasumi remote health <profile>`**: A non-destructive operational diagnostic covering physical listing, authenticated history and Epoch reachability, content availability, writer controls, and orphan/unknown counts. It does not perform Fsck's payload audit.
-* **`kasumi remote contents <profile> --audit`**: Audits and validates all **physically present** content objects in remote storage (including orphans), but without Fsck's private checkpoint or preceding transaction recovery.
+* **`kasumi remote contents <profile> --audit`**: Audits and validates all **physically present** content objects in remote storage (including orphans), without preceding transaction recovery.
 
-| Tool | Audits Referenced Payloads | Audits Orphan Payloads | Uses Checkpoint | Runs Transaction Recovery | Modifies Remote Vault |
-|---|---|---|---|---|---|
-| `kasumi fsck` | Yes (full download & verify) | No | Yes | Yes | No during audit; preceding recovery may publish |
-| `kasumi remote health` | No payload audit | No | No | No | No |
-| `kasumi remote contents <profile> --audit` | Yes (full download & verify) | Yes | No | No | No |
-| `kasumi gc` | No Fsck-style payload audit | No | No | Yes | Yes: authorized direct deletions and control cleanup; preceding recovery may publish |
+| Tool | Audits Referenced Payloads | Audits Orphan Payloads | Runs Transaction Recovery | Modifies Remote Vault |
+|---|---|---|---|---|
+| `kasumi fsck` | Yes (full download & verify) | No | Yes | No during audit; preceding recovery may publish |
+| `kasumi remote health` | No payload audit | No | No | No |
+| `kasumi remote contents <profile> --audit` | Yes (full download & verify) | Yes | No | No |
+| `kasumi gc` | No Fsck-style payload audit | No | Yes | Yes: authorized direct deletions and control cleanup; preceding recovery may publish |
 
 Fsck and GC run pending Sync transaction recovery first. Recovery may change local files or complete remote publication; Fsck's audit itself does not intentionally modify the remote vault.
 

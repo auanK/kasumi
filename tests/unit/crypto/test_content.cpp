@@ -16,11 +16,11 @@
 #include <atomic>
 #include <cstddef>
 #include <filesystem>
+#include <future>
 #include <gtest/gtest.h>
 #include <span>
 #include <string>
 #include <thread>
-#include <future>
 #include <vector>
 
 namespace {
@@ -857,8 +857,7 @@ TEST(CryptoFileTest,
     ASSERT_TRUE(std::filesystem::exists(temp_path));
 }
 
-TEST(CryptoFileTest,
-     MissingDestinationParentFailsWithoutCreatingOutput) {
+TEST(CryptoFileTest, MissingDestinationParentFailsWithoutCreatingOutput) {
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
     auto workspace = kasumi::test::make_temp_workspace("retry-policy");
     const auto plain = kasumi::test::workspace_path(workspace, "plain.txt");
@@ -995,8 +994,8 @@ TEST(CryptoFileTest, RejectsSymlinkDestinationWithoutChangingTarget) {
 }
 
 TEST(CryptoFileTest, EncryptionPreservesExistingCiphertextWhenInputIsMissing) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("encrypt-missing-input-preserves-dest");
+    auto workspace = kasumi::test::make_temp_workspace(
+        "encrypt-missing-input-preserves-dest");
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
 
     const auto missing_plain =
@@ -1075,8 +1074,8 @@ TEST(CryptoFileTest, EncryptionCreationFailureDoesNotModifyExistingFiles) {
         "sibling content that must remain untouched";
     kasumi::test::write_text(existing_sibling, sibling_content);
 
-    const auto bad_destination =
-        kasumi::test::workspace_path(workspace, "nonexistent_subdir/output.enc");
+    const auto bad_destination = kasumi::test::workspace_path(
+        workspace, "nonexistent_subdir/output.enc");
 
     std::string error_detail;
     auto res = kasumi::crypto::encrypt_file_with_hashes(
@@ -1113,11 +1112,7 @@ TEST(CryptoFileTest, EncryptionRejectsHardlinkAliasWithoutModifyingPlaintext) {
 
     std::string error_detail;
     auto res = kasumi::crypto::encrypt_file_with_hashes(
-        plain,
-        alias,
-        key,
-        kasumi::crypto::FilePurpose::Content,
-        &error_detail);
+        plain, alias, key, kasumi::crypto::FilePurpose::Content, &error_detail);
 
     EXPECT_FALSE(res.has_value());
     EXPECT_TRUE(std::filesystem::exists(plain));
@@ -1155,8 +1150,7 @@ TEST(CryptoFileTest,
     EXPECT_TRUE(std::filesystem::exists(plain));
 }
 
-TEST(CryptoFileTest,
-     EncryptionRejectsSymlinkDestinationWithoutChangingTarget) {
+TEST(CryptoFileTest, EncryptionRejectsSymlinkDestinationWithoutChangingTarget) {
     auto workspace =
         kasumi::test::make_temp_workspace("encrypt-dest-symlink-reject");
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
@@ -1193,16 +1187,13 @@ TEST(CryptoFileTest,
               "victim content untouched");
 }
 
-TEST(CryptoFileTest,
-     EncryptionAtomicallyReplacesExistingCiphertextOnSuccess) {
+TEST(CryptoFileTest, EncryptionAtomicallyReplacesExistingCiphertextOnSuccess) {
     auto workspace =
         kasumi::test::make_temp_workspace("encrypt-replaces-existing");
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
 
-    const auto plain_a =
-        kasumi::test::workspace_path(workspace, "plain_a.txt");
-    const auto plain_b =
-        kasumi::test::workspace_path(workspace, "plain_b.txt");
+    const auto plain_a = kasumi::test::workspace_path(workspace, "plain_a.txt");
+    const auto plain_b = kasumi::test::workspace_path(workspace, "plain_b.txt");
     const auto destination =
         kasumi::test::workspace_path(workspace, "shared.enc");
     const auto decrypted =
@@ -1230,16 +1221,12 @@ TEST(CryptoFileTest,
     EXPECT_EQ(entry_count, 4U);
 }
 
-TEST(CryptoFileTest,
-     ConcurrentEncryptionsToSameDestinationPreserveIntegrity) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("encrypt-concurrent");
+TEST(CryptoFileTest, ConcurrentEncryptionsToSameDestinationPreserveIntegrity) {
+    auto workspace = kasumi::test::make_temp_workspace("encrypt-concurrent");
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
 
-    const auto plain_a =
-        kasumi::test::workspace_path(workspace, "plain_a.txt");
-    const auto plain_b =
-        kasumi::test::workspace_path(workspace, "plain_b.txt");
+    const auto plain_a = kasumi::test::workspace_path(workspace, "plain_a.txt");
+    const auto plain_b = kasumi::test::workspace_path(workspace, "plain_b.txt");
     const auto destination =
         kasumi::test::workspace_path(workspace, "shared_dest.enc");
     const auto decrypted =
@@ -1299,23 +1286,16 @@ TEST(CryptoKeyDerivationTest, SeparatesEveryDomainAndKeysRemoteIdentifiers) {
         kasumi::crypto::derive_key(key, kasumi::crypto::KeyPurpose::Journal);
     const auto identifiers = kasumi::crypto::derive_key(
         key, kasumi::crypto::KeyPurpose::RemoteIdentifier);
-    const auto checkpoint = kasumi::crypto::derive_key(
-        key, kasumi::crypto::KeyPurpose::FsckCheckpoint);
     EXPECT_NE(content, history);
     EXPECT_NE(content, epoch);
     EXPECT_NE(content, journal);
     EXPECT_NE(content, identifiers);
-    EXPECT_NE(content, checkpoint);
     EXPECT_NE(history, epoch);
     EXPECT_NE(history, journal);
     EXPECT_NE(history, identifiers);
-    EXPECT_NE(history, checkpoint);
     EXPECT_NE(epoch, journal);
     EXPECT_NE(epoch, identifiers);
-    EXPECT_NE(epoch, checkpoint);
     EXPECT_NE(journal, identifiers);
-    EXPECT_NE(journal, checkpoint);
-    EXPECT_NE(identifiers, checkpoint);
 
     const auto plaintext_hash = kasumi::hasher::hash_string("known file");
     const auto first = kasumi::crypto::content_identifier(key, plaintext_hash);

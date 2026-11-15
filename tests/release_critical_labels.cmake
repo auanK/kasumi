@@ -53,9 +53,5 @@ set_tests_properties(
     SyncGcCrashTest.KilledAfterCandidateRemovalBeforeConfirmationRequiresFreshAnalysis
     IntegrityMaintenanceTest.BoundedConcurrentFsckRejectsValidAeadWrongLogicalIdentity
     IntegrityMaintenanceTest.BoundedConcurrentFsckHardTransportFailureDrainsAndReportsLowestIndex
-    FsckResumeTest.DecisiveAdversarialLyingPhysicalHashRejectsBlindReuseUnderThreatA
-    FsckResumeTest.CorruptedCheckpointFileFallsBackToFullAuditFailClosed
-    FsckCheckpointTest.RejectsWrongKey
-    FsckCheckpointTest.RejectsBitFlipInHeaderOrCiphertext
     PROPERTIES LABELS "release-critical"
 )

@@ -78,7 +78,6 @@ Keyed BLAKE2b derives distinct 32-byte subkeys across isolated domains:
 * `Epoch`: Epoch lifecycle envelope encryption
 * `Journal`: local transaction journal encryption
 * `RemoteIdentifier`: keyed identifier derivation
-* `FsckCheckpoint`: local authenticated fsck checkpoint
 
 Content, Commit, Epoch, and namespace identifiers also use disjoint cryptographic domain tags. Derived namespace components are truncated to eight hex characters (the version component to four), so namespace derivation is not a confidentiality guarantee for protocol structure. Ephemeral subkey buffers in memory are wiped at defined cleanup points using `crypto_wipe`; Kasumi does not claim to prevent all copies or swap exposure of secrets.
 

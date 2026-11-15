@@ -129,8 +129,6 @@ kasumi_add_test_suite(
         unit/application/test_inspection.cpp
         unit/application/integrity/test_maintenance.cpp
         unit/application/integrity/test_garbage_collection.cpp
-        unit/application/integrity/test_fsck_checkpoint.cpp
-        unit/application/integrity/test_fsck_resume.cpp
     LIBRARIES
         kasumi_application
         kasumi_sqlite3
