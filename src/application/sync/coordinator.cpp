@@ -2333,20 +2333,14 @@ execute(const runtime::RuntimeData& runtime_data,
                                                    *record,
                                                    runtime_data.local_dir);
     if (!timestamps) {
-        auto rolled = rollback_terminal();
-        if (!rolled)
-            return std::unexpected(rolled.error());
-        return std::unexpected(timestamps.error());
+        return fail_terminal(timestamps.error());
     }
 
     auto scanned = observation::collect_local_observation(
         runtime_data.local_dir, session, observed_input.ignore_list);
     if (!scanned) {
-        auto rolled = rollback_terminal();
-        if (!rolled)
-            return std::unexpected(rolled.error());
-        return std::unexpected(detail::make_error(ErrorCode::MutationFailure,
-                                                  "local scan failed"));
+        return fail_terminal(detail::make_error(ErrorCode::MutationFailure,
+                                                "local scan failed"));
     }
     // Identifies new files or directories created locally and concurrently
     // during sync.
@@ -2401,9 +2395,7 @@ execute(const runtime::RuntimeData& runtime_data,
         !detail::same_materialized_rows(
             reconciliation_result.candidate_shared_tree.rows,
             publication_tree->rows)) {
-        if (auto rolled = rollback_terminal(); !rolled)
-            return std::unexpected(rolled.error());
-        return std::unexpected(detail::make_error(
+        return fail_terminal(detail::make_error(
             ErrorCode::CompositionMismatch,
             "materialized tree does not match reconciled candidate tree"));
     }
@@ -2419,9 +2411,7 @@ execute(const runtime::RuntimeData& runtime_data,
             !detail::same_materialized_head_rows(found->commit.tree.rows,
                                                  publication_tree->rows,
                                                  observed_input.local_tree)) {
-            if (auto rolled = rollback_terminal(); !rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(detail::make_error(
+            return fail_terminal(detail::make_error(
                 ErrorCode::CompositionMismatch,
                 "local materialization diverges from observed head"));
         }

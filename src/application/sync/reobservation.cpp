@@ -605,14 +605,39 @@ stabilize(const runtime::RuntimeData& runtime_data,
           bool allow_unreferenced_content_reuse,
           bool trust_existing_content,
           const std::unordered_set<std::string>* initial_content_identifiers) {
+    const auto no_work = [](const reconciliation::Result& candidate) {
+        return !candidate.requires_publication &&
+               !candidate.requires_local_mutation &&
+               !candidate.requires_storage_repair &&
+               !candidate.requires_state_commit;
+    };
+    const auto concurrent_trust_error = []() {
+        return detail::make_error(
+            ErrorCode::ConcurrentModification,
+            "remote history was published concurrently during initial sync "
+            "with --trust-existing-content; operation was rejected to prevent "
+            "unverified content reuse");
+    };
+    const auto reconcile_and_refresh =
+        [&](reconciliation::Input& target,
+            bool allow_reuse) -> std::expected<reconciliation::Result, Error> {
+        auto recalculated = reconciliation::reconcile(target);
+        if (!recalculated) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::ObservationFailure, recalculated.error().detail));
+        }
+        return refresh_content_availability(target,
+                                            *recalculated,
+                                            storage,
+                                            key,
+                                            confirmed_missing,
+                                            allow_reuse,
+                                            trust_existing_content,
+                                            initial_content_identifiers);
+    };
+
     if (trust_existing_content && observed_input.storage.history_present) {
-        return std::unexpected(
-            detail::make_error(ErrorCode::ConcurrentModification,
-                               "remote history was published concurrently "
-                               "during initial sync with "
-                               "--trust-existing-content; operation was "
-                               "rejected to prevent unverified "
-                               "content reuse"));
+        return std::unexpected(concurrent_trust_error());
     }
 
     if (!content_availability_is_current) {
@@ -631,10 +656,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
         reconciliation_result = std::move(*available);
     }
 
-    if (!reconciliation_result.requires_publication &&
-        !reconciliation_result.requires_local_mutation &&
-        !reconciliation_result.requires_storage_repair &&
-        !reconciliation_result.requires_state_commit) {
+    if (no_work(reconciliation_result)) {
         return StableExecution{.input = std::move(observed_input),
                                .result = std::move(reconciliation_result)};
     }
@@ -664,29 +686,13 @@ stabilize(const runtime::RuntimeData& runtime_data,
                     ErrorCode::ConcurrentModification,
                     "state changed repeatedly before publication"));
             }
-            auto recalculated = reconciliation::reconcile(input);
-            if (!recalculated) {
-                return std::unexpected(
-                    detail::make_error(ErrorCode::ObservationFailure,
-                                       recalculated.error().detail));
-            }
             auto refreshed =
-                refresh_content_availability(input,
-                                             *recalculated,
-                                             storage,
-                                             key,
-                                             confirmed_missing,
-                                             allow_unreferenced_content_reuse,
-                                             trust_existing_content,
-                                             initial_content_identifiers);
+                reconcile_and_refresh(input, allow_unreferenced_content_reuse);
             if (!refreshed) {
                 return std::unexpected(refreshed.error());
             }
             result = std::move(*refreshed);
-            if (!result.requires_publication &&
-                !result.requires_local_mutation &&
-                !result.requires_storage_repair &&
-                !result.requires_state_commit) {
+            if (no_work(result)) {
                 return StableExecution{.input = std::move(input),
                                        .result = std::move(result)};
             }
@@ -738,11 +744,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
                 ErrorCode::ObservationFailure, observed.error().detail));
         }
         if (trust_existing_content && observed->storage.history_present) {
-            return fail_with_cleanup(detail::make_error(
-                ErrorCode::ConcurrentModification,
-                "remote history was published concurrently during initial sync "
-                "with --trust-existing-content; operation was rejected to "
-                "prevent unverified content reuse"));
+            return fail_with_cleanup(concurrent_trust_error());
         }
         observed->pending_deletion_authority = input.pending_deletion_authority;
         mutation_fault_test::hit("before_final_local_observation",
@@ -761,48 +763,29 @@ stabilize(const runtime::RuntimeData& runtime_data,
             observed->local_physical_evidence =
                 std::move(local_after_storage->physical_evidence);
         }
-        auto recalculated = reconciliation::reconcile(*observed);
-        if (!recalculated) {
-            return fail_with_cleanup(detail::make_error(
-                ErrorCode::ObservationFailure, recalculated.error().detail));
-        }
-        const bool current_allow_unreferenced_reuse =
-            allow_unreferenced_content_reuse &&
-            !observed->storage.history_present;
         auto refreshed =
-            refresh_content_availability(*observed,
-                                         *recalculated,
-                                         storage,
-                                         key,
-                                         confirmed_missing,
-                                         current_allow_unreferenced_reuse,
-                                         trust_existing_content,
-                                         initial_content_identifiers);
+            reconcile_and_refresh(*observed,
+                                  allow_unreferenced_content_reuse &&
+                                      !observed->storage.history_present);
         if (!refreshed) {
             return fail_with_cleanup(refreshed.error());
         }
-        recalculated = std::move(*refreshed);
-        if (same_observation(input, *observed)) {
-            if (auto removed =
-                    detail::remove_transaction_workspace(workspace, key);
-                !removed) {
-                return std::unexpected(removed.error());
-            }
-            return StableExecution{.input = std::move(*observed),
-                                   .result = std::move(*recalculated)};
-        }
-
         if (auto removed = detail::remove_transaction_workspace(workspace, key);
             !removed) {
             return std::unexpected(removed.error());
         }
+        if (same_observation(input, *observed)) {
+            return StableExecution{.input = std::move(*observed),
+                                   .result = std::move(*refreshed)};
+        }
+
         if (attempt + 1 == maximum_observation_attempts) {
             return std::unexpected(detail::make_error(
                 ErrorCode::ConcurrentModification,
                 "state changed repeatedly before publication"));
         }
         input = std::move(*observed);
-        result = std::move(*recalculated);
+        result = std::move(*refreshed);
     }
 
     return std::unexpected(
