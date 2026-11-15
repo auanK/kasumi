@@ -10,7 +10,6 @@
 #include <optional>
 #include <span>
 #include <string>
-#include <tuple>
 #include <vector>
 
 namespace kasumi::application::history_storage {
@@ -27,22 +26,12 @@ struct ContentReference {
     std::string commit_id;
     std::string path;
     std::uint64_t size = 0;
+
+    friend bool operator==(const ContentReference&,
+                           const ContentReference&) noexcept = default;
+    friend auto operator<=>(const ContentReference&,
+                            const ContentReference&) noexcept = default;
 };
-
-// Compares commit, path, and size.
-inline bool operator==(const ContentReference& left,
-                       const ContentReference& right) noexcept {
-    return std::tie(left.commit_id, left.path, left.size) ==
-           std::tie(right.commit_id, right.path, right.size);
-}
-
-// Orders by commit, path, and size.
-inline std::strong_ordering
-operator<=>(const ContentReference& left,
-            const ContentReference& right) noexcept {
-    return std::tie(left.commit_id, left.path, left.size) <=>
-           std::tie(right.commit_id, right.path, right.size);
-}
 
 // State and references of a content object.
 struct ContentEntry {

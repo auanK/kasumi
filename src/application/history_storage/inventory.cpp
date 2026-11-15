@@ -79,10 +79,9 @@ build_history_inventory(std::span<const std::string> identifiers,
     }
     for (auto* objects :
          {&inventory.commit_variants, &inventory.marker_variants}) {
-        for (auto& [unused, variants] : *objects) {
-            static_cast<void>(unused);
-            sort_unique(variants);
-            if (variants.size() > maximum_ciphertext_variants_per_commit) {
+        for (auto& entry : *objects) {
+            sort_unique(entry.second);
+            if (entry.second.size() > maximum_ciphertext_variants_per_commit) {
                 return std::unexpected(error(ErrorCode::LimitExceeded,
                                              "too many ciphertext variants"));
             }

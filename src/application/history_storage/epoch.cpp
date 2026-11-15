@@ -259,74 +259,78 @@ load_latest_impl(transport::Transport& storage,
                  const std::filesystem::path& workspace_root,
                  std::optional<std::span<const std::string>> known_identifiers,
                  std::optional<Reference> trusted_ancestor) {
-    const auto layout = derive_remote_layout(master_key);
-    auto inventory =
-        discover_epoch_inventory(storage, layout, known_identifiers);
-    if (!inventory) {
-        return std::unexpected(inventory.error());
-    }
-    if (inventory->references.empty()) {
-        return std::optional<VerifiedEpoch>{};
-    }
-    const auto& latest_reference = inventory->references.back();
-    if (trusted_ancestor &&
-        (trusted_ancestor->sequence > latest_reference.sequence ||
-         (trusted_ancestor->sequence == latest_reference.sequence &&
-          trusted_ancestor->epoch_id != latest_reference.epoch_id))) {
-        return std::unexpected(
-            error(ErrorCode::Conflict,
-                  "remote epoch regressed from exact local checkpoint"));
-    }
-    auto temporary = detail::make_workspace(workspace_root);
-    if (!temporary) {
-        return std::unexpected(
-            error(ErrorCode::WorkspaceFailure, temporary.error().detail));
-    }
-
-    std::size_t request_index = 0;
-    auto latest = load_exact_reference(storage,
-                                       layout,
-                                       master_key,
-                                       *temporary,
-                                       latest_reference,
-                                       request_index++);
-    if (!latest) {
-        return std::unexpected(latest.error());
-    }
-    const auto& contract = latest->value;
-    auto current = *latest;
-    std::size_t index = inventory->references.size() - 1;
-    while (current.reference.sequence != 0 &&
-           (!trusted_ancestor ||
-            current.reference.sequence > trusted_ancestor->sequence)) {
-        if (index == 0 || current.value.previous_epoch_id !=
-                              inventory->references[index - 1].epoch_id) {
-            return std::unexpected(error(
-                ErrorCode::Conflict, "epoch ancestry has invalid predecessor"));
+    return guard_alloc([&]() -> LatestResult {
+        const auto layout = derive_remote_layout(master_key);
+        auto inventory =
+            discover_epoch_inventory(storage, layout, known_identifiers);
+        if (!inventory) {
+            return std::unexpected(inventory.error());
         }
-        --index;
-        auto previous = load_exact_reference(storage,
-                                             layout,
-                                             master_key,
-                                             *temporary,
-                                             inventory->references[index],
-                                             request_index++);
-        if (!previous) {
-            return std::unexpected(previous.error());
+        if (inventory->references.empty()) {
+            return std::optional<VerifiedEpoch>{};
         }
-        if (previous->value.vault_id != contract.vault_id ||
-            previous->value.policy != contract.policy) {
+        const auto& latest_reference = inventory->references.back();
+        if (trusted_ancestor &&
+            (trusted_ancestor->sequence > latest_reference.sequence ||
+             (trusted_ancestor->sequence == latest_reference.sequence &&
+              trusted_ancestor->epoch_id != latest_reference.epoch_id))) {
             return std::unexpected(
                 error(ErrorCode::Conflict,
-                      "epoch ancestry diverges from authenticated contract"));
+                      "remote epoch regressed from exact local checkpoint"));
         }
-        current = std::move(*previous);
-    }
-    if (trusted_ancestor && current.reference != *trusted_ancestor) {
-        return std::unexpected(error(
-            ErrorCode::Conflict, "ancestry does not reach exact checkpoint"));
-    }
-    return std::optional<VerifiedEpoch>{std::move(*latest)};
+        auto temporary = detail::make_workspace(workspace_root);
+        if (!temporary) {
+            return std::unexpected(
+                error(ErrorCode::WorkspaceFailure, temporary.error().detail));
+        }
+
+        std::size_t request_index = 0;
+        auto latest = load_exact_reference(storage,
+                                           layout,
+                                           master_key,
+                                           *temporary,
+                                           latest_reference,
+                                           request_index++);
+        if (!latest) {
+            return std::unexpected(latest.error());
+        }
+        const auto& contract = latest->value;
+        auto current = *latest;
+        std::size_t index = inventory->references.size() - 1;
+        while (current.reference.sequence != 0 &&
+               (!trusted_ancestor ||
+                current.reference.sequence > trusted_ancestor->sequence)) {
+            if (index == 0 || current.value.previous_epoch_id !=
+                                  inventory->references[index - 1].epoch_id) {
+                return std::unexpected(
+                    error(ErrorCode::Conflict,
+                          "epoch ancestry has invalid predecessor"));
+            }
+            --index;
+            auto previous = load_exact_reference(storage,
+                                                 layout,
+                                                 master_key,
+                                                 *temporary,
+                                                 inventory->references[index],
+                                                 request_index++);
+            if (!previous) {
+                return std::unexpected(previous.error());
+            }
+            if (previous->value.vault_id != contract.vault_id ||
+                previous->value.policy != contract.policy) {
+                return std::unexpected(error(
+                    ErrorCode::Conflict,
+                    "epoch ancestry diverges from authenticated contract"));
+            }
+            current = std::move(*previous);
+        }
+        if (trusted_ancestor && current.reference != *trusted_ancestor) {
+            return std::unexpected(
+                error(ErrorCode::Conflict,
+                      "ancestry does not reach exact checkpoint"));
+        }
+        return std::optional<VerifiedEpoch>{std::move(*latest)};
+    });
 }
 
 ChainResult
@@ -624,10 +628,7 @@ select_latest(std::span<const VerifiedEpoch> epochs) {
             error(ErrorCode::NotFound, "no epochs available"));
     }
     const auto& contract = epochs.front().value;
-    std::vector<const VerifiedEpoch*> unique;
-    unique.reserve(epochs.size());
-    std::unordered_map<std::uint64_t, const VerifiedEpoch*> sequences;
-    sequences.reserve(epochs.size());
+    std::map<std::uint64_t, const VerifiedEpoch*> unique;
     for (const auto& candidate : epochs) {
         if (auto valid = validate_verified(candidate); !valid) {
             return std::unexpected(valid.error());
@@ -638,38 +639,31 @@ select_latest(std::span<const VerifiedEpoch> epochs) {
                 ErrorCode::Conflict, "epochs belong to different contracts"));
         }
         const auto [known, inserted] =
-            sequences.emplace(candidate.reference.sequence, &candidate);
-        if (!inserted) {
-            if (candidate != *known->second) {
-                return std::unexpected(
-                    error(ErrorCode::Conflict, "epoch sequence has conflict"));
-            }
-            continue;
+            unique.emplace(candidate.reference.sequence, &candidate);
+        if (!inserted && candidate != *known->second) {
+            return std::unexpected(
+                error(ErrorCode::Conflict, "epoch sequence has conflict"));
         }
-        unique.push_back(&candidate);
     }
-    std::ranges::sort(unique, [](const auto* left, const auto* right) {
-        return left->reference.sequence < right->reference.sequence;
-    });
-    if (unique.front()->reference.sequence != 0) {
+    if (unique.begin()->first != 0) {
         return std::unexpected(
             error(ErrorCode::Conflict, "epoch chain missing genesis"));
     }
-    for (std::size_t index = 1; index < unique.size(); ++index) {
-        const auto previous = unique[index - 1];
-        const auto current = unique[index];
-        if (previous->reference.sequence ==
-            std::numeric_limits<std::uint64_t>::max()) {
+    auto previous = unique.begin();
+    for (auto current = std::next(previous); current != unique.end();
+         previous = current++) {
+        if (previous->first == std::numeric_limits<std::uint64_t>::max()) {
             return std::unexpected(error(
                 ErrorCode::Conflict, "epoch chain exceeds maximum sequence"));
         }
-        if (current->reference.sequence != previous->reference.sequence + 1 ||
-            current->value.previous_epoch_id != previous->reference.epoch_id) {
+        if (current->first != previous->first + 1 ||
+            current->second->value.previous_epoch_id !=
+                previous->second->reference.epoch_id) {
             return std::unexpected(
                 error(ErrorCode::Conflict, "epoch chain has discontinuity"));
         }
     }
-    return *unique.back();
+    return *unique.rbegin()->second;
 }
 
 std::expected<void, Error>
@@ -693,8 +687,8 @@ publish(transport::Transport& storage,
         return std::unexpected(
             error(ErrorCode::WorkspaceFailure, written.error().detail));
     }
-    auto uploaded = transport::put(storage, source, *identifier);
-    if (!uploaded) {
+    if (auto uploaded = transport::put(storage, source, *identifier);
+        !uploaded) {
         return std::unexpected(error(ErrorCode::TransportFailure,
                                      transport::describe(uploaded.error())));
     }
@@ -744,10 +738,8 @@ LatestResult
 load_latest(transport::Transport& storage,
             std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
             const std::filesystem::path& workspace_root) {
-    return guard_alloc([&] {
-        return load_latest_impl(
-            storage, master_key, workspace_root, std::nullopt, std::nullopt);
-    });
+    return load_latest_impl(
+        storage, master_key, workspace_root, std::nullopt, std::nullopt);
 }
 
 LatestResult
@@ -755,10 +747,8 @@ load_latest(transport::Transport& storage,
             std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
             const std::filesystem::path& workspace_root,
             std::span<const std::string> identifiers) {
-    return guard_alloc([&] {
-        return load_latest_impl(
-            storage, master_key, workspace_root, identifiers, std::nullopt);
-    });
+    return load_latest_impl(
+        storage, master_key, workspace_root, identifiers, std::nullopt);
 }
 
 LatestResult
@@ -766,13 +756,11 @@ load_latest(transport::Transport& storage,
             std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
             const std::filesystem::path& workspace_root,
             std::optional<Reference> trusted_ancestor) {
-    return guard_alloc([&] {
-        return load_latest_impl(storage,
-                                master_key,
-                                workspace_root,
-                                std::nullopt,
-                                std::move(trusted_ancestor));
-    });
+    return load_latest_impl(storage,
+                            master_key,
+                            workspace_root,
+                            std::nullopt,
+                            std::move(trusted_ancestor));
 }
 
 LatestResult
@@ -781,13 +769,11 @@ load_latest(transport::Transport& storage,
             const std::filesystem::path& workspace_root,
             std::span<const std::string> identifiers,
             std::optional<Reference> trusted_ancestor) {
-    return guard_alloc([&] {
-        return load_latest_impl(storage,
-                                master_key,
-                                workspace_root,
-                                identifiers,
-                                std::move(trusted_ancestor));
-    });
+    return load_latest_impl(storage,
+                            master_key,
+                            workspace_root,
+                            identifiers,
+                            std::move(trusted_ancestor));
 }
 
 ChainResult
@@ -855,115 +841,102 @@ PruneResult plan_pruning(std::span<const kasumi::history::LoadedCommit> commits,
         return std::unexpected(NoPrune{"defensive limit exceeded"});
     }
 
-    std::unordered_map<std::string, const kasumi::history::LoadedCommit*> by_id;
-    std::unordered_set<std::string> has_parents;
+    std::unordered_map<std::string_view, const kasumi::history::LoadedCommit*>
+        by_id;
+    std::unordered_set<std::string_view> has_children;
+    by_id.reserve(commits.size());
+    has_children.reserve(commits.size());
     for (const auto& c : commits) {
         by_id[c.id] = &c;
         for (const auto& p : c.commit.parents) {
-            has_parents.insert(p);
+            has_children.insert(p);
         }
     }
 
-    std::vector<std::string> heads;
-    for (const auto& c : commits) {
-        if (!has_parents.contains(c.id)) {
-            heads.push_back(c.id);
-        }
-    }
+    std::unordered_map<std::string_view, std::uint64_t> shortest_depth;
+    shortest_depth.reserve(commits.size());
+    std::vector<const kasumi::history::LoadedCommit*> queue;
+    std::int64_t newest_authenticated_head = 0;
 
     for (const auto& c : commits) {
         for (const auto& parent : c.commit.parents) {
-            const auto parent_it = by_id.find(parent);
-            if (parent_it != by_id.end() &&
-                parent_it->second->commit.created_at > c.commit.created_at) {
+            if (const auto it = by_id.find(parent);
+                it != by_id.end() &&
+                it->second->commit.created_at > c.commit.created_at) {
                 return std::unexpected(
                     NoPrune{"timestamp regression detected"});
             }
         }
-    }
-
-    std::int64_t newest_authenticated_head = 0;
-    for (const auto& head : heads) {
-        const auto head_it = by_id.find(head);
-        if (head_it != by_id.end()) {
-            newest_authenticated_head = std::max(
-                newest_authenticated_head, head_it->second->commit.created_at);
+        if (!has_children.contains(c.id)) {
+            newest_authenticated_head =
+                std::max(newest_authenticated_head, c.commit.created_at);
+            shortest_depth[c.id] = 0;
+            queue.push_back(&c);
         }
     }
     if (newest_authenticated_head <= 0) {
         return std::unexpected(NoPrune{"no authenticated commit timestamp"});
     }
 
-    std::unordered_map<std::string, std::uint64_t> shortest_depth;
-    std::vector<std::string> queue = heads;
-    for (const auto& h : heads) {
-        shortest_depth[h] = 0;
-    }
-
-    std::size_t head_ptr = 0;
-    while (head_ptr < queue.size()) {
-        const auto current_id = queue[head_ptr++];
-        const auto depth = shortest_depth[current_id];
-        auto it = by_id.find(current_id);
-        if (it != by_id.end()) {
-            for (const auto& p : it->second->commit.parents) {
-                if (!shortest_depth.contains(p) ||
-                    shortest_depth[p] > depth + 1) {
-                    shortest_depth[p] = depth + 1;
-                    queue.push_back(p);
+    for (std::size_t head_ptr = 0; head_ptr < queue.size(); ++head_ptr) {
+        const auto* current = queue[head_ptr];
+        const auto next_depth = shortest_depth[current->id] + 1;
+        for (const auto& p : current->commit.parents) {
+            if (auto [it, inserted] = shortest_depth.try_emplace(p, next_depth);
+                inserted || it->second > next_depth) {
+                it->second = next_depth;
+                if (const auto parent_it = by_id.find(p);
+                    parent_it != by_id.end()) {
+                    queue.push_back(parent_it->second);
                 }
             }
         }
     }
 
-    std::unordered_set<std::string> prunable;
+    std::unordered_set<std::string_view> prunable;
     const auto age_limit_seconds =
         static_cast<std::int64_t>(policy.min_history_age_hours) * 3600LL;
     for (const auto& c : commits) {
-        if (shortest_depth.contains(c.id)) {
-            const auto depth = shortest_depth[c.id];
-            if (depth >= policy.min_history_depth && c.commit.created_at > 0 &&
-                c.commit.created_at <= newest_authenticated_head &&
-                newest_authenticated_head - c.commit.created_at >=
-                    age_limit_seconds) {
-                prunable.insert(c.id);
-            }
+        if (const auto it = shortest_depth.find(c.id);
+            it != shortest_depth.end() &&
+            it->second >= policy.min_history_depth && c.commit.created_at > 0 &&
+            c.commit.created_at <= newest_authenticated_head &&
+            newest_authenticated_head - c.commit.created_at >=
+                age_limit_seconds) {
+            prunable.insert(c.id);
         }
     }
-
-    std::vector<Anchor> anchors;
-    for (const auto& c : commits) {
-        if (!prunable.contains(c.id)) {
-            for (const auto& p : c.commit.parents) {
-                if (prunable.contains(p)) {
-                    auto parent_it = by_id.find(p);
-                    if (parent_it != by_id.end()) {
-                        anchors.push_back(
-                            Anchor{.commit_id = p,
-                                   .height = parent_it->second->commit.height});
-                    }
-                }
-            }
-        }
-    }
-
     if (prunable.empty()) {
         return std::unexpected(NoPrune{"no commits reached retention limits"});
     }
 
-    std::vector<std::string> pruned_list(prunable.begin(), prunable.end());
-    std::ranges::sort(pruned_list);
+    std::map<std::string_view, std::uint64_t> anchor_heights;
+    for (const auto& c : commits) {
+        if (prunable.contains(c.id)) {
+            continue;
+        }
+        for (const auto& p : c.commit.parents) {
+            if (prunable.contains(p)) {
+                if (const auto parent_it = by_id.find(p);
+                    parent_it != by_id.end()) {
+                    anchor_heights.emplace(p, parent_it->second->commit.height);
+                }
+            }
+        }
+    }
 
-    std::ranges::sort(anchors, [](const Anchor& a, const Anchor& b) {
-        return a.commit_id < b.commit_id;
-    });
-    auto last =
-        std::ranges::unique(anchors, [](const Anchor& a, const Anchor& b) {
-            return a.commit_id == b.commit_id;
-        });
-    anchors.erase(last.begin(), last.end());
-
-    return EpochPlan{.anchors = anchors, .prunable_commits = pruned_list};
+    EpochPlan plan;
+    plan.prunable_commits.reserve(prunable.size());
+    for (const auto id : prunable) {
+        plan.prunable_commits.emplace_back(id);
+    }
+    std::ranges::sort(plan.prunable_commits);
+    plan.anchors.reserve(anchor_heights.size());
+    for (const auto& [id, height] : anchor_heights) {
+        plan.anchors.push_back(
+            Anchor{.commit_id = std::string{id}, .height = height});
+    }
+    return plan;
 }
 
 } // namespace kasumi::application::history_storage::epoch

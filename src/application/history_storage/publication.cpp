@@ -81,22 +81,6 @@ verify_remote_physical_hash(transport::Transport& storage,
     return true;
 }
 
-std::expected<void, Error>
-verify_commit_object_impl(transport::Transport& storage,
-                          const RemoteLayout& layout,
-                          std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                          const history::Commit& commit,
-                          const HeadReference& reference,
-                          const std::filesystem::path& workspace_root,
-                          std::string_view local_physical_hash);
-
-std::expected<void, Error>
-verify_head_marker_impl(transport::Transport& storage,
-                        const RemoteLayout& layout,
-                        const HeadReference& reference,
-                        const std::filesystem::path& workspace_root,
-                        std::string_view local_physical_hash);
-
 PublishObjectResult
 publish_commit_object_impl(transport::Transport& storage,
                            const RemoteLayout& layout,
@@ -186,9 +170,8 @@ publish_commit_object_impl(transport::Transport& storage,
             !written) {
             return std::unexpected(written.error());
         }
-        const bool encrypted_commit = crypto::encrypt_file(
-            plaintext, ciphertext, key, crypto::FilePurpose::History);
-        if (!encrypted_commit) {
+        if (!crypto::encrypt_file(
+                plaintext, ciphertext, key, crypto::FilePurpose::History)) {
             return std::unexpected(detail::error(ErrorCode::CryptoFailure,
                                                  "could not encrypt commit"));
         }
@@ -206,26 +189,26 @@ publish_commit_object_impl(transport::Transport& storage,
         }
         physical_hash = std::move(*local_physical_hash);
         auto delta = detail::publication_delta(*inventory, reference, layout);
-        auto budget = detail::validate_publication_budget(
-            *inventory, reference, delta, !scoped);
-        if (!budget) {
+        if (auto budget = detail::validate_publication_budget(
+                *inventory, reference, delta, !scoped);
+            !budget) {
             return std::unexpected(budget.error());
         }
-        auto published = transport::put(
-            storage, ciphertext, commit_object(layout, reference));
-        if (!published) {
+        if (auto published = transport::put(
+                storage, ciphertext, commit_object(layout, reference));
+            !published) {
             if (!transport::mutation_result_is_ambiguous(published.error())) {
                 return std::unexpected(
                     detail::transport_error(published.error()));
             }
-            auto verified = verify_commit_object_impl(storage,
-                                                      layout,
-                                                      key,
-                                                      commit,
-                                                      reference,
-                                                      workspace_root,
-                                                      physical_hash);
-            if (!verified) {
+            if (auto verified = verify_commit_object(storage,
+                                                     layout,
+                                                     key,
+                                                     commit,
+                                                     reference,
+                                                     workspace_root,
+                                                     physical_hash);
+                !verified) {
                 return std::unexpected(verified.error());
             }
         }
@@ -235,46 +218,6 @@ publish_commit_object_impl(transport::Transport& storage,
                                  .marker_id = marker_object(layout, reference),
                                  .physical_hash = std::move(physical_hash),
                                  .reused_existing_ciphertext = reused};
-}
-
-std::expected<void, Error>
-verify_commit_object_impl(transport::Transport& storage,
-                          const RemoteLayout& layout,
-                          std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                          const history::Commit& commit,
-                          const HeadReference& reference,
-                          const std::filesystem::path& workspace_root,
-                          std::string_view local_physical_hash) {
-    if (!valid(reference)) {
-        return std::unexpected(detail::error(ErrorCode::InvalidIdentifier,
-                                             "invalid head reference"));
-    }
-    const auto canonical = history::serialize(commit);
-    if (!canonical ||
-        crypto::commit_identifier(key, *canonical) != reference.commit_id) {
-        return std::unexpected(
-            detail::error(ErrorCode::InvalidCommit, "commit ID mismatch"));
-    }
-    auto physical = verify_remote_physical_hash(
-        storage, commit_object(layout, reference), local_physical_hash);
-    if (!physical) {
-        return std::unexpected(physical.error());
-    }
-    if (*physical) {
-        return {};
-    }
-    auto temporary = detail::make_workspace(workspace_root);
-    if (!temporary) {
-        return std::unexpected(temporary.error());
-    }
-    std::size_t sequence = 0;
-    return detail::verify_published_commit(storage,
-                                           layout,
-                                           key,
-                                           commit,
-                                           reference,
-                                           (*temporary)->workspace.root,
-                                           sequence);
 }
 
 PublishHeadResult
@@ -294,9 +237,9 @@ publish_head_marker_impl(transport::Transport& storage,
         return std::unexpected(inventory.error());
     }
     auto delta = detail::publication_delta(*inventory, reference, layout);
-    auto budget = detail::validate_publication_budget(
-        *inventory, reference, delta, !scoped);
-    if (!budget) {
+    if (auto budget = detail::validate_publication_budget(
+            *inventory, reference, delta, !scoped);
+        !budget) {
         return std::unexpected(budget.error());
     }
 
@@ -336,88 +279,22 @@ publish_head_marker_impl(transport::Transport& storage,
                                                  local_physical_hash.error()));
         }
         physical_hash = std::move(*local_physical_hash);
-        auto uploaded =
-            transport::put(storage, marker, marker_object(layout, reference));
-        if (!uploaded) {
+        if (auto uploaded = transport::put(
+                storage, marker, marker_object(layout, reference));
+            !uploaded) {
             if (!transport::mutation_result_is_ambiguous(uploaded.error())) {
                 return std::unexpected(
                     detail::transport_error(uploaded.error()));
             }
-            auto verified = verify_head_marker_impl(
-                storage, layout, reference, workspace_root, physical_hash);
-            if (!verified) {
+            if (auto verified = verify_head_marker(
+                    storage, layout, reference, workspace_root, physical_hash);
+                !verified) {
                 return std::unexpected(verified.error());
             }
         }
     }
     return PublishedHeadMarker{.marker_id = marker_object(layout, reference),
                                .physical_hash = std::move(physical_hash)};
-}
-
-std::expected<void, Error>
-verify_head_marker_impl(transport::Transport& storage,
-                        const RemoteLayout& layout,
-                        const HeadReference& reference,
-                        const std::filesystem::path& workspace_root,
-                        std::string_view local_physical_hash) {
-    if (!transport::valid(storage) || !valid(reference)) {
-        return std::unexpected(detail::error(
-            ErrorCode::InvalidInput, "invalid transport or head reference"));
-    }
-    auto physical = verify_remote_physical_hash(
-        storage, marker_object(layout, reference), local_physical_hash);
-    if (!physical) {
-        return std::unexpected(physical.error());
-    }
-    if (*physical) {
-        return {};
-    }
-    auto temporary = detail::make_workspace(workspace_root);
-    if (!temporary) {
-        return std::unexpected(temporary.error());
-    }
-    std::size_t sequence = 0;
-    auto state = detail::inspect_marker(
-        storage, layout, reference, (*temporary)->workspace.root, sequence);
-    if (!state) {
-        return std::unexpected(state.error());
-    }
-    if (*state != detail::MarkerState::Valid) {
-        return std::unexpected(detail::error(ErrorCode::VerificationFailure,
-                                             "head marker is not valid"));
-    }
-    return {};
-}
-
-HeadMarkerInspection
-inspect_head_marker_impl(transport::Transport& storage,
-                         const RemoteLayout& layout,
-                         const HeadReference& reference,
-                         const std::filesystem::path& workspace_root) {
-    if (!transport::valid(storage) || !valid(reference)) {
-        return std::unexpected(detail::error(
-            ErrorCode::InvalidInput, "invalid transport or head reference"));
-    }
-    auto temporary = detail::make_workspace(workspace_root);
-    if (!temporary) {
-        return std::unexpected(temporary.error());
-    }
-    std::size_t sequence = 0;
-    auto state = detail::inspect_marker(
-        storage, layout, reference, (*temporary)->workspace.root, sequence);
-    if (!state) {
-        return std::unexpected(state.error());
-    }
-    switch (*state) {
-        case detail::MarkerState::Absent:
-            return HeadMarkerState::Absent;
-        case detail::MarkerState::Valid:
-            return HeadMarkerState::Valid;
-        case detail::MarkerState::Invalid:
-            return HeadMarkerState::Invalid;
-    }
-    return std::unexpected(
-        detail::error(ErrorCode::InvalidMarker, "unknown marker state"));
 }
 
 } // namespace
@@ -472,14 +349,37 @@ verify_commit_object(transport::Transport& storage,
                      const HeadReference& reference,
                      const std::filesystem::path& workspace_root,
                      std::string_view local_physical_hash) {
-    return detail::guard_alloc([&] {
-        return verify_commit_object_impl(storage,
-                                         layout,
-                                         key,
-                                         commit,
-                                         reference,
-                                         workspace_root,
-                                         local_physical_hash);
+    return detail::guard_alloc([&]() -> std::expected<void, Error> {
+        if (!valid(reference)) {
+            return std::unexpected(detail::error(ErrorCode::InvalidIdentifier,
+                                                 "invalid head reference"));
+        }
+        const auto canonical = history::serialize(commit);
+        if (!canonical ||
+            crypto::commit_identifier(key, *canonical) != reference.commit_id) {
+            return std::unexpected(
+                detail::error(ErrorCode::InvalidCommit, "commit ID mismatch"));
+        }
+        auto physical = verify_remote_physical_hash(
+            storage, commit_object(layout, reference), local_physical_hash);
+        if (!physical) {
+            return std::unexpected(physical.error());
+        }
+        if (*physical) {
+            return {};
+        }
+        auto temporary = detail::make_workspace(workspace_root);
+        if (!temporary) {
+            return std::unexpected(temporary.error());
+        }
+        std::size_t sequence = 0;
+        return detail::verify_published_commit(storage,
+                                               layout,
+                                               key,
+                                               commit,
+                                               reference,
+                                               (*temporary)->workspace.root,
+                                               sequence);
     });
 }
 
@@ -527,9 +427,35 @@ verify_head_marker(transport::Transport& storage,
                    const HeadReference& reference,
                    const std::filesystem::path& workspace_root,
                    std::string_view local_physical_hash) {
-    return detail::guard_alloc([&] {
-        return verify_head_marker_impl(
-            storage, layout, reference, workspace_root, local_physical_hash);
+    return detail::guard_alloc([&]() -> std::expected<void, Error> {
+        if (!transport::valid(storage) || !valid(reference)) {
+            return std::unexpected(
+                detail::error(ErrorCode::InvalidInput,
+                              "invalid transport or head reference"));
+        }
+        auto physical = verify_remote_physical_hash(
+            storage, marker_object(layout, reference), local_physical_hash);
+        if (!physical) {
+            return std::unexpected(physical.error());
+        }
+        if (*physical) {
+            return {};
+        }
+        auto temporary = detail::make_workspace(workspace_root);
+        if (!temporary) {
+            return std::unexpected(temporary.error());
+        }
+        std::size_t sequence = 0;
+        auto state = detail::inspect_marker(
+            storage, layout, reference, (*temporary)->workspace.root, sequence);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        if (*state != detail::MarkerState::Valid) {
+            return std::unexpected(detail::error(ErrorCode::VerificationFailure,
+                                                 "head marker is not valid"));
+        }
+        return {};
     });
 }
 
@@ -538,9 +464,32 @@ inspect_head_marker(transport::Transport& storage,
                     const RemoteLayout& layout,
                     const HeadReference& reference,
                     const std::filesystem::path& workspace_root) {
-    return detail::guard_alloc([&] {
-        return inspect_head_marker_impl(
-            storage, layout, reference, workspace_root);
+    return detail::guard_alloc([&]() -> HeadMarkerInspection {
+        if (!transport::valid(storage) || !valid(reference)) {
+            return std::unexpected(
+                detail::error(ErrorCode::InvalidInput,
+                              "invalid transport or head reference"));
+        }
+        auto temporary = detail::make_workspace(workspace_root);
+        if (!temporary) {
+            return std::unexpected(temporary.error());
+        }
+        std::size_t sequence = 0;
+        auto state = detail::inspect_marker(
+            storage, layout, reference, (*temporary)->workspace.root, sequence);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        switch (*state) {
+            case detail::MarkerState::Absent:
+                return HeadMarkerState::Absent;
+            case detail::MarkerState::Valid:
+                return HeadMarkerState::Valid;
+            case detail::MarkerState::Invalid:
+                return HeadMarkerState::Invalid;
+        }
+        return std::unexpected(
+            detail::error(ErrorCode::InvalidMarker, "unknown marker state"));
     });
 }
 

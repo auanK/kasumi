@@ -523,12 +523,19 @@ LoadResult load_impl(transport::Transport& storage,
     std::map<std::string, std::uint64_t> epoch_anchors;
     const KnownHistoryAnchor* cached_anchor = nullptr;
 
+    auto cancelled = [&](bool check_cancellation) -> std::optional<Error> {
+        if (check_cancellation && platform::cancellation::requested()) {
+            return error(ErrorCode::TransportFailure,
+                         "operation cancelled by user");
+        }
+        return std::nullopt;
+    };
+
     auto load_latest_epoch = [&](std::optional<epoch::Reference> accepted_epoch,
                                  bool check_cancellation)
         -> std::expected<std::optional<epoch::VerifiedEpoch>, Error> {
-        if (check_cancellation && platform::cancellation::requested()) {
-            return std::unexpected(error(ErrorCode::TransportFailure,
-                                         "operation cancelled by user"));
+        if (auto cancel = cancelled(check_cancellation)) {
+            return std::unexpected(*cancel);
         }
         auto raw_epoch =
             identifiers ? epoch::load_latest(storage,
@@ -538,9 +545,8 @@ LoadResult load_impl(transport::Transport& storage,
                                              accepted_epoch)
                         : epoch::load_latest(
                               storage, key, workspace_root, accepted_epoch);
-        if (check_cancellation && platform::cancellation::requested()) {
-            return std::unexpected(error(ErrorCode::TransportFailure,
-                                         "operation cancelled by user"));
+        if (auto cancel = cancelled(check_cancellation)) {
+            return std::unexpected(*cancel);
         }
         if (!raw_epoch) {
             const auto code = [&] {
@@ -564,17 +570,13 @@ LoadResult load_impl(transport::Transport& storage,
                             bool check_cancellation)
         -> std::expected<std::map<std::string, std::vector<HeadReference>>,
                          Error> {
-        if (check_cancellation && platform::cancellation::requested()) {
-            return std::unexpected(error(ErrorCode::TransportFailure,
-                                         "operation cancelled by user"));
-        }
         std::map<std::string, std::vector<HeadReference>> candidates;
         std::size_t sequence = 0;
         for (const auto& [commit_id, references] : inventory->marker_variants) {
-            if (check_cancellation && platform::cancellation::requested()) {
-                return std::unexpected(error(ErrorCode::TransportFailure,
-                                             "operation cancelled by user"));
+            if (auto cancel = cancelled(check_cancellation)) {
+                return std::unexpected(*cancel);
             }
+            std::vector<HeadReference> valid;
             for (const auto& reference : references) {
                 const auto marker_id = marker_object(layout, reference);
                 auto state =
@@ -590,15 +592,16 @@ LoadResult load_impl(transport::Transport& storage,
                     return std::unexpected(state.error());
                 }
                 if (*state == MarkerState::Valid) {
-                    candidates[commit_id].push_back(reference);
+                    valid.push_back(reference);
                 }
             }
-            if (candidates[commit_id].empty()) {
+            if (valid.empty()) {
                 return std::unexpected(
                     error(ErrorCode::InvalidMarker,
                           "all markers for a commit are invalid"));
             }
-            sort_unique(candidates[commit_id]);
+            sort_unique(valid);
+            candidates.emplace(commit_id, std::move(valid));
         }
         return candidates;
     };
@@ -619,32 +622,28 @@ LoadResult load_impl(transport::Transport& storage,
         } reads;
 
         auto fetch_commit_batch = [&]() -> std::expected<void, Error> {
-            if (platform::cancellation::requested()) {
-                return std::unexpected(error(ErrorCode::TransportFailure,
-                                             "operation cancelled by user"));
+            if (auto cancel = cancelled(true)) {
+                return std::unexpected(*cancel);
             }
             transport::GetBatch batch{
                 .source_prefix =
                     std::string{trim_trailing_slash(layout.commits_prefix)},
                 .destination_root = (*temporary)->workspace.root,
             };
-            for (const auto& [unused, references] :
-                 inventory->commit_variants) {
-                static_cast<void>(unused);
-                for (const auto& reference : references) {
+            for (const auto& entry : inventory->commit_variants) {
+                for (const auto& reference : entry.second) {
                     batch.identifiers.push_back(reference.commit_id + "/" +
                                                 reference.ciphertext_id);
                 }
             }
             if (!batch.identifiers.empty()) {
-                auto prefetched = transport::get_batch(storage, batch);
-                if (!prefetched) {
+                if (auto prefetched = transport::get_batch(storage, batch);
+                    !prefetched) {
                     return std::unexpected(transport_error(prefetched.error()));
                 }
             }
-            if (platform::cancellation::requested()) {
-                return std::unexpected(error(ErrorCode::TransportFailure,
-                                             "operation cancelled by user"));
+            if (auto cancel = cancelled(true)) {
+                return std::unexpected(*cancel);
             }
             return {};
         };
@@ -662,22 +661,19 @@ LoadResult load_impl(transport::Transport& storage,
             });
         }
 
-        // Deterministic error reduction precedence:
-        // 1. Commit batch error:
+        // Deterministic error reduction precedence: commit batch, then epoch,
+        // then marker.
         if (!reads.commit_batch_result) {
             return std::unexpected(reads.commit_batch_result.error());
         }
-        // 2. Epoch error:
         if (!reads.epoch_result) {
             return std::unexpected(reads.epoch_result.error());
         }
-        // 3. Marker error:
         if (!reads.marker_result) {
             return std::unexpected(reads.marker_result.error());
         }
-        if (platform::cancellation::requested()) {
-            return std::unexpected(error(ErrorCode::TransportFailure,
-                                         "operation cancelled by user"));
+        if (auto cancel = cancelled(true)) {
+            return std::unexpected(*cancel);
         }
 
         discovered_epoch = std::move(*reads.epoch_result);
@@ -743,9 +739,8 @@ LoadResult load_impl(transport::Transport& storage,
     bool scoped_anchor_referenced =
         scoped && cached_anchor &&
         marker_candidates.contains(cached_anchor->commit_id);
-    for (const auto& [commit_id, unused] : marker_candidates) {
-        static_cast<void>(unused);
-        pending.emplace_back(commit_id, 0);
+    for (const auto& entry : marker_candidates) {
+        pending.emplace_back(entry.first, 0);
     }
 
     std::size_t commit_sequence = 0;
@@ -756,10 +751,8 @@ LoadResult load_impl(transport::Transport& storage,
             return std::unexpected(
                 error(ErrorCode::LimitExceeded, "history graph is too deep"));
         }
-        if (loaded.contains(commit_id)) {
-            continue;
-        }
-        if (cached_anchor && commit_id == cached_anchor->commit_id) {
+        if (loaded.contains(commit_id) ||
+            (cached_anchor && commit_id == cached_anchor->commit_id)) {
             continue;
         }
         if (loaded.size() >= history::maximum_loaded_commit_count) {
@@ -776,45 +769,39 @@ LoadResult load_impl(transport::Transport& storage,
             }
         }
 
-        auto variants_for_attempt = [&]() {
+        HeadReference authenticated_reference;
+        auto attempt_load = [&]() {
             std::vector<HeadReference> variants;
             if (const auto found = inventory->commit_variants.find(commit_id);
                 found != inventory->commit_variants.end()) {
                 variants = found->second;
             }
-            if (const auto found = marker_candidates.find(commit_id);
-                found != marker_candidates.end()) {
-                variants.insert(
-                    variants.end(), found->second.begin(), found->second.end());
+            if (marker_found != marker_candidates.end()) {
+                variants.insert(variants.end(),
+                                marker_found->second.begin(),
+                                marker_found->second.end());
             }
             sort_unique(variants);
-            return variants;
+            return try_load_variants(storage,
+                                     layout,
+                                     key,
+                                     variants,
+                                     (*temporary)->workspace.root,
+                                     commit_sequence,
+                                     &authenticated_reference);
         };
 
-        HeadReference authenticated_reference;
-        auto commit = try_load_variants(storage,
-                                        layout,
-                                        key,
-                                        variants_for_attempt(),
-                                        (*temporary)->workspace.root,
-                                        commit_sequence,
-                                        &authenticated_reference);
+        auto commit = attempt_load();
         if (!commit && scoped && marker_found != marker_candidates.end() &&
             (commit.error().code == ErrorCode::MissingCommit ||
              commit.error().code == ErrorCode::InvalidCiphertext ||
              commit.error().code == ErrorCode::InvalidCommit)) {
-            auto discovered = discover_scoped_commit_variants(
-                storage, layout, commit_id, *inventory);
-            if (!discovered) {
+            if (auto discovered = discover_scoped_commit_variants(
+                    storage, layout, commit_id, *inventory);
+                !discovered) {
                 return std::unexpected(discovered.error());
             }
-            commit = try_load_variants(storage,
-                                       layout,
-                                       key,
-                                       variants_for_attempt(),
-                                       (*temporary)->workspace.root,
-                                       commit_sequence,
-                                       &authenticated_reference);
+            commit = attempt_load();
         }
         if (!commit) {
             return std::unexpected(commit.error());
@@ -825,9 +812,9 @@ LoadResult load_impl(transport::Transport& storage,
                                          "head height cannot have a child"));
         }
         const auto parents = commit->commit.parents;
-        if (const auto boundary = epoch_anchors.find(commit_id);
-            boundary != epoch_anchors.end()) {
-            if (commit->commit.height != boundary->second) {
+        const bool is_anchor = epoch_anchors.contains(commit_id);
+        if (is_anchor) {
+            if (commit->commit.height != epoch_anchors.at(commit_id)) {
                 return std::unexpected(
                     error(ErrorCode::InvalidCommit,
                           "Epoch anchor height does not match its commit"));
@@ -837,7 +824,7 @@ LoadResult load_impl(transport::Transport& storage,
         loaded.emplace(commit_id, std::move(*commit));
         authenticated_commit_variants.push_back(
             std::move(authenticated_reference));
-        if (epoch_anchors.contains(commit_id)) {
+        if (is_anchor) {
             continue;
         }
         for (const auto& parent : parents) {
@@ -849,9 +836,8 @@ LoadResult load_impl(transport::Transport& storage,
     }
 
     if (!epoch_anchors.empty()) {
-        for (const auto& [anchor_id, unused] : epoch_anchors) {
-            static_cast<void>(unused);
-            if (!loaded.contains(anchor_id)) {
+        for (const auto& entry : epoch_anchors) {
+            if (!loaded.contains(entry.first)) {
                 return std::unexpected(
                     error(ErrorCode::InvalidCommit,
                           "Epoch anchor is not reachable from a history head"));
@@ -924,14 +910,12 @@ LoadResult load_impl(transport::Transport& storage,
     }
     sort_unique(result.marked_head_identifiers);
     result.commits.reserve(loaded.size());
-    for (auto& [unused, commit] : loaded) {
-        static_cast<void>(unused);
-        result.commits.push_back(std::move(commit));
+    for (auto& entry : loaded) {
+        result.commits.push_back(std::move(entry.second));
     }
     if (!epoch_anchors.empty()) {
-        for (const auto& [anchor_id, unused] : epoch_anchors) {
-            static_cast<void>(unused);
-            result.trusted_anchor_ids.push_back(anchor_id);
+        for (const auto& entry : epoch_anchors) {
+            result.trusted_anchor_ids.push_back(entry.first);
         }
     } else if (cached_anchor) {
         result.trusted_anchor_ids.push_back(cached_anchor->commit_id);

@@ -39,33 +39,20 @@ std::optional<HeadReference> parse_head_reference(std::string_view identifier,
 
 RemoteLayout derive_remote_layout(
     std::span<const std::uint8_t, crypto::KEY_SIZE> master_key) {
-    const auto history_hash =
-        crypto::namespace_identifier(master_key, "history", 8);
-    const auto commits_hash =
-        crypto::namespace_identifier(master_key, "commits", 8);
-    const auto heads_hash =
-        crypto::namespace_identifier(master_key, "heads", 8);
-    const auto epochs_hash =
-        crypto::namespace_identifier(master_key, "epochs", 8);
-    const auto v1_hash = crypto::namespace_identifier(master_key, "v1", 4);
-    const auto gc_hash = crypto::namespace_identifier(master_key, "gc", 8);
-    const auto barrier_hash =
-        crypto::namespace_identifier(master_key, "barrier", 8);
-    const auto writers_hash =
-        crypto::namespace_identifier(master_key, "writers", 8);
-    const auto probes_hash =
-        crypto::namespace_identifier(master_key, "probes", 8);
-
+    auto ns = [&](std::string_view label, std::size_t bytes = 8) {
+        return crypto::namespace_identifier(master_key, label, bytes);
+    };
+    const auto v1_hash = ns("v1", 4);
     RemoteLayout layout;
-    layout.history_prefix = history_hash + "/";
-    layout.commits_prefix = layout.history_prefix + commits_hash + "/";
-    layout.heads_prefix = layout.history_prefix + heads_hash + "/";
+    layout.history_prefix = ns("history") + "/";
+    layout.commits_prefix = layout.history_prefix + ns("commits") + "/";
+    layout.heads_prefix = layout.history_prefix + ns("heads") + "/";
     layout.epochs_prefix =
-        layout.history_prefix + epochs_hash + "/" + v1_hash + "/";
-    layout.gc_prefix = layout.history_prefix + gc_hash + "/" + v1_hash + "/";
-    layout.barrier_identifier = layout.gc_prefix + barrier_hash;
-    layout.writers_prefix = layout.gc_prefix + writers_hash + "/";
-    layout.probes_prefix = layout.gc_prefix + probes_hash + "/";
+        layout.history_prefix + ns("epochs") + "/" + v1_hash + "/";
+    layout.gc_prefix = layout.history_prefix + ns("gc") + "/" + v1_hash + "/";
+    layout.barrier_identifier = layout.gc_prefix + ns("barrier");
+    layout.writers_prefix = layout.gc_prefix + ns("writers") + "/";
+    layout.probes_prefix = layout.gc_prefix + ns("probes") + "/";
     return layout;
 }
 

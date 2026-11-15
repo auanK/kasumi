@@ -215,28 +215,37 @@ inventory_impl(transport::Transport& storage,
         result.contents.reserve(references.size() + physical.size());
 
         std::size_t sequence = 0;
+        auto audit = [&](std::string_view id,
+                         std::optional<std::string_view> plaintext_hash,
+                         std::optional<std::uint64_t> expected_size)
+            -> std::expected<ContentObjectState, Error> {
+            if (!audit_payloads) {
+                return ContentObjectState::Present;
+            }
+            auto audited = audit_content_object(storage,
+                                                key,
+                                                id,
+                                                plaintext_hash,
+                                                expected_size,
+                                                temporary->workspace.root,
+                                                sequence++);
+            if (!audited) {
+                return std::unexpected(audited.error());
+            }
+            return audited->state;
+        };
+
         for (auto& content : references) {
             std::ranges::sort(content.references);
-            const bool found =
-                std::ranges::binary_search(physical, content.remote_id);
-            ContentObjectState state = ContentObjectState::Missing;
-            if (found) {
-                if (audit_payloads) {
-                    auto audited =
-                        audit_content_object(storage,
-                                             key,
-                                             content.remote_id,
-                                             content.plaintext_hash,
-                                             content.references.front().size,
-                                             temporary->workspace.root,
-                                             sequence++);
-                    if (!audited) {
-                        return std::unexpected(audited.error());
-                    }
-                    state = audited->state;
-                } else {
-                    state = ContentObjectState::Present;
+            auto state = ContentObjectState::Missing;
+            if (std::ranges::binary_search(physical, content.remote_id)) {
+                auto audited = audit(content.remote_id,
+                                     content.plaintext_hash,
+                                     content.references.front().size);
+                if (!audited) {
+                    return std::unexpected(audited.error());
                 }
+                state = *audited;
             }
             result.reachable_content_ids.push_back(content.remote_id);
             if (state == ContentObjectState::Missing) {
@@ -256,25 +265,15 @@ inventory_impl(transport::Transport& storage,
                 continue;
             }
             result.orphan_content_ids.push_back(content_id);
-            ContentObjectState state = ContentObjectState::Present;
-            if (audit_payloads) {
-                auto audited = audit_content_object(storage,
-                                                    key,
-                                                    content_id,
-                                                    std::nullopt,
-                                                    std::nullopt,
-                                                    temporary->workspace.root,
-                                                    sequence++);
-                if (!audited) {
-                    return std::unexpected(audited.error());
-                }
-                state = audited->state;
-                if (state == ContentObjectState::Corrupt) {
-                    result.corrupt_content_ids.push_back(content_id);
-                }
+            auto audited = audit(content_id, std::nullopt, std::nullopt);
+            if (!audited) {
+                return std::unexpected(audited.error());
+            }
+            if (*audited == ContentObjectState::Corrupt) {
+                result.corrupt_content_ids.push_back(content_id);
             }
             result.contents.push_back(ContentEntry{.content_id = content_id,
-                                                   .state = state,
+                                                   .state = *audited,
                                                    .reachable = false,
                                                    .references = {}});
         }
