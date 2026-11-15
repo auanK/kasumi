@@ -230,78 +230,64 @@ validate_configuration(const detail::RcloneConfiguration& configuration) {
 std::expected<std::uint16_t, Error> find_available_loopback_port() {
 #if defined(_WIN32)
     WSADATA data{};
-    const int startup = WSAStartup(MAKEWORD(2, 2), &data);
-    if (startup != 0) {
+    if (const int startup = WSAStartup(MAKEWORD(2, 2), &data); startup != 0) {
         return std::unexpected(make_error(
             ErrorCode::ProcessFailure, "WSAStartup failed", startup));
     }
-    const SOCKET socket_handle = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (socket_handle == INVALID_SOCKET) {
-        const int error = WSAGetLastError();
-        WSACleanup();
+    struct WinsockScope {
+        SOCKET handle{INVALID_SOCKET};
+        ~WinsockScope() {
+            if (handle != INVALID_SOCKET) {
+                closesocket(handle);
+            }
+            WSACleanup();
+        }
+    } guard{::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)};
+    using AddrLen = int;
+    const auto last_err = [] {
+        return WSAGetLastError();
+    };
+    if (guard.handle == INVALID_SOCKET) {
         return std::unexpected(
-            make_error(ErrorCode::ProcessFailure, "socket failed", error));
+            make_error(ErrorCode::ProcessFailure, "socket failed", last_err()));
     }
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    address.sin_port = htons(0);
-    if (::bind(socket_handle,
-               reinterpret_cast<const sockaddr*>(&address),
-               sizeof(address)) == SOCKET_ERROR) {
-        const int error = WSAGetLastError();
-        closesocket(socket_handle);
-        WSACleanup();
-        return std::unexpected(make_error(
-            ErrorCode::ProcessFailure, "loopback bind failed", error));
-    }
-    int address_length = sizeof(address);
-    if (::getsockname(socket_handle,
-                      reinterpret_cast<sockaddr*>(&address),
-                      &address_length) == SOCKET_ERROR ||
-        address.sin_port == 0) {
-        const int error = WSAGetLastError();
-        closesocket(socket_handle);
-        WSACleanup();
-        return std::unexpected(
-            make_error(ErrorCode::ProcessFailure, "getsockname failed", error));
-    }
-    const auto port = ntohs(address.sin_port);
-    closesocket(socket_handle);
-    WSACleanup();
-    return port;
 #else
-    const int socket_handle = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (socket_handle < 0) {
+    struct SocketScope {
+        int handle{-1};
+        ~SocketScope() {
+            if (handle >= 0) {
+                ::close(handle);
+            }
+        }
+    } guard{::socket(AF_INET, SOCK_STREAM, 0)};
+    using AddrLen = socklen_t;
+    const auto last_err = [] {
+        return errno;
+    };
+    if (guard.handle < 0) {
         return std::unexpected(
-            make_error(ErrorCode::ProcessFailure, "socket failed", errno));
+            make_error(ErrorCode::ProcessFailure, "socket failed", last_err()));
     }
+#endif
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     address.sin_port = htons(0);
-    if (::bind(socket_handle,
+    if (::bind(guard.handle,
                reinterpret_cast<const sockaddr*>(&address),
                sizeof(address)) != 0) {
-        const int error = errno;
-        ::close(socket_handle);
         return std::unexpected(make_error(
-            ErrorCode::ProcessFailure, "loopback bind failed", error));
+            ErrorCode::ProcessFailure, "loopback bind failed", last_err()));
     }
-    socklen_t address_length = sizeof(address);
-    if (::getsockname(socket_handle,
+    AddrLen address_length = sizeof(address);
+    if (::getsockname(guard.handle,
                       reinterpret_cast<sockaddr*>(&address),
                       &address_length) != 0 ||
         address.sin_port == 0) {
-        const int error = errno;
-        ::close(socket_handle);
-        return std::unexpected(
-            make_error(ErrorCode::ProcessFailure, "getsockname failed", error));
+        return std::unexpected(make_error(
+            ErrorCode::ProcessFailure, "getsockname failed", last_err()));
     }
-    const auto port = ntohs(address.sin_port);
-    ::close(socket_handle);
-    return port;
-#endif
+    return ntohs(address.sin_port);
 }
 
 std::error_code drain_process_output(State& state) {

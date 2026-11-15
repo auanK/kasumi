@@ -292,24 +292,21 @@ validate_physical_hash_batch_request(const PhysicalHashBatchRequest& request) {
         return std::unexpected(make_error(ErrorCode::InvalidIdentifier,
                                           "empty batch physical hash request"));
     }
-
-    std::unordered_set<std::string> identifiers;
+    const auto ids = validate_unique_identifiers(
+        request.objects,
+        [](const PhysicalHashExpectation& object) -> const std::string& {
+            return object.identifier;
+        },
+        "invalid or duplicate identifier in physical hash request",
+        true);
+    if (!ids) {
+        return std::unexpected(ids.error());
+    }
     for (const auto& object : request.objects) {
-        if (!detail::valid_relative_identifier(object.identifier, true) ||
-            object.identifier.find_first_of("\r\n") != std::string_view::npos) {
-            return std::unexpected(
-                make_error(ErrorCode::InvalidIdentifier,
-                           "invalid identifier in physical hash request"));
-        }
         if (object.expected_hash.empty()) {
             return std::unexpected(
                 make_error(ErrorCode::InvalidIdentifier,
                            "empty expected hash in physical hash request"));
-        }
-        if (!identifiers.insert(object.identifier).second) {
-            return std::unexpected(
-                make_error(ErrorCode::InvalidIdentifier,
-                           "duplicate identifiers in physical hash request"));
         }
     }
     return {};
@@ -462,7 +459,11 @@ Result put(Transport& transport,
     return call_required(transport, transport.storage.put, source, identifier);
 }
 
-Result put_batch(Transport& transport, const PutBatch& batch) {
+template <typename Batch, typename BatchFn, typename SingleFn>
+Result run_transfer_batch(Transport& transport,
+                          const Batch& batch,
+                          BatchFn batch_fn,
+                          SingleFn single_fn) {
     if (auto v = validate_batch(batch); !v) {
         return v;
     }
@@ -473,19 +474,24 @@ Result put_batch(Transport& transport, const PutBatch& batch) {
     if (state == nullptr) {
         return std::unexpected(invalid_transport_error());
     }
-    if (transport.storage.put_batch != nullptr) {
-        return transport.storage.put_batch(state, batch);
+    if (batch_fn != nullptr) {
+        return batch_fn(state, batch);
     }
     for (const auto& identifier : batch.identifiers) {
-        if (auto res =
-                put(transport,
-                    batch.source_root / platform::path::from_utf8(identifier),
-                    identifier);
-            !res) {
+        if (auto res = single_fn(identifier); !res) {
             return res;
         }
     }
     return {};
+}
+
+Result put_batch(Transport& transport, const PutBatch& batch) {
+    return run_transfer_batch(
+        transport, batch, transport.storage.put_batch, [&](const auto& id) {
+            return put(transport,
+                       batch.source_root / platform::path::from_utf8(id),
+                       id);
+        });
 }
 
 Result get(Transport& transport,
@@ -496,32 +502,15 @@ Result get(Transport& transport,
 }
 
 Result get_batch(Transport& transport, const GetBatch& batch) {
-    if (auto v = validate_batch(batch); !v) {
-        return v;
-    }
-    if (batch.identifiers.empty()) {
-        return {};
-    }
-    auto* state = state_pointer(transport);
-    if (state == nullptr) {
-        return std::unexpected(invalid_transport_error());
-    }
-    if (transport.storage.get_batch != nullptr) {
-        return transport.storage.get_batch(state, batch);
-    }
-    for (const auto& identifier : batch.identifiers) {
-        const auto source = batch.source_prefix.empty()
-                                ? identifier
-                                : batch.source_prefix + "/" + identifier;
-        if (auto res = get(transport,
-                           source,
-                           batch.destination_root /
-                               platform::path::from_utf8(identifier));
-            !res) {
-            return res;
-        }
-    }
-    return {};
+    return run_transfer_batch(
+        transport, batch, transport.storage.get_batch, [&](const auto& id) {
+            const auto source = batch.source_prefix.empty()
+                                    ? id
+                                    : batch.source_prefix + "/" + id;
+            return get(transport,
+                       source,
+                       batch.destination_root / platform::path::from_utf8(id));
+        });
 }
 
 PresenceResult presence(Transport& transport, std::string_view identifier) {

@@ -919,6 +919,50 @@ rclone_physical_hash_batch(void* context,
     return parse_physical_hash_batch_response_json(*response, request);
 }
 
+struct JobBatchItemStatus {
+    int status{200};
+    bool has_error{false};
+    std::string error_message;
+
+    bool is_not_found() const noexcept {
+        return status == 404 || (has_error && error_message.find("not found") !=
+                                                  std::string::npos);
+    }
+};
+
+std::expected<JobBatchItemStatus, Error>
+parse_job_batch_item_status(const nlohmann::json& item,
+                            std::string_view operation_name,
+                            bool require_nonempty_error_with_status) {
+    JobBatchItemStatus parsed;
+    if (item.contains("status")) {
+        auto parsed_status =
+            parse_job_batch_status(item.at("status"), operation_name);
+        if (!parsed_status) {
+            return std::unexpected(parsed_status.error());
+        }
+        parsed.status = *parsed_status;
+    }
+    if (item.contains("error")) {
+        if (!item.at("error").is_string()) {
+            return std::unexpected(
+                make_error(ErrorCode::ProtocolFailure,
+                           require_nonempty_error_with_status
+                               ? "invalid job/batch subcommand error"
+                               : "invalid remove job/batch error result"));
+        }
+        parsed.has_error = true;
+        parsed.error_message = item.at("error").get<std::string>();
+        if (require_nonempty_error_with_status &&
+            (parsed.error_message.empty() || !item.contains("status"))) {
+            return std::unexpected(
+                make_error(ErrorCode::ProtocolFailure,
+                           "invalid job/batch subcommand error"));
+        }
+    }
+    return parsed;
+}
+
 ControlReadBatchResponse
 parse_control_read_batch_response_json(const nlohmann::json& response,
                                        const ControlReadBatchRequest& request) {
@@ -937,30 +981,19 @@ parse_control_read_batch_response_json(const nlohmann::json& response,
             return std::unexpected(make_error(ErrorCode::ProtocolFailure,
                                               "invalid job/batch result"));
         }
-        std::optional<int> status;
-        if (item.contains("status")) {
-            auto parsed_status =
-                parse_job_batch_status(item.at("status"), "control");
-            if (!parsed_status) {
-                return std::unexpected(parsed_status.error());
-            }
-            status = *parsed_status;
+        const auto parsed = parse_job_batch_item_status(item, "control", true);
+        if (!parsed) {
+            return std::unexpected(parsed.error());
         }
-        if (item.contains("error")) {
-            if (!item.at("error").is_string() ||
-                item.at("error").get<std::string>().empty() || !status) {
-                return std::unexpected(
-                    make_error(ErrorCode::ProtocolFailure,
-                               "invalid job/batch subcommand error"));
-            }
-            if (*status == 404) {
+        if (parsed->has_error) {
+            if (parsed->status == 404) {
                 return true;
             }
             return std::unexpected(make_error(
                 ErrorCode::ProtocolFailure,
                 "job/batch subcommand failed; remote detail omitted"));
         }
-        if (status && (*status < 200 || *status >= 300)) {
+        if (parsed->status < 200 || parsed->status >= 300) {
             return std::unexpected(
                 make_error(ErrorCode::ProtocolFailure,
                            "job/batch subcommand status indicates failure"));
@@ -1250,37 +1283,22 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
         }
         matched[target_index] = true;
 
-        int status = 200;
-        if (result.contains("status")) {
-            auto parsed_status =
-                parse_job_batch_status(result.at("status"), "remove");
-            if (!parsed_status) {
-                return std::unexpected(parsed_status.error());
-            }
-            status = *parsed_status;
+        const auto parsed =
+            parse_job_batch_item_status(result, "remove", false);
+        if (!parsed) {
+            return std::unexpected(parsed.error());
         }
-
-        std::string err_msg;
-        bool has_error = result.contains("error");
-        if (has_error) {
-            if (!result.at("error").is_string()) {
-                return std::unexpected(
-                    make_error(ErrorCode::ProtocolFailure,
-                               "invalid remove job/batch error result"));
-            }
-            err_msg = result.at("error").get<std::string>();
-        }
-
-        if (status == 404 ||
-            (has_error && err_msg.find("not found") != std::string::npos)) {
+        if (parsed->is_not_found()) {
             report.items[target_index].result = Removal::AlreadyAbsent;
-        } else if (status >= 200 && status < 300 && !has_error) {
+        } else if (parsed->status >= 200 && parsed->status < 300 &&
+                   !parsed->has_error) {
             report.items[target_index].result = Removal::Removed;
         } else {
-            report.items[target_index].result = std::unexpected(
-                make_error(ErrorCode::ProtocolFailure,
-                           err_msg.empty() ? "remote remove failed" : err_msg,
-                           status));
+            report.items[target_index].result = std::unexpected(make_error(
+                ErrorCode::ProtocolFailure,
+                parsed->error_message.empty() ? "remote remove failed"
+                                              : parsed->error_message,
+                parsed->status));
         }
     }
 
@@ -1295,39 +1313,45 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
     return report;
 }
 
+template <typename Fn>
+auto parse_json_response(std::string_view response_body,
+                         std::string_view error_message,
+                         Fn fn) {
+    try {
+        return fn(nlohmann::json::parse(response_body));
+    } catch (const std::exception&) {
+        return decltype(fn(nlohmann::json{})){std::unexpected(make_error(
+            ErrorCode::ProtocolFailure, std::string{error_message}))};
+    }
+}
+
 } // namespace
 
 ControlReadBatchResponse
 parse_control_read_batch_response(std::string_view response_body,
                                   const ControlReadBatchRequest& request) {
-    try {
-        return parse_control_read_batch_response_json(
-            nlohmann::json::parse(response_body), request);
-    } catch (const std::exception&) {
-        return std::unexpected(make_error(
-            ErrorCode::ProtocolFailure, "invalid control job/batch response"));
-    }
+    return parse_json_response(
+        response_body,
+        "invalid control job/batch response",
+        [&](const auto& j) {
+            return parse_control_read_batch_response_json(j, request);
+        });
 }
 
 PhysicalHashBatchResult
 parse_physical_hash_batch_response(std::string_view response_body,
                                    const PhysicalHashBatchRequest& request) {
-    try {
-        return parse_physical_hash_batch_response_json(
-            nlohmann::json::parse(response_body), request);
-    } catch (const std::exception&) {
-        return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                          "invalid operations/check response"));
-    }
+    return parse_json_response(
+        response_body, "invalid operations/check response", [&](const auto& j) {
+            return parse_physical_hash_batch_response_json(j, request);
+        });
 }
 
 ListingResult parse_list_response(std::string_view response_body) {
-    try {
-        return parse_list_response_json(nlohmann::json::parse(response_body));
-    } catch (const std::exception&) {
-        return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                          "invalid operations/list response"));
-    }
+    return parse_json_response(
+        response_body, "invalid operations/list response", [](const auto& j) {
+            return parse_list_response_json(j);
+        });
 }
 
 StorageOperations make_storage_operations() noexcept {

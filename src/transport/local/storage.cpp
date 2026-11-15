@@ -73,6 +73,21 @@ resolve_object_path(const State& state, std::string_view identifier) {
            platform::path::from_utf8(identifier).lexically_normal();
 }
 
+std::expected<std::filesystem::path, Error>
+resolve_ready_path(void* context, std::string_view identifier) {
+    auto state = ready_local(context);
+    if (!state) {
+        return std::unexpected(state.error());
+    }
+    return resolve_object_path(**state, identifier);
+}
+
+Error storage_not_found() {
+    return Error{.code = ErrorCode::StorageNotFound,
+                 .message = "objects directory does not exist",
+                 .native_code = 0};
+}
+
 Result ensure_parent_directory(const std::filesystem::path& path) {
     const auto parent = path.parent_path();
     if (parent.empty()) {
@@ -171,11 +186,7 @@ Result local_initialize(void* context) {
 Result local_put(void* context,
                  const std::filesystem::path& source,
                  std::string_view identifier) {
-    auto state = ready_local(context);
-    if (!state) {
-        return std::unexpected(state.error());
-    }
-    auto destination = resolve_object_path(**state, identifier);
+    auto destination = resolve_ready_path(context, identifier);
     if (!destination) {
         return std::unexpected(destination.error());
     }
@@ -201,11 +212,7 @@ Result local_put(void* context,
 Result local_get(void* context,
                  std::string_view identifier,
                  const std::filesystem::path& destination) {
-    auto state = ready_local(context);
-    if (!state) {
-        return std::unexpected(state.error());
-    }
-    auto source = resolve_object_path(**state, identifier);
+    auto source = resolve_ready_path(context, identifier);
     if (!source) {
         return std::unexpected(source.error());
     }
@@ -216,11 +223,7 @@ Result local_get(void* context,
 }
 
 PresenceResult local_presence(void* context, std::string_view identifier) {
-    auto state = ready_local(context);
-    if (!state) {
-        return std::unexpected(state.error());
-    }
-    auto path = resolve_object_path(**state, identifier);
+    auto path = resolve_ready_path(context, identifier);
     if (!path) {
         return std::unexpected(path.error());
     }
@@ -240,14 +243,7 @@ ListingResult local_list(void* context) {
     const auto base = objects_directory(**state);
     std::error_code error;
     if (!std::filesystem::exists(base, error)) {
-        if (error) {
-            return std::unexpected(make_error(error));
-        }
-        return std::unexpected(Error{
-            .code = ErrorCode::StorageNotFound,
-            .message = "objects directory does not exist",
-            .native_code = 0,
-        });
+        return std::unexpected(error ? make_error(error) : storage_not_found());
     }
     return scan_directory<std::filesystem::recursive_directory_iterator>(base,
                                                                          false);
@@ -262,24 +258,16 @@ ListingResult local_list_prefix(void* context, std::string_view prefix) {
         objects_directory(**state) / platform::path::from_utf8(prefix);
     std::error_code error;
     if (!std::filesystem::is_directory(base, error)) {
-        if (error == std::errc::no_such_file_or_directory || !error) {
-            return std::unexpected(Error{
-                .code = ErrorCode::StorageNotFound,
-                .message = "objects directory does not exist",
-                .native_code = 0,
-            });
-        }
-        return std::unexpected(make_error(error));
+        return std::unexpected(
+            (error == std::errc::no_such_file_or_directory || !error)
+                ? storage_not_found()
+                : make_error(error));
     }
     return scan_directory<std::filesystem::directory_iterator>(base, true);
 }
 
 RemovalResult local_remove(void* context, std::string_view identifier) {
-    auto state = ready_local(context);
-    if (!state) {
-        return std::unexpected(state.error());
-    }
-    auto path = resolve_object_path(**state, identifier);
+    auto path = resolve_ready_path(context, identifier);
     if (!path) {
         return std::unexpected(path.error());
     }
