@@ -11,6 +11,7 @@
 #include <array>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <system_error>
 #include <utility>
 
@@ -63,12 +64,144 @@ file_hash(const std::filesystem::path& path, std::size_t operation_index) {
 }
 
 std::expected<void, MutationError>
+sync_file_checked(const std::filesystem::path& path,
+                  std::size_t operation_index) {
+    if (auto synced = platform::durability::sync_file(path); !synced) {
+        return std::unexpected(make_error(
+            MutationErrorCode::LocalIo, synced.error(), path, operation_index));
+    }
+    return {};
+}
+
+std::expected<void, MutationError>
 sync_parent_checked(const std::filesystem::path& path,
                     std::size_t operation_index) {
     if (auto synced = platform::durability::sync_parent_directory(path);
         !synced) {
         return std::unexpected(make_error(
             MutationErrorCode::LocalIo, synced.error(), path, operation_index));
+    }
+    return {};
+}
+
+std::expected<void, MutationError>
+validate_operation_metadata(const Operation& operation,
+                            std::size_t operation_index) {
+    if (operation_index == std::numeric_limits<std::size_t>::max() ||
+        !is_valid_action(operation.action) || !has_safe_paths(operation)) {
+        return std::unexpected(make_error(
+            operation_index == std::numeric_limits<std::size_t>::max() ||
+                    !is_valid_action(operation.action)
+                ? MutationErrorCode::InvalidOperation
+                : MutationErrorCode::UnsafePath,
+            "invalid operation or index",
+            operation.path,
+            operation_index));
+    }
+    return {};
+}
+
+std::expected<void, MutationError>
+require_regular_file(const std::filesystem::path& path,
+                     MutationErrorCode invalid_code,
+                     std::string_view invalid_message,
+                     std::size_t operation_index) {
+    auto status = read_status(path, operation_index);
+    if (!status || std::filesystem::is_symlink(*status) ||
+        !std::filesystem::is_regular_file(*status)) {
+        return std::unexpected(make_error(
+            invalid_code, std::string(invalid_message), path, operation_index));
+    }
+    return {};
+}
+
+bool identity_matches(const platform::private_storage::FileIdentity& actual,
+                      const kasumi::PhysicalFileIdentity& expected) noexcept {
+    return actual.valid && actual.volume_or_dev == expected.volume_or_dev &&
+           actual.file_id_low == expected.file_id_low &&
+           actual.file_id_high == expected.file_id_high;
+}
+
+std::expected<std::string, MutationError>
+verify_file_size_and_hash(const std::filesystem::path& path,
+                          std::uint64_t expected_size,
+                          std::string_view expected_hash,
+                          bool check_size,
+                          std::string_view size_message,
+                          std::string_view hash_message,
+                          std::size_t operation_index,
+                          MutationErrorCode mismatch_code) {
+    if (check_size) {
+        std::error_code size_error;
+        const auto actual_size = std::filesystem::file_size(path, size_error);
+        if (size_error || actual_size != expected_size) {
+            return std::unexpected(make_error(
+                size_error ? MutationErrorCode::LocalIo : mismatch_code,
+                size_error ? size_error.message() : std::string(size_message),
+                path,
+                operation_index));
+        }
+    }
+    auto actual = file_hash(path, operation_index);
+    if (!actual) {
+        return std::unexpected(actual.error());
+    }
+    if (!expected_hash.empty() && *actual != expected_hash) {
+        return std::unexpected(make_error(
+            mismatch_code, std::string(hash_message), path, operation_index));
+    }
+    return actual;
+}
+
+std::expected<void, MutationError>
+verify_disposable_source(const std::filesystem::path& path,
+                         const Operation& operation,
+                         std::size_t operation_index,
+                         std::string_view changed_message) {
+    if (auto ok = require_regular_file(
+            path,
+            MutationErrorCode::DestinationConflict,
+            "disposable source is missing or not a regular file",
+            operation_index);
+        !ok) {
+        return ok;
+    }
+    const auto before_identity =
+        platform::private_storage::query_file_identity(path);
+    std::error_code size_error;
+    const auto size = std::filesystem::file_size(path, size_error);
+    if (size_error ||
+        !identity_matches(before_identity,
+                          operation.expected_source_identity) ||
+        size != operation.size) {
+        return std::unexpected(make_error(
+            size_error ? MutationErrorCode::LocalIo
+                       : MutationErrorCode::DestinationConflict,
+            size_error ? size_error.message()
+                       : "disposable source identity or size changed",
+            path,
+            operation_index));
+    }
+    auto verified =
+        verify_file_size_and_hash(path,
+                                  operation.size,
+                                  operation.hash,
+                                  false,
+                                  {},
+                                  changed_message,
+                                  operation_index,
+                                  MutationErrorCode::DestinationConflict);
+    if (!verified) {
+        return std::unexpected(verified.error());
+    }
+    const auto after_identity =
+        platform::private_storage::query_file_identity(path);
+    if (!identity_matches(after_identity, operation.expected_source_identity)) {
+        return std::unexpected(
+            make_error(MutationErrorCode::DestinationConflict,
+                       std::string(changed_message),
+                       path,
+                       operation_index));
     }
     return {};
 }
@@ -274,14 +407,13 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
                                           operation_index));
     }
 
-    auto source_status = read_status(source, operation_index);
-    if (!source_status || std::filesystem::is_symlink(*source_status) ||
-        !std::filesystem::is_regular_file(*source_status)) {
-        return std::unexpected(
-            make_error(MutationErrorCode::IntegrityMismatch,
-                       "upload source is not a valid regular file",
-                       source,
-                       operation_index));
+    if (auto ok =
+            require_regular_file(source,
+                                 MutationErrorCode::IntegrityMismatch,
+                                 "upload source is not a valid regular file",
+                                 operation_index);
+        !ok) {
+        return std::unexpected(ok.error());
     }
 
     std::string encryption_error;
@@ -308,15 +440,14 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
                                           operation_index));
     }
 
-    auto encrypted_status = read_status(destination, operation_index);
-    if (!encrypted_status || std::filesystem::is_symlink(*encrypted_status) ||
-        !std::filesystem::is_regular_file(*encrypted_status)) {
+    if (auto ok =
+            require_regular_file(destination,
+                                 MutationErrorCode::LocalIo,
+                                 "encrypted file was not created properly",
+                                 operation_index);
+        !ok) {
         remove_temporary_file(destination);
-        return std::unexpected(
-            make_error(MutationErrorCode::LocalIo,
-                       "encrypted file was not created properly",
-                       destination,
-                       operation_index));
+        return std::unexpected(ok.error());
     }
 
     return PreparedUploadCiphertext{.plaintext_size = operation.size,

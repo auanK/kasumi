@@ -41,7 +41,10 @@ rollback_candidate_path(const std::filesystem::path& destination,
 std::expected<std::string, MutationError>
 file_hash(const std::filesystem::path& path, std::size_t operation_index);
 
-// Synchronizes the parent directory of path to durable storage.
+// Synchronizes a file or its parent directory to durable storage.
+std::expected<void, MutationError>
+sync_file_checked(const std::filesystem::path& path,
+                  std::size_t operation_index);
 std::expected<void, MutationError>
 sync_parent_checked(const std::filesystem::path& path,
                     std::size_t operation_index);
@@ -52,6 +55,35 @@ read_status(const std::filesystem::path& path, std::size_t operation_index);
 
 // Indicates that the file status represents a missing path.
 bool missing(std::filesystem::file_status status) noexcept;
+
+std::expected<void, MutationError>
+validate_operation_metadata(const Operation& operation,
+                            std::size_t operation_index);
+
+std::expected<void, MutationError>
+require_regular_file(const std::filesystem::path& path,
+                     MutationErrorCode invalid_code,
+                     std::string_view invalid_message,
+                     std::size_t operation_index);
+
+bool identity_matches(const platform::private_storage::FileIdentity& actual,
+                      const kasumi::PhysicalFileIdentity& expected) noexcept;
+
+std::expected<std::string, MutationError> verify_file_size_and_hash(
+    const std::filesystem::path& path,
+    std::uint64_t expected_size,
+    std::string_view expected_hash,
+    bool check_size,
+    std::string_view size_message,
+    std::string_view hash_message,
+    std::size_t operation_index,
+    MutationErrorCode mismatch_code = MutationErrorCode::IntegrityMismatch);
+
+std::expected<void, MutationError>
+verify_disposable_source(const std::filesystem::path& path,
+                         const Operation& operation,
+                         std::size_t operation_index,
+                         std::string_view changed_message);
 
 // Checks progress and workspace/backup structure without reading content.
 MutationResult

@@ -28,22 +28,15 @@ namespace kasumi::application::sync::mutation {
 namespace {
 
 using detail::file_hash;
+using detail::identity_matches;
 using detail::make_error;
 using detail::missing;
 using detail::read_status;
 using detail::remove_temporary_file;
+using detail::require_regular_file;
 using detail::resolve_local_path;
+using detail::sync_file_checked;
 using detail::sync_parent_checked;
-
-std::expected<void, MutationError>
-sync_file_checked(const std::filesystem::path& path,
-                  std::size_t operation_index) {
-    if (auto synced = platform::durability::sync_file(path); !synced) {
-        return std::unexpected(make_error(
-            MutationErrorCode::LocalIo, synced.error(), path, operation_index));
-    }
-    return {};
-}
 
 std::expected<void, MutationError>
 validate_parent_directory(const std::filesystem::path& destination,
@@ -83,14 +76,6 @@ install_without_overwrite_checked(const std::filesystem::path& candidate,
             operation_index));
     }
     return {};
-}
-
-template <typename Identity>
-bool identity_matches(const platform::private_storage::FileIdentity& actual,
-                      const Identity& expected) noexcept {
-    return actual.valid && actual.volume_or_dev == expected.volume_or_dev &&
-           actual.file_id_low == expected.file_id_low &&
-           actual.file_id_high == expected.file_id_high;
 }
 
 std::expected<std::pair<std::filesystem::path, std::filesystem::path>,
@@ -196,20 +181,6 @@ verify_local_file(const std::filesystem::path& path,
                   std::size_t operation_index) {
     return verify_local_file(
         path, operation.hash, operation.size, operation_index);
-}
-
-std::expected<void, MutationError>
-require_regular_file(const std::filesystem::path& path,
-                     MutationErrorCode invalid_code,
-                     std::string_view invalid_message,
-                     std::size_t operation_index) {
-    auto status = read_status(path, operation_index);
-    if (!status || std::filesystem::is_symlink(*status) ||
-        !std::filesystem::is_regular_file(*status)) {
-        return std::unexpected(make_error(
-            invalid_code, std::string(invalid_message), path, operation_index));
-    }
-    return {};
 }
 
 std::expected<void, MutationError>
@@ -417,10 +388,7 @@ apply_upload(const Operation& operation,
              const platform::Workspace& workspace,
              std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
     auto expected_hash = hash_from_hex(operation.hash);
-    auto source_status = read_status(source, operation_index);
-    if (!expected_hash || !source_status ||
-        std::filesystem::is_symlink(*source_status) ||
-        !std::filesystem::is_regular_file(*source_status)) {
+    if (!expected_hash) {
         return std::unexpected(
             make_error(MutationErrorCode::IntegrityMismatch,
                        "upload source is not a valid regular file",
@@ -926,20 +894,14 @@ apply_copy_local(const Operation& operation,
                        operation_index));
     }
 
-    std::error_code size_error;
-    const auto actual_source_size =
-        std::filesystem::file_size(source, size_error);
-    if (size_error || actual_source_size != operation.size) {
-        return std::unexpected(
-            make_error(size_error ? MutationErrorCode::LocalIo
-                                  : MutationErrorCode::IntegrityMismatch,
-                       size_error ? size_error.message()
-                                  : "copy source does not match expected size",
-                       source,
-                       operation_index));
-    }
-    auto verified_source =
-        verify_local_file(source, operation, operation_index);
+    auto verified_source = detail::verify_file_size_and_hash(
+        source,
+        operation.size,
+        operation.hash,
+        true,
+        "copy source does not match expected size",
+        "copy source content mismatch",
+        operation_index);
     if (!verified_source) {
         return std::unexpected(verified_source.error());
     }
@@ -1065,21 +1027,14 @@ apply_copy_local(const Operation& operation,
                        operation_index));
     }
 
-    std::error_code candidate_size_error;
-    const auto candidate_size =
-        std::filesystem::file_size(candidate, candidate_size_error);
-    if (candidate_size_error || candidate_size != operation.size) {
-        return std::unexpected(make_error(
-            candidate_size_error ? MutationErrorCode::LocalIo
-                                 : MutationErrorCode::IntegrityMismatch,
-            candidate_size_error ? candidate_size_error.message()
-                                 : "staging file size mismatch",
-            candidate,
-            operation_index));
-    }
-
     auto verified_staging =
-        verify_local_file(candidate, operation, operation_index);
+        detail::verify_file_size_and_hash(candidate,
+                                          operation.size,
+                                          operation.hash,
+                                          true,
+                                          "staging file size mismatch",
+                                          "staging file content mismatch",
+                                          operation_index);
     if (!verified_staging) {
         return std::unexpected(verified_staging.error());
     }
@@ -1159,16 +1114,10 @@ apply_operation(const Operation& operation,
                 const transaction::OperationProgress& progress,
                 DownloadCacheMode download_cache,
                 const DestinationPrecondition* condition) {
-    if (operation_index == std::numeric_limits<std::size_t>::max() ||
-        !is_valid_action(operation.action) || !has_safe_paths(operation)) {
-        return std::unexpected(make_error(
-            operation_index == std::numeric_limits<std::size_t>::max() ||
-                    !is_valid_action(operation.action)
-                ? MutationErrorCode::InvalidOperation
-                : MutationErrorCode::UnsafePath,
-            "invalid operation or path",
-            operation.path,
-            operation_index));
+    if (auto meta_valid =
+            detail::validate_operation_metadata(operation, operation_index);
+        !meta_valid) {
+        return meta_valid;
     }
 
     switch (operation.action) {
@@ -1320,55 +1269,13 @@ apply_operation(const Operation& operation,
                     operation_index));
             }
             mutation_fault_test::hit("before_delete_ignored_local_file", *path);
-            auto status = read_status(*path, operation_index);
-            if (!status) {
-                return std::unexpected(status.error());
-            }
-            if (missing(*status)) {
-                return std::unexpected(make_error(
-                    MutationErrorCode::DestinationConflict,
-                    "disposable source is missing or not a regular file",
+            if (auto verified = detail::verify_disposable_source(
                     *path,
-                    operation_index));
-            }
-            if (std::filesystem::is_symlink(*status) ||
-                !std::filesystem::is_regular_file(*status)) {
-                return std::unexpected(
-                    make_error(MutationErrorCode::DestinationConflict,
-                               "disposable source is no longer a regular file",
-                               *path,
-                               operation_index));
-            }
-            const auto identity =
-                platform::private_storage::query_file_identity(*path);
-            std::error_code size_error;
-            const auto size = std::filesystem::file_size(*path, size_error);
-            if (size_error ||
-                !identity_matches(identity,
-                                  operation.expected_source_identity) ||
-                size != operation.size) {
-                return std::unexpected(make_error(
-                    size_error ? MutationErrorCode::LocalIo
-                               : MutationErrorCode::DestinationConflict,
-                    size_error ? size_error.message()
-                               : "disposable source identity or size changed",
-                    *path,
-                    operation_index));
-            }
-            auto actual = file_hash(*path, operation_index);
-            const auto after_identity =
-                platform::private_storage::query_file_identity(*path);
-            if (!actual) {
-                return std::unexpected(actual.error());
-            }
-            if (*actual != operation.hash ||
-                !identity_matches(after_identity,
-                                  operation.expected_source_identity)) {
-                return std::unexpected(
-                    make_error(MutationErrorCode::DestinationConflict,
-                               "disposable source changed before removal",
-                               *path,
-                               operation_index));
+                    operation,
+                    operation_index,
+                    "disposable source changed before removal");
+                !verified) {
+                return verified;
             }
             platform::private_storage::PrivateOutputFile source{
                 .path = *path,

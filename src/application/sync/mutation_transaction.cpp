@@ -24,9 +24,12 @@ using detail::make_error;
 using detail::missing;
 using detail::read_status;
 using detail::remove_temporary_file;
+using detail::require_regular_file;
 using detail::resolve_local_path;
 using detail::rollback_candidate_path;
+using detail::sync_file_checked;
 using detail::sync_parent_checked;
+using detail::validate_operation_metadata;
 
 namespace {
 
@@ -55,25 +58,10 @@ backup_path(const platform::Workspace& workspace,
     return result;
 }
 
-std::expected<void, MutationError>
-validate_operation_metadata(const Operation& operation,
-                            std::size_t operation_index) {
-    if (operation_index == std::numeric_limits<std::size_t>::max() ||
-        !is_valid_action(operation.action) || !has_safe_paths(operation)) {
-        return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
-                                          "invalid operation or index",
-                                          operation.path,
-                                          operation_index));
-    }
-    return {};
-}
-
 bool identity_matches(const std::filesystem::path& path,
                       const kasumi::PhysicalFileIdentity& expected) {
-    const auto identity = platform::private_storage::query_file_identity(path);
-    return identity.valid && identity.volume_or_dev == expected.volume_or_dev &&
-           identity.file_id_low == expected.file_id_low &&
-           identity.file_id_high == expected.file_id_high;
+    return detail::identity_matches(
+        platform::private_storage::query_file_identity(path), expected);
 }
 
 struct ResolvedLocalPair {
@@ -165,45 +153,25 @@ verify_source_size_and_hash(const std::filesystem::path& source,
                             bool check_size,
                             std::string_view size_message,
                             std::string_view hash_message) {
-    if (check_size) {
-        std::error_code size_error;
-        const auto actual_size = std::filesystem::file_size(source, size_error);
-        if (size_error || actual_size != operation.size) {
-            return std::unexpected(make_error(
-                size_error ? MutationErrorCode::LocalIo
-                           : MutationErrorCode::IntegrityMismatch,
-                size_error ? size_error.message() : std::string(size_message),
-                source,
-                operation_index));
-        }
-    }
-    auto actual = file_hash(source, operation_index);
-    if (!actual) {
-        return std::unexpected(actual.error());
-    }
-    if (!operation.hash.empty() && *actual != operation.hash) {
-        return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
-                                          std::string(hash_message),
-                                          source,
-                                          operation_index));
-    }
-    return actual;
+    return detail::verify_file_size_and_hash(source,
+                                             operation.size,
+                                             operation.hash,
+                                             check_size,
+                                             size_message,
+                                             hash_message,
+                                             operation_index);
 }
 
 std::expected<void, MutationError>
 validate_backup(const std::filesystem::path& backup,
                 std::string_view expected_hash,
                 std::size_t operation_index) {
-    auto status = read_status(backup, operation_index);
-    if (!status) {
-        return std::unexpected(status.error());
-    }
-    if (missing(*status) || std::filesystem::is_symlink(*status) ||
-        !std::filesystem::is_regular_file(*status)) {
-        return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
-                                          "backup is missing or invalid",
-                                          backup,
-                                          operation_index));
+    if (auto ok = require_regular_file(backup,
+                                       MutationErrorCode::IntegrityMismatch,
+                                       "backup is missing or invalid",
+                                       operation_index);
+        !ok) {
+        return ok;
     }
     auto secured = platform::private_storage::protect_file(backup);
     if (!secured) {
@@ -228,18 +196,10 @@ validate_backup(const std::filesystem::path& backup,
 std::expected<void, MutationError>
 make_backup_durable(const std::filesystem::path& backup,
                     std::size_t operation_index) {
-    auto synced = platform::durability::sync_file(backup);
-    if (!synced) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          synced.error(),
-                                          backup,
-                                          operation_index));
+    if (auto synced = sync_file_checked(backup, operation_index); !synced) {
+        return synced;
     }
-    auto parent_synced = sync_parent_checked(backup, operation_index);
-    if (!parent_synced) {
-        return parent_synced;
-    }
-    return {};
+    return sync_parent_checked(backup, operation_index);
 }
 
 std::expected<void, MutationError>
@@ -630,13 +590,10 @@ restore_backup(const std::filesystem::path& backup,
         validate_backup(candidate, expected_hash, operation_index);
     if (!candidate_valid)
         return std::unexpected(candidate_valid.error());
-    auto synced = platform::durability::sync_file(candidate);
+    auto synced = sync_file_checked(candidate, operation_index);
     if (!synced) {
         remove_temporary_file(candidate);
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          synced.error(),
-                                          candidate,
-                                          operation_index));
+        return synced;
     }
     auto current_status = read_status(destination, operation_index);
     if (!current_status) {
@@ -1207,42 +1164,13 @@ prepare_operation(const Operation& operation,
         return result;
     }
     if (operation.action == Action::DeleteIgnoredLocalFile) {
-        auto status = read_status(*path, operation_index);
-        if (!status) {
-            return std::unexpected(status.error());
-        }
-        if (missing(*status) || std::filesystem::is_symlink(*status) ||
-            !std::filesystem::is_regular_file(*status)) {
-            return std::unexpected(
-                make_error(MutationErrorCode::DestinationConflict,
-                           "disposable source is missing or not a regular file",
-                           *path,
-                           operation_index));
-        }
-        std::error_code size_error;
-        const auto size = std::filesystem::file_size(*path, size_error);
-        if (size_error ||
-            !identity_matches(*path, operation.expected_source_identity) ||
-            size != operation.size) {
-            return std::unexpected(make_error(
-                size_error ? MutationErrorCode::LocalIo
-                           : MutationErrorCode::DestinationConflict,
-                size_error ? size_error.message()
-                           : "disposable source identity or size changed",
+        if (auto verified = detail::verify_disposable_source(
                 *path,
-                operation_index));
-        }
-        auto actual = file_hash(*path, operation_index);
-        if (!actual) {
-            return std::unexpected(actual.error());
-        }
-        if (*actual != operation.hash ||
-            !identity_matches(*path, operation.expected_source_identity)) {
-            return std::unexpected(make_error(
-                MutationErrorCode::DestinationConflict,
-                "disposable source changed while preparing its backup",
-                *path,
-                operation_index));
+                operation,
+                operation_index,
+                "disposable source changed while preparing its backup");
+            !verified) {
+            return std::unexpected(verified.error());
         }
         auto progress = current_progress;
         auto backup = backup_path(workspace, progress, *path, operation_index);
