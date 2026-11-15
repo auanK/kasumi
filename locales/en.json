@@ -371,7 +371,7 @@
     "remote_orphans": "Usage: kasumi remote orphans <profile>\n\nList orphans; does not run GC or remove objects.\n",
     "remote_writers": "Usage: kasumi remote writers <profile>\n\nList writers and the maintenance barrier.\n",
     "remote_health": "Usage: kasumi remote health <profile>\n\nFull remote health diagnostic. Findings still return 0; inspection failure returns 1.\nDoes not replace the fsck payload audit.\n",
-    "options": "\nGlobal option: --lang <code>, before the command (en, pt-BR or external catalog).\nHelp: -h, --help. Duplicate, unknown or valueless options are rejected.\n"
+    "options": "\nGlobal option: --lang <code>, before the command (en or pt-BR).\nHelp: -h, --help. Duplicate, unknown or valueless options are rejected.\n"
   },
   "resolve_missing": {
     "singular": "resolved 1 missing path",

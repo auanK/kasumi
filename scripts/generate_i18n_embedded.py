@@ -1,171 +1,203 @@
 #!/usr/bin/env python3
 """
-Generates generated/cli/i18n_embedded.hpp with bounded string literal fragments.
-Splits embedded catalogs so that no individual string literal exceeds the MSVC C2026 limit.
+Generates generated/cli/i18n_embedded.hpp with compile-time translation arrays
+indexed directly by kasumi::cli::i18n::Key.
 """
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
 
-MAX_RAW_DELIMITER_LENGTH = 16
-RAW_DELIMITER_OCCURRENCE = re.compile(r'\)(kasumi(?:_[0-9]+)?)"')
+EXCEPTIONS = {
+    "OperationDuration": "labels.duration",
+    "HelpText": "help_text",
+    "HelpGcRemoveWriter": "command_help.gc_remove-writer",
+    "HelpGcRemoveBarrier": "command_help.gc_remove-barrier",
+    "HelpResolveMissing": "command_help.resolve-missing",
+    "OperationCancelledByUser": "sync.operation_cancelled_by_user",
+    "PromptPassword": "prompts.password",
+    "PromptConfirmPassword": "prompts.confirm_password",
+    "PromptSalt": "prompts.salt",
+    "PromptConfirmSalt": "prompts.confirm_salt",
+    "PasswordsDoNotMatch": "prompts.passwords_do_not_match",
+    "SaltsDoNotMatch": "prompts.salts_do_not_match",
+}
+
+PREFIXES = sorted(
+    [
+        ("Label", "labels."),
+        ("Update", "update."),
+        ("ResolveMissing", "resolve_missing."),
+        ("Help", "command_help."),
+        ("Error", "errors."),
+        ("Sync", "sync."),
+        ("Plan", "sync.plan_"),
+        ("Preview", "sync.preview_"),
+        ("Status", "sync.status_"),
+        ("Fsck", "fsck."),
+        ("Gc", "gc."),
+        ("ManualWriterRemoval", "manual_writer_removal."),
+        ("ManualBarrierRemoval", "manual_barrier_removal."),
+        ("BarrierRemovalStage", "manual_barrier_removal.stage_"),
+        ("BarrierRemovalMutation", "manual_barrier_removal.mutation_"),
+        ("Remote", "remote."),
+        ("Field", "fields."),
+        ("Variant", "variants."),
+        ("ContentState", "content_states."),
+        ("MarkerState", "marker_states."),
+        ("ObjectCategory", "object_categories."),
+        ("OrphanKind", "orphan_kinds."),
+        ("WriterState", "writer_states."),
+        ("HealthState", "health_states."),
+        ("Wizard", "wizard."),
+    ],
+    key=lambda item: -len(item[0]),
+)
 
 
-def chunk_by_bytes(text: str, max_bytes: int = 2048) -> list[str]:
-    lines = text.splitlines(keepends=True)
-    chunks = []
-    current_chunk = []
-    current_bytes = 0
-    for line in lines:
-        line_bytes = len(line.encode("utf-8"))
-        if line_bytes > max_bytes:
-            if current_chunk:
-                chunks.append("".join(current_chunk))
-                current_chunk = []
-                current_bytes = 0
-            sub_chars = []
-            sub_bytes = 0
-            for char in line:
-                c_bytes = len(char.encode("utf-8"))
-                if sub_bytes + c_bytes > max_bytes:
-                    chunks.append("".join(sub_chars))
-                    sub_chars = [char]
-                    sub_bytes = c_bytes
-                else:
-                    sub_chars.append(char)
-                    sub_bytes += c_bytes
-            if sub_chars:
-                chunks.append("".join(sub_chars))
-        elif current_bytes + line_bytes > max_bytes:
-            chunks.append("".join(current_chunk))
-            current_chunk = [line]
-            current_bytes = line_bytes
+def key_to_json_path(key: str) -> str:
+    if key in EXCEPTIONS:
+        return EXCEPTIONS[key]
+    for prefix, section in PREFIXES:
+        if key.startswith(prefix):
+            tail = key[len(prefix) :]
+            snake = re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", tail).lower()
+            return section + snake
+    return re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", key).lower()
+
+
+def flatten_catalog(node: object, prefix: str = "") -> dict[str, str]:
+    if isinstance(node, dict):
+        result: dict[str, str] = {}
+        for key, value in node.items():
+            full = f"{prefix}.{key}" if prefix else str(key)
+            result.update(flatten_catalog(value, full))
+        return result
+    if isinstance(node, str):
+        return {prefix: node}
+    raise ValueError(f"Unsupported JSON value for key {prefix!r}: {type(node).__name__}")
+
+
+def parse_enum_keys(header_path: Path) -> list[str]:
+    text = header_path.read_text(encoding="utf-8")
+    match = re.search(r"enum class Key \{(.*?)\};", text, re.S)
+    if not match:
+        raise ValueError(f"Could not locate enum class Key in {header_path}")
+    return [
+        line.strip().rstrip(",")
+        for line in match.group(1).splitlines()
+        if line.strip() and not line.strip().startswith("//")
+    ]
+
+
+def cpp_string_literal(value: str) -> str:
+    # Split long multiline values across adjacent string literals so every token
+    # stays far below MSVC C2026 (16,380 bytes).
+    def escape(text: str) -> str:
+        out: list[str] = []
+        for ch in text:
+            if ch == "\\":
+                out.append("\\\\")
+            elif ch == '"':
+                out.append('\\"')
+            elif ch == "\n":
+                out.append("\\n")
+            elif ch == "\r":
+                out.append("\\r")
+            elif ch == "\t":
+                out.append("\\t")
+            else:
+                out.append(ch)
+        return "".join(out)
+
+    parts = value.splitlines(keepends=True) or [""]
+    chunks: list[str] = []
+    current = ""
+    for part in parts:
+        if current and len((current + part).encode("utf-8")) > 1024:
+            chunks.append(f'"{escape(current)}"')
+            current = part
         else:
-            current_chunk.append(line)
-            current_bytes += line_bytes
-    if current_chunk:
-        chunks.append("".join(current_chunk))
-    return chunks
+            current += part
+    chunks.append(f'"{escape(current)}"')
+    return " ".join(chunks)
 
 
-def select_raw_delimiter(fragments: list[str]) -> str:
-    used_delimiters = {
-        match.group(1)
-        for fragment in fragments
-        for match in RAW_DELIMITER_OCCURRENCE.finditer(fragment)
-        if len(match.group(1)) <= MAX_RAW_DELIMITER_LENGTH
-    }
-
-    max_suffix = 10 ** (MAX_RAW_DELIMITER_LENGTH - len("kasumi") - 1) - 1
-    for index in range(min(len(used_delimiters) + 1, max_suffix + 1)):
-        delimiter = "kasumi" if index == 0 else f"kasumi_{index}"
-        if delimiter not in used_delimiters:
-            return delimiter
-
-    raise ValueError(
-        f"Could not find a safe raw-string delimiter within "
-        f"the {MAX_RAW_DELIMITER_LENGTH}-character C++ limit"
-    )
+def emit_array(name: str, values: list[str]) -> list[str]:
+    lines = [f"inline constexpr std::array<std::string_view, {len(values)}> {name} = {{"]
+    for value in values:
+        lines.append(f"    {cpp_string_literal(value)},")
+    lines.append("};")
+    return lines
 
 
-def render_fragment(fragment: str, delimiter: str) -> str:
-    parts = fragment.split("\r")
-    literals = []
-    for index, part in enumerate(parts):
-        if part:
-            literals.append(f'R"{delimiter}({part}){delimiter}"')
-        if index < len(parts) - 1:
-            literals.append(r'"\r"')
-    return " ".join(literals)
+def generate_header(
+    en_path: Path, pt_path: Path, header_path: Path, out_path: Path
+) -> None:
+    keys = parse_enum_keys(header_path)
+    en_flat = flatten_catalog(json.loads(en_path.read_text(encoding="utf-8")))
+    pt_flat = flatten_catalog(json.loads(pt_path.read_text(encoding="utf-8")))
 
+    paths = [key_to_json_path(key) for key in keys]
+    for catalog_name, flat in (("en.json", en_flat), ("pt-BR.json", pt_flat)):
+        missing = [p for p in paths if not flat.get(p)]
+        if missing:
+            raise ValueError(f"Missing or empty keys in {catalog_name}: {missing[:5]}")
+        extra = set(flat.keys()) - set(paths)
+        if extra:
+            raise ValueError(f"Unmapped keys in {catalog_name}: {sorted(extra)[:5]}")
 
-def generate_header(en_path: Path, pt_path: Path, out_path: Path) -> None:
-    en_text = en_path.read_bytes().decode("utf-8")
-    pt_text = pt_path.read_bytes().decode("utf-8")
-
-    en_chunks = chunk_by_bytes(en_text, 2048)
-    pt_chunks = chunk_by_bytes(pt_text, 2048)
-    delimiter = select_raw_delimiter(en_chunks + pt_chunks)
+    en_values = [en_flat[p] for p in paths]
+    pt_values = [pt_flat[p] for p in paths]
 
     lines = [
         "// Generated by scripts/generate_i18n_embedded.py - DO NOT EDIT",
         "#ifndef KASUMI_CLI_I18N_EMBEDDED_HPP",
         "#define KASUMI_CLI_I18N_EMBEDDED_HPP",
         "",
-        "#include <span>",
-        "#include <string>",
+        "#include <array>",
+        "#include <cstddef>",
         "#include <string_view>",
         "",
         "namespace kasumi::cli::i18n::embedded {",
         "",
-        "inline constexpr std::size_t MAX_FRAGMENT_SIZE = 2048;",
+        f"inline constexpr std::size_t KEY_COUNT = {len(keys)};",
         "",
-        "inline constexpr std::string_view EN_JSON_FRAGMENTS[] = {",
-    ]
-
-    for chunk in en_chunks:
-        lines.append(f"    {render_fragment(chunk, delimiter)},")
-
-    lines.extend([
-        "};",
+        *emit_array("EN_STRINGS", en_values),
         "",
-        "inline constexpr std::string_view PT_BR_JSON_FRAGMENTS[] = {",
-    ])
-
-    for chunk in pt_chunks:
-        lines.append(f"    {render_fragment(chunk, delimiter)},")
-
-    lines.extend([
-        "};",
-        "",
-        "inline std::string reconstruct(std::span<const std::string_view> fragments) {",
-        "    std::size_t total_size = 0;",
-        "    for (const auto& fragment : fragments) {",
-        "        total_size += fragment.size();",
-        "    }",
-        "    std::string result;",
-        "    result.reserve(total_size);",
-        "    for (const auto& fragment : fragments) {",
-        "        result.append(fragment);",
-        "    }",
-        "    return result;",
-        "}",
-        "",
-        "inline std::string reconstructed_en_json() {",
-        "    return reconstruct(EN_JSON_FRAGMENTS);",
-        "}",
-        "",
-        "inline std::string reconstructed_pt_br_json() {",
-        "    return reconstruct(PT_BR_JSON_FRAGMENTS);",
-        "}",
+        *emit_array("PT_BR_STRINGS", pt_values),
         "",
         "} // namespace kasumi::cli::i18n::embedded",
         "",
         "#endif // KASUMI_CLI_I18N_EMBEDDED_HPP",
         "",
-    ])
+    ]
 
     content = "\n".join(lines).encode("utf-8")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if out_path.exists():
-        if out_path.read_bytes() == content:
-            return
-
+    if out_path.exists() and out_path.read_bytes() == content:
+        return
     out_path.write_bytes(content)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate embedded i18n catalogs.")
+    parser = argparse.ArgumentParser(description="Generate embedded i18n tables.")
     parser.add_argument("--en", required=True, type=Path, help="Path to en.json")
     parser.add_argument("--pt", required=True, type=Path, help="Path to pt-BR.json")
+    parser.add_argument(
+        "--header",
+        type=Path,
+        default=None,
+        help="Path to src/cli/i18n.hpp",
+    )
     parser.add_argument("--output", required=True, type=Path, help="Output header path")
     args = parser.parse_args()
 
+    header_path = args.header or (args.en.resolve().parent.parent / "src" / "cli" / "i18n.hpp")
     try:
-        generate_header(args.en, args.pt, args.output)
+        generate_header(args.en, args.pt, header_path, args.output)
     except ValueError as error:
         parser.error(str(error))
     return 0

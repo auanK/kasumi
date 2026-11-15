@@ -44,7 +44,7 @@ clang-format --dry-run --Werror @files
 
 ## Embedded Locale Generation
 
-The build generates `generated/cli/i18n_embedded.hpp` from `locales/en.json` and `locales/pt-BR.json` using `scripts/generate_i18n_embedded.py`. The generated header is a build artifact, not a checked-in source file. The generator emits bounded raw C++ string fragments to remain compatible with MSVC limits while preserving source bytes, including line endings. Keep the generated file under the build tree; do not hand-edit it.
+The build generates `generated/cli/i18n_embedded.hpp` from `locales/en.json`, `locales/pt-BR.json`, and `src/cli/i18n.hpp` using `scripts/generate_i18n_embedded.py`. The generated header is a build artifact, not a checked-in source file. The generator emits compile-time `std::string_view` tables indexed directly by `Key`. Keep the generated file under the build tree; do not hand-edit it.
 
 ## CMake Presets
 

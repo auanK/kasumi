@@ -224,13 +224,11 @@ To switch to **Portuguese**:
 * Command line: `kasumi --lang pt-BR <command> <profile>` (or `--lang pt`)
 * Environment variable: set `KASUMI_LANG=pt-BR` (or `pt`)
 
-To add a custom community language catalog, place `<lang>.json` in `%APPDATA%/kasumi/locales/` (Windows) or `$XDG_CONFIG_HOME/kasumi/locales/` (Linux; fallback `$HOME/.config/kasumi/locales/`) and select it with `kasumi --lang <lang> <command> ...`.
-
 ## Automation & Environment Variables
 
 | Variable | Description |
 |---|---|
-| `KASUMI_LANG` | Sets CLI language (`en`, `pt-BR`, `pt`, etc.) |
+| `KASUMI_LANG` | Sets CLI language (`en`, `pt-BR`, `pt`) |
 | `KASUMI_MASTER_KEY` | Provides a 64-hex-digit master key to application/inspection operations. It does not replace the wizard's Password/Password Salt creation prompts. For an existing profile with `key.bin`, the supplied key must match the persisted key |
 | `KASUMI_PASSWORD` | Provides the Password to the profile creation credential flow (minimum 12 characters) |
 | `KASUMI_PASSWORD2` | Provides the Password Salt to the profile creation credential flow (minimum 16 characters) |

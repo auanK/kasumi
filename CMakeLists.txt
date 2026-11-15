@@ -562,20 +562,19 @@ endif()
 
 set(I18N_GENERATOR "${PROJECT_SOURCE_DIR}/scripts/generate_i18n_embedded.py")
 set(I18N_EMBEDDED_HEADER "${PROJECT_BINARY_DIR}/generated/cli/i18n_embedded.hpp")
-set(I18N_COLLISION_FIXTURE "${PROJECT_SOURCE_DIR}/tests/unit/cli/data/i18n_delimiter_collision.json")
-set(I18N_COLLISION_HEADER "${PROJECT_BINARY_DIR}/generated/cli/i18n_collision.hpp")
 
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${PROJECT_SOURCE_DIR}/locales/en.json"
     "${PROJECT_SOURCE_DIR}/locales/pt-BR.json"
+    "${PROJECT_SOURCE_DIR}/src/cli/i18n.hpp"
     "${I18N_GENERATOR}"
-    "${I18N_COLLISION_FIXTURE}"
 )
 
 execute_process(
     COMMAND "${Python3_EXECUTABLE}" "${I18N_GENERATOR}"
             "--en" "${PROJECT_SOURCE_DIR}/locales/en.json"
             "--pt" "${PROJECT_SOURCE_DIR}/locales/pt-BR.json"
+            "--header" "${PROJECT_SOURCE_DIR}/src/cli/i18n.hpp"
             "--output" "${I18N_EMBEDDED_HEADER}"
     RESULT_VARIABLE I18N_GEN_RESULT
 )
@@ -588,26 +587,16 @@ add_custom_command(
     COMMAND "${Python3_EXECUTABLE}" "${I18N_GENERATOR}"
             "--en" "${PROJECT_SOURCE_DIR}/locales/en.json"
             "--pt" "${PROJECT_SOURCE_DIR}/locales/pt-BR.json"
+            "--header" "${PROJECT_SOURCE_DIR}/src/cli/i18n.hpp"
             "--output" "${I18N_EMBEDDED_HEADER}"
     DEPENDS
         "${I18N_GENERATOR}"
         "${PROJECT_SOURCE_DIR}/locales/en.json"
         "${PROJECT_SOURCE_DIR}/locales/pt-BR.json"
+        "${PROJECT_SOURCE_DIR}/src/cli/i18n.hpp"
     COMMENT "Generating embedded locale header"
     VERBATIM
 )
-
-add_custom_command(
-    OUTPUT "${I18N_COLLISION_HEADER}"
-    COMMAND "${Python3_EXECUTABLE}" "${I18N_GENERATOR}"
-            "--en" "${I18N_COLLISION_FIXTURE}"
-            "--pt" "${I18N_COLLISION_FIXTURE}"
-            "--output" "${I18N_COLLISION_HEADER}"
-    DEPENDS "${I18N_GENERATOR}" "${I18N_COLLISION_FIXTURE}"
-    COMMENT "Generating i18n delimiter-collision regression header"
-    VERBATIM
-)
-add_custom_target(kasumi_i18n_collision_header DEPENDS "${I18N_COLLISION_HEADER}")
 
 add_library(kasumi_cli STATIC
     src/cli/app.cpp

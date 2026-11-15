@@ -371,7 +371,7 @@
     "remote_orphans": "Uso: kasumi remote orphans <perfil>\n\nLista órfãos; não executa GC nem remove objetos.\n",
     "remote_writers": "Uso: kasumi remote writers <perfil>\n\nLista writers e a barrier de manutenção.\n",
     "remote_health": "Uso: kasumi remote health <perfil>\n\nDiagnóstico remoto completo. Achados retornam 0; falha de inspeção retorna 1.\nNão substitui auditoria de conteúdo do fsck.\n",
-    "options": "\nOpção global: --lang <código>, antes do comando (en, pt-BR ou catálogo externo).\nAjuda: -h, --help. Opções repetidas, desconhecidas ou sem valor são rejeitadas.\n"
+    "options": "\nOpção global: --lang <código>, antes do comando (en ou pt-BR).\nAjuda: -h, --help. Opções repetidas, desconhecidas ou sem valor são rejeitadas.\n"
   },
   "resolve_missing": {
     "singular": "1 caminho ausente resolvido",

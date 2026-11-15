@@ -13,7 +13,6 @@ namespace kasumi::cli::i18n {
 enum class Language {
     English,
     Portuguese,
-    Custom,
 };
 
 enum class Key {
@@ -393,19 +392,15 @@ enum class Key {
 
 Language current_language() noexcept;
 
-std::string_view current_language_code() noexcept;
+void set_language(Language language) noexcept;
 
-void set_language(Language language);
-
-void set_language(std::string_view code);
+void set_language(std::string_view code) noexcept;
 
 Language parse_language(std::string_view code) noexcept;
 
 std::string_view language_code(Language language) noexcept;
 
 std::string_view tr(Key key) noexcept;
-
-bool load_custom_catalog(std::string_view json_content);
 
 // Removes the optional --lang <code> prefix before the command.
 std::vector<std::string> extract_language_argument(int argc,
