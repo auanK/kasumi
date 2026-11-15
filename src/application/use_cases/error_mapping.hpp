@@ -2,13 +2,13 @@
 #define KASUMI_APPLICATION_USE_CASES_ERROR_MAPPING_HPP
 
 #include "application/execute.hpp"
-#include "application/integrity/maintenance.hpp"
-#include "application/sync/coordinator.hpp"
+#include "application/use_cases/context.hpp"
 #include "crypto/file_crypto.hpp"
 #include "runtime/vault.hpp"
 
 #include <expected>
 #include <string>
+#include <utility>
 
 namespace kasumi::application::detail {
 
@@ -23,30 +23,25 @@ resolve_key_into(Operation operation,
                  const RuntimeSummary& summary,
                  runtime::vault::KeyBytes& output);
 
-// Converts a transaction failure into an application error.
-Error transaction_error(Operation operation,
-                        const sync::coordinator::Error& error,
-                        const RuntimeSummary& summary);
-
-// Converts a maintenance failure into an application error.
-Error maintenance_error(Operation operation,
-                        const integrity::Error& error,
-                        const RuntimeSummary& summary);
-
-// Converts a recovery failure into a maintenance error.
-Error maintenance_recovery_error(Operation operation,
-                                 const sync::coordinator::Error& error,
-                                 const RuntimeSummary& summary);
-
-// Creates an error when computing the plan.
-Error plan_error(Operation operation,
+Error make_error(const OperationContext& context,
+                 ErrorCode code,
                  std::string detail,
-                 const RuntimeSummary& summary);
+                 std::optional<SyncStage> stage = std::nullopt);
 
-// Creates an error during synchronization.
-Error synchronization_error(Operation operation,
-                            std::string detail,
-                            const RuntimeSummary& summary);
+inline std::unexpected<Error>
+fail_app(const OperationContext& context,
+         ErrorCode code,
+         std::string detail,
+         std::optional<SyncStage> stage = std::nullopt) {
+    return std::unexpected(make_error(context, code, std::move(detail), stage));
+}
+
+inline Response make_response(const OperationContext& context,
+                              ResponseData data) {
+    return Response{.operation = context.operation,
+                    .runtime = context.summary,
+                    .data = std::move(data)};
+}
 
 } // namespace kasumi::application::detail
 

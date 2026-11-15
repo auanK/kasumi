@@ -39,22 +39,27 @@ run_with_recovery(OperationContext& context,
                   Stage initial_stage,
                   std::optional<Progress>& last_progress,
                   RunFn&& fn) {
+    const auto failure_code = context.operation == Operation::Fsck
+                                  ? ErrorCode::FsckFailure
+                                  : ErrorCode::GarbageCollectionFailure;
     auto callback = make_progress_callback<Callback, Progress>(
         context, initial_stage, last_progress);
     if (auto recovery = sync::coordinator::recover_if_needed(
             context.runtime, context.storage, context.key);
         !recovery) {
-        return std::unexpected(maintenance_recovery_error(
-            context.operation, recovery.error(), context.summary));
+        return std::unexpected(
+            make_error(context,
+                       failure_code,
+                       sync::coordinator::describe(recovery.error())));
     }
     auto res = fn(std::move(callback));
     if (!res) {
-        return std::unexpected(
-            maintenance_error(context.operation, res.error(), context.summary));
+        auto error =
+            make_error(context, failure_code, integrity::describe(res.error()));
+        error.garbage_collection = res.error().garbage_collection;
+        return std::unexpected(std::move(error));
     }
-    return Response{.operation = context.operation,
-                    .runtime = context.summary,
-                    .data = std::move(*res)};
+    return make_response(context, std::move(*res));
 }
 
 } // namespace
@@ -139,16 +144,13 @@ std::expected<Response, Error> run_remove_barrier(OperationContext& context) {
          history_storage::maintenance_protocol::BarrierRemovalOutcome::Removed)
             ? BarrierRemovalOutcome::Removed
             : BarrierRemovalOutcome::AlreadyAbsent;
-    return Response{
-        .operation = context.operation,
-        .runtime = context.summary,
-        .data =
-            ManualBarrierRemovalCompleted{
-                .identifier = layout.barrier_identifier,
-                .outcome = outcome,
-                .active_writers_count = removed->active_writers_count,
-            },
-    };
+    return make_response(
+        context,
+        ManualBarrierRemovalCompleted{
+            .identifier = layout.barrier_identifier,
+            .outcome = outcome,
+            .active_writers_count = removed->active_writers_count,
+        });
 }
 
 std::expected<Response, Error> run_remove_writer(OperationContext& context) {
@@ -156,17 +158,12 @@ std::expected<Response, Error> run_remove_writer(OperationContext& context) {
     auto removed = history_storage::maintenance_protocol::remove_writer(
         context.storage, layout, context.writer_identifier);
     if (!removed) {
-        return std::unexpected(Error{
-            .operation = context.operation,
-            .code = ErrorCode::WriterRemovalFailure,
-            .detail = removed.error().detail,
-            .runtime = context.summary,
-        });
+        return fail_app(
+            context, ErrorCode::WriterRemovalFailure, removed.error().detail);
     }
-    return Response{.operation = context.operation,
-                    .runtime = context.summary,
-                    .data = ManualWriterRemovalCompleted{
-                        .identifier = context.writer_identifier}};
+    return make_response(
+        context,
+        ManualWriterRemovalCompleted{.identifier = context.writer_identifier});
 }
 
 } // namespace kasumi::application::detail

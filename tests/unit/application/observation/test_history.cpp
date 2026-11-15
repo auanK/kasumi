@@ -13,6 +13,7 @@
 #include "kasumi/test/history_storage.hpp"
 #undef KASUMI_TEST_HISTORY_STORAGE_NO_ERROR_CODE_ALIAS
 #include "kasumi/test/temp_workspace.hpp"
+#include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 
 #include <algorithm>
@@ -40,6 +41,29 @@ using Commit = kasumi::history::Commit;
 using ErrorCode = kasumi::application::observation::history::ErrorCode;
 using StorageView = kasumi::application::observation::history::StorageView;
 using TempWorkspace = kasumi::test::TempWorkspace;
+
+TEST(ObservationHints, PreservesAcceptedEpochAndRejectsInvalidMarker) {
+    using namespace kasumi::application;
+    kasumi::state_storage::StoredState state;
+    state.commit_id = std::string(64, 'a');
+    state.ciphertext_id = std::string(64, 'b');
+    state.epoch_id = std::string(64, 'c');
+    state.epoch_sequence = 7;
+    const auto layout = history_storage::derive_remote_layout(Key{});
+    const auto hints =
+        observation::history::make_observation_hints(state, layout);
+    ASSERT_TRUE(hints.frontier);
+    ASSERT_EQ(hints.frontier->anchors.size(), 1);
+    EXPECT_EQ(hints.frontier->anchors.front().commit_id, state.commit_id);
+    ASSERT_TRUE(hints.frontier->accepted_epoch);
+    EXPECT_EQ(hints.frontier->accepted_epoch->sequence, state.epoch_sequence);
+    EXPECT_EQ(hints.trusted_marker_identifiers.size(), 1);
+    state.ciphertext_id = "invalid";
+    const auto untrusted =
+        observation::history::make_observation_hints(state, layout, false);
+    EXPECT_FALSE(untrusted.frontier);
+    EXPECT_TRUE(untrusted.trusted_marker_identifiers.empty());
+}
 
 kasumi::Snapshot
 make_tree(std::initializer_list<std::pair<std::string_view, std::string_view>>

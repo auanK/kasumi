@@ -103,6 +103,22 @@ classify_entry(const std::filesystem::path& path,
                              .linklike = false};
 }
 
+std::expected<PhysicalEntryType, ScanError>
+classify_path(const std::filesystem::path& path,
+              const std::filesystem::file_status& status,
+              const std::error_code& error) {
+    if (error) {
+        return std::unexpected(scan_error(
+            path, "query entry type", error, ScanErrorCode::Metadata));
+    }
+    auto type = classify_entry(path, status);
+    if (!type) {
+        return std::unexpected(scan_error(
+            path, "classify entry", type.error(), ScanErrorCode::Metadata));
+    }
+    return *type;
+}
+
 std::expected<cache::FileMetadata, ScanError>
 query_file_metadata(const MetadataQuery& metadata_query,
                     const std::filesystem::path& file_path,
@@ -351,15 +367,9 @@ scan_result(const std::filesystem::path& local_root,
         context.previous.emplace(row.path, &row);
     std::error_code error;
     const auto status = std::filesystem::symlink_status(local_root, error);
-    if (error)
-        return std::unexpected(scan_error(
-            local_root, "query entry type", error, ScanErrorCode::Metadata));
-    const auto root_type = classify_entry(local_root, status);
+    const auto root_type = classify_path(local_root, status, error);
     if (!root_type) {
-        return std::unexpected(scan_error(local_root,
-                                          "classify entry",
-                                          root_type.error(),
-                                          ScanErrorCode::Metadata));
+        return std::unexpected(root_type.error());
     }
     if (root_type->linklike ||
         (!root_type->directory && !root_type->regular_file)) {
@@ -436,17 +446,10 @@ scan_result(const std::filesystem::path& local_root,
                                               error,
                                               ScanErrorCode::Io));
         const auto entry_status = entry.symlink_status(error);
-        if (error)
-            return std::unexpected(scan_error(entry.path(),
-                                              "query entry type",
-                                              error,
-                                              ScanErrorCode::Metadata));
-        const auto entry_type = classify_entry(entry.path(), entry_status);
+        const auto entry_type =
+            classify_path(entry.path(), entry_status, error);
         if (!entry_type) {
-            return std::unexpected(scan_error(entry.path(),
-                                              "classify entry",
-                                              entry_type.error(),
-                                              ScanErrorCode::Metadata));
+            return std::unexpected(entry_type.error());
         }
         const auto entry_name =
             platform::path::to_logical_utf8(entry.path().filename());

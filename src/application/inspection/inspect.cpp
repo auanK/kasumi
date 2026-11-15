@@ -43,18 +43,13 @@
 namespace kasumi::application {
 namespace {
 
-struct InspectionObservationHints {
-    std::optional<history_storage::KnownHistoryFrontier> frontier;
-    std::vector<std::string> trusted_marker_identifiers;
-};
-
 struct InspectionContext {
     runtime::RuntimeData runtime;
     runtime::vault::KeyBytes key{};
     history_storage::RemoteLayout layout{};
     transport::Transport storage{};
     std::optional<platform::Workspace> workspace;
-    InspectionObservationHints hints;
+    observation::history::ObservationHints hints;
 };
 
 bool requires_complete_history(InspectionOperation operation) noexcept {
@@ -151,46 +146,22 @@ resolve_key(const Credentials& credentials,
         });
 }
 
-InspectionObservationHints
+observation::history::ObservationHints
 make_observation_hints(const runtime::RuntimeData& runtime_data,
                        InspectionOperation operation,
                        const history_storage::RemoteLayout& layout) {
-    InspectionObservationHints hints;
+    observation::history::ObservationHints hints;
     auto persisted = state_storage::load_state(runtime_data.database_path);
     if (!persisted || !*persisted) {
         return hints;
     }
 
-    auto& state = **persisted;
-    if (operation == InspectionOperation::RemoteHeads ||
-        operation == InspectionOperation::RemoteTree ||
-        operation == InspectionOperation::RemoteStat ||
-        operation == InspectionOperation::RemoteGet) {
-        hints.frontier.emplace();
-        hints.frontier->anchors.push_back(history_storage::KnownHistoryAnchor{
-            .commit_id = state.commit_id,
-            .height = state.height,
-            .tree = std::move(state.tree),
-        });
-        if (!state.epoch_id.empty()) {
-            hints.frontier->accepted_epoch = history_storage::epoch::Reference{
-                .sequence = state.epoch_sequence,
-                .epoch_id = state.epoch_id,
-            };
-        }
-    }
-
-    if (!state.ciphertext_id.empty()) {
-        const history_storage::HeadReference reference{
-            .commit_id = state.commit_id,
-            .ciphertext_id = state.ciphertext_id,
-        };
-        if (history_storage::valid(reference)) {
-            hints.trusted_marker_identifiers.push_back(
-                history_storage::marker_object(layout, reference));
-        }
-    }
-    return hints;
+    const bool use_frontier = operation == InspectionOperation::RemoteHeads ||
+                              operation == InspectionOperation::RemoteTree ||
+                              operation == InspectionOperation::RemoteStat ||
+                              operation == InspectionOperation::RemoteGet;
+    return observation::history::make_observation_hints(
+        **persisted, layout, use_frontier);
 }
 
 using ObservedCommitIndex =

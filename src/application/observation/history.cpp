@@ -1,10 +1,12 @@
 #include "application/observation/history.hpp"
 
 #include "application/history_storage/history_storage.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "core/hasher.hpp"
 #include "core/history.hpp"
 #include "crypto/key_derivation.hpp"
 #include "history_detail.hpp"
+#include "state_storage/database.hpp"
 
 #include <algorithm>
 #include <exception>
@@ -17,6 +19,31 @@
 #include <utility>
 
 namespace kasumi::application::observation::history {
+ObservationHints
+make_observation_hints(const state_storage::StoredState& state,
+                       const history_storage::RemoteLayout& layout,
+                       bool use_frontier) {
+    ObservationHints hints;
+    if (use_frontier) {
+        hints.frontier.emplace();
+        hints.frontier->anchors.push_back(
+            history_storage::KnownHistoryAnchor{.commit_id = state.commit_id,
+                                                .height = state.height,
+                                                .tree = state.tree});
+        if (!state.epoch_id.empty()) {
+            hints.frontier->accepted_epoch = history_storage::epoch::Reference{
+                .sequence = state.epoch_sequence, .epoch_id = state.epoch_id};
+        }
+    }
+    const history_storage::HeadReference reference{
+        .commit_id = state.commit_id, .ciphertext_id = state.ciphertext_id};
+    if (!state.ciphertext_id.empty() && history_storage::valid(reference)) {
+        hints.trusted_marker_identifiers.push_back(
+            history_storage::marker_object(layout, reference));
+    }
+    return hints;
+}
+
 namespace {
 
 constexpr std::size_t maximum_audited_content_object_count = 1'000'000;

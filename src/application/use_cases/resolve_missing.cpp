@@ -22,31 +22,26 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
     auto recovered = sync::coordinator::recover_if_needed(
         context.runtime, context.storage, context.key);
     if (!recovered) {
-        return std::unexpected(transaction_error(
-            context.operation, recovered.error(), context.summary));
+        return std::unexpected(
+            make_error(context,
+                       ErrorCode::SynchronizationFailure,
+                       sync::coordinator::describe(recovered.error())));
     }
 
     auto state = state_storage::load_state(context.runtime.database_path);
     if (!state || !*state) {
-        return std::unexpected(Error{
-            .operation = context.operation,
-            .code = ErrorCode::RuntimeFailure,
-            .detail = "failed to load accepted state",
-            .runtime = context.summary,
-        });
+        return fail_app(context,
+                        ErrorCode::RuntimeFailure,
+                        "failed to load accepted state");
     }
 
     if ((*state)->pending_materializations.empty()) {
-        return Response{
-            .operation = context.operation,
-            .runtime = context.summary,
-            .data =
-                ResolveMissingCompleted{
-                    .resolved_count = 0,
-                    .resolved_paths = {},
-                    .published = false,
-                },
-        };
+        return make_response(context,
+                             ResolveMissingCompleted{
+                                 .resolved_count = 0,
+                                 .resolved_paths = {},
+                                 .published = false,
+                             });
     }
 
     const auto authority = (*state)->pending_materializations;
@@ -55,8 +50,8 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
     auto collected = observation::collect_reconciliation_input(
         context.runtime, context.storage, context.key, false, {}, &session);
     if (!collected) {
-        return std::unexpected(plan_error(
-            context.operation, collected.error().detail, context.summary));
+        return std::unexpected(make_error(
+            context, ErrorCode::PlanFailure, collected.error().detail));
     }
 
     collected->pending_deletion_authority = authority;
@@ -64,9 +59,9 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
     auto reconciled = reconciliation::reconcile(*collected);
     if (!reconciled) {
         return std::unexpected(
-            plan_error(context.operation,
-                       describe_reconciliation_error(reconciled.error()),
-                       context.summary));
+            make_error(context,
+                       ErrorCode::PlanFailure,
+                       describe_reconciliation_error(reconciled.error())));
     }
 
     auto stable =
@@ -77,8 +72,10 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
                                                     std::move(*reconciled),
                                                     &session);
     if (!stable) {
-        return std::unexpected(transaction_error(
-            context.operation, stable.error(), context.summary));
+        return std::unexpected(
+            make_error(context,
+                       ErrorCode::SynchronizationFailure,
+                       sync::coordinator::describe(stable.error())));
     }
 
     std::unordered_set<std::string> eligible_paths;
@@ -133,25 +130,18 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
     if (stable->result.requires_local_mutation ||
         stable->result.requires_storage_repair ||
         expected_tree != stable->result.candidate_shared_tree) {
-        return std::unexpected(Error{
-            .operation = context.operation,
-            .code = ErrorCode::RecoveryFailure,
-            .detail = "plan contains unrelated logical mutations",
-            .runtime = context.summary,
-        });
+        return fail_app(context,
+                        ErrorCode::RecoveryFailure,
+                        "plan contains unrelated logical mutations");
     }
 
     if (resolved_paths.empty()) {
-        return Response{
-            .operation = context.operation,
-            .runtime = context.summary,
-            .data =
-                ResolveMissingCompleted{
-                    .resolved_count = 0,
-                    .resolved_paths = {},
-                    .published = false,
-                },
-        };
+        return make_response(context,
+                             ResolveMissingCompleted{
+                                 .resolved_count = 0,
+                                 .resolved_paths = {},
+                                 .published = false,
+                             });
     }
 
     history_storage::maintenance_protocol::RegistrationState writer;
@@ -163,8 +153,9 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
                 layout,
                 context.runtime.database_path.parent_path());
         if (!registered) {
-            return std::unexpected(synchronization_error(
-                context.operation, registered.error().detail, context.summary));
+            return std::unexpected(make_error(context,
+                                              ErrorCode::SynchronizationFailure,
+                                              registered.error().detail));
         }
         writer = std::move(*registered);
     }
@@ -180,26 +171,25 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
         auto released =
             history_storage::maintenance_protocol::release_registration(writer);
         if (synchronized && !released) {
-            return std::unexpected(synchronization_error(
-                context.operation, released.error().detail, context.summary));
+            return std::unexpected(make_error(context,
+                                              ErrorCode::SynchronizationFailure,
+                                              released.error().detail));
         }
     }
 
     if (!synchronized) {
-        return std::unexpected(transaction_error(
-            context.operation, synchronized.error(), context.summary));
+        return std::unexpected(
+            make_error(context,
+                       ErrorCode::SynchronizationFailure,
+                       sync::coordinator::describe(synchronized.error())));
     }
 
-    return Response{
-        .operation = context.operation,
-        .runtime = context.summary,
-        .data =
-            ResolveMissingCompleted{
-                .resolved_count = resolved_paths.size(),
-                .resolved_paths = std::move(resolved_paths),
-                .published = stable->result.requires_publication,
-            },
-    };
+    return make_response(context,
+                         ResolveMissingCompleted{
+                             .resolved_count = resolved_paths.size(),
+                             .resolved_paths = std::move(resolved_paths),
+                             .published = stable->result.requires_publication,
+                         });
 }
 
 } // namespace kasumi::application::detail

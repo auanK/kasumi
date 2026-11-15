@@ -94,12 +94,6 @@ std::expected<Response, Error> run_plan(OperationContext& context) {
             context.on_progress(SyncProgress{.stage = stage});
         }
     };
-    const auto fail_stage = [&](SyncStage stage, std::string detail) {
-        auto err =
-            plan_error(context.operation, std::move(detail), context.summary);
-        err.stage = stage;
-        return std::unexpected(std::move(err));
-    };
 
     notify(SyncStage::Observing);
 
@@ -114,24 +108,30 @@ std::expected<Response, Error> run_plan(OperationContext& context) {
                                                   {},
                                                   &observation_session);
     if (!collected) {
-        return fail_stage(SyncStage::Observing, collected.error().detail);
+        return fail_app(context,
+                        ErrorCode::PlanFailure,
+                        collected.error().detail,
+                        SyncStage::Observing);
     }
 
     notify(SyncStage::Calculating);
 
     auto reconciled = reconciliation::reconcile(*collected);
     if (!reconciled) {
-        return fail_stage(SyncStage::Calculating,
-                          describe_reconciliation_error(reconciled.error()));
+        return fail_app(context,
+                        ErrorCode::PlanFailure,
+                        describe_reconciliation_error(reconciled.error()),
+                        SyncStage::Calculating);
     }
 
     auto report = reconciliation_to_report(*collected, *reconciled);
     if (!report) {
-        return fail_stage(SyncStage::Calculating, report.error());
+        return fail_app(context,
+                        ErrorCode::PlanFailure,
+                        report.error(),
+                        SyncStage::Calculating);
     }
-    return Response{.operation = context.operation,
-                    .runtime = context.summary,
-                    .data = std::move(*report)};
+    return make_response(context, std::move(*report));
 }
 
 } // namespace kasumi::application::detail

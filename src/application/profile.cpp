@@ -68,6 +68,12 @@ bool valid_retention_policy(const Profile& profile) noexcept {
            profile.min_history_age_hours > 0;
 }
 
+std::unexpected<ProfileError> fail_profile(ProfileErrorCode code,
+                                           std::string detail) {
+    return std::unexpected(
+        ProfileError{.code = code, .detail = std::move(detail)});
+}
+
 ProfileError map_runtime_error(const runtime::Error& err) {
     return ProfileError{
         .code =
@@ -96,11 +102,9 @@ public:
             (!status_error &&
              status.type() == std::filesystem::file_type::not_found);
         if (status_error && !missing) {
-            return std::unexpected(ProfileError{
-                .code = ProfileErrorCode::StorageFailure,
-                .detail = "could not inspect configuration directory: " +
-                          status_error.message(),
-            });
+            return fail_profile(ProfileErrorCode::StorageFailure,
+                                "could not inspect configuration directory: " +
+                                    status_error.message());
         }
         if (missing) {
             auto created = storage::create_directory(app_data_dir);
@@ -110,26 +114,20 @@ public:
             if (!created &&
                 (status_error ||
                  status.type() != std::filesystem::file_type::directory)) {
-                return std::unexpected(ProfileError{
-                    .code = ProfileErrorCode::StorageFailure,
-                    .detail = created.error(),
-                });
+                return fail_profile(ProfileErrorCode::StorageFailure,
+                                    created.error());
             }
         }
         if (status_error ||
             status.type() != std::filesystem::file_type::directory) {
-            return std::unexpected(ProfileError{
-                .code = ProfileErrorCode::StorageFailure,
-                .detail = "configuration path is not a plain directory",
-            });
+            return fail_profile(ProfileErrorCode::StorageFailure,
+                                "configuration path is not a plain directory");
         }
 #if defined(_WIN32)
         if (!storage::query_directory_identity(app_data_dir).valid) {
-            return std::unexpected(ProfileError{
-                .code = ProfileErrorCode::StorageFailure,
-                .detail = "configuration path is not an accessible plain "
-                          "directory",
-            });
+            return fail_profile(ProfileErrorCode::StorageFailure,
+                                "configuration path is not an accessible plain "
+                                "directory");
         }
 #endif
         const auto lock_path = app_data_dir / "config.lock";
@@ -146,10 +144,9 @@ public:
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        return std::unexpected(ProfileError{
-            .code = ProfileErrorCode::LockFailure,
-            .detail = "could not acquire configuration lock: " + last_error,
-        });
+        return fail_profile(ProfileErrorCode::LockFailure,
+                            "could not acquire configuration lock: " +
+                                last_error);
     }
 
     ~ScopedConfigLock() {
@@ -191,6 +188,13 @@ struct EntryInfo {
     bool regular = false;
     bool link = false;
     std::uintmax_t size = 0;
+
+    bool is_plain_dir() const noexcept {
+        return state == EntryState::Present && directory && !link;
+    }
+    bool is_plain_file() const noexcept {
+        return state == EntryState::Present && regular && !link;
+    }
 };
 
 bool path_missing(const std::error_code& error) noexcept {
@@ -381,8 +385,7 @@ struct InspectionTempDirectory {
                                name == "db.sqlite-shm" ||
                                name == "db.sqlite-journal";
             const auto info = query_entry(entry->path());
-            if (info.state != EntryState::Present || !info.regular ||
-                info.link || !known) {
+            if (!info.is_plain_file() || !known) {
                 safe = false;
             } else {
                 removable.push_back(entry->path());
@@ -518,10 +521,9 @@ bool take_sqlite_snapshot(const std::filesystem::path& source,
                           const std::filesystem::path& destination,
                           bool wal_was_present,
                           bool rollback_was_present) {
-    auto wal_source = source;
-    wal_source += "-wal";
-    auto rollback_source = source;
-    rollback_source += "-journal";
+    const auto sources = detail::sqlite_sidecar_paths(source);
+    const auto& wal_source = sources[0];
+    const auto& rollback_source = sources[2];
     const auto wal = query_entry(wal_source);
     const auto rollback = query_entry(rollback_source);
     if ((wal_was_present && wal.state != EntryState::Present) ||
@@ -623,17 +625,14 @@ auto find_profile(std::vector<runtime::ProfileData>& profiles,
 std::expected<void, ProfileError>
 validate_profile_locations(const Profile& profile) {
     if (!profile.local_dir.is_absolute()) {
-        return std::unexpected(
-            ProfileError{.code = ProfileErrorCode::StorageFailure,
-                         .detail = "local path must be absolute"});
+        return fail_profile(ProfileErrorCode::StorageFailure,
+                            "local path must be absolute");
     }
     const auto valid_storage =
         transport::validate_transport_location(profile.remote_dir);
     if (!valid_storage) {
-        return std::unexpected(ProfileError{
-            .code = ProfileErrorCode::StorageFailure,
-            .detail = transport::describe(valid_storage.error()),
-        });
+        return fail_profile(ProfileErrorCode::StorageFailure,
+                            transport::describe(valid_storage.error()));
     }
     return {};
 }
@@ -666,10 +665,8 @@ load_profiles_locked(const std::filesystem::path& app_data_dir,
         }
         if (!not_found_detail.empty() &&
             profiles_res.error().code == runtime::ErrorCode::ConfigNotFound) {
-            return std::unexpected(ProfileError{
-                .code = ProfileErrorCode::NotFound,
-                .detail = std::string(not_found_detail),
-            });
+            return fail_profile(ProfileErrorCode::NotFound,
+                                std::string(not_found_detail));
         }
         return std::unexpected(map_runtime_error(profiles_res.error()));
     }
@@ -730,14 +727,12 @@ create_profile(const ExecutionEnvironment& environment,
 
     auto do_create = [&]() -> std::expected<void, ProfileError> {
         if (!runtime::is_valid_profile_name(profile.name)) {
-            return std::unexpected(
-                ProfileError{.code = ProfileErrorCode::InvalidName,
-                             .detail = "invalid profile name"});
+            return fail_profile(ProfileErrorCode::InvalidName,
+                                "invalid profile name");
         }
         if (!valid_retention_policy(profile)) {
-            return std::unexpected(
-                ProfileError{.code = ProfileErrorCode::ConfigFailure,
-                             .detail = "invalid retention policy"});
+            return fail_profile(ProfileErrorCode::ConfigFailure,
+                                "invalid retention policy");
         }
         if (const auto valid = validate_profile_locations(profile); !valid) {
             return valid;
@@ -762,9 +757,8 @@ create_profile(const ExecutionEnvironment& environment,
         const auto& config_path = loaded->config_path;
 
         if (find_profile(profiles, profile.name) != profiles.end()) {
-            return std::unexpected(
-                ProfileError{.code = ProfileErrorCode::AlreadyExists,
-                             .detail = "profile already exists"});
+            return fail_profile(ProfileErrorCode::AlreadyExists,
+                                "profile already exists");
         }
 
         auto paths_res = runtime::resolve_profile_paths(
@@ -775,9 +769,9 @@ create_profile(const ExecutionEnvironment& environment,
 
         if (query_entry(paths_res->profile_dir).state != EntryState::Absent ||
             query_entry(paths_res->key_path).state != EntryState::Absent) {
-            return std::unexpected(ProfileError{
-                .code = ProfileErrorCode::StorageFailure,
-                .detail = "profile infrastructure already exists on disk"});
+            return fail_profile(
+                ProfileErrorCode::StorageFailure,
+                "profile infrastructure already exists on disk");
         }
 
         auto ensure_res = runtime::ensure_profile_directory(*paths_res);
@@ -791,8 +785,7 @@ create_profile(const ExecutionEnvironment& environment,
                 detail +=
                     "; rollback also failed: " + remove_res.error().detail;
             }
-            return std::unexpected(
-                ProfileError{.code = code, .detail = std::move(detail)});
+            return fail_profile(code, std::move(detail));
         };
 
         if (!runtime::vault::write(paths_res->key_path, *master_key_res)) {
@@ -833,9 +826,8 @@ create_profile(const ExecutionEnvironment& environment,
 std::expected<void, ProfileError>
 update_profile(const ExecutionEnvironment& environment, Profile profile) {
     if (!valid_retention_policy(profile)) {
-        return std::unexpected(
-            ProfileError{.code = ProfileErrorCode::ConfigFailure,
-                         .detail = "invalid retention policy"});
+        return fail_profile(ProfileErrorCode::ConfigFailure,
+                            "invalid retention policy");
     }
     if (const auto valid = validate_profile_locations(profile); !valid) {
         return valid;
@@ -848,8 +840,7 @@ update_profile(const ExecutionEnvironment& environment, Profile profile) {
 
     auto it = find_profile(loaded->profiles, profile.name);
     if (it == loaded->profiles.end()) {
-        return std::unexpected(ProfileError{.code = ProfileErrorCode::NotFound,
-                                            .detail = "profile not found"});
+        return fail_profile(ProfileErrorCode::NotFound, "profile not found");
     }
 
     it->local_dir = profile.local_dir;
@@ -876,8 +867,7 @@ delete_profile(const ExecutionEnvironment& environment,
 
     auto it = find_profile(loaded->profiles, profile_name);
     if (it == loaded->profiles.end()) {
-        return std::unexpected(ProfileError{.code = ProfileErrorCode::NotFound,
-                                            .detail = "profile not found"});
+        return fail_profile(ProfileErrorCode::NotFound, "profile not found");
     }
 
     auto original_profiles = loaded->profiles;
@@ -902,8 +892,7 @@ delete_profile(const ExecutionEnvironment& environment,
                     " (config rollback failed: " + rollback_res.error().detail +
                     ")";
             }
-            return std::unexpected(ProfileError{
-                .code = ProfileErrorCode::StorageFailure, .detail = detail});
+            return fail_profile(ProfileErrorCode::StorageFailure, detail);
         }
     }
 
@@ -915,9 +904,8 @@ rename_profile(const ExecutionEnvironment& environment,
                std::string_view current_name,
                std::string_view new_name) {
     if (!runtime::is_valid_profile_name(new_name)) {
-        return std::unexpected(
-            ProfileError{.code = ProfileErrorCode::InvalidName,
-                         .detail = "invalid profile name"});
+        return fail_profile(ProfileErrorCode::InvalidName,
+                            "invalid profile name");
     }
 
     auto loaded = load_profiles_locked(environment.app_data_dir);
@@ -927,14 +915,12 @@ rename_profile(const ExecutionEnvironment& environment,
 
     auto it_current = find_profile(loaded->profiles, current_name);
     if (it_current == loaded->profiles.end()) {
-        return std::unexpected(ProfileError{.code = ProfileErrorCode::NotFound,
-                                            .detail = "profile not found"});
+        return fail_profile(ProfileErrorCode::NotFound, "profile not found");
     }
 
     if (find_profile(loaded->profiles, new_name) != loaded->profiles.end()) {
-        return std::unexpected(
-            ProfileError{.code = ProfileErrorCode::AlreadyExists,
-                         .detail = "a profile with this name already exists"});
+        return fail_profile(ProfileErrorCode::AlreadyExists,
+                            "a profile with this name already exists");
     }
 
     auto old_paths_res =
@@ -943,15 +929,13 @@ rename_profile(const ExecutionEnvironment& environment,
         runtime::resolve_profile_paths(environment.app_data_dir, new_name);
 
     if (!old_paths_res || !new_paths_res) {
-        return std::unexpected(
-            ProfileError{.code = ProfileErrorCode::StorageFailure,
-                         .detail = "failed to resolve paths"});
+        return fail_profile(ProfileErrorCode::StorageFailure,
+                            "failed to resolve paths");
     }
 
     if (query_entry(new_paths_res->profile_dir).state != EntryState::Absent) {
-        return std::unexpected(
-            ProfileError{.code = ProfileErrorCode::StorageFailure,
-                         .detail = "physical destination already exists"});
+        return fail_profile(ProfileErrorCode::StorageFailure,
+                            "physical destination already exists");
     }
 
     bool phys_renamed = false;
@@ -959,8 +943,7 @@ rename_profile(const ExecutionEnvironment& environment,
     const auto old_status =
         std::filesystem::symlink_status(old_paths_res->profile_dir, ec);
     if (ec && !path_missing(ec)) {
-        return std::unexpected(ProfileError{
-            .code = ProfileErrorCode::StorageFailure, .detail = ec.message()});
+        return fail_profile(ProfileErrorCode::StorageFailure, ec.message());
     }
     if (!ec && old_status.type() != std::filesystem::file_type::not_found) {
         auto ren_res =
@@ -986,8 +969,7 @@ rename_profile(const ExecutionEnvironment& environment,
                     ")";
             }
         }
-        return std::unexpected(ProfileError{
-            .code = ProfileErrorCode::StorageFailure, .detail = detail});
+        return fail_profile(ProfileErrorCode::StorageFailure, detail);
     }
 
     return {};
@@ -998,10 +980,8 @@ clone_profile(const ExecutionEnvironment& environment,
               std::string_view source_profile_name,
               std::string_view destination_profile_name) {
     if (!runtime::is_valid_profile_name(destination_profile_name)) {
-        return std::unexpected(ProfileError{
-            .code = ProfileErrorCode::InvalidName,
-            .detail = "invalid profile name",
-        });
+        return fail_profile(ProfileErrorCode::InvalidName,
+                            "invalid profile name");
     }
 
     auto loaded = load_profiles_locked(
@@ -1012,18 +992,14 @@ clone_profile(const ExecutionEnvironment& environment,
 
     auto source_it = find_profile(loaded->profiles, source_profile_name);
     if (source_it == loaded->profiles.end()) {
-        return std::unexpected(ProfileError{
-            .code = ProfileErrorCode::NotFound,
-            .detail = "source profile not found",
-        });
+        return fail_profile(ProfileErrorCode::NotFound,
+                            "source profile not found");
     }
 
     if (find_profile(loaded->profiles, destination_profile_name) !=
         loaded->profiles.end()) {
-        return std::unexpected(ProfileError{
-            .code = ProfileErrorCode::AlreadyExists,
-            .detail = "a profile with this name already exists",
-        });
+        return fail_profile(ProfileErrorCode::AlreadyExists,
+                            "a profile with this name already exists");
     }
 
     auto source_paths_res = runtime::resolve_profile_paths(
@@ -1057,19 +1033,14 @@ clone_profile(const ExecutionEnvironment& environment,
         auto ensure_res =
             platform::private_storage::ensure_directory(directory);
         if (!ensure_res) {
-            return std::unexpected(ProfileError{
-                .code = ProfileErrorCode::StorageFailure,
-                .detail = ensure_res.error(),
-            });
+            return fail_profile(ProfileErrorCode::StorageFailure,
+                                ensure_res.error());
         }
     }
     auto created = platform::private_storage::create_directory(
         dest_paths_res->profile_dir);
     if (!created) {
-        return std::unexpected(ProfileError{
-            .code = ProfileErrorCode::StorageFailure,
-            .detail = created.error(),
-        });
+        return fail_profile(ProfileErrorCode::StorageFailure, created.error());
     }
     const auto clone_identity =
         query_directory_identity(dest_paths_res->profile_dir);
@@ -1082,7 +1053,7 @@ clone_profile(const ExecutionEnvironment& environment,
         if (info.state == EntryState::Absent) {
             return !required;
         }
-        if (info.state != EntryState::Present || !info.regular || info.link) {
+        if (!info.is_plain_file()) {
             return false;
         }
         const auto identity =
@@ -1117,8 +1088,7 @@ clone_profile(const ExecutionEnvironment& environment,
                                name == "db.sqlite-shm" ||
                                name == "db.sqlite-journal";
             const auto info = query_entry(path);
-            if (!known || info.state != EntryState::Present || !info.regular ||
-                info.link) {
+            if (!known || !info.is_plain_file()) {
                 return std::unexpected("destination contains unknown data");
             }
             const auto owned =
@@ -1235,20 +1205,17 @@ clone_profile(const ExecutionEnvironment& environment,
                                      : "destination directory remains");
     };
     if (!clone_identity.valid) {
-        return std::unexpected(ProfileError{
-            .code = ProfileErrorCode::StorageFailure,
-            .detail = "could not verify ownership of destination directory",
-        });
+        return fail_profile(
+            ProfileErrorCode::StorageFailure,
+            "could not verify ownership of destination directory");
     }
 
     const auto fail_with_rollback = [&](std::string detail) {
         if (auto remove_res = rollback_directory(); !remove_res) {
             detail += "; rollback also failed: " + remove_res.error();
         }
-        return std::unexpected(ProfileError{
-            .code = ProfileErrorCode::StorageFailure,
-            .detail = std::move(detail),
-        });
+        return fail_profile(ProfileErrorCode::StorageFailure,
+                            std::move(detail));
     };
 
     bool write_ok = false;
@@ -1354,10 +1321,7 @@ clone_profile(const ExecutionEnvironment& environment,
         if (!remove_res) {
             detail += "; rollback also failed: " + remove_res.error().detail;
         }
-        return std::unexpected(ProfileError{
-            .code = ProfileErrorCode::ConfigFailure,
-            .detail = detail,
-        });
+        return fail_profile(ProfileErrorCode::ConfigFailure, detail);
     }
 
     return {};
@@ -1380,15 +1344,13 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
     for (const auto& directory :
          {environment.app_data_dir, profiles_dir, paths->profile_dir}) {
         const auto entry = query_entry(directory);
-        if (entry.state != EntryState::Present || !entry.directory ||
-            entry.link) {
+        if (!entry.is_plain_dir()) {
             return ProfileLocalState::Problem;
         }
     }
 
     const auto key = query_entry(paths->key_path);
-    if (key.state != EntryState::Present || !key.regular || key.link ||
-        key.size != crypto::KEY_SIZE) {
+    if (!key.is_plain_file() || key.size != crypto::KEY_SIZE) {
         return ProfileLocalState::Problem;
     }
     auto key_bytes = runtime::vault::read_only(paths->key_path);
@@ -1398,8 +1360,7 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
     KeyBytesWiper key_wiper{*key_bytes};
 
     const auto database = query_entry(paths->database_path);
-    if (database.state != EntryState::Present || !database.regular ||
-        database.link) {
+    if (!database.is_plain_file()) {
         return ProfileLocalState::Problem;
     }
 
@@ -1414,18 +1375,19 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
                (entry.state == EntryState::Present &&
                 (!entry.regular || entry.link));
     };
-    const auto rollback_path = paths->profile_dir / "db.sqlite-journal";
+    const auto sidecars = detail::sqlite_sidecar_paths(paths->database_path);
+    const auto& rollback_path = sidecars[2];
     const auto rollback_corrupt = [&](const auto& entry) {
         return auxiliary_corrupt(entry) ||
                (entry.state == EntryState::Present && entry.size > 0 &&
                 !can_read_first_byte(rollback_path));
     };
 
-    const auto wal = query_entry(paths->profile_dir / "db.sqlite-wal");
+    const auto wal = query_entry(sidecars[0]);
     if (auxiliary_corrupt(wal)) {
         return ProfileLocalState::Problem;
     }
-    if (auxiliary_corrupt(query_entry(paths->profile_dir / "db.sqlite-shm"))) {
+    if (auxiliary_corrupt(query_entry(sidecars[1]))) {
         return ProfileLocalState::Problem;
     }
     const auto rollback = query_entry(rollback_path);
@@ -1505,8 +1467,7 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
 #endif
     {
         const auto entry = query_entry(candidate);
-        if (entry.state != EntryState::Present || !entry.directory ||
-            entry.link ||
+        if (!entry.is_plain_dir() ||
             !(query_directory_identity(candidate) == temporary.identity)) {
             return ProfileLocalState::Problem;
         }

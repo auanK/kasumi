@@ -18,7 +18,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -641,29 +640,17 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                     }
 
                     const auto& report = *batch_result;
-                    bool report_valid = (report.items.size() == chunk_size);
-                    std::unordered_map<std::string_view,
-                                       const transport::RemoveBatchItemResult*>
-                        result_by_id;
-                    if (report_valid) {
-                        result_by_id.reserve(chunk_size);
-                        for (const auto& item_result : report.items) {
-                            if (!result_by_id
-                                     .emplace(item_result.identifier,
-                                              &item_result)
-                                     .second) {
-                                report_valid = false;
-                                break;
-                            }
-                        }
-                        for (std::size_t i = 0; report_valid && i < chunk_size;
-                             ++i) {
-                            if (!result_by_id.contains(
-                                    candidates[chunk_start + i])) {
-                                report_valid = false;
-                            }
-                        }
-                    }
+                    const auto requested =
+                        std::span{candidates}.subspan(chunk_start, chunk_size);
+                    const bool report_valid =
+                        report.items.size() == chunk_size &&
+                        std::ranges::all_of(requested, [&](const auto& id) {
+                            return std::ranges::count(
+                                       report.items,
+                                       id,
+                                       &transport::RemoveBatchItemResult::
+                                           identifier) == 1;
+                        });
 
                     if (!report_valid) {
                         return fail_uncertain(
@@ -683,7 +670,10 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
 
                     for (std::size_t i = 0; i < chunk_size; ++i) {
                         const auto& cand_id = candidates[chunk_start + i];
-                        const auto* res = result_by_id.at(cand_id);
+                        const auto* res = &*std::ranges::find(
+                            report.items,
+                            cand_id,
+                            &transport::RemoveBatchItemResult::identifier);
                         if (res->result.has_value()) {
                             ++batch_acknowledged;
                         } else if (first_failure == nullptr) {

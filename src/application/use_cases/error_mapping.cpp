@@ -44,68 +44,15 @@ resolve_key_into(Operation operation,
         });
 }
 
-namespace {
-
-Error build_error(Operation operation,
-                  ErrorCode code,
-                  std::string detail,
-                  const RuntimeSummary& summary,
-                  std::optional<GarbageCollectFailure> gc = std::nullopt) {
-    return Error{.operation = operation,
+Error make_error(const OperationContext& context,
+                 ErrorCode code,
+                 std::string detail,
+                 std::optional<SyncStage> stage) {
+    return Error{.operation = context.operation,
                  .code = code,
                  .detail = std::move(detail),
-                 .runtime = summary,
-                 .garbage_collection = std::move(gc)};
-}
-
-} // namespace
-
-Error transaction_error(Operation operation,
-                        const sync::coordinator::Error& error,
-                        const RuntimeSummary& summary) {
-    return build_error(operation,
-                       ErrorCode::SynchronizationFailure,
-                       sync::coordinator::describe(error),
-                       summary);
-}
-
-Error maintenance_error(Operation operation,
-                        const integrity::Error& error,
-                        const RuntimeSummary& summary) {
-    return build_error(operation,
-                       operation == Operation::Fsck
-                           ? ErrorCode::FsckFailure
-                           : ErrorCode::GarbageCollectionFailure,
-                       integrity::describe(error),
-                       summary,
-                       error.garbage_collection);
-}
-
-Error maintenance_recovery_error(Operation operation,
-                                 const sync::coordinator::Error& error,
-                                 const RuntimeSummary& summary) {
-    return build_error(operation,
-                       operation == Operation::Fsck
-                           ? ErrorCode::FsckFailure
-                           : ErrorCode::GarbageCollectionFailure,
-                       sync::coordinator::describe(error),
-                       summary);
-}
-
-Error plan_error(Operation operation,
-                 std::string detail,
-                 const RuntimeSummary& summary) {
-    return build_error(
-        operation, ErrorCode::PlanFailure, std::move(detail), summary);
-}
-
-Error synchronization_error(Operation operation,
-                            std::string detail,
-                            const RuntimeSummary& summary) {
-    return build_error(operation,
-                       ErrorCode::SynchronizationFailure,
-                       std::move(detail),
-                       summary);
+                 .runtime = context.summary,
+                 .stage = stage};
 }
 
 } // namespace kasumi::application::detail

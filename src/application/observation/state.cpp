@@ -315,7 +315,10 @@ collect_reconciliation_input(
     auto persisted = state_storage::load_state(runtime_data.database_path);
 
     reconciliation::Input input;
+    history::ObservationHints hints;
     if (persisted && *persisted) {
+        hints = history::make_observation_hints(
+            **persisted, history_storage::derive_remote_layout(key));
         input.base_tree = std::move((*persisted)->tree);
         input.pending_materializations =
             std::move((*persisted)->pending_materializations);
@@ -359,35 +362,7 @@ collect_reconciliation_input(
         !std::filesystem::exists(history_workspace, workspace_error)) {
         history_workspace = runtime_data.local_dir.parent_path();
     }
-    const history_storage::KnownHistoryFrontier* frontier = nullptr;
-    std::optional<history_storage::KnownHistoryFrontier> known_frontier;
-    std::vector<std::string> derived_trusted_markers;
-    if (input.base_state_present) {
-        known_frontier.emplace();
-        known_frontier->anchors.push_back(history_storage::KnownHistoryAnchor{
-            .commit_id = input.base_commit_id,
-            .height = input.local_generation,
-            .tree = input.base_tree,
-        });
-        if (!(*persisted)->epoch_id.empty()) {
-            known_frontier->accepted_epoch = history_storage::epoch::Reference{
-                .sequence = (*persisted)->epoch_sequence,
-                .epoch_id = (*persisted)->epoch_id,
-            };
-        }
-        frontier = &*known_frontier;
-        if (!audit_storage_objects && !input.base_ciphertext_id.empty()) {
-            const history_storage::HeadReference persisted_reference{
-                .commit_id = input.base_commit_id,
-                .ciphertext_id = input.base_ciphertext_id};
-            if (history_storage::valid(persisted_reference)) {
-                const auto layout = history_storage::derive_remote_layout(key);
-                derived_trusted_markers.push_back(
-                    history_storage::marker_object(layout,
-                                                   persisted_reference));
-            }
-        }
-    }
+    const auto& derived_trusted_markers = hints.trusted_marker_identifiers;
     std::span<const std::string> effective_trusted_markers{};
     if (!audit_storage_objects) {
         effective_trusted_markers =
@@ -395,12 +370,13 @@ collect_reconciliation_input(
                 ? trusted_marker_identifiers
                 : std::span<const std::string>{derived_trusted_markers};
     }
-    auto observed = history::observe(storage,
-                                     key,
-                                     history_workspace,
-                                     audit_storage_objects,
-                                     frontier,
-                                     effective_trusted_markers);
+    auto observed =
+        history::observe(storage,
+                         key,
+                         history_workspace,
+                         audit_storage_objects,
+                         hints.frontier ? &*hints.frontier : nullptr,
+                         effective_trusted_markers);
     local_scan.join();
     if (!local_observation) {
         return std::unexpected(
