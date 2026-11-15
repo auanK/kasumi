@@ -111,6 +111,16 @@ void seed_remote_history(const TempWorkspace& workspace,
         put_application_content(workspace, *opened, "orphan", "orphan-content");
 }
 
+auto execute_initial_sync(const ExecutionEnvironment& environment,
+                          std::string profile_name = "demo") {
+    return kasumi::application::execute(
+        {Request{.operation = Operation::Sync,
+                 .profile_name = std::move(profile_name),
+                 .initial = true},
+         Credentials{NoCredentials{}},
+         environment});
+}
+
 TEST(ApplicationExecuteTest, MissingProfileMapsToPublicApplicationError) {
     auto workspace =
         kasumi::test::make_temp_workspace("application-execute-missing");
@@ -252,12 +262,7 @@ TEST(ApplicationExecuteTest,
     const auto corrupt_before = kasumi::test::read_binary(remote / replaced_id);
     ASSERT_TRUE(std::filesystem::remove(database));
 
-    const auto initial =
-        kasumi::application::execute({Request{.operation = Operation::Sync,
-                                              .profile_name = "demo",
-                                              .initial = true},
-                                      Credentials{NoCredentials{}},
-                                      environment});
+    const auto initial = execute_initial_sync(environment);
     ASSERT_TRUE(initial.has_value()) << initial.error().detail;
     ASSERT_TRUE(kasumi::state_storage::validate(database));
     auto accepted = kasumi::state_storage::load_state(database);
@@ -454,12 +459,7 @@ TEST(ApplicationExecuteTest,
     ASSERT_FALSE(std::filesystem::exists(db_b));
 
     // Client B joins with --initial
-    const auto result =
-        kasumi::application::execute({Request{.operation = Operation::Sync,
-                                              .profile_name = "demo",
-                                              .initial = true},
-                                      Credentials{NoCredentials{}},
-                                      env_b});
+    const auto result = execute_initial_sync(env_b);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_TRUE(std::filesystem::exists(db_b));
     EXPECT_TRUE(kasumi::state_storage::validate(db_b));
@@ -502,12 +502,7 @@ TEST(ApplicationExecuteTest,
     ASSERT_TRUE(std::filesystem::remove(db_b));
 
     // Client B joins with --initial
-    const auto result_b =
-        kasumi::application::execute({Request{.operation = Operation::Sync,
-                                              .profile_name = "demo",
-                                              .initial = true},
-                                      Credentials{NoCredentials{}},
-                                      env_b});
+    const auto result_b = execute_initial_sync(env_b);
     ASSERT_TRUE(result_b.has_value()) << result_b.error().detail;
     EXPECT_TRUE(std::filesystem::exists(local_b / "from_a.txt"));
     EXPECT_TRUE(std::filesystem::exists(local_b / "from_b.txt"));
@@ -557,12 +552,7 @@ TEST(ApplicationExecuteTest,
     ASSERT_TRUE(std::filesystem::remove(db_b));
 
     // Client B joins with --initial
-    const auto result_b =
-        kasumi::application::execute({Request{.operation = Operation::Sync,
-                                              .profile_name = "demo",
-                                              .initial = true},
-                                      Credentials{NoCredentials{}},
-                                      env_b});
+    const auto result_b = execute_initial_sync(env_b);
     ASSERT_TRUE(result_b.has_value()) << result_b.error().detail;
 
     // Verify neither content was lost: local uncommitted version preserved,
@@ -643,12 +633,7 @@ TEST(ApplicationExecuteTest,
     const auto database = app / "profiles/demo/db.sqlite";
     ASSERT_TRUE(std::filesystem::remove(database));
 
-    const auto result =
-        kasumi::application::execute({Request{.operation = Operation::Sync,
-                                              .profile_name = "demo",
-                                              .initial = true},
-                                      Credentials{NoCredentials{}},
-                                      environment});
+    const auto result = execute_initial_sync(environment);
     ASSERT_FALSE(result.has_value());
     EXPECT_FALSE(std::filesystem::exists(database));
     const auto after = kasumi::transport::list(*opened);
@@ -675,12 +660,7 @@ TEST(ApplicationExecuteTest,
     ASSERT_TRUE(std::filesystem::create_directories(journal));
     kasumi::test::write_text(journal / "snapshot.enc", "unfinished");
 
-    const auto result =
-        kasumi::application::execute({Request{.operation = Operation::Sync,
-                                              .profile_name = "demo",
-                                              .initial = true},
-                                      Credentials{NoCredentials{}},
-                                      environment});
+    const auto result = execute_initial_sync(environment);
     ASSERT_FALSE(result.has_value());
     EXPECT_FALSE(std::filesystem::exists(database));
     EXPECT_TRUE(std::filesystem::exists(journal / "snapshot.enc"));
@@ -691,12 +671,7 @@ TEST(ApplicationExecuteTest,
     const auto workspace_evidence =
         app / "profiles/demo/.transactions/unfinished-workspace";
     ASSERT_TRUE(std::filesystem::create_directories(workspace_evidence));
-    const auto workspace_retry =
-        kasumi::application::execute({Request{.operation = Operation::Sync,
-                                              .profile_name = "demo",
-                                              .initial = true},
-                                      Credentials{NoCredentials{}},
-                                      environment});
+    const auto workspace_retry = execute_initial_sync(environment);
     ASSERT_FALSE(workspace_retry.has_value());
     EXPECT_FALSE(std::filesystem::exists(database));
     EXPECT_TRUE(std::filesystem::exists(workspace_evidence));
@@ -717,12 +692,7 @@ TEST(ApplicationExecuteTest,
     const auto database = app / "profiles/demo/db.sqlite";
     ASSERT_TRUE(std::filesystem::remove(database));
 
-    const auto initial =
-        kasumi::application::execute({Request{.operation = Operation::Sync,
-                                              .profile_name = "demo",
-                                              .initial = true},
-                                      Credentials{NoCredentials{}},
-                                      environment});
+    const auto initial = execute_initial_sync(environment);
     ASSERT_FALSE(initial.has_value());
     ASSERT_TRUE(kasumi::state_storage::validate(database));
     auto empty = kasumi::state_storage::load_state(database);
@@ -768,12 +738,7 @@ TEST(ApplicationExecuteTest,
     kasumi::test::write_binary(database, corrupt);
     const auto before = kasumi::test::read_binary(database);
 
-    const auto result =
-        kasumi::application::execute({Request{.operation = Operation::Sync,
-                                              .profile_name = "demo",
-                                              .initial = true},
-                                      Credentials{NoCredentials{}},
-                                      environment});
+    const auto result = execute_initial_sync(environment);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(kasumi::test::read_binary(database), before);
 }
@@ -1020,12 +985,7 @@ TEST(ApplicationExecuteTest, InitialSyncRejectsSymlinkAtDatabasePath) {
         GTEST_SKIP() << "Symlink creation not supported without elevation: "
                      << ec.message();
     }
-    const auto dangling_result =
-        kasumi::application::execute({Request{.operation = Operation::Sync,
-                                              .profile_name = "demo",
-                                              .initial = true},
-                                      Credentials{NoCredentials{}},
-                                      environment});
+    const auto dangling_result = execute_initial_sync(environment);
     EXPECT_FALSE(dangling_result.has_value());
     EXPECT_TRUE(
         std::filesystem::is_symlink(std::filesystem::symlink_status(database)));
@@ -1033,12 +993,7 @@ TEST(ApplicationExecuteTest, InitialSyncRejectsSymlinkAtDatabasePath) {
 
     // Test 2: Symlink pointing to a valid database
     ASSERT_TRUE(kasumi::state_storage::initialize(target));
-    const auto valid_symlink_result =
-        kasumi::application::execute({Request{.operation = Operation::Sync,
-                                              .profile_name = "demo",
-                                              .initial = true},
-                                      Credentials{NoCredentials{}},
-                                      environment});
+    const auto valid_symlink_result = execute_initial_sync(environment);
     EXPECT_FALSE(valid_symlink_result.has_value());
     EXPECT_TRUE(
         std::filesystem::is_symlink(std::filesystem::symlink_status(database)));
@@ -1060,12 +1015,7 @@ TEST(ApplicationExecuteTest, InitialSyncRejectsDirectoryAtDatabasePath) {
     ASSERT_TRUE(std::filesystem::remove(database));
     ASSERT_TRUE(std::filesystem::create_directories(database));
 
-    const auto result =
-        kasumi::application::execute({Request{.operation = Operation::Sync,
-                                              .profile_name = "demo",
-                                              .initial = true},
-                                      Credentials{NoCredentials{}},
-                                      environment});
+    const auto result = execute_initial_sync(environment);
     EXPECT_FALSE(result.has_value());
     EXPECT_TRUE(std::filesystem::is_directory(database));
 }
@@ -1114,12 +1064,7 @@ TEST(ApplicationExecuteTest,
     const auto db_b = app_b / "profiles/demo/db.sqlite";
     ASSERT_TRUE(std::filesystem::remove(db_b));
 
-    const auto result =
-        kasumi::application::execute({Request{.operation = Operation::Sync,
-                                              .profile_name = "demo",
-                                              .initial = true},
-                                      Credentials{NoCredentials{}},
-                                      env_b});
+    const auto result = execute_initial_sync(env_b);
     ASSERT_FALSE(result.has_value());
     EXPECT_FALSE(std::filesystem::exists(db_b));
 }
@@ -1166,12 +1111,7 @@ TEST(ApplicationExecuteTest,
     const auto db_b = app_b / "profiles/demo/db.sqlite";
     ASSERT_TRUE(std::filesystem::remove(db_b));
 
-    const auto result =
-        kasumi::application::execute({Request{.operation = Operation::Sync,
-                                              .profile_name = "demo",
-                                              .initial = true},
-                                      Credentials{NoCredentials{}},
-                                      env_b});
+    const auto result = execute_initial_sync(env_b);
     ASSERT_FALSE(result.has_value());
     EXPECT_FALSE(std::filesystem::exists(db_b));
 }
@@ -1217,12 +1157,7 @@ TEST(ApplicationExecuteTest,
     // Enrollment must NOT speculatively audit the orphan content.
     // Instead it must treat orphan_b.txt as normal new local content and upload
     // it.
-    const auto result =
-        kasumi::application::execute({Request{.operation = Operation::Sync,
-                                              .profile_name = "demo",
-                                              .initial = true},
-                                      Credentials{NoCredentials{}},
-                                      env_b});
+    const auto result = execute_initial_sync(env_b);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
 }
 

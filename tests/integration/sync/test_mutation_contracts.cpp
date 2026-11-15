@@ -323,6 +323,13 @@ Operation make_download_op(std::string_view path,
             .size = size};
 }
 
+auto prepare_slot0(const Operation& op,
+                   const std::filesystem::path& local,
+                   const platform::Workspace& transaction) {
+    return mutation::prepare_operation(
+        op, 0, local, transaction, {.backup_slot = 0});
+}
+
 } // namespace
 
 // Download with an edit after preparation.
@@ -338,8 +345,7 @@ TEST(MutationRaceCharacterizationTest,
     const auto r_hash = hasher::hash_string("REMOTE_R");
     const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -382,8 +388,7 @@ TEST(MutationRaceCharacterizationTest,
     const auto r_hash = hasher::hash_string("REMOTE_R");
     const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -425,8 +430,7 @@ TEST(LocalMutationContractTest, ConditionalInstallPreservesLateCreation) {
     const auto r_hash = hasher::hash_string("REMOTE_R");
     const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -462,8 +466,7 @@ TEST(MutationRaceCharacterizationTest,
 
     const Operation op{.action = Action::DeleteLocal, .path = "file.txt"};
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     bool hook_hit = false;
@@ -504,8 +507,7 @@ TEST(MutationRaceCharacterizationTest,
 
     const Operation op{.action = Action::DeleteLocal, .path = "file.txt"};
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     bool hook_hit = false;
@@ -547,8 +549,7 @@ TEST(MutationRaceCharacterizationTest,
                        .path = "source.txt",
                        .alt_path = "conflict.txt"};
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     bool hook_hit = false;
@@ -589,8 +590,7 @@ TEST(MutationRaceCharacterizationTest,
     const auto r_hash = hasher::hash_string("REMOTE_R");
     const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -641,8 +641,7 @@ TEST(MutationRaceCharacterizationTest,
     const auto r_hash = hasher::hash_string("REMOTE_R");
     const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -694,8 +693,7 @@ TEST(MutationRaceCharacterizationTest,
                        .path = "source.txt",
                        .alt_path = "conflict.txt"};
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     transport::Transport unavailable;
@@ -746,8 +744,8 @@ TEST(LocalMutationContractTest, DownloadIntoTrailingSlashSymlinkRoot) {
     test::write_text(root / "remote_src", "REMOTE_R");
     const auto hash = hasher::hash_string("REMOTE_R");
     const auto operation = make_download_op("file.txt", hash);
-    const auto prepared = mutation::prepare_operation(
-        operation, 0, configured_root, transaction, {.backup_slot = 0});
+    const auto prepared =
+        prepare_slot0(operation, configured_root, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -780,8 +778,8 @@ TEST(LocalMutationContractTest, InternalSymlinkStillRejectedWithLinkedRoot) {
     const std::filesystem::path configured_root{link.string() + "/"};
     const Operation operation{.action = Action::Download,
                               .path = "child/file.txt"};
-    const auto prepared = mutation::prepare_operation(
-        operation, 0, configured_root, transaction, {.backup_slot = 0});
+    const auto prepared =
+        prepare_slot0(operation, configured_root, transaction);
     ASSERT_FALSE(prepared.has_value());
     EXPECT_EQ(prepared.error().code, mutation::MutationErrorCode::UnsafePath);
     EXPECT_FALSE(std::filesystem::exists(outside / "file.txt"));
@@ -798,8 +796,7 @@ TEST(LocalMutationContractTest,
     std::filesystem::create_directories(transaction.root);
     std::filesystem::create_directory_symlink(real_root, link);
     const Operation operation{.action = Action::Download, .path = "file.txt"};
-    const auto prepared = mutation::prepare_operation(
-        operation, 0, link, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(operation, link, transaction);
     ASSERT_FALSE(prepared.has_value());
     EXPECT_EQ(prepared.error().code, mutation::MutationErrorCode::UnsafePath);
 }
@@ -824,8 +821,7 @@ TEST(LocalMutationContractTest, DownloadAfterConfirmedRenameLocal) {
                                 .hash = hash_hex(r_hash),
                                 .size = 8};
 
-    const auto prep_rename = mutation::prepare_operation(
-        rename_op, 0, local, transaction, {.backup_slot = 0});
+    const auto prep_rename = prepare_slot0(rename_op, local, transaction);
     ASSERT_TRUE(prep_rename.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -881,8 +877,7 @@ TEST(LocalMutationContractTest, RenameLocalFillingConflictDestination) {
     ASSERT_TRUE(storage.has_value());
     stage_remote_object(*storage, root / "remote_child", child_hash);
 
-    const auto prep_rename = mutation::prepare_operation(
-        rename_op, 0, local, transaction, {.backup_slot = 0});
+    const auto prep_rename = prepare_slot0(rename_op, local, transaction);
     ASSERT_TRUE(prep_rename.has_value());
     const auto rename_result = mutation::apply_operation(
         rename_op, 0, local, *storage, key, transaction, *prep_rename);
@@ -915,8 +910,7 @@ TEST(LocalMutationContractTest, CorruptedBackupWithConflict) {
     test::write_text(target, "ORIGINAL_O");
 
     const Operation op{.action = Action::DeleteLocal, .path = "file.txt"};
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     // Corrupt the backup
@@ -949,8 +943,7 @@ TEST(MutationRaceCharacterizationTest,
     const auto r_hash = hasher::hash_string("REMOTE_R");
     const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -1013,8 +1006,7 @@ TEST(LocalMutationContractTest, HardlinkAliasEditBeforeApplyIsRejected) {
     }
 
     const Operation op{.action = Action::DeleteLocal, .path = "file.txt"};
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     // Modify via alias
@@ -1048,8 +1040,7 @@ TEST(LocalMutationContractTest, SymlinkReparsePointInCriticalWindow) {
     test::write_text(target, "ORIGINAL_O");
 
     const Operation op{.action = Action::DeleteLocal, .path = "file.txt"};
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     bool hook_hit = false;
@@ -1110,8 +1101,7 @@ TEST(MutationRaceCharacterizationTest,
     const auto r_hash = hasher::hash_string("REMOTE_R");
     const auto op = make_download_op("subdir/file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -1147,8 +1137,7 @@ TEST(LocalMutationContractTest, UnexpectedObjectType) {
     test::write_text(target, "ORIGINAL_O");
 
     const Operation op{.action = Action::DeleteLocal, .path = "file.txt"};
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     HookGuard guard(
@@ -1278,8 +1267,7 @@ TEST(MutationRaceCharacterizationTest,
     const auto r_hash = hasher::hash_string("REMOTE_R");
     const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -1326,8 +1314,7 @@ TEST(MutationRaceCharacterizationTest,
 
     const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
     EXPECT_FALSE(prepared->had_original);
 
@@ -1381,8 +1368,7 @@ TEST(MutationRaceCharacterizationTest,
 
     const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
     EXPECT_TRUE(prepared->had_original);
 
@@ -1440,8 +1426,7 @@ TEST(MutationRaceCharacterizationTest,
                        .path = "source.txt",
                        .alt_path = "renamed.txt"};
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto h = open_native_write_handle(source);
@@ -1481,8 +1466,7 @@ TEST(LocalMutationContractTest, InterruptedBeforeInstallKeepsOriginal) {
 
     const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -1526,8 +1510,7 @@ TEST(LocalMutationContractTest,
 
     const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -1568,8 +1551,7 @@ TEST(LocalMutationContractTest, RollbackCandidateIsDeterministicAndReusable) {
 
     const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -1619,8 +1601,7 @@ TEST(LocalMutationContractTest, NewlyCopiedRollbackCandidateIsValidated) {
     test::write_text(root / "remote_src", "REMOTE_R");
     const auto remote_hash = hasher::hash_string("REMOTE_R");
     const auto operation = make_download_op("file.txt", remote_hash);
-    const auto prepared = mutation::prepare_operation(
-        operation, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(operation, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -1677,8 +1658,7 @@ TEST(LocalMutationContractTest, UnknownReservedArtifactIsNotAdoptedByDownload) {
 
     // The current transaction uses its own backup and leaves that file
     // untouched.
-    const auto prep_b =
-        mutation::prepare_operation(op, 0, local, tx_b, {.backup_slot = 0});
+    const auto prep_b = prepare_slot0(op, local, tx_b);
     ASSERT_TRUE(prep_b.has_value());
 
     auto res_b =
@@ -1718,8 +1698,7 @@ TEST(MutationRaceCharacterizationTest,
 
     const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -1765,8 +1744,7 @@ TEST(MutationRaceCharacterizationTest,
 
     const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -1805,8 +1783,7 @@ TEST(LocalMutationContractTest, ChangedDestinationBeforeApplyIsRejected) {
 
     const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto storage = open_initialized_storage(storage_dir);
@@ -1834,8 +1811,7 @@ TEST(LocalMutationContractTest, RollbackLeavesUnknownArtifactUntouched) {
 
     const auto remote_hash = hasher::hash_string("REMOTE_R");
     const auto operation = make_download_op("file.txt", remote_hash);
-    const auto prepared = mutation::prepare_operation(
-        operation, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(operation, local, transaction);
     ASSERT_TRUE(prepared.has_value());
     auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
@@ -1879,8 +1855,7 @@ TEST(LocalMutationContractTest, ExistingDestructiveMutationsRemainAvailable) {
                            .alt_path = "renamed.txt"};
     const Operation remove_directory{.action = Action::DeleteLocalDirectory,
                                      .path = "empty"};
-    const auto download_progress = mutation::prepare_operation(
-        download, 0, local, transaction, {.backup_slot = 0});
+    const auto download_progress = prepare_slot0(download, local, transaction);
     const auto delete_progress = mutation::prepare_operation(
         remove, 1, local, transaction, {.backup_slot = 1});
     const auto rename_progress = mutation::prepare_operation(
@@ -1953,8 +1928,7 @@ TEST(LocalMutationContractTest, RollbackRestoresExpectedFileAndRetainsBackup) {
                               .path = "file.txt",
                               .hash = hash_hex(hasher::hash_string("REMOTE")),
                               .size = 6};
-    const auto prepared = mutation::prepare_operation(
-        operation, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(operation, local, transaction);
     ASSERT_TRUE(prepared.has_value());
     test::write_text(target, "REMOTE");
     auto applied = *prepared;

@@ -207,12 +207,17 @@ HeadReference seed_fake_commit(FakeState& state,
     return reference;
 }
 
+kasumi::transport::Transport init_fake_transport(FakeState*& state) {
+    auto transport = make_fake_transport(state);
+    EXPECT_TRUE(kasumi::transport::initialize(transport));
+    return transport;
+}
+
 TEST(HistoryStorageTest, CompleteLoadConsumesOneNativeCommitBatch) {
     auto workspace =
         kasumi::test::make_temp_workspace("history-native-get-batch");
     FakeState* state = nullptr;
-    auto storage = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = init_fake_transport(state);
     const auto root = kasumi::test::workspace_root(workspace);
 
     const auto parent = make_commit(0, {}, "file.txt", "zero").value();
@@ -259,8 +264,7 @@ TEST(HistoryStorageTest,
     auto workspace =
         kasumi::test::make_temp_workspace("history-inspect-variants");
     FakeState* state = nullptr;
-    auto storage = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = init_fake_transport(state);
     const auto root = kasumi::test::workspace_root(workspace);
     const auto selected = make_commit(0, {}, "selected", "selected").value();
     const auto other = make_commit(0, {}, "other", "other").value();
@@ -329,8 +333,7 @@ TEST(HistoryStorageTest,
 TEST(HistoryStorageTest, AmbiguousCommitAndHeadPutsRollForwardWithoutRetry) {
     auto workspace = kasumi::test::make_temp_workspace("history-ambiguous-put");
     FakeState* state = nullptr;
-    auto storage = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = init_fake_transport(state);
     state->physical_hash_supported = true;
     state->fail_commit_put = true;
     state->persist_commit_on_put_failure = true;
@@ -357,8 +360,7 @@ TEST(HistoryStorageTest, AmbiguousCommitAndHeadPutsRollForwardWithoutRetry) {
 
 TEST(HistoryStorageTest, AmbiguousDeleteRemainsErrorWithoutRetry) {
     FakeState* state = nullptr;
-    auto storage = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = init_fake_transport(state);
     state->objects["object"] = {'x'};
     state->remove_then_fail_identifier = "object";
     state->remove_failure_native_code = 1234;
@@ -376,8 +378,7 @@ TEST(HistoryStorageTest, AmbiguousDeleteRemainsErrorWithoutRetry) {
 TEST(HistoryStorageTest, StrongPhysicalHashAvoidsCommitAndHeadReadback) {
     auto workspace = kasumi::test::make_temp_workspace("history-physical-hash");
     FakeState* state = nullptr;
-    auto storage = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = init_fake_transport(state);
     state->physical_hash_supported = true;
     const auto commit = make_commit(0, {}, "file.txt", "contents").value();
     const auto root = kasumi::test::workspace_root(workspace);
@@ -417,8 +418,7 @@ TEST(HistoryStorageTest, StrongPhysicalHashAvoidsCommitAndHeadReadback) {
 TEST(HistoryStorageTest, UnsupportedPhysicalHashFallsBackToSemanticReadback) {
     auto workspace = kasumi::test::make_temp_workspace("history-hash-fallback");
     FakeState* state = nullptr;
-    auto storage = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = init_fake_transport(state);
     const auto commit = make_commit(0, {}, "file.txt", "contents").value();
     const auto root = kasumi::test::workspace_root(workspace);
     const auto layout =
@@ -454,8 +454,7 @@ TEST(HistoryStorageTest, UnsupportedPhysicalHashFallsBackToSemanticReadback) {
 TEST(HistoryStorageTest, PhysicalHashMismatchFailsCommitAndHeadVerification) {
     auto workspace = kasumi::test::make_temp_workspace("history-hash-mismatch");
     FakeState* state = nullptr;
-    auto storage = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = init_fake_transport(state);
     state->physical_hash_supported = true;
     const auto commit = make_commit(0, {}, "file.txt", "contents").value();
     const auto root = kasumi::test::workspace_root(workspace);
@@ -496,8 +495,7 @@ TEST(HistoryStorageTest,
      PhysicalHashTransportFailureDoesNotFallbackToReadback) {
     auto workspace = kasumi::test::make_temp_workspace("history-hash-error");
     FakeState* state = nullptr;
-    auto storage = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = init_fake_transport(state);
     state->physical_hash_supported = true;
     const auto commit = make_commit(0, {}, "file.txt", "contents").value();
     const auto root = kasumi::test::workspace_root(workspace);
@@ -541,8 +539,7 @@ TEST(HistoryStorageTest, HealthyPublicationUsesOrderedRemoteVerification) {
     auto workspace =
         kasumi::test::make_temp_workspace("history-publication-order");
     FakeState* state = nullptr;
-    auto storage = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = init_fake_transport(state);
     state->physical_hash_supported = true;
     const auto commit = make_commit(0, {}, "file.txt", "contents").value();
 
@@ -559,8 +556,7 @@ TEST(HistoryStorageTest, HealthyPublicationUsesOrderedRemoteVerification) {
 TEST(HistoryStorageTest, TrustedOldMarkerDoesNotHideNewRemoteMarker) {
     auto workspace = kasumi::test::make_temp_workspace("history-marker-reuse");
     FakeState* state = nullptr;
-    auto storage = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = init_fake_transport(state);
     const auto root = kasumi::test::workspace_root(workspace);
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(test_key());
@@ -934,8 +930,7 @@ TEST(HistoryStorageTest, IgnoresLargeNonHistoryListings) {
     auto workspace =
         kasumi::test::make_temp_workspace("history-storage-large-listing");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
     for (std::size_t index = 0; index < 9000; ++index) {
         state->objects.emplace("content/" + std::to_string(index),
                                std::vector<std::uint8_t>{});
@@ -955,8 +950,7 @@ TEST(HistoryStorageTest, RejectsNewPublicationAtHistoryObjectLimitBeforePut) {
     auto workspace =
         kasumi::test::make_temp_workspace("history-storage-object-budget");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(test_key());
     for (std::size_t index = 0; index < 8192; ++index) {
@@ -980,8 +974,7 @@ TEST(HistoryStorageTest, IdempotentPublicationWorksAtHistoryObjectLimit) {
     auto workspace =
         kasumi::test::make_temp_workspace("history-storage-idempotent-budget");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
     const auto commit = kasumi::history::make_empty_bootstrap().value();
     const auto first = kasumi::application::history_storage::publish_commit(
         transport, test_key(), commit, kasumi::test::workspace_root(workspace));
@@ -1010,8 +1003,7 @@ TEST(HistoryStorageTest, RejectsThe65thCommitVariantBeforePut) {
     auto workspace = kasumi::test::make_temp_workspace(
         "history-storage-commit-variant-budget");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
     const auto commit = kasumi::history::make_empty_bootstrap().value();
     add_fake_commit_variants(*state, commit_id(commit), 64);
 
@@ -1026,8 +1018,7 @@ TEST(HistoryStorageTest, CreatesThe64thCommitVariant) {
     auto workspace = kasumi::test::make_temp_workspace(
         "history-storage-commit-variant-boundary");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
     const auto commit = kasumi::history::make_empty_bootstrap().value();
     add_fake_commit_variants(*state, commit_id(commit), 63);
 
@@ -1047,8 +1038,7 @@ TEST(HistoryStorageTest, RejectsThe65thMarkerVariantBeforePut) {
     auto workspace = kasumi::test::make_temp_workspace(
         "history-storage-marker-variant-budget");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
     const auto commit = kasumi::history::make_empty_bootstrap().value();
     const auto first = kasumi::application::history_storage::publish_commit(
         transport, test_key(), commit, kasumi::test::workspace_root(workspace));
@@ -1069,8 +1059,7 @@ TEST(HistoryStorageTest, CreatesThe64thMarkerVariantByReusingCiphertext) {
     auto workspace =
         kasumi::test::make_temp_workspace("history-storage-marker-boundary");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
     const auto commit = kasumi::history::make_empty_bootstrap().value();
     const auto first = kasumi::application::history_storage::publish_commit(
         transport, test_key(), commit, kasumi::test::workspace_root(workspace));
@@ -1094,8 +1083,7 @@ TEST(HistoryStorageTest, RejectsThe65thMarkedCommitBeforePut) {
     auto workspace =
         kasumi::test::make_temp_workspace("history-storage-marked-head-budget");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
     add_fake_marked_heads(*state, 64);
     const auto commit = kasumi::history::make_empty_bootstrap().value();
 
@@ -1110,8 +1098,7 @@ TEST(HistoryStorageTest, AllowsThe64thMarkedCommit) {
     auto workspace = kasumi::test::make_temp_workspace(
         "history-storage-marked-head-boundary");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
     add_fake_marked_heads(*state, 63);
     const auto commit = kasumi::history::make_empty_bootstrap().value();
 
@@ -1151,8 +1138,7 @@ TEST(HistoryStorageTest, PropagatesCommitTransportFailure) {
     auto workspace =
         kasumi::test::make_temp_workspace("history-storage-transport-failure");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
     const auto commit = kasumi::history::make_empty_bootstrap().value();
     const auto published = kasumi::application::history_storage::publish_commit(
         transport, test_key(), commit, kasumi::test::workspace_root(workspace));
@@ -1169,8 +1155,7 @@ TEST(HistoryStorageTest, PropagatesMarkerGetFailureDuringLoadAndReuse) {
     auto workspace =
         kasumi::test::make_temp_workspace("history-storage-marker-failure");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
     const auto commit = kasumi::history::make_empty_bootstrap().value();
     const auto first = kasumi::application::history_storage::publish_commit(
         transport, test_key(), commit, kasumi::test::workspace_root(workspace));
@@ -1198,8 +1183,7 @@ TEST(HistoryStorageTest, PropagatesCommitGetFailureDuringReuse) {
     auto workspace =
         kasumi::test::make_temp_workspace("history-storage-commit-failure");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
     const auto commit = kasumi::history::make_empty_bootstrap().value();
     const auto first = kasumi::application::history_storage::publish_commit(
         transport, test_key(), commit, kasumi::test::workspace_root(workspace));
@@ -1222,8 +1206,7 @@ TEST(HistoryStorageTest, RejectsOversizedDownloadedCiphertext) {
     auto workspace =
         kasumi::test::make_temp_workspace("history-storage-large-ciphertext");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
     const auto commit = kasumi::history::make_empty_bootstrap().value();
     const HeadReference reference{commit_id(commit), std::string(64, 'a')};
     state->objects[object_path(reference)] =
@@ -1425,8 +1408,7 @@ TEST(HistoryStorageTest, LocalCiphertextVerificationFailureIsNotCorruption) {
     auto workspace = kasumi::test::make_temp_workspace(
         "history-storage-local-verification-failure");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
     const auto commit = kasumi::history::make_empty_bootstrap().value();
     const auto first = kasumi::application::history_storage::publish_commit(
         transport, test_key(), commit, kasumi::test::workspace_root(workspace));
@@ -1520,8 +1502,7 @@ TEST(HistoryStorageTest, MarkerIsNeverPublishedBeforeCommitVerification) {
     auto workspace =
         kasumi::test::make_temp_workspace("history-storage-faults");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
     const auto commit = kasumi::history::make_empty_bootstrap().value();
 
     state->fail_commit_put = true;
@@ -1554,8 +1535,7 @@ TEST(HistoryStorageTest, MarkerIsNeverPublishedBeforeCommitVerification) {
 TEST(HistoryStorageTest, EmptyMarkerRemovalDoesNotList) {
     auto workspace = kasumi::test::make_temp_workspace("history-empty-prune");
     FakeState* state = nullptr;
-    auto transport = make_fake_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(transport));
+    auto transport = init_fake_transport(state);
 
     const auto result =
         kasumi::application::history_storage::remove_marker_variants(

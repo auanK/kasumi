@@ -118,6 +118,30 @@ make_download_operations(std::size_t count,
     return operations;
 }
 
+void set_journal_fail_env(const char* value) {
+#ifdef _WIN32
+    _putenv_s("KASUMI_TEST_JOURNAL_FAIL", value ? value : "");
+#else
+    if (value && *value != '\0') {
+        setenv("KASUMI_TEST_JOURNAL_FAIL", value, 1);
+    } else {
+        unsetenv("KASUMI_TEST_JOURNAL_FAIL");
+    }
+#endif
+}
+
+[[nodiscard]] ::testing::AssertionResult
+save_advance(const sync::journal::Paths& paths,
+             const kasumi::transaction::Record& record,
+             std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key,
+             sync::journal::Session& session) {
+    if (!sync::journal::save(
+            paths, record, key, sync::journal::SaveMode::Advance, &session)) {
+        return ::testing::AssertionFailure() << "journal advance save failed";
+    }
+    return ::testing::AssertionSuccess();
+}
+
 void run_download_sync(std::size_t file_count,
                        std::uint64_t& written_bytes,
                        std::uint64_t& durable_saves) {
@@ -768,18 +792,10 @@ TEST_F(JournalCorrectionTest,
 }
 
 TEST_F(JournalCorrectionTest, ParentSyncFailureThenRetryAuthenticatesDisk) {
-#ifdef _WIN32
-    _putenv_s("KASUMI_TEST_JOURNAL_FAIL", "parent-sync");
-#else
-    setenv("KASUMI_TEST_JOURNAL_FAIL", "parent-sync", 1);
-#endif
+    set_journal_fail_env("parent-sync");
     record.phase = kasumi::transaction::Phase::FilesStaged;
     auto failed = sync::journal::save(paths, record, key);
-#ifdef _WIN32
-    _putenv_s("KASUMI_TEST_JOURNAL_FAIL", "");
-#else
-    unsetenv("KASUMI_TEST_JOURNAL_FAIL");
-#endif
+    set_journal_fail_env(nullptr);
     if (failed)
         GTEST_SKIP() << "Fault injection requires dedicated build";
     ASSERT_TRUE(sync::journal::save(paths, record, key));
@@ -903,17 +919,9 @@ TEST_F(JournalCorrectionTest,
 TEST_F(JournalCorrectionTest, CleanupFailuresPreserveAuthorityAndAllowRetry) {
     for (const char* point : {"retire", "cleanup-parent-sync", "cleanup"}) {
         SCOPED_TRACE(point);
-#ifdef _WIN32
-        _putenv_s("KASUMI_TEST_JOURNAL_FAIL", point);
-#else
-        setenv("KASUMI_TEST_JOURNAL_FAIL", point, 1);
-#endif
+        set_journal_fail_env(point);
         auto cleared = sync::journal::clear(paths, key);
-#ifdef _WIN32
-        _putenv_s("KASUMI_TEST_JOURNAL_FAIL", "");
-#else
-        unsetenv("KASUMI_TEST_JOURNAL_FAIL");
-#endif
+        set_journal_fail_env(nullptr);
         if (cleared)
             GTEST_SKIP() << "Fault injection requires dedicated build";
         auto active = paths.final_path.parent_path();
@@ -959,17 +967,9 @@ TEST_F(JournalCorrectionTest,
         output << "partial append";
     }
     record.phase = kasumi::transaction::Phase::FilesStaged;
-#ifdef _WIN32
-    _putenv_s("KASUMI_TEST_JOURNAL_FAIL", "rollback-truncate");
-#else
-    setenv("KASUMI_TEST_JOURNAL_FAIL", "rollback-truncate", 1);
-#endif
+    set_journal_fail_env("rollback-truncate");
     auto retried = sync::journal::save(paths, record, key);
-#ifdef _WIN32
-    _putenv_s("KASUMI_TEST_JOURNAL_FAIL", "");
-#else
-    unsetenv("KASUMI_TEST_JOURNAL_FAIL");
-#endif
+    set_journal_fail_env(nullptr);
     if (retried)
         GTEST_SKIP() << "Fault injection requires dedicated build";
     EXPECT_EQ(kasumi::test::read_text(paths.log_path), "partial append");
@@ -1038,17 +1038,9 @@ TEST_F(JournalCorrectionTest,
 
 TEST_F(JournalCorrectionTest,
        PartialCleanupRetainsAuthenticatedIntentUntilDataSync) {
-#ifdef _WIN32
-    _putenv_s("KASUMI_TEST_JOURNAL_FAIL", "cleanup-data-sync");
-#else
-    setenv("KASUMI_TEST_JOURNAL_FAIL", "cleanup-data-sync", 1);
-#endif
+    set_journal_fail_env("cleanup-data-sync");
     auto cleared = sync::journal::clear(paths, key);
-#ifdef _WIN32
-    _putenv_s("KASUMI_TEST_JOURNAL_FAIL", "");
-#else
-    unsetenv("KASUMI_TEST_JOURNAL_FAIL");
-#endif
+    set_journal_fail_env(nullptr);
     if (cleared)
         GTEST_SKIP() << "Fault injection requires dedicated build";
     const auto retired = paths.final_path.parent_path().parent_path() /
@@ -1164,8 +1156,7 @@ TEST(JournalSessionOptimizationTest, SequentialCheckpointsReplayCountBounded) {
     ASSERT_TRUE(record.has_value());
 
     sync::journal::Session session;
-    ASSERT_TRUE(sync::journal::save(
-        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(save_advance(*paths, *record, key, session));
     ASSERT_TRUE(session.is_valid());
 
     kasumi::platform::perf_trace::force_enable(true);
@@ -1174,8 +1165,7 @@ TEST(JournalSessionOptimizationTest, SequentialCheckpointsReplayCountBounded) {
     for (std::size_t i = 0; i < op_count; ++i) {
         record->progress[i].state =
             kasumi::transaction::OperationState::Applied;
-        ASSERT_TRUE(sync::journal::save(
-            *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+        ASSERT_TRUE(save_advance(*paths, *record, key, session));
     }
 
     const auto replay_count =
@@ -1215,8 +1205,7 @@ TEST(JournalSessionOptimizationTest,
     ASSERT_TRUE(record.has_value());
 
     sync::journal::Session session;
-    ASSERT_TRUE(sync::journal::save(
-        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(save_advance(*paths, *record, key, session));
 
     kasumi::platform::perf_trace::force_enable(true);
     kasumi::platform::perf_trace::reset();
@@ -1224,8 +1213,7 @@ TEST(JournalSessionOptimizationTest,
     for (std::size_t i = 0; i < 10; ++i) {
         record->progress[i].state =
             kasumi::transaction::OperationState::Applied;
-        ASSERT_TRUE(sync::journal::save(
-            *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+        ASSERT_TRUE(save_advance(*paths, *record, key, session));
     }
     const auto early_replays =
         kasumi::platform::perf_trace::get_count("journal replay");
@@ -1233,16 +1221,14 @@ TEST(JournalSessionOptimizationTest,
     for (std::size_t i = 10; i < 190; ++i) {
         record->progress[i].state =
             kasumi::transaction::OperationState::Applied;
-        ASSERT_TRUE(sync::journal::save(
-            *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+        ASSERT_TRUE(save_advance(*paths, *record, key, session));
     }
 
     kasumi::platform::perf_trace::reset();
     for (std::size_t i = 190; i < 200; ++i) {
         record->progress[i].state =
             kasumi::transaction::OperationState::Applied;
-        ASSERT_TRUE(sync::journal::save(
-            *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+        ASSERT_TRUE(save_advance(*paths, *record, key, session));
     }
     const auto late_replays =
         kasumi::platform::perf_trace::get_count("journal replay");
@@ -1270,8 +1256,7 @@ TEST(JournalSessionOptimizationTest, SessionLifecycleTransitions) {
     EXPECT_EQ(session.status(), sync::journal::SessionState::Uninitialized);
     EXPECT_FALSE(session.is_valid());
 
-    ASSERT_TRUE(sync::journal::save(
-        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(save_advance(*paths, *record, key, session));
     EXPECT_EQ(session.status(), sync::journal::SessionState::Confirmed);
     EXPECT_TRUE(session.is_valid());
     EXPECT_EQ(session.operation(), record->operation_id);
@@ -1279,8 +1264,7 @@ TEST(JournalSessionOptimizationTest, SessionLifecycleTransitions) {
     EXPECT_EQ(session.confirmed()->storage_generation, 0ULL);
 
     record->progress[0].state = kasumi::transaction::OperationState::Applied;
-    ASSERT_TRUE(sync::journal::save(
-        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(save_advance(*paths, *record, key, session));
     EXPECT_EQ(session.status(), sync::journal::SessionState::Confirmed);
     EXPECT_TRUE(session.is_valid());
 
@@ -1313,8 +1297,7 @@ TEST(JournalSessionOptimizationTest, IdentityMismatchRejection) {
     ASSERT_TRUE(record.has_value());
 
     sync::journal::Session session;
-    ASSERT_TRUE(sync::journal::save(
-        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(save_advance(*paths, *record, key, session));
     ASSERT_TRUE(session.is_valid());
 
     auto tampered_record = *record;
@@ -1352,12 +1335,10 @@ TEST(JournalSessionOptimizationTest, DiskAuthorityDivergenceFallback) {
     ASSERT_TRUE(record.has_value());
 
     sync::journal::Session session;
-    ASSERT_TRUE(sync::journal::save(
-        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(save_advance(*paths, *record, key, session));
 
     record->progress[0].state = kasumi::transaction::OperationState::Applied;
-    ASSERT_TRUE(sync::journal::save(
-        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(save_advance(*paths, *record, key, session));
 
     const auto tip_file = paths->final_path.parent_path() / "confirmed.enc";
     ASSERT_TRUE(std::filesystem::exists(tip_file));
@@ -1387,14 +1368,12 @@ TEST(JournalSessionOptimizationTest, IdempotentCheckpoints) {
     ASSERT_TRUE(record.has_value());
 
     sync::journal::Session session;
-    ASSERT_TRUE(sync::journal::save(
-        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(save_advance(*paths, *record, key, session));
 
     const auto tip_bytes_before = session.confirmed_bytes();
     const auto tip_count_before = session.confirmed_count();
 
-    ASSERT_TRUE(sync::journal::save(
-        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(save_advance(*paths, *record, key, session));
     EXPECT_TRUE(session.is_valid());
     EXPECT_EQ(session.confirmed_bytes(), tip_bytes_before);
     EXPECT_EQ(session.confirmed_count(), tip_count_before);
@@ -1415,12 +1394,10 @@ TEST(JournalSessionOptimizationTest, RollbackUpdatesSession) {
     ASSERT_TRUE(record.has_value());
 
     sync::journal::Session session;
-    ASSERT_TRUE(sync::journal::save(
-        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(save_advance(*paths, *record, key, session));
 
     record->phase = kasumi::transaction::Phase::FilesStaged;
-    ASSERT_TRUE(sync::journal::save(
-        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(save_advance(*paths, *record, key, session));
     EXPECT_EQ(session.confirmed()->phase,
               kasumi::transaction::Phase::FilesStaged);
 
@@ -1458,15 +1435,13 @@ TEST(JournalSessionOptimizationTest,
             0));
     ASSERT_TRUE(record.has_value()) << record.error();
     sync::journal::Session session;
-    ASSERT_TRUE(sync::journal::save(
-        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(save_advance(*paths, *record, key, session));
     record->phase = kasumi::transaction::Phase::FilesStaged;
     record->progress.front().state =
         kasumi::transaction::OperationState::BackupCreated;
     record->progress.front().had_original = true;
     record->progress.front().previous_hash = hash;
-    ASSERT_TRUE(sync::journal::save(
-        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(save_advance(*paths, *record, key, session));
     EXPECT_GT(std::filesystem::file_size(paths->log_path), 0U);
 
     const auto loaded = sync::journal::load(*paths, key);
@@ -1517,16 +1492,13 @@ TEST(JournalSessionOptimizationTest, IndependentSessionsIsolation) {
     sync::journal::Session session1;
     sync::journal::Session session2;
 
-    ASSERT_TRUE(sync::journal::save(
-        *paths1, *rec1, key, sync::journal::SaveMode::Advance, &session1));
-    ASSERT_TRUE(sync::journal::save(
-        *paths2, *rec2, key, sync::journal::SaveMode::Advance, &session2));
+    ASSERT_TRUE(save_advance(*paths1, *rec1, key, session1));
+    ASSERT_TRUE(save_advance(*paths2, *rec2, key, session2));
 
     EXPECT_NE(session1.operation(), session2.operation());
 
     rec1->progress[0].state = kasumi::transaction::OperationState::Applied;
-    ASSERT_TRUE(sync::journal::save(
-        *paths1, *rec1, key, sync::journal::SaveMode::Advance, &session1));
+    ASSERT_TRUE(save_advance(*paths1, *rec1, key, session1));
 
     EXPECT_EQ(session1.confirmed()->progress[0].state,
               kasumi::transaction::OperationState::Applied);
@@ -1548,8 +1520,7 @@ TEST(JournalSessionOptimizationTest, RetirementLifecycle) {
     ASSERT_TRUE(record.has_value());
 
     sync::journal::Session session;
-    ASSERT_TRUE(sync::journal::save(
-        *paths, *record, key, sync::journal::SaveMode::Advance, &session));
+    ASSERT_TRUE(save_advance(*paths, *record, key, session));
     EXPECT_TRUE(session.is_valid());
 
     ASSERT_TRUE(sync::journal::clear(*paths, key, &session));
@@ -1902,18 +1873,10 @@ TEST_F(JournalSessionDurabilityTest,
        FailureAfterConfirmationInvalidatesCacheAndRetryDoesNotDuplicate) {
     activate();
     record.progress[0].state = kasumi::transaction::OperationState::Applied;
-#ifdef _WIN32
-    _putenv_s("KASUMI_TEST_JOURNAL_FAIL", "session-update");
-#else
-    setenv("KASUMI_TEST_JOURNAL_FAIL", "session-update", 1);
-#endif
+    set_journal_fail_env("session-update");
     auto saved = sync::journal::save(
         paths, record, key, sync::journal::SaveMode::Advance, &session);
-#ifdef _WIN32
-    _putenv_s("KASUMI_TEST_JOURNAL_FAIL", "");
-#else
-    unsetenv("KASUMI_TEST_JOURNAL_FAIL");
-#endif
+    set_journal_fail_env(nullptr);
     if (saved)
         GTEST_SKIP() << "Requires dedicated fault build";
     EXPECT_FALSE(session.is_valid());
@@ -1948,18 +1911,10 @@ TEST_F(JournalSessionDurabilityTest,
                                 std::ios::binary | std::ios::app);
             extra << "unconfirmed";
         }
-#ifdef _WIN32
-        _putenv_s("KASUMI_TEST_JOURNAL_FAIL", failure);
-#else
-        setenv("KASUMI_TEST_JOURNAL_FAIL", failure, 1);
-#endif
+        set_journal_fail_env(failure);
         auto saved = sync::journal::save(
             paths, requested, key, sync::journal::SaveMode::Advance, &session);
-#ifdef _WIN32
-        _putenv_s("KASUMI_TEST_JOURNAL_FAIL", "");
-#else
-        unsetenv("KASUMI_TEST_JOURNAL_FAIL");
-#endif
+        set_journal_fail_env(nullptr);
         if (saved)
             GTEST_SKIP() << "Requires dedicated fault build";
         EXPECT_FALSE(session.is_valid());
