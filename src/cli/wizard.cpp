@@ -48,9 +48,9 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         }
         std::vector<application::Profile> profiles = std::move(*profiles_res);
 
-        std::println("{}", i18n::tr(i18n::Key::WizardHeader));
+        i18n::println(i18n::Key::WizardHeader);
         if (profiles.empty()) {
-            std::println("{}", i18n::tr(i18n::Key::WizardNoProfiles));
+            i18n::println(i18n::Key::WizardNoProfiles);
         } else {
             for (const auto& prof : profiles) {
                 const auto state = application::inspect_profile_local_state(

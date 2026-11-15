@@ -1489,13 +1489,10 @@ fetch_releases(const ApiGet& get) {
     constexpr std::size_t maximum_pages = 20;
     std::vector<Release> releases;
     for (std::size_t page = 1; page <= maximum_pages; ++page) {
-        const auto page_str = std::to_string(page);
-        std::string url;
-        url.reserve(29 + GITHUB_REPOSITORY.size() + 27 + page_str.size());
-        url.append("https://api.github.com/repos/");
-        url.append(GITHUB_REPOSITORY);
-        url.append("/releases?per_page=100&page=");
-        url.append(page_str);
+        const auto url = std::format(
+            "https://api.github.com/repos/{}/releases?per_page=100&page={}",
+            GITHUB_REPOSITORY,
+            page);
         auto response = get(url, API_RESPONSE_LIMIT);
         if (!response) {
             return std::unexpected(response.error());
@@ -1640,16 +1637,10 @@ bool valid_verbose_archive_listing(std::string_view listing,
 
 std::string make_official_asset_url(std::string_view tag,
                                     std::string_view name) {
-    std::string url;
-    url.reserve(19 + GITHUB_REPOSITORY.size() + 19 + tag.size() + 1 +
-                name.size());
-    url.append("https://github.com/");
-    url.append(GITHUB_REPOSITORY);
-    url.append("/releases/download/");
-    url.append(tag);
-    url.push_back('/');
-    url.append(name);
-    return url;
+    return std::format("https://github.com/{}/releases/download/{}/{}",
+                       GITHUB_REPOSITORY,
+                       tag,
+                       name);
 }
 
 bool official_asset_url(std::string_view tag,

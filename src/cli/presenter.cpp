@@ -1,5 +1,6 @@
 #include "cli/presenter.hpp"
 
+#include "cli/help_topics.hpp"
 #include "cli/i18n.hpp"
 #include "cli/style.hpp"
 #include "platform/cancellation.hpp"
@@ -60,35 +61,7 @@ format_plural(std::uint64_t count, i18n::Key singular, i18n::Key plural) {
 }
 
 int present_help(std::string_view topic) {
-    constexpr std::pair<std::string_view, i18n::Key> topics[]{
-        {"sync", i18n::Key::HelpSync},
-        {"status", i18n::Key::HelpStatus},
-        {"fsck", i18n::Key::HelpFsck},
-        {"gc", i18n::Key::HelpGc},
-        {"gc remove-writer", i18n::Key::HelpGcRemoveWriter},
-        {"gc remove-barrier", i18n::Key::HelpGcRemoveBarrier},
-        {"resolve-missing", i18n::Key::HelpResolveMissing},
-        {"remote", i18n::Key::HelpRemote},
-        {"config", i18n::Key::HelpConfig},
-        {"update", i18n::Key::HelpUpdate},
-        {"remote heads", i18n::Key::HelpRemoteHeads},
-        {"remote tree", i18n::Key::HelpRemoteTree},
-        {"remote commits", i18n::Key::HelpRemoteCommits},
-        {"remote summary", i18n::Key::HelpRemoteSummary},
-        {"remote stat", i18n::Key::HelpRemoteStat},
-        {"remote commit", i18n::Key::HelpRemoteCommit},
-        {"remote get", i18n::Key::HelpRemoteGet},
-        {"remote epochs", i18n::Key::HelpRemoteEpochs},
-        {"remote epoch", i18n::Key::HelpRemoteEpoch},
-        {"remote contents", i18n::Key::HelpRemoteContents},
-        {"remote content", i18n::Key::HelpRemoteContent},
-        {"remote markers", i18n::Key::HelpRemoteMarkers},
-        {"remote objects", i18n::Key::HelpRemoteObjects},
-        {"remote orphans", i18n::Key::HelpRemoteOrphans},
-        {"remote writers", i18n::Key::HelpRemoteWriters},
-        {"remote health", i18n::Key::HelpRemoteHealth},
-    };
-    for (const auto& [name, key] : topics) {
+    for (const auto& [name, key] : help_topics) {
         if (name == topic) {
             std::print("{}{}", i18n::tr(key), i18n::tr(i18n::Key::HelpOptions));
             return 0;
@@ -196,7 +169,7 @@ void render_pending_paths(const std::vector<std::filesystem::path>& paths,
         return;
     }
     render_pending_status(paths.size());
-    std::println("{}", i18n::tr(i18n::Key::SyncPendingLabel));
+    i18n::println(i18n::Key::SyncPendingLabel);
 
     auto ordered = paths;
     std::ranges::sort(ordered);
@@ -214,12 +187,12 @@ void render_pending_paths(const std::vector<std::filesystem::path>& paths,
 void render_plan_report(const application::PlanReport& report,
                         bool full = false) {
     if (report.has_conflicts) {
-        std::println("{}", i18n::tr(i18n::Key::SyncConflictsWarning));
-        std::println("{}", i18n::tr(i18n::Key::SyncConflictsStatusHint));
+        i18n::println(i18n::Key::SyncConflictsWarning);
+        i18n::println(i18n::Key::SyncConflictsStatusHint);
     }
 
     if (report.items.empty() && report.pending_paths.empty()) {
-        std::println("{}", i18n::tr(i18n::Key::SyncNothingToDo));
+        i18n::println(i18n::Key::SyncNothingToDo);
         return;
     }
 
@@ -271,7 +244,7 @@ void render_plan_report(const application::PlanReport& report,
     };
     render_bounded(report.items, full, print_item, print_omitted);
 
-    std::println("{}", i18n::tr(i18n::Key::SyncSummaryHeader));
+    i18n::println(i18n::Key::SyncSummaryHeader);
     for (std::size_t i = 0; i < report.action_counts.size(); ++i) {
         if (report.action_counts[i] > 0) {
             if (i < std::size(ACTION_NAMES)) {
@@ -282,7 +255,7 @@ void render_plan_report(const application::PlanReport& report,
     }
 
     if (report.upload_bytes > 0 || report.download_bytes > 0) {
-        std::println("{}", i18n::tr(i18n::Key::SyncEstimatedTraffic));
+        i18n::println(i18n::Key::SyncEstimatedTraffic);
         if (report.upload_bytes > 0)
             i18n::println(i18n::Key::SyncUpload,
                           format_size(report.upload_bytes));
@@ -318,7 +291,7 @@ int present_remote_report(const Report& report) = delete;
 
 int present_remote_report(const application::RemoteHeadsReport& report) {
     if (report.heads.empty()) {
-        std::println("{}", i18n::tr(i18n::Key::RemoteHeadsNone));
+        i18n::println(i18n::Key::RemoteHeadsNone);
         return 0;
     }
 
@@ -338,7 +311,7 @@ int present_remote_report(const application::RemoteHeadsReport& report) {
 
 int present_remote_report(const application::RemoteTreeReport& report) {
     if (!report.history_present) {
-        std::println("{}", i18n::tr(i18n::Key::RemoteTreeNone));
+        i18n::println(i18n::Key::RemoteTreeNone);
         return 0;
     }
 
@@ -362,7 +335,7 @@ int present_remote_report(const application::RemoteTreeReport& report) {
 
 int present_remote_report(const application::RemoteCommitsReport& report) {
     if (!report.history_present) {
-        std::println("{}", i18n::tr(i18n::Key::RemoteCommitsNone));
+        i18n::println(i18n::Key::RemoteCommitsNone);
         return 0;
     }
 
@@ -393,7 +366,7 @@ std::string_view dash_or(std::string_view value) {
 }
 
 int present_remote_report(const application::RemoteSummaryReport& report) {
-    std::println("{}", i18n::tr(i18n::Key::RemoteSummaryHeader));
+    i18n::println(i18n::Key::RemoteSummaryHeader);
     i18n::println(i18n::Key::FieldHistory,
                   report.history_present
                       ? i18n::tr(i18n::Key::RemoteSummaryHistoryPresent)
@@ -411,8 +384,8 @@ int present_remote_report(const application::RemoteSummaryReport& report) {
 }
 
 int present_remote_report(const application::RemoteStatReport& report) {
-    std::println("{}", i18n::tr(i18n::Key::RemoteStatHeader));
-    std::println("{}", i18n::tr(i18n::Key::RemoteStatView));
+    i18n::println(i18n::Key::RemoteStatHeader);
+    i18n::println(i18n::Key::RemoteStatView);
     i18n::println(i18n::Key::FieldHeight, report.observed_height);
     i18n::println(i18n::Key::FieldConflicts, yes_no(report.has_conflicts));
     i18n::println(i18n::Key::FieldPath, report.path);
@@ -439,7 +412,7 @@ std::string_view variant_state(application::RemoteCommitVariantState state) {
 
 int present_remote_report(const application::RemoteCommitReport& report) {
     const auto& commit = report.commit;
-    std::println("{}", i18n::tr(i18n::Key::RemoteCommitHeader));
+    i18n::println(i18n::Key::RemoteCommitHeader);
     i18n::println(i18n::Key::FieldCommit, commit.commit_id);
     i18n::println(i18n::Key::FieldHeight, commit.height);
     i18n::println(i18n::Key::FieldCreatedAt, commit.created_at);
@@ -468,7 +441,7 @@ int present_remote_report(const application::RemoteCommitReport& report) {
 }
 
 int present_remote_report(const application::RemoteFileReport& report) {
-    std::println("{}", i18n::tr(i18n::Key::RemoteFileSavedHeader));
+    i18n::println(i18n::Key::RemoteFileSavedHeader);
     i18n::println(i18n::Key::FieldPath, report.path);
     i18n::println(i18n::Key::FieldDestination, report.destination_path);
     i18n::println(i18n::Key::FieldLogicalHash, report.logical_hash);
@@ -503,7 +476,7 @@ int present_remote_report(const application::RemoteEpochsReport& report) {
 }
 
 int present_remote_report(const application::RemoteEpochReport& report) {
-    std::println("{}", i18n::tr(i18n::Key::RemoteEpochDetailHeader));
+    i18n::println(i18n::Key::RemoteEpochDetailHeader);
     present_epoch_info(report.epoch);
     return 0;
 }
@@ -554,7 +527,7 @@ int present_remote_report(const application::RemoteContentsReport& report) {
 }
 
 int present_remote_report(const application::RemoteContentReport& report) {
-    std::println("{}", i18n::tr(i18n::Key::RemoteContentHeader));
+    i18n::println(i18n::Key::RemoteContentHeader);
     present_content_info(report.content);
     return 0;
 }
@@ -634,7 +607,7 @@ std::string_view orphan_kind(application::RemoteOrphanKind kind) {
 
 int present_remote_report(const application::RemoteOrphansReport& report) {
     i18n::println(i18n::Key::RemoteOrphansHeader, report.objects.size());
-    std::println("{}", i18n::tr(i18n::Key::RemoteOrphansReadOnlyHint));
+    i18n::println(i18n::Key::RemoteOrphansReadOnlyHint);
     render_indexed(report.objects, [](const auto& object) {
         i18n::println(i18n::Key::FieldIdentifier, object.identifier);
         i18n::println(i18n::Key::FieldClassification, orphan_kind(object.kind));
@@ -694,59 +667,32 @@ int present_remote_report(const application::RemoteHealthReport& report) {
     return 0;
 }
 
-template <typename Report>
-bool inspection_op_matches(application::InspectionOperation op) noexcept {
+bool inspection_op_matches(
+    const application::InspectionResponse& response) noexcept {
     using Op = application::InspectionOperation;
-    if constexpr (std::is_same_v<Report, application::RemoteHeadsReport>) {
-        return op == Op::RemoteHeads;
-    } else if constexpr (std::is_same_v<Report,
-                                        application::RemoteTreeReport>) {
-        return op == Op::RemoteTree;
-    } else if constexpr (std::is_same_v<Report,
-                                        application::RemoteCommitsReport>) {
-        return op == Op::RemoteCommits;
-    } else if constexpr (std::is_same_v<Report,
-                                        application::RemoteSummaryReport>) {
-        return op == Op::RemoteSummary;
-    } else if constexpr (std::is_same_v<Report,
-                                        application::RemoteStatReport>) {
-        return op == Op::RemoteStat;
-    } else if constexpr (std::is_same_v<Report,
-                                        application::RemoteCommitReport>) {
-        return op == Op::RemoteCommit;
-    } else if constexpr (std::is_same_v<Report,
-                                        application::RemoteFileReport>) {
-        return op == Op::RemoteGet;
-    } else if constexpr (std::is_same_v<Report,
-                                        application::RemoteEpochsReport>) {
-        return op == Op::RemoteEpochs;
-    } else if constexpr (std::is_same_v<Report,
-                                        application::RemoteEpochReport>) {
-        return op == Op::RemoteEpoch;
-    } else if constexpr (std::is_same_v<Report,
-                                        application::RemoteContentsReport>) {
-        return op == Op::RemoteContents || op == Op::RemoteContentsAudit;
-    } else if constexpr (std::is_same_v<Report,
-                                        application::RemoteContentReport>) {
-        return op == Op::RemoteContent;
-    } else if constexpr (std::is_same_v<Report,
-                                        application::RemoteMarkersReport>) {
-        return op == Op::RemoteMarkers;
-    } else if constexpr (std::is_same_v<Report,
-                                        application::RemoteObjectsReport>) {
-        return op == Op::RemoteObjects;
-    } else if constexpr (std::is_same_v<Report,
-                                        application::RemoteOrphansReport>) {
-        return op == Op::RemoteOrphans;
-    } else if constexpr (std::is_same_v<Report,
-                                        application::RemoteWritersReport>) {
-        return op == Op::RemoteWriters;
-    } else if constexpr (std::is_same_v<Report,
-                                        application::RemoteHealthReport>) {
-        return op == Op::RemoteHealth;
-    } else {
-        return false;
-    }
+    // Keep this table in InspectionPayload variant order.
+    constexpr std::array operations{Op::RemoteHeads,
+                                    Op::RemoteTree,
+                                    Op::RemoteCommits,
+                                    Op::RemoteSummary,
+                                    Op::RemoteStat,
+                                    Op::RemoteCommit,
+                                    Op::RemoteGet,
+                                    Op::RemoteEpochs,
+                                    Op::RemoteEpoch,
+                                    Op::RemoteContents,
+                                    Op::RemoteContent,
+                                    Op::RemoteMarkers,
+                                    Op::RemoteObjects,
+                                    Op::RemoteOrphans,
+                                    Op::RemoteWriters,
+                                    Op::RemoteHealth};
+    static_assert(operations.size() ==
+                  std::variant_size_v<application::InspectionPayload>);
+    return response.operation == operations[response.payload.index()] ||
+           (response.operation == Op::RemoteContentsAudit &&
+            std::holds_alternative<application::RemoteContentsReport>(
+                response.payload));
 }
 
 void render_sync_summary(const application::SyncCompleted& summary) {
@@ -813,7 +759,7 @@ void render_sync_summary(const application::SyncCompleted& summary) {
 }
 
 int render_inventory_audit(const application::InventoryAuditReport& report) {
-    std::println("{}", i18n::tr(i18n::Key::SyncInventoryAuditHeader));
+    i18n::println(i18n::Key::SyncInventoryAuditHeader);
     std::println("{}",
                  i18n::format(i18n::Key::SyncInventoryAuditSummary,
                               report.referenced_content,
@@ -834,7 +780,7 @@ void present(const application::SyncProgress& progress,
     if (operation == application::Operation::Preview ||
         operation == application::Operation::Status) {
         if (progress.stage == application::SyncStage::Observing) {
-            std::println("{}", i18n::tr(i18n::Key::PlanStageObserving));
+            i18n::println(i18n::Key::PlanStageObserving);
         } else if (progress.stage == application::SyncStage::Calculating) {
             std::println("{}\n", i18n::tr(i18n::Key::PlanStageCalculating));
         }
@@ -884,7 +830,7 @@ void present(const application::GarbageCollectProgress& progress,
         progress.candidate_count.has_value() &&
         state.last_candidate_count != progress.candidate_count) {
         if (*progress.candidate_count == 0) {
-            std::println("{}", i18n::tr(i18n::Key::GcCandidatesNone));
+            i18n::println(i18n::Key::GcCandidatesNone);
         } else {
             std::println("{}",
                          format_plural(*progress.candidate_count,
@@ -920,7 +866,7 @@ void present(const application::FsckProgress& progress,
     }
     if (*progress.total_objects == 0) {
         if (!state.empty_inventory_reported) {
-            std::println("{}", i18n::tr(i18n::Key::FsckNoContent));
+            i18n::println(i18n::Key::FsckNoContent);
             state.empty_inventory_reported = true;
         }
         return;
@@ -1002,7 +948,7 @@ int present(const application::Response& response, bool full) {
                 }
                 render_plan_report(data, full);
                 if (op == Op::Preview) {
-                    std::println("{}", i18n::tr(i18n::Key::PreviewCompleted));
+                    i18n::println(i18n::Key::PreviewCompleted);
                 }
                 return data.pending_paths.empty() ? 0 : 2;
             } else if constexpr (std::is_same_v<T,
@@ -1089,7 +1035,7 @@ int present(const application::Response& response, bool full) {
                                       i18n::Key::ResolveMissingSingular,
                                       i18n::Key::ResolveMissingPlural));
                 } else {
-                    std::println("{}", i18n::tr(i18n::Key::ResolveMissingNone));
+                    i18n::println(i18n::Key::ResolveMissingNone);
                 }
                 return 0;
             } else {
@@ -1102,8 +1048,7 @@ int present(const application::Response& response, bool full) {
 int present(const application::InspectionResponse& response) {
     return std::visit(
         [&](const auto& report) -> int {
-            using R = std::decay_t<decltype(report)>;
-            if (inspection_op_matches<R>(response.operation)) {
+            if (inspection_op_matches(response)) {
                 return present_remote_report(report);
             }
             print_status_line(style::red,
@@ -1181,7 +1126,7 @@ int present(const application::Error& error) {
         {C::RecoveryFailure, i18n::Key::ErrorSyncFailed},
     }};
     if (error.code == C::FsckFailure) {
-        std::println("{}", i18n::tr(i18n::Key::ErrorFsckAuditing));
+        i18n::println(i18n::Key::ErrorFsckAuditing);
     }
     const auto found = std::ranges::find(
         kErrorFormats, error.code, &std::pair<C, i18n::Key>::first);
@@ -1232,14 +1177,12 @@ int present(const application::Error& error) {
                          transport::describe(*br.transport_error));
         }
     } else if (error.code == C::InventoryAuditFailure && error.sync_completed) {
-        std::println("{}",
-                     i18n::tr(i18n::Key::ErrorInventoryAuditSyncCompleted));
+        i18n::println(i18n::Key::ErrorInventoryAuditSyncCompleted);
         if (error.sync_completed->partial) {
             render_pending_status(error.sync_completed->pending);
         }
         if (error.sync_completed->published) {
-            std::println("{}",
-                         i18n::tr(i18n::Key::ErrorInventoryAuditPublished));
+            i18n::println(i18n::Key::ErrorInventoryAuditPublished);
         }
     }
     return 1;
@@ -1250,13 +1193,13 @@ int present(const application::InspectionError& error) {
     if (error.code == application::InspectionErrorCode::HeadSelectionRequired ||
         (error.code == application::InspectionErrorCode::RemoteHeadNotFound &&
          !error.candidate_ids.empty())) {
-        std::println("{}", i18n::tr(i18n::Key::ErrorAvailableHeads));
+        i18n::println(i18n::Key::ErrorAvailableHeads);
         for (const auto& id : error.candidate_ids) {
             std::println("  {}", id);
         }
         if (error.code ==
             application::InspectionErrorCode::HeadSelectionRequired) {
-            std::println("{}", i18n::tr(i18n::Key::ErrorUseRemoteTreeHead));
+            i18n::println(i18n::Key::ErrorUseRemoteTreeHead);
         }
     }
     return 1;

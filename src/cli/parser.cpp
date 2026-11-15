@@ -1,6 +1,7 @@
 #include "cli/parser.hpp"
 
 #include "application/history_storage/remote_layout.hpp"
+#include "cli/help_topics.hpp"
 
 #include <algorithm>
 #include <array>
@@ -9,33 +10,6 @@
 
 namespace kasumi::cli {
 namespace {
-
-constexpr std::array<std::string_view, 26> help_topics{"sync",
-                                                       "status",
-                                                       "fsck",
-                                                       "gc",
-                                                       "gc remove-writer",
-                                                       "gc remove-barrier",
-                                                       "resolve-missing",
-                                                       "remote",
-                                                       "config",
-                                                       "update",
-                                                       "remote heads",
-                                                       "remote tree",
-                                                       "remote commits",
-                                                       "remote summary",
-                                                       "remote stat",
-                                                       "remote commit",
-                                                       "remote get",
-                                                       "remote epochs",
-                                                       "remote epoch",
-                                                       "remote contents",
-                                                       "remote content",
-                                                       "remote markers",
-                                                       "remote objects",
-                                                       "remote orphans",
-                                                       "remote writers",
-                                                       "remote health"};
 
 bool operand(const char* value) {
     return value != nullptr && value[0] != '\0' && value[0] != '-';
@@ -75,12 +49,14 @@ std::string help_topic(int argc, char* argv[]) {
     if (argc < 2 || argv == nullptr || argv[1] == nullptr)
         return {};
     const std::string command{argv[1]};
-    if (std::ranges::find(help_topics, command) == help_topics.end())
+    if (std::ranges::find(help_topics, command, &HelpTopic::name) ==
+        help_topics.end())
         return {};
     if ((command == "remote" || command == "gc") && argc > 2 &&
         argv[2] != nullptr) {
         const auto topic = command + " " + argv[2];
-        if (std::ranges::find(help_topics, topic) != help_topics.end())
+        if (std::ranges::find(help_topics, topic, &HelpTopic::name) !=
+            help_topics.end())
             return topic;
     }
     return command;

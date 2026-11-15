@@ -410,6 +410,10 @@ template <typename... Args> inline std::string format(Key key, Args&&... args) {
     return std::vformat(tr(key), std::make_format_args(args...));
 }
 
+inline void println(Key key) {
+    std::println("{}", tr(key));
+}
+
 template <typename... Args> inline void println(Key key, Args&&... args) {
     std::println("{}", std::vformat(tr(key), std::make_format_args(args...)));
 }
