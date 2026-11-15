@@ -101,23 +101,15 @@ std::string list_detail(std::string_view prefix,
 }
 
 std::string path_detail(const std::vector<std::filesystem::path>& paths) {
-    constexpr std::size_t limit = 20;
-    const auto displayed = std::min(paths.size(), limit);
-    std::string result = "referenced objects missing or corrupted; fsck repair "
-                         "unavailable at this stage (paths: ";
-    for (std::size_t index = 0; index < displayed; ++index) {
-        if (index != 0) {
-            result += ", ";
-        }
-        result += platform::path::to_utf8(paths[index]);
+    std::vector<std::string> utf8_paths;
+    utf8_paths.reserve(paths.size());
+    for (const auto& path : paths) {
+        utf8_paths.push_back(platform::path::to_utf8(path));
     }
-    if (paths.size() > limit) {
-        result += "; and ";
-        result += std::to_string(paths.size() - limit);
-        result += " more";
-    }
-    result += ')';
-    return result;
+    return list_detail("referenced objects missing or corrupted; fsck repair "
+                       "unavailable at this stage (paths: ",
+                       utf8_paths) +
+           ')';
 }
 
 std::filesystem::path
@@ -241,14 +233,19 @@ audit_object(transport::Transport& storage,
     if (!prepared)
         return std::unexpected(prepared.error());
 
+    const auto cleanup_temporaries = [&]() -> std::expected<void, Error> {
+        for (const auto& path : {encrypted, plaintext}) {
+            if (auto removed = remove_temporary_file(path); !removed) {
+                return std::unexpected(removed.error());
+            }
+        }
+        return {};
+    };
+
     auto downloaded = transport::get(storage, remote_identifier, encrypted);
     if (!downloaded) {
-        auto removed = remove_temporary_file(encrypted);
-        if (!removed)
-            return std::unexpected(removed.error());
-        removed = remove_temporary_file(plaintext);
-        if (!removed)
-            return std::unexpected(removed.error());
+        if (auto cleaned = cleanup_temporaries(); !cleaned)
+            return std::unexpected(cleaned.error());
         if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
             return AuditState::Missing;
         }
@@ -277,12 +274,8 @@ audit_object(transport::Transport& storage,
         }
     }
 
-    auto removed = remove_temporary_file(encrypted);
-    if (!removed)
-        return std::unexpected(removed.error());
-    removed = remove_temporary_file(plaintext);
-    if (!removed)
-        return std::unexpected(removed.error());
+    if (auto cleaned = cleanup_temporaries(); !cleaned)
+        return std::unexpected(cleaned.error());
     return result;
 }
 

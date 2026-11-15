@@ -12641,6 +12641,69 @@ TEST(SyncCoordinatorTest, UploadSubBatchChunkingAndSafeResumption) {
         recover_expect(runtime_data, storage, key, RecoveryResult::NoJournal));
 }
 
+TEST(SyncCoordinatorTest, NonGenesisUploadSubBatchResumesSafely) {
+    auto [workspace, profile, local, storage_path, runtime_data, key] =
+        make_coordinator_env("non-genesis-sub-batch-resumption");
+    AmbiguousPublicationState* state = nullptr;
+    auto storage = make_initialized_ambiguous_storage(state);
+
+    // Publish initial seed commit so subsequent sync is non-genesis
+    kasumi::test::write_text(local / "seed.txt", "seed");
+    auto seed_input = empty_publication_input();
+    auto seed_local = app_obs::collect_local_tree(local);
+    ASSERT_TRUE(seed_local.has_value());
+    seed_input.local_tree = *seed_local;
+    const auto seed_plan = kasumi::reconciliation::reconcile(seed_input);
+    ASSERT_TRUE(seed_plan.has_value()) << seed_plan.error().detail;
+    ASSERT_TRUE(
+        coord::execute(runtime_data, storage, key, seed_input, *seed_plan));
+
+    // Create 260 new files in non-genesis repository and fail at item 257
+    constexpr std::size_t file_count = 260;
+    for (std::size_t i = 0; i < file_count; ++i) {
+        kasumi::test::write_text(local / ("file_" + std::to_string(i) + ".txt"),
+                                 "payload_" + std::to_string(i));
+    }
+    const auto observed =
+        app_obs::collect_reconciliation_input(runtime_data, storage, key, true);
+    ASSERT_TRUE(observed.has_value()) << observed.error().detail;
+    ASSERT_TRUE(observed->storage.history_present);
+    ASSERT_FALSE(observed->storage.logical_heads.empty());
+    ASSERT_TRUE(observed->base_state_present);
+    const auto plan = kasumi::reconciliation::reconcile(*observed);
+    ASSERT_TRUE(plan.has_value()) << plan.error().detail;
+    ASSERT_EQ(plan->plan.operations.size(), file_count);
+
+    state->content_put_count = 0;
+    state->fail_content_put_at = 257;
+    std::size_t upload_ops = 0;
+    for (const auto& op : plan->plan.operations) {
+        if (op.action == kasumi::Action::Upload) {
+            ++upload_ops;
+        }
+    }
+    ASSERT_EQ(upload_ops, file_count);
+    const auto first_exec =
+        coord::execute(runtime_data, storage, key, *observed, *plan);
+    ASSERT_FALSE(first_exec.has_value())
+        << "puts=" << state->content_put_count
+        << " fail_at=" << state->fail_content_put_at;
+
+    const auto recovered = coord::recover_if_needed(runtime_data, storage, key);
+    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+    EXPECT_EQ(*recovered, RecoveryResult::ResumableTransaction);
+
+    state->fail_content_put_at = 0;
+    state->content_put_count = 0;
+
+    const auto second_exec =
+        coord::execute(runtime_data, storage, key, *observed, *plan);
+    ASSERT_TRUE(second_exec.has_value()) << second_exec.error().detail;
+    EXPECT_EQ(state->content_put_count, 4U);
+    ASSERT_TRUE(
+        recover_expect(runtime_data, storage, key, RecoveryResult::NoJournal));
+}
+
 TEST(SyncCoordinatorTest,
      ResolveMissingPublicationFailurePreservesAllPendingMaterializations) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =

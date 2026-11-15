@@ -27,14 +27,16 @@ struct RawReference {
     ContentReference reference;
 };
 
-std::expected<ContentObjectState, Error>
-audit_object(transport::Transport& storage,
-             std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-             std::string_view content_id,
-             std::optional<std::string_view> expected_plaintext_hash,
-             std::optional<std::uint64_t> expected_size,
-             const std::filesystem::path& workspace,
-             std::size_t sequence) {
+} // namespace
+
+std::expected<ContentAuditResult, Error>
+audit_content_object(transport::Transport& storage,
+                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                     std::string_view content_id,
+                     std::optional<std::string_view> expected_plaintext_hash,
+                     std::optional<std::uint64_t> expected_size,
+                     const std::filesystem::path& workspace,
+                     std::size_t sequence) {
     const auto encrypted =
         workspace / ("content-" + std::to_string(sequence) + ".enc");
     const auto plaintext =
@@ -49,12 +51,12 @@ audit_object(transport::Transport& storage,
     if (!downloaded) {
         cleanup();
         if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
-            return ContentObjectState::Missing;
+            return ContentAuditResult{.state = ContentObjectState::Missing};
         }
         return std::unexpected(detail::transport_error(downloaded.error()));
     }
 
-    ContentObjectState state = ContentObjectState::Corrupt;
+    ContentAuditResult result{.state = ContentObjectState::Corrupt};
     if (crypto::decrypt_file(encrypted, plaintext, key)) {
         std::error_code plain_size_error;
         const auto plain_size =
@@ -65,14 +67,16 @@ audit_object(transport::Transport& storage,
             (!expected_plaintext_hash ||
              hash_hex(*actual_hash) == *expected_plaintext_hash) &&
             crypto::content_identifier(key, *actual_hash) == content_id) {
-            state = ContentObjectState::Present;
+            result.state = ContentObjectState::Present;
+            result.plaintext_hash = hash_hex(*actual_hash);
+            result.size = plain_size;
         }
     }
     cleanup();
-    return state;
+    return result;
 }
 
-} // namespace
+namespace {} // namespace
 
 ContentReachabilityResult
 inventory_impl(transport::Transport& storage,
@@ -218,17 +222,18 @@ inventory_impl(transport::Transport& storage,
             ContentObjectState state = ContentObjectState::Missing;
             if (found) {
                 if (audit_payloads) {
-                    auto audited = audit_object(storage,
-                                                key,
-                                                content.remote_id,
-                                                content.plaintext_hash,
-                                                content.references.front().size,
-                                                temporary->workspace.root,
-                                                sequence++);
+                    auto audited =
+                        audit_content_object(storage,
+                                             key,
+                                             content.remote_id,
+                                             content.plaintext_hash,
+                                             content.references.front().size,
+                                             temporary->workspace.root,
+                                             sequence++);
                     if (!audited) {
                         return std::unexpected(audited.error());
                     }
-                    state = *audited;
+                    state = audited->state;
                 } else {
                     state = ContentObjectState::Present;
                 }
@@ -253,17 +258,17 @@ inventory_impl(transport::Transport& storage,
             result.orphan_content_ids.push_back(content_id);
             ContentObjectState state = ContentObjectState::Present;
             if (audit_payloads) {
-                auto audited = audit_object(storage,
-                                            key,
-                                            content_id,
-                                            std::nullopt,
-                                            std::nullopt,
-                                            temporary->workspace.root,
-                                            sequence++);
+                auto audited = audit_content_object(storage,
+                                                    key,
+                                                    content_id,
+                                                    std::nullopt,
+                                                    std::nullopt,
+                                                    temporary->workspace.root,
+                                                    sequence++);
                 if (!audited) {
                     return std::unexpected(audited.error());
                 }
-                state = *audited;
+                state = audited->state;
                 if (state == ContentObjectState::Corrupt) {
                     result.corrupt_content_ids.push_back(content_id);
                 }

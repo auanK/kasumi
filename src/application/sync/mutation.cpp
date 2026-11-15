@@ -32,17 +32,7 @@ using detail::missing;
 using detail::read_status;
 using detail::remove_temporary_file;
 using detail::resolve_local_path;
-
-std::expected<void, MutationError>
-sync_parent_checked(const std::filesystem::path& path,
-                    std::size_t operation_index) {
-    if (auto synced = platform::durability::sync_parent_directory(path);
-        !synced) {
-        return std::unexpected(make_error(
-            MutationErrorCode::LocalIo, synced.error(), path, operation_index));
-    }
-    return {};
-}
+using detail::sync_parent_checked;
 
 std::expected<void, MutationError>
 sync_file_checked(const std::filesystem::path& path,
@@ -399,7 +389,6 @@ apply_upload(const Operation& operation,
     std::error_code cleanup_error;
     std::filesystem::remove(encrypted, cleanup_error);
     if (cleanup_error) {
-        remove_temporary_file(encrypted);
         return std::unexpected(make_error(
             MutationErrorCode::LocalIo,
             "failed to remove previous ciphertext: " + cleanup_error.message(),
@@ -442,7 +431,6 @@ apply_upload(const Operation& operation,
     }
 
     if (encrypted_remove_error) {
-        remove_temporary_file(encrypted);
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
                                           "failed to remove temporary file: " +
                                               encrypted_remove_error.message(),
@@ -620,8 +608,7 @@ apply_download(const Operation& operation,
             auto downloaded =
                 transport::get(storage, remote_identifier, encrypted);
             if (!downloaded) {
-                std::error_code cleanup_error;
-                std::filesystem::remove(encrypted, cleanup_error);
+                remove_temporary_file(encrypted);
                 prepared =
                     detail::validate_prepared_destination(operation,
                                                           operation_index,
@@ -646,8 +633,7 @@ apply_download(const Operation& operation,
         if (!encrypted_after_get ||
             std::filesystem::is_symlink(*encrypted_after_get) ||
             !std::filesystem::is_regular_file(*encrypted_after_get)) {
-            std::error_code cleanup_error;
-            std::filesystem::remove(encrypted, cleanup_error);
+            remove_temporary_file(encrypted);
             return std::unexpected(
                 make_error(MutationErrorCode::LocalIo,
                            "downloaded encrypted object is invalid",
@@ -657,10 +643,8 @@ apply_download(const Operation& operation,
 
         const bool decrypted = crypto::decrypt_file(encrypted, candidate, key);
         if (!decrypted) {
-            std::error_code encrypted_cleanup_error;
-            std::filesystem::remove(encrypted, encrypted_cleanup_error);
-            std::error_code candidate_cleanup_error;
-            std::filesystem::remove(candidate, candidate_cleanup_error);
+            remove_temporary_file(encrypted);
+            remove_temporary_file(candidate);
             return std::unexpected(make_error(MutationErrorCode::CryptoFailure,
                                               "failed to decrypt object",
                                               destination,
@@ -670,10 +654,8 @@ apply_download(const Operation& operation,
         auto verified =
             verify_local_file(candidate, operation, operation_index);
         if (!verified) {
-            std::error_code encrypted_cleanup_error;
-            std::filesystem::remove(encrypted, encrypted_cleanup_error);
-            std::error_code candidate_cleanup_error;
-            std::filesystem::remove(candidate, candidate_cleanup_error);
+            remove_temporary_file(encrypted);
+            remove_temporary_file(candidate);
             return std::unexpected(
                 make_error(MutationErrorCode::IntegrityMismatch,
                            verified.error().detail,

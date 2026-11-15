@@ -18,35 +18,36 @@ namespace {
 
 std::expected<PlanAction, std::string>
 core_action_to_plan_action(Action action) {
-    switch (action) {
-        case Action::RenameLocal:
-            return PlanAction::RenameLocal;
-        case Action::Upload:
-            return PlanAction::Upload;
-        case Action::CreateLocalDirectory:
-            return PlanAction::CreateLocalDirectory;
-        case Action::CreateRemoteDirectory:
-            return PlanAction::CreateRemoteDirectory;
-        case Action::MoveLocal:
-            return PlanAction::MoveLocal;
-        case Action::Download:
-            return PlanAction::Download;
-        case Action::DeleteLocal:
-            return PlanAction::DeleteLocal;
-        case Action::DeleteLocalDirectory:
-            return PlanAction::DeleteLocalDirectory;
-        case Action::DeleteRemote:
-            return PlanAction::DeleteRemote;
-        case Action::DeleteRemoteDirectory:
-            return PlanAction::DeleteRemoteDirectory;
-        case Action::CopyLocal:
-            return PlanAction::CopyLocal;
-        case Action::DeleteIgnoredLocalFile:
-            return PlanAction::DeleteIgnoredLocalFile;
-        case Action::Count:
-            return std::unexpected("count action is not a valid plan");
+    static_assert(
+        static_cast<std::size_t>(PlanAction::RenameLocal) ==
+            action_index(Action::RenameLocal) &&
+        static_cast<std::size_t>(PlanAction::Upload) ==
+            action_index(Action::Upload) &&
+        static_cast<std::size_t>(PlanAction::CreateLocalDirectory) ==
+            action_index(Action::CreateLocalDirectory) &&
+        static_cast<std::size_t>(PlanAction::CreateRemoteDirectory) ==
+            action_index(Action::CreateRemoteDirectory) &&
+        static_cast<std::size_t>(PlanAction::MoveLocal) ==
+            action_index(Action::MoveLocal) &&
+        static_cast<std::size_t>(PlanAction::Download) ==
+            action_index(Action::Download) &&
+        static_cast<std::size_t>(PlanAction::DeleteLocal) ==
+            action_index(Action::DeleteLocal) &&
+        static_cast<std::size_t>(PlanAction::DeleteLocalDirectory) ==
+            action_index(Action::DeleteLocalDirectory) &&
+        static_cast<std::size_t>(PlanAction::DeleteRemote) ==
+            action_index(Action::DeleteRemote) &&
+        static_cast<std::size_t>(PlanAction::DeleteRemoteDirectory) ==
+            action_index(Action::DeleteRemoteDirectory) &&
+        static_cast<std::size_t>(PlanAction::CopyLocal) ==
+            action_index(Action::CopyLocal) &&
+        static_cast<std::size_t>(PlanAction::DeleteIgnoredLocalFile) ==
+            action_index(Action::DeleteIgnoredLocalFile) &&
+        PLAN_ACTION_COUNT == ActionCount);
+    if (!is_valid_action(action)) {
+        return std::unexpected("count action is not a valid plan");
     }
-    std::unreachable();
+    return static_cast<PlanAction>(action_index(action));
 }
 
 std::expected<PlanReport, std::string>

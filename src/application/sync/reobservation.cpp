@@ -87,6 +87,15 @@ verify_existing_content(transport::Transport& storage,
         platform::workspace_file(workspace, index, ".initial.enc");
     const auto plaintext =
         platform::workspace_file(workspace, index, ".initial.plain");
+    struct TempFileCleanup {
+        const std::filesystem::path& encrypted;
+        const std::filesystem::path& plaintext;
+        ~TempFileCleanup() noexcept {
+            std::error_code ignored;
+            std::filesystem::remove(encrypted, ignored);
+            std::filesystem::remove(plaintext, ignored);
+        }
+    } temp_cleanup{encrypted, plaintext};
     const auto identifier = crypto::content_identifier(key, hash);
     auto downloaded = transport::get(storage, identifier, encrypted);
     if (!downloaded) {
@@ -138,7 +147,8 @@ std::expected<void, Error> observe_content_availability(
     const std::unordered_set<std::string>* initial_content_identifiers =
         nullptr) {
     HashSet hashes{0, hash_key};
-    HashSet upload_hashes{0, hash_key};
+    std::unordered_map<Hash, std::uint64_t, decltype(&hash_key)> upload_sizes{
+        0, hash_key};
     std::unordered_set<std::string> upload_identities;
     std::unordered_map<std::string, std::size_t> relocated_delete_counts;
     if (input.base_state_present && input.storage.history_present &&
@@ -172,7 +182,7 @@ std::expected<void, Error> observe_content_availability(
         if (candidate.action == Action::Upload) {
             if (const auto hash = hash_from_hex(candidate.hash)) {
                 if (allow_unreferenced_content_reuse) {
-                    upload_hashes.insert(*hash);
+                    upload_sizes.emplace(*hash, candidate.size);
                     add_hash(*hash);
                 } else {
                     const auto identity =
@@ -229,21 +239,15 @@ std::expected<void, Error> observe_content_availability(
     if (allow_unreferenced_content_reuse && trust_existing_content &&
         initial_content_identifiers != nullptr &&
         !input.audit_storage_objects) {
-        const auto operations = sync_plan_operations(result.plan);
-        for (const auto& candidate : operations) {
-            if (candidate.action != Action::Upload) {
-                continue;
-            }
-            const auto hash = hash_from_hex(candidate.hash);
-            if (!hash) {
-                continue;
-            }
-            const auto identifier = crypto::content_identifier(key, *hash);
+        for (auto it = upload_sizes.begin(); it != upload_sizes.end();) {
+            const auto identifier = crypto::content_identifier(key, it->first);
             if (initial_content_identifiers->contains(identifier)) {
                 input.trusted_remote_content_objects.insert(
-                    hash_hex(*hash) + ':' + std::to_string(candidate.size));
-                upload_hashes.erase(*hash);
-                hashes.erase(*hash);
+                    hash_hex(it->first) + ':' + std::to_string(it->second));
+                hashes.erase(it->first);
+                it = upload_sizes.erase(it);
+            } else {
+                ++it;
             }
         }
     }
@@ -261,14 +265,6 @@ std::expected<void, Error> observe_content_availability(
             platform::cleanup_workspace(workspace);
         }
     } cleanup{reuse_workspace};
-    if (!upload_hashes.empty()) {
-        auto created = platform::create_workspace("sync-initial-content");
-        if (!created) {
-            return std::unexpected(detail::make_error(
-                ErrorCode::ObservationFailure, created.error()));
-        }
-        reuse_workspace = std::move(*created);
-    }
     std::vector<std::pair<Hash, std::string>> requested;
     requested.reserve(hashes.size());
     for (const auto& hash : hashes) {
@@ -336,36 +332,35 @@ std::expected<void, Error> observe_content_availability(
                         ", PRESENCE says " + (present ? "present" : "absent")));
             }
         }
+        const auto upload_it = upload_sizes.find(hash);
         if (allow_unreferenced_content_reuse && present &&
-            upload_hashes.contains(hash)) {
-            const auto operations = sync_plan_operations(result.plan);
-            const auto operation =
-                std::ranges::find_if(operations, [&](const auto& candidate) {
-                    return candidate.action == Action::Upload &&
-                           candidate.hash == hash_hex(hash);
-                });
-            if (operation == operations.end()) {
-                return std::unexpected(detail::make_error(
-                    ErrorCode::ObservationFailure,
-                    "verified Content has no matching upload operation"));
-            }
+            upload_it != upload_sizes.end()) {
+            const auto identity =
+                hash_hex(hash) + ':' + std::to_string(upload_it->second);
             if (trust_existing_content) {
-                input.trusted_remote_content_objects.insert(
-                    hash_hex(hash) + ':' + std::to_string(operation->size));
+                input.trusted_remote_content_objects.insert(identity);
                 continue;
             }
+            if (reuse_workspace.root.empty()) {
+                auto created =
+                    platform::create_workspace("sync-initial-content");
+                if (!created) {
+                    return std::unexpected(detail::make_error(
+                        ErrorCode::ObservationFailure, created.error()));
+                }
+                reuse_workspace = std::move(*created);
+            }
             const auto verified = verify_existing_content(
-                storage, key, hash, operation->size, reuse_workspace, index);
+                storage, key, hash, upload_it->second, reuse_workspace, index);
             if (!verified) {
                 return std::unexpected(verified.error());
             }
             if (*verified) {
-                input.verified_remote_content_objects.insert(
-                    hash_hex(hash) + ':' + std::to_string(operation->size));
+                input.verified_remote_content_objects.insert(identity);
                 continue;
             }
         }
-        if (!present || upload_hashes.contains(hash)) {
+        if (!present || upload_it != upload_sizes.end()) {
             missing.push_back(hash);
         }
     }
@@ -675,8 +670,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
                     detail::make_error(ErrorCode::ObservationFailure,
                                        recalculated.error().detail));
             }
-            auto reobserved_availability =
-                observe_content_availability(input,
+            auto refreshed =
+                refresh_content_availability(input,
                                              *recalculated,
                                              storage,
                                              key,
@@ -684,16 +679,10 @@ stabilize(const runtime::RuntimeData& runtime_data,
                                              allow_unreferenced_content_reuse,
                                              trust_existing_content,
                                              initial_content_identifiers);
-            if (!reobserved_availability) {
-                return std::unexpected(reobserved_availability.error());
+            if (!refreshed) {
+                return std::unexpected(refreshed.error());
             }
-            recalculated = reconciliation::reconcile(input);
-            if (!recalculated) {
-                return std::unexpected(
-                    detail::make_error(ErrorCode::ObservationFailure,
-                                       recalculated.error().detail));
-            }
-            result = std::move(*recalculated);
+            result = std::move(*refreshed);
             if (!result.requires_publication &&
                 !result.requires_local_mutation &&
                 !result.requires_storage_repair &&
@@ -789,8 +778,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
         const bool current_allow_unreferenced_reuse =
             allow_unreferenced_content_reuse &&
             !observed->storage.history_present;
-        auto reobserved_availability =
-            observe_content_availability(*observed,
+        auto refreshed =
+            refresh_content_availability(*observed,
                                          *recalculated,
                                          storage,
                                          key,
@@ -798,22 +787,14 @@ stabilize(const runtime::RuntimeData& runtime_data,
                                          current_allow_unreferenced_reuse,
                                          trust_existing_content,
                                          initial_content_identifiers);
-        if (!reobserved_availability) {
+        if (!refreshed) {
             auto removed = detail::remove_transaction_workspace(workspace, key);
             if (!removed) {
                 return std::unexpected(removed.error());
             }
-            return std::unexpected(reobserved_availability.error());
+            return std::unexpected(refreshed.error());
         }
-        recalculated = reconciliation::reconcile(*observed);
-        if (!recalculated) {
-            auto removed = detail::remove_transaction_workspace(workspace, key);
-            if (!removed) {
-                return std::unexpected(removed.error());
-            }
-            return std::unexpected(detail::make_error(
-                ErrorCode::ObservationFailure, recalculated.error().detail));
-        }
+        recalculated = std::move(*refreshed);
         if (same_observation(input, *observed)) {
             auto removed = detail::remove_transaction_workspace(workspace, key);
             if (!removed) {

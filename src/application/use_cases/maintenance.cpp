@@ -32,7 +32,9 @@ Callback make_progress_callback(const OperationContext& context,
     return callback;
 }
 
-std::expected<Response, Error> run_fsck_operation(OperationContext& context) {
+} // namespace
+
+std::expected<Response, Error> run_fsck(OperationContext& context) {
     std::optional<FsckProgress> last_fsck_progress;
     auto fsck_progress =
         make_progress_callback<integrity::FsckProgressCallback, FsckProgress>(
@@ -65,8 +67,7 @@ std::expected<Response, Error> run_fsck_operation(OperationContext& context) {
                     }};
 }
 
-std::expected<Response, Error>
-run_garbage_collect_operation(OperationContext& context) {
+std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
     std::optional<GarbageCollectProgress> last_progress;
     auto gc_progress =
         make_progress_callback<integrity::GarbageCollectProgressCallback,
@@ -93,16 +94,6 @@ run_garbage_collect_operation(OperationContext& context) {
                         .analysis_only = collected->analysis_only,
                         .removed_objects = collected->removed_objects,
                     }};
-}
-
-} // namespace
-
-std::expected<Response, Error> run_fsck(OperationContext& context) {
-    return run_fsck_operation(context);
-}
-
-std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
-    return run_garbage_collect_operation(context);
 }
 
 std::expected<Response, Error> run_remove_barrier(OperationContext& context) {

@@ -105,8 +105,6 @@ private:
     SessionState state = SessionState::Uninitialized;
     Paths paths{};
     std::string operation_id{};
-    std::uint64_t local_generation = 0;
-    std::uint64_t storage_generation = 0;
     std::array<std::byte, 32> key_identity{};
     std::optional<transaction::Record> confirmed_record{};
     std::array<std::byte, 32> tip_chain{};

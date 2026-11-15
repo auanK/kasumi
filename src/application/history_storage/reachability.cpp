@@ -141,6 +141,7 @@ ReachabilityResult inventory_impl(
         commit.variants.reserve(references.size());
         for (const auto& reference : references) {
             auto loaded = detail::try_load_variant(storage,
+                                                   layout,
                                                    key,
                                                    reference,
                                                    (*temporary)->workspace.root,
@@ -248,12 +249,6 @@ ReachabilityResult inventory_impl(
         }
     }
 
-    for (const auto& [commit_id, references] : listed->marker_variants) {
-        static_cast<void>(commit_id);
-        for (const auto& reference : references) {
-            add_missing_variant(commits, reference);
-        }
-    }
     if (commits.size() > history::maximum_loaded_commit_count) {
         return std::unexpected(detail::error(
             ErrorCode::LimitExceeded, "history contains too many commits"));

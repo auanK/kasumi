@@ -19,7 +19,6 @@ namespace kasumi::application {
 struct SyncProgress {
     SyncStage stage = SyncStage::Observing;
     std::optional<SyncCompleted> summary = std::nullopt;
-    std::uint32_t completed_items = 0;
     std::uint32_t total_items = 0;
 };
 

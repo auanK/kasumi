@@ -614,8 +614,7 @@ parse_object_identifier(const RemoteLayout& layout,
         return std::unexpected(
             error(ErrorCode::InvalidInput, "invalid epoch object name"));
     }
-    return Reference{.sequence = parsed->sequence,
-                     .epoch_id = std::move(parsed->epoch_id)};
+    return *parsed;
 }
 
 std::expected<VerifiedEpoch, Error>
@@ -718,33 +717,25 @@ verify(transport::Transport& storage,
        std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
        const std::filesystem::path& workspace_root) {
     const auto layout = derive_remote_layout(master_key);
-    auto identifier = object_identifier(layout, reference);
-    if (!identifier) {
-        return std::unexpected(identifier.error());
-    }
     auto temporary = detail::make_workspace(workspace_root);
     if (!temporary) {
         return std::unexpected(
             error(ErrorCode::WorkspaceFailure, temporary.error().detail));
     }
-    const auto copy = (*temporary)->workspace.root / "epoch.copy";
-    if (auto downloaded = detail::download(storage, *identifier, copy);
-        !downloaded) {
+    auto verified = load_exact_reference(
+        storage, layout, master_key, *temporary, reference, 0);
+    if (!verified) {
+        if (verified.error().code == ErrorCode::TransportFailure ||
+            verified.error().code == ErrorCode::WorkspaceFailure ||
+            verified.error().code == ErrorCode::InvalidInput) {
+            return std::unexpected(verified.error());
+        }
         return std::unexpected(
-            error(ErrorCode::TransportFailure, downloaded.error().detail));
+            error(ErrorCode::VerificationFailure, verified.error().detail));
     }
-    auto bytes = detail::read_file(
-        copy, envelope_header.size() + mac_size + maximum_encoded_size);
-    if (!bytes) {
-        return std::unexpected(
-            error(ErrorCode::WorkspaceFailure, bytes.error().detail));
-    }
-    auto verified = open(*bytes, reference, master_key);
-    if (!verified || verified->value != expected) {
+    if (verified->value != expected) {
         return std::unexpected(error(ErrorCode::VerificationFailure,
-                                     verified
-                                         ? "remote epoch diverges from expected"
-                                         : verified.error().detail));
+                                     "remote epoch diverges from expected"));
     }
     return {};
 }
@@ -960,9 +951,7 @@ PruneResult plan_pruning(std::span<const kasumi::history::LoadedCommit> commits,
         return std::unexpected(NoPrune{"no commits reached retention limits"});
     }
 
-    std::vector<std::string> pruned_list;
-    for (const auto& id : prunable)
-        pruned_list.push_back(id);
+    std::vector<std::string> pruned_list(prunable.begin(), prunable.end());
     std::ranges::sort(pruned_list);
 
     std::ranges::sort(anchors, [](const Anchor& a, const Anchor& b) {

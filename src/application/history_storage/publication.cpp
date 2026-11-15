@@ -138,6 +138,7 @@ publish_commit_object_impl(transport::Transport& storage,
         found != inventory->commit_variants.end()) {
         for (const auto& candidate : found->second) {
             auto loaded = detail::try_load_variant(storage,
+                                                   layout,
                                                    key,
                                                    candidate,
                                                    (*temporary)->workspace.root,

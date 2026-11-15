@@ -315,20 +315,6 @@ try_load_variant(transport::Transport& storage,
                                         .commit = std::move(*commit)}};
 }
 
-VariantResult
-try_load_variant(transport::Transport& storage,
-                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                 const HeadReference& reference,
-                 const std::filesystem::path& workspace,
-                 std::size_t sequence) {
-    return try_load_variant(storage,
-                            derive_remote_layout(key),
-                            key,
-                            reference,
-                            workspace,
-                            sequence);
-}
-
 std::expected<history::LoadedCommit, Error>
 try_load_variants(transport::Transport& storage,
                   const RemoteLayout& layout,
@@ -382,22 +368,6 @@ try_load_variants(transport::Transport& storage,
         error(ErrorCode::MissingCommit, "commit object is missing"));
 }
 
-std::expected<history::LoadedCommit, Error>
-try_load_variants(transport::Transport& storage,
-                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                  std::vector<HeadReference> references,
-                  const std::filesystem::path& workspace,
-                  std::size_t& sequence,
-                  HeadReference* authenticated_reference) {
-    return try_load_variants(storage,
-                             derive_remote_layout(key),
-                             key,
-                             std::move(references),
-                             workspace,
-                             sequence,
-                             authenticated_reference);
-}
-
 std::expected<void, Error>
 verify_published_commit(transport::Transport& storage,
                         const RemoteLayout& layout,
@@ -424,29 +394,10 @@ verify_published_commit(transport::Transport& storage,
     return {};
 }
 
-std::expected<void, Error>
-verify_published_commit(transport::Transport& storage,
-                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                        const history::Commit& expected,
-                        const HeadReference& reference,
-                        const std::filesystem::path& workspace,
-                        std::size_t& sequence) {
-    return verify_published_commit(storage,
-                                   derive_remote_layout(key),
-                                   key,
-                                   expected,
-                                   reference,
-                                   workspace,
-                                   sequence);
-}
-
 std::expected<HistoryInventory, Error>
 build_scoped_history_inventory(transport::Transport& storage,
                                const RemoteLayout& layout) {
-    const auto heads_dir =
-        layout.heads_prefix.ends_with('/')
-            ? layout.heads_prefix.substr(0, layout.heads_prefix.size() - 1)
-            : layout.heads_prefix;
+    const auto heads_dir = trim_trailing_slash(layout.heads_prefix);
     auto listing = transport::list(storage, heads_dir);
     if (!listing) {
         if (listing.error().code == transport::ErrorCode::StorageNotFound) {
@@ -471,10 +422,7 @@ build_scoped_history_inventory(transport::Transport& storage,
         inventory.marker_variants[reference->commit_id].push_back(
             std::move(*reference));
     }
-    std::ranges::sort(inventory.identifiers);
-    auto [first_marker, last_marker] =
-        std::ranges::unique(inventory.identifiers);
-    inventory.identifiers.erase(first_marker, last_marker);
+    sort_unique(inventory.identifiers);
     if (inventory.identifiers.size() > maximum_history_object_count) {
         return std::unexpected(
             error(ErrorCode::LimitExceeded, "too many storage objects"));
@@ -522,10 +470,7 @@ discover_scoped_commit_variants(transport::Transport& storage,
         inventory.identifiers.push_back(identifier);
         variants.push_back(std::move(*reference));
     }
-    std::ranges::sort(inventory.identifiers);
-    auto [first_commit, last_commit] =
-        std::ranges::unique(inventory.identifiers);
-    inventory.identifiers.erase(first_commit, last_commit);
+    sort_unique(inventory.identifiers);
     sort_unique(variants);
     if (inventory.identifiers.size() > maximum_history_object_count ||
         variants.size() > maximum_ciphertext_variants_per_commit) {
@@ -578,6 +523,86 @@ LoadResult load_impl(transport::Transport& storage,
     std::map<std::string, std::uint64_t> epoch_anchors;
     const KnownHistoryAnchor* cached_anchor = nullptr;
 
+    auto load_latest_epoch = [&](std::optional<epoch::Reference> accepted_epoch,
+                                 bool check_cancellation)
+        -> std::expected<std::optional<epoch::VerifiedEpoch>, Error> {
+        if (check_cancellation && platform::cancellation::requested()) {
+            return std::unexpected(error(ErrorCode::TransportFailure,
+                                         "operation cancelled by user"));
+        }
+        auto raw_epoch =
+            identifiers ? epoch::load_latest(storage,
+                                             key,
+                                             workspace_root,
+                                             *identifiers,
+                                             accepted_epoch)
+                        : epoch::load_latest(
+                              storage, key, workspace_root, accepted_epoch);
+        if (check_cancellation && platform::cancellation::requested()) {
+            return std::unexpected(error(ErrorCode::TransportFailure,
+                                         "operation cancelled by user"));
+        }
+        if (!raw_epoch) {
+            const auto code = [&] {
+                switch (raw_epoch.error().code) {
+                    case epoch::ErrorCode::TransportFailure:
+                        return ErrorCode::TransportFailure;
+                    case epoch::ErrorCode::WorkspaceFailure:
+                        return ErrorCode::WorkspaceFailure;
+                    case epoch::ErrorCode::LimitExceeded:
+                        return ErrorCode::LimitExceeded;
+                    default:
+                        return ErrorCode::InconsistentInventory;
+                }
+            }();
+            return std::unexpected(error(code, raw_epoch.error().detail));
+        }
+        return *raw_epoch;
+    };
+
+    auto load_markers = [&](const std::filesystem::path& workspace_dir,
+                            bool check_cancellation)
+        -> std::expected<std::map<std::string, std::vector<HeadReference>>,
+                         Error> {
+        if (check_cancellation && platform::cancellation::requested()) {
+            return std::unexpected(error(ErrorCode::TransportFailure,
+                                         "operation cancelled by user"));
+        }
+        std::map<std::string, std::vector<HeadReference>> candidates;
+        std::size_t sequence = 0;
+        for (const auto& [commit_id, references] : inventory->marker_variants) {
+            if (check_cancellation && platform::cancellation::requested()) {
+                return std::unexpected(error(ErrorCode::TransportFailure,
+                                             "operation cancelled by user"));
+            }
+            for (const auto& reference : references) {
+                const auto marker_id = marker_object(layout, reference);
+                auto state =
+                    std::ranges::find(trusted_marker_identifiers, marker_id) !=
+                            trusted_marker_identifiers.end()
+                        ? std::expected<MarkerState, Error>{MarkerState::Valid}
+                        : inspect_marker(storage,
+                                         layout,
+                                         reference,
+                                         workspace_dir,
+                                         sequence);
+                if (!state) {
+                    return std::unexpected(state.error());
+                }
+                if (*state == MarkerState::Valid) {
+                    candidates[commit_id].push_back(reference);
+                }
+            }
+            if (candidates[commit_id].empty()) {
+                return std::unexpected(
+                    error(ErrorCode::InvalidMarker,
+                          "all markers for a commit are invalid"));
+            }
+            sort_unique(candidates[commit_id]);
+        }
+        return candidates;
+    };
+
     if (native_complete_batch) {
         auto marker_temporary = make_workspace(temporary_root);
         if (!marker_temporary) {
@@ -598,13 +623,9 @@ LoadResult load_impl(transport::Transport& storage,
                 return std::unexpected(error(ErrorCode::TransportFailure,
                                              "operation cancelled by user"));
             }
-            const auto commits_dir =
-                layout.commits_prefix.ends_with('/')
-                    ? layout.commits_prefix.substr(
-                          0, layout.commits_prefix.size() - 1)
-                    : layout.commits_prefix;
             transport::GetBatch batch{
-                .source_prefix = commits_dir,
+                .source_prefix =
+                    std::string{trim_trailing_slash(layout.commits_prefix)},
                 .destination_root = (*temporary)->workspace.root,
             };
             for (const auto& [unused, references] :
@@ -628,97 +649,16 @@ LoadResult load_impl(transport::Transport& storage,
             return {};
         };
 
-        auto load_epoch =
-            [&]() -> std::expected<std::optional<epoch::VerifiedEpoch>, Error> {
-            if (platform::cancellation::requested()) {
-                return std::unexpected(error(ErrorCode::TransportFailure,
-                                             "operation cancelled by user"));
-            }
-            auto raw_epoch =
-                identifiers ? epoch::load_latest(storage,
-                                                 key,
-                                                 workspace_root,
-                                                 *identifiers,
-                                                 std::nullopt)
-                            : epoch::load_latest(
-                                  storage, key, workspace_root, std::nullopt);
-            if (platform::cancellation::requested()) {
-                return std::unexpected(error(ErrorCode::TransportFailure,
-                                             "operation cancelled by user"));
-            }
-            if (!raw_epoch) {
-                const auto code = [&] {
-                    switch (raw_epoch.error().code) {
-                        case epoch::ErrorCode::TransportFailure:
-                            return ErrorCode::TransportFailure;
-                        case epoch::ErrorCode::WorkspaceFailure:
-                            return ErrorCode::WorkspaceFailure;
-                        case epoch::ErrorCode::LimitExceeded:
-                            return ErrorCode::LimitExceeded;
-                        default:
-                            return ErrorCode::InconsistentInventory;
-                    }
-                }();
-                return std::unexpected(error(code, raw_epoch.error().detail));
-            }
-            return *raw_epoch;
-        };
-
-        auto load_markers = [&]()
-            -> std::expected<std::map<std::string, std::vector<HeadReference>>,
-                             Error> {
-            if (platform::cancellation::requested()) {
-                return std::unexpected(error(ErrorCode::TransportFailure,
-                                             "operation cancelled by user"));
-            }
-            std::map<std::string, std::vector<HeadReference>> candidates;
-            std::size_t sequence = 0;
-            for (const auto& [commit_id, references] :
-                 inventory->marker_variants) {
-                if (platform::cancellation::requested()) {
-                    return std::unexpected(
-                        error(ErrorCode::TransportFailure,
-                              "operation cancelled by user"));
-                }
-                for (const auto& reference : references) {
-                    const auto marker_id = marker_object(layout, reference);
-                    auto state = std::ranges::find(trusted_marker_identifiers,
-                                                   marker_id) !=
-                                         trusted_marker_identifiers.end()
-                                     ? std::expected<MarkerState,
-                                                     Error>{MarkerState::Valid}
-                                     : inspect_marker(
-                                           storage,
-                                           layout,
-                                           reference,
-                                           (*marker_temporary)->workspace.root,
-                                           sequence);
-                    if (!state) {
-                        return std::unexpected(state.error());
-                    }
-                    if (*state == MarkerState::Valid) {
-                        candidates[commit_id].push_back(reference);
-                    }
-                }
-                if (candidates[commit_id].empty()) {
-                    return std::unexpected(
-                        error(ErrorCode::InvalidMarker,
-                              "all markers for a commit are invalid"));
-                }
-                sort_unique(candidates[commit_id]);
-            }
-            return candidates;
-        };
-
         {
             std::jthread batch_thread([&] {
                 reads.commit_batch_result = fetch_commit_batch();
             });
             std::jthread epoch_thread([&] {
-                reads.epoch_result = load_epoch();
+                reads.epoch_result = load_latest_epoch(std::nullopt, true);
             });
             std::jthread marker_thread([&] {
-                reads.marker_result = load_markers();
+                reads.marker_result =
+                    load_markers((*marker_temporary)->workspace.root, true);
             });
         }
 
@@ -766,28 +706,9 @@ LoadResult load_impl(transport::Transport& storage,
         const auto accepted_epoch = frontier
                                         ? frontier->accepted_epoch
                                         : std::optional<epoch::Reference>{};
-        auto raw_epoch =
-            identifiers ? epoch::load_latest(storage,
-                                             key,
-                                             workspace_root,
-                                             *identifiers,
-                                             accepted_epoch)
-                        : epoch::load_latest(
-                              storage, key, workspace_root, accepted_epoch);
+        auto raw_epoch = load_latest_epoch(accepted_epoch, false);
         if (!raw_epoch) {
-            const auto code = [&] {
-                switch (raw_epoch.error().code) {
-                    case epoch::ErrorCode::TransportFailure:
-                        return ErrorCode::TransportFailure;
-                    case epoch::ErrorCode::WorkspaceFailure:
-                        return ErrorCode::WorkspaceFailure;
-                    case epoch::ErrorCode::LimitExceeded:
-                        return ErrorCode::LimitExceeded;
-                    default:
-                        return ErrorCode::InconsistentInventory;
-                }
-            }();
-            return std::unexpected(error(code, raw_epoch.error().detail));
+            return std::unexpected(raw_epoch.error());
         }
         discovered_epoch = *raw_epoch;
         const bool unchanged_accepted_epoch =
@@ -800,33 +721,11 @@ LoadResult load_impl(transport::Transport& storage,
             }
         }
 
-        std::size_t sequence = 0;
-        for (const auto& [commit_id, references] : inventory->marker_variants) {
-            for (const auto& reference : references) {
-                const auto marker_id = marker_object(layout, reference);
-                auto state =
-                    std::ranges::find(trusted_marker_identifiers, marker_id) !=
-                            trusted_marker_identifiers.end()
-                        ? std::expected<MarkerState, Error>{MarkerState::Valid}
-                        : inspect_marker(storage,
-                                         layout,
-                                         reference,
-                                         (*temporary)->workspace.root,
-                                         sequence);
-                if (!state) {
-                    return std::unexpected(state.error());
-                }
-                if (*state == MarkerState::Valid) {
-                    marker_candidates[commit_id].push_back(reference);
-                }
-            }
-            if (marker_candidates[commit_id].empty()) {
-                return std::unexpected(
-                    error(ErrorCode::InvalidMarker,
-                          "all markers for a commit are invalid"));
-            }
-            sort_unique(marker_candidates[commit_id]);
+        auto loaded_markers = load_markers((*temporary)->workspace.root, false);
+        if (!loaded_markers) {
+            return std::unexpected(loaded_markers.error());
         }
+        marker_candidates = std::move(*loaded_markers);
     }
 
     if (marker_candidates.empty()) {
@@ -1016,18 +915,14 @@ LoadResult load_impl(transport::Transport& storage,
     result.authenticated_commit_variants =
         std::move(authenticated_commit_variants);
     result.marked_heads.reserve(marker_candidates.size());
-    for (const auto& [commit_id, unused] : marker_candidates) {
-        static_cast<void>(unused);
+    for (const auto& [commit_id, references] : marker_candidates) {
         result.marked_heads.push_back(commit_id);
-        for (const auto& reference : marker_candidates.at(commit_id)) {
+        for (const auto& reference : references) {
             result.marked_head_identifiers.push_back(
                 marker_object(layout, reference));
         }
     }
-    std::ranges::sort(result.marked_head_identifiers);
-    result.marked_head_identifiers.erase(
-        std::ranges::unique(result.marked_head_identifiers).begin(),
-        result.marked_head_identifiers.end());
+    sort_unique(result.marked_head_identifiers);
     result.commits.reserve(loaded.size());
     for (auto& [unused, commit] : loaded) {
         static_cast<void>(unused);

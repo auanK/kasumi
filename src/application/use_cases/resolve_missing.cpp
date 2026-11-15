@@ -169,31 +169,25 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
         writer = std::move(*registered);
     }
 
-    const auto execute_outcome = [&]() -> std::expected<void, Error> {
-        auto synchronized = sync::coordinator::execute(context.runtime,
-                                                       context.storage,
-                                                       context.key,
-                                                       stable->input,
-                                                       stable->result,
-                                                       &session);
-        if (!synchronized) {
-            return std::unexpected(transaction_error(
-                context.operation, synchronized.error(), context.summary));
-        }
-        return {};
-    }();
+    auto synchronized = sync::coordinator::execute(context.runtime,
+                                                   context.storage,
+                                                   context.key,
+                                                   stable->input,
+                                                   stable->result,
+                                                   &session);
 
     if (history_storage::maintenance_protocol::registration_active(writer)) {
         auto released =
             history_storage::maintenance_protocol::release_registration(writer);
-        if (execute_outcome && !released) {
+        if (synchronized && !released) {
             return std::unexpected(synchronization_error(
                 context.operation, released.error().detail, context.summary));
         }
     }
 
-    if (!execute_outcome) {
-        return std::unexpected(execute_outcome.error());
+    if (!synchronized) {
+        return std::unexpected(transaction_error(
+            context.operation, synchronized.error(), context.summary));
     }
 
     return Response{

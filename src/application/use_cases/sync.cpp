@@ -162,9 +162,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 return std::unexpected(err);
             }
 
-            const bool is_bootstrap =
+            const bool allow_unreferenced_content_reuse =
                 context.initial_sync && !collected->storage.history_present;
-            const bool allow_unreferenced_content_reuse = is_bootstrap;
 
             auto available =
                 sync::coordinator::reobservation::refresh_content_availability(
@@ -250,21 +249,26 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 return std::unexpected(err);
             }
 
-            auto summary = compute_sync_summary(stable->result);
-            summary.trusted_content_reused = static_cast<std::uint32_t>(
-                stable->input.trusted_remote_content_objects.size());
-            if (context.on_progress) {
-                context.on_progress(SyncProgress{
-                    .stage = SyncStage::Calculating,
-                    .summary = summary,
-                    .total_items = summary.total,
-                });
-            }
+            const auto update_progress_after_stabilize =
+                [&](SyncCompleted& target) {
+                    target = compute_sync_summary(stable->result);
+                    target.trusted_content_reused = static_cast<std::uint32_t>(
+                        stable->input.trusted_remote_content_objects.size());
+                    if (context.on_progress) {
+                        context.on_progress(SyncProgress{
+                            .stage = SyncStage::Calculating,
+                            .summary = target,
+                            .total_items = target.total,
+                        });
+                    }
+                    return !stable->result.requires_publication &&
+                           !stable->result.requires_local_mutation &&
+                           !stable->result.requires_storage_repair &&
+                           !stable->result.requires_state_commit;
+                };
 
-            if (!stable->result.requires_publication &&
-                !stable->result.requires_local_mutation &&
-                !stable->result.requires_storage_repair &&
-                !stable->result.requires_state_commit) {
+            SyncCompleted summary;
+            if (update_progress_after_stabilize(summary)) {
                 if (observation_session.cache_dirty) {
                     static_cast<void>(state_storage::save_file_cache_delta(
                         context.runtime.database_path,
@@ -385,20 +389,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     return std::unexpected(err);
                 }
                 stable = std::move(restabilized);
-                summary = compute_sync_summary(stable->result);
-                summary.trusted_content_reused = static_cast<std::uint32_t>(
-                    stable->input.trusted_remote_content_objects.size());
-                if (context.on_progress) {
-                    context.on_progress(SyncProgress{
-                        .stage = SyncStage::Calculating,
-                        .summary = summary,
-                        .total_items = summary.total,
-                    });
-                }
-                if (!stable->result.requires_publication &&
-                    !stable->result.requires_local_mutation &&
-                    !stable->result.requires_storage_repair &&
-                    !stable->result.requires_state_commit) {
+                if (update_progress_after_stabilize(summary)) {
                     synchronized = {};
                     break;
                 }

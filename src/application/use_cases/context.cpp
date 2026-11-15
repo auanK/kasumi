@@ -181,13 +181,13 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
                     "initial sync requires absent local state; existing "
                     "database or transaction evidence was left untouched");
             }
-            if (!state_storage::validate(runtime_data->database_path)) {
-                return reject_initial(
-                    "initial sync requires absent local state; existing "
-                    "database or transaction evidence was left untouched");
-            }
-            auto loaded =
-                state_storage::load_state(runtime_data->database_path);
+            const auto loaded =
+                std::filesystem::is_symlink(db_status) ||
+                        !std::filesystem::is_regular_file(db_status) ||
+                        !state_storage::validate(runtime_data->database_path)
+                    ? std::expected<std::optional<state_storage::StoredState>,
+                                    std::string>{std::unexpected("invalid")}
+                    : state_storage::load_state(runtime_data->database_path);
             if (!loaded || loaded->has_value()) {
                 return reject_initial(
                     "initial sync requires absent local state; existing "

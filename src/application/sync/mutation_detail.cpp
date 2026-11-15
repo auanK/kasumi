@@ -60,6 +60,17 @@ file_hash(const std::filesystem::path& path, std::size_t operation_index) {
     return hash_hex(*hash);
 }
 
+std::expected<void, MutationError>
+sync_parent_checked(const std::filesystem::path& path,
+                    std::size_t operation_index) {
+    if (auto synced = platform::durability::sync_parent_directory(path);
+        !synced) {
+        return std::unexpected(make_error(
+            MutationErrorCode::LocalIo, synced.error(), path, operation_index));
+    }
+    return {};
+}
+
 std::expected<std::filesystem::file_status, MutationError>
 read_status(const std::filesystem::path& path, std::size_t operation_index) {
     std::error_code error;

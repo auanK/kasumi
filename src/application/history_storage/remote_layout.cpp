@@ -18,10 +18,6 @@ bool valid_lower_hex(std::string_view value) noexcept {
     });
 }
 
-bool valid_hex_hash(std::string_view value) noexcept {
-    return value.size() == HASH_HEX_SIZE && valid_lower_hex(value);
-}
-
 std::optional<HeadReference> parse_head_reference(std::string_view identifier,
                                                   std::string_view prefix,
                                                   char separator) {
@@ -156,6 +152,10 @@ bool is_control_object(const RemoteLayout& layout,
 bool is_history_object(const RemoteLayout& layout,
                        std::string_view identifier) noexcept {
     return identifier.starts_with(layout.history_prefix);
+}
+
+bool valid_hex_hash(std::string_view value) noexcept {
+    return value.size() == HASH_HEX_SIZE && valid_lower_hex(value);
 }
 
 bool valid_writer_identifier(std::string_view identifier) noexcept {

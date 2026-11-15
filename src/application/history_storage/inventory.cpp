@@ -60,9 +60,7 @@ build_history_inventory(std::span<const std::string> identifiers,
             inventory.identifiers.push_back(identifier);
         }
     }
-    std::ranges::sort(inventory.identifiers);
-    auto [first, last] = std::ranges::unique(inventory.identifiers);
-    inventory.identifiers.erase(first, last);
+    sort_unique(inventory.identifiers);
 
     if (inventory.identifiers.size() > maximum_history_object_count) {
         return std::unexpected(
@@ -128,30 +126,24 @@ validate_publication_budget(const HistoryInventory& inventory,
                   "publication exceeds history object limit"));
     }
 
-    const auto commit_count =
-        inventory.commit_variants.contains(reference.commit_id)
-            ? inventory.commit_variants.at(reference.commit_id).size()
-            : 0U;
-    const auto commit_capacity =
-        maximum_ciphertext_variants_per_commit -
-        std::min(commit_count, maximum_ciphertext_variants_per_commit);
-    if ((delta.adds_commit_object ? 1U : 0U) > commit_capacity) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded,
-                  "publication exceeds commit variant limit"));
+    if (delta.adds_commit_object) {
+        const auto it = inventory.commit_variants.find(reference.commit_id);
+        if (it != inventory.commit_variants.end() &&
+            it->second.size() >= maximum_ciphertext_variants_per_commit) {
+            return std::unexpected(
+                error(ErrorCode::LimitExceeded,
+                      "publication exceeds commit variant limit"));
+        }
     }
 
-    const auto marker_count =
-        inventory.marker_variants.contains(reference.commit_id)
-            ? inventory.marker_variants.at(reference.commit_id).size()
-            : 0U;
-    const auto marker_capacity =
-        maximum_ciphertext_variants_per_commit -
-        std::min(marker_count, maximum_ciphertext_variants_per_commit);
-    if ((delta.adds_marker_object ? 1U : 0U) > marker_capacity) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded,
-                  "publication exceeds marker variant limit"));
+    if (delta.adds_marker_object) {
+        const auto it = inventory.marker_variants.find(reference.commit_id);
+        if (it != inventory.marker_variants.end() &&
+            it->second.size() >= maximum_ciphertext_variants_per_commit) {
+            return std::unexpected(
+                error(ErrorCode::LimitExceeded,
+                      "publication exceeds marker variant limit"));
+        }
     }
 
     if (delta.adds_marked_commit && inventory.marker_variants.size() >=

@@ -247,16 +247,15 @@ std::expected<void, Error>
 verify_registration(const RegistrationState& registration) {
     if (!registration_active(registration)) {
         return std::unexpected(
-            error(ErrorCode::InvalidInput, "registro remoto inativo"));
+            error(ErrorCode::InvalidInput, "remote registration is inactive"));
     }
     auto matches = registration_matches(*registration.storage, registration);
     if (!matches) {
         return std::unexpected(matches.error());
     }
     if (!*matches) {
-        return std::unexpected(
-            error(ErrorCode::Blocked,
-                  "a propriedade da barreira mudou durante a coleta"));
+        return std::unexpected(error(
+            ErrorCode::Blocked, "barrier ownership changed during collection"));
     }
     return {};
 }
@@ -336,10 +335,7 @@ register_writer(transport::Transport& storage,
                                    .verify_owner = false};
     std::vector<std::string> listed;
     transport::Presence barrier = transport::Presence::Absent;
-    const auto writers_dir =
-        layout.writers_prefix.ends_with('/')
-            ? layout.writers_prefix.substr(0, layout.writers_prefix.size() - 1)
-            : layout.writers_prefix;
+    const auto writers_dir = detail::trim_trailing_slash(layout.writers_prefix);
     auto control_reads = transport::control_read_batch(
         storage,
         transport::ControlReadBatchRequest{
@@ -420,10 +416,7 @@ establish_barrier(transport::Transport& storage,
 
 std::expected<std::vector<std::string>, Error>
 active_writers(transport::Transport& storage, const RemoteLayout& layout) {
-    const auto writers_dir =
-        layout.writers_prefix.ends_with('/')
-            ? layout.writers_prefix.substr(0, layout.writers_prefix.size() - 1)
-            : layout.writers_prefix;
+    const auto writers_dir = detail::trim_trailing_slash(layout.writers_prefix);
     auto listed = list_children(storage, writers_dir);
     if (!listed) {
         return std::unexpected(listed.error());
@@ -737,10 +730,7 @@ supports_online_collection(transport::Transport& storage,
         return {};
     };
 
-    const auto probes_dir =
-        layout.probes_prefix.ends_with('/')
-            ? layout.probes_prefix.substr(0, layout.probes_prefix.size() - 1)
-            : layout.probes_prefix;
+    const auto probes_dir = detail::trim_trailing_slash(layout.probes_prefix);
     for (int observation = 0; observation < 2; ++observation) {
         auto listed = list_children(storage, probes_dir);
         if (!listed) {

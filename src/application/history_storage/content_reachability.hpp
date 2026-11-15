@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <tuple>
@@ -65,6 +66,23 @@ struct ContentReachabilityInventory {
 // Result of content reachability inventory.
 using ContentReachabilityResult =
     std::expected<ContentReachabilityInventory, Error>;
+
+// Outcome of downloading, decrypting, and verifying a remote content object.
+struct ContentAuditResult {
+    ContentObjectState state = ContentObjectState::Missing;
+    std::string plaintext_hash;
+    std::uint64_t size = 0;
+};
+
+// Downloads, decrypts, and cryptographically verifies a remote content object.
+std::expected<ContentAuditResult, Error>
+audit_content_object(transport::Transport& storage,
+                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                     std::string_view content_id,
+                     std::optional<std::string_view> expected_plaintext_hash,
+                     std::optional<std::uint64_t> expected_size,
+                     const std::filesystem::path& workspace,
+                     std::size_t sequence);
 
 // Audits referenced and orphan objects without removing them.
 ContentReachabilityResult inventory_content_reachability(

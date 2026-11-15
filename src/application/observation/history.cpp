@@ -215,18 +215,12 @@ ObserveResult observe(transport::Transport& storage,
                       : remote_inventory
                           ? history_storage::load_history(
                                 storage, key, workspace_root, *remote_inventory)
-                      : frontier ? history_storage::load_history_scoped(
-                                       storage,
-                                       key,
-                                       workspace_root,
-                                       frontier,
-                                       trusted_marker_identifiers)
-                                 : history_storage::load_history_scoped(
-                                       storage,
-                                       key,
-                                       workspace_root,
-                                       nullptr,
-                                       trusted_marker_identifiers);
+                          : history_storage::load_history_scoped(
+                                storage,
+                                key,
+                                workspace_root,
+                                frontier,
+                                trusted_marker_identifiers);
         if (!loaded) {
             return std::unexpected(storage_error(loaded.error()));
         }

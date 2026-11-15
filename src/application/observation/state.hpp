@@ -35,40 +35,22 @@ struct LocalTreeObservation {
 };
 
 std::expected<LocalTreeObservation, std::string>
-collect_local_observation(const std::filesystem::path& local_root);
-
-std::expected<LocalTreeObservation, std::string>
-collect_local_observation(
-    const std::filesystem::path& local_root,
-    const kasumi::ignore::IgnoreList& ignore_list);
+collect_local_observation(const std::filesystem::path& local_root,
+                          const kasumi::ignore::IgnoreList& ignore_list);
 
 std::expected<LocalTreeObservation, std::string>
 collect_local_observation(const std::filesystem::path& local_root,
-                          LocalObservationSession* session);
+                          LocalObservationSession* session = nullptr);
 
 std::expected<LocalTreeObservation, std::string>
 collect_local_observation(const std::filesystem::path& local_root,
                           LocalObservationSession* session,
                           const kasumi::ignore::IgnoreList& ignore_list);
 
-// Collects the local tree with full hashing.
-std::expected<Snapshot, std::string>
-collect_local_tree(const std::filesystem::path& local_root);
-
-// Collects the local tree reusing session state when safe.
+// Collects the local tree with full hashing or reusing session state when safe.
 std::expected<Snapshot, std::string>
 collect_local_tree(const std::filesystem::path& local_root,
-                   LocalObservationSession* session);
-
-// Collects a managed projection using rules selected from authenticated state.
-std::expected<Snapshot, std::string>
-collect_local_tree(const std::filesystem::path& local_root,
-                   const kasumi::ignore::IgnoreList& ignore_list);
-
-std::expected<Snapshot, std::string>
-collect_local_tree(const std::filesystem::path& local_root,
-                   LocalObservationSession* session,
-                   const kasumi::ignore::IgnoreList& ignore_list);
+                   LocalObservationSession* session = nullptr);
 
 // Combines logical storage state with observed physical namespace snapshot.
 struct StorageObservation {

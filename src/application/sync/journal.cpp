@@ -357,48 +357,30 @@ Delta compute_delta(const transaction::Record& prev,
     return delta;
 }
 
-std::optional<std::uint64_t> delta_size(const Delta& delta) noexcept {
-    std::uint64_t size = 1;
-    const auto add = [&](std::uint64_t n) {
-        if (n > maximum_payload_size - size)
-            return false;
-        size += n;
-        return true;
-    };
-    const auto string = [&](const std::string& value) {
-        return add(4) && add(value.size());
-    };
-    const auto strings = [&](const std::vector<std::string>& values) {
-        if (!add(4))
-            return false;
-        for (const auto& value : values)
-            if (!string(value))
-                return false;
-        return true;
-    };
-    if ((delta.flags & HasPhase) && !add(1))
-        return std::nullopt;
-    if (delta.flags & HasProgress) {
-        if (!add(4))
-            return std::nullopt;
-        for (const auto& [index, progress] : delta.progress_changes) {
-            (void)index;
-            if (!add(10) || !string(progress.previous_hash))
-                return std::nullopt;
-        }
+std::expected<std::uint32_t, std::string>
+validate_log_entry_header(std::span<const std::uint8_t> bytes,
+                          std::size_t offset,
+                          std::size_t limit,
+                          std::uint64_t count,
+                          const Hash& chain) {
+    if (limit - offset < log_header_size) {
+        return std::unexpected("journal delta header truncated");
     }
-    if ((delta.flags & HasPublication) &&
-        (!string(delta.commit_id) || !string(delta.ciphertext_id) ||
-         !string(delta.marker_id) || !strings(delta.parent_ids)))
-        return std::nullopt;
-    if ((delta.flags & HasEpoch) &&
-        (!string(delta.epoch_vault_id) || !string(delta.epoch_id) || !add(16)))
-        return std::nullopt;
-    if ((delta.flags & HasPendingPaths) &&
-        (!strings(delta.observed_pending_paths) ||
-         !strings(delta.pending_paths)))
-        return std::nullopt;
-    return size;
+    const auto* ptr = bytes.data() + offset;
+    if (!std::equal(journal_log_magic.begin(), journal_log_magic.end(), ptr)) {
+        return std::unexpected("incompatible journal delta format");
+    }
+    if (count >= maximum_delta_count ||
+        decode_le<std::uint64_t>(ptr + 4) != count ||
+        std::memcmp(chain.data(), ptr + 12, 32) != 0) {
+        return std::unexpected("journal delta sequence or chain mismatch");
+    }
+    const auto payload_size = decode_le<std::uint32_t>(ptr + 44);
+    if (payload_size > maximum_payload_size ||
+        payload_size > limit - offset - log_header_size) {
+        return std::unexpected("invalid or truncated journal delta payload");
+    }
+    return payload_size;
 }
 
 std::vector<std::byte> encode_delta(const Delta& delta) {
@@ -1034,24 +1016,14 @@ std::expected<Replay, std::string> replay(const Paths& paths,
     auto chain = tip->snapshot;
     std::size_t offset = 0;
     while (offset < tip->bytes) {
-        if (tip->bytes - offset < log_header_size)
-            return std::unexpected("confirmed delta header truncated");
+        const auto payload_size =
+            validate_log_entry_header(log, offset, tip->bytes, count, chain);
+        if (!payload_size)
+            return std::unexpected(payload_size.error());
         const auto* ptr = log.data() + offset;
-        if (!std::equal(
-                journal_log_magic.begin(), journal_log_magic.end(), ptr))
-            return std::unexpected("incompatible journal delta format");
-        if (count >= maximum_delta_count ||
-            decode_le<std::uint64_t>(ptr + 4) != count ||
-            std::memcmp(chain.data(), ptr + 12, 32) != 0)
-            return std::unexpected("journal delta sequence or chain mismatch");
-        const auto payload_size = decode_le<std::uint32_t>(ptr + 44);
-        if (payload_size > maximum_payload_size ||
-            payload_size > tip->bytes - offset - log_header_size)
-            return std::unexpected(
-                "invalid or truncated confirmed delta payload");
         const auto aad =
-            make_delta_aad(count, chain, payload_size, record->operation_id);
-        SensitiveBytes delta(payload_size);
+            make_delta_aad(count, chain, *payload_size, record->operation_id);
+        SensitiveBytes delta(*payload_size);
         if (crypto_aead_unlock(delta.data(),
                                ptr + 48 + nonce_size,
                                log_key.value.data(),
@@ -1059,7 +1031,7 @@ std::expected<Replay, std::string> replay(const Paths& paths,
                                aad.data(),
                                aad.size(),
                                ptr + log_header_size,
-                               payload_size) != 0)
+                               *payload_size) != 0)
             return std::unexpected("journal delta authentication failed");
         auto applied = apply_delta(*record, std::as_bytes(std::span{delta}));
         if (!applied)
@@ -1070,8 +1042,8 @@ std::expected<Replay, std::string> replay(const Paths& paths,
             return std::unexpected(
                 "journal delta semantic validation failed: " +
                 semantic.error());
-        chain = hasher::hash_bytes(ptr, log_header_size + payload_size);
-        offset += log_header_size + payload_size;
+        chain = hasher::hash_bytes(ptr, log_header_size + *payload_size);
+        offset += log_header_size + *payload_size;
         ++count;
     }
     if (count != tip->count || chain != tip->chain)
@@ -1090,14 +1062,11 @@ std::expected<Tip, std::string> save_snapshot(const Paths& paths,
     if (!encoded)
         return std::unexpected(encoded.error());
     PayloadGuard encoded_guard{*encoded};
-    SensitiveBytes plaintext(encoded->size());
-    std::memcpy(plaintext.data(), encoded->data(), encoded->size());
-    crypto_wipe(encoded->data(), encoded->size());
-    if (plaintext.size() > maximum_payload_size)
+    if (encoded->size() > maximum_payload_size)
         return std::unexpected("journal snapshot exceeds limit");
-    std::vector<std::uint8_t> bytes(header_size + plaintext.size());
+    std::vector<std::uint8_t> bytes(header_size + encoded->size());
     std::copy(journal_magic.begin(), journal_magic.end(), bytes.begin());
-    encode_le<std::uint64_t>(plaintext.size(), bytes.data() + 4);
+    encode_le<std::uint64_t>(encoded->size(), bytes.data() + 4);
     auto random = platform::random::fill_bytes(
         std::span{bytes}.subspan(aad_size, nonce_size));
     if (!random)
@@ -1108,8 +1077,8 @@ std::expected<Tip, std::string> save_snapshot(const Paths& paths,
                      bytes.data() + aad_size,
                      bytes.data(),
                      aad_size,
-                     plaintext.data(),
-                     plaintext.size());
+                     reinterpret_cast<const std::uint8_t*>(encoded->data()),
+                     encoded->size());
     auto written = write_file(paths.temporary_path, bytes, record, false, 0);
     if (!written)
         return std::unexpected(written.error());
@@ -1288,25 +1257,19 @@ save_delta(const Paths& paths,
     }
     if (previous_tip.count >= maximum_delta_count)
         return std::unexpected("journal delta count exceeds limit");
-    auto payload_size = delta_size(delta);
-    if (!payload_size || previous_tip.bytes > maximum_log_size ||
-        log_header_size + *payload_size > maximum_log_size - previous_tip.bytes)
-        return std::unexpected("journal delta/log exceeds limit");
     auto encoded = encode_delta(delta);
     PayloadGuard encoded_guard{encoded};
-    SensitiveBytes payload(encoded.size());
-    std::memcpy(payload.data(), encoded.data(), encoded.size());
-    crypto_wipe(encoded.data(), encoded.size());
-    if (payload.size() > maximum_payload_size ||
-        log_header_size + payload.size() >
+    if (encoded.size() > maximum_payload_size ||
+        previous_tip.bytes > maximum_log_size ||
+        log_header_size + encoded.size() >
             maximum_log_size - previous_tip.bytes)
-        return std::unexpected("journal log exceeds limit");
+        return std::unexpected("journal delta/log exceeds limit");
     KeyGuard log_key{derive_log_key(key)};
     const auto aad = make_delta_aad(previous_tip.count,
                                     previous_tip.chain,
-                                    static_cast<std::uint32_t>(payload.size()),
+                                    static_cast<std::uint32_t>(encoded.size()),
                                     record.operation_id);
-    std::vector<std::uint8_t> bytes(log_header_size + payload.size());
+    std::vector<std::uint8_t> bytes(log_header_size + encoded.size());
     std::copy_n(aad.begin(), 48, bytes.begin());
     auto random =
         platform::random::fill_bytes(std::span{bytes}.subspan(48, nonce_size));
@@ -1318,8 +1281,8 @@ save_delta(const Paths& paths,
                      bytes.data() + 48,
                      aad.data(),
                      aad.size(),
-                     payload.data(),
-                     payload.size());
+                     reinterpret_cast<const std::uint8_t*>(encoded.data()),
+                     encoded.size());
     auto written =
         write_file(paths.log_path, bytes, record, true, previous_tip.count);
     if (!written)
@@ -1371,23 +1334,13 @@ std::expected<void, std::string> validate_retirement(const Paths& paths,
             std::uint64_t count = 0;
             std::size_t offset = 0;
             while (offset < bytes->size()) {
-                if (bytes->size() - offset < log_header_size)
-                    return std::unexpected("retired log truncated");
-                const auto* ptr = bytes->data() + offset;
-                if (!std::equal(journal_log_magic.begin(),
-                                journal_log_magic.end(),
-                                ptr) ||
-                    decode_le<std::uint64_t>(ptr + 4) != count ||
-                    std::memcmp(chain.data(), ptr + 12, 32) != 0)
-                    return std::unexpected(
-                        "retired log generation or sequence mismatch");
-                const auto size = decode_le<std::uint32_t>(ptr + 44);
-                if (size > maximum_payload_size ||
-                    size > bytes->size() - offset - log_header_size ||
-                    count >= maximum_delta_count)
-                    return std::unexpected("invalid retired log record");
-                chain = hasher::hash_bytes(ptr, log_header_size + size);
-                offset += log_header_size + size;
+                const auto size = validate_log_entry_header(
+                    *bytes, offset, bytes->size(), count, chain);
+                if (!size)
+                    return std::unexpected(size.error());
+                chain = hasher::hash_bytes(bytes->data() + offset,
+                                           log_header_size + *size);
+                offset += log_header_size + *size;
                 ++count;
             }
             if (count != proof.count || chain != proof.chain)
@@ -1599,8 +1552,6 @@ save(const Paths& paths,
                 return std::unexpected(log.error());
             session->paths = paths;
             session->operation_id = confirmed.operation_id;
-            session->local_generation = confirmed.local_generation;
-            session->storage_generation = confirmed.storage_generation;
             session->key_identity = key_id;
             session->tip_snapshot = tip.snapshot;
             session->tip_bytes = tip.bytes;
@@ -1766,109 +1717,79 @@ load(const Paths& paths,
      Session* session) {
     std::lock_guard lock(journal_mutex);
     KeyGuard journal_key{crypto::derive_key(key, crypto::KeyPurpose::Journal)};
+    const auto invalidate_session = [&]() noexcept {
+        if (session)
+            session->invalidate();
+    };
+    const auto fail = [&](std::string message)
+        -> std::expected<std::optional<transaction::Record>, std::string> {
+        invalidate_session();
+        return std::unexpected(std::move(message));
+    };
+    const auto retire_and_clear = [&]()
+        -> std::expected<std::optional<transaction::Record>, std::string> {
+        auto cleared = clear_locked(paths, journal_key.value);
+        if (!cleared)
+            return fail(cleared.error());
+        if (session) {
+            session->state = SessionState::Retired;
+            session->invalidate();
+        }
+        return std::optional<transaction::Record>{};
+    };
     try {
         if (session && session->state == SessionState::Retired)
             return std::unexpected("journal session is retired");
         const auto key_id = journal_key_id(journal_key);
         if (session && session->is_valid() &&
             !session->bound_to(paths, key_id)) {
-            session->invalidate();
-            return std::unexpected("active journal session paths/key changed");
+            return fail("active journal session paths/key changed");
         }
         auto structural = validate_paths(paths);
-        if (!structural) {
-            if (session)
-                session->invalidate();
-            return std::unexpected(structural.error());
-        }
+        if (!structural)
+            return fail(structural.error());
         auto retired = read_status(retired_path(paths));
-        if (!retired) {
-            if (session)
-                session->invalidate();
-            return std::unexpected(retired.error());
-        }
-        if (!missing(*retired)) {
-            auto cleared = clear_locked(paths, journal_key.value);
-            if (!cleared) {
-                if (session)
-                    session->invalidate();
-                return std::unexpected(cleared.error());
-            }
-            if (session) {
-                session->state = SessionState::Retired;
-                session->invalidate();
-            }
-            return std::optional<transaction::Record>{};
-        }
+        if (!retired)
+            return fail(retired.error());
+        if (!missing(*retired))
+            return retire_and_clear();
         auto outer =
             validate_parent_directory(paths.final_path.parent_path(), true);
-        if (!outer) {
-            if (session)
-                session->invalidate();
-            return std::unexpected(outer.error());
-        }
+        if (!outer)
+            return fail(outer.error());
         auto parent = validate_parent_directory(paths.final_path, true);
-        if (!parent) {
-            if (session)
-                session->invalidate();
-            return std::unexpected(parent.error());
-        }
+        if (!parent)
+            return fail(parent.error());
         auto directory = read_status(paths.final_path.parent_path());
-        if (!directory) {
-            if (session)
-                session->invalidate();
-            return std::unexpected(directory.error());
-        }
+        if (!directory)
+            return fail(directory.error());
         if (missing(*directory)) {
-            if (session) {
-                session->invalidate();
+            invalidate_session();
+            if (session)
                 session->state = SessionState::Uninitialized;
-            }
             return std::optional<transaction::Record>{};
         }
         auto proof = read_status(retirement_path(paths));
-        if (!proof) {
-            if (session)
-                session->invalidate();
-            return std::unexpected(proof.error());
-        }
-        if (!missing(*proof)) {
-            auto cleared = clear_locked(paths, journal_key.value);
-            if (!cleared) {
-                if (session)
-                    session->invalidate();
-                return std::unexpected(cleared.error());
-            }
-            if (session) {
-                session->state = SessionState::Retired;
-                session->invalidate();
-            }
-            return std::optional<transaction::Record>{};
-        }
+        if (!proof)
+            return fail(proof.error());
+        if (!missing(*proof))
+            return retire_and_clear();
         auto loaded = replay(paths, journal_key.value);
-        if (!loaded) {
-            if (session)
-                session->invalidate();
-            return std::unexpected(loaded.error());
-        }
+        if (!loaded)
+            return fail(loaded.error());
         journal_fault_test::hit("loaded", &loaded->record);
         if (session) {
             auto snapshot = artifact_state(paths.final_path);
             auto log = artifact_state(paths.log_path);
             if (!snapshot || !log) {
-                session->invalidate();
-                return std::unexpected(!snapshot ? snapshot.error()
-                                                 : log.error());
+                return fail(!snapshot ? snapshot.error() : log.error());
             }
             session->snapshot_fingerprint = snapshot->fingerprint;
             session->snapshot_bytes = snapshot->bytes;
             session->log_fingerprint = log->fingerprint;
             session->paths = paths;
             session->operation_id = loaded->record.operation_id;
-            session->local_generation = loaded->record.local_generation;
-            session->storage_generation = loaded->record.storage_generation;
-            session->key_identity = hasher::hash_bytes(
-                journal_key.value.data(), journal_key.value.size());
+            session->key_identity = key_id;
             session->tip_snapshot = loaded->tip.snapshot;
             session->tip_bytes = loaded->tip.bytes;
             session->tip_count = loaded->tip.count;
@@ -1878,10 +1799,7 @@ load(const Paths& paths,
         }
         return std::optional<transaction::Record>{std::move(loaded->record)};
     } catch (const std::exception& error) {
-        if (session)
-            session->invalidate();
-        return std::unexpected(std::string{"failed to load journal: "} +
-                               error.what());
+        return fail(std::string{"failed to load journal: "} + error.what());
     }
 }
 

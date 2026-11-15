@@ -14,6 +14,7 @@
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
+#include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 #include "platform/workspace.hpp"
 #include "runtime/resolver.hpp"
@@ -27,6 +28,7 @@
 #include <charconv>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <optional>
@@ -119,7 +121,7 @@ resolve_key(const Credentials& credentials,
                   "credentials are required to inspect remote history"));
     }
 
-    std::optional<runtime::vault::KeyBytes> resolved;
+    bool has_master_key = false;
     if (const auto* master_key = std::get_if<MasterKeyHex>(&credentials)) {
         auto decoded = runtime::vault::decode_hex(master_key->value);
         if (!decoded) {
@@ -127,46 +129,45 @@ resolve_key(const Credentials& credentials,
                                          InspectionErrorCode::CredentialFailure,
                                          decoded.error().detail));
         }
-        resolved = *decoded;
+        output = *decoded;
         crypto::secure_memory::wipe(decoded->data(), decoded->size());
+        has_master_key = true;
     }
 
     if (*present) {
         auto stored = runtime::vault::read_only(runtime_data.key_path);
         if (!stored) {
-            if (resolved) {
-                crypto::secure_memory::wipe(resolved->data(), resolved->size());
+            if (has_master_key) {
+                crypto::secure_memory::wipe(output.data(), output.size());
             }
             return std::unexpected(
                 error(operation,
                       InspectionErrorCode::CredentialFailure,
                       "failed to read profile persisted key"));
         }
-        if (resolved) {
-            const bool matches = *stored == *resolved;
+        if (has_master_key) {
+            const bool matches = *stored == output;
             crypto::secure_memory::wipe(stored->data(), stored->size());
             if (!matches) {
-                crypto::secure_memory::wipe(resolved->data(), resolved->size());
+                crypto::secure_memory::wipe(output.data(), output.size());
                 return std::unexpected(
                     error(operation,
                           InspectionErrorCode::CredentialFailure,
                           "credential does not match profile"));
             }
         } else {
-            resolved = *stored;
+            output = *stored;
             crypto::secure_memory::wipe(stored->data(), stored->size());
         }
     }
 
-    output = *resolved;
-    crypto::secure_memory::wipe(resolved->data(), resolved->size());
     return {};
 }
 
 InspectionObservationHints
 make_observation_hints(const runtime::RuntimeData& runtime_data,
                        InspectionOperation operation,
-                       std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+                       const history_storage::RemoteLayout& layout) {
     InspectionObservationHints hints;
     auto persisted = state_storage::load_state(runtime_data.database_path);
     if (!persisted || !*persisted) {
@@ -198,7 +199,6 @@ make_observation_hints(const runtime::RuntimeData& runtime_data,
             .ciphertext_id = state.ciphertext_id,
         };
         if (history_storage::valid(reference)) {
-            const auto layout = history_storage::derive_remote_layout(key);
             hints.trusted_marker_identifiers.push_back(
                 history_storage::marker_object(layout, reference));
         }
@@ -586,19 +586,62 @@ install_remote_file(const std::filesystem::path& plaintext,
     }
     const auto temporary =
         destination.parent_path() / (".kasumi-download-" + *token + ".tmp");
-    const auto cleanup = [&] {
-        std::error_code ignored;
-        std::filesystem::remove(temporary, ignored);
-    };
-    std::error_code filesystem_error;
-    if (!std::filesystem::copy_file(plaintext,
-                                    temporary,
-                                    std::filesystem::copy_options::none,
-                                    filesystem_error)) {
-        cleanup();
+    auto private_tmp =
+        platform::private_storage::create_private_file(temporary);
+    if (!private_tmp) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::DestinationFailure,
                                      "failed to prepare destination file"));
+    }
+    const auto cleanup = [&] {
+        static_cast<void>(
+            platform::private_storage::remove_private_file_if_owned(
+                *private_tmp));
+    };
+    {
+        std::ifstream input(plaintext, std::ios::binary);
+        if (!input) {
+            cleanup();
+            return std::unexpected(
+                error(operation,
+                      InspectionErrorCode::DestinationFailure,
+                      "failed to read downloaded file"));
+        }
+        std::array<char, 65536> buffer{};
+        while (input) {
+            input.read(buffer.data(),
+                       static_cast<std::streamsize>(buffer.size()));
+            const auto count = input.gcount();
+            if (count > 0) {
+                if (auto written =
+                        platform::private_storage::write_private_file(
+                            *private_tmp,
+                            buffer.data(),
+                            static_cast<std::size_t>(count));
+                    !written) {
+                    cleanup();
+                    return std::unexpected(
+                        error(operation,
+                              InspectionErrorCode::DestinationFailure,
+                              "failed to prepare destination file"));
+                }
+            }
+        }
+        if (input.bad() || (input.fail() && !input.eof())) {
+            cleanup();
+            return std::unexpected(
+                error(operation,
+                      InspectionErrorCode::DestinationFailure,
+                      "failed to read downloaded file"));
+        }
+    }
+    if (auto closed = platform::private_storage::flush_and_close_private_file(
+            *private_tmp);
+        !closed) {
+        cleanup();
+        return std::unexpected(error(operation,
+                                     InspectionErrorCode::DestinationFailure,
+                                     "failed to persist download"));
     }
     if (auto synced = platform::durability::sync_file(temporary); !synced) {
         cleanup();
@@ -822,45 +865,35 @@ inspect_contents(const observation::history::StorageView& observed,
             continue;
         }
 
-        const auto encrypted =
-            context.workspace->root /
-            ("content-audit-" + std::to_string(audit_index) + ".enc");
-        const auto plaintext =
-            context.workspace->root /
-            ("content-audit-" + std::to_string(audit_index++) + ".plain");
-        auto downloaded =
-            transport::get(context.storage, content.content_id, encrypted);
-        if (!downloaded) {
-            if (downloaded.error().code ==
-                transport::ErrorCode::ObjectNotFound) {
-                content.physically_present = false;
-                content.state = RemoteContentState::Missing;
-                continue;
-            }
+        auto audited = history_storage::audit_content_object(
+            context.storage,
+            context.key,
+            content.content_id,
+            content.referenced
+                ? std::optional<std::string_view>{content.logical_hash}
+                : std::nullopt,
+            content.referenced ? std::optional<std::uint64_t>{content.size}
+                               : std::nullopt,
+            context.workspace->root,
+            audit_index++);
+        if (!audited) {
             return std::unexpected(
                 error(operation,
                       InspectionErrorCode::RemoteObservationFailure,
                       "failed to download object during audit"));
         }
-        if (!crypto::decrypt_file(encrypted, plaintext, context.key)) {
-            content.state = RemoteContentState::Invalid;
+        if (audited->state == history_storage::ContentObjectState::Missing) {
+            content.physically_present = false;
+            content.state = RemoteContentState::Missing;
             continue;
         }
-        const auto hash = crypto::content::hash_file(plaintext);
-        std::error_code filesystem_error;
-        const auto size =
-            std::filesystem::file_size(plaintext, filesystem_error);
-        if (!hash || filesystem_error ||
-            crypto::content_identifier(context.key, *hash) !=
-                content.content_id ||
-            (content.referenced && (hash_hex(*hash) != content.logical_hash ||
-                                    size != content.size))) {
+        if (audited->state == history_storage::ContentObjectState::Corrupt) {
             content.state = RemoteContentState::Invalid;
             continue;
         }
         if (!content.referenced) {
-            content.logical_hash = hash_hex(*hash);
-            content.size = size;
+            content.logical_hash = std::move(audited->plaintext_hash);
+            content.size = audited->size;
         }
         content.state = RemoteContentState::Valid;
     }
@@ -1536,7 +1569,7 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     context.layout = history_storage::derive_remote_layout(context.key);
 
     context.hints =
-        make_observation_hints(context.runtime, operation, context.key);
+        make_observation_hints(context.runtime, operation, context.layout);
 
     auto opened = transport::open_transport(context.runtime.storage_location,
                                             context.runtime.local_dir);
@@ -1817,8 +1850,6 @@ audit_remote_inventory(transport::Transport& storage,
                 .unknown_objects = objects.unknown_count,
             };
         }();
-    } catch (const std::exception&) {
-        result = std::unexpected("exception during remote inventory audit");
     } catch (...) {
         result = std::unexpected("exception during remote inventory audit");
     }
@@ -1837,10 +1868,6 @@ inspect(InspectionInput input) {
                               "remote inspection failure"));
     try {
         result = run_inspection(input, context);
-    } catch (const std::exception&) {
-        result = std::unexpected(error(input.request.operation,
-                                       InspectionErrorCode::RuntimeFailure,
-                                       "exception during remote inspection"));
     } catch (...) {
         result = std::unexpected(error(input.request.operation,
                                        InspectionErrorCode::RuntimeFailure,

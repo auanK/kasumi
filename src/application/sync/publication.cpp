@@ -228,12 +228,6 @@ publish_commit(transport::Transport& storage,
                std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                const PreparedCommit& prepared,
                const std::filesystem::path& workspace_root) {
-    auto computed = commit_identifier(key, prepared.commit);
-    if (!computed || !history::valid_commit_id(prepared.commit_id) ||
-        *computed != prepared.commit_id) {
-        return std::unexpected(Error{.code = ErrorCode::InvalidCommit,
-                                     .detail = "invalid commit"});
-    }
     const auto layout = history_storage::derive_remote_layout(key);
     auto object = sync::publication::publish_commit_object(
         storage, layout, key, prepared, workspace_root);

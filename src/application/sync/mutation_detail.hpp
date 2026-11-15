@@ -19,8 +19,8 @@
 
 namespace kasumi::application::sync::mutation::detail {
 
-using ::kasumi::Operation;
 using ::kasumi::Action;
+using ::kasumi::Operation;
 
 // Creates a mutation failure with operation context.
 MutationError make_error(MutationErrorCode code,
@@ -40,6 +40,11 @@ rollback_candidate_path(const std::filesystem::path& destination,
 // Computes cryptographic hash of a file and formats as hex string.
 std::expected<std::string, MutationError>
 file_hash(const std::filesystem::path& path, std::size_t operation_index);
+
+// Synchronizes the parent directory of path to durable storage.
+std::expected<void, MutationError>
+sync_parent_checked(const std::filesystem::path& path,
+                    std::size_t operation_index);
 
 // Reads path status and contextualizes any failure.
 std::expected<std::filesystem::file_status, MutationError>
@@ -126,10 +131,10 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
                           std::span<const std::uint8_t, crypto::KEY_SIZE> key);
 
 // Records the unique FileIdentity of an installed or staging local copy.
-std::expected<void, MutationError>
-record_copy_installed_identity(const platform::Workspace& workspace,
-                               std::size_t operation_index,
-                               const platform::private_storage::FileIdentity& identity);
+std::expected<void, MutationError> record_copy_installed_identity(
+    const platform::Workspace& workspace,
+    std::size_t operation_index,
+    const platform::private_storage::FileIdentity& identity);
 
 // Reads the recorded FileIdentity of an installed local copy.
 std::expected<std::optional<platform::private_storage::FileIdentity>,

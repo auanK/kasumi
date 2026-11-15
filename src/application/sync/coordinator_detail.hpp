@@ -65,17 +65,17 @@ profile_directory(const runtime::RuntimeData& runtime_data);
 std::expected<std::filesystem::path, Error>
 transactions_directory(const std::filesystem::path& profile, bool create);
 // Creates an isolated temporary workspace for a transaction.
-std::expected<platform::Workspace, Error>
-create_transaction_workspace(const std::filesystem::path& profile,
-                             std::string_view id,
-                             std::span<const std::uint8_t, crypto::KEY_SIZE> key);
-// Opens a persisted workspace only when its owner marker authenticates; older
-// workspaces are returned without deletion authority for recovery compatibility.
-std::expected<std::optional<platform::Workspace>, Error>
-open_transaction_workspace(
+std::expected<platform::Workspace, Error> create_transaction_workspace(
     const std::filesystem::path& profile,
     std::string_view id,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+// Opens a persisted workspace only when its owner marker authenticates; older
+// workspaces are returned without deletion authority for recovery
+// compatibility.
+std::expected<std::optional<platform::Workspace>, Error>
+open_transaction_workspace(const std::filesystem::path& profile,
+                           std::string_view id,
+                           std::span<const std::uint8_t, crypto::KEY_SIZE> key);
 // Removes the temporary transaction workspace, if it exists.
 std::expected<void, Error> remove_transaction_workspace(
     const std::optional<platform::Workspace>& workspace,
@@ -88,9 +88,8 @@ finish_transaction_cleanup(const journal::Paths& paths,
                            journal::Session* session = nullptr);
 // Cleans up orphan workspaces without a matching transaction.
 std::expected<void, Error>
-cleanup_orphan_workspaces(
-    const std::filesystem::path& profile,
-    std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+cleanup_orphan_workspaces(const std::filesystem::path& profile,
+                          std::span<const std::uint8_t, crypto::KEY_SIZE> key);
 // Resolves transaction journal paths within the profile.
 std::expected<journal::Paths, Error>
 make_journal_paths(const runtime::RuntimeData& runtime_data);
@@ -134,6 +133,15 @@ checkpoint_upload_batch(const journal::Paths& paths,
                         const mutation::StagedUploadBatch& batch,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         journal::Session* session = nullptr);
+
+// Returns true when any local mutation requires workspace/backup rollback.
+bool has_local_rollback_work(const transaction::Record& record) noexcept;
+
+// Extracts the next upload sub-batch bounded by item count and total bytes.
+std::vector<std::size_t>
+next_upload_batch_chunk(std::span<const std::size_t> pending_uploads,
+                        std::size_t& cursor,
+                        std::span<const transaction::Operation> operations);
 
 // Rolls back the transaction and updates its persisted record.
 std::expected<void, Error>

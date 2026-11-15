@@ -194,13 +194,6 @@ try_load_variant(transport::Transport& storage,
                  const std::filesystem::path& workspace,
                  std::size_t sequence);
 
-VariantResult
-try_load_variant(transport::Transport& storage,
-                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                 const HeadReference& reference,
-                 const std::filesystem::path& workspace,
-                 std::size_t sequence);
-
 // Returns the first valid variant of the commit.
 std::expected<history::LoadedCommit, Error>
 try_load_variants(transport::Transport& storage,
@@ -211,26 +204,10 @@ try_load_variants(transport::Transport& storage,
                   std::size_t& sequence,
                   HeadReference* authenticated_reference = nullptr);
 
-std::expected<history::LoadedCommit, Error>
-try_load_variants(transport::Transport& storage,
-                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                  std::vector<HeadReference> references,
-                  const std::filesystem::path& workspace,
-                  std::size_t& sequence,
-                  HeadReference* authenticated_reference = nullptr);
-
 // Confirms that the remote commit matches the published one.
 std::expected<void, Error>
 verify_published_commit(transport::Transport& storage,
                         const RemoteLayout& layout,
-                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                        const history::Commit& expected,
-                        const HeadReference& reference,
-                        const std::filesystem::path& workspace,
-                        std::size_t& sequence);
-
-std::expected<void, Error>
-verify_published_commit(transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         const history::Commit& expected,
                         const HeadReference& reference,

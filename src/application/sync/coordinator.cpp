@@ -1088,6 +1088,82 @@ bool has_local_rollback_work(const transaction::Record& record) noexcept {
     return false;
 }
 
+std::vector<std::size_t>
+next_upload_batch_chunk(std::span<const std::size_t> pending_uploads,
+                        std::size_t& cursor,
+                        std::span<const transaction::Operation> operations) {
+    std::vector<std::size_t> chunk;
+    std::uint64_t chunk_bytes = 0;
+    while (cursor + chunk.size() < pending_uploads.size() &&
+           chunk.size() < upload_batch_max_items &&
+           (chunk.empty() ||
+            chunk_bytes +
+                    operations[pending_uploads[cursor + chunk.size()]].size <=
+                upload_batch_max_bytes)) {
+        const auto op_index = pending_uploads[cursor + chunk.size()];
+        chunk_bytes += operations[op_index].size;
+        chunk.push_back(op_index);
+    }
+    cursor += chunk.size();
+    return chunk;
+}
+
+std::expected<void, Error> rollback_operations_in_workspace(
+    transaction::Record& record,
+    const std::optional<platform::Workspace>& workspace,
+    const std::filesystem::path& local_root,
+    bool local_mutations_only) {
+    if (has_local_rollback_work(record) && !workspace) {
+        return std::unexpected(make_error(
+            ErrorCode::RecoveryConflict,
+            "transaction workspace missing while local rollback is required"));
+    }
+    if (!workspace) {
+        return {};
+    }
+    const auto dependencies =
+        mutation::detail::destination_dependencies(record.plan.operations);
+    for (std::size_t index = record.plan.operations.size(); index > 0;
+         --index) {
+        const auto operation_index = index - 1;
+        const auto& operation = record.plan.operations[operation_index];
+        auto& progress = record.progress[operation_index];
+        if ((local_mutations_only && !is_local_mutation(operation.action)) ||
+            (progress.state < transaction::OperationState::BackupCreated &&
+             !(operation.action == Action::CopyLocal &&
+               progress.state == transaction::OperationState::Prepared))) {
+            continue;
+        }
+        auto condition = mutation::detail::effective_destination(
+            record, operation_index, dependencies);
+        if (!condition) {
+            return std::unexpected(
+                make_error(ErrorCode::RecoveryConflict,
+                           mutation::describe(condition.error()),
+                           operation_index));
+        }
+        auto rolled =
+            mutation::rollback_operation(operation,
+                                         operation_index,
+                                         local_root,
+                                         *workspace,
+                                         progress,
+                                         *condition ? &**condition : nullptr);
+        if (!rolled) {
+            return std::unexpected(make_error(
+                ErrorCode::RecoveryConflict,
+                std::string{local_mutations_only ? "rollback local failed: "
+                                                 : "rollback failed: "} +
+                    mutation::describe(rolled.error()),
+                operation_index));
+        }
+        if (local_mutations_only) {
+            progress.state = transaction::OperationState::Prepared;
+        }
+    }
+    return {};
+}
+
 std::expected<void, Error>
 rollback_transaction(const journal::Paths& paths,
                      transaction::Record& record,
@@ -1095,45 +1171,10 @@ rollback_transaction(const journal::Paths& paths,
                      const std::filesystem::path& local_root,
                      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                      journal::Session* session) {
-    if (has_local_rollback_work(record) && !workspace) {
-        return std::unexpected(make_error(
-            ErrorCode::RecoveryConflict,
-            "transaction workspace missing while local rollback is required"));
-    }
-    if (workspace) {
-        const auto dependencies =
-            mutation::detail::destination_dependencies(record.plan.operations);
-        for (std::size_t index = record.plan.operations.size(); index > 0;
-             --index) {
-            const auto operation_index = index - 1;
-            const auto& progress = record.progress[operation_index];
-            if (progress.state < transaction::OperationState::BackupCreated &&
-                !(record.plan.operations[operation_index].action ==
-                      Action::CopyLocal &&
-                  progress.state == transaction::OperationState::Prepared)) {
-                continue;
-            }
-            auto condition = mutation::detail::effective_destination(
-                record, operation_index, dependencies);
-            if (!condition)
-                return std::unexpected(
-                    make_error(ErrorCode::RecoveryConflict,
-                               mutation::describe(condition.error()),
-                               operation_index));
-            auto rolled = mutation::rollback_operation(
-                record.plan.operations[operation_index],
-                operation_index,
-                local_root,
-                *workspace,
-                progress,
-                *condition ? &**condition : nullptr);
-            if (!rolled) {
-                return std::unexpected(make_error(
-                    ErrorCode::RecoveryConflict,
-                    "rollback failed: " + mutation::describe(rolled.error()),
-                    operation_index));
-            }
-        }
+    if (auto rolled = rollback_operations_in_workspace(
+            record, workspace, local_root, false);
+        !rolled) {
+        return rolled;
     }
     record.phase = transaction::Phase::Started;
     record.commit_id.clear();
@@ -1163,51 +1204,10 @@ std::expected<void, Error>
 rollback_local_mutations(transaction::Record& record,
                          const std::optional<platform::Workspace>& workspace,
                          const std::filesystem::path& local_root) {
-    if (has_local_rollback_work(record) && !workspace) {
-        return std::unexpected(make_error(
-            ErrorCode::RecoveryConflict,
-            "transaction workspace missing while local rollback is required"));
-    }
-    if (!workspace) {
-        return {};
-    }
-    const auto dependencies =
-        mutation::detail::destination_dependencies(record.plan.operations);
-    for (std::size_t index = record.plan.operations.size(); index > 0;
-         --index) {
-        const auto operation_index = index - 1;
-        if (!is_local_mutation(
-                record.plan.operations[operation_index].action) ||
-            (record.progress[operation_index].state <
-                 transaction::OperationState::BackupCreated &&
-             !(record.plan.operations[operation_index].action ==
-                   Action::CopyLocal &&
-               record.progress[operation_index].state ==
-                   transaction::OperationState::Prepared))) {
-            continue;
-        }
-        auto condition = mutation::detail::effective_destination(
-            record, operation_index, dependencies);
-        if (!condition)
-            return std::unexpected(
-                make_error(ErrorCode::RecoveryConflict,
-                           mutation::describe(condition.error()),
-                           operation_index));
-        auto rolled = mutation::rollback_operation(
-            record.plan.operations[operation_index],
-            operation_index,
-            local_root,
-            *workspace,
-            record.progress[operation_index],
-            *condition ? &**condition : nullptr);
-        if (!rolled) {
-            return std::unexpected(make_error(
-                ErrorCode::RecoveryConflict,
-                "rollback local failed: " + mutation::describe(rolled.error()),
-                operation_index));
-        }
-        record.progress[operation_index].state =
-            transaction::OperationState::Prepared;
+    if (auto rolled = rollback_operations_in_workspace(
+            record, workspace, local_root, true);
+        !rolled) {
+        return rolled;
     }
     record.phase = transaction::Phase::FilesStaged;
     return {};
@@ -1513,19 +1513,15 @@ std::vector<bool> required_content_uploads(const reconciliation::Input& input,
         if (operation.action != Action::Upload) {
             continue;
         }
-        const auto content_identity =
+        auto content_identity =
             operation.hash + ':' + std::to_string(operation.size);
         if (input.verified_remote_content_objects.contains(content_identity) ||
             input.trusted_remote_content_objects.contains(content_identity)) {
-            available.insert(operation.hash + ':' +
-                             std::to_string(operation.size));
+            available.insert(std::move(content_identity));
             required[index] = false;
             continue;
         }
-        required[index] =
-            available
-                .insert(operation.hash + ':' + std::to_string(operation.size))
-                .second;
+        required[index] = available.insert(std::move(content_identity)).second;
     }
     return required;
 }
@@ -1713,23 +1709,6 @@ std::string describe(const Error& error) {
     return result;
 }
 
-bool same_plan_operations(const SyncPlan& left,
-                          const SyncPlan& right) noexcept {
-    if (left.operations.size() != right.operations.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < left.operations.size(); ++i) {
-        const auto& a = left.operations[i];
-        const auto& b = right.operations[i];
-        if (a.action != b.action || a.path != b.path || a.hash != b.hash ||
-            a.size != b.size || a.alt_path != b.alt_path ||
-            a.exclusive_destination != b.exclusive_destination) {
-            return false;
-        }
-    }
-    return true;
-}
-
 std::expected<void, Error>
 execute(const runtime::RuntimeData& runtime_data,
         transport::Transport& storage,
@@ -1807,8 +1786,9 @@ execute(const runtime::RuntimeData& runtime_data,
             (*existing)->observed_base_id == observed_base_id &&
             (*existing)->observed_pending_paths == observed_pending_paths &&
             (*existing)->pending_paths == pending_paths &&
-            same_plan_operations((*existing)->plan,
-                                 reconciliation_result.plan)) {
+            std::ranges::equal((*existing)->plan.operations,
+                               reconciliation_result.plan.operations,
+                               same_operation)) {
             record_storage = std::move(**existing);
         } else {
             return std::unexpected(detail::make_error(
@@ -2216,22 +2196,8 @@ execute(const runtime::RuntimeData& runtime_data,
 
         for (std::size_t chunk_start = 0;
              chunk_start < pending_uploads.size();) {
-            std::vector<std::size_t> chunk;
-            std::uint64_t chunk_bytes = 0;
-            while (chunk_start + chunk.size() < pending_uploads.size() &&
-                   chunk.size() < detail::upload_batch_max_items &&
-                   (chunk.empty() ||
-                    chunk_bytes + record->plan
-                                      .operations[pending_uploads[chunk_start +
-                                                                  chunk.size()]]
-                                      .size <=
-                        detail::upload_batch_max_bytes)) {
-                const auto op_index =
-                    pending_uploads[chunk_start + chunk.size()];
-                chunk_bytes += record->plan.operations[op_index].size;
-                chunk.push_back(op_index);
-            }
-            chunk_start += chunk.size();
+            const auto chunk = detail::next_upload_batch_chunk(
+                pending_uploads, chunk_start, record->plan.operations);
 
             auto staged_batch = mutation::stage_upload_batch(
                 chunk, *record, runtime_data.local_dir, key, *workspace);
@@ -2240,6 +2206,18 @@ execute(const runtime::RuntimeData& runtime_data,
                 return fail_mutation(staged_batch.error().operation_index,
                                      staged_batch.error());
             }
+
+            bool cleaned_explicitly = false;
+            struct StagedBatchCleanup {
+                const mutation::StagedUploadBatch& batch;
+                bool& cleaned_explicitly;
+                ~StagedBatchCleanup() noexcept {
+                    if (!cleaned_explicitly) {
+                        static_cast<void>(
+                            mutation::cleanup_upload_batch(batch));
+                    }
+                }
+            } batch_cleanup{*staged_batch, cleaned_explicitly};
 
             auto transferred = mutation::transfer_upload_batch(
                 *staged_batch, storage, parallelism);
@@ -2273,6 +2251,7 @@ execute(const runtime::RuntimeData& runtime_data,
                 return std::unexpected(checkpointed.error());
             }
 
+            cleaned_explicitly = true;
             auto cleaned = mutation::cleanup_upload_batch(*staged_batch);
 
             if (!cleaned) {
@@ -2390,11 +2369,6 @@ execute(const runtime::RuntimeData& runtime_data,
             const auto& actual = publication_tree->rows[index];
             const auto& expected =
                 reconciliation_result.candidate_shared_tree.rows[index];
-            if (actual.path != expected.path ||
-                actual.is_directory != expected.is_directory) {
-                mismatch_index = index;
-                break;
-            }
             if (!detail::same_materialized_row(expected, actual)) {
                 mismatch_index = index;
                 break;
@@ -2438,16 +2412,6 @@ execute(const runtime::RuntimeData& runtime_data,
                 detail_message +=
                     " (file missing from disk during sync: " + removed_file +
                     ")";
-            } else {
-                for (std::size_t index = 0; index < count; ++index) {
-                    if (!detail::same_materialized_row(
-                            reconciliation_result.candidate_shared_tree
-                                .rows[index],
-                            publication_tree->rows[index])) {
-                        mismatch_index = index;
-                        break;
-                    }
-                }
             }
         }
         if (mismatch_index < count) {
@@ -2541,10 +2505,9 @@ execute(const runtime::RuntimeData& runtime_data,
             auto it = std::ranges::find(observed_input.storage.marked_heads,
                                         found->id);
             if (it != observed_input.storage.marked_heads.end()) {
+                const auto layout = history_storage::derive_remote_layout(key);
                 for (const auto& identifier :
                      observed_input.storage.marked_head_identifiers) {
-                    const auto layout =
-                        history_storage::derive_remote_layout(key);
                     const auto parsed = history_storage::parse_marker_object(
                         layout, identifier);
                     if (parsed && parsed->commit_id == found->id) {

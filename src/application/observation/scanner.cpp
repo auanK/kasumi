@@ -243,6 +243,83 @@ process_file(const std::filesystem::path& file_path,
     return row;
 }
 
+std::expected<void, ScanError>
+validate_ignore_list(const std::filesystem::path& local_root,
+                     const IgnoreList& ignore_list) {
+    if (ignore_list.parse_error) {
+        return std::unexpected(ScanError{
+            .code = ScanErrorCode::Io,
+            .path = local_root / ".kasumiignore",
+            .operation =
+                ignore_list.parse_error->line == 0
+                    ? "read ignore file"
+                    : "parse ignore rule at line " +
+                          std::to_string(ignore_list.parse_error->line),
+            .detail = ignore_list.parse_error->detail,
+        });
+    }
+    return {};
+}
+
+std::expected<std::int64_t, ScanError>
+read_directory_mtime(const std::filesystem::path& path) {
+    const auto modified = platform::metadata::last_write_time(path);
+    if (!modified) {
+        return std::unexpected(ScanError{ScanErrorCode::Metadata,
+                                         path,
+                                         "read modification time",
+                                         modified.error()});
+    }
+    const auto mtime_ns = platform::metadata::unix_nanoseconds(*modified);
+    if (!mtime_ns) {
+        return std::unexpected(ScanError{ScanErrorCode::Metadata,
+                                         path,
+                                         "convert modification time",
+                                         "timestamp is out of range"});
+    }
+    return *mtime_ns;
+}
+
+std::expected<void, ScanError>
+verify_disposable_metadata(const std::filesystem::path& current,
+                           std::string_view relative,
+                           const reconciliation::IgnoredEntryEvidence& found,
+                           MetadataQuery metadata_query,
+                           const IgnoreList* ignore_list,
+                           const char* operation,
+                           const char* mismatch_detail) {
+    auto metadata = metadata_query(current, relative);
+    if (!metadata || !metadata->has_value() ||
+        !(**metadata).identity.has_value()) {
+        return std::unexpected(ScanError{
+            .code = ScanErrorCode::Metadata,
+            .path = current,
+            .operation = operation,
+            .detail = !metadata ? metadata.error().message
+                                : "file identity is unavailable",
+        });
+    }
+    const PhysicalFileIdentity observed_identity{
+        .volume_or_dev = (**metadata).identity->volume,
+        .file_id_low = (**metadata).identity->file_low,
+        .file_id_high = (**metadata).identity->file_high,
+        .valid = true,
+    };
+    if (observed_identity != found.identity ||
+        (**metadata).size != found.size ||
+        (ignore_list != nullptr &&
+         classify_ignore(relative, false, *ignore_list) !=
+             IgnoreDisposition::IgnoredDisposable)) {
+        return std::unexpected(ScanError{
+            .code = ScanErrorCode::Metadata,
+            .path = current,
+            .operation = operation,
+            .detail = mismatch_detail,
+        });
+    }
+    return {};
+}
+
 } // namespace
 
 std::string describe(const ScanError& error) {
@@ -266,17 +343,8 @@ scan_result(const std::filesystem::path& local_root,
             ScanPolicy policy,
             MetadataQuery metadata_query,
             const IgnoreList& ignore_list) {
-    if (ignore_list.parse_error) {
-        return std::unexpected(ScanError{
-            .code = ScanErrorCode::Io,
-            .path = local_root / ".kasumiignore",
-            .operation =
-                ignore_list.parse_error->line == 0
-                    ? "read ignore file"
-                    : "parse ignore rule at line " +
-                          std::to_string(ignore_list.parse_error->line),
-            .detail = ignore_list.parse_error->detail,
-        });
+    if (auto valid = validate_ignore_list(local_root, ignore_list); !valid) {
+        return std::unexpected(valid.error());
     }
     ScanContext context{.policy = policy,
                         .metadata_query = metadata_query,
@@ -325,18 +393,9 @@ scan_result(const std::filesystem::path& local_root,
 
     Snapshot snapshot;
     snapshot.rows.reserve(previous_cache.size() + 1);
-    const auto modified = platform::metadata::last_write_time(local_root);
-    if (!modified)
-        return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                         local_root,
-                                         "read modification time",
-                                         modified.error()});
-    const auto root_mtime = platform::metadata::unix_nanoseconds(*modified);
+    const auto root_mtime = read_directory_mtime(local_root);
     if (!root_mtime) {
-        return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                         local_root,
-                                         "convert modification time",
-                                         "timestamp is out of range"});
+        return std::unexpected(root_mtime.error());
     }
     // The parent must precede its descendants.
     snapshot.rows.push_back(
@@ -508,18 +567,9 @@ scan_result(const std::filesystem::path& local_root,
             snapshot.rows.push_back(std::move(*row));
             continue;
         }
-        const auto mtime = platform::metadata::last_write_time(entry.path());
-        if (!mtime)
-            return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                             entry.path(),
-                                             "read modification time",
-                                             mtime.error()});
-        const auto mtime_ns = platform::metadata::unix_nanoseconds(*mtime);
+        const auto mtime_ns = read_directory_mtime(entry.path());
         if (!mtime_ns) {
-            return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                             entry.path(),
-                                             "convert modification time",
-                                             "timestamp is out of range"});
+            return std::unexpected(mtime_ns.error());
         }
         snapshot.rows.push_back(
             {.path = relative, .mtime = *mtime_ns, .is_directory = true});
@@ -588,17 +638,8 @@ hash_disposable_candidates(
     std::span<const std::filesystem::path> candidate_paths,
     const IgnoreList& ignore_list,
     MetadataQuery metadata_query) {
-    if (ignore_list.parse_error) {
-        return std::unexpected(ScanError{
-            .code = ScanErrorCode::Io,
-            .path = local_root / ".kasumiignore",
-            .operation =
-                ignore_list.parse_error->line == 0
-                    ? "read ignore file"
-                    : "parse ignore rule at line " +
-                          std::to_string(ignore_list.parse_error->line),
-            .detail = ignore_list.parse_error->detail,
-        });
+    if (auto valid = validate_ignore_list(local_root, ignore_list); !valid) {
+        return std::unexpected(valid.error());
     }
     std::vector<std::string> paths;
     paths.reserve(candidate_paths.size());
@@ -692,63 +733,32 @@ hash_disposable_candidates(
             start = slash + 1;
         }
 
-        auto metadata = metadata_query(current, relative);
-        if (!metadata || !metadata->has_value() ||
-            !(**metadata).identity.has_value()) {
-            return std::unexpected(ScanError{
-                .code = ScanErrorCode::Metadata,
-                .path = current,
-                .operation = "verify disposable candidate metadata",
-                .detail = !metadata ? metadata.error().message
-                                    : "file identity is unavailable",
-            });
-        }
-        const auto before_identity = PhysicalFileIdentity{
-            .volume_or_dev = (**metadata).identity->volume,
-            .file_id_low = (**metadata).identity->file_low,
-            .file_id_high = (**metadata).identity->file_high,
-            .valid = true,
-        };
-        if (before_identity != found->identity ||
-            (**metadata).size != found->size) {
-            return std::unexpected(ScanError{
-                .code = ScanErrorCode::Metadata,
-                .path = current,
-                .operation = "verify disposable candidate metadata",
-                .detail = "physical identity or size changed after observation",
-            });
+        if (auto before = verify_disposable_metadata(
+                current,
+                relative,
+                *found,
+                metadata_query,
+                nullptr,
+                "verify disposable candidate metadata",
+                "physical identity or size changed after observation");
+            !before) {
+            return std::unexpected(before.error());
         }
 
         auto row = process_file(current, relative, context);
         if (!row) {
             return std::unexpected(row.error());
         }
-        auto after = metadata_query(current, relative);
-        if (!after || !after->has_value() || !(**after).identity.has_value()) {
-            return std::unexpected(ScanError{
-                .code = ScanErrorCode::Metadata,
-                .path = current,
-                .operation = "verify disposable candidate after hashing",
-                .detail = !after ? after.error().message
-                                 : "file identity is unavailable",
-            });
-        }
-        const PhysicalFileIdentity after_identity{
-            .volume_or_dev = (**after).identity->volume,
-            .file_id_low = (**after).identity->file_low,
-            .file_id_high = (**after).identity->file_high,
-            .valid = true,
-        };
-        if (after_identity != found->identity ||
-            (**after).size != found->size ||
-            classify_ignore(relative, false, ignore_list) !=
-                IgnoreDisposition::IgnoredDisposable) {
-            return std::unexpected(ScanError{
-                .code = ScanErrorCode::Metadata,
-                .path = current,
-                .operation = "verify disposable candidate after hashing",
-                .detail = "file or ignore rules changed while hashing",
-            });
+        if (auto after = verify_disposable_metadata(
+                current,
+                relative,
+                *found,
+                metadata_query,
+                &ignore_list,
+                "verify disposable candidate after hashing",
+                "file or ignore rules changed while hashing");
+            !after) {
+            return std::unexpected(after.error());
         }
         result.push_back({.path = relative,
                           .hash = hash_hex(row->hash),

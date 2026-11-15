@@ -17,8 +17,7 @@ enum class Operation {
     // Analyzes cryptographic and structural integrity of remotely stored
     // blocks.
     Fsck,
-    // Removes objects unreachable from any logical head. The implementation
-    // is being reconstructed without quarantine; the public concept remains.
+    // Removes objects unreachable from any logical head.
     GarbageCollect,
     // Resolves unavailable pending materializations as logical deletions.
     ResolveMissing,

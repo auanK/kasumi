@@ -101,6 +101,16 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
 
     StagedUploadBatch batch;
     batch.root = *root;
+    bool commit_batch = false;
+    struct BatchGuard {
+        StagedUploadBatch& batch;
+        bool& commit_batch;
+        ~BatchGuard() noexcept {
+            if (!commit_batch) {
+                static_cast<void>(cleanup_upload_batch(batch));
+            }
+        }
+    } batch_guard{batch, commit_batch};
 
     for (const auto index : operation_indices) {
         const auto& operation = record.plan.operations[index];
@@ -159,13 +169,13 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
             auto staged = stage_upload_to_path(
                 operation, index, local_root, destination, identifier, key);
             if (!staged) {
-                static_cast<void>(cleanup_upload_batch(batch));
                 return std::unexpected(staged.error());
             }
             batch.objects.push_back(std::move(*staged));
         }
     }
 
+    commit_batch = true;
     return batch;
 }
 
@@ -394,16 +404,17 @@ MutationResult cleanup_upload_batch(const StagedUploadBatch& batch) {
         return {};
     }
 
+    const std::size_t operation_index =
+        batch.objects.empty() ? 0
+                              : batch.objects.front().operation_indices.front();
     std::error_code ec;
     if (!std::filesystem::exists(batch.root, ec)) {
         if (ec) {
-            return std::unexpected(detail::make_error(
-                MutationErrorCode::LocalIo,
-                "stat failed before cleanup",
-                batch.root,
-                batch.objects.empty()
-                    ? 0
-                    : batch.objects.front().operation_indices.front()));
+            return std::unexpected(
+                detail::make_error(MutationErrorCode::LocalIo,
+                                   "stat failed before cleanup",
+                                   batch.root,
+                                   operation_index));
         }
         return {};
     }
@@ -414,9 +425,7 @@ MutationResult cleanup_upload_batch(const StagedUploadBatch& batch) {
             MutationErrorCode::UnsafePath,
             "directory is redirected (TOCTOU violation detected)",
             batch.root,
-            batch.objects.empty()
-                ? 0
-                : batch.objects.front().operation_indices.front()));
+            operation_index));
     }
 
     std::filesystem::remove_all(batch.root, ec);
@@ -425,9 +434,7 @@ MutationResult cleanup_upload_batch(const StagedUploadBatch& batch) {
             MutationErrorCode::LocalIo,
             "failed to safely cleanup batch staging directory",
             batch.root,
-            batch.objects.empty()
-                ? 0
-                : batch.objects.front().operation_indices.front()));
+            operation_index));
     }
 
     return {};

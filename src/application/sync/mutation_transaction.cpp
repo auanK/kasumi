@@ -19,12 +19,14 @@
 
 namespace kasumi::application::sync::mutation {
 
+using detail::file_hash;
 using detail::make_error;
 using detail::missing;
 using detail::read_status;
 using detail::remove_temporary_file;
 using detail::resolve_local_path;
 using detail::rollback_candidate_path;
+using detail::sync_parent_checked;
 
 namespace {
 
@@ -51,17 +53,6 @@ backup_path(const platform::Workspace& workspace,
                                           operation_index));
     }
     return result;
-}
-
-std::expected<void, MutationError>
-sync_parent_checked(const std::filesystem::path& path,
-                    std::size_t operation_index) {
-    if (auto synced = platform::durability::sync_parent_directory(path);
-        !synced) {
-        return std::unexpected(make_error(
-            MutationErrorCode::LocalIo, synced.error(), path, operation_index));
-    }
-    return {};
 }
 
 std::expected<void, MutationError>
@@ -140,23 +131,18 @@ validate_workspace(const platform::Workspace& workspace,
                                           workspace.root,
                                           operation_index));
     }
-    std::error_code error;
-    const auto status = std::filesystem::symlink_status(workspace.root, error);
-    if (error == std::errc::no_such_file_or_directory) {
+    auto status = read_status(workspace.root, operation_index);
+    if (!status) {
+        return std::unexpected(status.error());
+    }
+    if (missing(*status)) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
                                           "workspace does not exist",
                                           workspace.root,
                                           operation_index));
     }
-    if (error) {
-        return std::unexpected(
-            make_error(MutationErrorCode::LocalIo,
-                       "failed to query workspace: " + error.message(),
-                       workspace.root,
-                       operation_index));
-    }
-    if (std::filesystem::is_symlink(status) ||
-        !std::filesystem::is_directory(status)) {
+    if (std::filesystem::is_symlink(*status) ||
+        !std::filesystem::is_directory(*status)) {
         return std::unexpected(make_error(MutationErrorCode::UnsafePath,
                                           "invalid workspace",
                                           workspace.root,
@@ -170,16 +156,6 @@ validate_workspace(const platform::Workspace& workspace,
                                           operation_index));
     }
     return {};
-}
-
-std::expected<std::string, MutationError>
-file_hash(const std::filesystem::path& path, std::size_t operation_index) {
-    auto hash = crypto::content::hash_file(path);
-    if (!hash) {
-        return std::unexpected(make_error(
-            MutationErrorCode::LocalIo, hash.error(), path, operation_index));
-    }
-    return hash_hex(*hash);
 }
 
 std::expected<std::string, MutationError>
@@ -1047,13 +1023,15 @@ rollback_file_operation(const Operation& operation,
     return {};
 }
 
+} // namespace
+
 PreparationResult
-prepare_operation_impl(const Operation& operation,
-                       std::size_t operation_index,
-                       const std::filesystem::path& local_root,
-                       const platform::Workspace& workspace,
-                       const transaction::OperationProgress& current_progress,
-                       std::span<const Operation> plan_operations = {}) {
+prepare_operation(const Operation& operation,
+                  std::size_t operation_index,
+                  const std::filesystem::path& local_root,
+                  const platform::Workspace& workspace,
+                  const transaction::OperationProgress& current_progress,
+                  std::span<const Operation> plan_operations) {
     if (auto meta_valid =
             validate_operation_metadata(operation, operation_index);
         !meta_valid) {
@@ -1291,20 +1269,10 @@ prepare_operation_impl(const Operation& operation,
                            *path,
                            operation_index));
         }
-        const auto identity_matches = [&](const auto& identity) {
-            return identity.valid &&
-                   identity.volume_or_dev ==
-                       operation.expected_source_identity.volume_or_dev &&
-                   identity.file_id_low ==
-                       operation.expected_source_identity.file_id_low &&
-                   identity.file_id_high ==
-                       operation.expected_source_identity.file_id_high;
-        };
-        const auto identity =
-            platform::private_storage::query_file_identity(*path);
         std::error_code size_error;
         const auto size = std::filesystem::file_size(*path, size_error);
-        if (size_error || !identity_matches(identity) ||
+        if (size_error ||
+            !identity_matches(*path, operation.expected_source_identity) ||
             size != operation.size) {
             return std::unexpected(make_error(
                 size_error ? MutationErrorCode::LocalIo
@@ -1319,8 +1287,7 @@ prepare_operation_impl(const Operation& operation,
             return std::unexpected(actual.error());
         }
         if (*actual != operation.hash ||
-            !identity_matches(
-                platform::private_storage::query_file_identity(*path))) {
+            !identity_matches(*path, operation.expected_source_identity)) {
             return std::unexpected(make_error(
                 MutationErrorCode::DestinationConflict,
                 "disposable source changed while preparing its backup",
@@ -1337,17 +1304,7 @@ prepare_operation_impl(const Operation& operation,
         if (!created) {
             return std::unexpected(created.error());
         }
-        auto valid_backup =
-            validate_backup(*backup, operation.hash, operation_index);
-        if (!valid_backup) {
-            return std::unexpected(valid_backup.error());
-        }
-        auto durable = make_backup_durable(*backup, operation_index);
-        if (!durable) {
-            return std::unexpected(durable.error());
-        }
-        if (!identity_matches(
-                platform::private_storage::query_file_identity(*path))) {
+        if (!identity_matches(*path, operation.expected_source_identity)) {
             return std::unexpected(
                 make_error(MutationErrorCode::DestinationConflict,
                            "disposable source identity changed during backup",
@@ -1364,12 +1321,12 @@ prepare_operation_impl(const Operation& operation,
 }
 
 std::expected<void, MutationError>
-rollback_operation_impl(const Operation& operation,
-                        std::size_t operation_index,
-                        const std::filesystem::path& local_root,
-                        const platform::Workspace& workspace,
-                        const transaction::OperationProgress& progress,
-                        const DestinationPrecondition* condition) {
+rollback_operation(const Operation& operation,
+                   std::size_t operation_index,
+                   const std::filesystem::path& local_root,
+                   const platform::Workspace& workspace,
+                   const transaction::OperationProgress& progress,
+                   const DestinationPrecondition* condition) {
     if (auto meta_valid =
             validate_operation_metadata(operation, operation_index);
         !meta_valid) {
@@ -1562,8 +1519,6 @@ rollback_operation_impl(const Operation& operation,
     return rollback_file_operation(
         operation, operation_index, local_root, workspace, progress, condition);
 }
-
-} // namespace
 
 MutationResult detail::validate_prepared_operation(
     const Operation& operation,
@@ -1815,32 +1770,6 @@ MutationResult detail::validate_prepared_rename(
                        operation.path,
                        index));
     return {};
-}
-
-PreparationResult
-prepare_operation(const Operation& operation,
-                  std::size_t operation_index,
-                  const std::filesystem::path& local_root,
-                  const platform::Workspace& workspace,
-                  const transaction::OperationProgress& current_progress,
-                  std::span<const Operation> plan_operations) {
-    return prepare_operation_impl(operation,
-                                  operation_index,
-                                  local_root,
-                                  workspace,
-                                  current_progress,
-                                  plan_operations);
-}
-
-std::expected<void, MutationError>
-rollback_operation(const Operation& operation,
-                   std::size_t operation_index,
-                   const std::filesystem::path& local_root,
-                   const platform::Workspace& workspace,
-                   const transaction::OperationProgress& progress,
-                   const DestinationPrecondition* condition) {
-    return rollback_operation_impl(
-        operation, operation_index, local_root, workspace, progress, condition);
 }
 
 } // namespace kasumi::application::sync::mutation

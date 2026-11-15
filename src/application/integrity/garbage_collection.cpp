@@ -16,9 +16,7 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <tuple>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -29,34 +27,6 @@ namespace history_storage = application::history_storage;
 namespace protocol = application::history_storage::maintenance_protocol;
 using KeySpan = std::span<const std::uint8_t, crypto::KEY_SIZE>;
 constexpr std::size_t gc_delete_batch_size = 8;
-
-enum class CandidateKind {
-    CommitVariant,
-    Content,
-};
-
-struct Candidate {
-    CandidateKind kind = CandidateKind::Content;
-    std::string identifier;
-    std::string commit_id;
-
-    bool operator==(const Candidate&) const = default;
-};
-
-// Built once from the authenticated observation and consumed as-is by Apply.
-// The maintenance barrier excludes cooperative writers; there is no distributed
-// CAS, so later non-cooperative mutation is outside this contract.
-struct DeletionPlan {
-    std::vector<Candidate> candidates;
-    std::vector<std::string> protected_objects;
-};
-
-struct Observation {
-    std::vector<std::string> logical_heads;
-    std::vector<std::string> reachable_commits;
-    std::vector<std::string> reachable_content;
-    DeletionPlan plan;
-};
 
 Error make_error(ErrorCode code,
                  std::string detail,
@@ -357,109 +327,7 @@ required_variants(const history_storage::ReachabilityInventory& inventory,
     return required;
 }
 
-std::expected<void, Error>
-validate_deletion_plan(const DeletionPlan& plan,
-                       const history_storage::ReachabilityInventory& history,
-                       const std::vector<std::string>& orphan_contents,
-                       const history_storage::RemoteLayout& layout) {
-    for (std::size_t index = 1; index < plan.candidates.size(); ++index) {
-        const auto& previous = plan.candidates[index - 1];
-        const auto& current = plan.candidates[index];
-        if (!(std::tie(previous.kind, previous.identifier) <
-              std::tie(current.kind, current.identifier))) {
-            return std::unexpected(make_error(
-                ErrorCode::IntegrityFailure,
-                "deletion plan candidates are not sorted and unique"));
-        }
-    }
-
-    const std::unordered_set<std::string> protected_objects(
-        plan.protected_objects.begin(), plan.protected_objects.end());
-    std::unordered_set<std::string> deletions;
-    deletions.reserve(plan.candidates.size());
-    for (const auto& candidate : plan.candidates) {
-        if (candidate.identifier.empty() ||
-            history_storage::maintenance_protocol::is_control_object(
-                layout, candidate.identifier) ||
-            protected_objects.contains(candidate.identifier) ||
-            !deletions.insert(candidate.identifier).second) {
-            return std::unexpected(make_error(
-                ErrorCode::IntegrityFailure,
-                "deletion plan intersects protected or control objects",
-                candidate.identifier));
-        }
-        if (candidate.kind == CandidateKind::Content) {
-            if (!std::ranges::binary_search(orphan_contents,
-                                            candidate.identifier)) {
-                return std::unexpected(make_error(
-                    ErrorCode::IntegrityFailure,
-                    "deletion plan contains an unclassified content object",
-                    candidate.identifier));
-            }
-            continue;
-        }
-        const auto commit =
-            std::ranges::find(history.commits,
-                              candidate.commit_id,
-                              &history_storage::ReachabilityCommit::commit_id);
-        if (commit == history.commits.end() || !commit->reachable ||
-            !commit->valid) {
-            return std::unexpected(make_error(
-                ErrorCode::IntegrityFailure,
-                "deletion plan contains an unclassified commit variant",
-                candidate.identifier));
-        }
-        const auto variant = std::ranges::find(
-            commit->variants,
-            candidate.identifier,
-            &history_storage::ReachabilityVariant::identifier);
-        if (variant == commit->variants.end() ||
-            variant->state != history_storage::detail::VariantState::Valid) {
-            return std::unexpected(make_error(
-                ErrorCode::IntegrityFailure,
-                "deletion plan contains an unclassified commit variant",
-                candidate.identifier));
-        }
-    }
-
-    for (const auto& commit : history.commits) {
-        if (!commit.reachable) {
-            continue;
-        }
-        const bool preserves_alternative =
-            std::ranges::any_of(commit.variants, [&](const auto& variant) {
-                return !variant.identifier.empty() &&
-                       variant.state ==
-                           history_storage::detail::VariantState::Valid &&
-                       !deletions.contains(variant.identifier);
-            });
-        if (!preserves_alternative) {
-            return std::unexpected(
-                make_error(ErrorCode::IntegrityFailure,
-                           "deletion plan removes every valid variant of a "
-                           "reachable commit",
-                           commit.commit_id));
-        }
-    }
-
-    for (const auto& marker : history.markers) {
-        if (marker.state != history_storage::ReachabilityMarkerState::Valid ||
-            !marker.reference.has_value()) {
-            continue;
-        }
-        const auto identifier =
-            history_storage::commit_object(layout, *marker.reference);
-        if (deletions.contains(identifier)) {
-            return std::unexpected(
-                make_error(ErrorCode::IntegrityFailure,
-                           "deletion plan removes a head-selected variant",
-                           identifier));
-        }
-    }
-    return {};
-}
-
-std::expected<Observation, Error>
+std::expected<std::vector<std::string>, Error>
 observe(transport::Transport& storage,
         KeySpan key,
         const std::filesystem::path& workspace_root) {
@@ -493,29 +361,21 @@ observe(transport::Transport& storage,
     std::ranges::sort(orphan_ids);
     orphan_ids.erase(std::ranges::unique(orphan_ids).begin(), orphan_ids.end());
 
-    DeletionPlan plan;
-    plan.protected_objects = required_variants(*history, layout);
-    plan.protected_objects.insert(plan.protected_objects.end(),
-                                  content->reachable_content_ids.begin(),
-                                  content->reachable_content_ids.end());
-    plan.protected_objects.insert(plan.protected_objects.end(),
-                                  history->valid_epochs.begin(),
-                                  history->valid_epochs.end());
-    plan.protected_objects.insert(plan.protected_objects.end(),
-                                  history->orphan_epochs.begin(),
-                                  history->orphan_epochs.end());
-    std::ranges::sort(plan.protected_objects);
-    plan.protected_objects.erase(
-        std::ranges::unique(plan.protected_objects).begin(),
-        plan.protected_objects.end());
+    auto protected_objects = required_variants(*history, layout);
+    protected_objects.insert(protected_objects.end(),
+                             content->reachable_content_ids.begin(),
+                             content->reachable_content_ids.end());
+    protected_objects.insert(protected_objects.end(),
+                             history->valid_epochs.begin(),
+                             history->valid_epochs.end());
+    protected_objects.insert(protected_objects.end(),
+                             history->orphan_epochs.begin(),
+                             history->orphan_epochs.end());
+    std::ranges::sort(protected_objects);
+    protected_objects.erase(std::ranges::unique(protected_objects).begin(),
+                            protected_objects.end());
 
-    for (const auto& identifier : orphan_ids) {
-        plan.candidates.push_back(Candidate{
-            .kind = CandidateKind::Content,
-            .identifier = identifier,
-            .commit_id = {},
-        });
-    }
+    std::vector<std::string> candidates;
     for (const auto& commit : history->commits) {
         if (!commit.reachable) {
             continue;
@@ -523,35 +383,35 @@ observe(transport::Transport& storage,
         for (const auto& variant : commit.variants) {
             if (variant.identifier.empty() ||
                 variant.state != history_storage::detail::VariantState::Valid ||
-                std::ranges::binary_search(plan.protected_objects,
+                std::ranges::binary_search(protected_objects,
                                            variant.identifier)) {
                 continue;
             }
-            plan.candidates.push_back(Candidate{
-                .kind = CandidateKind::CommitVariant,
-                .identifier = variant.identifier,
-                .commit_id = commit.commit_id,
-            });
+            if (protocol::is_control_object(layout, variant.identifier)) {
+                return std::unexpected(
+                    make_error(ErrorCode::IntegrityFailure,
+                               "deletion candidate intersects control objects",
+                               variant.identifier));
+            }
+            candidates.push_back(variant.identifier);
         }
     }
-    std::ranges::sort(plan.candidates, [](const auto& left, const auto& right) {
-        return std::tie(left.kind, left.identifier) <
-               std::tie(right.kind, right.identifier);
-    });
-    plan.candidates.erase(std::ranges::unique(plan.candidates).begin(),
-                          plan.candidates.end());
+    std::ranges::sort(candidates);
+    candidates.erase(std::ranges::unique(candidates).begin(), candidates.end());
 
-    if (auto valid = validate_deletion_plan(plan, *history, orphan_ids, layout);
-        !valid) {
-        return std::unexpected(valid.error());
+    for (const auto& identifier : orphan_ids) {
+        if (identifier.empty() ||
+            protocol::is_control_object(layout, identifier) ||
+            std::ranges::binary_search(protected_objects, identifier)) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "deletion candidate intersects protected or control objects",
+                identifier));
+        }
+        candidates.push_back(identifier);
     }
 
-    return Observation{
-        .logical_heads = std::move(history->logical_heads),
-        .reachable_commits = std::move(history->reachable_commits),
-        .reachable_content = std::move(content->reachable_content_ids),
-        .plan = std::move(plan),
-    };
+    return candidates;
 }
 
 std::expected<void, Error>
@@ -688,12 +548,13 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
 
         failure_diagnostic.stage = GarbageCollectStage::Analyzing;
         notify(on_progress, GarbageCollectStage::Analyzing, std::nullopt, 0);
-        auto snapshot = observe(storage, key, workspace_root);
-        if (!snapshot) {
-            return finish(std::unexpected(snapshot.error()));
+        auto observed_candidates = observe(storage, key, workspace_root);
+        if (!observed_candidates) {
+            return finish(std::unexpected(observed_candidates.error()));
         }
 
-        const auto candidate_count = snapshot->plan.candidates.size();
+        const auto& candidates = *observed_candidates;
+        const auto candidate_count = candidates.size();
         failure_diagnostic.candidate_objects = candidate_count;
 
         if (!*online) {
@@ -721,7 +582,6 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                 (storage.storage.remove_batch == nullptr);
 
             std::size_t chunk_start = 0;
-            const auto& candidates = snapshot->plan.candidates;
             const std::size_t total_candidates = candidates.size();
 
             while (chunk_start < total_candidates) {
@@ -744,8 +604,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                     batch.items.reserve(chunk_size);
                     for (std::size_t i = 0; i < chunk_size; ++i) {
                         batch.items.push_back(transport::RemoveBatchItem{
-                            .identifier =
-                                candidates[chunk_start + i].identifier,
+                            .identifier = candidates[chunk_start + i],
                         });
                     }
 
@@ -787,8 +646,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                         if (report_valid) {
                             for (std::size_t i = 0; i < chunk_size; ++i) {
                                 if (!result_by_id.contains(
-                                        candidates[chunk_start + i]
-                                            .identifier)) {
+                                        candidates[chunk_start + i])) {
                                     report_valid = false;
                                     break;
                                 }
@@ -817,8 +675,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                     std::string first_failed_identifier;
 
                     for (std::size_t i = 0; i < chunk_size; ++i) {
-                        const auto& cand_id =
-                            candidates[chunk_start + i].identifier;
+                        const auto& cand_id = candidates[chunk_start + i];
                         const auto* res = result_by_id.at(cand_id);
                         if (res->result.has_value()) {
                             ++batch_acknowledged;
@@ -858,10 +715,9 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                     chunk_start += chunk_size;
                 } else {
                     const auto& candidate = candidates[chunk_start];
-                    failure_diagnostic.failed_identifier = candidate.identifier;
+                    failure_diagnostic.failed_identifier = candidate;
                     mutation_in_flight = true;
-                    auto removed =
-                        transport::remove(storage, candidate.identifier);
+                    auto removed = transport::remove(storage, candidate);
                     mutation_in_flight = false;
                     if (!removed) {
                         failure_diagnostic.mutation_state =

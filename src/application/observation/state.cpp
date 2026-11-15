@@ -245,11 +245,6 @@ reconciliation::StorageState to_storage_state(history::StorageView& observed) {
 } // namespace
 
 std::expected<LocalTreeObservation, std::string>
-collect_local_observation(const std::filesystem::path& local_root) {
-    return collect_local_observation(local_root, nullptr);
-}
-
-std::expected<LocalTreeObservation, std::string>
 collect_local_observation(const std::filesystem::path& local_root,
                           const kasumi::ignore::IgnoreList& ignore_list) {
     return scan_local_tree(local_root, &ignore_list);
@@ -291,32 +286,6 @@ collect_local_observation(const std::filesystem::path& local_root,
     } catch (const std::exception& exception) {
         return std::unexpected(exception.what());
     }
-}
-
-std::expected<Snapshot, std::string>
-collect_local_tree(const std::filesystem::path& local_root) {
-    return collect_local_tree(local_root, nullptr);
-}
-
-std::expected<Snapshot, std::string>
-collect_local_tree(const std::filesystem::path& local_root,
-                   const kasumi::ignore::IgnoreList& ignore_list) {
-    auto observed = collect_local_observation(local_root, ignore_list);
-    if (!observed) {
-        return std::unexpected(observed.error());
-    }
-    return std::move(observed->snapshot);
-}
-
-std::expected<Snapshot, std::string>
-collect_local_tree(const std::filesystem::path& local_root,
-                   LocalObservationSession* session,
-                   const kasumi::ignore::IgnoreList& ignore_list) {
-    auto observed = collect_local_observation(local_root, session, ignore_list);
-    if (!observed) {
-        return std::unexpected(observed.error());
-    }
-    return std::move(observed->snapshot);
 }
 
 std::expected<Snapshot, std::string>
@@ -537,18 +506,9 @@ collect_reconciliation_input(
             [&](const reconciliation::LocalDirectoryEvidence& directory) {
                 const auto* base = find_row(input.base_tree, directory.path);
                 return !directory.path.empty() && !directory.ignored_entry &&
+                       directory.has_disposable_descendants &&
                        base != nullptr && base->is_directory &&
-                       find_row(input.storage.tree, directory.path) ==
-                           nullptr &&
-                       std::ranges::any_of(
-                           input.local_physical_evidence.ignored_entries,
-                           [&](const reconciliation::IgnoredEntryEvidence&
-                                   item) {
-                               return item.disposition ==
-                                          ignore::IgnoreDisposition::
-                                              IgnoredDisposable &&
-                                      is_descendant(item.path, directory.path);
-                           });
+                       find_row(input.storage.tree, directory.path) == nullptr;
             });
     if (maybe_disposable_removal) {
         auto initial_plan = reconciliation::reconcile(input);
