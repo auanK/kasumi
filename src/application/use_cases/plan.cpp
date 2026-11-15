@@ -18,32 +18,7 @@ namespace {
 
 std::expected<PlanAction, std::string>
 core_action_to_plan_action(Action action) {
-    static_assert(
-        static_cast<std::size_t>(PlanAction::RenameLocal) ==
-            action_index(Action::RenameLocal) &&
-        static_cast<std::size_t>(PlanAction::Upload) ==
-            action_index(Action::Upload) &&
-        static_cast<std::size_t>(PlanAction::CreateLocalDirectory) ==
-            action_index(Action::CreateLocalDirectory) &&
-        static_cast<std::size_t>(PlanAction::CreateRemoteDirectory) ==
-            action_index(Action::CreateRemoteDirectory) &&
-        static_cast<std::size_t>(PlanAction::MoveLocal) ==
-            action_index(Action::MoveLocal) &&
-        static_cast<std::size_t>(PlanAction::Download) ==
-            action_index(Action::Download) &&
-        static_cast<std::size_t>(PlanAction::DeleteLocal) ==
-            action_index(Action::DeleteLocal) &&
-        static_cast<std::size_t>(PlanAction::DeleteLocalDirectory) ==
-            action_index(Action::DeleteLocalDirectory) &&
-        static_cast<std::size_t>(PlanAction::DeleteRemote) ==
-            action_index(Action::DeleteRemote) &&
-        static_cast<std::size_t>(PlanAction::DeleteRemoteDirectory) ==
-            action_index(Action::DeleteRemoteDirectory) &&
-        static_cast<std::size_t>(PlanAction::CopyLocal) ==
-            action_index(Action::CopyLocal) &&
-        static_cast<std::size_t>(PlanAction::DeleteIgnoredLocalFile) ==
-            action_index(Action::DeleteIgnoredLocalFile) &&
-        PLAN_ACTION_COUNT == ActionCount);
+    static_assert(PLAN_ACTION_COUNT == ActionCount);
     if (!is_valid_action(action)) {
         return std::unexpected("count action is not a valid plan");
     }

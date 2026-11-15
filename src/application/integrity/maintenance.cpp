@@ -1,5 +1,6 @@
 #include "application/integrity/maintenance.hpp"
 
+#include "application/concurrency.hpp"
 #include "application/detail.hpp"
 #include "application/history_storage/content_reachability.hpp"
 #include "application/history_storage/detail.hpp"
@@ -15,6 +16,7 @@
 #include "platform/workspace.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <exception>
 #include <filesystem>
@@ -263,103 +265,6 @@ audit_object(transport::Transport& storage,
     return result;
 }
 
-struct AuditWorkResult {
-    enum class Disposition {
-        Completed,
-        HardFailure,
-        AbortedByWindowStop,
-        UserCancelled
-    };
-
-    std::size_t index = 0;
-    Disposition disposition = Disposition::Completed;
-    AuditState state = AuditState::Healthy;
-    std::optional<Error> error;
-};
-
-struct AuditWindowState {
-    std::mutex mutex;
-    std::condition_variable_any changed;
-    std::vector<std::optional<std::size_t>> tasks;
-    std::vector<std::optional<AuditWorkResult>> completions;
-    bool stop_requested = false;
-};
-
-void run_audit_worker(
-    std::stop_token stop,
-    std::size_t slot,
-    AuditWindowState& state,
-    transport::Transport& storage,
-    KeySpan key,
-    const std::vector<kasumi::maintenance::ObjectReference>& references,
-    const platform::Workspace& workspace,
-    const testing::FsckWorkerEventCallback& on_worker_event) {
-    while (true) {
-        std::size_t index = 0;
-        {
-            std::unique_lock lock(state.mutex);
-            state.changed.wait(lock, [&] {
-                return state.tasks[slot].has_value() || state.stop_requested ||
-                       stop.stop_requested();
-            });
-            if (!state.tasks[slot].has_value()) {
-                return;
-            }
-            index = *state.tasks[slot];
-            state.tasks[slot].reset();
-        }
-
-        AuditWorkResult result{.index = index};
-        try {
-            if (on_worker_event) {
-                try {
-                    on_worker_event(testing::FsckWorkerEvent::BeforeAudit,
-                                    index);
-                } catch (...) {
-                    // Test observation cannot alter the audit result.
-                }
-            }
-            bool window_stop_requested = false;
-            {
-                std::lock_guard lock(state.mutex);
-                window_stop_requested =
-                    state.stop_requested || stop.stop_requested();
-            }
-            if (platform::cancellation::requested()) {
-                result.disposition =
-                    AuditWorkResult::Disposition::UserCancelled;
-            } else if (window_stop_requested) {
-                result.disposition =
-                    AuditWorkResult::Disposition::AbortedByWindowStop;
-            } else {
-                auto audited = audit_object(
-                    storage, key, references[index], workspace, index);
-                if (!audited) {
-                    result.disposition =
-                        AuditWorkResult::Disposition::HardFailure;
-                    result.error = audited.error();
-                } else {
-                    result.state = *audited;
-                }
-            }
-        } catch (const std::exception& exception) {
-            result.disposition = AuditWorkResult::Disposition::HardFailure;
-            result.error =
-                make_error(ErrorCode::StateFailure, exception.what());
-        } catch (...) {
-            result.disposition = AuditWorkResult::Disposition::HardFailure;
-            result.error =
-                make_error(ErrorCode::StateFailure, "audit worker failed");
-        }
-
-        {
-            std::lock_guard lock(state.mutex);
-            state.completions[slot] = std::move(result);
-        }
-        state.changed.notify_all();
-    }
-}
-
 } // namespace
 
 std::string describe(const Error& error) {
@@ -501,155 +406,187 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                 .checked_objects = total_objects,
             };
 
-            const auto effective_concurrency =
-                std::max<std::size_t>(1, audit_concurrency);
-            const auto worker_count =
-                std::min<std::size_t>(effective_concurrency, total_objects);
-
+            const auto worker_count = std::min<std::size_t>(
+                std::max<std::size_t>(1, audit_concurrency), total_objects);
             if (total_objects == 0) {
                 report_progress(application::FsckStage::Finalizing);
                 return fsck_result;
             }
 
-            AuditWindowState state;
-            state.tasks.resize(worker_count);
-            state.completions.resize(worker_count);
-
-            std::vector<std::jthread> workers;
-            workers.reserve(worker_count);
-            for (std::size_t slot = 0; slot < worker_count; ++slot) {
-                workers.emplace_back(run_audit_worker,
-                                     slot,
-                                     std::ref(state),
-                                     std::ref(storage),
-                                     key,
-                                     std::cref(inventory->referenced_objects),
-                                     std::cref(*workspace),
-                                     std::cref(on_worker_event));
-            }
-
-            std::size_t next = 0;
-            std::size_t outstanding = 0;
-            const auto admit = [&](std::size_t slot) {
-                {
-                    std::lock_guard lock(state.mutex);
-                    state.tasks[slot] = next++;
-                    ++outstanding;
-                }
-                state.changed.notify_all();
-            };
-
-            for (std::size_t slot = 0; slot < worker_count; ++slot) {
-                admit(slot);
-            }
-
+            std::mutex state_mutex;
+            std::atomic<bool> stop_requested{false};
+            std::atomic<bool> stop_event_notified{false};
             std::optional<std::pair<std::size_t, Error>> lowest_hard_failure;
             std::vector<std::filesystem::path> unrecoverable;
             bool cancelled = false;
-            bool stop_event_notified = false;
+
             const auto request_window_stop = [&] {
-                {
-                    std::lock_guard lock(state.mutex);
-                    state.stop_requested = true;
-                }
-                state.changed.notify_all();
-                for (auto& worker : workers) {
-                    worker.request_stop();
-                }
-                if (!stop_event_notified) {
-                    stop_event_notified = true;
-                    if (on_worker_event) {
-                        try {
-                            on_worker_event(
-                                testing::FsckWorkerEvent::WindowStopRequested,
-                                0);
-                        } catch (...) {
-                            // Test observation cannot alter the audit result.
-                        }
+                stop_requested.store(true, std::memory_order_release);
+                if (on_worker_event && !stop_event_notified.exchange(true)) {
+                    try {
+                        on_worker_event(
+                            testing::FsckWorkerEvent::WindowStopRequested, 0);
+                    } catch (...) {
+                        // Test observation cannot alter the audit result.
                     }
                 }
             };
-
-            while (outstanding != 0) {
-                std::size_t slot = 0;
-                AuditWorkResult work_result;
+            const auto record_hard_failure = [&](std::size_t index, Error err) {
                 {
-                    std::unique_lock lock(state.mutex);
-                    state.changed.wait(lock, [&] {
-                        return std::ranges::any_of(state.completions,
-                                                   [](const auto& item) {
-                                                       return item.has_value();
-                                                   });
+                    std::lock_guard lock(state_mutex);
+                    if (!lowest_hard_failure ||
+                        index < lowest_hard_failure->first) {
+                        lowest_hard_failure = std::pair{index, std::move(err)};
+                    }
+                }
+                request_window_stop();
+            };
+
+            std::condition_variable progress_cv;
+            std::condition_variable progress_ack_cv;
+            std::vector<std::uint64_t> completed_sizes;
+            std::size_t acked_completions = 0;
+            bool workers_done = false;
+            bool progress_aborted = false;
+
+            const auto run_workers = [&] {
+                application::parallel_for_indexed(
+                    total_objects, worker_count, [&](std::size_t index) {
+                        if (stop_requested.load(std::memory_order_acquire)) {
+                            return;
+                        }
+                        try {
+                            if (on_worker_event) {
+                                try {
+                                    on_worker_event(
+                                        testing::FsckWorkerEvent::BeforeAudit,
+                                        index);
+                                } catch (...) {
+                                }
+                            }
+                            if (platform::cancellation::requested()) {
+                                {
+                                    std::lock_guard lock(state_mutex);
+                                    cancelled = true;
+                                }
+                                request_window_stop();
+                                return;
+                            }
+                            if (stop_requested.load(
+                                    std::memory_order_acquire)) {
+                                return;
+                            }
+                            auto audited = audit_object(
+                                storage,
+                                key,
+                                inventory->referenced_objects[index],
+                                *workspace,
+                                index);
+                            if (!audited) {
+                                record_hard_failure(index,
+                                                    std::move(audited.error()));
+                                return;
+                            }
+                            std::size_t ticket = 0;
+                            {
+                                std::lock_guard lock(state_mutex);
+                                const auto& reference =
+                                    inventory->referenced_objects[index];
+                                if (*audited != AuditState::Healthy) {
+                                    unrecoverable.insert(
+                                        unrecoverable.end(),
+                                        reference.referenced_paths.begin(),
+                                        reference.referenced_paths.end());
+                                }
+                                if (!on_progress) {
+                                    return;
+                                }
+                                completed_sizes.push_back(reference.size);
+                                ticket = completed_sizes.size();
+                            }
+                            progress_cv.notify_one();
+                            std::unique_lock lock(state_mutex);
+                            progress_ack_cv.wait(lock, [&] {
+                                return acked_completions >= ticket ||
+                                       progress_aborted;
+                            });
+                        } catch (const std::exception& exception) {
+                            record_hard_failure(
+                                index,
+                                make_error(ErrorCode::StateFailure,
+                                           exception.what()));
+                        } catch (...) {
+                            record_hard_failure(
+                                index,
+                                make_error(ErrorCode::StateFailure,
+                                           "audit worker failed"));
+                        }
                     });
-                    auto it = std::ranges::find_if(state.completions,
-                                                   [](const auto& item) {
-                                                       return item.has_value();
-                                                   });
-                    slot = static_cast<std::size_t>(it -
-                                                    state.completions.begin());
-                    work_result = std::move(**it);
-                    it->reset();
-                }
-                --outstanding;
-                bool object_classified = false;
-                std::uint64_t classified_size = 0;
+            };
 
-                if (platform::cancellation::requested()) {
-                    cancelled = true;
-                    request_window_stop();
-                }
-
-                using Disposition = AuditWorkResult::Disposition;
-                if (work_result.disposition == Disposition::HardFailure) {
-                    if (work_result.error &&
-                        (!lowest_hard_failure ||
-                         work_result.index < lowest_hard_failure->first)) {
-                        lowest_hard_failure = std::pair{
-                            work_result.index, std::move(*work_result.error)};
+            if (on_progress) {
+                std::jthread driver([&] {
+                    run_workers();
+                    {
+                        std::lock_guard lock(state_mutex);
+                        workers_done = true;
                     }
-                    request_window_stop();
-                } else if (work_result.disposition ==
-                           Disposition::UserCancelled) {
-                    cancelled = true;
-                    request_window_stop();
-                } else if (work_result.disposition == Disposition::Completed) {
-                    const auto& reference =
-                        inventory->referenced_objects[work_result.index];
-                    classified_size = reference.size;
-                    if (work_result.state != AuditState::Healthy) {
-                        unrecoverable.insert(unrecoverable.end(),
-                                             reference.referenced_paths.begin(),
-                                             reference.referenced_paths.end());
-                    }
-                    object_classified = true;
-                }
-
-                if (!state.stop_requested && !cancelled &&
-                    !lowest_hard_failure && next < total_objects) {
-                    if (platform::cancellation::requested()) {
-                        cancelled = true;
-                        request_window_stop();
-                    } else {
-                        admit(slot);
-                    }
-                }
-                if (object_classified && on_progress) {
-                    ++completed_objects;
-                    if (completed_plaintext_bytes) {
-                        if (classified_size >
-                            std::numeric_limits<std::uint64_t>::max() -
-                                *completed_plaintext_bytes) {
-                            completed_plaintext_bytes.reset();
-                        } else {
-                            *completed_plaintext_bytes += classified_size;
+                    progress_cv.notify_one();
+                });
+                try {
+                    std::size_t cursor = 0;
+                    for (;;) {
+                        std::vector<std::uint64_t> batch;
+                        bool done = false;
+                        {
+                            std::unique_lock lock(state_mutex);
+                            progress_cv.wait(lock, [&] {
+                                return cursor < completed_sizes.size() ||
+                                       workers_done;
+                            });
+                            done = workers_done &&
+                                   cursor == completed_sizes.size();
+                            while (cursor < completed_sizes.size()) {
+                                batch.push_back(completed_sizes[cursor++]);
+                            }
+                        }
+                        for (const std::uint64_t size : batch) {
+                            ++completed_objects;
+                            if (completed_plaintext_bytes) {
+                                if (size >
+                                    std::numeric_limits<std::uint64_t>::max() -
+                                        *completed_plaintext_bytes) {
+                                    completed_plaintext_bytes.reset();
+                                } else {
+                                    *completed_plaintext_bytes += size;
+                                }
+                            }
+                            report_progress(
+                                application::FsckStage::AuditingContent);
+                            {
+                                std::lock_guard lock(state_mutex);
+                                ++acked_completions;
+                            }
+                            progress_ack_cv.notify_all();
+                        }
+                        if (done) {
+                            break;
                         }
                     }
-                    report_progress(application::FsckStage::AuditingContent);
+                } catch (...) {
+                    {
+                        std::lock_guard lock(state_mutex);
+                        progress_aborted = true;
+                    }
+                    request_window_stop();
+                    progress_ack_cv.notify_all();
+                    throw;
                 }
+            } else {
+                run_workers();
             }
 
             request_window_stop();
-            workers.clear();
             report_progress(application::FsckStage::Finalizing);
 
             if (lowest_hard_failure) {

@@ -44,56 +44,68 @@ resolve_key_into(Operation operation,
         });
 }
 
+namespace {
+
+Error build_error(Operation operation,
+                  ErrorCode code,
+                  std::string detail,
+                  const RuntimeSummary& summary,
+                  std::optional<GarbageCollectFailure> gc = std::nullopt) {
+    return Error{.operation = operation,
+                 .code = code,
+                 .detail = std::move(detail),
+                 .runtime = summary,
+                 .garbage_collection = std::move(gc)};
+}
+
+} // namespace
+
 Error transaction_error(Operation operation,
                         const sync::coordinator::Error& error,
                         const RuntimeSummary& summary) {
-    return Error{.operation = operation,
-                 .code = ErrorCode::SynchronizationFailure,
-                 .detail = sync::coordinator::describe(error),
-                 .runtime = summary};
+    return build_error(operation,
+                       ErrorCode::SynchronizationFailure,
+                       sync::coordinator::describe(error),
+                       summary);
 }
 
 Error maintenance_error(Operation operation,
                         const integrity::Error& error,
                         const RuntimeSummary& summary) {
-    ErrorCode code = ErrorCode::GarbageCollectionFailure;
-    if (operation == Operation::Fsck) {
-        code = ErrorCode::FsckFailure;
-    }
-    return Error{.operation = operation,
-                 .code = code,
-                 .detail = integrity::describe(error),
-                 .runtime = summary,
-                 .garbage_collection = error.garbage_collection};
+    return build_error(operation,
+                       operation == Operation::Fsck
+                           ? ErrorCode::FsckFailure
+                           : ErrorCode::GarbageCollectionFailure,
+                       integrity::describe(error),
+                       summary,
+                       error.garbage_collection);
 }
 
 Error maintenance_recovery_error(Operation operation,
                                  const sync::coordinator::Error& error,
                                  const RuntimeSummary& summary) {
-    return Error{.operation = operation,
-                 .code = operation == Operation::Fsck
-                             ? ErrorCode::FsckFailure
-                             : ErrorCode::GarbageCollectionFailure,
-                 .detail = sync::coordinator::describe(error),
-                 .runtime = summary};
+    return build_error(operation,
+                       operation == Operation::Fsck
+                           ? ErrorCode::FsckFailure
+                           : ErrorCode::GarbageCollectionFailure,
+                       sync::coordinator::describe(error),
+                       summary);
 }
 
 Error plan_error(Operation operation,
                  std::string detail,
                  const RuntimeSummary& summary) {
-    return Error{.operation = operation,
-                 .code = ErrorCode::PlanFailure,
-                 .detail = std::move(detail),
-                 .runtime = summary};
+    return build_error(
+        operation, ErrorCode::PlanFailure, std::move(detail), summary);
 }
 
 Error synchronization_error(Operation operation,
                             std::string detail,
                             const RuntimeSummary& summary) {
-    return Error{.operation = operation,
-                 .code = ErrorCode::SynchronizationFailure,
-                 .detail = std::move(detail),
-                 .runtime = summary};
+    return build_error(operation,
+                       ErrorCode::SynchronizationFailure,
+                       std::move(detail),
+                       summary);
 }
 
 } // namespace kasumi::application::detail

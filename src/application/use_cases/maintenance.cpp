@@ -33,68 +33,76 @@ Callback make_progress_callback(const OperationContext& context,
     return callback;
 }
 
-} // namespace
-
-std::expected<Response, Error> run_fsck(OperationContext& context) {
-    std::optional<FsckProgress> last_fsck_progress;
-    auto fsck_progress =
-        make_progress_callback<integrity::FsckProgressCallback, FsckProgress>(
-            context, FsckStage::Preparing, last_fsck_progress);
-
+template <typename Callback, typename Progress, typename Stage, typename RunFn>
+std::expected<Response, Error>
+run_with_recovery(OperationContext& context,
+                  Stage initial_stage,
+                  std::optional<Progress>& last_progress,
+                  RunFn&& fn) {
+    auto callback = make_progress_callback<Callback, Progress>(
+        context, initial_stage, last_progress);
     if (auto recovery = sync::coordinator::recover_if_needed(
             context.runtime, context.storage, context.key);
         !recovery) {
         return std::unexpected(maintenance_recovery_error(
             context.operation, recovery.error(), context.summary));
     }
-
-    auto checked = integrity::fsck(context.runtime,
-                                   context.storage,
-                                   context.key,
-                                   content_concurrency(),
-                                   std::move(fsck_progress));
-    if (!checked) {
-        return std::unexpected(maintenance_error(
-            context.operation, checked.error(), context.summary));
+    auto res = fn(std::move(callback));
+    if (!res) {
+        return std::unexpected(
+            maintenance_error(context.operation, res.error(), context.summary));
     }
     return Response{.operation = context.operation,
                     .runtime = context.summary,
-                    .data = FsckCompleted{
-                        .checked_objects = checked->checked_objects,
-                        .checked_plaintext_bytes =
-                            last_fsck_progress
-                                ? last_fsck_progress->completed_plaintext_bytes
-                                : std::nullopt,
-                    }};
+                    .data = std::move(*res)};
+}
+
+} // namespace
+
+std::expected<Response, Error> run_fsck(OperationContext& context) {
+    std::optional<FsckProgress> last_progress;
+    return run_with_recovery<integrity::FsckProgressCallback>(
+        context,
+        FsckStage::Preparing,
+        last_progress,
+        [&](integrity::FsckProgressCallback cb)
+            -> std::expected<ResponseData, integrity::Error> {
+            auto checked = integrity::fsck(context.runtime,
+                                           context.storage,
+                                           context.key,
+                                           content_concurrency(),
+                                           std::move(cb));
+            if (!checked) {
+                return std::unexpected(std::move(checked.error()));
+            }
+            return FsckCompleted{
+                .checked_objects = checked->checked_objects,
+                .checked_plaintext_bytes =
+                    last_progress ? last_progress->completed_plaintext_bytes
+                                  : std::nullopt,
+            };
+        });
 }
 
 std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
     std::optional<GarbageCollectProgress> last_progress;
-    auto gc_progress =
-        make_progress_callback<integrity::GarbageCollectProgressCallback,
-                               GarbageCollectProgress>(
-            context, GarbageCollectStage::Preparing, last_progress);
-
-    if (auto recovery = sync::coordinator::recover_if_needed(
-            context.runtime, context.storage, context.key);
-        !recovery) {
-        return std::unexpected(maintenance_recovery_error(
-            context.operation, recovery.error(), context.summary));
-    }
-
-    auto collected = integrity::garbage_collect(
-        context.runtime, context.storage, context.key, std::move(gc_progress));
-    if (!collected) {
-        return std::unexpected(maintenance_error(
-            context.operation, collected.error(), context.summary));
-    }
-    return Response{.operation = context.operation,
-                    .runtime = context.summary,
-                    .data = GarbageCollectCompleted{
-                        .candidate_objects = collected->candidate_objects,
-                        .analysis_only = collected->analysis_only,
-                        .removed_objects = collected->removed_objects,
-                    }};
+    return run_with_recovery<integrity::GarbageCollectProgressCallback>(
+        context,
+        GarbageCollectStage::Preparing,
+        last_progress,
+        [&](integrity::GarbageCollectProgressCallback cb)
+            -> std::expected<ResponseData, integrity::Error> {
+            auto collected = integrity::garbage_collect(
+                context.runtime, context.storage, context.key, std::move(cb));
+            if (!collected) {
+                return std::unexpected(std::move(collected.error()));
+            }
+            return GarbageCollectCompleted{
+                .candidate_objects = collected->candidate_objects,
+                .analysis_only = collected->analysis_only,
+                .removed_objects = collected->removed_objects,
+            };
+        });
 }
 
 std::expected<Response, Error> run_remove_barrier(OperationContext& context) {
