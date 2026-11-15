@@ -1,6 +1,7 @@
 #include "crypto/file_crypto.hpp"
 
 #include "crypto/physical_hash.hpp"
+#include "crypto/secure_memory.hpp"
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
 #include "platform/private_storage.hpp"
@@ -68,39 +69,39 @@ make_chunk_ad(const std::array<std::uint8_t, header_ad_size>& header,
     return result;
 }
 
-struct CryptoBufferCleanup {
-    std::array<std::uint8_t, NONCE_SIZE>& base_nonce;
-    std::array<std::uint8_t, NONCE_SIZE>& chunk_nonce;
-    std::array<std::uint8_t, MAC_SIZE>& header_mac;
-    std::array<std::uint8_t, MAC_SIZE>& mac;
-    std::vector<std::uint8_t>& buffer_a;
-    std::vector<std::uint8_t>& buffer_b;
+struct CryptoSession {
+    std::array<std::uint8_t, NONCE_SIZE> base_nonce{};
+    std::array<std::uint8_t, NONCE_SIZE> chunk_nonce{};
+    std::array<std::uint8_t, MAC_SIZE> header_mac{};
+    std::array<std::uint8_t, MAC_SIZE> mac{};
+    std::vector<std::uint8_t> buffer_a;
+    std::vector<std::uint8_t> buffer_b;
+    platform::private_storage::PrivateOutputFile file;
+    bool published{false};
 
-    ~CryptoBufferCleanup() noexcept {
+    ~CryptoSession() noexcept {
         crypto_wipe(base_nonce.data(), base_nonce.size());
         crypto_wipe(chunk_nonce.data(), chunk_nonce.size());
         crypto_wipe(header_mac.data(), header_mac.size());
         crypto_wipe(mac.data(), mac.size());
-        if (!buffer_a.empty()) {
-            crypto_wipe(buffer_a.data(), buffer_a.size());
+        for (auto* buf : {&buffer_a, &buffer_b}) {
+            if (!buf->empty()) {
+                crypto_wipe(buf->data(), buf->size());
+            }
         }
-        if (!buffer_b.empty()) {
-            crypto_wipe(buffer_b.data(), buffer_b.size());
-        }
-    }
-};
-
-struct TemporaryOutputGuard {
-    platform::private_storage::PrivateOutputFile file;
-    bool published{false};
-
-    ~TemporaryOutputGuard() noexcept {
         if (!published && !file.published && !file.path.empty()) {
             static_cast<void>(
                 platform::private_storage::remove_private_file_if_owned(file));
         } else {
             platform::private_storage::close_private_file(file);
         }
+    }
+
+    void resize_buffers(std::uint64_t total_size) {
+        const auto size = static_cast<std::size_t>(
+            std::min<std::uint64_t>(CHUNK_SIZE, total_size));
+        buffer_a.resize(size);
+        buffer_b.resize(size);
     }
 };
 
@@ -111,23 +112,42 @@ std::nullopt_t fail_crypto(std::string* error_detail, std::string_view msg) {
     return std::nullopt;
 }
 
+std::optional<std::pair<std::ifstream, std::uint64_t>>
+open_input_sized(const std::filesystem::path& input_path,
+                 std::string* error_detail) {
+    std::ifstream input(input_path, std::ios::binary | std::ios::ate);
+    if (!input) {
+        return fail_crypto(error_detail, "opening plaintext input failed");
+    }
+    const auto end_position = input.tellg();
+    const auto stream_size = static_cast<std::streamoff>(end_position);
+    if (end_position < std::streampos{0} || stream_size < 0) {
+        return fail_crypto(error_detail, "reading plaintext size failed");
+    }
+    const auto input_size = static_cast<std::uintmax_t>(stream_size);
+    if (input_size > static_cast<std::uintmax_t>(
+                         std::numeric_limits<std::uint64_t>::max())) {
+        return fail_crypto(error_detail, "plaintext size is unsupported");
+    }
+    input.seekg(0, std::ios::beg);
+    if (!input) {
+        return fail_crypto(error_detail, "seeking plaintext input failed");
+    }
+    return std::pair{std::move(input), static_cast<std::uint64_t>(input_size)};
+}
+
 std::optional<std::filesystem::path>
 prepare_crypto_paths(const std::filesystem::path& input_path,
                      const std::filesystem::path& output_path,
                      bool check_dest_parent,
                      std::string* error_detail) {
-    if (input_path.empty() || output_path.empty() ||
-        input_path == output_path) {
-        return fail_crypto(error_detail,
-                           "invalid empty or identical input/output paths");
-    }
-
     const auto target_path = output_path.has_parent_path()
                                  ? output_path
                                  : (std::filesystem::path(".") / output_path);
-    if (input_path == target_path) {
+    if (input_path.empty() || output_path.empty() ||
+        input_path == output_path || input_path == target_path) {
         return fail_crypto(error_detail,
-                           "input and target output paths are identical");
+                           "invalid empty or identical input/output paths");
     }
 
     std::error_code ec;
@@ -213,9 +233,10 @@ bool reserve_temp_output(const std::filesystem::path& target_path,
     return false;
 }
 
-bool close_verified_input(std::ifstream& input,
-                          const TemporaryOutputGuard& temp_guard,
-                          std::string* error_detail) {
+bool close_and_publish_temp(std::ifstream& input,
+                            CryptoSession& session,
+                            const std::filesystem::path& target_path,
+                            std::string* error_detail) {
     char trailing = 0;
     input.read(&trailing, 1);
     if (input.gcount() != 0 || input.bad()) {
@@ -228,20 +249,14 @@ bool close_verified_input(std::ifstream& input,
         fail_crypto(error_detail, "closing plaintext input failed");
         return false;
     }
-    if (!temp_guard.file.identity.valid) {
+    if (!session.file.identity.valid) {
         fail_crypto(error_detail, "temporary file identity is invalid");
         return false;
     }
-    return true;
-}
-
-bool publish_temp_output(TemporaryOutputGuard& temp_guard,
-                         const std::filesystem::path& target_path,
-                         std::string* error_detail) {
     auto published = platform::private_storage::publish_private_file(
-        temp_guard.file, target_path);
-    if (temp_guard.file.published) {
-        temp_guard.published = true;
+        session.file, target_path);
+    if (session.file.published) {
+        session.published = true;
     }
     if (!published) {
         fail_crypto(error_detail,
@@ -259,12 +274,7 @@ auto with_derived_key(std::span<const std::uint8_t, KEY_SIZE> master_key,
         derive_key(master_key,
                    purpose == FilePurpose::Content ? KeyPurpose::Content
                                                    : KeyPurpose::History);
-    struct KeyWipeGuard {
-        decltype(key)& value;
-        ~KeyWipeGuard() noexcept {
-            crypto_wipe(value.data(), value.size());
-        }
-    } key_guard{key};
+    secure_memory::WipeGuard key_guard{key};
     return fn(key);
 }
 
@@ -279,47 +289,37 @@ void derive_chunk_nonce(const std::uint8_t* base_nonce,
     }
 }
 
-void derive_header_nonce(const std::uint8_t* base_nonce,
-                         std::uint8_t* out_nonce) noexcept {
-    std::copy_n(base_nonce, NONCE_SIZE, out_nonce);
-    out_nonce[0] ^= 0x80U;
-}
-
-void create_header_mac(std::uint8_t* mac,
-                       const std::uint8_t* base_nonce,
-                       std::span<const std::uint8_t, header_ad_size> header,
-                       const std::uint8_t* key) noexcept {
+bool header_mac_op(std::uint8_t* mac,
+                   const std::uint8_t* base_nonce,
+                   std::span<const std::uint8_t, header_ad_size> header,
+                   const std::uint8_t* key,
+                   bool lock) noexcept {
     std::array<std::uint8_t, NONCE_SIZE> header_nonce{};
-    derive_header_nonce(base_nonce, header_nonce.data());
+    std::copy_n(base_nonce, NONCE_SIZE, header_nonce.data());
+    header_nonce[0] ^= 0x80U;
     std::uint8_t empty = 0;
-    crypto_aead_lock(&empty,
-                     mac,
-                     key,
-                     header_nonce.data(),
-                     header.data(),
-                     header.size(),
-                     &empty,
-                     0);
+    bool ok = true;
+    if (lock) {
+        crypto_aead_lock(&empty,
+                         mac,
+                         key,
+                         header_nonce.data(),
+                         header.data(),
+                         header.size(),
+                         &empty,
+                         0);
+    } else {
+        ok = crypto_aead_unlock(&empty,
+                                mac,
+                                key,
+                                header_nonce.data(),
+                                header.data(),
+                                header.size(),
+                                &empty,
+                                0) == 0;
+    }
     crypto_wipe(header_nonce.data(), header_nonce.size());
-}
-
-bool valid_header_mac(const std::uint8_t* mac,
-                      const std::uint8_t* base_nonce,
-                      std::span<const std::uint8_t, header_ad_size> header,
-                      const std::uint8_t* key) noexcept {
-    std::array<std::uint8_t, NONCE_SIZE> header_nonce{};
-    derive_header_nonce(base_nonce, header_nonce.data());
-    std::uint8_t empty = 0;
-    const bool valid = crypto_aead_unlock(&empty,
-                                          mac,
-                                          key,
-                                          header_nonce.data(),
-                                          header.data(),
-                                          header.size(),
-                                          &empty,
-                                          0) == 0;
-    crypto_wipe(header_nonce.data(), header_nonce.size());
-    return valid;
+    return ok;
 }
 
 bool encoded_size_matches(std::uint64_t plaintext_size,
@@ -359,60 +359,17 @@ encrypt_file_with_hashes(const std::filesystem::path& input_path,
                 return std::nullopt;
             }
             const auto& target_path = *prepared_target;
-
-            std::array<std::uint8_t, NONCE_SIZE> base_nonce{};
-            std::array<std::uint8_t, NONCE_SIZE> chunk_nonce{};
-            std::array<std::uint8_t, MAC_SIZE> header_mac{};
-            std::array<std::uint8_t, MAC_SIZE> mac{};
-            std::vector<std::uint8_t> plain_buffer;
-            std::vector<std::uint8_t> cipher_buffer;
-            CryptoBufferCleanup cleanup{base_nonce,
-                                        chunk_nonce,
-                                        header_mac,
-                                        mac,
-                                        plain_buffer,
-                                        cipher_buffer};
-
-            TemporaryOutputGuard temp_guard;
+            CryptoSession session;
 
             try {
-                std::ifstream input(input_path,
-                                    std::ios::binary | std::ios::ate);
-                if (!input) {
-                    return fail_crypto(error_detail,
-                                       "opening plaintext input failed");
+                auto opened = open_input_sized(input_path, error_detail);
+                if (!opened) {
+                    return std::nullopt;
                 }
+                auto& [input, plaintext_size] = *opened;
 
-                const auto end_position = input.tellg();
-                if (end_position < std::streampos{0}) {
-                    return fail_crypto(error_detail,
-                                       "reading plaintext size failed");
-                }
-
-                const auto stream_size =
-                    static_cast<std::streamoff>(end_position);
-                if (stream_size < 0) {
-                    return fail_crypto(error_detail,
-                                       "reading plaintext size failed");
-                }
-                const auto input_size =
-                    static_cast<std::uintmax_t>(stream_size);
-                if (input_size >
-                    static_cast<std::uintmax_t>(
-                        std::numeric_limits<std::uint64_t>::max())) {
-                    return fail_crypto(error_detail,
-                                       "plaintext size is unsupported");
-                }
-                const auto plaintext_size =
-                    static_cast<std::uint64_t>(input_size);
-
-                input.seekg(0, std::ios::beg);
-                if (!input) {
-                    return fail_crypto(error_detail,
-                                       "seeking plaintext input failed");
-                }
-
-                auto random_result = platform::random::fill_bytes(base_nonce);
+                auto random_result =
+                    platform::random::fill_bytes(session.base_nonce);
                 if (!random_result) {
                     return fail_crypto(error_detail,
                                        "generating encryption nonce failed: " +
@@ -420,17 +377,16 @@ encrypt_file_with_hashes(const std::filesystem::path& input_path,
                 }
 
                 const auto header =
-                    make_header_ad(base_nonce.data(), plaintext_size);
-                create_header_mac(
-                    header_mac.data(), base_nonce.data(), header, key.data());
+                    make_header_ad(session.base_nonce.data(), plaintext_size);
+                header_mac_op(session.header_mac.data(),
+                              session.base_nonce.data(),
+                              header,
+                              key.data(),
+                              true);
 
-                const auto buffer_size = static_cast<std::size_t>(
-                    std::min<std::uint64_t>(CHUNK_SIZE, plaintext_size));
-                plain_buffer.resize(buffer_size);
-                cipher_buffer.resize(buffer_size);
-
+                session.resize_buffers(plaintext_size);
                 if (!reserve_temp_output(
-                        target_path, temp_guard.file, error_detail)) {
+                        target_path, session.file, error_detail)) {
                     return std::nullopt;
                 }
 
@@ -441,7 +397,7 @@ encrypt_file_with_hashes(const std::filesystem::path& input_path,
                     }
                     auto written =
                         platform::private_storage::write_private_file(
-                            temp_guard.file, data, size);
+                            session.file, data, size);
                     if (!written) {
                         return false;
                     }
@@ -452,21 +408,15 @@ encrypt_file_with_hashes(const std::filesystem::path& input_path,
                 };
 
                 if (!write(header.data(), header.size()) ||
-                    !write(header_mac.data(), header_mac.size())) {
-                    if (error_detail) {
-                        *error_detail = "writing ciphertext header failed";
-                    }
-                    return std::nullopt;
+                    !write(session.header_mac.data(),
+                           session.header_mac.size())) {
+                    return fail_crypto(error_detail,
+                                       "writing ciphertext header failed");
                 }
 
                 blake3_hasher plaintext_hash;
                 blake3_hasher_init(&plaintext_hash);
-                struct HasherWipeGuard {
-                    blake3_hasher& hasher;
-                    ~HasherWipeGuard() noexcept {
-                        crypto_wipe(&hasher, sizeof(hasher));
-                    }
-                } hasher_guard{plaintext_hash};
+                secure_memory::WipeGuard hasher_guard{plaintext_hash};
                 std::uint64_t total_read = 0;
                 std::uint64_t chunk_index = 0;
                 while (total_read < plaintext_size) {
@@ -474,38 +424,35 @@ encrypt_file_with_hashes(const std::filesystem::path& input_path,
                         static_cast<std::size_t>(std::min<std::uint64_t>(
                             CHUNK_SIZE, plaintext_size - total_read));
 
-                    input.read(reinterpret_cast<char*>(plain_buffer.data()),
+                    input.read(reinterpret_cast<char*>(session.buffer_a.data()),
                                static_cast<std::streamsize>(chunk_size));
                     if (input.gcount() !=
                             static_cast<std::streamsize>(chunk_size) ||
                         input.bad()) {
-                        if (error_detail) {
-                            *error_detail = "reading plaintext chunk failed";
-                        }
-                        return std::nullopt;
+                        return fail_crypto(error_detail,
+                                           "reading plaintext chunk failed");
                     }
                     blake3_hasher_update(
-                        &plaintext_hash, plain_buffer.data(), chunk_size);
+                        &plaintext_hash, session.buffer_a.data(), chunk_size);
 
-                    derive_chunk_nonce(
-                        base_nonce.data(), chunk_index, chunk_nonce.data());
+                    derive_chunk_nonce(session.base_nonce.data(),
+                                       chunk_index,
+                                       session.chunk_nonce.data());
                     const auto chunk_ad =
                         make_chunk_ad(header, chunk_index, chunk_size);
-                    crypto_aead_lock(cipher_buffer.data(),
-                                     mac.data(),
+                    crypto_aead_lock(session.buffer_b.data(),
+                                     session.mac.data(),
                                      key.data(),
-                                     chunk_nonce.data(),
+                                     session.chunk_nonce.data(),
                                      chunk_ad.data(),
                                      chunk_ad.size(),
-                                     plain_buffer.data(),
+                                     session.buffer_a.data(),
                                      chunk_size);
 
-                    if (!write(mac.data(), mac.size()) ||
-                        !write(cipher_buffer.data(), chunk_size)) {
-                        if (error_detail) {
-                            *error_detail = "writing encrypted chunk failed";
-                        }
-                        return std::nullopt;
+                    if (!write(session.mac.data(), session.mac.size()) ||
+                        !write(session.buffer_b.data(), chunk_size)) {
+                        return fail_crypto(error_detail,
+                                           "writing encrypted chunk failed");
                     }
 
                     total_read += chunk_size;
@@ -513,15 +460,9 @@ encrypt_file_with_hashes(const std::filesystem::path& input_path,
                 }
 
                 if (total_read != plaintext_size) {
-                    if (error_detail) {
-                        *error_detail =
-                            "plaintext size changed during encryption";
-                    }
-                    return std::nullopt;
-                }
-
-                if (!close_verified_input(input, temp_guard, error_detail)) {
-                    return std::nullopt;
+                    return fail_crypto(
+                        error_detail,
+                        "plaintext size changed during encryption");
                 }
 
                 EncryptionResult result{
@@ -532,13 +473,11 @@ encrypt_file_with_hashes(const std::filesystem::path& input_path,
                                        reinterpret_cast<std::uint8_t*>(
                                            result.plaintext_hash.data()),
                                        result.plaintext_hash.size());
-                crypto_wipe(&plaintext_hash, sizeof(plaintext_hash));
 
-                if (!publish_temp_output(
-                        temp_guard, target_path, error_detail)) {
+                if (!close_and_publish_temp(
+                        input, session, target_path, error_detail)) {
                     return std::nullopt;
                 }
-
                 return result;
             } catch (const std::exception& exception) {
                 return fail_crypto(
@@ -573,39 +512,14 @@ bool decrypt_file(const std::filesystem::path& input_path,
             return false;
         }
         const auto& target_path = *prepared_target;
-
-        std::array<std::uint8_t, NONCE_SIZE> base_nonce{};
-        std::array<std::uint8_t, NONCE_SIZE> chunk_nonce{};
-        std::array<std::uint8_t, MAC_SIZE> header_mac{};
-        std::array<std::uint8_t, MAC_SIZE> mac{};
-        std::vector<std::uint8_t> cipher_buffer;
-        std::vector<std::uint8_t> plain_buffer;
-        CryptoBufferCleanup cleanup{base_nonce,
-                                    chunk_nonce,
-                                    header_mac,
-                                    mac,
-                                    cipher_buffer,
-                                    plain_buffer};
-
-        TemporaryOutputGuard temp_guard;
+        CryptoSession session;
 
         try {
-            std::ifstream input(input_path, std::ios::binary | std::ios::ate);
-            if (!input) {
+            auto opened = open_input_sized(input_path, nullptr);
+            if (!opened) {
                 return false;
             }
-
-            const auto end_position = input.tellg();
-            if (end_position < std::streampos{0}) {
-                return false;
-            }
-
-            const auto input_size = static_cast<std::uintmax_t>(
-                static_cast<std::streamoff>(end_position));
-            input.seekg(0, std::ios::beg);
-            if (!input) {
-                return false;
-            }
+            auto& [input, input_size] = *opened;
 
             std::array<std::uint8_t, header_ad_size> header{};
             input.read(reinterpret_cast<char*>(header.data()),
@@ -617,27 +531,26 @@ bool decrypt_file(const std::filesystem::path& input_path,
             }
 
             std::copy_n(header.data() + format_magic.size(),
-                        base_nonce.size(),
-                        base_nonce.data());
+                        session.base_nonce.size(),
+                        session.base_nonce.data());
             const auto expected_size =
                 decode_u64_le(header.data() + format_magic.size() + NONCE_SIZE);
 
-            input.read(reinterpret_cast<char*>(header_mac.data()),
-                       static_cast<std::streamsize>(header_mac.size()));
+            input.read(reinterpret_cast<char*>(session.header_mac.data()),
+                       static_cast<std::streamsize>(session.header_mac.size()));
             if (input.gcount() !=
-                    static_cast<std::streamsize>(header_mac.size()) ||
+                    static_cast<std::streamsize>(session.header_mac.size()) ||
                 !encoded_size_matches(expected_size, input_size) ||
-                !valid_header_mac(
-                    header_mac.data(), base_nonce.data(), header, key.data())) {
+                !header_mac_op(session.header_mac.data(),
+                               session.base_nonce.data(),
+                               header,
+                               key.data(),
+                               false)) {
                 return false;
             }
 
-            const auto buffer_size = static_cast<std::size_t>(
-                std::min<std::uint64_t>(CHUNK_SIZE, expected_size));
-            cipher_buffer.resize(buffer_size);
-            plain_buffer.resize(buffer_size);
-
-            if (!reserve_temp_output(target_path, temp_guard.file, nullptr)) {
+            session.resize_buffers(expected_size);
+            if (!reserve_temp_output(target_path, session.file, nullptr)) {
                 return false;
             }
 
@@ -649,39 +562,39 @@ bool decrypt_file(const std::filesystem::path& input_path,
                     static_cast<std::size_t>(std::min<std::uint64_t>(
                         CHUNK_SIZE, expected_size - total_decrypted));
 
-                input.read(reinterpret_cast<char*>(mac.data()),
-                           static_cast<std::streamsize>(mac.size()));
+                input.read(reinterpret_cast<char*>(session.mac.data()),
+                           static_cast<std::streamsize>(session.mac.size()));
                 if (input.gcount() !=
-                    static_cast<std::streamsize>(mac.size())) {
+                    static_cast<std::streamsize>(session.mac.size())) {
                     return false;
                 }
 
-                input.read(reinterpret_cast<char*>(cipher_buffer.data()),
+                input.read(reinterpret_cast<char*>(session.buffer_a.data()),
                            static_cast<std::streamsize>(chunk_size));
                 if (input.gcount() !=
                     static_cast<std::streamsize>(chunk_size)) {
                     return false;
                 }
 
-                derive_chunk_nonce(
-                    base_nonce.data(), chunk_index, chunk_nonce.data());
+                derive_chunk_nonce(session.base_nonce.data(),
+                                   chunk_index,
+                                   session.chunk_nonce.data());
                 const auto chunk_ad =
                     make_chunk_ad(header, chunk_index, chunk_size);
 
-                if (crypto_aead_unlock(plain_buffer.data(),
-                                       mac.data(),
+                if (crypto_aead_unlock(session.buffer_b.data(),
+                                       session.mac.data(),
                                        key.data(),
-                                       chunk_nonce.data(),
+                                       session.chunk_nonce.data(),
                                        chunk_ad.data(),
                                        chunk_ad.size(),
-                                       cipher_buffer.data(),
+                                       session.buffer_a.data(),
                                        chunk_size) != 0) {
                     return false;
                 }
 
-                auto written = platform::private_storage::write_private_file(
-                    temp_guard.file, plain_buffer.data(), chunk_size);
-                if (!written) {
+                if (!platform::private_storage::write_private_file(
+                        session.file, session.buffer_b.data(), chunk_size)) {
                     return false;
                 }
 
@@ -689,8 +602,7 @@ bool decrypt_file(const std::filesystem::path& input_path,
                 ++chunk_index;
             }
 
-            return close_verified_input(input, temp_guard, nullptr) &&
-                   publish_temp_output(temp_guard, target_path, nullptr);
+            return close_and_publish_temp(input, session, target_path, nullptr);
         } catch (...) {
             return false;
         }

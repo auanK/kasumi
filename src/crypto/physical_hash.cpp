@@ -1,21 +1,11 @@
 #include "crypto/physical_hash.hpp"
 
+#include "platform/private_storage.hpp"
+
 #include <algorithm>
 #include <array>
-#include <cerrno>
 #include <cstdint>
 #include <cstring>
-
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
 
 namespace kasumi::crypto::physical {
 namespace {
@@ -162,85 +152,17 @@ hash_file(const std::filesystem::path& path, std::string_view algorithm) {
 
     auto state = sha256_init();
     std::array<std::uint8_t, 64U * 1024U> buffer{};
-
-#if defined(_WIN32)
-    const auto handle =
-        CreateFileW(path.c_str(),
-                    GENERIC_READ,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    nullptr,
-                    OPEN_EXISTING,
-                    FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
-                    nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
+    auto streamed = platform::private_storage::stream_regular_file(
+        path, buffer, [&](std::span<const std::uint8_t> chunk) {
+            sha256_update(state, chunk);
+        });
+    if (!streamed) {
         return std::unexpected(
-            "could not open file for physical hash calculation");
+            streamed.error().kind ==
+                    platform::private_storage::StreamErrorKind::ReadFailed
+                ? "could not read file for physical hash calculation"
+                : "could not open file for physical hash calculation");
     }
-    struct HandleGuard {
-        HANDLE h;
-        ~HandleGuard() noexcept {
-            CloseHandle(h);
-        }
-    } guard{handle};
-    FILE_ATTRIBUTE_TAG_INFO attributes{};
-    if (!GetFileInformationByHandleEx(
-            handle, FileAttributeTagInfo, &attributes, sizeof(attributes)) ||
-        (attributes.FileAttributes &
-         (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY |
-          FILE_ATTRIBUTE_DEVICE)) != 0) {
-        return std::unexpected(
-            "could not open file for physical hash calculation");
-    }
-    for (;;) {
-        DWORD count = 0;
-        if (!ReadFile(handle,
-                      buffer.data(),
-                      static_cast<DWORD>(buffer.size()),
-                      &count,
-                      nullptr)) {
-            return std::unexpected(
-                "could not read file for physical hash calculation");
-        }
-        if (count == 0) {
-            break;
-        }
-        sha256_update(state,
-                      std::span{buffer}.first(static_cast<std::size_t>(count)));
-    }
-#else
-    const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0) {
-        return std::unexpected(
-            "could not open file for physical hash calculation");
-    }
-    struct FdGuard {
-        int fd;
-        ~FdGuard() noexcept {
-            ::close(fd);
-        }
-    } guard{fd};
-    struct stat st{};
-    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
-        return std::unexpected(
-            "could not open file for physical hash calculation");
-    }
-    for (;;) {
-        const auto count = ::read(fd, buffer.data(), buffer.size());
-        if (count == 0) {
-            break;
-        }
-        if (count < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return std::unexpected(
-                "could not read file for physical hash calculation");
-        }
-        sha256_update(state,
-                      std::span{buffer}.first(static_cast<std::size_t>(count)));
-    }
-#endif
-
     return sha256_finish(state);
 }
 
