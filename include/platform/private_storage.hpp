@@ -4,8 +4,12 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <type_traits>
 #include <utility>
 
 namespace kasumi::platform::private_storage {
@@ -139,6 +143,50 @@ protect_file(const std::filesystem::path& path);
 
 std::expected<void, std::string>
 write_atomically(const std::filesystem::path& path, std::string_view bytes);
+
+enum class StreamErrorKind {
+    NotFound,
+    Symlink,
+    NotRegular,
+    SizeMismatch,
+    OpenFailed,
+    ReadFailed,
+    Aborted,
+};
+
+struct StreamError {
+    StreamErrorKind kind{StreamErrorKind::OpenFailed};
+    std::string detail;
+    std::error_code system_error{};
+};
+
+std::expected<std::uint64_t, StreamError> stream_regular_file_raw(
+    const std::filesystem::path& path,
+    std::span<std::uint8_t> scratch,
+    bool (*on_chunk)(void*, std::span<const std::uint8_t>),
+    void* context,
+    std::optional<std::uint64_t> expected_size = std::nullopt);
+
+template <typename Callback>
+std::expected<std::uint64_t, StreamError>
+stream_regular_file(const std::filesystem::path& path,
+                    std::span<std::uint8_t> scratch,
+                    Callback&& on_chunk,
+                    std::optional<std::uint64_t> expected_size = std::nullopt) {
+    struct Adapter {
+        static bool invoke(void* ctx, std::span<const std::uint8_t> chunk) {
+            auto& fn = *static_cast<std::remove_reference_t<Callback>*>(ctx);
+            if constexpr (std::is_same_v<decltype(fn(chunk)), bool>) {
+                return fn(chunk);
+            } else {
+                fn(chunk);
+                return true;
+            }
+        }
+    };
+    return stream_regular_file_raw(
+        path, scratch, &Adapter::invoke, &on_chunk, expected_size);
+}
 
 } // namespace kasumi::platform::private_storage
 

@@ -1,5 +1,6 @@
 #include "platform/private_storage.hpp"
 
+#include "detail.hpp"
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
 #include "platform/random.hpp"
@@ -7,8 +8,9 @@
 #include <array>
 #include <cerrno>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
-#include <fstream>
+#include <memory>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -55,54 +57,7 @@ FileIdentity to_file_identity(const FILE_ID_INFO& info) noexcept {
     return identity;
 }
 
-std::expected<PSECURITY_DESCRIPTOR, std::string>
-security_descriptor(bool directory) {
-    HANDLE token = nullptr;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
-        return std::unexpected(
-            windows_error("OpenProcessToken failed", GetLastError()));
-    }
-
-    DWORD size = 0;
-    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
-    std::vector<std::byte> token_data(size);
-    if (size == 0 || !GetTokenInformation(
-                         token, TokenUser, token_data.data(), size, &size)) {
-        const auto code = GetLastError();
-        CloseHandle(token);
-        return std::unexpected(
-            windows_error("GetTokenInformation failed", code));
-    }
-    CloseHandle(token);
-
-    wchar_t* sid_text = nullptr;
-    const auto* token_user =
-        reinterpret_cast<const TOKEN_USER*>(token_data.data());
-    if (!ConvertSidToStringSidW(token_user->User.Sid, &sid_text)) {
-        return std::unexpected(
-            windows_error("ConvertSidToStringSidW failed", GetLastError()));
-    }
-    std::wstring sid;
-    try {
-        sid = sid_text;
-    } catch (...) {
-        LocalFree(sid_text);
-        return std::unexpected("could not copy user SID");
-    }
-    LocalFree(sid_text);
-    const std::wstring inherit = directory ? L"OICI" : L"";
-    const std::wstring sddl = L"D:P(A;" + inherit + L";FA;;;SY)(A;" + inherit +
-                              L";FA;;;" + sid + L")";
-
-    PSECURITY_DESCRIPTOR descriptor = nullptr;
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.c_str(), SDDL_REVISION_1, &descriptor, nullptr)) {
-        return std::unexpected(windows_error(
-            "ConvertStringSecurityDescriptorToSecurityDescriptorW failed",
-            GetLastError()));
-    }
-    return descriptor;
-}
+using UniqueLocalMem = std::unique_ptr<void, decltype(&LocalFree)>;
 
 struct ProcessSecurityContext {
     std::array<std::byte, SECURITY_MAX_SID_SIZE> user_sid{};
@@ -116,18 +71,16 @@ ProcessSecurityContext get_process_security_context() noexcept {
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
         return context;
     }
+    PrivateHandle token_guard{reinterpret_cast<std::intptr_t>(token)};
     std::array<std::byte, sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE> buffer{};
     DWORD returned_size = 0;
-    const BOOL token_ok = GetTokenInformation(token,
-                                              TokenUser,
-                                              buffer.data(),
-                                              static_cast<DWORD>(buffer.size()),
-                                              &returned_size);
-    CloseHandle(token);
-    if (!token_ok) {
+    if (!GetTokenInformation(token,
+                             TokenUser,
+                             buffer.data(),
+                             static_cast<DWORD>(buffer.size()),
+                             &returned_size)) {
         return context;
     }
-
     const auto* token_user = reinterpret_cast<const TOKEN_USER*>(buffer.data());
     if (!token_user->User.Sid || !IsValidSid(token_user->User.Sid)) {
         return context;
@@ -146,9 +99,34 @@ ProcessSecurityContext get_process_security_context() noexcept {
         !IsValidSid(context.system_sid.data())) {
         return context;
     }
-
     context.valid = true;
     return context;
+}
+
+std::expected<UniqueLocalMem, std::string> security_descriptor(bool directory) {
+    auto context = get_process_security_context();
+    if (!context.valid) {
+        return std::unexpected(
+            windows_error("OpenProcessToken failed", GetLastError()));
+    }
+    wchar_t* sid_text = nullptr;
+    if (!ConvertSidToStringSidW(context.user_sid.data(), &sid_text)) {
+        return std::unexpected(
+            windows_error("ConvertSidToStringSidW failed", GetLastError()));
+    }
+    UniqueLocalMem sid_guard{sid_text, LocalFree};
+    const std::wstring inherit = directory ? L"OICI" : L"";
+    const std::wstring sddl = L"D:P(A;" + inherit + L";FA;;;SY)(A;" + inherit +
+                              L";FA;;;" + sid_text + L")";
+
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.c_str(), SDDL_REVISION_1, &descriptor, nullptr)) {
+        return std::unexpected(windows_error(
+            "ConvertStringSecurityDescriptorToSecurityDescriptorW failed",
+            GetLastError()));
+    }
+    return UniqueLocalMem{descriptor, LocalFree};
 }
 
 bool is_dacl_compliant(const std::filesystem::path& path,
@@ -159,36 +137,31 @@ bool is_dacl_compliant(const std::filesystem::path& path,
     }
 
     PACL current_dacl = nullptr;
-    PSECURITY_DESCRIPTOR current_sd = nullptr;
-    const auto get_res =
-        GetNamedSecurityInfoW(const_cast<wchar_t*>(path.c_str()),
+    PSECURITY_DESCRIPTOR raw_sd = nullptr;
+    if (GetNamedSecurityInfoW(const_cast<wchar_t*>(path.c_str()),
                               SE_FILE_OBJECT,
                               DACL_SECURITY_INFORMATION,
                               nullptr,
                               nullptr,
                               &current_dacl,
                               nullptr,
-                              &current_sd);
-    if (get_res != ERROR_SUCCESS || !current_sd || !current_dacl) {
-        if (current_sd) {
-            LocalFree(current_sd);
+                              &raw_sd) != ERROR_SUCCESS ||
+        !raw_sd || !current_dacl) {
+        if (raw_sd) {
+            LocalFree(raw_sd);
         }
         return false;
     }
+    UniqueLocalMem sd_guard{raw_sd, LocalFree};
 
     SECURITY_DESCRIPTOR_CONTROL control{};
     DWORD revision = 0;
-    if (!GetSecurityDescriptorControl(current_sd, &control, &revision) ||
-        (control & SE_DACL_PROTECTED) == 0) {
-        LocalFree(current_sd);
-        return false;
-    }
-
     ACL_SIZE_INFORMATION info{};
-    if (!GetAclInformation(
+    if (!GetSecurityDescriptorControl(raw_sd, &control, &revision) ||
+        (control & SE_DACL_PROTECTED) == 0 ||
+        !GetAclInformation(
             current_dacl, &info, sizeof(info), AclSizeInformation) ||
         info.AceCount != 2) {
-        LocalFree(current_sd);
         return false;
     }
 
@@ -200,19 +173,14 @@ bool is_dacl_compliant(const std::filesystem::path& path,
     for (DWORD i = 0; i < info.AceCount; ++i) {
         void* ace_ptr = nullptr;
         if (!GetAce(current_dacl, i, &ace_ptr) || !ace_ptr) {
-            LocalFree(current_sd);
             return false;
         }
         const auto* header = static_cast<const ACE_HEADER*>(ace_ptr);
+        const auto* ace = static_cast<const ACCESS_ALLOWED_ACE*>(ace_ptr);
         if (header->AceType != ACCESS_ALLOWED_ACE_TYPE ||
             (header->AceFlags & INHERITED_ACE) != 0 ||
-            header->AceFlags != expected_flags) {
-            LocalFree(current_sd);
-            return false;
-        }
-        const auto* ace = static_cast<const ACCESS_ALLOWED_ACE*>(ace_ptr);
-        if ((ace->Mask & FILE_ALL_ACCESS) != FILE_ALL_ACCESS) {
-            LocalFree(current_sd);
+            header->AceFlags != expected_flags ||
+            (ace->Mask & FILE_ALL_ACCESS) != FILE_ALL_ACCESS) {
             return false;
         }
         auto* sid = const_cast<DWORD*>(&ace->SidStart);
@@ -223,11 +191,9 @@ bool is_dacl_compliant(const std::filesystem::path& path,
                        const_cast<std::byte*>(context.system_sid.data()))) {
             system_seen = true;
         } else {
-            LocalFree(current_sd);
             return false;
         }
     }
-    LocalFree(current_sd);
     return user_seen && system_seen;
 }
 
@@ -244,12 +210,11 @@ std::expected<void, std::string> apply_acl(const std::filesystem::path& path,
     BOOL present = FALSE;
     BOOL defaulted = FALSE;
     PACL dacl = nullptr;
-    if (!GetSecurityDescriptorDacl(*descriptor, &present, &dacl, &defaulted) ||
+    if (!GetSecurityDescriptorDacl(
+            descriptor->get(), &present, &dacl, &defaulted) ||
         !present) {
-        const auto error =
-            windows_error("GetSecurityDescriptorDacl failed", GetLastError());
-        LocalFree(*descriptor);
-        return std::unexpected(error);
+        return std::unexpected(
+            windows_error("GetSecurityDescriptorDacl failed", GetLastError()));
     }
     auto writable = path.wstring();
     const auto result = SetNamedSecurityInfoW(
@@ -260,7 +225,6 @@ std::expected<void, std::string> apply_acl(const std::filesystem::path& path,
         nullptr,
         dacl,
         nullptr);
-    LocalFree(*descriptor);
     if (result != ERROR_SUCCESS) {
         return std::unexpected(
             windows_error("SetNamedSecurityInfoW failed", result));
@@ -378,59 +342,102 @@ protect_windows_tree(const std::filesystem::path& root) {
     if (!protected_root) {
         return protected_root;
     }
+    return platform::detail::walk_windows_tree(
+        root,
+        false,
+        [](void*,
+           const std::filesystem::path& path,
+           std::uint32_t attrs) -> std::expected<void, std::string> {
+            if ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                return protect_directory(path);
+            }
+            if ((attrs & FILE_ATTRIBUTE_DEVICE) == 0) {
+                return protect_file(path);
+            }
+            return std::unexpected("invalid internal object in '" +
+                                   platform::path::to_utf8(path) + "'");
+        },
+        nullptr);
+}
+#endif
 
-    std::vector<std::filesystem::path> directories{root};
-    while (!directories.empty()) {
-        auto directory = std::move(directories.back());
-        directories.pop_back();
-        WIN32_FIND_DATAW entry{};
-        auto pattern = directory.native();
+} // namespace
+
+#if defined(_WIN32)
+std::expected<void, std::string>
+detail::walk_windows_tree(const std::filesystem::path& root,
+                          bool postorder_dirs,
+                          WalkEntryFn on_entry,
+                          void* context) {
+    struct Frame {
+        std::filesystem::path path;
+        bool postorder{false};
+    };
+    std::vector<Frame> stack{{root, false}};
+    while (!stack.empty()) {
+        auto frame = std::move(stack.back());
+        stack.pop_back();
+        if (frame.postorder) {
+            if (auto res =
+                    on_entry(context, frame.path, FILE_ATTRIBUTE_DIRECTORY);
+                !res) {
+                return res;
+            }
+            continue;
+        }
+        auto pattern = frame.path.native();
         pattern.append(L"\\*");
+        WIN32_FIND_DATAW entry{};
         const auto search = FindFirstFileW(pattern.c_str(), &entry);
         if (search == INVALID_HANDLE_VALUE) {
             const auto code = GetLastError();
             if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
+                if (postorder_dirs) {
+                    stack.push_back({std::move(frame.path), true});
+                }
                 continue;
             }
             return std::unexpected(
                 windows_error("FindFirstFileW failed for '" +
-                                  platform::path::to_utf8(directory) + "'",
+                                  platform::path::to_utf8(frame.path) + "'",
                               code));
         }
-
+        if (postorder_dirs) {
+            stack.push_back({frame.path, true});
+        }
         std::string failure;
         do {
             const std::wstring_view name{entry.cFileName};
             if (name == L"." || name == L"..") {
                 continue;
             }
-            auto native_path = directory.native();
+            auto native_path = frame.path.native();
             native_path.push_back(L'\\');
             native_path.append(entry.cFileName);
-            const std::filesystem::path path{std::move(native_path)};
+            const std::filesystem::path child{std::move(native_path)};
             if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
                 failure = "reparse point is not allowed in '" +
-                          platform::path::to_utf8(path) + "'";
+                          platform::path::to_utf8(child) + "'";
                 break;
             }
-
-            std::expected<void, std::string> secured;
             if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-                secured = protect_directory(path);
-                directories.push_back(path);
-            } else if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DEVICE) == 0) {
-                secured = protect_file(path);
+                if (!postorder_dirs) {
+                    if (auto res =
+                            on_entry(context, child, entry.dwFileAttributes);
+                        !res) {
+                        failure = res.error();
+                        break;
+                    }
+                }
+                stack.push_back({child, false});
             } else {
-                failure = "invalid internal object in '" +
-                          platform::path::to_utf8(path) + "'";
-                break;
-            }
-            if (!secured) {
-                failure = secured.error();
-                break;
+                if (auto res = on_entry(context, child, entry.dwFileAttributes);
+                    !res) {
+                    failure = res.error();
+                    break;
+                }
             }
         } while (FindNextFileW(search, &entry));
-
         const auto enumeration_error = GetLastError();
         FindClose(search);
         if (!failure.empty()) {
@@ -441,15 +448,13 @@ protect_windows_tree(const std::filesystem::path& root) {
             enumeration_error != ERROR_PATH_NOT_FOUND) {
             return std::unexpected(
                 windows_error("FindNextFileW failed for '" +
-                                  platform::path::to_utf8(directory) + "'",
+                                  platform::path::to_utf8(frame.path) + "'",
                               enumeration_error));
         }
     }
     return {};
 }
 #endif
-
-} // namespace
 
 std::expected<void, std::string>
 create_directory(const std::filesystem::path& path) {
@@ -463,16 +468,13 @@ create_directory(const std::filesystem::path& path) {
     }
     SECURITY_ATTRIBUTES attributes{
         .nLength = sizeof(SECURITY_ATTRIBUTES),
-        .lpSecurityDescriptor = *descriptor,
+        .lpSecurityDescriptor = descriptor->get(),
         .bInheritHandle = FALSE,
     };
     if (!CreateDirectoryW(path.c_str(), &attributes)) {
-        const auto error =
-            windows_error("CreateDirectoryW failed", GetLastError());
-        LocalFree(*descriptor);
-        return std::unexpected(error);
+        return std::unexpected(
+            windows_error("CreateDirectoryW failed", GetLastError()));
     }
-    LocalFree(*descriptor);
 #else
     if (::mkdir(path.c_str(), 0700) != 0) {
         return std::unexpected(system_error(
@@ -492,14 +494,12 @@ std::expected<void, std::string>
 ensure_directory(const std::filesystem::path& path) {
     std::error_code error;
     const auto status = std::filesystem::symlink_status(path, error);
-    if (error == std::errc::no_such_file_or_directory) {
+    if (error == std::errc::no_such_file_or_directory ||
+        (!error && status.type() == std::filesystem::file_type::not_found)) {
         return private_storage::create_directory(path);
     }
     if (error) {
         return std::unexpected(system_error("symlink_status failed", error));
-    }
-    if (status.type() == std::filesystem::file_type::not_found) {
-        return private_storage::create_directory(path);
     }
     return protect_directory(path);
 }
@@ -580,7 +580,7 @@ create_private_file(const std::filesystem::path& path) {
     }
     SECURITY_ATTRIBUTES attributes{
         .nLength = sizeof(SECURITY_ATTRIBUTES),
-        .lpSecurityDescriptor = *descriptor,
+        .lpSecurityDescriptor = descriptor->get(),
         .bInheritHandle = FALSE,
     };
     const auto file = CreateFileW(path.c_str(),
@@ -592,7 +592,6 @@ create_private_file(const std::filesystem::path& path) {
                                   nullptr);
     const DWORD create_error =
         (file == INVALID_HANDLE_VALUE) ? GetLastError() : ERROR_SUCCESS;
-    LocalFree(*descriptor);
     if (file == INVALID_HANDLE_VALUE) {
         const auto code = create_error;
         const bool is_col =
@@ -792,17 +791,11 @@ flush_and_close_private_file(PrivateOutputFile& file) {
 #endif
 }
 
-FileIdentity query_file_identity(const std::filesystem::path& path) noexcept {
-    if (path.empty()) {
-        return {};
-    }
 #if defined(_WIN32)
-    const DWORD attrs = GetFileAttributesW(path.c_str());
-    if (attrs == INVALID_FILE_ATTRIBUTES ||
-        (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
-        (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return {};
-    }
+namespace {
+
+FileIdentity query_windows_identity(const std::filesystem::path& path,
+                                    bool want_directory) noexcept {
     const auto handle =
         CreateFileW(path.c_str(),
                     FILE_READ_ATTRIBUTES,
@@ -814,23 +807,42 @@ FileIdentity query_file_identity(const std::filesystem::path& path) noexcept {
     if (handle == INVALID_HANDLE_VALUE) {
         return {};
     }
+    PrivateHandle guard{reinterpret_cast<std::intptr_t>(handle)};
+    FILE_ATTRIBUTE_TAG_INFO attributes{};
     FILE_ID_INFO id{};
-    FileIdentity result{};
-    if (GetFileInformationByHandleEx(handle, FileIdInfo, &id, sizeof(id))) {
-        result = to_file_identity(id);
+    if (!GetFileInformationByHandleEx(
+            handle, FileAttributeTagInfo, &attributes, sizeof(attributes)) ||
+        (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return {};
     }
-    CloseHandle(handle);
-    return result;
+    const bool is_dir =
+        (attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    if (is_dir != want_directory ||
+        !GetFileInformationByHandleEx(handle, FileIdInfo, &id, sizeof(id))) {
+        return {};
+    }
+    return to_file_identity(id);
+}
+
+} // namespace
+#endif
+
+FileIdentity query_file_identity(const std::filesystem::path& path) noexcept {
+    if (path.empty()) {
+        return {};
+    }
+#if defined(_WIN32)
+    return query_windows_identity(path, false);
 #else
     struct stat st{};
     if (::lstat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
         return {};
     }
-    FileIdentity result{};
-    result.volume_or_dev = static_cast<std::uint64_t>(st.st_dev);
-    result.file_id_low = static_cast<std::uint64_t>(st.st_ino);
-    result.valid = true;
-    return result;
+    return FileIdentity{
+        .volume_or_dev = static_cast<std::uint64_t>(st.st_dev),
+        .file_id_low = static_cast<std::uint64_t>(st.st_ino),
+        .valid = true,
+    };
 #endif
 }
 
@@ -840,34 +852,7 @@ query_directory_identity(const std::filesystem::path& path) noexcept {
         return {};
     }
 #if defined(_WIN32)
-    const auto handle =
-        CreateFileW(path.c_str(),
-                    FILE_READ_ATTRIBUTES,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    nullptr,
-                    OPEN_EXISTING,
-                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                    nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        return {};
-    }
-    FILE_ATTRIBUTE_TAG_INFO attributes{};
-    FILE_ID_INFO id{};
-    DirectoryIdentity result{};
-    if (GetFileInformationByHandleEx(
-            handle, FileAttributeTagInfo, &attributes, sizeof(attributes)) &&
-        (attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-        (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
-        GetFileInformationByHandleEx(handle, FileIdInfo, &id, sizeof(id))) {
-        const auto file_id = to_file_identity(id);
-        result.volume_or_dev = file_id.volume_or_dev;
-        result.file_id_low = file_id.file_id_low;
-        result.file_id_high = file_id.file_id_high;
-        result.valid = true;
-        result = to_file_identity(id);
-    }
-    CloseHandle(handle);
-    return result;
+    return query_windows_identity(path, true);
 #else
     const int descriptor = ::open(path.c_str(),
                                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW
@@ -878,15 +863,16 @@ query_directory_identity(const std::filesystem::path& path) noexcept {
     if (descriptor < 0) {
         return {};
     }
+    PrivateHandle guard{descriptor};
     struct stat status{};
-    DirectoryIdentity result{};
-    if (::fstat(descriptor, &status) == 0 && S_ISDIR(status.st_mode)) {
-        result.volume_or_dev = static_cast<std::uint64_t>(status.st_dev);
-        result.file_id_low = static_cast<std::uint64_t>(status.st_ino);
-        result.valid = true;
+    if (::fstat(descriptor, &status) != 0 || !S_ISDIR(status.st_mode)) {
+        return {};
     }
-    static_cast<void>(::close(descriptor));
-    return result;
+    return DirectoryIdentity{
+        .volume_or_dev = static_cast<std::uint64_t>(status.st_dev),
+        .file_id_low = static_cast<std::uint64_t>(status.st_ino),
+        .valid = true,
+    };
 #endif
 }
 
@@ -990,14 +976,19 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
         close_private_file(file);
         return CleanupResult::AlreadyAbsent;
     }
-
     if (!file.identity.valid) {
         close_private_file(file);
         return CleanupResult::IdentityMismatch;
     }
 
-    if (file.is_open()) {
 #if defined(_WIN32)
+    const auto map_win_err = [](DWORD code) noexcept {
+        if (code == ERROR_ACCESS_DENIED || code == ERROR_SHARING_VIOLATION) {
+            return CleanupResult::AccessDenied;
+        }
+        return CleanupResult::FilesystemError;
+    };
+    if (file.is_open()) {
         HANDLE h = reinterpret_cast<HANDLE>(file.handle.value);
         FILE_DISPOSITION_INFO disp{TRUE};
         const BOOL disp_ok = SetFileInformationByHandle(
@@ -1009,11 +1000,7 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
             if (current_id.valid && !(current_id == file.identity)) {
                 return CleanupResult::IdentityMismatch;
             }
-            if (disp_err == ERROR_ACCESS_DENIED ||
-                disp_err == ERROR_SHARING_VIOLATION) {
-                return CleanupResult::AccessDenied;
-            }
-            return CleanupResult::FilesystemError;
+            return map_win_err(disp_err);
         }
         std::error_code exists_err;
         if (std::filesystem::exists(file.path, exists_err)) {
@@ -1023,52 +1010,8 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
             }
         }
         return CleanupResult::Removed;
-#else
-        int fd = static_cast<int>(file.handle);
-        struct stat st_fd{};
-        if (::fstat(fd, &st_fd) != 0) {
-            close_private_file(file);
-            return CleanupResult::FilesystemError;
-        }
-        struct stat st_path{};
-        if (::lstat(file.path.c_str(), &st_path) != 0) {
-            const auto err = errno;
-            close_private_file(file);
-            return map_unlink_errno(err);
-        }
-        if (!S_ISREG(st_fd.st_mode) || !S_ISREG(st_path.st_mode) ||
-            st_fd.st_dev != st_path.st_dev || st_fd.st_ino != st_path.st_ino) {
-            close_private_file(file);
-            return CleanupResult::IdentityMismatch;
-        }
-
-        // shortcut: unlink can race; revisit for adversarial writers.
-        const int unlink_res = ::unlink(file.path.c_str());
-        const int unlink_err = errno;
-        close_private_file(file);
-        return unlink_res == 0 ? CleanupResult::Removed
-                               : map_unlink_errno(unlink_err);
-#endif
     }
 
-    if (file.path.empty()) {
-        return CleanupResult::AlreadyAbsent;
-    }
-    std::error_code exists_err;
-    const auto status = std::filesystem::symlink_status(file.path, exists_err);
-    if (exists_err == std::errc::no_such_file_or_directory ||
-        (!exists_err &&
-         status.type() == std::filesystem::file_type::not_found)) {
-        return CleanupResult::AlreadyAbsent;
-    }
-    if (exists_err) {
-        return CleanupResult::FilesystemError;
-    }
-    if (!file.identity.valid) {
-        return CleanupResult::IdentityMismatch;
-    }
-
-#if defined(_WIN32)
     HANDLE h =
         CreateFileW(file.path.c_str(),
                     DELETE | FILE_READ_ATTRIBUTES,
@@ -1079,44 +1022,61 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
                     nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         const auto code = GetLastError();
-        if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
-            return CleanupResult::AlreadyAbsent;
-        }
-        if (code == ERROR_ACCESS_DENIED || code == ERROR_SHARING_VIOLATION) {
-            return CleanupResult::AccessDenied;
-        }
-        return CleanupResult::FilesystemError;
+        return (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND)
+                   ? CleanupResult::AlreadyAbsent
+                   : map_win_err(code);
     }
-
+    PrivateHandle guard{reinterpret_cast<std::intptr_t>(h)};
+    FILE_ATTRIBUTE_TAG_INFO attributes{};
     FILE_ID_INFO current_id{};
     if (!GetFileInformationByHandleEx(
+            h, FileAttributeTagInfo, &attributes, sizeof(attributes)) ||
+        (attributes.FileAttributes &
+         (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0 ||
+        !GetFileInformationByHandleEx(
             h, FileIdInfo, &current_id, sizeof(current_id)) ||
         !(to_file_identity(current_id) == file.identity)) {
-        CloseHandle(h);
         return CleanupResult::IdentityMismatch;
     }
-
     FILE_DISPOSITION_INFO disp{TRUE};
-    if (!SetFileInformationByHandle(
-            h, FileDispositionInfo, &disp, sizeof(disp))) {
-        const auto code = GetLastError();
-        CloseHandle(h);
-        if (code == ERROR_ACCESS_DENIED || code == ERROR_SHARING_VIOLATION) {
-            return CleanupResult::AccessDenied;
-        }
-        return CleanupResult::FilesystemError;
-    }
-    CloseHandle(h);
-    return CleanupResult::Removed;
+    return SetFileInformationByHandle(
+               h, FileDispositionInfo, &disp, sizeof(disp))
+               ? CleanupResult::Removed
+               : map_win_err(GetLastError());
 #else
-    const auto current_id = query_file_identity(file.path);
-    if (!current_id.valid || !(current_id == file.identity)) {
+    struct stat st_path{};
+    if (::lstat(file.path.c_str(), &st_path) != 0) {
+        const auto err = errno;
+        close_private_file(file);
+        return map_unlink_errno(err);
+    }
+    bool same = S_ISREG(st_path.st_mode);
+    if (file.is_open()) {
+        struct stat st_fd{};
+        if (::fstat(static_cast<int>(file.handle), &st_fd) != 0) {
+            close_private_file(file);
+            return CleanupResult::FilesystemError;
+        }
+        same = same && S_ISREG(st_fd.st_mode) &&
+               st_fd.st_dev == st_path.st_dev && st_fd.st_ino == st_path.st_ino;
+    } else {
+        same = same &&
+               FileIdentity{
+                   .volume_or_dev = static_cast<std::uint64_t>(st_path.st_dev),
+                   .file_id_low = static_cast<std::uint64_t>(st_path.st_ino),
+                   .valid = true,
+               } == file.identity;
+    }
+    if (!same) {
+        close_private_file(file);
         return CleanupResult::IdentityMismatch;
     }
-    if (::unlink(file.path.c_str()) != 0) {
-        return map_unlink_errno(errno);
-    }
-    return CleanupResult::Removed;
+    // shortcut: unlink can race; revisit for adversarial writers.
+    const int unlink_res = ::unlink(file.path.c_str());
+    const int unlink_err = errno;
+    close_private_file(file);
+    return unlink_res == 0 ? CleanupResult::Removed
+                           : map_unlink_errno(unlink_err);
 #endif
 }
 
@@ -1183,4 +1143,211 @@ write_atomically(const std::filesystem::path& path, std::string_view bytes) {
     return std::unexpected("could not reserve temporary file");
 }
 
+std::expected<std::uint64_t, StreamError>
+stream_regular_file_raw(const std::filesystem::path& path,
+                        std::span<std::uint8_t> scratch,
+                        bool (*on_chunk)(void*, std::span<const std::uint8_t>),
+                        void* context,
+                        std::optional<std::uint64_t> expected_size) {
+    if (scratch.empty() || on_chunk == nullptr) {
+        return std::unexpected(StreamError{
+            .kind = StreamErrorKind::ReadFailed,
+            .detail = "invalid stream buffer or callback",
+        });
+    }
+#if defined(_WIN32)
+    const auto handle =
+        CreateFileW(path.c_str(),
+                    GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT |
+                        FILE_FLAG_SEQUENTIAL_SCAN,
+                    nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        const DWORD code = GetLastError();
+        const std::error_code sys_err{static_cast<int>(code),
+                                      std::system_category()};
+        const auto kind =
+            (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND)
+                ? StreamErrorKind::NotFound
+                : StreamErrorKind::OpenFailed;
+        return std::unexpected(StreamError{
+            .kind = kind,
+            .detail = sys_err.message(),
+            .system_error = sys_err,
+        });
+    }
+    PrivateHandle guard{reinterpret_cast<std::intptr_t>(handle)};
+    FILE_ATTRIBUTE_TAG_INFO attributes{};
+    if (!GetFileInformationByHandleEx(
+            handle, FileAttributeTagInfo, &attributes, sizeof(attributes))) {
+        return std::unexpected(StreamError{
+            .kind = StreamErrorKind::OpenFailed,
+            .detail = "could not query opened file attributes",
+        });
+    }
+    if ((attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return std::unexpected(StreamError{
+            .kind = StreamErrorKind::Symlink,
+            .detail = "path is a symlink",
+        });
+    }
+    if ((attributes.FileAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DEVICE)) != 0) {
+        return std::unexpected(StreamError{
+            .kind = StreamErrorKind::NotRegular,
+            .detail = "path is not a regular file",
+        });
+    }
+    LARGE_INTEGER actual_size{};
+    if (!GetFileSizeEx(handle, &actual_size) || actual_size.QuadPart < 0) {
+        return std::unexpected(StreamError{
+            .kind = StreamErrorKind::ReadFailed,
+            .detail = "could not read file size",
+        });
+    }
+    if (expected_size &&
+        static_cast<std::uint64_t>(actual_size.QuadPart) != *expected_size) {
+        return std::unexpected(StreamError{
+            .kind = StreamErrorKind::SizeMismatch,
+            .detail = "file size does not match expected size",
+        });
+    }
+    std::uint64_t total_read = 0;
+    for (;;) {
+        DWORD count = 0;
+        if (!ReadFile(handle,
+                      scratch.data(),
+                      static_cast<DWORD>(scratch.size()),
+                      &count,
+                      nullptr)) {
+            const DWORD code = GetLastError();
+            return std::unexpected(StreamError{
+                .kind = StreamErrorKind::ReadFailed,
+                .detail = windows_error("ReadFile failed", code),
+                .system_error = {static_cast<int>(code),
+                                 std::system_category()},
+            });
+        }
+        if (count == 0) {
+            break;
+        }
+        const auto chunk_size = static_cast<std::size_t>(count);
+        total_read += chunk_size;
+        if (!on_chunk(context, scratch.first(chunk_size))) {
+            return std::unexpected(StreamError{
+                .kind = StreamErrorKind::Aborted,
+                .detail = "stream aborted by consumer",
+            });
+        }
+    }
+    return total_read;
+#else
+    const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        const std::error_code sys_err{errno, std::generic_category()};
+        const auto kind = errno == ELOOP ? StreamErrorKind::Symlink
+                          : (errno == ENOENT || errno == ENOTDIR)
+                              ? StreamErrorKind::NotFound
+                              : StreamErrorKind::OpenFailed;
+        return std::unexpected(StreamError{
+            .kind = kind,
+            .detail = sys_err.message(),
+            .system_error = sys_err,
+        });
+    }
+    PrivateHandle guard{fd};
+    struct stat st{};
+    if (::fstat(fd, &st) != 0) {
+        const std::error_code sys_err{errno, std::generic_category()};
+        return std::unexpected(StreamError{
+            .kind = StreamErrorKind::OpenFailed,
+            .detail = sys_err.message(),
+            .system_error = sys_err,
+        });
+    }
+    if (!S_ISREG(st.st_mode)) {
+        return std::unexpected(StreamError{
+            .kind = StreamErrorKind::NotRegular,
+            .detail = "path is not a regular file",
+        });
+    }
+    if (expected_size &&
+        static_cast<std::uint64_t>(st.st_size) != *expected_size) {
+        return std::unexpected(StreamError{
+            .kind = StreamErrorKind::SizeMismatch,
+            .detail = "file size does not match expected size",
+        });
+    }
+    std::uint64_t total_read = 0;
+    for (;;) {
+        const auto count = ::read(fd, scratch.data(), scratch.size());
+        if (count == 0) {
+            break;
+        }
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            const std::error_code sys_err{errno, std::generic_category()};
+            return std::unexpected(StreamError{
+                .kind = StreamErrorKind::ReadFailed,
+                .detail = sys_err.message(),
+                .system_error = sys_err,
+            });
+        }
+        const auto chunk_size = static_cast<std::size_t>(count);
+        total_read += chunk_size;
+        if (!on_chunk(context, scratch.first(chunk_size))) {
+            return std::unexpected(StreamError{
+                .kind = StreamErrorKind::Aborted,
+                .detail = "stream aborted by consumer",
+            });
+        }
+    }
+    return total_read;
+#endif
+}
+
 } // namespace kasumi::platform::private_storage
+
+namespace kasumi::platform::path {
+
+std::optional<std::filesystem::path> environment_value(std::string_view name) {
+    if (name.empty()) {
+        return std::nullopt;
+    }
+#if defined(_WIN32)
+    const auto wide_name = from_utf8(name).native();
+    DWORD required = GetEnvironmentVariableW(wide_name.c_str(), nullptr, 0);
+    std::wstring buffer;
+    while (required > 0) {
+        buffer.resize(required);
+        const DWORD actual =
+            GetEnvironmentVariableW(wide_name.c_str(), buffer.data(), required);
+        if (actual == 0) {
+            return std::nullopt;
+        }
+        if (actual < required) {
+            buffer.resize(actual);
+            if (buffer.empty()) {
+                return std::nullopt;
+            }
+            return std::filesystem::path{std::move(buffer)};
+        }
+        required = actual;
+    }
+    return std::nullopt;
+#else
+    const std::string key{name};
+    const char* value = std::getenv(key.c_str());
+    if (value == nullptr || *value == '\0') {
+        return std::nullopt;
+    }
+    return std::filesystem::path{value};
+#endif
+}
+
+} // namespace kasumi::platform::path

@@ -1,5 +1,6 @@
 #include "platform/durability.hpp"
 
+#include "detail.hpp"
 #include "platform/path.hpp"
 
 #include <cerrno>
@@ -23,6 +24,35 @@
 #include <fcntl.h>
 #include <unistd.h>
 #endif
+
+namespace kasumi::platform::detail {
+
+std::error_code rename_no_replace(const std::filesystem::path& source,
+                                  const std::filesystem::path& destination) {
+#if defined(_WIN32)
+    if (MoveFileExW(
+            source.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        return {};
+    }
+    return {static_cast<int>(GetLastError()), std::system_category()};
+#elif defined(__linux__) && defined(SYS_renameat2)
+    if (::syscall(SYS_renameat2,
+                  AT_FDCWD,
+                  source.c_str(),
+                  AT_FDCWD,
+                  destination.c_str(),
+                  RENAME_NOREPLACE) == 0) {
+        return {};
+    }
+    return {errno, std::generic_category()};
+#else
+    static_cast<void>(source);
+    static_cast<void>(destination);
+    return std::make_error_code(std::errc::operation_not_supported);
+#endif
+}
+
+} // namespace kasumi::platform::detail
 
 namespace kasumi::platform::durability {
 
@@ -60,33 +90,14 @@ bool path_not_found(const std::error_code& error) noexcept {
 }
 
 std::expected<void, std::string>
-validate_parent(const std::filesystem::path& path, std::string_view operation) {
-    const auto parent = path.parent_path();
-    if (parent.empty()) {
-        return std::unexpected(std::string{operation} +
-                               ": empty parent directory for '" +
-                               platform::path::to_utf8(path) + "'");
+validate_entry(const std::filesystem::path& path,
+               bool expect_directory,
+               std::string_view operation,
+               std::string_view label) {
+    if (path.empty()) {
+        return std::unexpected(std::string{operation} + ": empty " +
+                               std::string{label});
     }
-
-    std::error_code error;
-    const auto status = std::filesystem::symlink_status(parent, error);
-    if (error) {
-        return std::unexpected(
-            std::string{operation} +
-            ": could not query parent directory: " + error.message());
-    }
-    if (std::filesystem::is_symlink(status) ||
-        !std::filesystem::is_directory(status)) {
-        return std::unexpected(std::string{operation} +
-                               ": invalid parent directory for '" +
-                               platform::path::to_utf8(path) + "'");
-    }
-    return {};
-}
-
-std::expected<void, std::string>
-validate_regular_file(const std::filesystem::path& path,
-                      std::string_view operation) {
     std::error_code error;
     const auto status = std::filesystem::symlink_status(path, error);
     if (error) {
@@ -94,44 +105,42 @@ validate_regular_file(const std::filesystem::path& path,
                                platform::path::to_utf8(path) +
                                "': " + error.message());
     }
-    if (std::filesystem::is_symlink(status) ||
-        !std::filesystem::is_regular_file(status)) {
-        return std::unexpected(std::string{operation} +
-                               ": regular file expected at '" +
+    const bool type_ok = expect_directory
+                             ? std::filesystem::is_directory(status)
+                             : std::filesystem::is_regular_file(status);
+    if (std::filesystem::is_symlink(status) || !type_ok) {
+        return std::unexpected(std::string{operation} + ": invalid " +
+                               std::string{label} + " '" +
                                platform::path::to_utf8(path) + "'");
     }
     return {};
 }
 
+bool same_parent_dir(const std::filesystem::path& source,
+                     const std::filesystem::path& target) {
+    return !source.empty() && !target.empty() &&
+           source.parent_path().lexically_normal() ==
+               target.parent_path().lexically_normal();
+}
+
 std::expected<void, std::string>
 validate_replace_paths(const std::filesystem::path& source,
                        const std::filesystem::path& target) {
-    if (source.empty() || target.empty()) {
+    if (!same_parent_dir(source, target)) {
         return std::unexpected(
-            "replace_atomically: source and target cannot be empty");
+            "replace_atomically: source and target must share a valid parent");
     }
-
-    auto source_file = validate_regular_file(source, "replace_atomically");
-    if (!source_file) {
-        return source_file;
+    for (const auto& [path, dir, label] :
+         {std::tuple{&source, false, "regular file"},
+          std::tuple{&source, true, "parent directory"},
+          std::tuple{&target, true, "parent directory"}}) {
+        const auto check_path = dir ? path->parent_path() : *path;
+        if (auto res =
+                validate_entry(check_path, dir, "replace_atomically", label);
+            !res) {
+            return res;
+        }
     }
-
-    auto source_parent = validate_parent(source, "replace_atomically");
-    if (!source_parent) {
-        return source_parent;
-    }
-    auto target_parent = validate_parent(target, "replace_atomically");
-    if (!target_parent) {
-        return target_parent;
-    }
-
-    if (source.parent_path().lexically_normal() !=
-        target.parent_path().lexically_normal()) {
-        return std::unexpected(
-            "replace_atomically: source and target must share "
-            "the parent directory");
-    }
-
     std::error_code error;
     const auto target_status = std::filesystem::symlink_status(target, error);
     if (path_not_found(error) ||
@@ -144,13 +153,10 @@ validate_replace_paths(const std::filesystem::path& source,
                                error.message());
     }
     if (std::filesystem::is_symlink(target_status) ||
-        std::filesystem::is_directory(target_status)) {
+        !std::filesystem::is_regular_file(target_status)) {
         return std::unexpected(
-            "replace_atomically: target cannot be symlink or directory");
-    }
-    if (!std::filesystem::is_regular_file(target_status)) {
-        return std::unexpected(
-            "replace_atomically: target is not a regular file");
+            "replace_atomically: target cannot be symlink, directory, or "
+            "non-regular file");
     }
     return {};
 }
@@ -253,32 +259,29 @@ replace_atomically(const std::filesystem::path& source,
 std::expected<void, std::error_code>
 install_without_overwrite(const std::filesystem::path& source,
                           const std::filesystem::path& target) {
-    if (source.empty() || target.empty() || source == target ||
-        source.parent_path().lexically_normal() !=
-            target.parent_path().lexically_normal()) {
+    if (source == target || !same_parent_dir(source, target)) {
         return std::unexpected(
             std::make_error_code(std::errc::invalid_argument));
     }
-    std::error_code error;
-    const auto source_status = std::filesystem::symlink_status(source, error);
-    if (error)
-        return std::unexpected(error);
-    if (std::filesystem::is_symlink(source_status))
-        return std::unexpected(
-            std::make_error_code(std::errc::too_many_symbolic_link_levels));
-    if (!std::filesystem::is_regular_file(source_status))
-        return std::unexpected(
-            std::make_error_code(std::errc::invalid_argument));
-    const auto parent_status =
-        std::filesystem::symlink_status(source.parent_path(), error);
-    if (error)
-        return std::unexpected(error);
-    if (std::filesystem::is_symlink(parent_status))
-        return std::unexpected(
-            std::make_error_code(std::errc::too_many_symbolic_link_levels));
-    if (!std::filesystem::is_directory(parent_status))
-        return std::unexpected(
-            std::make_error_code(std::errc::invalid_argument));
+    const auto inspect = [](const std::filesystem::path& p,
+                            bool dir) -> std::expected<void, std::error_code> {
+        std::error_code ec;
+        const auto s = std::filesystem::symlink_status(p, ec);
+        if (ec)
+            return std::unexpected(ec);
+        if (std::filesystem::is_symlink(s))
+            return std::unexpected(
+                std::make_error_code(std::errc::too_many_symbolic_link_levels));
+        if (!(dir ? std::filesystem::is_directory(s)
+                  : std::filesystem::is_regular_file(s)))
+            return std::unexpected(
+                std::make_error_code(std::errc::invalid_argument));
+        return {};
+    };
+    if (auto ok = inspect(source, false); !ok)
+        return ok;
+    if (auto ok = inspect(source.parent_path(), true); !ok)
+        return ok;
 #if defined(_WIN32)
     const auto attributes = GetFileAttributesW(source.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES)
@@ -287,37 +290,24 @@ install_without_overwrite(const std::filesystem::path& source,
     if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
         return std::unexpected(
             std::make_error_code(std::errc::too_many_symbolic_link_levels));
-    if (!MoveFileExW(source.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH))
-        return std::unexpected(std::error_code(static_cast<int>(GetLastError()),
-                                               std::system_category()));
-#elif defined(__linux__) && defined(SYS_renameat2)
-    if (::syscall(SYS_renameat2,
-                  AT_FDCWD,
-                  source.c_str(),
-                  AT_FDCWD,
-                  target.c_str(),
-                  RENAME_NOREPLACE) != 0)
-        return std::unexpected(std::error_code(errno, std::generic_category()));
-#else
-    return std::unexpected(
-        std::make_error_code(std::errc::operation_not_supported));
 #endif
+    if (const auto ec = detail::rename_no_replace(source, target); ec)
+        return std::unexpected(ec);
     return {};
 }
 
 std::expected<void, std::string>
 retire_directory(const std::filesystem::path& source,
                  const std::filesystem::path& target) {
-    if (source.empty() || target.empty() ||
-        source.parent_path().lexically_normal() !=
-            target.parent_path().lexically_normal())
+    if (!same_parent_dir(source, target))
         return std::unexpected("retire_directory: physical siblings required");
-    auto parent = validate_parent(source, "retire_directory");
-    if (!parent)
-        return parent;
-    auto directory = validate_parent(source / ".", "retire_directory");
-    if (!directory)
-        return directory;
+    if (auto ok = validate_entry(
+            source.parent_path(), true, "retire_directory", "parent directory");
+        !ok)
+        return ok;
+    if (auto ok = validate_entry(source, true, "retire_directory", "directory");
+        !ok)
+        return ok;
     std::error_code error;
     auto status = std::filesystem::symlink_status(target, error);
     if ((error && !path_not_found(error)) ||
@@ -337,16 +327,14 @@ retire_directory(const std::filesystem::path& source,
 }
 
 std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
-    if (path.empty()) {
-        return std::unexpected("sync_file: path cannot be empty");
+    if (auto ok = validate_entry(
+            path.parent_path(), true, "sync_file", "parent directory");
+        !ok) {
+        return ok;
     }
-    auto parent_validation = validate_parent(path, "sync_file");
-    if (!parent_validation) {
-        return parent_validation;
-    }
-    auto validation = validate_regular_file(path, "sync_file");
-    if (!validation) {
-        return validation;
+    if (auto ok = validate_entry(path, false, "sync_file", "regular file");
+        !ok) {
+        return ok;
     }
 
 #if defined(_WIN32)
@@ -398,12 +386,12 @@ std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
 
 std::expected<void, std::string>
 sync_parent_directory(const std::filesystem::path& path) {
-    if (path.empty()) {
-        return std::unexpected("sync_parent_directory: path cannot be empty");
-    }
-    auto validation = validate_parent(path, "sync_parent_directory");
-    if (!validation) {
-        return validation;
+    if (auto ok = validate_entry(path.parent_path(),
+                                 true,
+                                 "sync_parent_directory",
+                                 "parent directory");
+        !ok) {
+        return ok;
     }
 
 #if defined(_WIN32)

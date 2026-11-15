@@ -1,5 +1,6 @@
 #include "platform/workspace.hpp"
 
+#include "detail.hpp"
 #include "platform/path.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
@@ -15,14 +16,6 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#else
-#include <cerrno>
-#include <fcntl.h>
-#if defined(__linux__)
-#include <linux/fs.h>
-#include <sys/syscall.h>
-#endif
-#include <unistd.h>
 #endif
 
 namespace kasumi::platform {
@@ -99,10 +92,8 @@ clear_read_only(const std::filesystem::path& root) {
                                platform::path::to_utf8(root) +
                                "': " + error.message());
     }
-
-    const auto clear_attribute =
-        [](const std::filesystem::path& path,
-           DWORD attributes) -> std::expected<void, std::string> {
+    auto clear_attr = [](const std::filesystem::path& path,
+                         DWORD attributes) -> std::expected<void, std::string> {
         if ((attributes & FILE_ATTRIBUTE_READONLY) != 0 &&
             !SetFileAttributesW(
                 path.c_str(),
@@ -117,147 +108,51 @@ clear_read_only(const std::filesystem::path& root) {
         }
         return {};
     };
-
-    auto attributes = GetFileAttributesW(native_root.c_str());
+    const auto attributes = GetFileAttributesW(native_root.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
         return std::unexpected("could not inspect workspace '" +
                                platform::path::to_utf8(root) +
                                "': " + windows_error(GetLastError()));
     }
-    if (auto cleared = clear_attribute(native_root, attributes); !cleared) {
+    if (auto cleared = clear_attr(native_root, attributes); !cleared) {
         return cleared;
     }
-
-    std::vector<std::filesystem::path> directories{native_root};
-    while (!directories.empty()) {
-        auto directory = std::move(directories.back());
-        directories.pop_back();
-        WIN32_FIND_DATAW entry{};
-        auto pattern = directory.native();
-        pattern.append(L"\\*");
-        const auto search = FindFirstFileW(pattern.c_str(), &entry);
-        if (search == INVALID_HANDLE_VALUE) {
-            const auto code = GetLastError();
-            if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
-                continue;
-            }
-            return std::unexpected("could not enumerate workspace '" +
-                                   platform::path::to_utf8(directory) +
-                                   "': " + windows_error(code));
-        }
-
-        std::string failure;
-        do {
-            const std::wstring_view name{entry.cFileName};
-            if (name == L"." || name == L"..") {
-                continue;
-            }
-            auto native_path = directory.native();
-            native_path.push_back(L'\\');
-            native_path.append(entry.cFileName);
-            const std::filesystem::path path{std::move(native_path)};
-            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                failure = "invalid workspace path '" +
-                          platform::path::to_utf8(path) +
-                          "': reparse point is not allowed";
-                break;
-            }
-            auto cleared = clear_attribute(path, entry.dwFileAttributes);
-            if (!cleared) {
-                failure = cleared.error();
-                break;
-            }
-            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-                directories.push_back(path);
-            }
-        } while (FindNextFileW(search, &entry));
-
-        const auto enumeration_error = GetLastError();
-        FindClose(search);
-        if (!failure.empty()) {
-            return std::unexpected(std::move(failure));
-        }
-        if (enumeration_error != ERROR_NO_MORE_FILES &&
-            enumeration_error != ERROR_FILE_NOT_FOUND &&
-            enumeration_error != ERROR_PATH_NOT_FOUND) {
-            return std::unexpected("could not advance in workspace '" +
-                                   platform::path::to_utf8(directory) +
-                                   "': " + windows_error(enumeration_error));
-        }
-    }
-    return {};
+    return detail::walk_windows_tree(
+        native_root,
+        false,
+        [](void* ctx, const std::filesystem::path& path, std::uint32_t attrs) {
+            return (*static_cast<decltype(clear_attr)*>(ctx))(path, attrs);
+        },
+        &clear_attr);
 }
 
 std::error_code remove_tree_windows(const std::filesystem::path& root) {
-    std::vector<std::pair<std::filesystem::path, bool>> pending{{root, false}};
-    while (!pending.empty()) {
-        auto [path, postorder] = std::move(pending.back());
-        pending.pop_back();
-        if (postorder) {
-            if (!RemoveDirectoryW(path.c_str())) {
+    std::error_code result;
+    auto walked = detail::walk_windows_tree(
+        root,
+        true,
+        [](void* ctx,
+           const std::filesystem::path& path,
+           std::uint32_t attrs) -> std::expected<void, std::string> {
+            const BOOL ok = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0
+                                ? RemoveDirectoryW(path.c_str())
+                                : DeleteFileW(path.c_str());
+            if (!ok) {
                 const auto code = GetLastError();
                 if (code != ERROR_FILE_NOT_FOUND &&
                     code != ERROR_PATH_NOT_FOUND) {
-                    return {static_cast<int>(code), std::system_category()};
+                    *static_cast<std::error_code*>(ctx) = {
+                        static_cast<int>(code), std::system_category()};
+                    return std::unexpected(std::string{"remove"});
                 }
             }
-            continue;
-        }
-
-        auto pattern = path.native();
-        pattern.append(L"\\*");
-        WIN32_FIND_DATAW entry{};
-        const auto search = FindFirstFileW(pattern.c_str(), &entry);
-        if (search == INVALID_HANDLE_VALUE) {
-            const auto code = GetLastError();
-            if (code != ERROR_FILE_NOT_FOUND && code != ERROR_PATH_NOT_FOUND) {
-                return {static_cast<int>(code), std::system_category()};
-            }
-            pending.emplace_back(std::move(path), true);
-            continue;
-        }
-
-        pending.emplace_back(path, true);
-        std::error_code failure;
-        do {
-            const std::wstring_view name{entry.cFileName};
-            if (name == L"." || name == L"..") {
-                continue;
-            }
-            auto native_child = path.native();
-            native_child.push_back(L'\\');
-            native_child.append(entry.cFileName);
-            std::filesystem::path child{std::move(native_child)};
-            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                failure =
-                    std::make_error_code(std::errc::operation_not_permitted);
-                break;
-            }
-            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-                pending.emplace_back(std::move(child), false);
-            } else if (!DeleteFileW(child.c_str())) {
-                const auto code = GetLastError();
-                if (code != ERROR_FILE_NOT_FOUND &&
-                    code != ERROR_PATH_NOT_FOUND) {
-                    failure = {static_cast<int>(code), std::system_category()};
-                    break;
-                }
-            }
-        } while (FindNextFileW(search, &entry));
-
-        const auto enumeration_error = GetLastError();
-        FindClose(search);
-        if (failure) {
-            return failure;
-        }
-        if (enumeration_error != ERROR_NO_MORE_FILES &&
-            enumeration_error != ERROR_FILE_NOT_FOUND &&
-            enumeration_error != ERROR_PATH_NOT_FOUND) {
-            return {static_cast<int>(enumeration_error),
-                    std::system_category()};
-        }
+            return {};
+        },
+        &result);
+    if (!walked && !result) {
+        return std::make_error_code(std::errc::operation_not_permitted);
     }
-    return {};
+    return result;
 }
 
 bool retryable_lock(std::error_code error) noexcept {
@@ -265,30 +160,6 @@ bool retryable_lock(std::error_code error) noexcept {
            error.value() == ERROR_LOCK_VIOLATION;
 }
 
-#else
-
-std::error_code rename_no_replace(const std::filesystem::path& source,
-                                  const std::filesystem::path& destination) {
-#if defined(__linux__)
-    if (::syscall(SYS_renameat2,
-                  AT_FDCWD,
-                  source.c_str(),
-                  AT_FDCWD,
-                  destination.c_str(),
-                  RENAME_NOREPLACE) == 0) {
-        return {};
-    }
-    return {errno, std::generic_category()};
-#else
-    static_cast<void>(source);
-    static_cast<void>(destination);
-    return std::make_error_code(std::errc::operation_not_supported);
-#endif
-}
-
-#endif
-
-#ifdef _WIN32
 std::error_code rename_no_replace(const std::filesystem::path& source,
                                   const std::filesystem::path& destination) {
     std::error_code error;
@@ -300,11 +171,16 @@ std::error_code rename_no_replace(const std::filesystem::path& source,
     if (error) {
         return error;
     }
-    if (MoveFileW(native_source.c_str(), native_destination.c_str())) {
-        return {};
-    }
-    return {static_cast<int>(GetLastError()), std::system_category()};
+    return detail::rename_no_replace(native_source, native_destination);
 }
+
+#else
+
+std::error_code rename_no_replace(const std::filesystem::path& source,
+                                  const std::filesystem::path& destination) {
+    return detail::rename_no_replace(source, destination);
+}
+
 #endif
 
 std::expected<Workspace, std::string>

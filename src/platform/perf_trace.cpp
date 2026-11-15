@@ -20,6 +20,17 @@ std::mutex metrics_mutex;
 std::map<std::string, Metric> metrics;
 std::atomic<bool> forced_enable_state{false};
 
+template <typename Fn> void with_metrics(bool active, Fn&& fn) noexcept {
+    if (!active) {
+        return;
+    }
+    try {
+        std::lock_guard lock(metrics_mutex);
+        fn();
+    } catch (...) {
+    }
+}
+
 } // namespace
 
 bool enabled() noexcept {
@@ -35,14 +46,9 @@ void force_enable(bool state) noexcept {
 }
 
 void reset() noexcept {
-    if (!enabled()) {
-        return;
-    }
-    try {
-        std::lock_guard lock(metrics_mutex);
+    with_metrics(enabled(), [] {
         metrics.clear();
-    } catch (...) {
-    }
+    });
 }
 
 Token begin() noexcept {
@@ -56,45 +62,32 @@ void finish(std::string_view name, Token token) noexcept {
         return;
     }
     const auto elapsed = std::chrono::steady_clock::now() - token.started;
-    try {
-        std::lock_guard lock(metrics_mutex);
+    with_metrics(true, [&] {
         auto& metric = metrics[std::string{name}];
         ++metric.calls;
         metric.elapsed += elapsed;
-    } catch (...) {
-    }
+    });
 }
 
 void count(std::string_view name, std::uint64_t amount) noexcept {
-    if (!enabled() || name.empty()) {
-        return;
-    }
-    try {
-        std::lock_guard lock(metrics_mutex);
+    with_metrics(enabled() && !name.empty(), [&] {
         metrics[std::string{name}].calls += amount;
-    } catch (...) {
-    }
+    });
 }
 
 std::uint64_t get_count(std::string_view name) noexcept {
-    if (!enabled() || name.empty()) {
-        return 0;
-    }
-    try {
-        std::lock_guard lock(metrics_mutex);
-        const auto it = metrics.find(std::string{name});
-        return it != metrics.end() ? it->second.calls : 0;
-    } catch (...) {
-        return 0;
-    }
+    std::uint64_t calls = 0;
+    with_metrics(enabled() && !name.empty(), [&] {
+        if (const auto it = metrics.find(std::string{name});
+            it != metrics.end()) {
+            calls = it->second.calls;
+        }
+    });
+    return calls;
 }
 
 void report(std::string_view outcome) noexcept {
-    if (!enabled()) {
-        return;
-    }
-    try {
-        std::lock_guard lock(metrics_mutex);
+    with_metrics(enabled(), [&] {
         for (const auto& [name, metric] : metrics) {
             const auto microseconds =
                 std::chrono::duration_cast<std::chrono::microseconds>(
@@ -111,8 +104,7 @@ void report(std::string_view outcome) noexcept {
                      static_cast<int>(outcome.size()),
                      outcome.data());
         std::fflush(stderr);
-    } catch (...) {
-    }
+    });
 }
 
 } // namespace kasumi::platform::perf_trace

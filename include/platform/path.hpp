@@ -3,6 +3,7 @@
 
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -45,6 +46,8 @@ temporary_sibling_path(const std::filesystem::path& destination,
     filename += from_utf8(suffix).native();
     return destination.parent_path() / std::filesystem::path{filename};
 }
+
+std::optional<std::filesystem::path> environment_value(std::string_view name);
 
 } // namespace kasumi::platform::path
 

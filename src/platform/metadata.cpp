@@ -102,35 +102,28 @@ from_windows_ticks(std::uint64_t ticks) noexcept {
 
 std::expected<std::uint64_t, std::string>
 to_windows_ticks(std::filesystem::file_time_type value) noexcept {
-#if defined(_MSC_VER)
     using file_ticks =
         std::chrono::duration<std::int64_t, std::ratio<1, 10000000>>;
-    const auto count =
+#if defined(_MSC_VER)
+    const auto ticks =
         std::chrono::duration_cast<file_ticks>(value.time_since_epoch())
             .count();
-    if (count <= 0) {
-        return std::unexpected("timestamp out of valid Windows FILETIME range");
-    }
-    return static_cast<std::uint64_t>(count);
 #else
-    using file_ticks =
-        std::chrono::duration<std::int64_t, std::ratio<1, 10000000>>;
     constexpr std::int64_t unix_to_windows_epoch_ticks = 116444736000000000LL;
-    const auto sys_time = file_clock_to_sys(value);
-    const auto sys_ticks =
-        std::chrono::duration_cast<file_ticks>(sys_time.time_since_epoch())
-            .count();
+    const auto sys_ticks = std::chrono::duration_cast<file_ticks>(
+                               file_clock_to_sys(value).time_since_epoch())
+                               .count();
     if (sys_ticks > std::numeric_limits<std::int64_t>::max() -
                         unix_to_windows_epoch_ticks ||
         sys_ticks < -unix_to_windows_epoch_ticks) {
         return std::unexpected("timestamp out of valid Windows FILETIME range");
     }
     const auto ticks = sys_ticks + unix_to_windows_epoch_ticks;
+#endif
     if (ticks <= 0) {
         return std::unexpected("timestamp out of valid Windows FILETIME range");
     }
     return static_cast<std::uint64_t>(ticks);
-#endif
 }
 
 } // namespace detail
