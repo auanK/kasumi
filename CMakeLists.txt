@@ -23,26 +23,6 @@ option(
     "Build Kasumi system tests that require external executables"
     OFF
 )
-option(
-    KASUMI_BUILD_BENCHMARKS
-    "Build Kasumi operational benchmark executables"
-    OFF
-)
-option(
-    KASUMI_BUILD_REMOTE_COPY_SMOKE
-    "Build the opt-in real-rclone-remote copy smoke test"
-    OFF
-)
-option(
-    KASUMI_BUILD_GC_LIVE_PREFLIGHT
-    "Build the read-only GC live namespace preflight diagnostic"
-    OFF
-)
-option(
-    KASUMI_BUILD_PROVIDER_CERTIFICATION
-    "Build the multi-target provider certification runner"
-    OFF
-)
 
 add_library(kasumi_warnings INTERFACE)
 if(WIN32)
@@ -540,20 +520,6 @@ target_link_libraries(kasumi_runtime
     kasumi_hardening
 )
 
-add_library(kasumi_operational_provider_target_config STATIC
-    tests/operational/provider_target_config.cpp
-)
-target_include_directories(
-    kasumi_operational_provider_target_config
-    PUBLIC
-    ${PROJECT_SOURCE_DIR}/tests/operational
-)
-target_link_libraries(
-    kasumi_operational_provider_target_config
-    PUBLIC kasumi_transport
-    PRIVATE tomlplusplus::tomlplusplus kasumi_warnings
-)
-
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(NOT Python3_Interpreter_FOUND)
     find_program(Python3_EXECUTABLE NAMES python3 python py REQUIRED)
@@ -655,41 +621,6 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
     )
 endif()
 
-if(KASUMI_BUILD_REMOTE_COPY_SMOKE)
-    add_executable(
-        kasumi_remote_copy_smoke
-        tests/operational/remote_copy_smoke.cpp
-        tests/operational/remote_copy_smoke_support.cpp
-    )
-    target_link_libraries(
-        kasumi_remote_copy_smoke
-        PRIVATE
-        kasumi_transport
-        kasumi_platform
-        nlohmann_json::nlohmann_json
-        reproc++
-        kasumi_warnings
-    )
-endif()
-
-if(KASUMI_BUILD_GC_LIVE_PREFLIGHT)
-    add_executable(
-        kasumi_gc_live_preflight
-        tests/operational/gc_live_preflight.cpp
-        tests/operational/gc_live_preflight_support.cpp
-        tests/operational/remote_copy_smoke_support.cpp
-    )
-    target_link_libraries(
-        kasumi_gc_live_preflight
-        PRIVATE
-        kasumi_transport
-        kasumi_platform
-        nlohmann_json::nlohmann_json
-        reproc++
-        kasumi_warnings
-    )
-endif()
-
 set(KASUMI_FIRST_PARTY_TARGETS
     kasumi_core
     kasumi_transport
@@ -731,54 +662,4 @@ if(BUILD_TESTING)
         endif()
     endif()
     add_subdirectory(tests)
-endif()
-
-if(KASUMI_BUILD_PROVIDER_CERTIFICATION)
-    if(NOT BUILD_TESTING)
-        message(FATAL_ERROR
-            "KASUMI_BUILD_PROVIDER_CERTIFICATION requires BUILD_TESTING=ON")
-    endif()
-    add_executable(
-        kasumi_provider_certification
-        tests/operational/provider_certification.cpp
-        tests/operational/provider_certification_support.cpp
-        tests/operational/gc_live_preflight_support.cpp
-        tests/operational/remote_copy_smoke_support.cpp
-        tests/support/src/provider_scenarios.cpp
-        tests/support/src/transport_scenarios.cpp
-    )
-    target_include_directories(
-        kasumi_provider_certification
-        PRIVATE
-        ${PROJECT_SOURCE_DIR}/tests/operational
-        ${PROJECT_SOURCE_DIR}/src
-    )
-    target_link_libraries(
-        kasumi_provider_certification
-        PRIVATE
-        kasumi_application
-        kasumi_transport
-        kasumi_operational_provider_target_config
-        reproc++
-        kasumi_platform
-        kasumi_crypto
-        kasumi_test_support
-        httplib::httplib
-        nlohmann_json::nlohmann_json
-        kasumi_warnings
-    )
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
-        target_link_options(kasumi_provider_certification PRIVATE
-            -static-libgcc
-            -static-libstdc++
-            -Wl,--allow-multiple-definition
-        )
-    endif()
-    add_test(
-        NAME kasumi_provider_certification_startup
-        COMMAND
-            ${CMAKE_COMMAND}
-            "-DKASUMI_PROVIDER_CERTIFICATION_EXECUTABLE=$<TARGET_FILE:kasumi_provider_certification>"
-            -P ${PROJECT_SOURCE_DIR}/tests/operational/check_provider_certification_startup.cmake
-    )
 endif()

@@ -184,12 +184,9 @@ counters are emitted explicitly. `gc.candidate_remove_errors` counts rejected
 or throwing candidate attempts; `gc.barrier_cleanup_errors` separately counts
 failed cleanup. `gc.errors` counts a failed GC outcome (zero or one), preserving
 the distinction between its primary and secondary errors. Earlier admission
-failures can leave these metrics unavailable. A missing metric in a benchmark
-report is `null`, not zero. Counts never reinterpret a failed DELETE as success.
+failures can leave these metrics unavailable. Counts never reinterpret a failed DELETE as success.
 
-Use the [GC benchmark harness](../build-and-test.md#gc-performance) for isolated
-fixtures and separate fixture/GC/FSCK/cleanup timings. Apply throughput includes
-batch DELETE latency, loop overhead and the fixed pre-Apply check. Small
+Small
 encrypted payloads do not model large payload transfer workloads. Cloud latency,
 throttling and provider retries must be measured rather than extrapolated from
 local storage; Kasumi's lack of retries does not prove the provider made none.

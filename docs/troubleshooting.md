@@ -426,20 +426,9 @@ For a slow GC, enable `KASUMI_PERF_TRACE=1` and compare `gc.analysis_list_us`,
 `gc.candidate_remove_attempts` can exceed acknowledgements on failure;
 `gc.confirmed_removed` retains only acknowledged operations. These timers nest:
 do not add DELETE time to Apply time or control subtimers to total time.
-Measure with [disposable benchmark fixtures](build-and-test.md#gc-performance),
-never an existing vault. Slow cloud DELETEs do not justify increasing the fixed concurrency limit or
+Slow cloud DELETEs do not justify increasing the fixed concurrency limit or
 running concurrent Sync. There are deliberately no periodic
 ownership checkpoints or distributed CAS.
-
-If a benchmark fails or times out, preserve its output directory, `result.json`,
-`owned-objects.json`, private test key and reported namespace. Missing metrics
-are unavailable, not zero. Stop all writers for that disposable vault and inspect
-the exact namespace and recorded ownership before manual recovery. Do not run
-`gc remove-barrier`, cleanup, purge or a new GC automatically after an uncertain
-result. A fresh run uses a new child; it never reuses the failed run's decision.
-An ambiguous fixture-write error is not a GC measurement or proof that no write
-occurred. A later listing does not turn a rejected operation into an acknowledgement;
-a new run uses a fresh isolated child and preserves the uncertain namespace.
 
 ### Related Documentation
 * [Garbage Collection Architecture](architecture/garbage-collection.md)
