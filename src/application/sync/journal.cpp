@@ -1246,6 +1246,32 @@ struct SaveDeltaResult {
     Delta changes;
 };
 
+bool is_known_artifact_name(std::string_view name) noexcept {
+    constexpr std::array<std::string_view, 7> known_names{
+        "snapshot.enc",
+        "snapshot.enc.new",
+        "transaction.log.enc",
+        "confirmed.enc",
+        "confirmed.enc.new",
+        "retired.enc",
+        "retired.enc.new",
+    };
+    return std::ranges::find(known_names, name) != known_names.end();
+}
+
+bool is_reset_checkpoint(const transaction::Record& record) noexcept {
+    return record.phase == transaction::Phase::Started &&
+           std::ranges::all_of(record.progress, [](const auto& progress) {
+               return progress.state == transaction::OperationState::Pending &&
+                      !progress.had_original && progress.previous_hash.empty();
+           });
+}
+
+kasumi::Hash journal_key_id(const KeyGuard& journal_key) {
+    return hasher::hash_bytes(journal_key.value.data(),
+                              journal_key.value.size());
+}
+
 std::expected<SaveDeltaResult, std::string>
 save_delta(const Paths& paths,
            const transaction::Record& record,
@@ -1259,12 +1285,7 @@ save_delta(const Paths& paths,
     if (!identity_matches)
         return std::unexpected("active journal identity changed; complete "
                                "recovery/clear before a new transaction");
-    const bool rollback_reset =
-        record.phase == transaction::Phase::Started &&
-        std::ranges::all_of(record.progress, [](const auto& progress) {
-            return progress.state == transaction::OperationState::Pending &&
-                   !progress.had_original && progress.previous_hash.empty();
-        });
+    const bool rollback_reset = is_reset_checkpoint(record);
     const bool local_rollback =
         mode == SaveMode::Rollback && !record.publication_required &&
         record.phase == transaction::Phase::FilesStaged &&
@@ -1494,10 +1515,7 @@ std::expected<void, std::string> clear_locked(const Paths& paths,
     // artifact.
     for (const auto& entry : std::filesystem::directory_iterator(root)) {
         const auto name = entry.path().filename().string();
-        if (name != "snapshot.enc" && name != "snapshot.enc.new" &&
-            name != "transaction.log.enc" && name != "confirmed.enc" &&
-            name != "confirmed.enc.new" && name != "retired.enc" &&
-            name != "retired.enc.new")
+        if (!is_known_artifact_name(name))
             return std::unexpected("unknown journal cleanup artifact");
         auto validated =
             validate_file_or_absent(entry.path(), "cleanup artifact");
@@ -1524,12 +1542,7 @@ std::expected<void, std::string> clear_locked(const Paths& paths,
         if (!previous)
             return std::unexpected(previous.error());
         const auto& record = previous->record;
-        const bool reset =
-            record.phase == transaction::Phase::Started &&
-            std::ranges::all_of(record.progress, [](const auto& progress) {
-                return progress.state == transaction::OperationState::Pending &&
-                       !progress.had_original && progress.previous_hash.empty();
-            });
+        const bool reset = is_reset_checkpoint(record);
         if (record.phase != transaction::Phase::CleanupCompleted && !reset)
             return std::unexpected(
                 "cannot clear a nonterminal journal before confirmed rollback");
@@ -1645,8 +1658,7 @@ save(const Paths& paths,
             return std::unexpected(
                 "requested record must be independent of the session cache");
         }
-        const auto key_id = hasher::hash_bytes(journal_key.value.data(),
-                                               journal_key.value.size());
+        const auto key_id = journal_key_id(journal_key);
         if (session && session->is_valid() &&
             !session->bound_to(paths, key_id)) {
             invalidate();
@@ -1884,8 +1896,7 @@ load(const Paths& paths,
     try {
         if (session && session->state == SessionState::Retired)
             return std::unexpected("journal session is retired");
-        const auto key_id = hasher::hash_bytes(journal_key.value.data(),
-                                               journal_key.value.size());
+        const auto key_id = journal_key_id(journal_key);
         if (session && session->is_valid() &&
             !session->bound_to(paths, key_id)) {
             session->invalidate();
@@ -2013,8 +2024,7 @@ clear(const Paths& paths,
     KeyGuard journal_key{crypto::derive_key(key, crypto::KeyPurpose::Journal)};
     const auto trace = platform::perf_trace::begin();
     try {
-        const auto key_id = hasher::hash_bytes(journal_key.value.data(),
-                                               journal_key.value.size());
+        const auto key_id = journal_key_id(journal_key);
         if (session && session->is_valid() &&
             !session->bound_to(paths, key_id)) {
             session->invalidate();
@@ -2101,10 +2111,7 @@ InspectionResult inspect(const Paths& paths,
                     return false;
                 }
                 const auto name = entry.path().filename().string();
-                if (name != "snapshot.enc" && name != "snapshot.enc.new" &&
-                    name != "transaction.log.enc" && name != "confirmed.enc" &&
-                    name != "confirmed.enc.new" && name != "retired.enc" &&
-                    name != "retired.enc.new") {
+                if (!is_known_artifact_name(name)) {
                     return false;
                 }
                 if (name == "retired.enc") {

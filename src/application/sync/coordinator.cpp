@@ -112,6 +112,26 @@ read_status(const std::filesystem::path& path) {
     return status;
 }
 
+std::expected<void, Error>
+require_physical_directory(std::filesystem::file_status status,
+                           const std::filesystem::path& path,
+                           std::string_view error_title) {
+    if (std::filesystem::is_symlink(status) ||
+        !std::filesystem::is_directory(status)) {
+        return std::unexpected(workspace_error(
+            error_title, path, "expected a physical directory"));
+    }
+    return {};
+}
+
+std::unexpected<Error> fail_after_rollback(std::expected<void, Error> rolled,
+                                           Error original) {
+    if (!rolled) {
+        return std::unexpected(std::move(rolled.error()));
+    }
+    return std::unexpected(std::move(original));
+}
+
 std::expected<std::filesystem::path, Error>
 profile_directory(const runtime::RuntimeData& runtime_data) {
     const auto profile = runtime_data.database_path.parent_path();
@@ -153,12 +173,10 @@ transactions_directory(const std::filesystem::path& profile, bool create) {
         }
         return directory;
     }
-    if (std::filesystem::is_symlink(*status) ||
-        !std::filesystem::is_directory(*status)) {
-        return std::unexpected(
-            workspace_error("invalid transactions directory",
-                            directory,
-                            "expected a physical directory"));
+    if (auto valid = require_physical_directory(
+            *status, directory, "invalid transactions directory");
+        !valid) {
+        return std::unexpected(valid.error());
     }
     auto secured = platform::private_storage::protect_directory(directory);
     if (!secured) {
@@ -429,12 +447,10 @@ std::expected<platform::Workspace, Error> create_transaction_workspace(
         return std::unexpected(status.error());
     }
     if (!missing(*status)) {
-        if (std::filesystem::is_symlink(*status) ||
-            !std::filesystem::is_directory(*status)) {
-            return std::unexpected(
-                workspace_error("invalid transaction workspace",
-                                root,
-                                "expected a physical directory"));
+        if (auto valid = require_physical_directory(
+                *status, root, "invalid transaction workspace");
+            !valid) {
+            return std::unexpected(valid.error());
         }
         auto opened = open_transaction_workspace(profile, id, key);
         if (!opened) {
@@ -496,12 +512,12 @@ open_transaction_workspace(
     if (!status) {
         return std::unexpected(status.error());
     }
-    if (!missing(*status) && (std::filesystem::is_symlink(*status) ||
-                              !std::filesystem::is_directory(*status))) {
-        return std::unexpected(
-            workspace_error("invalid transaction workspace",
-                            root,
-                            "expected a physical directory"));
+    if (!missing(*status)) {
+        if (auto valid = require_physical_directory(
+                *status, root, "invalid transaction workspace");
+            !valid) {
+            return std::unexpected(valid.error());
+        }
     }
 
     std::optional<platform::Workspace> quarantined;
@@ -636,12 +652,10 @@ std::expected<void, Error> remove_transaction_workspace(
         }
         return retire_workspace_owner(sidecar, id, workspace->identity, key);
     }
-    if (std::filesystem::is_symlink(*status) ||
-        !std::filesystem::is_directory(*status)) {
-        return std::unexpected(
-            workspace_error("invalid transaction workspace",
-                            workspace->root,
-                            "expected a physical directory"));
+    if (auto valid = require_physical_directory(
+            *status, workspace->root, "invalid transaction workspace");
+        !valid) {
+        return valid;
     }
     if (!workspace->identity.valid) {
         return std::unexpected(
@@ -740,12 +754,10 @@ cleanup_orphan_workspaces(const std::filesystem::path& profile,
     if (missing(*status)) {
         return {};
     }
-    if (std::filesystem::is_symlink(*status) ||
-        !std::filesystem::is_directory(*status)) {
-        return std::unexpected(
-            workspace_error("invalid transactions directory",
-                            *directory,
-                            "expected a physical directory"));
+    if (auto valid = require_physical_directory(
+            *status, *directory, "invalid transactions directory");
+        !valid) {
+        return valid;
     }
 
     std::vector<std::string> candidates;
@@ -877,6 +889,25 @@ history_storage::epoch::Epoch genesis_epoch(const transaction::Record& record) {
 }
 
 std::expected<history_storage::epoch::SealedEpoch, Error>
+seal_transaction_epoch(transaction::Record& record,
+                       const history_storage::epoch::Epoch& epoch,
+                       std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                       std::string_view mismatch_message) {
+    auto sealed = history_storage::epoch::seal(epoch, key);
+    if (!sealed) {
+        return std::unexpected(
+            make_error(ErrorCode::PublicationFailure, sealed.error().detail));
+    }
+    if (!record.epoch_id.empty() &&
+        record.epoch_id != sealed->reference.epoch_id) {
+        return std::unexpected(make_error(ErrorCode::RecoveryConflict,
+                                          std::string(mismatch_message)));
+    }
+    record.epoch_id = sealed->reference.epoch_id;
+    return *sealed;
+}
+
+std::expected<history_storage::epoch::SealedEpoch, Error>
 prepare_genesis_epoch(transaction::Record& record,
                       history_storage::epoch::RetentionPolicy policy,
                       std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
@@ -897,18 +928,8 @@ prepare_genesis_epoch(transaction::Record& record,
         record.epoch_min_history_depth = policy.min_history_depth;
         record.epoch_min_history_age_hours = policy.min_history_age_hours;
     }
-    auto sealed = history_storage::epoch::seal(genesis_epoch(record), key);
-    if (!sealed) {
-        return std::unexpected(
-            make_error(ErrorCode::PublicationFailure, sealed.error().detail));
-    }
-    if (!record.epoch_id.empty() &&
-        record.epoch_id != sealed->reference.epoch_id) {
-        return std::unexpected(make_error(ErrorCode::RecoveryConflict,
-                                          "journal genesis Epoch mismatch"));
-    }
-    record.epoch_id = sealed->reference.epoch_id;
-    return *sealed;
+    return seal_transaction_epoch(
+        record, genesis_epoch(record), key, "journal genesis Epoch mismatch");
 }
 
 std::expected<history_storage::epoch::SealedEpoch, Error>
@@ -942,18 +963,7 @@ prepare_pruning_epoch(transaction::Record& record,
                                            .anchors = plan.anchors,
                                            .previous_epoch_id =
                                                previous_epoch_id};
-    auto sealed = history_storage::epoch::seal(epoch, key);
-    if (!sealed) {
-        return std::unexpected(
-            make_error(ErrorCode::PublicationFailure, sealed.error().detail));
-    }
-    if (!record.epoch_id.empty() &&
-        record.epoch_id != sealed->reference.epoch_id) {
-        return std::unexpected(
-            make_error(ErrorCode::RecoveryConflict, "journal Epoch mismatch"));
-    }
-    record.epoch_id = sealed->reference.epoch_id;
-    return *sealed;
+    return seal_transaction_epoch(record, epoch, key, "journal Epoch mismatch");
 }
 
 static std::expected<std::optional<history_storage::epoch::Reference>, Error>
@@ -1884,6 +1894,11 @@ execute(const runtime::RuntimeData& runtime_data,
         return detail::save_record(
             *paths, *record, key, mode, &journal_session);
     };
+    const auto advance_phase =
+        [&](transaction::Phase phase) -> std::expected<void, Error> {
+        record->phase = phase;
+        return save_active_record();
+    };
     const auto content_upload_required = required_content_uploads(
         observed_input, reconciliation_result, record->plan);
     for (const auto& operation : record->plan.operations) {
@@ -1910,6 +1925,25 @@ execute(const runtime::RuntimeData& runtime_data,
         return std::unexpected(workspace.error());
     }
     std::optional<platform::Workspace> transaction_workspace{*workspace};
+    const auto rollback_local = [&]() {
+        return detail::rollback_transaction(*paths,
+                                            *record,
+                                            transaction_workspace,
+                                            runtime_data.local_dir,
+                                            key);
+    };
+    const auto rollback_terminal = [&]() {
+        return detail::rollback_transaction(*paths,
+                                            *record,
+                                            transaction_workspace,
+                                            runtime_data.local_dir,
+                                            key,
+                                            &journal_session);
+    };
+    const auto fail_terminal = [&](Error original) {
+        return detail::fail_after_rollback(rollback_terminal(),
+                                           std::move(original));
+    };
 
     for (std::size_t index = 0; index < record->plan.operations.size();
          ++index) {
@@ -1921,14 +1955,8 @@ execute(const runtime::RuntimeData& runtime_data,
                                         record->progress[index],
                                         record->plan.operations);
         if (!prepared) {
-            auto rolled = detail::rollback_transaction(*paths,
-                                                       *record,
-                                                       transaction_workspace,
-                                                       runtime_data.local_dir,
-                                                       key);
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(mutation_error(prepared.error()));
+            return detail::fail_after_rollback(
+                rollback_local(), mutation_error(prepared.error()));
         }
         record->progress[index] = *prepared;
         journal_fault_test::hit("prepared", &*record, index);
@@ -1951,15 +1979,6 @@ execute(const runtime::RuntimeData& runtime_data,
         platform::perf_trace::get_count("journal written bytes total") -
             preparation_bytes_before);
 
-    const auto rollback_terminal = [&]() {
-        return detail::rollback_transaction(*paths,
-                                            *record,
-                                            transaction_workspace,
-                                            runtime_data.local_dir,
-                                            key,
-                                            &journal_session);
-    };
-
     std::optional<publication::PreparedCommit> prepared_commit;
     std::optional<CommitTimeDecision> commit_time;
     // Destroyed first: waits for the task before destroying prepared_commit.
@@ -1967,10 +1986,7 @@ execute(const runtime::RuntimeData& runtime_data,
     if (record->publication_required) {
         const auto local_now = platform::clock::unix_seconds();
         if (!local_now || *local_now <= 0) {
-            auto rolled = rollback_terminal();
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(detail::make_error(
+            return fail_terminal(detail::make_error(
                 ErrorCode::PublicationFailure,
                 local_now ? "invalid local commit timestamp"
                           : "failed to read local commit timestamp: " +
@@ -1979,10 +1995,7 @@ execute(const runtime::RuntimeData& runtime_data,
         auto chosen_time =
             choose_commit_time(observed_input.storage, *local_now);
         if (!chosen_time) {
-            auto rolled = rollback_terminal();
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(chosen_time.error());
+            return fail_terminal(chosen_time.error());
         }
         commit_time.emplace(*chosen_time);
         auto prepared = publication::prepare_commit(
@@ -1993,10 +2006,7 @@ execute(const runtime::RuntimeData& runtime_data,
             commit_time->created_at,
             key);
         if (!prepared) {
-            auto rolled = rollback_terminal();
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(publication_error(prepared.error()));
+            return fail_terminal(publication_error(prepared.error()));
         }
         prepared_commit.emplace(std::move(*prepared));
 
@@ -2036,10 +2046,7 @@ execute(const runtime::RuntimeData& runtime_data,
                     return published;
                 });
         } catch (const std::exception& exception) {
-            auto rolled = rollback_terminal();
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(detail::make_error(
+            return fail_terminal(detail::make_error(
                 ErrorCode::PublicationFailure,
                 std::string{"failed to start commit upload: "} +
                     exception.what()));
@@ -2146,32 +2153,20 @@ execute(const runtime::RuntimeData& runtime_data,
                         transaction::OperationState::Prepared;
                 }
             }
-            auto rolled = detail::rollback_transaction(*paths,
-                                                       *record,
-                                                       transaction_workspace,
-                                                       runtime_data.local_dir,
-                                                       key);
-            if (!rolled) {
-                return std::unexpected(rolled.error());
-            }
-            return std::unexpected(detail::make_error(
-                ErrorCode::ConcurrentModification,
-                "local destination changed before mutation; completed local "
-                "effects were retained and the transaction was cleared; "
-                "reobserve and retry: " +
-                    mutation::describe(failure),
-                index));
+            return detail::fail_after_rollback(
+                rollback_local(),
+                detail::make_error(
+                    ErrorCode::ConcurrentModification,
+                    "local destination changed before mutation; completed "
+                    "local "
+                    "effects were retained and the transaction was cleared; "
+                    "reobserve and retry: " +
+                        mutation::describe(failure),
+                    index));
         }
         if (failure.code == mutation::MutationErrorCode::RemoteContentMissing) {
-            auto rolled = detail::rollback_transaction(*paths,
-                                                       *record,
-                                                       transaction_workspace,
-                                                       runtime_data.local_dir,
-                                                       key);
-            if (!rolled) {
-                return std::unexpected(rolled.error());
-            }
-            return std::unexpected(mutation_error(failure));
+            return detail::fail_after_rollback(rollback_local(),
+                                               mutation_error(failure));
         }
         if (!record->publication_required &&
             is_storage_repair_operation(observed_input,
@@ -2189,15 +2184,8 @@ execute(const runtime::RuntimeData& runtime_data,
             }
             return std::unexpected(mutation_error(failure));
         }
-        auto rolled = detail::rollback_transaction(*paths,
-                                                   *record,
-                                                   transaction_workspace,
-                                                   runtime_data.local_dir,
-                                                   key);
-        if (!rolled) {
-            return std::unexpected(rolled.error());
-        }
-        return std::unexpected(mutation_error(failure));
+        return detail::fail_after_rollback(rollback_local(),
+                                           mutation_error(failure));
     };
 
     const auto parallelism = detail::content_concurrency();
@@ -2504,10 +2492,7 @@ execute(const runtime::RuntimeData& runtime_data,
         reconciliation_result.candidate_shared_tree,
         scanned->physical_evidence);
     if (!publication_tree) {
-        auto rolled = rollback_terminal();
-        if (!rolled)
-            return std::unexpected(rolled.error());
-        return std::unexpected(detail::make_error(
+        return fail_terminal(detail::make_error(
             ErrorCode::PublicationFailure, publication_tree.error().detail));
     }
 
@@ -2724,61 +2709,54 @@ execute(const runtime::RuntimeData& runtime_data,
             }
             return std::unexpected(database_error);
         }
-        record->phase = transaction::Phase::DatabaseCommitted;
-        saved = save_active_record();
-        if (!saved)
-            return std::unexpected(saved.error());
-        record->phase = transaction::Phase::CleanupCompleted;
-        saved = save_active_record();
-        if (!saved)
-            return std::unexpected(saved.error());
+        if (auto saved_phase =
+                advance_phase(transaction::Phase::DatabaseCommitted);
+            !saved_phase) {
+            return std::unexpected(saved_phase.error());
+        }
+        if (auto saved_phase =
+                advance_phase(transaction::Phase::CleanupCompleted);
+            !saved_phase) {
+            return std::unexpected(saved_phase.error());
+        }
         return detail::finish_transaction_cleanup(
             *paths, transaction_workspace, key, &journal_session);
     }
 
     if (!prepared_commit || !commit_publication.valid()) {
-        auto rolled = rollback_terminal();
-        if (!rolled)
-            return std::unexpected(rolled.error());
-        return std::unexpected(detail::make_error(
+        return fail_terminal(detail::make_error(
             ErrorCode::PublicationFailure,
             "speculative commit publication was not initialized"));
     }
     record->commit_id = prepared_commit->commit_id;
     record->parent_ids = prepared_commit->commit.parents;
-    record->phase = transaction::Phase::CommitPrepared;
-    saved = save_active_record();
-    if (!saved)
-        return std::unexpected(saved.error());
+    if (auto saved_phase = advance_phase(transaction::Phase::CommitPrepared);
+        !saved_phase) {
+        return std::unexpected(saved_phase.error());
+    }
 
     publication::PublishObjectResult published;
     try {
         published = commit_publication.get();
     } catch (const std::exception& exception) {
-        auto rolled = rollback_terminal();
-        if (!rolled)
-            return std::unexpected(rolled.error());
-        return std::unexpected(
+        return fail_terminal(
             detail::make_error(ErrorCode::PublicationFailure,
                                std::string{"commit publication task failed: "} +
                                    exception.what()));
     }
     if (!published) {
-        auto rolled = rollback_terminal();
-        if (!rolled)
-            return std::unexpected(rolled.error());
-        return std::unexpected(publication_error(published.error()));
+        return fail_terminal(publication_error(published.error()));
     }
     record->ciphertext_id = published->head.ciphertext_id;
     record->marker_id = published->marker_id;
-    record->phase = transaction::Phase::CommitUploaded;
-    saved = save_active_record();
-    if (!saved)
-        return std::unexpected(saved.error());
-    record->phase = transaction::Phase::CommitVerified;
-    saved = save_active_record();
-    if (!saved)
-        return std::unexpected(saved.error());
+    if (auto saved_phase = advance_phase(transaction::Phase::CommitUploaded);
+        !saved_phase) {
+        return std::unexpected(saved_phase.error());
+    }
+    if (auto saved_phase = advance_phase(transaction::Phase::CommitVerified);
+        !saved_phase) {
+        return std::unexpected(saved_phase.error());
+    }
 
     const auto layout = history_storage::derive_remote_layout(key);
     const auto head_put_trace = platform::perf_trace::begin();
@@ -2799,16 +2777,13 @@ execute(const runtime::RuntimeData& runtime_data,
                 inspected.error(), "head marker publication"));
         }
         if (*inspected != publication::HeadMarkerState::Valid) {
-            auto rolled = rollback_terminal();
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(publication_error(marker_published.error()));
+            return fail_terminal(publication_error(marker_published.error()));
         }
     }
-    record->phase = transaction::Phase::HeadPublished;
-    saved = save_active_record();
-    if (!saved)
-        return std::unexpected(saved.error());
+    if (auto saved_phase = advance_phase(transaction::Phase::HeadPublished);
+        !saved_phase) {
+        return std::unexpected(saved_phase.error());
+    }
 
     const auto head_verification_trace = platform::perf_trace::begin();
     auto head_verified = publication::verify_head_marker(
@@ -2822,10 +2797,7 @@ execute(const runtime::RuntimeData& runtime_data,
     if (!head_verified) {
         if (head_verified.error().code ==
             publication::ErrorCode::VerificationFailure) {
-            auto rolled = rollback_terminal();
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(publication_error(head_verified.error()));
+            return fail_terminal(publication_error(head_verified.error()));
         }
         auto inspected = publication::inspect_head_marker(
             storage,
@@ -2837,18 +2809,53 @@ execute(const runtime::RuntimeData& runtime_data,
                 inspected.error(), "head marker verification"));
         }
         if (*inspected != publication::HeadMarkerState::Valid) {
-            auto rolled = rollback_terminal();
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(publication_error(head_verified.error()));
+            return fail_terminal(publication_error(head_verified.error()));
         }
     }
-    record->phase = transaction::Phase::HeadVerified;
-    saved = save_active_record();
-    if (!saved)
-        return std::unexpected(saved.error());
+    if (auto saved_phase = advance_phase(transaction::Phase::HeadVerified);
+        !saved_phase) {
+        return std::unexpected(saved_phase.error());
+    }
 
     std::optional<history_storage::epoch::Reference> verified_new_epoch;
+    const auto publish_and_verify_epoch =
+        [&](const history_storage::epoch::Epoch& expected_epoch,
+            const history_storage::epoch::SealedEpoch& sealed_epoch,
+            std::string_view epoch_kind) -> std::expected<void, Error> {
+        const auto workspace_dir = runtime_data.database_path.parent_path();
+        auto verify_epoch = [&]() {
+            return history_storage::epoch::verify(storage,
+                                                  expected_epoch,
+                                                  sealed_epoch.reference,
+                                                  key,
+                                                  workspace_dir);
+        };
+        if (auto epoch_published = history_storage::epoch::publish(
+                storage, key, sealed_epoch, workspace_dir);
+            !epoch_published && !verify_epoch()) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::PublicationFailure,
+                "failed to publish " + std::string(epoch_kind) +
+                    " Epoch: " + epoch_published.error().detail));
+        }
+        if (auto saved_phase = advance_phase(transaction::Phase::EpochUploaded);
+            !saved_phase) {
+            return std::unexpected(saved_phase.error());
+        }
+        if (auto epoch_verified = verify_epoch(); !epoch_verified) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::PublicationFailure,
+                "failed to verify " + std::string(epoch_kind) +
+                    " Epoch: " + epoch_verified.error().detail));
+        }
+        if (auto saved_phase = advance_phase(transaction::Phase::EpochVerified);
+            !saved_phase) {
+            return std::unexpected(saved_phase.error());
+        }
+        verified_new_epoch = sealed_epoch.reference;
+        return {};
+    };
+
     if (prepared_commit->commit.parents.empty()) {
         history_storage::epoch::RetentionPolicy policy{
             .min_history_depth = runtime_data.min_history_depth,
@@ -2857,49 +2864,15 @@ execute(const runtime::RuntimeData& runtime_data,
         if (!epoch) {
             return std::unexpected(epoch.error());
         }
-        record->phase = transaction::Phase::EpochPrepared;
-        saved = save_active_record();
-        if (!saved)
-            return std::unexpected(saved.error());
-
-        auto epoch_published = history_storage::epoch::publish(
-            storage, key, *epoch, runtime_data.database_path.parent_path());
-        if (!epoch_published) {
-            auto visible = history_storage::epoch::verify(
-                storage,
-                detail::genesis_epoch(*record),
-                epoch->reference,
-                key,
-                runtime_data.database_path.parent_path());
-            if (!visible) {
-                return std::unexpected(
-                    detail::make_error(ErrorCode::PublicationFailure,
-                                       "failed to publish genesis Epoch: " +
-                                           epoch_published.error().detail));
-            }
+        if (auto saved_phase = advance_phase(transaction::Phase::EpochPrepared);
+            !saved_phase) {
+            return std::unexpected(saved_phase.error());
         }
-        record->phase = transaction::Phase::EpochUploaded;
-        saved = save_active_record();
-        if (!saved)
-            return std::unexpected(saved.error());
-
-        auto epoch_verified = history_storage::epoch::verify(
-            storage,
-            detail::genesis_epoch(*record),
-            epoch->reference,
-            key,
-            runtime_data.database_path.parent_path());
-        if (!epoch_verified) {
-            return std::unexpected(
-                detail::make_error(ErrorCode::PublicationFailure,
-                                   "failed to verify genesis Epoch: " +
-                                       epoch_verified.error().detail));
+        if (auto published_epoch = publish_and_verify_epoch(
+                detail::genesis_epoch(*record), *epoch, "genesis");
+            !published_epoch) {
+            return std::unexpected(published_epoch.error());
         }
-        record->phase = transaction::Phase::EpochVerified;
-        saved = save_active_record();
-        if (!saved)
-            return std::unexpected(saved.error());
-        verified_new_epoch = epoch->reference;
     } else if (!observed_input.storage.epoch_id.empty()) {
         auto policy =
             detail::authenticated_epoch_policy(observed_input.storage);
@@ -2939,51 +2912,11 @@ execute(const runtime::RuntimeData& runtime_data,
                     .anchors = plan->anchors,
                     .previous_epoch_id = observed_input.storage.epoch_id};
 
-                auto epoch_published = history_storage::epoch::publish(
-                    storage,
-                    key,
-                    *epoch,
-                    runtime_data.database_path.parent_path());
-                if (!epoch_published) {
-                    auto visible = history_storage::epoch::verify(
-                        storage,
-                        expected_epoch,
-                        epoch->reference,
-                        key,
-                        runtime_data.database_path.parent_path());
-                    if (!visible) {
-                        return std::unexpected(detail::make_error(
-                            ErrorCode::PublicationFailure,
-                            "failed to publish pruning Epoch: " +
-                                epoch_published.error().detail));
-                    }
+                if (auto published_epoch = publish_and_verify_epoch(
+                        expected_epoch, *epoch, "pruning");
+                    !published_epoch) {
+                    return std::unexpected(published_epoch.error());
                 }
-
-                record->phase = transaction::Phase::EpochUploaded;
-                saved = save_active_record();
-                if (!saved) {
-                    return std::unexpected(saved.error());
-                }
-
-                auto epoch_verified = history_storage::epoch::verify(
-                    storage,
-                    expected_epoch,
-                    epoch->reference,
-                    key,
-                    runtime_data.database_path.parent_path());
-                if (!epoch_verified) {
-                    return std::unexpected(
-                        detail::make_error(ErrorCode::PublicationFailure,
-                                           "failed to verify pruning Epoch: " +
-                                               epoch_verified.error().detail));
-                }
-
-                record->phase = transaction::Phase::EpochVerified;
-                saved = save_active_record();
-                if (!saved) {
-                    return std::unexpected(saved.error());
-                }
-                verified_new_epoch = epoch->reference;
             }
         }
     }
@@ -3014,10 +2947,10 @@ execute(const runtime::RuntimeData& runtime_data,
         return std::unexpected(detail::make_error(ErrorCode::DatabaseFailure,
                                                   "failed to save state.db"));
     }
-    record->phase = transaction::Phase::DatabaseCommitted;
-    saved = save_active_record();
-    if (!saved)
-        return std::unexpected(saved.error());
+    if (auto saved_phase = advance_phase(transaction::Phase::DatabaseCommitted);
+        !saved_phase) {
+        return std::unexpected(saved_phase.error());
+    }
 
     auto observed_cleanup_ids = prepared_commit->commit.parents;
     observed_cleanup_ids.insert(
@@ -3035,10 +2968,10 @@ execute(const runtime::RuntimeData& runtime_data,
         return std::unexpected(detail::indeterminate_publication(
             post_prune.error(), "marker pruning"));
     }
-    record->phase = transaction::Phase::CleanupCompleted;
-    saved = save_active_record();
-    if (!saved)
-        return std::unexpected(saved.error());
+    if (auto saved_phase = advance_phase(transaction::Phase::CleanupCompleted);
+        !saved_phase) {
+        return std::unexpected(saved_phase.error());
+    }
     return detail::finish_transaction_cleanup(
         *paths, transaction_workspace, key, &journal_session);
 }
