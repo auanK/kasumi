@@ -142,18 +142,30 @@ void compare_nodes_3way(
                                    authorized_deletions);
             };
 
-        const bool ignored =
+        const auto add_op = [&](Action action,
+                                const std::filesystem::path& op_path,
+                                std::string op_hash = {},
+                                const std::filesystem::path& alt = {},
+                                std::uint64_t op_size = 0,
+                                bool exclusive = false) {
+            ops.push_back(SyncOperation{.action = action,
+                                        .path = op_path,
+                                        .hash = std::move(op_hash),
+                                        .alt_path = alt,
+                                        .size = op_size,
+                                        .exclusive_destination = exclusive});
+        };
+        const auto ignored =
             ignore_list != nullptr
                 ? kasumi::ignore::is_ignored(path, *ignore_list, is_dir)
                 : kasumi::ignore::is_reserved_internal(path);
 
         if (ignored) {
             if (c) {
-                ops.push_back({c->is_directory ? Action::DeleteRemoteDirectory
-                                               : Action::DeleteRemote,
-                               target,
-                               c->is_directory ? "" : hash_hex(c->hash),
-                               {}});
+                add_op(c->is_directory ? Action::DeleteRemoteDirectory
+                                       : Action::DeleteRemote,
+                       target,
+                       c->is_directory ? "" : hash_hex(c->hash));
             }
             continue;
         }
@@ -164,12 +176,10 @@ void compare_nodes_3way(
                 // Authorized for deletion: allow 3-way merge to emit
                 // DeleteRemote
             } else {
-                if (authorized_deletions == nullptr && l && !l->is_directory)
-                    ops.push_back({Action::Upload,
-                                   target,
-                                   hash_hex(l->hash),
-                                   {},
-                                   l->size});
+                if (authorized_deletions == nullptr && l && !l->is_directory) {
+                    add_op(
+                        Action::Upload, target, hash_hex(l->hash), {}, l->size);
+                }
                 continue;
             }
         }
@@ -183,12 +193,9 @@ void compare_nodes_3way(
                 if (l && l->is_directory) {
                     recurse(l, b, nullptr);
                 }
-                ops.push_back({l && l->is_directory
-                                   ? Action::DeleteLocalDirectory
-                                   : Action::DeleteLocal,
-                               target,
-                               "",
-                               {}});
+                add_op(l && l->is_directory ? Action::DeleteLocalDirectory
+                                            : Action::DeleteLocal,
+                       target);
             } else {
                 if (c->is_directory) {
                     if (!l || !l->is_directory) {
@@ -206,46 +213,37 @@ void compare_nodes_3way(
                             }
                         }
                         if (conflict_artifact != nullptr) {
-                            ops.push_back({Action::RenameLocal,
-                                           target,
-                                           "",
-                                           platform::path::from_utf8(
-                                               conflict_artifact->path),
-                                           0,
-                                           false});
+                            add_op(Action::RenameLocal,
+                                   target,
+                                   "",
+                                   platform::path::from_utf8(
+                                       conflict_artifact->path));
                         }
-                        ops.push_back(
-                            {Action::CreateLocalDirectory, target, "", {}});
+                        add_op(Action::CreateLocalDirectory, target);
                     }
                 } else {
-                    ops.push_back({Action::Download,
-                                   target,
-                                   hash_hex(c->hash),
-                                   {},
-                                   c->size});
+                    add_op(Action::Download,
+                           target,
+                           hash_hex(c->hash),
+                           {},
+                           c->size);
                 }
                 if ((l && l->is_directory) || c->is_directory)
                     recurse(l, b, c);
             }
         } else if (same_hash(c, b)) {
             if (!l) {
-                ops.push_back({b && b->is_directory
-                                   ? Action::DeleteRemoteDirectory
-                                   : Action::DeleteRemote,
-                               target,
-                               b ? hash_hex(b->hash) : "",
-                               {}});
+                add_op(b && b->is_directory ? Action::DeleteRemoteDirectory
+                                            : Action::DeleteRemote,
+                       target,
+                       b ? hash_hex(b->hash) : "");
             } else {
                 if (l->is_directory) {
                     if (!c || !c->is_directory)
-                        ops.push_back(
-                            {Action::CreateRemoteDirectory, target, "", {}});
+                        add_op(Action::CreateRemoteDirectory, target);
                 } else {
-                    ops.push_back({Action::Upload,
-                                   target,
-                                   hash_hex(l->hash),
-                                   {},
-                                   l->size});
+                    add_op(
+                        Action::Upload, target, hash_hex(l->hash), {}, l->size);
                 }
                 if ((c && c->is_directory) || l->is_directory)
                     recurse(l, b, c);
@@ -259,20 +257,20 @@ void compare_nodes_3way(
             if (already_relocated) {
                 continue;
             }
-            ops.push_back({c->is_directory ? Action::CreateLocalDirectory
-                                           : Action::Download,
-                           target,
-                           c->is_directory ? "" : hash_hex(c->hash),
-                           {},
-                           c->size});
+            add_op(c->is_directory ? Action::CreateLocalDirectory
+                                   : Action::Download,
+                   target,
+                   c->is_directory ? "" : hash_hex(c->hash),
+                   {},
+                   c->size);
             recurse(l, b, c);
         } else if (l && !c) {
-            ops.push_back({l->is_directory ? Action::CreateRemoteDirectory
-                                           : Action::Upload,
-                           target,
-                           l->is_directory ? "" : hash_hex(l->hash),
-                           {},
-                           l->is_directory ? 0 : l->size});
+            add_op(l->is_directory ? Action::CreateRemoteDirectory
+                                   : Action::Upload,
+                   target,
+                   l->is_directory ? "" : hash_hex(l->hash),
+                   {},
+                   l->is_directory ? 0 : l->size);
             recurse(l, b, c);
         } else if (l && c && l->is_directory != c->is_directory) {
             const auto conflict_path = [&](const char* suffix) {
@@ -281,81 +279,67 @@ void compare_nodes_3way(
             };
             const auto download_remote_conflict =
                 [&](const std::filesystem::path& conflict_target) {
-                    ops.push_back({Action::Download,
-                                   conflict_path(".kasumiconflict_remote"),
-                                   hash_hex(c->hash),
-                                   conflict_target,
-                                   c->size,
-                                   true});
+                    add_op(Action::Download,
+                           conflict_path(".kasumiconflict_remote"),
+                           hash_hex(c->hash),
+                           conflict_target,
+                           c->size,
+                           true);
                 };
             if (!b) {
                 if (l->is_directory) {
-                    ops.push_back(
-                        {Action::CreateRemoteDirectory, target, "", {}});
+                    add_op(Action::CreateRemoteDirectory, target);
                     download_remote_conflict(target);
                     recurse(l, nullptr, nullptr);
                 } else {
                     const auto conflict =
                         conflict_path(".kasumiconflict_local");
-                    ops.push_back(
-                        {Action::RenameLocal, target, "", conflict, 0, true});
-                    ops.push_back({Action::Upload,
-                                   conflict,
-                                   hash_hex(l->hash),
-                                   {},
-                                   l->size});
-                    ops.push_back(
-                        {Action::CreateLocalDirectory, target, "", {}});
+                    add_op(Action::RenameLocal, target, "", conflict, 0, true);
+                    add_op(Action::Upload,
+                           conflict,
+                           hash_hex(l->hash),
+                           {},
+                           l->size);
+                    add_op(Action::CreateLocalDirectory, target);
                     recurse(nullptr, nullptr, c);
                 }
             } else if (l->mtime > c->mtime) {
-                ops.push_back(
-                    {Action::DeleteRemote, target, hash_hex(c->hash), {}});
+                add_op(Action::DeleteRemote, target, hash_hex(c->hash));
                 recurse(l, nullptr, nullptr);
             } else if (l->is_directory) {
                 download_remote_conflict({});
                 recurse(l, nullptr, nullptr);
             } else {
                 if (c->is_directory) {
-                    ops.push_back(
-                        {Action::CreateLocalDirectory, target, "", {}});
+                    add_op(Action::CreateLocalDirectory, target);
                 } else {
-                    ops.push_back({Action::DeleteLocal, target, "", {}});
-                    ops.push_back({Action::Download,
-                                   target,
-                                   hash_hex(c->hash),
-                                   {},
-                                   c->size});
+                    add_op(Action::DeleteLocal, target);
+                    add_op(Action::Download,
+                           target,
+                           hash_hex(c->hash),
+                           {},
+                           c->size);
                 }
                 recurse(nullptr, nullptr, c);
             }
         } else if (l && c && !l->is_directory) {
-            const auto download_op =
-                [&](const std::filesystem::path& dest,
-                    const std::filesystem::path& alt_target,
-                    bool exclusive) {
-                    ops.push_back({Action::Download,
-                                   dest,
-                                   hash_hex(c->hash),
-                                   alt_target,
-                                   c->size,
-                                   exclusive});
-                };
             if (l->mtime > c->mtime) {
-                ops.push_back(
-                    {Action::Upload, target, hash_hex(l->hash), {}, l->size});
-                download_op(platform::path::from_utf8(make_conflict_path(
-                                path, ".kasumiconflict_remote")),
-                            target,
-                            true);
+                add_op(Action::Upload, target, hash_hex(l->hash), {}, l->size);
+                add_op(Action::Download,
+                       platform::path::from_utf8(
+                           make_conflict_path(path, ".kasumiconflict_remote")),
+                       hash_hex(c->hash),
+                       target,
+                       c->size,
+                       true);
             } else {
                 const auto conflict = platform::path::from_utf8(
                     make_conflict_path(path, ".kasumiconflict_local"));
-                ops.push_back(
-                    {Action::RenameLocal, target, "", conflict, 0, true});
-                download_op(target, {}, false);
-                ops.push_back(
-                    {Action::Upload, conflict, hash_hex(l->hash), {}, l->size});
+                add_op(Action::RenameLocal, target, "", conflict, 0, true);
+                add_op(
+                    Action::Download, target, hash_hex(c->hash), {}, c->size);
+                add_op(
+                    Action::Upload, conflict, hash_hex(l->hash), {}, l->size);
             }
         } else {
             recurse(l, b, c);

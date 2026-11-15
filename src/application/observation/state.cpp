@@ -487,8 +487,8 @@ collect_reconciliation_input(
     }
     input.ignore_list = std::move(*effective_rules);
     if (input.ignore_list != local_ignore_list) {
-        auto projected = collect_local_observation(
-            runtime_data.local_dir, session, input.ignore_list);
+        auto projected = collect_local_observation(runtime_data.local_dir,
+                                                   input.ignore_list);
         if (!projected) {
             return std::unexpected(
                 state_error(reconciliation::ErrorCode::InvalidLocalTree,

@@ -560,12 +560,6 @@ candidate_shared_tree(const Input& input,
                     !parents) {
                     return std::unexpected(std::move(parents.error()));
                 }
-                auto row = *local_row;
-                row.path = path;
-                row.hash = {};
-                row.size = 0;
-                row.is_directory = true;
-                upsert_row(result.tree, std::move(row));
                 break;
             }
             case Action::DeleteRemote:
@@ -639,18 +633,13 @@ project_local_tree(Snapshot local_tree,
                    const Snapshot& desired_tree,
                    ErrorCode error_code) {
     if (!kasumi::valid_snapshot(local_tree, false)) {
-        return std::unexpected(Error{
-            .code = error_code,
-            .detail = "invalid local tree for managed projection",
-            .paths = {},
-        });
+        return std::unexpected(fail_error(
+            error_code, "invalid local tree for managed projection"));
     }
     if (!kasumi::valid_snapshot(desired_tree, true)) {
-        return std::unexpected(Error{
-            .code = ErrorCode::InvalidStorageTree,
-            .detail = "invalid desired tree for managed projection",
-            .paths = {},
-        });
+        return std::unexpected(
+            fail_error(ErrorCode::InvalidStorageTree,
+                       "invalid desired tree for managed projection"));
     }
 
     std::unordered_set<std::string> retained_directories;
@@ -701,11 +690,8 @@ project_local_tree(Snapshot local_tree,
     }
     finalize_snapshot(projected);
     if (!kasumi::valid_snapshot(projected, false)) {
-        return std::unexpected(Error{
-            .code = error_code,
-            .detail = "managed local projection is invalid",
-            .paths = {},
-        });
+        return std::unexpected(
+            fail_error(error_code, "managed local projection is invalid"));
     }
     return projected;
 }
@@ -937,12 +923,10 @@ merge_pending_references(Snapshot& publication_tree,
                          const Snapshot& candidate_shared_tree) {
     for (const auto& pending : pending_rows) {
         if (pending.is_directory) {
-            return std::unexpected(Error{
-                .code = ErrorCode::InvalidStorageTree,
-                .detail = "pending reference cannot "
-                          "represent directory",
-                .paths = {platform::path::from_utf8(pending.path)},
-            });
+            return std::unexpected(
+                fail_error(ErrorCode::InvalidStorageTree,
+                           "pending reference cannot represent directory",
+                           {platform::path::from_utf8(pending.path)}));
         }
 
         erase_subtree(publication_tree, pending.path);
@@ -962,10 +946,6 @@ merge_pending_references(Snapshot& publication_tree,
     finalize_snapshot(publication_tree);
 
     return {};
-}
-
-Error invalid_tree_error(ErrorCode code, std::string detail) {
-    return fail_error(code, std::move(detail));
 }
 
 struct ContentIdentityKey {
@@ -1262,31 +1242,29 @@ ReconcileResult reconcile(const Input& input) {
         });
     }
     if (!kasumi::valid_snapshot(input.local_tree, false)) {
-        return std::unexpected(invalid_tree_error(ErrorCode::InvalidLocalTree,
-                                                  "invalid local tree"));
+        return std::unexpected(
+            fail_error(ErrorCode::InvalidLocalTree, "invalid local tree"));
     }
 
     if (!kasumi::valid_snapshot(input.base_tree, true)) {
-        return std::unexpected(invalid_tree_error(ErrorCode::InvalidBaseTree,
-                                                  "invalid base tree"));
+        return std::unexpected(
+            fail_error(ErrorCode::InvalidBaseTree, "invalid base tree"));
     }
 
     if (!kasumi::valid_snapshot(input.storage.tree,
                                 !input.storage.history_present)) {
-        return std::unexpected(invalid_tree_error(ErrorCode::InvalidStorageTree,
-                                                  "invalid storage tree"));
+        return std::unexpected(
+            fail_error(ErrorCode::InvalidStorageTree, "invalid storage tree"));
     }
 
     if (input.base_state_present && !input.storage.history_present) {
-        return std::unexpected(Error{
-            .code = ErrorCode::MissingStorageHistory,
-            .detail = "remote history is missing for the persisted local base",
-            .paths = {},
-        });
+        return std::unexpected(fail_error(
+            ErrorCode::MissingStorageHistory,
+            "remote history is missing for the persisted local base"));
     }
 
     if (!valid_pending_rows(input)) {
-        return std::unexpected(invalid_tree_error(
+        return std::unexpected(fail_error(
             ErrorCode::InvalidLocalBaseState,
             "pending materializations do not match the accepted base"));
     }
@@ -1296,20 +1274,15 @@ ReconcileResult reconcile(const Input& input) {
                               input.base_commit_id,
                               &kasumi::history::LoadedCommit::id);
         if (found == input.storage.reachable_commits.end()) {
-            return std::unexpected(Error{
-                .code = ErrorCode::StorageHistoryRegression,
-                .detail = "local base commit is not reachable from storage",
-                .paths = {},
-            });
+            return std::unexpected(
+                fail_error(ErrorCode::StorageHistoryRegression,
+                           "local base commit is not reachable from storage"));
         }
         if (found->commit.height != input.local_generation ||
             found->commit.tree != input.base_tree) {
-            return std::unexpected(Error{
-                .code = ErrorCode::InvalidLocalBaseState,
-                .detail =
-                    "persisted local base identity does not match its commit",
-                .paths = {},
-            });
+            return std::unexpected(fail_error(
+                ErrorCode::InvalidLocalBaseState,
+                "persisted local base identity does not match its commit"));
         }
     }
 
