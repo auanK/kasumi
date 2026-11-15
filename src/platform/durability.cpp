@@ -134,23 +134,21 @@ validate_replace_paths(const std::filesystem::path& source,
 
     std::error_code error;
     const auto target_status = std::filesystem::symlink_status(target, error);
-    std::filesystem::file_status effective_target_status = target_status;
-    if (path_not_found(error)) {
-        error.clear();
-        effective_target_status =
-            std::filesystem::file_status{std::filesystem::file_type::not_found};
-    } else if (error) {
+    if (path_not_found(error) ||
+        (!error &&
+         target_status.type() == std::filesystem::file_type::not_found)) {
+        return {};
+    }
+    if (error) {
         return std::unexpected("replace_atomically: could not query target: " +
                                error.message());
     }
-    if (std::filesystem::is_symlink(effective_target_status) ||
-        std::filesystem::is_directory(effective_target_status)) {
+    if (std::filesystem::is_symlink(target_status) ||
+        std::filesystem::is_directory(target_status)) {
         return std::unexpected(
             "replace_atomically: target cannot be symlink or directory");
     }
-    if (!std::filesystem::is_regular_file(effective_target_status) &&
-        effective_target_status.type() !=
-            std::filesystem::file_type::not_found) {
+    if (!std::filesystem::is_regular_file(target_status)) {
         return std::unexpected(
             "replace_atomically: target is not a regular file");
     }

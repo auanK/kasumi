@@ -30,7 +30,7 @@ using PathSet = std::unordered_set<std::string>;
 std::vector<std::byte> serialize_tree(const Snapshot& snapshot,
                                       std::uint64_t height) {
     wire::Writer writer;
-    writer.buffer.reserve(1024 * 1024);
+    writer.buffer.reserve(12 + snapshot.rows.size() * 64);
 
     const char magic[] = "KASU";
     wire::write_bytes(writer, std::as_bytes(std::span{magic, 4}));
@@ -314,41 +314,16 @@ std::expected<std::vector<std::string>, Error> find_best_common_ancestors(
         return std::vector<std::string>{};
     }
 
-    std::unordered_set<std::string> visited;
-    std::vector<std::pair<std::string, std::size_t>> pending;
-
+    std::unordered_set<std::string_view> parent_of_common;
     for (const auto& candidate : common_ancestors) {
         for (const auto& parent : index.at(candidate)->commit.parents) {
-            pending.emplace_back(parent, 1);
-        }
-    }
-
-    while (!pending.empty()) {
-        auto [id, depth] = std::move(pending.back());
-        pending.pop_back();
-
-        if (depth > maximum_graph_depth) {
-            return std::unexpected(
-                Error{ErrorCode::LimitExceeded, "graph depth exceeded"});
-        }
-
-        if (!visited.insert(id).second) {
-            continue;
-        }
-
-        if (visited.size() > maximum_loaded_commit_count) {
-            return std::unexpected(
-                Error{ErrorCode::LimitExceeded, "ancestor count exceeded"});
-        }
-
-        for (const auto& parent : index.at(id)->commit.parents) {
-            pending.emplace_back(parent, depth + 1);
+            parent_of_common.insert(parent);
         }
     }
 
     std::vector<std::string> best;
     for (const auto& candidate : common_ancestors) {
-        if (!visited.contains(candidate)) {
+        if (!parent_of_common.contains(candidate)) {
             best.push_back(candidate);
         }
     }

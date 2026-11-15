@@ -117,6 +117,20 @@ void compare_nodes_3way(
         const auto target = platform::path::from_utf8(path);
         const bool is_dir = (c && c->is_directory) || (l && l->is_directory) ||
                             (b && b->is_directory);
+        const auto recurse =
+            [&](const NodeRow* nl, const NodeRow* nb, const NodeRow* nc) {
+                compare_nodes_3way(local_snapshot,
+                                   base_snapshot,
+                                   cloud_snapshot,
+                                   nl,
+                                   nb,
+                                   nc,
+                                   path,
+                                   missing_blocks,
+                                   ops,
+                                   ignore_list,
+                                   authorized_deletions);
+            };
 
         const bool ignored =
             ignore_list != nullptr
@@ -151,33 +165,13 @@ void compare_nodes_3way(
         }
         if (same_hash(l, c)) {
             if (l && c && l->is_directory && c->is_directory)
-                compare_nodes_3way(local_snapshot,
-                                   base_snapshot,
-                                   cloud_snapshot,
-                                   l,
-                                   b,
-                                   c,
-                                   path,
-                                   missing_blocks,
-                                   ops,
-                                   ignore_list,
-                                   authorized_deletions);
+                recurse(l, b, c);
             continue;
         }
         if (same_hash(l, b)) {
             if (!c) {
                 if (l && l->is_directory) {
-                    compare_nodes_3way(local_snapshot,
-                                       base_snapshot,
-                                       cloud_snapshot,
-                                       l,
-                                       b,
-                                       nullptr,
-                                       path,
-                                       missing_blocks,
-                                       ops,
-                                       ignore_list,
-                                       authorized_deletions);
+                    recurse(l, b, nullptr);
                 }
                 ops.push_back({l && l->is_directory
                                    ? Action::DeleteLocalDirectory
@@ -221,17 +215,7 @@ void compare_nodes_3way(
                                    c->size});
                 }
                 if ((l && l->is_directory) || c->is_directory)
-                    compare_nodes_3way(local_snapshot,
-                                       base_snapshot,
-                                       cloud_snapshot,
-                                       l,
-                                       b,
-                                       c,
-                                       path,
-                                       missing_blocks,
-                                       ops,
-                                       ignore_list,
-                                       authorized_deletions);
+                    recurse(l, b, c);
             }
         } else if (same_hash(c, b)) {
             if (!l) {
@@ -254,17 +238,7 @@ void compare_nodes_3way(
                                    l->size});
                 }
                 if ((c && c->is_directory) || l->is_directory)
-                    compare_nodes_3way(local_snapshot,
-                                       base_snapshot,
-                                       cloud_snapshot,
-                                       l,
-                                       b,
-                                       c,
-                                       path,
-                                       missing_blocks,
-                                       ops,
-                                       ignore_list,
-                                       authorized_deletions);
+                    recurse(l, b, c);
             }
         } else if (!l && c) {
             const bool already_relocated =
@@ -281,17 +255,7 @@ void compare_nodes_3way(
                            c->is_directory ? "" : hash_hex(c->hash),
                            {},
                            c->size});
-            compare_nodes_3way(local_snapshot,
-                               base_snapshot,
-                               cloud_snapshot,
-                               l,
-                               b,
-                               c,
-                               path,
-                               missing_blocks,
-                               ops,
-                               ignore_list,
-                               authorized_deletions);
+            recurse(l, b, c);
         } else if (l && !c) {
             ops.push_back({l->is_directory ? Action::CreateRemoteDirectory
                                            : Action::Upload,
@@ -299,17 +263,7 @@ void compare_nodes_3way(
                            l->is_directory ? "" : hash_hex(l->hash),
                            {},
                            l->is_directory ? 0 : l->size});
-            compare_nodes_3way(local_snapshot,
-                               base_snapshot,
-                               cloud_snapshot,
-                               l,
-                               b,
-                               c,
-                               path,
-                               missing_blocks,
-                               ops,
-                               ignore_list,
-                               authorized_deletions);
+            recurse(l, b, c);
         } else if (l && c && l->is_directory != c->is_directory) {
             if (!b) {
                 if (l->is_directory) {
@@ -322,17 +276,7 @@ void compare_nodes_3way(
                                    target,
                                    c->size,
                                    true});
-                    compare_nodes_3way(local_snapshot,
-                                       base_snapshot,
-                                       cloud_snapshot,
-                                       l,
-                                       nullptr,
-                                       nullptr,
-                                       path,
-                                       missing_blocks,
-                                       ops,
-                                       ignore_list,
-                                       authorized_deletions);
+                    recurse(l, nullptr, nullptr);
                 } else {
                     const auto conflict = platform::path::from_utf8(
                         make_conflict_path(path, ".kasumiconflict_local"));
@@ -345,33 +289,13 @@ void compare_nodes_3way(
                                    l->size});
                     ops.push_back(
                         {Action::CreateLocalDirectory, target, "", {}});
-                    compare_nodes_3way(local_snapshot,
-                                       base_snapshot,
-                                       cloud_snapshot,
-                                       nullptr,
-                                       nullptr,
-                                       c,
-                                       path,
-                                       missing_blocks,
-                                       ops,
-                                       ignore_list,
-                                       authorized_deletions);
+                    recurse(nullptr, nullptr, c);
                 }
             } else {
                 if (l->mtime > c->mtime) {
                     ops.push_back(
                         {Action::DeleteRemote, target, hash_hex(c->hash), {}});
-                    compare_nodes_3way(local_snapshot,
-                                       base_snapshot,
-                                       cloud_snapshot,
-                                       l,
-                                       nullptr,
-                                       nullptr,
-                                       path,
-                                       missing_blocks,
-                                       ops,
-                                       ignore_list,
-                                       authorized_deletions);
+                    recurse(l, nullptr, nullptr);
                 } else if (l->is_directory) {
                     ops.push_back({Action::Download,
                                    platform::path::from_utf8(make_conflict_path(
@@ -380,17 +304,7 @@ void compare_nodes_3way(
                                    {},
                                    c->size,
                                    true});
-                    compare_nodes_3way(local_snapshot,
-                                       base_snapshot,
-                                       cloud_snapshot,
-                                       l,
-                                       nullptr,
-                                       nullptr,
-                                       path,
-                                       missing_blocks,
-                                       ops,
-                                       ignore_list,
-                                       authorized_deletions);
+                    recurse(l, nullptr, nullptr);
                 } else {
                     if (c->is_directory)
                         ops.push_back(
@@ -403,17 +317,7 @@ void compare_nodes_3way(
                                        {},
                                        c->size});
                     }
-                    compare_nodes_3way(local_snapshot,
-                                       base_snapshot,
-                                       cloud_snapshot,
-                                       nullptr,
-                                       nullptr,
-                                       c,
-                                       path,
-                                       missing_blocks,
-                                       ops,
-                                       ignore_list,
-                                       authorized_deletions);
+                    recurse(nullptr, nullptr, c);
                 }
             }
         } else if (l && c && !l->is_directory) {
@@ -438,17 +342,7 @@ void compare_nodes_3way(
                     {Action::Upload, conflict, hash_hex(l->hash), {}, l->size});
             }
         } else {
-            compare_nodes_3way(local_snapshot,
-                               base_snapshot,
-                               cloud_snapshot,
-                               l,
-                               b,
-                               c,
-                               path,
-                               missing_blocks,
-                               ops,
-                               ignore_list,
-                               authorized_deletions);
+            recurse(l, b, c);
         }
     }
 }

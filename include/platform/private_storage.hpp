@@ -97,10 +97,6 @@ struct PrivateOutputFile {
 struct CreateFileError {
     std::string message;
     bool is_collision{false};
-
-    const std::string& error() const noexcept {
-        return message;
-    }
 };
 
 std::expected<PrivateOutputFile, CreateFileError>

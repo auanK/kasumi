@@ -38,6 +38,29 @@ template <typename TimePoint> constexpr auto file_clock_from_sys(TimePoint tp) {
 #endif
 }
 
+std::optional<std::filesystem::file_time_type>
+add_nanoseconds_to_unix_epoch(std::int64_t unix_ns) noexcept {
+    using Duration = std::filesystem::file_time_type::duration;
+    using Rep = Duration::rep;
+    static_assert(std::is_integral_v<Rep> && std::is_signed_v<Rep>);
+    static_assert(
+        std::ratio_greater_equal_v<typename Duration::period, std::nano>);
+
+    const auto origin =
+        file_clock_from_sys(std::chrono::system_clock::time_point{})
+            .time_since_epoch();
+    const auto delta =
+        std::chrono::duration_cast<Duration>(std::chrono::nanoseconds{unix_ns});
+    if ((delta.count() > 0 &&
+         origin.count() > std::numeric_limits<Rep>::max() - delta.count()) ||
+        (delta.count() < 0 &&
+         origin.count() < std::numeric_limits<Rep>::lowest() - delta.count())) {
+        return std::nullopt;
+    }
+    return std::filesystem::file_time_type{
+        Duration{origin.count() + delta.count()}};
+}
+
 } // namespace
 
 #if defined(_WIN32)
@@ -68,23 +91,12 @@ from_windows_ticks(std::uint64_t ticks) noexcept {
         return std::unexpected(
             "timestamp outside representable nanosecond range");
     }
-    const auto unix_ns = diff_ticks * 100LL;
-    using Duration = std::filesystem::file_time_type::duration;
-    using Rep = Duration::rep;
-    const auto origin =
-        file_clock_from_sys(std::chrono::system_clock::time_point{})
-            .time_since_epoch();
-    const auto delta =
-        std::chrono::duration_cast<Duration>(std::chrono::nanoseconds{unix_ns});
-    if ((delta.count() > 0 &&
-         origin.count() > std::numeric_limits<Rep>::max() - delta.count()) ||
-        (delta.count() < 0 &&
-         origin.count() < std::numeric_limits<Rep>::lowest() - delta.count())) {
+    const auto result = add_nanoseconds_to_unix_epoch(diff_ticks * 100LL);
+    if (!result) {
         return std::unexpected(
             "timestamp outside representable file_time_type range");
     }
-    return std::filesystem::file_time_type{
-        Duration{origin.count() + delta.count()}};
+    return *result;
 #endif
 }
 
@@ -204,7 +216,7 @@ auto with_windows_metadata_handle(const std::filesystem::path& path,
                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     nullptr,
                     OPEN_EXISTING,
-                    FILE_FLAG_BACKUP_SEMANTICS,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
                     nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         return std::unexpected(
@@ -224,7 +236,7 @@ FILETIME to_file_time(std::uint64_t ticks) {
     return result;
 }
 
-std::expected<void, std::string>
+std::expected<std::uint64_t, std::string>
 set_windows_time(const std::filesystem::path& path,
                  std::filesystem::file_time_type value) {
     auto ticks = detail::to_windows_ticks(value);
@@ -236,13 +248,13 @@ set_windows_time(const std::filesystem::path& path,
         path,
         FILE_WRITE_ATTRIBUTES,
         "CreateFileW failed: ",
-        [&](HANDLE handle) -> std::expected<void, std::string> {
+        [&](HANDLE handle) -> std::expected<std::uint64_t, std::string> {
             if (!SetFileTime(handle, nullptr, nullptr, &file_time)) {
                 return std::unexpected("SetFileTime failed: " +
                                        std::system_category().message(
                                            static_cast<int>(GetLastError())));
             }
-            return {};
+            return *ticks;
         });
 }
 
@@ -263,24 +275,6 @@ read_windows_ticks(const std::filesystem::path& path) {
                     << 32) |
                    file_time.dwLowDateTime;
         });
-}
-
-std::expected<bool, std::string>
-equivalent_file_time(std::filesystem::file_time_type requested,
-                     std::uint64_t actual_ticks) {
-    auto requested_ticks = detail::to_windows_ticks(requested);
-    if (!requested_ticks) {
-        return std::unexpected(requested_ticks.error());
-    }
-    return *requested_ticks == actual_ticks;
-}
-#else
-std::expected<bool, std::string>
-equivalent_file_time(std::filesystem::file_time_type requested,
-                     std::filesystem::file_time_type actual) {
-    // The API writes and reads the same representation, allowing exact
-    // comparison.
-    return requested == actual;
 }
 #endif
 
@@ -314,26 +308,7 @@ file_time_from_unix_nanoseconds(std::int64_t value) noexcept {
     if (value == 0) {
         return std::filesystem::file_time_type{};
     }
-
-    using Duration = std::filesystem::file_time_type::duration;
-    using Rep = Duration::rep;
-    static_assert(std::is_integral_v<Rep> && std::is_signed_v<Rep>);
-    static_assert(
-        std::ratio_greater_equal_v<typename Duration::period, std::nano>);
-
-    const auto delta =
-        std::chrono::duration_cast<Duration>(std::chrono::nanoseconds{value});
-    const auto origin =
-        file_clock_from_sys(std::chrono::system_clock::time_point{})
-            .time_since_epoch();
-    if ((delta.count() > 0 &&
-         origin.count() > std::numeric_limits<Rep>::max() - delta.count()) ||
-        (delta.count() < 0 &&
-         origin.count() < std::numeric_limits<Rep>::lowest() - delta.count())) {
-        return std::nullopt;
-    }
-    return std::filesystem::file_time_type{
-        Duration{origin.count() + delta.count()}};
+    return add_nanoseconds_to_unix_epoch(value);
 }
 
 bool filesystem_equivalent(std::int64_t left_ns,
@@ -391,48 +366,30 @@ set_last_write_time(const std::filesystem::path& path,
     }
 
 #if defined(_WIN32)
-    {
-        auto written = set_windows_time(path, value);
-        if (!written) {
-            return std::unexpected(written.error());
-        }
+    const auto written = set_windows_time(path, value);
+    if (!written) {
+        return std::unexpected(written.error());
     }
-#else
-    {
-        std::error_code error;
-        std::filesystem::last_write_time(path, value, error);
-        if (error) {
-            return std::unexpected("failed to set timestamp: " +
-                                   error.message());
-        }
-    }
-#endif
-
-#if defined(_WIN32)
     const auto actual = read_windows_ticks(path);
     if (!actual) {
         return std::unexpected("failed to confirm timestamp: " +
                                actual.error());
     }
+    const bool matches = (*written == *actual);
 #else
     std::error_code error;
+    std::filesystem::last_write_time(path, value, error);
+    if (error) {
+        return std::unexpected("failed to set timestamp: " + error.message());
+    }
     const auto actual = std::filesystem::last_write_time(path, error);
     if (error) {
         return std::unexpected("failed to confirm timestamp: " +
                                error.message());
     }
+    const bool matches = (value == actual);
 #endif
-#if defined(_WIN32)
-    const auto equivalent = equivalent_file_time(value, *actual);
-#else
-    const auto equivalent = equivalent_file_time(value, actual);
-#endif
-    if (!equivalent) {
-        return std::unexpected("failed to verify timestamp for " +
-                               kasumi::platform::path::to_utf8(path) + ": " +
-                               equivalent.error());
-    }
-    if (!*equivalent) {
+    if (!matches) {
         return std::unexpected("timestamp verification failed for " +
                                kasumi::platform::path::to_utf8(path));
     }

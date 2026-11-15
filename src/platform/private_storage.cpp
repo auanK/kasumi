@@ -371,11 +371,6 @@ protect_entry(const std::filesystem::path& path,
 #endif
 }
 
-void remove_temporary(const std::filesystem::path& path) noexcept {
-    std::error_code ignored;
-    std::filesystem::remove(path, ignored);
-}
-
 #if defined(_WIN32)
 std::expected<void, std::string>
 protect_windows_tree(const std::filesystem::path& root) {
@@ -869,6 +864,7 @@ query_directory_identity(const std::filesystem::path& path) noexcept {
         result.file_id_low = file_id.file_id_low;
         result.file_id_high = file_id.file_id_high;
         result.valid = true;
+        result = to_file_identity(id);
     }
     CloseHandle(handle);
     return result;
@@ -991,16 +987,12 @@ publish_private_file(PrivateOutputFile& file,
 
 CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
     if (file.is_published() || file.path.empty()) {
-        if (file.is_open()) {
-            close_private_file(file);
-        }
+        close_private_file(file);
         return CleanupResult::AlreadyAbsent;
     }
 
     if (!file.identity.valid) {
-        if (file.is_open()) {
-            close_private_file(file);
-        }
+        close_private_file(file);
         return CleanupResult::IdentityMismatch;
     }
 
@@ -1013,11 +1005,9 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
         const auto disp_err = GetLastError();
         close_private_file(file);
         if (!disp_ok) {
-            if (!file.path.empty()) {
-                const auto current_id = query_file_identity(file.path);
-                if (current_id.valid && !(current_id == file.identity)) {
-                    return CleanupResult::IdentityMismatch;
-                }
+            const auto current_id = query_file_identity(file.path);
+            if (current_id.valid && !(current_id == file.identity)) {
+                return CleanupResult::IdentityMismatch;
             }
             if (disp_err == ERROR_ACCESS_DENIED ||
                 disp_err == ERROR_SHARING_VIOLATION) {
@@ -1025,13 +1015,11 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
             }
             return CleanupResult::FilesystemError;
         }
-        if (!file.path.empty()) {
-            std::error_code exists_err;
-            if (std::filesystem::exists(file.path, exists_err)) {
-                const auto current_id = query_file_identity(file.path);
-                if (!current_id.valid || !(current_id == file.identity)) {
-                    return CleanupResult::IdentityMismatch;
-                }
+        std::error_code exists_err;
+        if (std::filesystem::exists(file.path, exists_err)) {
+            const auto current_id = query_file_identity(file.path);
+            if (!current_id.valid || !(current_id == file.identity)) {
+                return CleanupResult::IdentityMismatch;
             }
         }
         return CleanupResult::Removed;
@@ -1067,12 +1055,14 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
         return CleanupResult::AlreadyAbsent;
     }
     std::error_code exists_err;
-    const bool exists = std::filesystem::exists(file.path, exists_err);
+    const auto status = std::filesystem::symlink_status(file.path, exists_err);
+    if (exists_err == std::errc::no_such_file_or_directory ||
+        (!exists_err &&
+         status.type() == std::filesystem::file_type::not_found)) {
+        return CleanupResult::AlreadyAbsent;
+    }
     if (exists_err) {
         return CleanupResult::FilesystemError;
-    }
-    if (!exists) {
-        return CleanupResult::AlreadyAbsent;
     }
     if (!file.identity.valid) {
         return CleanupResult::IdentityMismatch;
@@ -1166,39 +1156,26 @@ write_atomically(const std::filesystem::path& path, std::string_view bytes) {
         }
         const auto temporary =
             platform::path::temporary_sibling_path(path, ".", "." + *id);
-        auto created = create_file(temporary);
-        if (!created) {
-            std::error_code exists_error;
-            if (std::filesystem::exists(temporary, exists_error) &&
-                !exists_error) {
+        auto file = create_private_file(temporary);
+        if (!file) {
+            if (file.error().is_collision) {
                 continue;
             }
-            return created;
+            return std::unexpected(file.error().message);
         }
-
-        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-        if (!output ||
-            (!bytes.empty() &&
-             !output.write(bytes.data(),
-                           static_cast<std::streamsize>(bytes.size()))) ||
-            !output.flush()) {
-            output.close();
-            remove_temporary(temporary);
-            return std::unexpected("failed to write private file");
+        if (auto written =
+                write_private_file(*file, bytes.data(), bytes.size());
+            !written) {
+            static_cast<void>(remove_private_file_if_owned(*file));
+            return written;
         }
-        output.close();
-        if (output.fail()) {
-            remove_temporary(temporary);
-            return std::unexpected("failed to close private file");
+        if (auto flushed = flush_and_close_private_file(*file); !flushed) {
+            static_cast<void>(remove_private_file_if_owned(*file));
+            return flushed;
         }
-        auto synced = durability::sync_file(temporary);
-        if (!synced) {
-            remove_temporary(temporary);
-            return synced;
-        }
-        auto replaced = durability::replace_atomically(temporary, path);
-        if (!replaced) {
-            remove_temporary(temporary);
+        if (auto replaced = durability::replace_atomically(temporary, path);
+            !replaced) {
+            static_cast<void>(remove_private_file_if_owned(*file));
             return replaced;
         }
         return durability::sync_parent_directory(path);

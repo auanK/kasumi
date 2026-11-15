@@ -30,7 +30,7 @@ regular_file_fingerprint(const std::filesystem::path& path) {
                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     nullptr,
                     OPEN_EXISTING,
-                    FILE_FLAG_BACKUP_SEMANTICS,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
                     nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         const auto e = GetLastError();
@@ -41,6 +41,9 @@ regular_file_fingerprint(const std::filesystem::path& path) {
     }
     FILE_ID_INFO id{};
     FILE_BASIC_INFO basic{};
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    const auto tag_ok = GetFileInformationByHandleEx(
+        handle, FileAttributeTagInfo, &tag, sizeof(tag));
     const auto id_ok =
         GetFileInformationByHandleEx(handle, FileIdInfo, &id, sizeof(id));
     const auto id_error = id_ok ? ERROR_SUCCESS : GetLastError();
@@ -55,7 +58,9 @@ regular_file_fingerprint(const std::filesystem::path& path) {
         return std::unexpected(
             std::system_category().message(static_cast<int>(e)));
     }
-    if ((basic.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+    if ((tag_ok && (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) ||
+        (basic.FileAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
         return std::optional<FileFingerprint>{};
     FileFingerprint result{.kind = FileFingerprintKind::WindowsFileIdentity};
     result.value[0] = id.VolumeSerialNumber;
@@ -67,7 +72,7 @@ regular_file_fingerprint(const std::filesystem::path& path) {
     return std::optional<FileFingerprint>{result};
 #else
     struct stat status{};
-    if (stat(path.c_str(), &status) != 0)
+    if (::lstat(path.c_str(), &status) != 0)
         return std::unexpected(std::system_category().message(errno));
     if (!S_ISREG(status.st_mode))
         return std::optional<FileFingerprint>{};

@@ -348,7 +348,6 @@ add_library(kasumi_platform STATIC
     src/platform/clock.cpp
     src/platform/durability.cpp
     src/platform/file_fingerprint.cpp
-    src/platform/identity.cpp
     src/platform/metadata.cpp
     src/platform/perf_trace.cpp
     src/platform/private_storage.cpp
@@ -588,6 +587,7 @@ target_link_libraries(
     PUBLIC
     kasumi_application
     PRIVATE
+    kasumi_crypto
     kasumi_warnings
     kasumi_release_optimizations
     kasumi_hardening
@@ -595,7 +595,7 @@ target_link_libraries(
     reproc++
 )
 if(WIN32)
-    target_link_libraries(kasumi_cli PRIVATE advapi32 winhttp bcrypt shell32 version)
+    target_link_libraries(kasumi_cli PRIVATE advapi32 winhttp shell32 version)
 endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
     target_link_libraries(kasumi_cli PRIVATE stdc++exp)

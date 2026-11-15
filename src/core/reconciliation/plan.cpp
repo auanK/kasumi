@@ -47,31 +47,15 @@ bool is_eligible_for_deletion(const Input& input,
                               const NodeRow& pending,
                               const HashSet& missing_objects,
                               const LocalSources& local_sources) {
-    if (input.pending_deletion_authority.empty()) {
-        return false;
-    }
-    const auto it = std::ranges::find_if(input.pending_deletion_authority,
-                                         [&](const NodeRow& auth) {
-                                             return auth == pending;
-                                         });
-    if (it == input.pending_deletion_authority.end()) {
+    if (!std::ranges::contains(input.pending_deletion_authority, pending) ||
+        find_row(input.local_tree, pending.path) != nullptr ||
+        local_sources.contains(pending.hash) ||
+        !missing_objects.contains(pending.hash)) {
         return false;
     }
     const auto* remote = find_row(input.storage.tree, pending.path);
-    if (remote == nullptr || remote->is_directory ||
-        remote->hash != pending.hash || remote->size != pending.size) {
-        return false;
-    }
-    if (find_row(input.local_tree, pending.path) != nullptr) {
-        return false;
-    }
-    if (local_sources.contains(pending.hash)) {
-        return false;
-    }
-    if (!missing_objects.contains(pending.hash)) {
-        return false;
-    }
-    return true;
+    return remote != nullptr && !remote->is_directory &&
+           remote->hash == pending.hash && remote->size == pending.size;
 }
 
 Snapshot logical_local_view(const Input& input,
@@ -241,19 +225,15 @@ synchronize_ancestor_rows(Snapshot& candidate,
 
 std::filesystem::path
 reserve_conflict_path(const std::filesystem::path& preferred,
-                      std::unordered_set<std::string>& reserved,
                       std::unordered_set<std::string>& reserved_case_keys) {
     const auto preferred_text = platform::path::to_logical_utf8(preferred);
     auto candidate = preferred_text;
     std::size_t suffix = 0;
 
-    while (reserved_case_keys.contains(portable_case_key(candidate))) {
+    while (!reserved_case_keys.insert(portable_case_key(candidate)).second) {
         candidate =
             make_conflict_path(preferred_text, "." + std::to_string(++suffix));
     }
-
-    reserved.insert(candidate);
-    reserved_case_keys.insert(portable_case_key(candidate));
 
     return platform::path::from_utf8(candidate);
 }
@@ -261,16 +241,11 @@ reserve_conflict_path(const std::filesystem::path& preferred,
 void reserve_conflict_destinations(const Snapshot& local_tree,
                                    const Snapshot& storage_tree,
                                    std::vector<Operation>& operations) {
-    std::unordered_set<std::string> reserved;
     std::unordered_set<std::string> reserved_case_keys;
+    reserved_case_keys.reserve(local_tree.rows.size() +
+                               storage_tree.rows.size() + operations.size());
 
-    const std::size_t estimated_size =
-        local_tree.rows.size() + storage_tree.rows.size() + operations.size();
-    reserved.reserve(estimated_size);
-    reserved_case_keys.reserve(estimated_size);
-
-    auto add_reserved = [&](const std::string& path) {
-        reserved.insert(path);
+    auto add_reserved = [&](std::string_view path) {
         reserved_case_keys.insert(portable_case_key(path));
     };
 
@@ -304,7 +279,7 @@ void reserve_conflict_destinations(const Snapshot& local_tree,
             const auto preferred = operation.alt_path;
 
             const auto selected =
-                reserve_conflict_path(preferred, reserved, reserved_case_keys);
+                reserve_conflict_path(preferred, reserved_case_keys);
 
             operation.alt_path = selected;
 
@@ -316,8 +291,8 @@ void reserve_conflict_destinations(const Snapshot& local_tree,
             }
         } else if (operation.action == Action::Download &&
                    operation.exclusive_destination) {
-            operation.path = reserve_conflict_path(
-                operation.path, reserved, reserved_case_keys);
+            operation.path =
+                reserve_conflict_path(operation.path, reserved_case_keys);
         }
     }
 }
@@ -1131,7 +1106,6 @@ void plan_local_moves(std::vector<Operation>& operations,
         });
     }
 
-    std::vector<std::uint8_t> consumed(operations.size(), 0);
     std::unordered_set<std::string> used_destinations;
     bool any_matched = false;
     for (std::size_t index = 0; index < operations.size(); ++index) {
@@ -1162,23 +1136,14 @@ void plan_local_moves(std::vector<Operation>& operations,
             .size = expected_size,
             .exclusive_destination = false,
         };
-        consumed[source_index] = 1;
+        operations[source_index].action = Action::Count;
         any_matched = true;
     }
 
     if (any_matched) {
-        std::size_t write_index = 0;
-        for (std::size_t read_index = 0; read_index < operations.size();
-             ++read_index) {
-            if (consumed[read_index] != 0) {
-                continue;
-            }
-            if (write_index != read_index) {
-                operations[write_index] = std::move(operations[read_index]);
-            }
-            ++write_index;
-        }
-        operations.resize(write_index);
+        std::erase_if(operations, [](const Operation& op) {
+            return op.action == Action::Count;
+        });
     }
 }
 
@@ -1368,14 +1333,8 @@ ReconcileResult reconcile(const Input& input) {
                                                   "invalid base tree"));
     }
 
-    if (input.storage.history_present &&
-        !kasumi::valid_snapshot(input.storage.tree, false)) {
-        return std::unexpected(invalid_tree_error(ErrorCode::InvalidStorageTree,
-                                                  "invalid storage tree"));
-    }
-
-    if (!input.storage.history_present &&
-        !kasumi::valid_snapshot(input.storage.tree, true)) {
+    if (!kasumi::valid_snapshot(input.storage.tree,
+                                !input.storage.history_present)) {
         return std::unexpected(invalid_tree_error(ErrorCode::InvalidStorageTree,
                                                   "invalid storage tree"));
     }

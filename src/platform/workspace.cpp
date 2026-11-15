@@ -307,6 +307,16 @@ std::error_code rename_no_replace(const std::filesystem::path& source,
 }
 #endif
 
+std::expected<Workspace, std::string>
+identify_created_workspace(std::filesystem::path root) {
+    const auto identity = private_storage::query_directory_identity(root);
+    if (!identity.valid) {
+        return std::unexpected("could not identify newly created workspace '" +
+                               platform::path::to_utf8(root) + "'");
+    }
+    return Workspace{.root = std::move(root), .identity = identity};
+}
+
 } // namespace
 
 std::expected<Workspace, std::string>
@@ -327,14 +337,7 @@ create_workspace(std::string_view purpose) {
                 base / ("kasumi-" + std::string{purpose} + "-" + *id);
             auto created = private_storage::create_directory(root);
             if (created) {
-                const auto identity =
-                    private_storage::query_directory_identity(root);
-                if (!identity.valid) {
-                    return std::unexpected(
-                        "could not identify newly created workspace '" +
-                        platform::path::to_utf8(root) + "'");
-                }
-                return Workspace{.root = root, .identity = identity};
+                return identify_created_workspace(root);
             }
             std::error_code exists_error;
             if (!std::filesystem::exists(root, exists_error) || exists_error) {
@@ -362,12 +365,7 @@ create_workspace_at(const std::filesystem::path& root) {
                                platform::path::to_utf8(root) +
                                "': " + created.error());
     }
-    const auto identity = private_storage::query_directory_identity(root);
-    if (!identity.valid) {
-        return std::unexpected("could not identify newly created workspace '" +
-                               platform::path::to_utf8(root) + "'");
-    }
-    return Workspace{.root = root, .identity = identity};
+    return identify_created_workspace(root);
 }
 
 std::filesystem::path workspace_file(const Workspace& workspace,

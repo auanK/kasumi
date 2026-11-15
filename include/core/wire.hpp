@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -14,6 +15,11 @@
 #include <vector>
 
 namespace wire {
+
+template <typename T>
+concept WireScalar =
+    (std::is_integral_v<T> && !std::is_same_v<std::remove_cv_t<T>, bool>) ||
+    (std::is_floating_point_v<T> && (sizeof(T) == 4 || sizeof(T) == 8));
 
 // Possible failures when decoding the binary stream.
 enum class Error {
@@ -37,13 +43,11 @@ struct Reader {
 void write_bytes(Writer& writer, std::span<const std::byte> bytes);
 
 // Encodes a number in little-endian.
-template <typename T>
-    requires std::is_integral_v<T> || std::is_floating_point_v<T>
-inline void write(Writer& writer, T value) {
+template <WireScalar T> inline void write(Writer& writer, T value) {
     using WireInt = std::conditional_t<
         std::is_integral_v<T>,
         T,
-        std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>>;
+        std::conditional_t<sizeof(T) == 4, std::uint32_t, std::uint64_t>>;
     auto wire_val = std::bit_cast<WireInt>(value);
     if constexpr (sizeof(WireInt) > 1 &&
                   std::endian::native != std::endian::little) {
@@ -65,19 +69,17 @@ inline void write_enum(Writer& writer, E value) {
 void write_string(Writer& writer, std::string_view str);
 
 // Appends a raw byte array without conversion.
-template <size_t N>
+template <std::size_t N>
 inline void write_array(Writer& writer, const std::array<std::byte, N>& arr) {
     write_bytes(writer, arr);
 }
 
 // Consumes n bytes or returns BufferUnderflow.
 std::expected<std::span<const std::byte>, Error> read_bytes(Reader& reader,
-                                                            size_t n);
+                                                            std::size_t n);
 
 // Decodes a number in little-endian.
-template <typename T>
-    requires std::is_integral_v<T> || std::is_floating_point_v<T>
-inline std::expected<T, Error> read(Reader& reader) {
+template <WireScalar T> inline std::expected<T, Error> read(Reader& reader) {
     auto bytes = read_bytes(reader, sizeof(T));
     if (!bytes) {
         return std::unexpected(bytes.error());
@@ -85,7 +87,7 @@ inline std::expected<T, Error> read(Reader& reader) {
     using WireInt = std::conditional_t<
         std::is_integral_v<T>,
         T,
-        std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>>;
+        std::conditional_t<sizeof(T) == 4, std::uint32_t, std::uint64_t>>;
     WireInt wire_val;
     std::memcpy(&wire_val, bytes->data(), sizeof(T));
     if constexpr (sizeof(WireInt) > 1 &&
@@ -109,10 +111,10 @@ inline std::expected<E, Error> read_enum(Reader& reader) {
 
 // Decodes a string capped by max_length.
 std::expected<std::string, Error> read_string(Reader& reader,
-                                              size_t max_length = 4096);
+                                              std::size_t max_length = 4096);
 
 // Consumes an array of N bytes.
-template <size_t N>
+template <std::size_t N>
 inline std::expected<std::array<std::byte, N>, Error>
 read_array(Reader& reader) {
     auto bytes = read_bytes(reader, N);

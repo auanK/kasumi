@@ -262,12 +262,10 @@ bool valid_snapshot(const Snapshot& snapshot, bool allow_empty) {
 
     for (std::size_t index = 0; index < snapshot.rows.size(); ++index) {
         const auto& row = snapshot.rows[index];
-        if (index != 0 &&
-            (row.path.empty() || row.path == snapshot.rows[index - 1].path)) {
-            return false;
-        }
-
         if (index != 0) {
+            if (row.path.empty() || row.path == snapshot.rows[index - 1].path) {
+                return false;
+            }
             const auto* parent_row = find_row(snapshot, row_parent(row.path));
             if (parent_row == nullptr || !parent_row->is_directory ||
                 !valid_logical_path(row.path)) {

@@ -157,6 +157,42 @@ bool has_columns(sqlite3* database,
            });
 }
 
+std::string quote_sql_identifier(std::string_view identifier) {
+    std::string quoted;
+    quoted.reserve(identifier.size() + 2);
+    quoted.push_back('"');
+    for (const char ch : identifier) {
+        if (ch == '"') {
+            quoted.push_back('"');
+        }
+        quoted.push_back(ch);
+    }
+    quoted.push_back('"');
+    return quoted;
+}
+
+bool protect_wal_sidecars(const std::filesystem::path& database_path) {
+    for (const auto& suffix : {"-wal", "-shm"}) {
+        const auto sidecar =
+            platform::path::temporary_sibling_path(database_path, "", suffix);
+        std::error_code status_error;
+        const auto status =
+            std::filesystem::symlink_status(sidecar, status_error);
+        if (status_error == std::errc::no_such_file_or_directory ||
+            (!status_error &&
+             status.type() == std::filesystem::file_type::not_found)) {
+            continue;
+        }
+        if (status_error || std::filesystem::is_symlink(status)) {
+            return false;
+        }
+        if (!platform::private_storage::protect_file(sidecar)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool has_binary_primary_key(sqlite3* database,
                             std::string_view table,
                             std::string_view column) {
@@ -177,7 +213,8 @@ bool has_binary_primary_key(sqlite3* database,
         return false;
     }
     auto columns = require_statement(sqlite::prepare(
-        database, "PRAGMA index_xinfo(" + primary_key_index + ")"));
+        database,
+        "PRAGMA index_xinfo(" + quote_sql_identifier(primary_key_index) + ")"));
     std::size_t key_columns = 0;
     while (require_step(columns)) {
         if (sqlite::integer(columns, 5) == 0) {
@@ -211,17 +248,6 @@ bool has_expected_schema(sqlite3* database) {
            valid_table(database, "file_cache", "path", file_cache_columns);
 }
 
-void create_file_cache(sqlite3* database) {
-    if (object_kind(database, "file_cache") != ObjectKind::Missing)
-        throw std::runtime_error("state.db file_cache already exists");
-    require(sqlite::execute(
-        database,
-        "CREATE TABLE file_cache (path TEXT PRIMARY KEY NOT NULL, hash TEXT "
-        "NOT NULL, size INTEGER NOT NULL, fingerprint_kind INTEGER NOT NULL, "
-        "fp0 TEXT NOT NULL, fp1 TEXT NOT NULL, fp2 TEXT NOT NULL, fp3 TEXT NOT "
-        "NULL)"));
-}
-
 void create_schema(sqlite3* database) {
     require(sqlite::execute(database, R"(
         CREATE TABLE nodes (
@@ -243,7 +269,12 @@ void create_schema(sqlite3* database) {
             size INTEGER NOT NULL,
             mtime INTEGER NOT NULL
         ))"));
-    create_file_cache(database);
+    require(sqlite::execute(
+        database,
+        "CREATE TABLE file_cache (path TEXT PRIMARY KEY NOT NULL, hash TEXT "
+        "NOT NULL, size INTEGER NOT NULL, fingerprint_kind INTEGER NOT NULL, "
+        "fp0 TEXT NOT NULL, fp1 TEXT NOT NULL, fp2 TEXT NOT NULL, fp3 TEXT NOT "
+        "NULL)"));
 }
 
 bool valid_pending_materializations(
@@ -367,8 +398,7 @@ void write_tree_delta(sqlite3* database,
 std::expected<Snapshot, std::string> load_tree(sqlite3* database) {
     try {
         auto query = require_statement(sqlite::prepare(
-            database,
-            "SELECT path, hash, size, mtime, is_dir FROM nodes ORDER BY path"));
+            database, "SELECT path, hash, size, mtime, is_dir FROM nodes"));
         Snapshot snapshot;
         while (require_step(query)) {
             auto hash = hash_from_hex(sqlite::text(query, 1));
@@ -416,15 +446,6 @@ std::optional<std::uint64_t> parse_word(std::string_view value) {
 }
 
 constexpr std::int64_t kUnifiedMetadataKind = 3;
-
-bool same_cache_row(const FileCacheRow& left,
-                    const FileCacheRow& right) noexcept {
-    return left.path == right.path && left.hash == right.hash &&
-           left.size == right.size &&
-           left.mtime_nanoseconds == right.mtime_nanoseconds &&
-           left.volume == right.volume && left.file_low == right.file_low &&
-           left.file_high == right.file_high;
-}
 
 std::vector<FileCacheRow> read_cache_rows(sqlite3* database) {
     auto query = require_statement(sqlite::prepare(
@@ -496,7 +517,7 @@ void write_cache_delta(sqlite3* database,
         old.emplace(row.path, &row);
     for (const auto& row : current) {
         const auto found = old.find(row.path);
-        if (found == old.end() || !same_cache_row(*found->second, row)) {
+        if (found == old.end() || *found->second != row) {
             upsert_row(row);
         }
         old.erase(row.path);
@@ -525,14 +546,34 @@ std::optional<std::uint64_t> parse_canonical_u64(std::string_view value) {
 bool initialize(const std::filesystem::path& database_path) {
     try {
         std::error_code status_error;
+        const auto db_status =
+            std::filesystem::symlink_status(database_path, status_error);
         const bool database_existed =
-            std::filesystem::exists(database_path, status_error);
+            !status_error &&
+            db_status.type() != std::filesystem::file_type::not_found;
         if (database_existed) {
-            if (!validate(database_path)) {
+            if (std::filesystem::is_symlink(db_status) ||
+                !validate(database_path)) {
                 return false;
             }
-        } else if (status_error) {
+        } else if (status_error &&
+                   status_error != std::errc::no_such_file_or_directory) {
             return false;
+        } else {
+            // Create db.sqlite with restrictive permissions before SQLite
+            // opens it so no permissive umask window occurs.
+            auto created =
+                platform::private_storage::create_private_file(database_path);
+            if (!created) {
+                return false;
+            }
+            if (!platform::private_storage::flush_and_close_private_file(
+                    *created)) {
+                static_cast<void>(
+                    platform::private_storage::remove_private_file_if_owned(
+                        *created));
+                return false;
+            }
         }
         auto opened = detail::open_state_database_readwrite(database_path,
                                                             /*create=*/
@@ -566,20 +607,7 @@ bool initialize(const std::filesystem::path& database_path) {
         }
         require(sqlite::commit(*transaction));
         require(sqlite::execute(opened->get(), "PRAGMA journal_mode=WAL"));
-        for (const auto& suffix : {"-wal", "-shm"}) {
-            const auto sidecar = platform::path::temporary_sibling_path(
-                database_path, "", suffix);
-            status_error.clear();
-            if (std::filesystem::exists(sidecar, status_error)) {
-                secured = platform::private_storage::protect_file(sidecar);
-                if (!secured) {
-                    return false;
-                }
-            } else if (status_error) {
-                return false;
-            }
-        }
-        return true;
+        return protect_wal_sidecars(database_path);
     } catch (const std::exception&) {
         return false;
     }
@@ -781,7 +809,7 @@ bool save_state(const std::filesystem::path& database_path,
             put_meta("epoch_sequence", std::to_string(state.epoch_sequence));
         }
         require(sqlite::commit(*transaction));
-        return true;
+        return protect_wal_sidecars(database_path);
     } catch (const std::exception&) {
         return false;
     }
@@ -791,10 +819,16 @@ std::expected<std::vector<FileCacheRow>, std::string>
 load_file_cache(const std::filesystem::path& database_path) {
     try {
         std::error_code error;
-        if (!std::filesystem::exists(database_path, error)) {
-            if (error)
-                return std::unexpected(error.message());
+        const auto db_status =
+            std::filesystem::symlink_status(database_path, error);
+        if (error == std::errc::no_such_file_or_directory ||
+            (!error &&
+             db_status.type() == std::filesystem::file_type::not_found)) {
             return std::vector<FileCacheRow>{};
+        }
+        if (error || std::filesystem::is_symlink(db_status)) {
+            return std::unexpected(error ? error.message()
+                                         : "database path is a symlink");
         }
         auto opened = detail::open_state_database_readonly(database_path);
         if (!opened)
@@ -823,7 +857,7 @@ bool save_file_cache_delta(const std::filesystem::path& database_path,
         const auto previous = read_cache_rows(opened->get());
         write_cache_delta(opened->get(), previous, rows);
         require(sqlite::commit(*transaction));
-        return true;
+        return protect_wal_sidecars(database_path);
     } catch (const std::exception&) {
         return false;
     }

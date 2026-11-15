@@ -1,5 +1,6 @@
 #include "platform/perf_trace.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -17,7 +18,7 @@ struct Metric {
 
 std::mutex metrics_mutex;
 std::map<std::string, Metric> metrics;
-bool forced_enable_state = false;
+std::atomic<bool> forced_enable_state{false};
 
 } // namespace
 
@@ -26,11 +27,11 @@ bool enabled() noexcept {
         const char* setting = std::getenv("KASUMI_PERF_TRACE");
         return setting != nullptr && std::string_view{setting} == "1";
     }();
-    return value || forced_enable_state;
+    return value || forced_enable_state.load(std::memory_order_relaxed);
 }
 
 void force_enable(bool state) noexcept {
-    forced_enable_state = state;
+    forced_enable_state.store(state, std::memory_order_relaxed);
 }
 
 void reset() noexcept {

@@ -399,11 +399,21 @@ IgnoreList parse_ignore_rules(std::string_view content) {
 IgnoreList load_ignore_list(const std::filesystem::path& file_path) {
     IgnoreList result;
     std::error_code error;
-    if (!std::filesystem::exists(file_path, error)) {
-        if (error) {
-            result.parse_error = IgnoreParseError{
-                0, "could not inspect ignore file: " + error.message()};
-        }
+    const auto status = std::filesystem::symlink_status(file_path, error);
+    if (error == std::errc::no_such_file_or_directory ||
+        error == std::errc::not_a_directory ||
+        (!error && status.type() == std::filesystem::file_type::not_found)) {
+        return result;
+    }
+    if (error) {
+        result.parse_error = IgnoreParseError{
+            0, "could not inspect ignore file: " + error.message()};
+        return result;
+    }
+    if (std::filesystem::is_symlink(status) ||
+        !std::filesystem::is_regular_file(status)) {
+        result.parse_error = IgnoreParseError{
+            0, "ignore file must be a regular non-symlink file"};
         return result;
     }
     std::ifstream input(file_path);
