@@ -7,7 +7,6 @@
 #include "application/history_storage/reachability.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
-#include "core/wire.hpp"
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
 #include "crypto/key_derivation.hpp"
@@ -15,7 +14,6 @@
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
-#include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 #include "platform/workspace.hpp"
 #include "runtime/resolver.hpp"
@@ -29,7 +27,6 @@
 #include <charconv>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <limits>
 #include <map>
 #include <optional>
@@ -43,16 +40,9 @@
 namespace kasumi::application {
 namespace {
 
-struct InspectionHistoryCache {
-    std::string anchor_id;
-    std::optional<history_storage::epoch::Reference> epoch;
-    std::vector<history::LoadedCommit> commits;
-};
-
 struct InspectionObservationHints {
     std::optional<history_storage::KnownHistoryFrontier> frontier;
     std::vector<std::string> trusted_marker_identifiers;
-    std::optional<InspectionHistoryCache> history_cache;
 };
 
 struct InspectionContext {
@@ -64,21 +54,6 @@ struct InspectionContext {
     InspectionObservationHints hints;
 };
 
-constexpr std::array<std::byte, 8> history_cache_magic{std::byte{'K'},
-                                                       std::byte{'S'},
-                                                       std::byte{'H'},
-                                                       std::byte{'C'},
-                                                       std::byte{'A'},
-                                                       std::byte{'C'},
-                                                       std::byte{'H'},
-                                                       std::byte{'E'}};
-constexpr std::uint32_t history_cache_version = 1;
-constexpr std::uint64_t maximum_history_cache_size = 256ULL * 1024ULL * 1024ULL;
-constexpr std::string_view history_cache_name = "inspection-history-v1.cache";
-constexpr std::size_t history_cache_tag_size = 64;
-constexpr std::size_t history_cache_trailer_size =
-    sizeof(std::uint32_t) + history_cache_tag_size;
-
 bool requires_complete_history(InspectionOperation operation) noexcept {
     return operation == InspectionOperation::RemoteCommits ||
            operation == InspectionOperation::RemoteSummary ||
@@ -86,309 +61,6 @@ bool requires_complete_history(InspectionOperation operation) noexcept {
            operation == InspectionOperation::RemoteContents ||
            operation == InspectionOperation::RemoteContentsAudit ||
            operation == InspectionOperation::RemoteContent;
-}
-
-std::filesystem::path
-history_cache_path(const runtime::RuntimeData& runtime_data) {
-    return runtime_data.database_path.parent_path() / history_cache_name;
-}
-
-bool same_commit(const history::Commit& left, const history::Commit& right) {
-    const auto left_bytes = history::serialize(left);
-    const auto right_bytes = history::serialize(right);
-    return left_bytes && right_bytes && *left_bytes == *right_bytes;
-}
-
-bool cache_graph_is_complete(const InspectionHistoryCache& cache) {
-    if (cache.commits.empty() || !history::valid_commit_id(cache.anchor_id)) {
-        return false;
-    }
-    std::unordered_map<std::string_view, const history::LoadedCommit*> commits;
-    commits.reserve(cache.commits.size());
-    for (const auto& commit : cache.commits) {
-        if (!commits.emplace(commit.id, &commit).second) {
-            return false;
-        }
-    }
-    if (!commits.contains(cache.anchor_id)) {
-        return false;
-    }
-    std::unordered_set<std::string_view> visited;
-    std::vector<std::string_view> pending{cache.anchor_id};
-    while (!pending.empty()) {
-        const auto current = pending.back();
-        pending.pop_back();
-        if (!visited.insert(current).second) {
-            continue;
-        }
-        const auto found = commits.find(current);
-        if (found == commits.end()) {
-            return false;
-        }
-        for (const auto& parent : found->second->commit.parents) {
-            pending.push_back(parent);
-        }
-    }
-    if (visited.size() != commits.size()) {
-        return false;
-    }
-    const std::array marked_heads{cache.anchor_id};
-    std::vector<std::string> anchors;
-    if (cache.epoch) {
-        for (const auto& commit : cache.commits) {
-            if (commit.commit.parents.empty() && commit.commit.height != 0) {
-                anchors.push_back(commit.id);
-            }
-        }
-    }
-    const auto resolved =
-        anchors.empty()
-            ? history::resolve_authenticated(cache.commits, marked_heads)
-            : history::resolve_from_frontier_authenticated(
-                  cache.commits, marked_heads, anchors);
-    return resolved && resolved->heads == std::vector{cache.anchor_id};
-}
-
-std::optional<InspectionHistoryCache>
-load_history_cache(const runtime::RuntimeData& runtime_data,
-                   std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
-    try {
-        std::error_code filesystem_error;
-        if (!std::filesystem::is_regular_file(runtime_data.database_path,
-                                              filesystem_error) ||
-            filesystem_error) {
-            return std::nullopt;
-        }
-        const auto path = history_cache_path(runtime_data);
-        const auto status =
-            std::filesystem::symlink_status(path, filesystem_error);
-        if (filesystem_error ||
-            status.type() != std::filesystem::file_type::regular) {
-            return std::nullopt;
-        }
-        const auto size = std::filesystem::file_size(path, filesystem_error);
-        if (filesystem_error || size > maximum_history_cache_size ||
-            size > static_cast<std::uint64_t>(
-                       std::numeric_limits<std::streamsize>::max())) {
-            return std::nullopt;
-        }
-        std::string bytes(static_cast<std::size_t>(size), '\0');
-        std::ifstream input(path, std::ios::binary);
-        if (!input ||
-            (!bytes.empty() &&
-             !input.read(bytes.data(), static_cast<std::streamsize>(size)))) {
-            return std::nullopt;
-        }
-        if (bytes.size() < history_cache_trailer_size) {
-            return std::nullopt;
-        }
-        const auto signed_size = bytes.size() - history_cache_trailer_size;
-        wire::Reader trailer{std::span<const std::byte>{
-            reinterpret_cast<const std::byte*>(bytes.data() + signed_size),
-            history_cache_trailer_size}};
-        const auto tag = wire::read_string(trailer, history_cache_tag_size);
-        const auto signed_bytes = std::span<const std::uint8_t>{
-            reinterpret_cast<const std::uint8_t*>(bytes.data()), signed_size};
-        if (!tag || !trailer.data.empty() ||
-            crypto::commit_identifier(key, signed_bytes) != *tag) {
-            return std::nullopt;
-        }
-        wire::Reader reader{std::span<const std::byte>{
-            reinterpret_cast<const std::byte*>(bytes.data()), signed_size}};
-        const auto magic = wire::read_array<history_cache_magic.size()>(reader);
-        const auto version = wire::read<std::uint32_t>(reader);
-        const auto anchor_id = wire::read_string(reader, 64);
-        const auto epoch_sequence = wire::read<std::uint64_t>(reader);
-        const auto epoch_id = wire::read_string(reader, 64);
-        const auto count = wire::read<std::uint32_t>(reader);
-        if (!magic || *magic != history_cache_magic || !version ||
-            *version != history_cache_version || !anchor_id ||
-            !epoch_sequence || !epoch_id || !count ||
-            *count > history::maximum_loaded_commit_count ||
-            (!epoch_id->empty() && !history::valid_commit_id(*epoch_id)) ||
-            (epoch_id->empty() && *epoch_sequence != 0)) {
-            return std::nullopt;
-        }
-
-        InspectionHistoryCache cache{.anchor_id = std::move(*anchor_id)};
-        if (!epoch_id->empty()) {
-            cache.epoch = history_storage::epoch::Reference{
-                .sequence = *epoch_sequence, .epoch_id = std::move(*epoch_id)};
-        }
-        cache.commits.reserve(*count);
-        for (std::uint32_t index = 0; index < *count; ++index) {
-            auto id = wire::read_string(reader, 64);
-            auto encoded_size = wire::read<std::uint64_t>(reader);
-            if (!id || !history::valid_commit_id(*id) || !encoded_size ||
-                *encoded_size > history::maximum_commit_plaintext_size) {
-                return std::nullopt;
-            }
-            auto encoded = wire::read_bytes(
-                reader, static_cast<std::size_t>(*encoded_size));
-            if (!encoded) {
-                return std::nullopt;
-            }
-            const auto commit_bytes = std::span<const std::uint8_t>{
-                reinterpret_cast<const std::uint8_t*>(encoded->data()),
-                encoded->size()};
-            auto commit = history::deserialize(commit_bytes);
-            if (!commit) {
-                return std::nullopt;
-            }
-            auto canonical = history::serialize(*commit);
-            if (!canonical || !std::ranges::equal(*canonical, commit_bytes)) {
-                return std::nullopt;
-            }
-            cache.commits.push_back(history::LoadedCommit{
-                .id = std::move(*id), .commit = std::move(*commit)});
-        }
-        if (!reader.data.empty() || !cache_graph_is_complete(cache)) {
-            return std::nullopt;
-        }
-        return cache;
-    } catch (...) {
-        return std::nullopt;
-    }
-}
-
-bool save_history_cache(const runtime::RuntimeData& runtime_data,
-                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                        const observation::history::StorageView& observed) {
-    try {
-        std::error_code filesystem_error;
-        // ponytail: current frontier supports a single head; concurrency uses
-        // cold observation until there is a measured gain for a multi-head
-        // cache.
-        if (observed.logical_heads.size() != 1 ||
-            !std::filesystem::is_regular_file(runtime_data.database_path,
-                                              filesystem_error) ||
-            filesystem_error ||
-            observed.reachable_commits.size() >
-                history::maximum_loaded_commit_count) {
-            return false;
-        }
-        auto commits = observed.reachable_commits;
-        std::ranges::sort(commits, {}, &history::LoadedCommit::id);
-        const InspectionHistoryCache cache{
-            .anchor_id = observed.logical_heads.front(),
-            .epoch = observed.epoch
-                         ? std::optional{observed.epoch->reference}
-                         : std::optional<history_storage::epoch::Reference>{},
-            .commits = commits,
-        };
-        if (!cache_graph_is_complete(cache)) {
-            return false;
-        }
-        wire::Writer writer;
-        wire::write_array(writer, history_cache_magic);
-        wire::write(writer, history_cache_version);
-        wire::write_string(writer, observed.logical_heads.front());
-        wire::write(writer,
-                    observed.epoch ? observed.epoch->reference.sequence : 0);
-        wire::write_string(writer,
-                           observed.epoch ? observed.epoch->reference.epoch_id
-                                          : std::string_view{});
-        wire::write(writer, static_cast<std::uint32_t>(commits.size()));
-        for (const auto& loaded : commits) {
-            auto encoded = history::serialize(loaded.commit);
-            if (!encoded || !history::valid_commit_id(loaded.id)) {
-                return false;
-            }
-            wire::write_string(writer, loaded.id);
-            wire::write(writer, static_cast<std::uint64_t>(encoded->size()));
-            wire::write_bytes(writer, std::as_bytes(std::span{*encoded}));
-            if (writer.buffer.size() > maximum_history_cache_size) {
-                return false;
-            }
-        }
-        const auto signed_bytes = std::span<const std::uint8_t>{
-            reinterpret_cast<const std::uint8_t*>(writer.buffer.data()),
-            writer.buffer.size()};
-        wire::write_string(writer,
-                           crypto::commit_identifier(key, signed_bytes));
-        if (writer.buffer.size() > maximum_history_cache_size) {
-            return false;
-        }
-        const auto bytes = std::string_view{
-            reinterpret_cast<const char*>(writer.buffer.data()),
-            writer.buffer.size()};
-        return platform::private_storage::write_atomically(
-                   history_cache_path(runtime_data), bytes)
-            .has_value();
-    } catch (...) {
-        return false;
-    }
-}
-
-bool merge_history_cache(observation::history::StorageView& observed,
-                         const InspectionHistoryCache& cache) {
-    try {
-        const auto observed_epoch =
-            observed.epoch ? std::optional{observed.epoch->reference}
-                           : std::optional<history_storage::epoch::Reference>{};
-        if (observed_epoch != cache.epoch) {
-            return false;
-        }
-        std::map<std::string, history::LoadedCommit> merged;
-        for (const auto& loaded : observed.reachable_commits) {
-            merged.emplace(loaded.id, loaded);
-        }
-        for (const auto& cached : cache.commits) {
-            const auto found = merged.find(cached.id);
-            if (found == merged.end()) {
-                merged.emplace(cached.id, cached);
-                continue;
-            }
-            if (same_commit(found->second.commit, cached.commit)) {
-                continue;
-            }
-            if (cached.id != cache.anchor_id ||
-                found->second.commit.height != cached.commit.height ||
-                found->second.commit.tree != cached.commit.tree) {
-                return false;
-            }
-            found->second = cached;
-        }
-        if (merged.size() > history::maximum_loaded_commit_count) {
-            return false;
-        }
-        std::vector<history::LoadedCommit> commits;
-        commits.reserve(merged.size());
-        for (auto& [unused, commit] : merged) {
-            static_cast<void>(unused);
-            commits.push_back(std::move(commit));
-        }
-        std::vector<std::string> anchors;
-        if (observed.epoch) {
-            for (const auto& commit : commits) {
-                if (commit.commit.parents.empty() &&
-                    commit.commit.height != 0) {
-                    anchors.push_back(commit.id);
-                }
-            }
-        }
-        const auto resolved =
-            anchors.empty()
-                ? history::resolve_authenticated(commits, observed.marked_heads)
-                : history::resolve_from_frontier_authenticated(
-                      commits, observed.marked_heads, anchors);
-        if (!resolved || resolved->tree != observed.effective_tree ||
-            resolved->height != observed.observed_height ||
-            resolved->heads != observed.logical_heads ||
-            resolved->has_conflicts != observed.has_conflicts) {
-            return false;
-        }
-        observed.reachable_commits = std::move(commits);
-        observed.reachable_commit_ids.clear();
-        observed.reachable_commit_ids.reserve(
-            observed.reachable_commits.size());
-        for (const auto& commit : observed.reachable_commits) {
-            observed.reachable_commit_ids.push_back(commit.id);
-        }
-        return true;
-    } catch (...) {
-        return false;
-    }
 }
 
 InspectionError error(InspectionOperation operation,
@@ -506,32 +178,10 @@ make_observation_hints(const runtime::RuntimeData& runtime_data,
 
     platform::perf_trace::count("inspection persisted state available");
     auto& state = **persisted;
-    if (requires_complete_history(operation)) {
-        auto cache = load_history_cache(runtime_data, key);
-        if (cache) {
-            const auto anchor = std::ranges::find(
-                cache->commits, cache->anchor_id, &history::LoadedCommit::id);
-            if (anchor != cache->commits.end()) {
-                hints.frontier.emplace();
-                hints.frontier->anchors.push_back(
-                    history_storage::KnownHistoryAnchor{
-                        .commit_id = anchor->id,
-                        .height = anchor->commit.height,
-                        .tree = anchor->commit.tree,
-                    });
-                hints.frontier->accepted_epoch = cache->epoch;
-                hints.history_cache = std::move(*cache);
-                platform::perf_trace::count("inspection history cache used");
-                platform::perf_trace::count("inspection frontier used");
-            }
-        }
-        if (!hints.frontier) {
-            platform::perf_trace::count("inspection frontier unavailable");
-        }
-    } else if (operation == InspectionOperation::RemoteHeads ||
-               operation == InspectionOperation::RemoteTree ||
-               operation == InspectionOperation::RemoteStat ||
-               operation == InspectionOperation::RemoteGet) {
+    if (operation == InspectionOperation::RemoteHeads ||
+        operation == InspectionOperation::RemoteTree ||
+        operation == InspectionOperation::RemoteStat ||
+        operation == InspectionOperation::RemoteGet) {
         hints.frontier.emplace();
         hints.frontier->anchors.push_back(history_storage::KnownHistoryAnchor{
             .commit_id = state.commit_id,
@@ -1913,7 +1563,7 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     if (!context.hints.frontier) {
         platform::perf_trace::count("inspection cold observation");
     }
-    if (requires_complete_history(operation) && !context.hints.history_cache) {
+    if (requires_complete_history(operation)) {
         platform::perf_trace::count("inspection full history observation");
     }
 
@@ -1969,31 +1619,12 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     const auto remote_trace = platform::perf_trace::begin();
     auto observed = observe_remote(
         context.hints.frontier ? &*context.hints.frontier : nullptr);
-    if (context.hints.history_cache &&
-        (!observed ||
-         !merge_history_cache(*observed, *context.hints.history_cache))) {
-        platform::perf_trace::count("inspection history cache fallback");
-        observed = observe_remote(
-            static_cast<const history_storage::KnownHistoryFrontier*>(nullptr));
-        context.hints.history_cache.reset();
-    }
     platform::perf_trace::finish("inspection remote observation", remote_trace);
     if (!observed) {
         return std::unexpected(
             error(operation,
                   InspectionErrorCode::RemoteObservationFailure,
                   "failed to observe remote history"));
-    }
-    if (requires_complete_history(operation)) {
-        if (context.hints.history_cache &&
-            observed->authenticated_commit_variants.empty()) {
-            platform::perf_trace::count("inspection history cache unchanged");
-        } else if (save_history_cache(
-                       context.runtime, context.key, *observed)) {
-            platform::perf_trace::count("inspection history cache saved");
-        } else {
-            platform::perf_trace::count("inspection history cache not saved");
-        }
     }
 
     if (operation == InspectionOperation::RemoteContents ||
@@ -2281,19 +1912,6 @@ inspect(InspectionInput input) {
     platform::perf_trace::report(result ? "inspection-success"
                                         : "inspection-error");
     return result;
-}
-
-std::expected<InspectionResponse, InspectionError>
-read_remote_file(InspectionInput input) {
-    if (input.request.operation != InspectionOperation::RemoteGet) {
-        const auto result = std::unexpected(
-            error(input.request.operation,
-                  InspectionErrorCode::InvalidRequest,
-                  "read_remote_file requires RemoteGet operation"));
-        wipe_credentials(input.credentials);
-        return result;
-    }
-    return inspect(std::move(input));
 }
 
 } // namespace kasumi::application

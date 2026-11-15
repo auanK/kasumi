@@ -149,10 +149,7 @@ int run(int argc, char* argv[]) {
                 .credentials = std::move(credentials),
                 .environment = environment,
             };
-            return request.operation ==
-                           application::InspectionOperation::RemoteGet
-                       ? application::read_remote_file(std::move(input))
-                       : application::inspect(std::move(input));
+            return application::inspect(std::move(input));
         };
         auto initial_credentials = credentials::from_environment();
         auto result = run_remote(std::move(initial_credentials));

@@ -380,8 +380,6 @@ TEST(ApplicationInspectionTest,
     const auto at_six_full = perf_count("inspection full history observation");
     const auto at_six_trusted = perf_count("inspection trusted marker used");
     const auto at_six_gets = perf_count("rc/get_commit");
-    const auto at_six_cache_saved =
-        perf_count("inspection history cache saved");
     kasumi::platform::perf_trace::force_enable(false);
 
     const auto at_six_report =
@@ -392,7 +390,6 @@ TEST(ApplicationInspectionTest,
     EXPECT_EQ(at_six_full, 1U);
     EXPECT_EQ(at_six_trusted, 1U);
     EXPECT_EQ(at_six_gets, 7U);
-    EXPECT_EQ(at_six_cache_saved, 1U);
 
     for (std::uint64_t height = 7; height <= 8; ++height) {
         const auto commit = kasumi::history::make_commit(
@@ -412,7 +409,6 @@ TEST(ApplicationInspectionTest,
     const auto at_eight_frontier = perf_count("inspection frontier used");
     const auto at_eight_full =
         perf_count("inspection full history observation");
-    const auto at_eight_cache = perf_count("inspection history cache used");
     const auto at_eight_gets = perf_count("rc/get_commit");
     kasumi::platform::perf_trace::force_enable(false);
 
@@ -424,237 +420,9 @@ TEST(ApplicationInspectionTest,
     ASSERT_EQ(at_eight_report->commits.size(), 9U);
     EXPECT_EQ(at_eight_report->commits.front().height, 8U);
     EXPECT_EQ(at_eight_report->commits.back().height, 0U);
-    EXPECT_EQ(at_eight_frontier, 1U);
-    EXPECT_EQ(at_eight_full, 0U);
-    EXPECT_EQ(at_eight_cache, 1U);
-    EXPECT_EQ(at_eight_gets, 2U);
-
-    kasumi::platform::perf_trace::force_enable(true);
-    const auto unchanged =
-        inspect(workspace, InspectionOperation::RemoteCommits);
-    const auto unchanged_gets = perf_count("rc/get_commit");
-    const auto unchanged_cache =
-        perf_count("inspection history cache unchanged");
-    kasumi::platform::perf_trace::force_enable(false);
-
-    ASSERT_TRUE(unchanged.has_value()) << unchanged.error().detail;
-    const auto& unchanged_report =
-        std::get<kasumi::application::RemoteCommitsReport>(unchanged->payload);
-    EXPECT_EQ(unchanged_report.commits.size(), 9U);
-    EXPECT_EQ(unchanged_gets, 0U);
-    EXPECT_EQ(unchanged_cache, 1U);
-}
-
-TEST(ApplicationInspectionTest,
-     CompleteHistoryCommandsReuseTheAuthenticatedCache) {
-    auto fixture = make_local_storage();
-    auto workspace =
-        kasumi::test::make_temp_workspace("application-history-cache");
-    write_profile(workspace,
-                  kasumi::test::workspace_path(fixture.workspace, "storage"));
-
-    std::vector<kasumi::history::Commit> commits;
-    std::vector<std::string> commit_ids;
-    std::optional<HistoryHeadReference> previous;
-    for (std::uint64_t height = 0; height < 3; ++height) {
-        auto commit =
-            kasumi::history::make_commit(
-                height,
-                previous ? std::vector<std::string>{previous->commit_id}
-                         : std::vector<std::string>{},
-                make_tree("file.txt", std::to_string(height)))
-                .value();
-        const auto published = publish(fixture, commit);
-        if (previous) {
-            ASSERT_TRUE(kasumi::transport::remove(fixture.transport,
-                                                  marker_path(*previous)));
-        }
-        previous = published.head;
-        commits.push_back(std::move(commit));
-        commit_ids.push_back(published.head.commit_id);
-    }
-    ASSERT_TRUE(previous.has_value());
-    persist_state(workspace, commits.back(), *previous);
-
-    const auto cold = inspect(workspace, InspectionOperation::RemoteCommits);
-    ASSERT_TRUE(cold.has_value()) << cold.error().detail;
-
-    const auto historical_content_id = kasumi::crypto::content_identifier(
-        test_key(), commits.front().tree.rows.at(1).hash);
-    const std::array requests{
-        InspectionRequest{InspectionOperation::RemoteCommits, "demo"},
-        InspectionRequest{InspectionOperation::RemoteSummary, "demo"},
-        InspectionRequest{.operation = InspectionOperation::RemoteCommit,
-                          .profile_name = "demo",
-                          .commit_id = commit_ids.front()},
-        InspectionRequest{InspectionOperation::RemoteContents, "demo"},
-        InspectionRequest{InspectionOperation::RemoteContentsAudit, "demo"},
-        InspectionRequest{.operation = InspectionOperation::RemoteContent,
-                          .profile_name = "demo",
-                          .content_id = historical_content_id},
-    };
-    for (const auto& request : requests) {
-        kasumi::platform::perf_trace::force_enable(true);
-        const auto result = inspect(workspace, request);
-        const auto cache_used = perf_count("inspection history cache used");
-        const auto commit_gets = perf_count("rc/get_commit");
-        kasumi::platform::perf_trace::force_enable(false);
-
-        ASSERT_TRUE(result.has_value()) << result.error().detail;
-        EXPECT_EQ(cache_used, 1U);
-        EXPECT_EQ(commit_gets,
-                  request.operation == InspectionOperation::RemoteCommit ? 1U
-                                                                         : 0U);
-        if (request.operation == InspectionOperation::RemoteCommits) {
-            EXPECT_EQ(std::get<kasumi::application::RemoteCommitsReport>(
-                          result->payload)
-                          .commits.size(),
-                      3U);
-        } else if (request.operation == InspectionOperation::RemoteSummary) {
-            EXPECT_EQ(std::get<kasumi::application::RemoteSummaryReport>(
-                          result->payload)
-                          .reachable_commit_count,
-                      3U);
-        } else if (request.operation == InspectionOperation::RemoteCommit) {
-            EXPECT_EQ(std::get<kasumi::application::RemoteCommitReport>(
-                          result->payload)
-                          .commit.commit_id,
-                      commit_ids.front());
-        } else if (request.operation == InspectionOperation::RemoteContents ||
-                   request.operation ==
-                       InspectionOperation::RemoteContentsAudit) {
-            EXPECT_EQ(std::get<kasumi::application::RemoteContentsReport>(
-                          result->payload)
-                          .referenced_count,
-                      3U);
-        } else {
-            EXPECT_TRUE(std::get<kasumi::application::RemoteContentReport>(
-                            result->payload)
-                            .content.referenced);
-        }
-    }
-}
-
-TEST(ApplicationInspectionTest,
-     InvalidHistoryCacheFallsBackToACompleteColdObservation) {
-    auto fixture = make_local_storage();
-    auto workspace =
-        kasumi::test::make_temp_workspace("application-history-cache-invalid");
-    write_profile(workspace,
-                  kasumi::test::workspace_path(fixture.workspace, "storage"));
-    const auto first =
-        publish(fixture, make_commit(0, {}, "file.txt", "zero").value());
-    const auto latest_commit =
-        make_commit(1, {first.head.commit_id}, "file.txt", "one").value();
-    const auto latest = publish(fixture, latest_commit);
-    ASSERT_TRUE(
-        kasumi::transport::remove(fixture.transport, marker_path(first.head)));
-    persist_state(workspace, latest_commit, latest.head);
-
-    const auto request =
-        InspectionRequest{InspectionOperation::RemoteCommits, "demo"};
-    ASSERT_TRUE(inspect(workspace, request));
-    kasumi::test::write_text(
-        kasumi::test::workspace_path(
-            workspace, "app/profiles/demo/inspection-history-v1.cache"),
-        "invalid cache");
-
-    kasumi::platform::perf_trace::force_enable(true);
-    const auto recovered = inspect(workspace, request);
-    const auto cache_used = perf_count("inspection history cache used");
-    const auto full = perf_count("inspection full history observation");
-    const auto commit_gets = perf_count("rc/get_commit");
-    kasumi::platform::perf_trace::force_enable(false);
-
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(cache_used, 0U);
-    EXPECT_EQ(full, 1U);
-    EXPECT_EQ(commit_gets, 2U);
-    const auto& report =
-        std::get<kasumi::application::RemoteCommitsReport>(recovered->payload);
-    EXPECT_EQ(report.commits.size(), 2U);
-}
-
-TEST(ApplicationInspectionTest,
-     AdvancedEpochRejectsAncestorsFromThePreviousHistoryCache) {
-    namespace epoch = kasumi::application::history_storage::epoch;
-    auto fixture = make_local_storage();
-    auto workspace =
-        kasumi::test::make_temp_workspace("application-history-cache-epoch");
-    write_profile(workspace,
-                  kasumi::test::workspace_path(fixture.workspace, "storage"));
-
-    const auto first_commit = make_commit(0, {}, "file.txt", "zero").value();
-    const auto first = publish(fixture, first_commit);
-    const auto second_commit =
-        make_commit(1, {first.head.commit_id}, "file.txt", "one").value();
-    const auto second = publish(fixture, second_commit);
-    ASSERT_TRUE(
-        kasumi::transport::remove(fixture.transport, marker_path(first.head)));
-    const auto third_commit =
-        make_commit(2, {second.head.commit_id}, "file.txt", "two").value();
-    const auto third = publish(fixture, third_commit);
-    ASSERT_TRUE(
-        kasumi::transport::remove(fixture.transport, marker_path(second.head)));
-    persist_state(workspace, third_commit, third.head);
-
-    epoch::Epoch first_epoch{
-        .vault_id = std::string(64, 'a'),
-        .sequence = 0,
-        .issued_at = 100,
-        .anchors = {{.commit_id = first.head.commit_id, .height = 0}}};
-    const auto sealed_first = epoch::seal(first_epoch, test_key());
-    ASSERT_TRUE(sealed_first.has_value());
-    ASSERT_TRUE(
-        epoch::publish(fixture.transport,
-                       test_key(),
-                       *sealed_first,
-                       kasumi::test::workspace_root(fixture.workspace)));
-    const auto request =
-        InspectionRequest{InspectionOperation::RemoteCommits, "demo"};
-    const auto cached = inspect(workspace, request);
-    ASSERT_TRUE(cached.has_value()) << cached.error().detail;
-    EXPECT_EQ(
-        std::get<kasumi::application::RemoteCommitsReport>(cached->payload)
-            .commits.size(),
-        3U);
-
-    auto next_epoch = first_epoch;
-    next_epoch.sequence = 1;
-    next_epoch.issued_at = 200;
-    next_epoch.previous_epoch_id = sealed_first->reference.epoch_id;
-    next_epoch.anchors = {{.commit_id = third.head.commit_id, .height = 2}};
-    const auto sealed_next = epoch::seal(next_epoch, test_key());
-    ASSERT_TRUE(sealed_next.has_value());
-    ASSERT_TRUE(
-        epoch::publish(fixture.transport,
-                       test_key(),
-                       *sealed_next,
-                       kasumi::test::workspace_root(fixture.workspace)));
-
-    kasumi::platform::perf_trace::force_enable(true);
-    const auto advanced = inspect(workspace, request);
-    const auto fallback = perf_count("inspection history cache fallback");
-    const auto cache_saved = perf_count("inspection history cache saved");
-    kasumi::platform::perf_trace::force_enable(false);
-
-    ASSERT_TRUE(advanced.has_value()) << advanced.error().detail;
-    EXPECT_EQ(fallback, 1U);
-    EXPECT_EQ(cache_saved, 1U);
-    const auto& report =
-        std::get<kasumi::application::RemoteCommitsReport>(advanced->payload);
-    ASSERT_EQ(report.commits.size(), 1U);
-    EXPECT_EQ(report.commits.front().commit_id, third.head.commit_id);
-
-    kasumi::platform::perf_trace::force_enable(true);
-    const auto warm = inspect(workspace, request);
-    const auto warm_fallback = perf_count("inspection history cache fallback");
-    const auto warm_gets = perf_count("rc/get_commit");
-    kasumi::platform::perf_trace::force_enable(false);
-
-    ASSERT_TRUE(warm.has_value()) << warm.error().detail;
-    EXPECT_EQ(warm_fallback, 0U);
-    EXPECT_EQ(warm_gets, 0U);
+    EXPECT_EQ(at_eight_frontier, 0U);
+    EXPECT_EQ(at_eight_full, 1U);
+    EXPECT_EQ(at_eight_gets, 9U);
 }
 
 TEST(ApplicationInspectionTest, EmptyRemoteIsSuccessfulAndUntouched) {
@@ -1999,7 +1767,7 @@ TEST(ApplicationInspectionTest,
     const auto config_before = kasumi::test::read_binary(config);
     const auto remote_before = kasumi::test::snapshot_tree(remote_root);
 
-    const auto result = kasumi::application::read_remote_file(
+    const auto result = kasumi::application::inspect(
         {InspectionRequest{.operation = InspectionOperation::RemoteGet,
                            .profile_name = "demo",
                            .logical_path = "relatório final.txt",
@@ -2045,7 +1813,7 @@ TEST(ApplicationInspectionTest, RemoteGetInstallsUnicodeDestination) {
     kasumi::test::write_text(destination, "previous content");
     const auto remote_before = kasumi::test::snapshot_tree(remote_root);
 
-    const auto result = kasumi::application::read_remote_file(
+    const auto result = kasumi::application::inspect(
         {InspectionRequest{.operation = InspectionOperation::RemoteGet,
                            .profile_name = "demo",
                            .logical_path = "カード💝.png",
@@ -2087,7 +1855,7 @@ TEST(
         kasumi::test::workspace_path(workspace, "download.txt");
     kasumi::test::write_text(destination, "preservar");
     const auto read = [&](std::string path) {
-        return kasumi::application::read_remote_file(
+        return kasumi::application::inspect(
             {InspectionRequest{
                  .operation = InspectionOperation::RemoteGet,
                  .profile_name = "demo",
@@ -2123,16 +1891,6 @@ TEST(ApplicationInspectionTest, RemoteGetValidatesItsDedicatedRequest) {
     auto workspace =
         kasumi::test::make_temp_workspace("application-remote-get-invalid");
     write_profile(workspace, kasumi::test::workspace_path(workspace, "remote"));
-    const auto environment =
-        ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")};
-
-    const auto wrong_operation = kasumi::application::read_remote_file(
-        {InspectionRequest{InspectionOperation::RemoteStat, "demo"},
-         Credentials{NoCredentials{}},
-         environment});
-    ASSERT_FALSE(wrong_operation.has_value());
-    EXPECT_EQ(wrong_operation.error().code,
-              InspectionErrorCode::InvalidRequest);
 
     for (const auto& request : {
              InspectionRequest{.operation = InspectionOperation::RemoteGet,

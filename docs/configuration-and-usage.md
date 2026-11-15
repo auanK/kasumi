@@ -158,7 +158,7 @@ For the recovery state transitions, see [Transactions and Recovery](architecture
 
 ## Remote Inspection
 
-These commands do not publish synchronization changes or run garbage collection. Complete-history inspection may maintain the local private `inspection-history-v1.cache`; `remote get` writes the requested destination after authenticating the payload. See [Remote Inspection](architecture/remote-inspection.md) for each family's data flow and failure behavior.
+These commands do not publish synchronization changes or run garbage collection. `remote get` writes the requested destination after authenticating the payload. See [Remote Inspection](architecture/remote-inspection.md) for each family's data flow and failure behavior.
 
 Use `kasumi remote --help` to choose a view, and
 `kasumi remote <subcommand> --help` for its required arguments. For example:

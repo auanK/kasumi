@@ -278,11 +278,6 @@ inspect(InspectionInput input) {
     return result;
 }
 
-std::expected<InspectionResponse, InspectionError>
-read_remote_file(InspectionInput input) {
-    return inspect(std::move(input));
-}
-
 } // namespace kasumi::application
 
 namespace kasumi::cli::update {
