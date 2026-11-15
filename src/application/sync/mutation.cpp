@@ -35,6 +35,93 @@ using detail::remove_temporary_file;
 using detail::resolve_local_path;
 
 std::expected<void, MutationError>
+sync_parent_checked(const std::filesystem::path& path,
+                    std::size_t operation_index) {
+    if (auto synced = platform::durability::sync_parent_directory(path);
+        !synced) {
+        return std::unexpected(make_error(
+            MutationErrorCode::LocalIo, synced.error(), path, operation_index));
+    }
+    return {};
+}
+
+std::expected<void, MutationError>
+sync_file_checked(const std::filesystem::path& path,
+                  std::size_t operation_index) {
+    if (auto synced = platform::durability::sync_file(path); !synced) {
+        return std::unexpected(make_error(
+            MutationErrorCode::LocalIo, synced.error(), path, operation_index));
+    }
+    return {};
+}
+
+std::expected<void, MutationError>
+validate_parent_directory(const std::filesystem::path& destination,
+                          std::size_t operation_index) {
+    const auto parent = destination.parent_path();
+    auto parent_status = read_status(parent, operation_index);
+    if (!parent_status) {
+        return std::unexpected(parent_status.error());
+    }
+    if (missing(*parent_status) ||
+        std::filesystem::is_symlink(*parent_status) ||
+        !std::filesystem::is_directory(*parent_status)) {
+        return std::unexpected(
+            make_error(MutationErrorCode::UnsafePath,
+                       "destination parent directory is invalid",
+                       parent,
+                       operation_index));
+    }
+    return {};
+}
+
+std::expected<void, MutationError>
+install_without_overwrite_checked(const std::filesystem::path& candidate,
+                                  const std::filesystem::path& destination,
+                                  std::size_t operation_index) {
+    auto installed =
+        platform::durability::install_without_overwrite(candidate, destination);
+    if (!installed) {
+        return std::unexpected(make_error(
+            installed.error() == std::errc::file_exists
+                ? MutationErrorCode::DestinationConflict
+            : installed.error() == std::errc::too_many_symbolic_link_levels
+                ? MutationErrorCode::UnsafePath
+                : MutationErrorCode::LocalIo,
+            "conditional install failed: " + installed.error().message(),
+            destination,
+            operation_index));
+    }
+    return {};
+}
+
+template <typename Identity>
+bool identity_matches(const platform::private_storage::FileIdentity& actual,
+                      const Identity& expected) noexcept {
+    return actual.valid && actual.volume_or_dev == expected.volume_or_dev &&
+           actual.file_id_low == expected.file_id_low &&
+           actual.file_id_high == expected.file_id_high;
+}
+
+std::expected<std::pair<std::filesystem::path, std::filesystem::path>,
+              MutationError>
+resolve_pair(const std::filesystem::path& local_root,
+             const Operation& operation,
+             std::size_t operation_index) {
+    auto source =
+        resolve_local_path(local_root, operation.path, operation_index);
+    if (!source) {
+        return std::unexpected(source.error());
+    }
+    auto destination =
+        resolve_local_path(local_root, operation.alt_path, operation_index);
+    if (!destination) {
+        return std::unexpected(destination.error());
+    }
+    return std::pair{std::move(*source), std::move(*destination)};
+}
+
+std::expected<void, MutationError>
 move_local_without_replace(const std::filesystem::path& source,
                            const std::filesystem::path& destination,
                            std::size_t operation_index) {
@@ -448,18 +535,10 @@ apply_download(const Operation& operation,
                        operation_index));
     }
 
-    const auto parent = destination.parent_path();
-    auto parent_status = read_status(parent, operation_index);
-    if (!parent_status) {
-        return std::unexpected(parent_status.error());
-    }
-    if (missing(*parent_status) || std::filesystem::is_symlink(*parent_status) ||
-        !std::filesystem::is_directory(*parent_status)) {
-        return std::unexpected(
-            make_error(MutationErrorCode::UnsafePath,
-                       "destination parent directory is invalid",
-                       parent,
-                       operation_index));
+    if (auto parent_ok =
+            validate_parent_directory(destination, operation_index);
+        !parent_ok) {
+        return parent_ok;
     }
 
     const auto candidate = detail::download_candidate_path(
@@ -654,16 +733,12 @@ apply_download(const Operation& operation,
                                                      condition);
     if (!prepared)
         return prepared;
-    MutationResult replaced;
     if (!prepared_hash.empty()) {
         mutation_fault_test::hit("before_download_replace", destination);
-        auto synced = platform::durability::sync_file(candidate);
-        if (!synced) {
+        if (auto synced = sync_file_checked(candidate, operation_index);
+            !synced) {
             remove_temporary_file(candidate);
-            return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                              synced.error(),
-                                              candidate,
-                                              operation_index));
+            return synced;
         }
         auto installed =
             platform::durability::replace_atomically(candidate, destination);
@@ -676,47 +751,21 @@ apply_download(const Operation& operation,
                            operation_index));
         }
         mutation_fault_test::hit("after_download_replace", destination);
-        synced = platform::durability::sync_parent_directory(destination);
-        if (!synced) {
-            return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                              synced.error(),
-                                              destination,
-                                              operation_index));
-        }
-
-        replaced = {};
     } else {
         mutation_fault_test::hit("before_download_install", destination);
-        auto synced = platform::durability::sync_file(candidate);
-        if (!synced)
-            return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                              synced.error(),
-                                              candidate,
-                                              operation_index));
-        auto installed = platform::durability::install_without_overwrite(
-            candidate, destination);
-        if (!installed) {
-            return std::unexpected(make_error(
-                installed.error() == std::errc::file_exists
-                    ? MutationErrorCode::DestinationConflict
-                : installed.error() == std::errc::too_many_symbolic_link_levels
-                    ? MutationErrorCode::UnsafePath
-                    : MutationErrorCode::LocalIo,
-                "conditional install failed: " + installed.error().message(),
-                destination,
-                operation_index));
+        if (auto synced = sync_file_checked(candidate, operation_index);
+            !synced) {
+            return synced;
         }
-        synced = platform::durability::sync_parent_directory(destination);
-        if (!synced)
-            return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                              synced.error(),
-                                              destination,
-                                              operation_index));
+        if (auto installed = install_without_overwrite_checked(
+                candidate, destination, operation_index);
+            !installed) {
+            return installed;
+        }
     }
-    if (!replaced) {
-        std::error_code candidate_cleanup_error;
-        std::filesystem::remove(candidate, candidate_cleanup_error);
-        return std::unexpected(replaced.error());
+    if (auto synced = sync_parent_checked(destination, operation_index);
+        !synced) {
+        return synced;
     }
     if (download_cache == DownloadCacheMode::None) {
         std::error_code encrypted_cleanup_error;
@@ -797,18 +846,10 @@ apply_move_local(const Operation& operation,
             platform::perf_trace::finish("move apply wall", token);
         }
     } move_apply_guard{platform::perf_trace::begin()};
-    const auto parent = destination.parent_path();
-    auto parent_status = read_status(parent, operation_index);
-    if (!parent_status) {
-        return std::unexpected(parent_status.error());
-    }
-    if (std::filesystem::is_symlink(*parent_status) ||
-        !std::filesystem::is_directory(*parent_status)) {
-        return std::unexpected(
-            make_error(MutationErrorCode::UnsafePath,
-                       "destination parent directory is invalid",
-                       parent,
-                       operation_index));
+    if (auto parent_ok =
+            validate_parent_directory(destination, operation_index);
+        !parent_ok) {
+        return parent_ok;
     }
 
     mutation_fault_test::hit("before_rename_move", source);
@@ -888,21 +929,11 @@ apply_move_local(const Operation& operation,
         }
     }
 
-    auto dest_synced = platform::durability::sync_parent_directory(destination);
-    if (!dest_synced) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          dest_synced.error(),
-                                          destination,
-                                          operation_index));
+    if (auto synced = sync_parent_checked(destination, operation_index);
+        !synced) {
+        return synced;
     }
-    auto source_synced = platform::durability::sync_parent_directory(source);
-    if (!source_synced) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          source_synced.error(),
-                                          source,
-                                          operation_index));
-    }
-    return {};
+    return sync_parent_checked(source, operation_index);
 }
 
 MutationResult
@@ -926,18 +957,10 @@ apply_copy_local(const Operation& operation,
                                           destination,
                                           operation_index));
     }
-    const auto parent = destination.parent_path();
-    auto parent_status = read_status(parent, operation_index);
-    if (!parent_status) {
-        return std::unexpected(parent_status.error());
-    }
-    if (std::filesystem::is_symlink(*parent_status) ||
-        !std::filesystem::is_directory(*parent_status)) {
-        return std::unexpected(
-            make_error(MutationErrorCode::UnsafePath,
-                       "destination parent directory is invalid",
-                       parent,
-                       operation_index));
+    if (auto parent_ok =
+            validate_parent_directory(destination, operation_index);
+        !parent_ok) {
+        return parent_ok;
     }
 
     auto source_status = read_status(source, operation_index);
@@ -1123,13 +1146,10 @@ apply_copy_local(const Operation& operation,
 
     mutation_fault_test::hit("before_copy_local_durability", candidate);
     const auto durability_trace = platform::perf_trace::begin();
-    auto synced = platform::durability::sync_file(candidate);
+    auto synced = sync_file_checked(candidate, operation_index);
     platform::perf_trace::finish("copy durability wall", durability_trace);
     if (!synced) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          synced.error(),
-                                          candidate,
-                                          operation_index));
+        return synced;
     }
 
     auto recorded_id = detail::record_copy_installed_identity(
@@ -1140,19 +1160,11 @@ apply_copy_local(const Operation& operation,
 
     mutation_fault_test::hit("before_copy_local_install", destination);
     const auto install_trace = platform::perf_trace::begin();
-    auto installed = platform::durability::install_without_overwrite(
-        candidate, destination);
+    auto installed = install_without_overwrite_checked(
+        candidate, destination, operation_index);
     platform::perf_trace::finish("copy install wall", install_trace);
     if (!installed) {
-        return std::unexpected(make_error(
-            installed.error() == std::errc::file_exists
-                ? MutationErrorCode::DestinationConflict
-            : installed.error() == std::errc::too_many_symbolic_link_levels
-                ? MutationErrorCode::UnsafePath
-                : MutationErrorCode::LocalIo,
-            "conditional install failed: " + installed.error().message(),
-            destination,
-            operation_index));
+        return installed;
     }
     staging_guard.keep = true;
     mutation_fault_test::hit("after_copy_local_install", destination);
@@ -1165,15 +1177,16 @@ apply_copy_local(const Operation& operation,
                                           operation_index));
     }
 
-    synced = platform::durability::sync_parent_directory(destination);
+    auto dir_synced = platform::durability::sync_parent_directory(destination);
 #ifdef KASUMI_MUTATION_FAULT_TESTS
     if (mutation_fault_test::g_fail_copy_post_install_dir_sync_return) {
-        synced = std::unexpected("simulated destination directory sync return error");
+        dir_synced = std::unexpected(
+            "simulated destination directory sync return error");
     }
 #endif
-    if (!synced) {
+    if (!dir_synced) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          synced.error(),
+                                          dir_synced.error(),
                                           destination,
                                           operation_index));
     }
@@ -1230,26 +1243,21 @@ apply_operation(const Operation& operation,
 
     switch (operation.action) {
         case Action::RenameLocal: {
-            auto source =
-                resolve_local_path(local_root, operation.path, operation_index);
-            if (!source) {
-                return std::unexpected(source.error());
-            }
-            auto destination = resolve_local_path(
-                local_root, operation.alt_path, operation_index);
-            if (!destination) {
-                return std::unexpected(destination.error());
+            auto pair = resolve_pair(local_root, operation, operation_index);
+            if (!pair) {
+                return std::unexpected(pair.error());
             }
             auto prepared = detail::validate_prepared_rename(operation,
                                                              operation_index,
-                                                             *source,
-                                                             *destination,
+                                                             pair->first,
+                                                             pair->second,
                                                              workspace,
                                                              progress);
-            if (!prepared)
+            if (!prepared) {
                 return prepared;
+            }
             return apply_rename(
-                operation, operation_index, *source, *destination);
+                operation, operation_index, pair->first, pair->second);
         }
 
         case Action::Upload: {
@@ -1302,6 +1310,7 @@ apply_operation(const Operation& operation,
         }
 
         case Action::CreateRemoteDirectory:
+        case Action::DeleteRemoteDirectory:
             if (operation.path.empty() || operation.path == ".") {
                 return std::unexpected(
                     make_error(MutationErrorCode::InvalidOperation,
@@ -1312,39 +1321,27 @@ apply_operation(const Operation& operation,
             return {};
 
         case Action::MoveLocal: {
-            auto source =
-                resolve_local_path(local_root, operation.path, operation_index);
-            if (!source) {
-                return std::unexpected(source.error());
-            }
-            auto destination = resolve_local_path(
-                local_root, operation.alt_path, operation_index);
-            if (!destination) {
-                return std::unexpected(destination.error());
+            auto pair = resolve_pair(local_root, operation, operation_index);
+            if (!pair) {
+                return std::unexpected(pair.error());
             }
             return apply_move_local(operation,
                                     operation_index,
-                                    *source,
-                                    *destination,
+                                    pair->first,
+                                    pair->second,
                                     workspace,
                                     progress);
         }
 
         case Action::CopyLocal: {
-            auto source =
-                resolve_local_path(local_root, operation.path, operation_index);
-            if (!source) {
-                return std::unexpected(source.error());
-            }
-            auto destination = resolve_local_path(
-                local_root, operation.alt_path, operation_index);
-            if (!destination) {
-                return std::unexpected(destination.error());
+            auto pair = resolve_pair(local_root, operation, operation_index);
+            if (!pair) {
+                return std::unexpected(pair.error());
             }
             return apply_copy_local(operation,
                                     operation_index,
-                                    *source,
-                                    *destination,
+                                    pair->first,
+                                    pair->second,
                                     workspace,
                                     progress);
         }
@@ -1410,13 +1407,9 @@ apply_operation(const Operation& operation,
                 platform::private_storage::query_file_identity(*path);
             std::error_code size_error;
             const auto size = std::filesystem::file_size(*path, size_error);
-            if (size_error || !identity.valid ||
-                identity.volume_or_dev !=
-                    operation.expected_source_identity.volume_or_dev ||
-                identity.file_id_low !=
-                    operation.expected_source_identity.file_id_low ||
-                identity.file_id_high !=
-                    operation.expected_source_identity.file_id_high ||
+            if (size_error ||
+                !identity_matches(identity,
+                                  operation.expected_source_identity) ||
                 size != operation.size) {
                 return std::unexpected(make_error(
                     size_error ? MutationErrorCode::LocalIo
@@ -1432,13 +1425,9 @@ apply_operation(const Operation& operation,
             if (!actual) {
                 return std::unexpected(actual.error());
             }
-            if (*actual != operation.hash || !after_identity.valid ||
-                after_identity.volume_or_dev !=
-                    operation.expected_source_identity.volume_or_dev ||
-                after_identity.file_id_low !=
-                    operation.expected_source_identity.file_id_low ||
-                after_identity.file_id_high !=
-                    operation.expected_source_identity.file_id_high) {
+            if (*actual != operation.hash ||
+                !identity_matches(after_identity,
+                                  operation.expected_source_identity)) {
                 return std::unexpected(make_error(
                     MutationErrorCode::DestinationConflict,
                     "disposable source changed before removal",
@@ -1473,14 +1462,7 @@ apply_operation(const Operation& operation,
                     operation_index));
             }
             mutation_fault_test::hit("after_delete_ignored_local_file", *path);
-            auto synced = platform::durability::sync_parent_directory(*path);
-            if (!synced) {
-                return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                                  synced.error(),
-                                                  *path,
-                                                  operation_index));
-            }
-            return {};
+            return sync_parent_checked(*path, operation_index);
         }
 
         case Action::DeleteLocal: {
@@ -1530,14 +1512,7 @@ apply_operation(const Operation& operation,
                                "failed to remove file: " + error.message(),
                                *path,
                                operation_index));
-            auto synced = platform::durability::sync_parent_directory(*path);
-            if (!synced) {
-                return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                                  synced.error(),
-                                                  *path,
-                                                  operation_index));
-            }
-            return {};
+            return sync_parent_checked(*path, operation_index);
         }
 
         case Action::DeleteLocalDirectory: {
@@ -1595,16 +1570,6 @@ apply_operation(const Operation& operation,
         }
 
         case Action::DeleteRemote:
-            return {};
-
-        case Action::DeleteRemoteDirectory:
-            if (operation.path.empty() || operation.path == ".") {
-                return std::unexpected(
-                    make_error(MutationErrorCode::InvalidOperation,
-                               "remote directory without path",
-                               operation.path,
-                               operation_index));
-            }
             return {};
 
         case Action::Count:
