@@ -19,9 +19,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #else
+#include <windows.h>
+
 #include <aclapi.h>
 #include <sddl.h>
-#include <windows.h>
 #endif
 
 TEST(CliUpdateTest, ParsesTheSinglePublicUpdateCommand) {

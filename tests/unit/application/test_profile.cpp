@@ -48,9 +48,10 @@
 #define NOMINMAX
 #endif
 #define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 #include <aclapi.h>
 #include <sddl.h>
-#include <windows.h>
 #include <winioctl.h>
 #else
 #include <spawn.h>

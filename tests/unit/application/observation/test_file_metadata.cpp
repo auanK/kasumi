@@ -18,12 +18,13 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <windows.h>
+
 #include <aclapi.h>
 #include <cstddef>
 #include <functional>
 #include <thread>
 #include <vector>
-#include <windows.h>
 #else
 #include <cerrno>
 #include <fcntl.h>

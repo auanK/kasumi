@@ -18,9 +18,10 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <windows.h>
+
 #include <aclapi.h>
 #include <sddl.h>
-#include <windows.h>
 #else
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -629,7 +630,6 @@ create_private_file(const std::filesystem::path& path) {
             CreateFileError{windows_error(detail, code), is_col});
     }
     FILE_ID_INFO id{};
-    FileIdentity identity{};
     const BOOL id_ok =
         GetFileInformationByHandleEx(file, FileIdInfo, &id, sizeof(id));
     if (!id_ok) {
