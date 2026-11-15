@@ -646,6 +646,87 @@ bool take_sqlite_snapshot(const std::filesystem::path& source,
 #endif
     return true;
 }
+
+auto find_profile(std::vector<runtime::ProfileData>& profiles,
+                  std::string_view name) {
+    return std::ranges::find_if(profiles, [&](const auto& p) {
+        return p.name == name;
+    });
+}
+
+std::expected<void, ProfileError>
+validate_profile_locations(const Profile& profile) {
+    if (!profile.local_dir.is_absolute()) {
+        return std::unexpected(
+            ProfileError{.code = ProfileErrorCode::StorageFailure,
+                         .detail = "local path must be absolute"});
+    }
+    const auto valid_storage =
+        transport::validate_transport_location(profile.remote_dir);
+    if (!valid_storage) {
+        return std::unexpected(ProfileError{
+            .code = ProfileErrorCode::StorageFailure,
+            .detail = transport::describe(valid_storage.error()),
+        });
+    }
+    return {};
+}
+
+struct LockedConfig {
+    ScopedConfigLock lock;
+    std::filesystem::path config_path;
+    std::vector<runtime::ProfileData> profiles;
+};
+
+std::expected<LockedConfig, ProfileError>
+load_profiles_locked(const std::filesystem::path& app_data_dir,
+                     bool not_found_as_empty = false,
+                     std::string_view not_found_detail = {}) {
+    auto lock = ScopedConfigLock::acquire(app_data_dir);
+    if (!lock) {
+        return std::unexpected(lock.error());
+    }
+    auto config_path = app_data_dir / "config.toml";
+    auto profiles_res = runtime::load_profiles(config_path);
+    std::vector<runtime::ProfileData> profiles;
+    if (!profiles_res) {
+        if (not_found_as_empty &&
+            profiles_res.error().code == runtime::ErrorCode::ConfigNotFound) {
+            return LockedConfig{
+                .lock = std::move(*lock),
+                .config_path = std::move(config_path),
+                .profiles = {},
+            };
+        }
+        if (!not_found_detail.empty() &&
+            profiles_res.error().code == runtime::ErrorCode::ConfigNotFound) {
+            return std::unexpected(ProfileError{
+                .code = ProfileErrorCode::NotFound,
+                .detail = std::string(not_found_detail),
+            });
+        }
+        return std::unexpected(map_runtime_error(profiles_res.error()));
+    }
+    return LockedConfig{
+        .lock = std::move(*lock),
+        .config_path = std::move(config_path),
+        .profiles = std::move(*profiles_res),
+    };
+}
+
+struct KeyBytesWiper {
+    runtime::vault::KeyBytes& key;
+    bool active = true;
+    void release() noexcept {
+        if (active) {
+            crypto::secure_memory::wipe(key.data(), key.size());
+            active = false;
+        }
+    }
+    ~KeyBytesWiper() {
+        release();
+    }
+};
 } // namespace
 
 std::expected<std::vector<Profile>, ProfileError>
@@ -697,19 +778,8 @@ create_profile(const ExecutionEnvironment& environment,
                 ProfileError{.code = ProfileErrorCode::ConfigFailure,
                              .detail = "invalid retention policy"});
         }
-        if (!profile.local_dir.is_absolute()) {
-            return std::unexpected(
-                ProfileError{.code = ProfileErrorCode::StorageFailure,
-                             .detail = "local path must be absolute"});
-        }
-
-        const auto valid_storage =
-            transport::validate_transport_location(profile.remote_dir);
-        if (!valid_storage) {
-            return std::unexpected(ProfileError{
-                .code = ProfileErrorCode::StorageFailure,
-                .detail = transport::describe(valid_storage.error()),
-            });
+        if (const auto valid = validate_profile_locations(profile); !valid) {
+            return valid;
         }
 
         if (const auto* hex = std::get_if<MasterKeyHex>(&credentials)) {
@@ -735,10 +805,7 @@ create_profile(const ExecutionEnvironment& environment,
             profiles = std::move(*profiles_res);
         }
 
-        auto it = std::ranges::find_if(profiles, [&](const auto& p) {
-            return p.name == profile.name;
-        });
-        if (it != profiles.end()) {
+        if (find_profile(profiles, profile.name) != profiles.end()) {
             return std::unexpected(
                 ProfileError{.code = ProfileErrorCode::AlreadyExists,
                              .detail = "profile already exists"});
@@ -810,35 +877,17 @@ create_profile(const ExecutionEnvironment& environment,
 
 std::expected<void, ProfileError>
 update_profile(const ExecutionEnvironment& environment, Profile profile) {
-    if (!profile.local_dir.is_absolute()) {
-        return std::unexpected(
-            ProfileError{.code = ProfileErrorCode::StorageFailure,
-                         .detail = "local path must be absolute"});
-    }
-    const auto valid_storage =
-        transport::validate_transport_location(profile.remote_dir);
-    if (!valid_storage) {
-        return std::unexpected(ProfileError{
-            .code = ProfileErrorCode::StorageFailure,
-            .detail = transport::describe(valid_storage.error()),
-        });
+    if (const auto valid = validate_profile_locations(profile); !valid) {
+        return valid;
     }
 
-    auto lock = ScopedConfigLock::acquire(environment.app_data_dir);
-    if (!lock) {
-        return std::unexpected(lock.error());
+    auto loaded = load_profiles_locked(environment.app_data_dir);
+    if (!loaded) {
+        return std::unexpected(loaded.error());
     }
 
-    auto config_path = environment.app_data_dir / "config.toml";
-    auto profiles_res = runtime::load_profiles(config_path);
-    if (!profiles_res) {
-        return std::unexpected(map_runtime_error(profiles_res.error()));
-    }
-
-    auto it = std::ranges::find_if(*profiles_res, [&](const auto& p) {
-        return p.name == profile.name;
-    });
-    if (it == profiles_res->end()) {
+    auto it = find_profile(loaded->profiles, profile.name);
+    if (it == loaded->profiles.end()) {
         return std::unexpected(ProfileError{.code = ProfileErrorCode::NotFound,
                                             .detail = "profile not found"});
     }
@@ -846,7 +895,8 @@ update_profile(const ExecutionEnvironment& environment, Profile profile) {
     it->local_dir = profile.local_dir;
     it->remote_dir = profile.remote_dir;
 
-    auto save_res = runtime::save_profiles(config_path, *profiles_res);
+    auto save_res =
+        runtime::save_profiles(loaded->config_path, loaded->profiles);
     if (!save_res) {
         return std::unexpected(map_runtime_error(save_res.error()));
     }
@@ -857,29 +907,22 @@ update_profile(const ExecutionEnvironment& environment, Profile profile) {
 std::expected<void, ProfileError>
 delete_profile(const ExecutionEnvironment& environment,
                std::string_view profile_name) {
-    auto lock = ScopedConfigLock::acquire(environment.app_data_dir);
-    if (!lock) {
-        return std::unexpected(lock.error());
+    auto loaded = load_profiles_locked(environment.app_data_dir);
+    if (!loaded) {
+        return std::unexpected(loaded.error());
     }
 
-    auto config_path = environment.app_data_dir / "config.toml";
-    auto profiles_res = runtime::load_profiles(config_path);
-    if (!profiles_res) {
-        return std::unexpected(map_runtime_error(profiles_res.error()));
-    }
-
-    auto it = std::ranges::find_if(*profiles_res, [&](const auto& p) {
-        return p.name == profile_name;
-    });
-    if (it == profiles_res->end()) {
+    auto it = find_profile(loaded->profiles, profile_name);
+    if (it == loaded->profiles.end()) {
         return std::unexpected(ProfileError{.code = ProfileErrorCode::NotFound,
                                             .detail = "profile not found"});
     }
 
-    auto original_profiles = *profiles_res;
-    profiles_res->erase(it);
+    auto original_profiles = loaded->profiles;
+    loaded->profiles.erase(it);
 
-    auto save_res = runtime::save_profiles(config_path, *profiles_res);
+    auto save_res =
+        runtime::save_profiles(loaded->config_path, loaded->profiles);
     if (!save_res) {
         return std::unexpected(map_runtime_error(save_res.error()));
     }
@@ -890,7 +933,7 @@ delete_profile(const ExecutionEnvironment& environment,
         auto remove_res = runtime::remove_profile_directory(*paths_res);
         if (!remove_res) {
             auto rollback_res =
-                runtime::save_profiles(config_path, original_profiles);
+                runtime::save_profiles(loaded->config_path, original_profiles);
             std::string detail = remove_res.error().detail;
             if (!rollback_res) {
                 detail +=
@@ -915,29 +958,18 @@ rename_profile(const ExecutionEnvironment& environment,
                          .detail = "invalid profile name"});
     }
 
-    auto lock = ScopedConfigLock::acquire(environment.app_data_dir);
-    if (!lock) {
-        return std::unexpected(lock.error());
+    auto loaded = load_profiles_locked(environment.app_data_dir);
+    if (!loaded) {
+        return std::unexpected(loaded.error());
     }
 
-    auto config_path = environment.app_data_dir / "config.toml";
-    auto profiles_res = runtime::load_profiles(config_path);
-    if (!profiles_res) {
-        return std::unexpected(map_runtime_error(profiles_res.error()));
-    }
-
-    auto it_current = std::ranges::find_if(*profiles_res, [&](const auto& p) {
-        return p.name == current_name;
-    });
-    if (it_current == profiles_res->end()) {
+    auto it_current = find_profile(loaded->profiles, current_name);
+    if (it_current == loaded->profiles.end()) {
         return std::unexpected(ProfileError{.code = ProfileErrorCode::NotFound,
                                             .detail = "profile not found"});
     }
 
-    auto it_new = std::ranges::find_if(*profiles_res, [&](const auto& p) {
-        return p.name == new_name;
-    });
-    if (it_new != profiles_res->end()) {
+    if (find_profile(loaded->profiles, new_name) != loaded->profiles.end()) {
         return std::unexpected(
             ProfileError{.code = ProfileErrorCode::AlreadyExists,
                          .detail = "a profile with this name already exists"});
@@ -973,7 +1005,8 @@ rename_profile(const ExecutionEnvironment& environment,
 
     it_current->name = std::string(new_name);
 
-    auto save_res = runtime::save_profiles(config_path, *profiles_res);
+    auto save_res =
+        runtime::save_profiles(loaded->config_path, loaded->profiles);
     if (!save_res) {
         std::string detail = save_res.error().detail;
         if (phys_renamed) {
@@ -1003,37 +1036,22 @@ clone_profile(const ExecutionEnvironment& environment,
         });
     }
 
-    auto lock = ScopedConfigLock::acquire(environment.app_data_dir);
-    if (!lock) {
-        return std::unexpected(lock.error());
+    auto loaded = load_profiles_locked(
+        environment.app_data_dir, false, "source profile not found");
+    if (!loaded) {
+        return std::unexpected(loaded.error());
     }
 
-    auto config_path = environment.app_data_dir / "config.toml";
-    auto profiles_res = runtime::load_profiles(config_path);
-    if (!profiles_res) {
-        if (profiles_res.error().code == runtime::ErrorCode::ConfigNotFound) {
-            return std::unexpected(ProfileError{
-                .code = ProfileErrorCode::NotFound,
-                .detail = "source profile not found",
-            });
-        }
-        return std::unexpected(map_runtime_error(profiles_res.error()));
-    }
-
-    auto source_it = std::ranges::find_if(*profiles_res, [&](const auto& p) {
-        return p.name == source_profile_name;
-    });
-    if (source_it == profiles_res->end()) {
+    auto source_it = find_profile(loaded->profiles, source_profile_name);
+    if (source_it == loaded->profiles.end()) {
         return std::unexpected(ProfileError{
             .code = ProfileErrorCode::NotFound,
             .detail = "source profile not found",
         });
     }
 
-    auto dest_it = std::ranges::find_if(*profiles_res, [&](const auto& p) {
-        return p.name == destination_profile_name;
-    });
-    if (dest_it != profiles_res->end()) {
+    if (find_profile(loaded->profiles, destination_profile_name) !=
+        loaded->profiles.end()) {
         return std::unexpected(ProfileError{
             .code = ProfileErrorCode::AlreadyExists,
             .detail = "a profile with this name already exists",
@@ -1074,14 +1092,13 @@ clone_profile(const ExecutionEnvironment& environment,
     if (!master_key_res) {
         return std::unexpected(map_runtime_error(master_key_res.error()));
     }
+    KeyBytesWiper key_wiper{*master_key_res};
 
     for (const auto& directory : {environment.app_data_dir,
                                   dest_paths_res->profile_dir.parent_path()}) {
         auto ensure_res =
             platform::private_storage::ensure_directory(directory);
         if (!ensure_res) {
-            crypto::secure_memory::wipe(master_key_res->data(),
-                                        master_key_res->size());
             return std::unexpected(ProfileError{
                 .code = ProfileErrorCode::StorageFailure,
                 .detail = ensure_res.error(),
@@ -1091,8 +1108,6 @@ clone_profile(const ExecutionEnvironment& environment,
     auto created = platform::private_storage::create_directory(
         dest_paths_res->profile_dir);
     if (!created) {
-        crypto::secure_memory::wipe(master_key_res->data(),
-                                    master_key_res->size());
         return std::unexpected(ProfileError{
             .code = ProfileErrorCode::StorageFailure,
             .detail = created.error(),
@@ -1265,8 +1280,6 @@ clone_profile(const ExecutionEnvironment& environment,
                                      : "destination directory remains");
     };
     if (!clone_identity.valid) {
-        crypto::secure_memory::wipe(master_key_res->data(),
-                                    master_key_res->size());
         return std::unexpected(ProfileError{
             .code = ProfileErrorCode::StorageFailure,
             .detail = "could not verify ownership of destination directory",
@@ -1294,7 +1307,7 @@ clone_profile(const ExecutionEnvironment& environment,
         clone_files.emplace_back(dest_paths_res->key_path, key_identity);
     }
     const bool key_owned = write_ok && key_identity.valid;
-    crypto::secure_memory::wipe(master_key_res->data(), master_key_res->size());
+    key_wiper.release();
     if (!write_ok || !key_owned) {
         auto remove_res = rollback_directory();
         std::string detail = write_ok ? "could not verify cloned key ownership"
@@ -1347,7 +1360,7 @@ clone_profile(const ExecutionEnvironment& environment,
 
     auto cloned_profile = *source_it;
     cloned_profile.name = std::string(destination_profile_name);
-    profiles_res->push_back(std::move(cloned_profile));
+    loaded->profiles.push_back(std::move(cloned_profile));
 
     std::expected<void, runtime::Error> save_res;
 #ifdef KASUMI_MUTATION_FAULT_TESTS
@@ -1366,7 +1379,8 @@ clone_profile(const ExecutionEnvironment& environment,
     } else
 #endif
     {
-        save_res = runtime::save_profiles(config_path, *profiles_res);
+        save_res =
+            runtime::save_profiles(loaded->config_path, loaded->profiles);
     }
 
     if (!save_res) {

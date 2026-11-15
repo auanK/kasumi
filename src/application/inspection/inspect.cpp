@@ -739,6 +739,25 @@ make_tree_report(const InspectionRequest& request,
     return report;
 }
 
+RemoteCommitInfo make_commit_info(const kasumi::history::LoadedCommit& loaded,
+                                  bool logical_head,
+                                  bool physically_marked,
+                                  bool ancestral_marked) {
+    const auto& rows = loaded.commit.tree.rows;
+    return RemoteCommitInfo{
+        .commit_id = loaded.id,
+        .height = loaded.commit.height,
+        .created_at = loaded.commit.created_at,
+        .parent_ids = loaded.commit.parents,
+        .logical_head = logical_head,
+        .physically_marked = physically_marked,
+        .ancestral_marked = ancestral_marked,
+        .root_hash = hash_hex(rows.front().hash),
+        .total_bytes = rows.front().size,
+        .entry_count = static_cast<std::uint64_t>(rows.size() - 1),
+    };
+}
+
 std::expected<RemoteCommitsReport, InspectionError>
 make_commits_report(const observation::history::StorageView& observed,
                     InspectionOperation operation) {
@@ -784,18 +803,11 @@ make_commits_report(const observation::history::StorageView& observed,
         if (logical_head) {
             logical_heads.emplace_back(loaded.commit.height, loaded.id);
         }
-        report.commits.push_back(RemoteCommitInfo{
-            .commit_id = loaded.id,
-            .height = loaded.commit.height,
-            .created_at = loaded.commit.created_at,
-            .parent_ids = loaded.commit.parents,
-            .logical_head = logical_head,
-            .physically_marked = marked_head_ids.contains(loaded.id),
-            .ancestral_marked = ancestral_marked_head_ids.contains(loaded.id),
-            .root_hash = hash_hex(rows.front().hash),
-            .total_bytes = rows.front().size,
-            .entry_count = static_cast<std::uint64_t>(rows.size() - 1),
-        });
+        report.commits.push_back(
+            make_commit_info(loaded,
+                             logical_head,
+                             marked_head_ids.contains(loaded.id),
+                             ancestral_marked_head_ids.contains(loaded.id)));
     }
 
     if (logical_heads.size() != observed.logical_heads.size()) {
@@ -1719,24 +1731,13 @@ inspect_physical(InspectionContext& context, InspectionOperation operation) {
 RemoteCommitInfo
 commit_info(const kasumi::history::LoadedCommit& loaded,
             const observation::history::StorageView& observed) {
-    const auto& rows = loaded.commit.tree.rows;
-    return RemoteCommitInfo{
-        .commit_id = loaded.id,
-        .height = loaded.commit.height,
-        .created_at = loaded.commit.created_at,
-        .parent_ids = loaded.commit.parents,
-        .logical_head = std::ranges::find(observed.logical_heads, loaded.id) !=
-                        observed.logical_heads.end(),
-        .physically_marked =
-            std::ranges::find(observed.marked_heads, loaded.id) !=
-            observed.marked_heads.end(),
-        .ancestral_marked =
-            std::ranges::find(observed.ancestral_marked_heads, loaded.id) !=
-            observed.ancestral_marked_heads.end(),
-        .root_hash = hash_hex(rows.front().hash),
-        .total_bytes = rows.front().size,
-        .entry_count = static_cast<std::uint64_t>(rows.size() - 1),
+    const auto contains = [&](const auto& ids) {
+        return std::ranges::find(ids, loaded.id) != ids.end();
     };
+    return make_commit_info(loaded,
+                            contains(observed.logical_heads),
+                            contains(observed.marked_heads),
+                            contains(observed.ancestral_marked_heads));
 }
 
 std::expected<RemoteCommitReport, InspectionError>
@@ -1838,12 +1839,18 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
                                      InspectionErrorCode::InvalidRequest,
                                      "remote path or destination is invalid"));
     }
-    if (operation == InspectionOperation::RemoteCommit &&
-        (!input.request.commit_id ||
-         !history::valid_commit_id(*input.request.commit_id))) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::InvalidRequest,
-                                     "requested commit ID is invalid"));
+    if (const auto id = operation == InspectionOperation::RemoteCommit
+                            ? &input.request.commit_id
+                        : operation == InspectionOperation::RemoteContent
+                            ? &input.request.content_id
+                            : nullptr;
+        id != nullptr && (!*id || !history::valid_commit_id(**id))) {
+        return std::unexpected(
+            error(operation,
+                  InspectionErrorCode::InvalidRequest,
+                  operation == InspectionOperation::RemoteCommit
+                      ? "requested commit ID is invalid"
+                      : "requested content ID is invalid"));
     }
     if (operation == InspectionOperation::RemoteEpoch &&
         (!input.request.epoch_selector ||
@@ -1854,30 +1861,26 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
                   InspectionErrorCode::InvalidRequest,
                   "requested Epoch ID or sequence is invalid"));
     }
-    if (operation == InspectionOperation::RemoteContent &&
-        (!input.request.content_id ||
-         !history::valid_commit_id(*input.request.content_id))) {
-        return std::unexpected(error(operation,
-                                     InspectionErrorCode::InvalidRequest,
-                                     "requested content ID is invalid"));
-    }
-    if (operation != InspectionOperation::RemoteHeads &&
-        operation != InspectionOperation::RemoteTree &&
-        operation != InspectionOperation::RemoteCommits &&
-        operation != InspectionOperation::RemoteSummary &&
-        operation != InspectionOperation::RemoteStat &&
-        operation != InspectionOperation::RemoteCommit &&
-        operation != InspectionOperation::RemoteGet &&
-        operation != InspectionOperation::RemoteEpochs &&
-        operation != InspectionOperation::RemoteEpoch &&
-        operation != InspectionOperation::RemoteContents &&
-        operation != InspectionOperation::RemoteContentsAudit &&
-        operation != InspectionOperation::RemoteContent &&
-        operation != InspectionOperation::RemoteMarkers &&
-        operation != InspectionOperation::RemoteObjects &&
-        operation != InspectionOperation::RemoteOrphans &&
-        operation != InspectionOperation::RemoteWriters &&
-        operation != InspectionOperation::RemoteHealth) {
+    constexpr std::array<InspectionOperation, 17> valid_operations{
+        InspectionOperation::RemoteHeads,
+        InspectionOperation::RemoteTree,
+        InspectionOperation::RemoteCommits,
+        InspectionOperation::RemoteSummary,
+        InspectionOperation::RemoteStat,
+        InspectionOperation::RemoteCommit,
+        InspectionOperation::RemoteGet,
+        InspectionOperation::RemoteEpochs,
+        InspectionOperation::RemoteEpoch,
+        InspectionOperation::RemoteContents,
+        InspectionOperation::RemoteContentsAudit,
+        InspectionOperation::RemoteContent,
+        InspectionOperation::RemoteMarkers,
+        InspectionOperation::RemoteObjects,
+        InspectionOperation::RemoteOrphans,
+        InspectionOperation::RemoteWriters,
+        InspectionOperation::RemoteHealth};
+    if (std::ranges::find(valid_operations, operation) ==
+        valid_operations.end()) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::RuntimeFailure,
                                      "unknown inspection operation"));
