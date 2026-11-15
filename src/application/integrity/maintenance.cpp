@@ -1,5 +1,6 @@
 #include "application/integrity/maintenance.hpp"
 
+#include "application/detail.hpp"
 #include "application/history_storage/content_reachability.hpp"
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
@@ -112,59 +113,28 @@ std::string path_detail(const std::vector<std::filesystem::path>& paths) {
            ')';
 }
 
-std::filesystem::path
-maintenance_workspace_root(const runtime::RuntimeData& runtime_data) {
-    auto root = runtime_data.database_path.parent_path();
-    std::error_code error;
-    if (root.empty() || !std::filesystem::exists(root, error)) {
-        root = runtime_data.local_dir.parent_path();
-    }
-    return root;
-}
-
-std::expected<void, Error>
-prepare_workspace_file(const std::filesystem::path& path) {
+std::expected<bool, Error> check_regular_file(const std::filesystem::path& path,
+                                              ErrorCode failure_code,
+                                              bool allow_absent,
+                                              std::string_view detail) {
     std::error_code error;
     const auto status = std::filesystem::symlink_status(path, error);
-    if (not_found(error) ||
+    if ((allow_absent && not_found(error)) ||
         status.type() == std::filesystem::file_type::not_found) {
-        return {};
+        if (allow_absent) {
+            return false;
+        }
+        return std::unexpected(make_error(failure_code, std::string{detail}));
     }
     if (error) {
-        return std::unexpected(
-            make_error(ErrorCode::WorkspaceFailure,
-                       "could not inspect temporary file: " + error.message()));
+        return std::unexpected(make_error(
+            failure_code, std::string{detail} + ": " + error.message()));
     }
     if (std::filesystem::is_symlink(status) ||
         !std::filesystem::is_regular_file(status)) {
-        return std::unexpected(make_error(ErrorCode::WorkspaceFailure,
-                                          "temporary file has invalid type"));
+        return std::unexpected(make_error(failure_code, std::string{detail}));
     }
-    std::filesystem::remove(path, error);
-    if (error) {
-        return std::unexpected(
-            make_error(ErrorCode::WorkspaceFailure,
-                       "could not clean temporary file: " + error.message()));
-    }
-    return {};
-}
-
-std::expected<void, Error>
-require_regular_file(const std::filesystem::path& path,
-                     ErrorCode failure_code,
-                     std::string detail) {
-    std::error_code error;
-    const auto status = std::filesystem::symlink_status(path, error);
-    if (error) {
-        return std::unexpected(make_error(
-            failure_code, std::move(detail) + ": " + error.message()));
-    }
-    if (status.type() == std::filesystem::file_type::not_found ||
-        std::filesystem::is_symlink(status) ||
-        !std::filesystem::is_regular_file(status)) {
-        return std::unexpected(make_error(failure_code, std::move(detail)));
-    }
-    return {};
+    return true;
 }
 
 std::expected<void, Error>
@@ -179,14 +149,27 @@ remove_temporary_file(const std::filesystem::path& path) {
     return {};
 }
 
+std::expected<void, Error>
+prepare_workspace_file(const std::filesystem::path& path) {
+    auto present = check_regular_file(path,
+                                      ErrorCode::WorkspaceFailure,
+                                      true,
+                                      "temporary file has invalid type");
+    if (!present) {
+        return std::unexpected(present.error());
+    }
+    return *present ? remove_temporary_file(path)
+                    : std::expected<void, Error>{};
+}
+
 std::expected<void, Error> verify_content(const std::filesystem::path& path,
                                           std::string_view identifier,
                                           std::uint64_t expected_size,
                                           ErrorCode io_failure) {
-    auto regular = require_regular_file(
-        path, io_failure, "file is not regular for verification");
-    if (!regular) {
-        return regular;
+    if (auto regular = check_regular_file(
+            path, io_failure, false, "file is not regular for verification");
+        !regular) {
+        return std::unexpected(regular.error());
     }
     std::error_code error;
     const auto actual_size = std::filesystem::file_size(path, error);
@@ -226,12 +209,10 @@ audit_object(transport::Transport& storage,
         platform::workspace_file(workspace, index, ".audit.enc");
     const auto plaintext =
         platform::workspace_file(workspace, index, ".audit.plain");
-    auto prepared = prepare_workspace_file(encrypted);
-    if (!prepared)
-        return std::unexpected(prepared.error());
-    prepared = prepare_workspace_file(plaintext);
-    if (!prepared)
-        return std::unexpected(prepared.error());
+    if (auto p = prepare_workspace_file(encrypted); !p)
+        return std::unexpected(p.error());
+    if (auto p = prepare_workspace_file(plaintext); !p)
+        return std::unexpected(p.error());
 
     const auto cleanup_temporaries = [&]() -> std::expected<void, Error> {
         for (const auto& path : {encrypted, plaintext}) {
@@ -253,10 +234,13 @@ audit_object(transport::Transport& storage,
             transport_error(downloaded.error(), reference.identifier));
     }
 
-    auto regular = require_regular_file(
-        encrypted, ErrorCode::WorkspaceFailure, "invalid temporary download");
-    if (!regular)
+    if (auto regular = check_regular_file(encrypted,
+                                          ErrorCode::WorkspaceFailure,
+                                          false,
+                                          "invalid temporary download");
+        !regular) {
         return std::unexpected(regular.error());
+    }
 
     AuditState result = AuditState::Healthy;
     if (!crypto::decrypt_file(encrypted, plaintext, key)) {
@@ -443,7 +427,8 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
             make_error(ErrorCode::InvalidInput, "invalid fsck context"));
     }
     report_progress(application::FsckStage::Observing);
-    const auto history_workspace = maintenance_workspace_root(runtime_data);
+    const auto history_workspace =
+        application::detail::maintenance_workspace_root(runtime_data);
     auto observation = observation::collect_storage_observation(
         storage, key, history_workspace, true);
     if (!observation) {

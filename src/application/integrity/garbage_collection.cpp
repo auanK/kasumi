@@ -1,4 +1,6 @@
+#include "application/detail.hpp"
 #include "application/history_storage/content_reachability.hpp"
+#include "application/history_storage/detail.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
 #include "application/history_storage/remote_layout.hpp"
@@ -175,16 +177,6 @@ struct BarrierCleanup {
     }
 };
 
-std::filesystem::path
-maintenance_workspace_root(const runtime::RuntimeData& runtime_data) {
-    auto root = runtime_data.database_path.parent_path();
-    std::error_code error;
-    if (root.empty() || !std::filesystem::exists(root, error)) {
-        root = runtime_data.local_dir.parent_path();
-    }
-    return root;
-}
-
 void notify(const GarbageCollectProgressCallback& on_progress,
             GarbageCollectStage stage,
             std::optional<std::size_t> candidate_count,
@@ -297,9 +289,7 @@ required_variants(const history_storage::ReachabilityInventory& inventory,
         required.push_back(
             history_storage::commit_object(layout, *marker.reference));
     }
-    std::ranges::sort(marked_commits);
-    marked_commits.erase(std::ranges::unique(marked_commits).begin(),
-                         marked_commits.end());
+    history_storage::detail::sort_unique(marked_commits);
 
     for (const auto& commit : inventory.commits) {
         if (!commit.reachable ||
@@ -317,8 +307,7 @@ required_variants(const history_storage::ReachabilityInventory& inventory,
         }
     }
 
-    std::ranges::sort(required);
-    required.erase(std::ranges::unique(required).begin(), required.end());
+    history_storage::detail::sort_unique(required);
     return required;
 }
 
@@ -353,8 +342,7 @@ observe(transport::Transport& storage,
     }
 
     std::vector<std::string> orphan_ids = content->orphan_content_ids;
-    std::ranges::sort(orphan_ids);
-    orphan_ids.erase(std::ranges::unique(orphan_ids).begin(), orphan_ids.end());
+    history_storage::detail::sort_unique(orphan_ids);
 
     auto protected_objects = required_variants(*history, layout);
     protected_objects.insert(protected_objects.end(),
@@ -366,9 +354,7 @@ observe(transport::Transport& storage,
     protected_objects.insert(protected_objects.end(),
                              history->orphan_epochs.begin(),
                              history->orphan_epochs.end());
-    std::ranges::sort(protected_objects);
-    protected_objects.erase(std::ranges::unique(protected_objects).begin(),
-                            protected_objects.end());
+    history_storage::detail::sort_unique(protected_objects);
 
     std::vector<std::string> candidates;
     for (const auto& commit : history->commits) {
@@ -391,8 +377,7 @@ observe(transport::Transport& storage,
             candidates.push_back(variant.identifier);
         }
     }
-    std::ranges::sort(candidates);
-    candidates.erase(std::ranges::unique(candidates).begin(), candidates.end());
+    history_storage::detail::sort_unique(candidates);
 
     for (const auto& identifier : orphan_ids) {
         if (identifier.empty() ||
@@ -447,7 +432,8 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid transport"));
     }
-    const auto workspace_root = maintenance_workspace_root(runtime_data);
+    const auto workspace_root =
+        application::detail::maintenance_workspace_root(runtime_data);
     if (workspace_root.empty()) {
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid workspace"));
@@ -526,6 +512,23 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
     };
 
     bool mutation_in_flight = false;
+    const auto fail_exception = [&](std::string_view what) {
+        if (mutation_in_flight) {
+            failure_diagnostic.mutation_state =
+                GarbageCollectMutationState::Uncertain;
+        }
+        std::string detail =
+            failure_diagnostic.stage == GarbageCollectStage::Applying
+                ? "garbage collection failed during apply"
+                : "garbage collection failed";
+        if (!what.empty()) {
+            detail += ": ";
+            detail += what;
+        }
+        return finish(std::unexpected(
+            make_error(ErrorCode::StateFailure, std::move(detail))));
+    };
+
     try {
         if (auto verified = require_barrier_ownership(cleanup.registration);
             !verified) {
@@ -737,29 +740,9 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             .analysis_only = false,
         });
     } catch (const std::exception& error) {
-        if (mutation_in_flight) {
-            failure_diagnostic.mutation_state =
-                GarbageCollectMutationState::Uncertain;
-        }
-        auto detail = std::string{"garbage collection failed: "};
-        if (failure_diagnostic.stage == GarbageCollectStage::Applying) {
-            detail = "garbage collection failed during apply: ";
-        }
-        detail += error.what();
-        return finish(std::unexpected(
-            make_error(ErrorCode::StateFailure, std::move(detail))));
+        return fail_exception(error.what());
     } catch (...) {
-        if (mutation_in_flight) {
-            failure_diagnostic.mutation_state =
-                GarbageCollectMutationState::Uncertain;
-        }
-        if (failure_diagnostic.stage == GarbageCollectStage::Applying) {
-            return finish(std::unexpected(
-                make_error(ErrorCode::StateFailure,
-                           "garbage collection failed during apply")));
-        }
-        return finish(std::unexpected(
-            make_error(ErrorCode::StateFailure, "garbage collection failed")));
+        return fail_exception({});
     }
 }
 

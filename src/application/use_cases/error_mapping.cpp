@@ -1,34 +1,21 @@
 #include "application/use_cases/error_mapping.hpp"
 
-#include "crypto/secure_memory.hpp"
+#include "application/detail.hpp"
 #include "runtime/resolver.hpp"
 #include "runtime/vault.hpp"
 
-#include <filesystem>
 #include <string>
 #include <utility>
 
 namespace kasumi::application::detail {
 
 ErrorCode runtime_error_to_application_error(runtime::ErrorCode code) {
-    switch (code) {
-        case runtime::ErrorCode::InvalidProfileName:
-            return ErrorCode::InvalidProfile;
-        case runtime::ErrorCode::ProfileNotFound:
-            return ErrorCode::ProfileNotFound;
-        case runtime::ErrorCode::KeyNotFound:
-        case runtime::ErrorCode::KeyInvalid:
-        case runtime::ErrorCode::KeyDerivationFailure:
-        case runtime::ErrorCode::KeyWriteFailure:
-            return ErrorCode::CredentialFailure;
-        case runtime::ErrorCode::ConfigNotFound:
-        case runtime::ErrorCode::ConfigInvalid:
-        case runtime::ErrorCode::ProfileInvalid:
-        case runtime::ErrorCode::PathEscape:
-        case runtime::ErrorCode::IoFailure:
-            return ErrorCode::RuntimeFailure;
-    }
-    std::unreachable();
+    return map_runtime_error_code(code,
+                                  ErrorCode::InvalidProfile,
+                                  ErrorCode::ProfileNotFound,
+                                  ErrorCode::CredentialFailure,
+                                  ErrorCode::RuntimeFailure,
+                                  ErrorCode::RuntimeFailure);
 }
 
 std::expected<void, Error>
@@ -37,68 +24,24 @@ resolve_key_into(Operation operation,
                  const runtime::RuntimeData& runtime_data,
                  const RuntimeSummary& summary,
                  runtime::vault::KeyBytes& output) {
-    crypto::secure_memory::wipe(output.data(), output.size());
-
-    if (std::holds_alternative<NoCredentials>(credentials)) {
-        if (!std::filesystem::exists(runtime_data.key_path)) {
-            return std::unexpected(Error{
-                .operation = operation,
-                .code = ErrorCode::CredentialFailure,
-                .detail = "key not found and credentials not provided",
-                .runtime = summary,
-            });
-        }
-
-        auto result = runtime::vault::read(runtime_data.key_path);
-        if (!result) {
-            return std::unexpected(Error{
-                .operation = operation,
-                .code = ErrorCode::CredentialFailure,
-                .detail = result.error().detail,
-                .runtime = summary,
-            });
-        }
-        output = *result;
-        crypto::secure_memory::wipe(result->data(), result->size());
-        return {};
-    }
-
-    const auto& master_key = std::get<MasterKeyHex>(credentials);
-    auto result = runtime::vault::decode_hex(master_key.value);
-    if (!result) {
-        return std::unexpected(Error{
-            .operation = operation,
-            .code = ErrorCode::CredentialFailure,
-            .detail = result.error().detail,
-            .runtime = summary,
+    return resolve_vault_key<Error>(
+        credentials,
+        runtime_data,
+        output,
+        VaultKeyPolicy<Error>{
+            .read_only = false,
+            .missing_code = ErrorCode::CredentialFailure,
+            .mismatch_code = ErrorCode::RuntimeFailure,
+            .io_code = ErrorCode::CredentialFailure,
+            .credential_code = ErrorCode::CredentialFailure,
+            .missing_detail = "key not found and credentials not provided",
+        },
+        [&](ErrorCode code, std::string detail) {
+            return Error{.operation = operation,
+                         .code = code,
+                         .detail = std::move(detail),
+                         .runtime = summary};
         });
-    }
-    if (std::filesystem::exists(runtime_data.key_path)) {
-        auto stored = runtime::vault::read(runtime_data.key_path);
-        if (!stored) {
-            crypto::secure_memory::wipe(result->data(), result->size());
-            return std::unexpected(Error{
-                .operation = operation,
-                .code = ErrorCode::CredentialFailure,
-                .detail = stored.error().detail,
-                .runtime = summary,
-            });
-        }
-        const bool matches = *stored == *result;
-        crypto::secure_memory::wipe(stored->data(), stored->size());
-        if (!matches) {
-            crypto::secure_memory::wipe(result->data(), result->size());
-            return std::unexpected(Error{
-                .operation = operation,
-                .code = ErrorCode::RuntimeFailure,
-                .detail = "credential does not match profile",
-                .runtime = summary,
-            });
-        }
-    }
-    output = *result;
-    crypto::secure_memory::wipe(result->data(), result->size());
-    return {};
 }
 
 Error transaction_error(Operation operation,

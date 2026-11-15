@@ -1,6 +1,7 @@
 #include "application/integrity/maintenance.hpp"
 
 #include "application/concurrency.hpp"
+#include "application/detail.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/sync/coordinator.hpp"
@@ -98,18 +99,8 @@ std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
 
 std::expected<Response, Error> run_remove_barrier(OperationContext& context) {
     const auto layout = history_storage::derive_remote_layout(context.key);
-    auto workspace_root = context.runtime.database_path.parent_path();
-    std::error_code ec;
-    if (workspace_root.empty() ||
-        !std::filesystem::exists(workspace_root, ec)) {
-        workspace_root = context.runtime.local_dir.parent_path();
-    }
-    if (workspace_root.empty() ||
-        !std::filesystem::exists(workspace_root, ec)) {
-        workspace_root = std::filesystem::temp_directory_path();
-    }
     auto removed = history_storage::maintenance_protocol::remove_barrier(
-        context.storage, layout, workspace_root);
+        context.storage, layout, maintenance_workspace_root(context.runtime));
     if (!removed) {
         const auto& err = removed.error();
         const auto stage = err.stage.has_value()
