@@ -725,20 +725,34 @@ bool valid_commit_id(std::string_view id) noexcept {
     return id.size() == HASH_HEX_SIZE && is_lowercase_hex(id);
 }
 
+std::expected<void, Error>
+validate_parent_ids(std::span<const std::string> parents, bool require_sorted) {
+    if (parents.size() > maximum_parent_count) {
+        return std::unexpected(
+            Error{ErrorCode::LimitExceeded, "too many parents"});
+    }
+    std::string_view previous;
+    for (const auto& parent : parents) {
+        if (!valid_commit_id(parent)) {
+            return std::unexpected(
+                Error{ErrorCode::InvalidParent, "invalid parent id"});
+        }
+        if (require_sorted && !previous.empty() && parent <= previous) {
+            return std::unexpected(Error{ErrorCode::InvalidParent,
+                                         "parents not sorted or duplicate"});
+        }
+        previous = parent;
+    }
+    return {};
+}
+
 CommitResult make_commit(std::uint64_t height,
                          std::vector<std::string> parents,
                          Snapshot tree,
                          std::int64_t created_at) {
     try {
-        if (parents.size() > maximum_parent_count) {
-            return std::unexpected(
-                Error{ErrorCode::LimitExceeded, "too many parents"});
-        }
-        for (const auto& parent : parents) {
-            if (!valid_commit_id(parent)) {
-                return std::unexpected(
-                    Error{ErrorCode::InvalidParent, "invalid parent id"});
-            }
+        if (auto valid = validate_parent_ids(parents, false); !valid) {
+            return std::unexpected(valid.error());
         }
         std::ranges::sort(parents);
         if (std::ranges::adjacent_find(parents) != parents.end()) {
@@ -787,23 +801,9 @@ BytesResult serialize(const Commit& commit) {
         if (!valid) {
             return std::unexpected(valid.error());
         }
-        if (commit.parents.size() > maximum_parent_count) {
-            return std::unexpected(
-                Error{ErrorCode::LimitExceeded, "too many parents"});
-        }
-
-        std::string previous;
-        for (const auto& parent : commit.parents) {
-            if (!valid_commit_id(parent)) {
-                return std::unexpected(
-                    Error{ErrorCode::InvalidParent, "invalid parent id"});
-            }
-            if (!previous.empty() && parent <= previous) {
-                return std::unexpected(
-                    Error{ErrorCode::InvalidParent,
-                          "parents not sorted or duplicate"});
-            }
-            previous = parent;
+        if (auto parents_valid = validate_parent_ids(commit.parents, true);
+            !parents_valid) {
+            return std::unexpected(parents_valid.error());
         }
 
         std::vector<std::byte> tree_bytes;
@@ -1210,27 +1210,32 @@ resolve_authenticated(std::span<const LoadedCommit> commits,
     return resolve_impl(commits, marked_heads, {}, true);
 }
 
-ResolutionResult resolve_from_anchor(std::span<const LoadedCommit> commits,
-                                     std::span<const std::string> marked_heads,
-                                     std::string_view trusted_anchor_id) {
+ResolutionResult
+resolve_single_anchor(std::span<const LoadedCommit> commits,
+                      std::span<const std::string> marked_heads,
+                      std::string_view trusted_anchor_id,
+                      bool authenticate) {
     if (trusted_anchor_id.empty()) {
         return std::unexpected(
             Error{ErrorCode::InvalidCommitId, "trusted anchor is empty"});
     }
     const std::array anchors{std::string{trusted_anchor_id}};
-    return resolve_impl(commits, marked_heads, anchors, false);
+    return resolve_impl(commits, marked_heads, anchors, authenticate);
+}
+
+ResolutionResult resolve_from_anchor(std::span<const LoadedCommit> commits,
+                                     std::span<const std::string> marked_heads,
+                                     std::string_view trusted_anchor_id) {
+    return resolve_single_anchor(
+        commits, marked_heads, trusted_anchor_id, false);
 }
 
 ResolutionResult
 resolve_from_anchor_authenticated(std::span<const LoadedCommit> commits,
                                   std::span<const std::string> marked_heads,
                                   std::string_view trusted_anchor_id) {
-    if (trusted_anchor_id.empty()) {
-        return std::unexpected(
-            Error{ErrorCode::InvalidCommitId, "trusted anchor is empty"});
-    }
-    const std::array anchors{std::string{trusted_anchor_id}};
-    return resolve_impl(commits, marked_heads, anchors, true);
+    return resolve_single_anchor(
+        commits, marked_heads, trusted_anchor_id, true);
 }
 
 ResolutionResult resolve_from_frontier_authenticated(

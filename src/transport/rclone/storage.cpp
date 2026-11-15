@@ -427,6 +427,61 @@ bool not_found(const Error& error) noexcept {
     return false;
 }
 
+struct SplitLocalPath {
+    std::filesystem::path absolute;
+    std::string parent;
+    std::string name;
+};
+
+std::expected<SplitLocalPath, Error>
+split_local_path(const std::filesystem::path& path,
+                 std::string_view invalid_message) {
+    const auto absolute = absolute_path(path);
+    if (!absolute) {
+        return std::unexpected(absolute.error());
+    }
+    auto name = platform::path::to_utf8(absolute->filename());
+    auto parent = platform::path::to_utf8(absolute->parent_path());
+    if (name.empty() || parent.empty()) {
+        return std::unexpected(make_error(ErrorCode::InvalidContext,
+                                          std::string{invalid_message}));
+    }
+    return SplitLocalPath{
+        .absolute = *absolute,
+        .parent = std::move(parent),
+        .name = std::move(name),
+    };
+}
+
+Result copyfile_object(State& state,
+                       std::string_view src_fs,
+                       std::string_view src_remote,
+                       std::string_view dst_fs,
+                       std::string_view dst_remote,
+                       std::string_view trace_name,
+                       std::string_view not_found_message = {}) {
+    const auto copy_trace = platform::perf_trace::begin();
+    const auto copied = request_json(state,
+                                     "operations/copyfile",
+                                     nlohmann::json{
+                                         {"srcFs", std::string{src_fs}},
+                                         {"srcRemote", std::string{src_remote}},
+                                         {"dstFs", std::string{dst_fs}},
+                                         {"dstRemote", std::string{dst_remote}},
+                                     },
+                                     maximum_response_size,
+                                     transfer_timeout);
+    platform::perf_trace::finish(trace_name, copy_trace);
+    if (!copied) {
+        if (!not_found_message.empty() && not_found(copied.error())) {
+            return std::unexpected(make_error(ErrorCode::ObjectNotFound,
+                                              std::string{not_found_message}));
+        }
+        return std::unexpected(copied.error());
+    }
+    return {};
+}
+
 PresenceResult rclone_presence(void* context, std::string_view identifier);
 
 Result rclone_initialize(void* context) {
@@ -458,40 +513,21 @@ Result rclone_put(void* context,
         return std::unexpected(invalid_identifier_error());
     }
 
-    const auto absolute_source = absolute_path(source);
-    if (!absolute_source) {
-        return std::unexpected(absolute_source.error());
+    const auto local = split_local_path(source, "invalid source file");
+    if (!local) {
+        return std::unexpected(local.error());
     }
-    const auto source_file = require_regular_source(*absolute_source);
-    if (!source_file) {
+    if (const auto source_file = require_regular_source(local->absolute);
+        !source_file) {
         return source_file;
     }
 
-    const auto source_name =
-        platform::path::to_utf8(absolute_source->filename());
-    const auto source_parent =
-        platform::path::to_utf8(absolute_source->parent_path());
-    if (source_name.empty() || source_parent.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::InvalidContext, "invalid source file"));
-    }
-
-    const auto copy_trace = platform::perf_trace::begin();
-    const auto copied = request_json(*state,
-                                     "operations/copyfile",
-                                     nlohmann::json{
-                                         {"srcFs", source_parent},
-                                         {"srcRemote", source_name},
-                                         {"dstFs", rooted_remote_fs(*state)},
-                                         {"dstRemote", std::string{identifier}},
-                                     },
-                                     maximum_response_size,
-                                     transfer_timeout);
-    platform::perf_trace::finish("rclone copyfile upload", copy_trace);
-    if (!copied) {
-        return std::unexpected(copied.error());
-    }
-    return {};
+    return copyfile_object(*state,
+                           local->parent,
+                           local->name,
+                           rooted_remote_fs(*state),
+                           identifier,
+                           "rclone copyfile upload");
 }
 
 Result rclone_put_batch(void* context, const PutBatch& batch) {
@@ -549,24 +585,17 @@ Result rclone_put_files_batch(void* context, const PutFilesBatch& batch) {
             !destinations.insert(item.destination_identifier).second) {
             return std::unexpected(invalid_identifier_error());
         }
-        const auto source = absolute_path(item.source);
-        if (!source) {
-            return std::unexpected(source.error());
+        const auto local = split_local_path(item.source, "invalid source file");
+        if (!local) {
+            return std::unexpected(local.error());
         }
-        if (auto valid = require_regular_source(*source); !valid) {
+        if (auto valid = require_regular_source(local->absolute); !valid) {
             return valid;
-        }
-        const auto source_name = platform::path::to_utf8(source->filename());
-        const auto source_parent =
-            platform::path::to_utf8(source->parent_path());
-        if (source_name.empty() || source_parent.empty()) {
-            return std::unexpected(
-                make_error(ErrorCode::InvalidContext, "invalid source file"));
         }
         inputs.push_back(nlohmann::json{
             {"_path", "operations/copyfile"},
-            {"srcFs", source_parent},
-            {"srcRemote", source_name},
+            {"srcFs", local->parent},
+            {"srcRemote", local->name},
             {"dstFs", rooted_remote_fs(*state)},
             {"dstRemote", item.destination_identifier},
         });
@@ -612,46 +641,28 @@ Result rclone_get(void* context,
         return std::unexpected(invalid_identifier_error());
     }
 
-    const auto absolute_destination = absolute_path(destination);
-    if (!absolute_destination) {
-        return std::unexpected(absolute_destination.error());
+    const auto local =
+        split_local_path(destination, "invalid local destination");
+    if (!local) {
+        return std::unexpected(local.error());
     }
-    const auto parent = ensure_parent_directory(*absolute_destination);
-    if (!parent) {
+    if (const auto parent = ensure_parent_directory(local->absolute); !parent) {
         return parent;
     }
 
-    const auto destination_name =
-        platform::path::to_utf8(absolute_destination->filename());
-    const auto destination_parent =
-        platform::path::to_utf8(absolute_destination->parent_path());
-    if (destination_name.empty() || destination_parent.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::InvalidContext, "invalid local destination"));
-    }
-
-    const auto copy_trace = platform::perf_trace::begin();
-    const auto copied = request_json(*state,
-                                     "operations/copyfile",
-                                     nlohmann::json{
-                                         {"srcFs", rooted_remote_fs(*state)},
-                                         {"srcRemote", std::string{identifier}},
-                                         {"dstFs", destination_parent},
-                                         {"dstRemote", destination_name},
-                                     },
-                                     maximum_response_size,
-                                     transfer_timeout);
-    platform::perf_trace::finish("rclone copyfile download", copy_trace);
-    if (!copied) {
-        if (not_found(copied.error())) {
-            return std::unexpected(make_error(ErrorCode::ObjectNotFound,
-                                              "remote object does not exist"));
-        }
-        return std::unexpected(copied.error());
+    if (const auto copied = copyfile_object(*state,
+                                            rooted_remote_fs(*state),
+                                            identifier,
+                                            local->parent,
+                                            local->name,
+                                            "rclone copyfile download",
+                                            "remote object does not exist");
+        !copied) {
+        return copied;
     }
 
     std::error_code error;
-    if (!std::filesystem::is_regular_file(*absolute_destination, error)) {
+    if (!std::filesystem::is_regular_file(local->absolute, error)) {
         if (error) {
             return std::unexpected(filesystem_error(error));
         }
@@ -675,27 +686,13 @@ Result rclone_copy(void* context,
         return std::unexpected(invalid_identifier_error());
     }
 
-    const auto copy_trace = platform::perf_trace::begin();
-    const auto copied =
-        request_json(*state,
-                     "operations/copyfile",
-                     nlohmann::json{
-                         {"srcFs", rooted_remote_fs(*state)},
-                         {"srcRemote", std::string{source_identifier}},
-                         {"dstFs", rooted_remote_fs(*state)},
-                         {"dstRemote", std::string{destination_identifier}},
-                     },
-                     maximum_response_size,
-                     transfer_timeout);
-    platform::perf_trace::finish("rclone copyfile remote copy", copy_trace);
-    if (!copied) {
-        if (not_found(copied.error())) {
-            return std::unexpected(make_error(ErrorCode::ObjectNotFound,
-                                              "remote source does not exist"));
-        }
-        return std::unexpected(copied.error());
-    }
-    return {};
+    return copyfile_object(*state,
+                           rooted_remote_fs(*state),
+                           source_identifier,
+                           rooted_remote_fs(*state),
+                           destination_identifier,
+                           "rclone copyfile remote copy",
+                           "remote source does not exist");
 }
 
 Result rclone_copy_batch(void* context, const CopyBatch& batch) {

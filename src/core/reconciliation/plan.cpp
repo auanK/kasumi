@@ -458,6 +458,13 @@ candidate_shared_tree(const Input& input,
         return found == local_tree.rows.end() ? nullptr : &*found;
     };
 
+    const auto matches_file = [](const NodeRow* row,
+                                 const Hash& expected_hash,
+                                 std::uint64_t expected_size) {
+        return row != nullptr && !row->is_directory &&
+               row->hash == expected_hash && row->size == expected_size;
+    };
+
     for (const auto& operation : sync_plan_operations(plan)) {
         switch (operation.action) {
             case Action::Upload: {
@@ -476,9 +483,7 @@ candidate_shared_tree(const Input& input,
                 }
 
                 const auto source = find_local_row(operation);
-                if (source == nullptr || source->is_directory ||
-                    source->hash != *expected_hash ||
-                    source->size != operation.size) {
+                if (!matches_file(source, *expected_hash, operation.size)) {
                     return std::unexpected(Error{
                         .code = ErrorCode::UnsafePlan,
                         .detail = "upload does not match observed local row",
@@ -505,13 +510,10 @@ candidate_shared_tree(const Input& input,
                 const auto* local_row = find_row(local_tree, source_path);
                 const auto* storage_row =
                     find_row(input.storage.tree, dest_path);
-                if (!expected_hash || local_row == nullptr ||
-                    local_row->is_directory ||
-                    local_row->hash != *expected_hash ||
-                    local_row->size != operation.size ||
-                    storage_row == nullptr || storage_row->is_directory ||
-                    storage_row->hash != *expected_hash ||
-                    storage_row->size != operation.size) {
+                if (!expected_hash ||
+                    !matches_file(local_row, *expected_hash, operation.size) ||
+                    !matches_file(
+                        storage_row, *expected_hash, operation.size)) {
                     return std::unexpected(Error{
                         .code = ErrorCode::UnsafePlan,
                         .detail = operation.action == Action::MoveLocal
@@ -541,9 +543,7 @@ candidate_shared_tree(const Input& input,
                 const auto source_path =
                     platform::path::to_logical_utf8(operation.alt_path);
                 const auto* source = find_row(input.storage.tree, source_path);
-                if (source == nullptr || source->is_directory ||
-                    source->hash != *expected_hash ||
-                    source->size != operation.size) {
+                if (!matches_file(source, *expected_hash, operation.size)) {
                     return std::unexpected(Error{
                         .code = ErrorCode::UnsafePlan,
                         .detail = "conflict download does not match observed "
@@ -643,31 +643,24 @@ candidate_shared_tree(const Input& input,
     return result;
 }
 
+std::size_t path_depth(const std::filesystem::path& path) {
+    return static_cast<std::size_t>(std::distance(path.begin(), path.end()));
+}
+
 void order_directory_operations(SyncPlan& plan) {
-    auto creations = sync_plan_phase(plan, Action::CreateLocalDirectory);
-    auto deletions = sync_plan_phase(plan, Action::DeleteLocalDirectory);
-
-    std::ranges::sort(creations, [](const Operation& a, const Operation& b) {
-        const auto da = static_cast<std::size_t>(
-            std::distance(a.path.begin(), a.path.end()));
-        const auto db = static_cast<std::size_t>(
-            std::distance(b.path.begin(), b.path.end()));
-        if (da != db) {
-            return da < db;
-        }
-        return a.path < b.path;
-    });
-
-    std::ranges::sort(deletions, [](const Operation& a, const Operation& b) {
-        const auto da = static_cast<std::size_t>(
-            std::distance(a.path.begin(), a.path.end()));
-        const auto db = static_cast<std::size_t>(
-            std::distance(b.path.begin(), b.path.end()));
-        if (da != db) {
-            return da > db;
-        }
-        return a.path < b.path;
-    });
+    const auto sort_by_depth = [](auto span, bool ascending) {
+        std::ranges::sort(span,
+                          [ascending](const Operation& a, const Operation& b) {
+                              const auto da = path_depth(a.path);
+                              const auto db = path_depth(b.path);
+                              if (da != db) {
+                                  return ascending ? da < db : da > db;
+                              }
+                              return a.path < b.path;
+                          });
+    };
+    sort_by_depth(sync_plan_phase(plan, Action::CreateLocalDirectory), true);
+    sort_by_depth(sync_plan_phase(plan, Action::DeleteLocalDirectory), false);
 }
 
 const LocalDirectoryEvidence*
