@@ -14,7 +14,8 @@
 namespace kasumi::application::sync::mutation_fault_test {
 
 #ifdef KASUMI_MUTATION_FAULT_TESTS
-using Hook = std::function<void(std::string_view point, const std::filesystem::path& path)>;
+using Hook = std::function<void(std::string_view point,
+                                const std::filesystem::path& path)>;
 
 inline std::atomic<bool> g_fail_copy_identity_sync_return{false};
 inline std::atomic<bool> g_fail_copy_identity_dir_sync_return{false};
@@ -40,7 +41,8 @@ inline void clear_hook() {
     global_hook_instance() = nullptr;
 }
 
-inline void hit(std::string_view point, const std::filesystem::path& path = {}) {
+inline void hit(std::string_view point,
+                const std::filesystem::path& path = {}) {
     // Test builds only: serialize callbacks and their installation/removal.
     std::lock_guard lock(global_hook_mutex());
     if (global_hook_instance())

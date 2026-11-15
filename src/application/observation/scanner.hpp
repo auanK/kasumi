@@ -1,6 +1,7 @@
 #ifndef KASUMI_APPLICATION_OBSERVATION_SCANNER_HPP
 #define KASUMI_APPLICATION_OBSERVATION_SCANNER_HPP
 
+#include "application/observation/file_metadata.hpp"
 #include "core/ignore.hpp"
 #include "core/node.hpp"
 #include "core/reconciliation/types.hpp"
@@ -14,8 +15,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include "application/observation/file_metadata.hpp"
 
 namespace kasumi::application::observation::scanner {
 
@@ -50,19 +49,19 @@ struct ScanError {
 };
 
 // Function used to obtain file metadata and identity.
-using MetadataQuery =
-    std::expected<std::optional<cache::FileMetadata>, cache::FileMetadataError> (*)(
-        const std::filesystem::path&, std::string_view);
+using MetadataQuery = std::expected<std::optional<cache::FileMetadata>,
+                                    cache::FileMetadataError> (*)(
+    const std::filesystem::path&, std::string_view);
 
 // Formats a scan failure.
 std::string describe(const ScanError& error);
 
 // Scans the local tree according to the chosen policy.
-std::expected<ScanResult, ScanError> scan_result(
-    const std::filesystem::path& local_root,
-    std::span<const state_storage::FileCacheRow> previous_cache = {},
-    ScanPolicy policy = ScanPolicy::FullHash,
-    MetadataQuery metadata_query = cache::read_file_metadata);
+std::expected<ScanResult, ScanError>
+scan_result(const std::filesystem::path& local_root,
+            std::span<const state_storage::FileCacheRow> previous_cache = {},
+            ScanPolicy policy = ScanPolicy::FullHash,
+            MetadataQuery metadata_query = cache::read_file_metadata);
 
 // Scans using the ignore rules selected by the current reconciliation.
 std::expected<ScanResult, ScanError>
